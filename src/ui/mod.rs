@@ -1,5 +1,6 @@
 pub mod effects;
 pub mod layout;
+pub mod profiles;
 pub mod theme;
 
 use ratatui::{
@@ -153,7 +154,7 @@ pub fn render_with_state(frame: &mut Frame<'_>, app: &App, state: &mut UiState) 
     });
 
     if let Some(overlay) = &app.overlay {
-        render_overlay(frame, area, overlay, theme);
+        render_overlay(frame, area, overlay, app, state, theme);
     }
 
     if state.last_focus.is_some() && state.last_focus != Some(app.focus) {
@@ -387,7 +388,7 @@ fn render_editor(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
         inner,
     );
 
-    if app.focus == Focus::Editor && editor.row < inner.height as usize {
+    if app.overlay.is_none() && app.focus == Focus::Editor && editor.row < inner.height as usize {
         let prefix = number_width as u16 + 4;
         let x = inner
             .x
@@ -660,16 +661,17 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
     );
 }
 
-fn render_overlay(frame: &mut Frame<'_>, area: Rect, overlay: &Overlay, theme: Theme) {
+fn render_overlay(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    overlay: &Overlay,
+    app: &App,
+    state: &mut UiState,
+    theme: Theme,
+) {
     match overlay {
         Overlay::Help(focus) => render_help(frame, area, *focus, theme),
-        Overlay::ProfileManager => render_message(
-            frame,
-            area,
-            "CONNECTIONS",
-            "Profile picker is not open in this view",
-            theme,
-        ),
+        Overlay::ProfileManager => profiles::render_profile_manager(frame, area, app, state, theme),
         Overlay::Message { title, body } => render_message(frame, area, title, body, theme),
     }
 }
