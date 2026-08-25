@@ -87,7 +87,10 @@ async fn query(
     sql: &str,
 ) {
     dispatch(app, runtime, Action::ReplaceEditor(sql.to_owned()));
-    let commands = dispatch(app, runtime, Action::RunActiveSql);
+    let commands = dispatch(app, runtime, Action::RunAllSql);
+    assert!(commands.is_empty());
+    dispatch(app, runtime, Action::ToggleExecutionConfirmationFocus);
+    let commands = dispatch(app, runtime, Action::ConfirmExecution);
     assert!(matches!(commands.as_slice(), [Command::RunQuery { .. }]));
     let action = apply_next(app, runtime, receiver).await;
     assert!(matches!(action, Action::QueryFinished { .. }));

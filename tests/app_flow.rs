@@ -4,16 +4,31 @@ use std::{
     time::Duration,
 };
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lazydb::{
     action::Action,
     app::App,
-    model::workspace::ConnectionStatus,
+    model::{tab::CompletionPopup, workspace::ConnectionStatus},
     persistence::{profiles::ProfileStore, secrets::NativeSecretStore},
     profile::import_connection_url,
     runtime::Runtime,
 };
 use tempfile::TempDir;
 use tokio::{sync::mpsc, time::timeout};
+
+#[test]
+fn typing_dismisses_stale_completion_and_updates_the_editor() {
+    let mut app = App::new(Vec::new());
+    app.active_console_mut().completion = Some(CompletionPopup::default());
+
+    app.update(Action::EditorKey(KeyEvent::new(
+        KeyCode::Char('s'),
+        KeyModifiers::NONE,
+    )));
+
+    assert_eq!(app.active_editor_text().unwrap(), "s");
+    assert!(app.active_console().completion.is_none());
+}
 
 #[tokio::test]
 async fn connects_loads_catalog_and_executes_through_runtime() {
@@ -59,7 +74,17 @@ async fn connects_loads_catalog_and_executes_through_runtime() {
                 .into(),
         ),
     );
-    dispatch(&mut app, &mut runtime, Action::RunActiveSql);
+    dispatch(&mut app, &mut runtime, Action::RunAllSql);
+    assert!(matches!(
+        app.overlay,
+        Some(lazydb::model::workspace::Overlay::ExecutionConfirm { .. })
+    ));
+    dispatch(
+        &mut app,
+        &mut runtime,
+        Action::ToggleExecutionConfirmationFocus,
+    );
+    dispatch(&mut app, &mut runtime, Action::ConfirmExecution);
     let action = timeout(Duration::from_secs(3), receiver.recv())
         .await
         .unwrap()
@@ -97,7 +122,7 @@ async fn connects_loads_catalog_and_executes_through_runtime() {
         .unwrap();
     dispatch(&mut app, &mut runtime, action);
     assert_eq!(app.active_console().name, "users data");
-    assert!(app.active_console().editor.text().contains("LIMIT 500"));
+    assert!(app.active_editor_text().unwrap().contains("LIMIT 500"));
     assert_eq!(
         app.active_console()
             .outcome
@@ -116,9 +141,8 @@ async fn connects_loads_catalog_and_executes_through_runtime() {
     dispatch(&mut app, &mut runtime, action);
     assert_eq!(app.active_console().name, "users DDL");
     assert!(
-        app.active_console()
-            .editor
-            .text()
+        app.active_editor_text()
+            .unwrap()
             .contains("CREATE TABLE users")
     );
 
@@ -131,4 +155,28 @@ fn dispatch(app: &mut App, runtime: &mut Runtime, action: Action) {
     for command in app.update(action) {
         runtime.dispatch(command);
     }
+}
+
+#[test]
+fn ex_quit_is_reduced_by_app_not_called_directly() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::EditorKey(KeyEvent::new(
+        KeyCode::Esc,
+        KeyModifiers::NONE,
+    )));
+    app.update(Action::EditorKey(KeyEvent::new(
+        KeyCode::Char(':'),
+        KeyModifiers::NONE,
+    )));
+    app.update(Action::EditorPaste("q".into()));
+    let commands = app.update(Action::EditorKey(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    )));
+    assert!(app.should_quit);
+    assert!(
+        commands
+            .iter()
+            .any(|command| matches!(command, lazydb::action::Command::Quit))
+    );
 }

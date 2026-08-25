@@ -31,8 +31,20 @@ pub struct Cli {
     #[arg(long, global = true, value_enum, default_value_t = ColorMode::Auto)]
     pub color: ColorMode,
 
+    #[arg(long, global = true, value_enum, default_value_t = ConfirmationPolicy::RiskyOnly)]
+    pub confirm_execution: ConfirmationPolicy,
+
     #[command(subcommand)]
     pub command: Option<Command>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum ConfirmationPolicy {
+    #[default]
+    #[value(name = "risky")]
+    RiskyOnly,
+    #[value(name = "always")]
+    Always,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]

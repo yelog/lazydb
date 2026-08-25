@@ -1,19 +1,22 @@
-use std::{collections::HashMap, time::Instant};
+use std::collections::HashMap;
 
 use futures_util::TryStreamExt;
 use secrecy::{ExposeSecret, SecretString};
 use sqlx::{
-    AssertSqlSafe, Column, Either, PgPool, Row, TypeInfo, ValueRef,
-    postgres::{PgConnectOptions, PgPoolOptions, PgRow, PgSslMode},
+    AssertSqlSafe, Column, Connection, Either, PgPool, Row, TypeInfo, ValueRef,
+    pool::PoolConnection,
+    postgres::{PgConnectOptions, PgConnection, PgPoolOptions, PgRow, PgSslMode, Postgres},
 };
+use sqlx_core::transaction::TransactionManager;
 use uuid::Uuid;
 
 use crate::profile::{ConnectionProfile, DatabaseKind, SslMode};
 
+use super::transaction::{TransactionBackend, TransactionError};
 use super::{
     DatabaseError, ErrorCategory, ServerInfo,
     catalog::{CatalogId, CatalogKind, CatalogNode},
-    query::{ColumnMeta, QueryOutcome, QueryStats, ResultSet},
+    query::{ColumnMeta, QueryOutcome, QueryOutcomeAccumulator},
     value::CellValue,
 };
 
@@ -41,6 +44,17 @@ WHERE table_catalog = current_database()
   AND table_schema <> 'information_schema'
   AND table_schema NOT LIKE 'pg_%'
 ORDER BY table_schema, table_name, ordinal_position
+"#;
+
+pub const CATALOG_ROUTINES_SQL: &str = r#"
+SELECT n.nspname AS routine_schema, p.proname AS routine_name,
+       p.prokind::text AS prokind,
+       pg_get_function_identity_arguments(p.oid) AS arguments,
+       pg_get_function_result(p.oid) AS result
+FROM pg_proc p
+JOIN pg_namespace n ON n.oid = p.pronamespace
+WHERE n.nspname <> 'information_schema' AND n.nspname NOT LIKE 'pg_%'
+ORDER BY n.nspname, p.proname, p.oid
 "#;
 
 pub const CATALOG_INDEXES_SQL: &str = r#"
@@ -76,6 +90,26 @@ pub struct PostgresAdapter {
 }
 
 impl PostgresAdapter {
+    pub(crate) async fn transaction_backend(
+        &self,
+    ) -> Result<PostgresTransactionBackend, DatabaseError> {
+        let mut connection = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Network))?;
+        let pid = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Network))?;
+        Ok(PostgresTransactionBackend {
+            connection,
+            control: self.pool.clone(),
+            pid,
+            adapter: self.clone(),
+        })
+    }
+
     pub async fn connect(
         profile: &ConnectionProfile,
         password: Option<&SecretString>,
@@ -129,41 +163,46 @@ impl PostgresAdapter {
     }
 
     pub async fn execute(&self, sql: &str) -> Result<QueryOutcome, DatabaseError> {
-        let started = Instant::now();
-        let mut first_event_at = None;
-        let mut stream = sqlx::raw_sql(AssertSqlSafe(sql)).fetch_many(&self.pool);
-        let mut result_sets = Vec::new();
-        let mut current: Option<ResultSet> = None;
+        self.execute_pool(sql).await
+    }
 
+    pub(crate) async fn execute_pool(&self, sql: &str) -> Result<QueryOutcome, DatabaseError> {
+        let mut stream = sqlx::raw_sql(AssertSqlSafe(sql)).fetch_many(&self.pool);
+        self.collect_stream(&mut stream).await
+    }
+
+    pub(crate) async fn execute_connection(
+        &self,
+        connection: &mut PgConnection,
+        sql: &str,
+    ) -> Result<QueryOutcome, DatabaseError> {
+        let mut stream = sqlx::raw_sql(AssertSqlSafe(sql)).fetch_many(&mut *connection);
+        self.collect_stream(&mut stream).await
+    }
+
+    async fn collect_stream<E>(&self, stream: &mut E) -> Result<QueryOutcome, DatabaseError>
+    where
+        E: futures_util::TryStream<
+                Ok = Either<sqlx::postgres::PgQueryResult, PgRow>,
+                Error = sqlx::Error,
+            > + Unpin,
+    {
+        let mut accumulator = QueryOutcomeAccumulator::new();
         while let Some(event) = stream
             .try_next()
             .await
             .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Sql))?
         {
-            first_event_at.get_or_insert_with(|| started.elapsed());
             match event {
                 Either::Right(row) => {
-                    let result = current.get_or_insert_with(|| ResultSet {
-                        columns: columns(&row),
-                        rows: Vec::new(),
-                        affected_rows: 0,
-                    });
-                    result.rows.push(decode_row(&row));
+                    accumulator.row(columns(&row), decode_row(&row));
                 }
                 Either::Left(done) => {
-                    let mut result = current.take().unwrap_or_default();
-                    result.affected_rows = done.rows_affected();
-                    result_sets.push(result);
+                    accumulator.done(done.rows_affected());
                 }
             }
         }
-        let total = started.elapsed();
-        let execution = first_event_at.unwrap_or(total);
-        let row_count = result_sets.iter().map(|result| result.rows.len()).sum();
-        Ok(QueryOutcome {
-            result_sets,
-            stats: QueryStats::new(execution, total.saturating_sub(execution), row_count),
-        })
+        Ok(accumulator.finish())
     }
 
     pub async fn load_catalog(&self) -> Result<Vec<CatalogNode>, DatabaseError> {
@@ -205,6 +244,46 @@ impl PostgresAdapter {
                 true,
             ));
             schema_ids.insert(schema, id);
+        }
+
+        for row in sqlx::query(CATALOG_ROUTINES_SQL)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Sql))?
+        {
+            let schema: String = row.try_get("routine_schema").map_err(decode_error)?;
+            let name: String = row.try_get("routine_name").map_err(decode_error)?;
+            let prokind: String = row.try_get("prokind").map_err(decode_error)?;
+            let arguments: String = row.try_get("arguments").map_err(decode_error)?;
+            let result: Option<String> = row.try_get("result").map_err(decode_error)?;
+            let kind = if prokind == "p" {
+                CatalogKind::Procedure
+            } else {
+                CatalogKind::Function
+            };
+            if let Some(parent) = schema_ids.get(&schema) {
+                let id = CatalogId::new(
+                    self.connection_id,
+                    kind,
+                    [
+                        database.clone(),
+                        schema.clone(),
+                        name.clone(),
+                        arguments.clone(),
+                    ],
+                );
+                nodes.push(CatalogNode::new(
+                    id,
+                    Some(parent.clone()),
+                    name,
+                    "routine",
+                    Some(match result {
+                        Some(result) => format!("({arguments}) -> {result}"),
+                        None => format!("({arguments})"),
+                    }),
+                    false,
+                ));
+            }
         }
 
         let mut object_ids = HashMap::new();
@@ -291,6 +370,66 @@ impl PostgresAdapter {
 
     pub async fn close(self) {
         self.pool.close().await;
+    }
+}
+
+pub(crate) struct PostgresTransactionBackend {
+    connection: PoolConnection<Postgres>,
+    control: PgPool,
+    pid: i32,
+    adapter: PostgresAdapter,
+}
+
+#[async_trait::async_trait]
+impl TransactionBackend for PostgresTransactionBackend {
+    async fn begin(&mut self) -> Result<(), TransactionError> {
+        <Postgres as sqlx::Database>::TransactionManager::begin(&mut self.connection, None)
+            .await
+            .map_err(|error| TransactionError(error.to_string()))
+    }
+    async fn execute(&mut self, sql: &str) -> Result<QueryOutcome, TransactionError> {
+        self.adapter
+            .execute_connection(&mut self.connection, sql)
+            .await
+            .map_err(Into::into)
+    }
+    async fn commit(&mut self) -> Result<(), TransactionError> {
+        <Postgres as sqlx::Database>::TransactionManager::commit(&mut self.connection)
+            .await
+            .map_err(|error| TransactionError(error.to_string()))
+    }
+    async fn rollback(&mut self) -> Result<(), TransactionError> {
+        <Postgres as sqlx::Database>::TransactionManager::rollback(&mut self.connection)
+            .await
+            .map_err(|error| TransactionError(error.to_string()))
+    }
+    async fn cancel(&mut self) -> Result<(), TransactionError> {
+        let cancelled = sqlx::query_scalar::<_, bool>("SELECT pg_cancel_backend($1)")
+            .bind(self.pid)
+            .fetch_one(&self.control)
+            .await
+            .map_err(|error| TransactionError(error.to_string()))?;
+        if cancelled {
+            Ok(())
+        } else {
+            Err(TransactionError(
+                "PostgreSQL backend refused cancellation".into(),
+            ))
+        }
+    }
+    fn depth(&self) -> usize {
+        <Postgres as sqlx::Database>::TransactionManager::get_transaction_depth(&self.connection)
+    }
+    fn force_close(self) -> futures_util::future::BoxFuture<'static, Result<(), TransactionError>> {
+        Box::pin(async move {
+            // SQLx 0.9 has no close_hard on PoolConnection. Detach first, then close the raw
+            // connection so a possibly dirty session can never be returned to this pool.
+            let connection = self.connection.detach();
+            connection
+                .close()
+                .await
+                .map_err(|error| TransactionError(error.to_string()))
+        })
     }
 }
 

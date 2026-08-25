@@ -31,6 +31,13 @@ connection generation prevents a late connection result from replacing a newer
 connection. Each console has its own generation so a cancelled or old query
 cannot overwrite a newer run.
 
+The editor is an App-owned `EditorWorkspace` keyed by console UUID. Modalkit
+types stay behind that boundary; actions and UI consume LazyDB-owned editor
+snapshots, effects, selections, and UTF-8 byte ranges. SQL scope, risk,
+formatting, highlighting, completion, and execution drafts are pure projections
+over those snapshots. Confirmation dispatches the immutable SQL snapshot rather
+than rereading mutable editor text.
+
 ## Profile and Credential Boundary
 
 `ProfileStore` atomically persists versioned connection metadata in TOML without
@@ -59,7 +66,21 @@ effects; effects never enter application state. Inactive effects cause no idle
 redraw.
 
 Database text passes through terminal-control sanitization before it reaches
-diagnostic state. Future clipboard/export paths must retain the same boundary.
+diagnostic state or display-only editor/SQL-preview projections. Raw SQL remains
+unchanged when sent to the database. Completion labels/details and prompt text
+are sanitized only for display; their raw insertion/request values remain
+separate.
+
+## Transaction Boundary
+
+AUTO queries use the active pool and are tagged with `ConnectionIdentity`.
+MANUAL mode owns one serial worker and one physical connection per console.
+Adapters drive SQLx's concrete `TransactionManager` directly on that connection;
+the worker never sends transaction controls through a random pool connection.
+An armed guard detaches and backend-closes uncertain sessions. PostgreSQL and
+MySQL use database-native cancellation metadata; SQLite uses a progress handler
+and awaited connection close. Commit/rollback acknowledgement loss is represented
+as `OutcomeUnknown` and is never retried automatically.
 
 ## Neovim Boundary
 
@@ -68,12 +89,8 @@ one process per Neovim tab handle, and lifecycle/health checks. It does not pars
 SQL, connect to databases, or store credentials. The embedded LazyDB TUI
 provides the same Profile Manager and keyring behavior when launched by Neovim.
 
-## Next Architectural Steps
+## Remaining Architectural Work
 
 - Persist console manifests and SQL files atomically.
-- Pin physical connections for manual transaction sessions.
-- Replace complete result collection with bounded row batches and viewport
-  storage.
-- Add database-native cancellation and connection quarantine.
-- Add statement selection, parser-backed risk classification, and completion.
+- Replace complete result collection with bounded row batches and viewport storage.
 - Add a conservative mutation planner for stable-key single-table previews.

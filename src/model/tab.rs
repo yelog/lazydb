@@ -1,8 +1,11 @@
 use uuid::Uuid;
 
 use crate::db::query::QueryOutcome;
+use crate::sql::CompletionCandidate;
 
-use super::{editor::EditorBuffer, workspace::QueryStatus};
+use super::workspace::QueryStatus;
+use super::{transaction::TransactionMode, transaction::TransactionState};
+use crate::sql::ExecutionDraft;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ResultView {
@@ -30,7 +33,6 @@ pub struct OutputEntry {
 pub struct ConsoleTab {
     pub id: Uuid,
     pub name: String,
-    pub editor: EditorBuffer,
     pub generation: u64,
     pub query_status: QueryStatus,
     pub outcome: Option<QueryOutcome>,
@@ -38,6 +40,31 @@ pub struct ConsoleTab {
     pub result_view: ResultView,
     pub selected_row: usize,
     pub selected_column: usize,
+    pub completion: Option<CompletionPopup>,
+    pub transaction_generation: u64,
+    pub transaction_mode: TransactionMode,
+    pub transaction_state: TransactionState,
+    pub last_execution: Option<LastExecution>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ExecutionResult {
+    Dispatched,
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LastExecution {
+    pub draft: ExecutionDraft,
+    pub result: ExecutionResult,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CompletionPopup {
+    pub candidates: Vec<CompletionCandidate>,
+    pub selected: usize,
 }
 
 impl ConsoleTab {
@@ -45,7 +72,6 @@ impl ConsoleTab {
         Self {
             id: Uuid::new_v4(),
             name: name.into(),
-            editor: EditorBuffer::default(),
             generation: 0,
             query_status: QueryStatus::Idle,
             outcome: None,
@@ -53,6 +79,11 @@ impl ConsoleTab {
             result_view: ResultView::Data,
             selected_row: 0,
             selected_column: 0,
+            completion: None,
+            transaction_generation: 0,
+            transaction_mode: TransactionMode::Auto,
+            transaction_state: TransactionState::Idle,
+            last_execution: None,
         }
     }
 }

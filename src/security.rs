@@ -1,6 +1,13 @@
 use std::fmt::Write;
 
+use unicode_width::UnicodeWidthChar;
 use url::Url;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DisplayLineProjection {
+    pub text: String,
+    pub source_to_display_cells: Vec<usize>,
+}
 
 pub fn sanitize_terminal_text(value: &str) -> String {
     let mut sanitized = String::with_capacity(value.len());
@@ -16,6 +23,40 @@ pub fn sanitize_terminal_text(value: &str) -> String {
         }
     }
     sanitized
+}
+
+pub fn project_editor_line(value: &str) -> DisplayLineProjection {
+    let mut text = String::with_capacity(value.len());
+    let mut source_to_display_cells = Vec::with_capacity(value.chars().count() + 1);
+    let mut cells = 0;
+    source_to_display_cells.push(0);
+    for character in value.chars() {
+        match character {
+            '\t' => {
+                let spaces = 4 - (cells % 4);
+                text.extend(std::iter::repeat_n(' ', spaces));
+                cells += spaces;
+            }
+            '\n' => text.push_str("<LF>"),
+            '\r' => text.push_str("<CR>"),
+            '\u{1b}' => text.push_str("<ESC>"),
+            value if value.is_control() => {
+                let _ = write!(text, "<0x{:02X}>", value as u32);
+            }
+            value => text.push(value),
+        }
+        cells += match character {
+            '\t' => 0,
+            '\n' | '\r' | '\u{1b}' => 0,
+            value if value.is_control() => format!("<0x{:02X}>", value as u32).len(),
+            value => value.width().unwrap_or(0),
+        };
+        source_to_display_cells.push(cells);
+    }
+    DisplayLineProjection {
+        text,
+        source_to_display_cells,
+    }
 }
 
 pub fn redact_connection_string(value: &str) -> String {

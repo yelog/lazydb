@@ -1,3 +1,5 @@
+#![allow(clippy::type_complexity)]
+
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex as StdMutex},
@@ -11,7 +13,8 @@ use secrecy::SecretString;
 use tokio::{
     sync::{Mutex, mpsc},
     task::{self, JoinHandle},
-    time::{MissedTickBehavior, interval},
+    time::sleep,
+    time::{MissedTickBehavior, interval, timeout},
 };
 use uuid::Uuid;
 
@@ -19,7 +22,7 @@ use crate::{
     action::{Action, Command},
     app::App,
     cli::{Cli, MouseMode},
-    db::DatabaseConnection,
+    db::{DatabaseConnection, transaction::TransactionRequest},
     input::{
         keymap::{Keymap, map_paste},
         mouse::map_mouse,
@@ -40,6 +43,10 @@ use crate::{
     terminal::TerminalSession,
     ui::{self, UiState},
 };
+
+pub(crate) mod transaction;
+
+use transaction::ForcedCloseHandle;
 
 #[derive(Clone, Debug)]
 struct ActiveConnection {
@@ -65,6 +72,15 @@ struct ProfileRegistry {
     startup_password: Option<SecretString>,
 }
 
+struct ManualTransactionEntry {
+    connection: ConnectionIdentity,
+    transaction_generation: u64,
+    request_sender: tokio::sync::mpsc::UnboundedSender<crate::db::transaction::TransactionRequest>,
+    worker_handle: JoinHandle<crate::db::transaction::WorkerDisposition>,
+    cancellation_sender: Option<tokio::sync::oneshot::Sender<()>>,
+    forced_close_handle: ForcedCloseHandle,
+}
+
 pub struct Runtime {
     registry: Arc<Mutex<ProfileRegistry>>,
     profile_store: ProfileStore,
@@ -76,6 +92,8 @@ pub struct Runtime {
     query_tasks: HashMap<(Uuid, u64), JoinHandle<()>>,
     background_tasks: Vec<JoinHandle<()>>,
     profile_tasks: Vec<JoinHandle<()>>,
+    completion_tasks: HashMap<Uuid, JoinHandle<()>>,
+    manual_transactions: HashMap<Uuid, ManualTransactionEntry>,
 }
 
 impl Runtime {
@@ -124,6 +142,8 @@ impl Runtime {
             query_tasks: HashMap::new(),
             background_tasks: Vec::new(),
             profile_tasks: Vec::new(),
+            completion_tasks: HashMap::new(),
+            manual_transactions: HashMap::new(),
         }
     }
 
@@ -160,6 +180,37 @@ impl Runtime {
                 generation,
                 sql,
             } => self.run_query(connection, tab_id, generation, sql),
+            Command::ManualBegin {
+                connection,
+                tab_id,
+                query_generation,
+                transaction_generation,
+            } => self.manual_begin(connection, tab_id, query_generation, transaction_generation),
+            Command::ManualExecute {
+                connection,
+                tab_id,
+                query_generation,
+                transaction_generation,
+                sql,
+            } => self.manual_execute(
+                connection,
+                tab_id,
+                query_generation,
+                transaction_generation,
+                sql,
+            ),
+            Command::ManualCommit {
+                connection,
+                tab_id,
+                query_generation,
+                transaction_generation,
+            } => self.manual_commit(connection, tab_id, query_generation, transaction_generation),
+            Command::ManualRollback {
+                connection,
+                tab_id,
+                query_generation,
+                transaction_generation,
+            } => self.manual_rollback(connection, tab_id, query_generation, transaction_generation),
             Command::PreviewTable {
                 connection,
                 tab_id,
@@ -179,6 +230,29 @@ impl Runtime {
                 if let Some(task) = self.query_tasks.remove(&(tab_id, generation)) {
                     task.abort();
                 }
+            }
+            Command::CancelManual {
+                tab_id,
+                transaction_generation,
+                ..
+            } => {
+                if let Some(entry) = self.manual_transactions.get_mut(&tab_id)
+                    && entry.transaction_generation == transaction_generation
+                    && let Some(cancel) = entry.cancellation_sender.take()
+                {
+                    let _ = cancel.send(());
+                }
+            }
+            Command::ScheduleCompletion(key) => {
+                if let Some(task) = self.completion_tasks.remove(&key.console_id) {
+                    task.abort();
+                }
+                let sender = self.event_sender.clone();
+                let task = tokio::spawn(async move {
+                    sleep(Duration::from_millis(120)).await;
+                    let _ = sender.send(Action::CompletionDue(key));
+                });
+                self.completion_tasks.insert(key.console_id, task);
             }
             Command::PersistWorkspace | Command::Quit => {}
         }
@@ -507,6 +581,7 @@ impl Runtime {
                 let _ = sender.send(Action::QueryFailed {
                     tab_id,
                     generation,
+                    connection: expected,
                     message: "No active database connection".to_owned(),
                 });
                 return;
@@ -516,6 +591,7 @@ impl Runtime {
                     let _ = sender.send(Action::QueryFinished {
                         tab_id,
                         generation,
+                        connection: expected,
                         outcome,
                     });
                 }
@@ -523,12 +599,314 @@ impl Runtime {
                     let _ = sender.send(Action::QueryFailed {
                         tab_id,
                         generation,
+                        connection: expected,
                         message: error.to_string(),
                     });
                 }
             }
         });
         self.query_tasks.insert((tab_id, generation), task);
+    }
+
+    fn manual_begin(
+        &mut self,
+        connection: ConnectionIdentity,
+        tab_id: Uuid,
+        query_generation: u64,
+        transaction_generation: u64,
+    ) {
+        self.ensure_manual_worker(
+            connection,
+            tab_id,
+            query_generation,
+            transaction_generation,
+            None,
+        );
+    }
+
+    fn manual_execute(
+        &mut self,
+        connection: ConnectionIdentity,
+        tab_id: Uuid,
+        query_generation: u64,
+        transaction_generation: u64,
+        sql: String,
+    ) {
+        let (reply, result) = tokio::sync::oneshot::channel();
+        let (cancel, cancel_receiver) = tokio::sync::oneshot::channel();
+        self.ensure_manual_worker(
+            connection,
+            tab_id,
+            query_generation,
+            transaction_generation,
+            Some((sql, cancel_receiver, reply)),
+        );
+        if let Some(entry) = self.manual_transactions.get_mut(&tab_id) {
+            entry.cancellation_sender = Some(cancel);
+            let sender = self.event_sender.clone();
+            self.query_tasks.insert(
+                (tab_id, query_generation),
+                tokio::spawn(async move {
+                    match result.await {
+                        Ok(Ok(outcome)) => {
+                            let _ = sender.send(Action::ManualQueryFinished {
+                                tab_id,
+                                query_generation,
+                                transaction_generation,
+                                connection,
+                                outcome,
+                            });
+                        }
+                        Ok(Err(error)) => {
+                            let _ = sender.send(Action::ManualQueryFailed {
+                                tab_id,
+                                query_generation,
+                                transaction_generation,
+                                connection,
+                                message: error.0,
+                            });
+                        }
+                        Err(_) => {
+                            let _ = sender.send(Action::ManualQueryFailed {
+                                tab_id,
+                                query_generation,
+                                transaction_generation,
+                                connection,
+                                message: "Manual query acknowledgement was lost".to_owned(),
+                            });
+                        }
+                    }
+                }),
+            );
+        }
+    }
+
+    fn manual_commit(
+        &mut self,
+        connection: ConnectionIdentity,
+        tab_id: Uuid,
+        query_generation: u64,
+        transaction_generation: u64,
+    ) {
+        let Some(entry) = self.manual_transactions.get(&tab_id) else {
+            return;
+        };
+        let (reply, result) = tokio::sync::oneshot::channel();
+        if entry
+            .request_sender
+            .send(TransactionRequest::Commit { reply })
+            .is_err()
+        {
+            let _ = self.event_sender.send(Action::ManualCommitFailed {
+                tab_id,
+                query_generation,
+                transaction_generation,
+                connection,
+                message: "Commit acknowledgement was lost".to_owned(),
+                unknown: true,
+            });
+            return;
+        }
+        let sender = self.event_sender.clone();
+        self.background_tasks.push(tokio::spawn(async move {
+            match result.await {
+                Ok(Ok(())) => {
+                    let _ = sender.send(Action::ManualCommitted {
+                        tab_id,
+                        query_generation,
+                        transaction_generation,
+                        connection,
+                    });
+                }
+                Ok(Err(error)) => {
+                    let _ = sender.send(Action::ManualCommitFailed {
+                        tab_id,
+                        query_generation,
+                        transaction_generation,
+                        connection,
+                        message: error.0,
+                        unknown: false,
+                    });
+                }
+                Err(_) => {
+                    let _ = sender.send(Action::ManualCommitFailed {
+                        tab_id,
+                        query_generation,
+                        transaction_generation,
+                        connection,
+                        message: "Commit acknowledgement was lost".to_owned(),
+                        unknown: true,
+                    });
+                }
+            }
+        }));
+    }
+
+    fn manual_rollback(
+        &mut self,
+        connection: ConnectionIdentity,
+        tab_id: Uuid,
+        query_generation: u64,
+        transaction_generation: u64,
+    ) {
+        let Some(entry) = self.manual_transactions.get(&tab_id) else {
+            return;
+        };
+        let (reply, result) = tokio::sync::oneshot::channel();
+        if entry
+            .request_sender
+            .send(TransactionRequest::Rollback { reply })
+            .is_err()
+        {
+            let _ = self.event_sender.send(Action::ManualRollbackFailed {
+                tab_id,
+                query_generation,
+                transaction_generation,
+                connection,
+                message: "Rollback acknowledgement was lost".to_owned(),
+                unknown: true,
+            });
+            return;
+        }
+        let sender = self.event_sender.clone();
+        self.background_tasks.push(tokio::spawn(async move {
+            match result.await {
+                Ok(Ok(())) => {
+                    let _ = sender.send(Action::ManualRolledBack {
+                        tab_id,
+                        query_generation,
+                        transaction_generation,
+                        connection,
+                    });
+                }
+                Ok(Err(error)) => {
+                    let _ = sender.send(Action::ManualRollbackFailed {
+                        tab_id,
+                        query_generation,
+                        transaction_generation,
+                        connection,
+                        message: error.0,
+                        unknown: false,
+                    });
+                }
+                Err(_) => {
+                    let _ = sender.send(Action::ManualRollbackFailed {
+                        tab_id,
+                        query_generation,
+                        transaction_generation,
+                        connection,
+                        message: "Rollback acknowledgement was lost".to_owned(),
+                        unknown: true,
+                    });
+                }
+            }
+        }));
+    }
+
+    fn ensure_manual_worker(
+        &mut self,
+        connection: ConnectionIdentity,
+        tab_id: Uuid,
+        query_generation: u64,
+        transaction_generation: u64,
+        request: Option<(
+            String,
+            tokio::sync::oneshot::Receiver<()>,
+            tokio::sync::oneshot::Sender<
+                Result<crate::db::query::QueryOutcome, crate::db::transaction::TransactionError>,
+            >,
+        )>,
+    ) {
+        if let Some(entry) = self.manual_transactions.get(&tab_id) {
+            if entry.connection == connection
+                && entry.transaction_generation == transaction_generation
+                && let Some((sql, cancel, reply)) = request
+            {
+                let _ = entry.request_sender.send(TransactionRequest::Execute {
+                    query_generation,
+                    sql,
+                    cancel,
+                    reply,
+                });
+            }
+            return;
+        }
+        let (proxy, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let database = Arc::clone(&self.connection);
+        let sender = self.event_sender.clone();
+        let worker_handle = tokio::spawn(async move {
+            let Some(database) = active_database(database, connection).await else {
+                let _ = sender.send(Action::ManualStartFailed {
+                    tab_id,
+                    query_generation,
+                    transaction_generation,
+                    connection,
+                    message: "No active database connection".to_owned(),
+                });
+                return crate::db::transaction::WorkerDisposition::Quarantine;
+            };
+            let worker = match database.start_transaction_worker().await {
+                Ok(worker) => worker,
+                Err(error) => {
+                    let _ = sender.send(Action::ManualStartFailed {
+                        tab_id,
+                        query_generation,
+                        transaction_generation,
+                        connection,
+                        message: error.to_string(),
+                    });
+                    return crate::db::transaction::WorkerDisposition::Quarantine;
+                }
+            };
+            let crate::runtime::transaction::TransactionWorkerHandle {
+                requests, worker, ..
+            } = worker;
+            let _ = sender.send(Action::ManualStarted {
+                tab_id,
+                query_generation,
+                transaction_generation,
+                connection,
+            });
+            tokio::pin!(worker);
+            loop {
+                tokio::select! {
+                    request = receiver.recv() => {
+                        let Some(request) = request else { break };
+                        if requests.send(request).is_err() { break; }
+                    }
+                    disposition = &mut worker => {
+                        if disposition.as_ref().is_ok_and(|d| *d == crate::db::transaction::WorkerDisposition::ImplicitlyEnded) {
+                            let _ = sender.send(Action::ManualImplicitlyEnded { tab_id, query_generation, transaction_generation, connection });
+                        }
+                        return disposition.unwrap_or(crate::db::transaction::WorkerDisposition::Quarantine);
+                    }
+                }
+            }
+            worker
+                .await
+                .unwrap_or(crate::db::transaction::WorkerDisposition::Quarantine)
+        });
+        self.manual_transactions.insert(
+            tab_id,
+            ManualTransactionEntry {
+                connection,
+                transaction_generation,
+                request_sender: proxy,
+                worker_handle,
+                cancellation_sender: None,
+                forced_close_handle: ForcedCloseHandle::new(),
+            },
+        );
+        if let Some((sql, cancel, reply)) = request
+            && let Some(entry) = self.manual_transactions.get(&tab_id)
+        {
+            let _ = entry.request_sender.send(TransactionRequest::Execute {
+                query_generation,
+                sql,
+                cancel,
+                reply,
+            });
+        }
     }
 
     fn preview_table(
@@ -546,6 +924,7 @@ impl Runtime {
                 let _ = sender.send(Action::QueryFailed {
                     tab_id,
                     generation,
+                    connection: expected,
                     message: "No active database connection".to_owned(),
                 });
                 return;
@@ -568,6 +947,7 @@ impl Runtime {
                     let _ = sender.send(Action::QueryFailed {
                         tab_id,
                         generation,
+                        connection: expected,
                         message: error.to_string(),
                     });
                 }
@@ -592,6 +972,7 @@ impl Runtime {
                 let _ = sender.send(Action::QueryFailed {
                     tab_id,
                     generation,
+                    connection: expected,
                     message: "No active database connection".to_owned(),
                 });
                 return;
@@ -608,6 +989,7 @@ impl Runtime {
                     let _ = sender.send(Action::QueryFailed {
                         tab_id,
                         generation,
+                        connection: expected,
                         message: "DDL is not available for this object type".to_owned(),
                     });
                 }
@@ -615,6 +997,7 @@ impl Runtime {
                     let _ = sender.send(Action::QueryFailed {
                         tab_id,
                         generation,
+                        connection: expected,
                         message: error.to_string(),
                     });
                 }
@@ -634,6 +1017,23 @@ impl Runtime {
         }
         for task in self.profile_tasks.drain(..) {
             let _ = task.await;
+        }
+        for (_, entry) in self.manual_transactions.drain() {
+            let _ = entry
+                .request_sender
+                .send(crate::db::transaction::TransactionRequest::Shutdown);
+            let forced_close = entry.forced_close_handle.clone();
+            let mut worker = entry.worker_handle;
+            if timeout(Duration::from_secs(2), &mut worker).await.is_err() {
+                worker.abort();
+                let _ = worker.await;
+                let _ = timeout(Duration::from_secs(2), async {
+                    while !forced_close.completed() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await;
+            }
         }
         if let Some(connection) = self.connection.lock().await.take() {
             connection.database.close().await;
@@ -1019,7 +1419,7 @@ async fn active_database(
 
 pub async fn run_tui(cli: Cli) -> Result<()> {
     let startup = load_startup_profiles(&cli)?;
-    let mut app = App::new(startup.profiles.clone());
+    let mut app = App::with_confirmation_policy(startup.profiles.clone(), cli.confirm_execution);
     let (event_sender, mut event_receiver) = mpsc::unbounded_channel();
     let mut runtime = Runtime::new(
         startup.profiles,
@@ -1047,6 +1447,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                 .map_or(Action::OpenProfileManager, Action::RequestConnect),
         );
         terminal.draw(|frame| ui::render_with_state(frame, &app, &mut ui_state))?;
+        sync_editor_viewport(&mut app, &mut runtime, &ui_state);
 
         while !app.should_quit {
             let mut redraw = false;
@@ -1095,6 +1496,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
 
             if redraw && !app.should_quit {
                 terminal.draw(|frame| ui::render_with_state(frame, &app, &mut ui_state))?;
+                sync_editor_viewport(&mut app, &mut runtime, &ui_state);
             }
         }
 
@@ -1109,6 +1511,15 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
 fn apply_action(app: &mut App, runtime: &mut Runtime, action: Action) {
     for command in app.update(action) {
         runtime.dispatch(command);
+    }
+}
+
+fn sync_editor_viewport(app: &mut App, runtime: &mut Runtime, state: &UiState) {
+    let Some(viewport) = state.editor_viewport else {
+        return;
+    };
+    if app.active_editor_viewport().ok() != Some(viewport) {
+        apply_action(app, runtime, Action::EditorViewportChanged(viewport));
     }
 }
 

@@ -3,6 +3,97 @@ pub enum EditorMode {
     Normal,
     #[default]
     Insert,
+    Replace,
+    VisualChar,
+    VisualLine,
+    VisualBlock,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EditorPosition {
+    pub line: usize,
+    pub column: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EditorViewport {
+    pub width: usize,
+    pub height: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EditorSelectionShape {
+    Char,
+    Line,
+    Block,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EditorSelection {
+    pub start: EditorPosition,
+    pub end: EditorPosition,
+    pub shape: EditorSelectionShape,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EditorRenderSpan {
+    pub text: String,
+    pub source_start: usize,
+    pub source_end: usize,
+    pub kind: EditorHighlightKind,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum EditorHighlightKind {
+    #[default]
+    Plain,
+    Keyword,
+    Identifier,
+    String,
+    Number,
+    Comment,
+    Operator,
+    Punctuation,
+    Parameter,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EditorRenderLine {
+    pub line: usize,
+    pub spans: Vec<EditorRenderSpan>,
+    /// Display-cell offset for every source character boundary, including the end.
+    pub source_to_display_cells: Vec<usize>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EditorPromptKind {
+    SearchForward,
+    SearchBackward,
+    Command,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EditorPromptSnapshot {
+    pub kind: EditorPromptKind,
+    pub prefix: String,
+    pub text: String,
+    pub cursor: usize,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EditorRenderSnapshot {
+    pub revision: u64,
+    pub mode: EditorMode,
+    pub first_line: usize,
+    pub total_lines: usize,
+    pub viewport: EditorViewport,
+    pub horizontal_offset: usize,
+    pub lines: Vec<EditorRenderLine>,
+    pub cursor: EditorPosition,
+    pub cursor_screen_cell: Option<(u16, u16)>,
+    pub selections: Vec<EditorSelection>,
+    pub prompt: Option<EditorPromptSnapshot>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

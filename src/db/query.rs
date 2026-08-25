@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -42,6 +42,66 @@ impl QueryStats {
 pub struct QueryOutcome {
     pub result_sets: Vec<ResultSet>,
     pub stats: QueryStats,
+}
+
+/// Collects SQLx stream events without knowing which database produced them.
+pub(crate) struct QueryOutcomeAccumulator {
+    started: Instant,
+    first_event: Option<Duration>,
+    result_sets: Vec<ResultSet>,
+    current: Option<ResultSet>,
+}
+
+impl QueryOutcomeAccumulator {
+    pub(crate) fn new() -> Self {
+        Self {
+            started: Instant::now(),
+            first_event: None,
+            result_sets: Vec::new(),
+            current: None,
+        }
+    }
+
+    pub(crate) fn row(&mut self, columns: Vec<ColumnMeta>, row: Vec<CellValue>) {
+        self.mark_event();
+        self.current
+            .get_or_insert_with(|| ResultSet {
+                columns,
+                rows: Vec::new(),
+                affected_rows: 0,
+            })
+            .rows
+            .push(row);
+    }
+
+    pub(crate) fn done(&mut self, affected_rows: u64) {
+        self.mark_event();
+        let mut result = self.current.take().unwrap_or_default();
+        result.affected_rows = affected_rows;
+        self.result_sets.push(result);
+    }
+
+    pub(crate) fn finish(mut self) -> QueryOutcome {
+        if let Some(result) = self.current.take() {
+            self.result_sets.push(result);
+        }
+        let total = self.started.elapsed();
+        let execution = self.first_event.unwrap_or(total);
+        let row_count = self
+            .result_sets
+            .iter()
+            .map(|result| result.rows.len())
+            .sum();
+        QueryOutcome {
+            result_sets: self.result_sets,
+            stats: QueryStats::new(execution, total.saturating_sub(execution), row_count),
+        }
+    }
+
+    fn mark_event(&mut self) {
+        self.first_event
+            .get_or_insert_with(|| self.started.elapsed());
+    }
 }
 
 #[cfg(test)]

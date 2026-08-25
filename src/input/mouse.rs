@@ -52,7 +52,10 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                     rows: 3,
                     columns: 0,
                 }),
-                Focus::Editor => Some(Action::MoveDown),
+                Focus::Editor => Some(Action::EditorScroll {
+                    rows: 3,
+                    columns: 0,
+                }),
             }
         }
         MouseEventKind::ScrollUp => {
@@ -70,7 +73,10 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                     rows: -3,
                     columns: 0,
                 }),
-                Focus::Editor => Some(Action::MoveUp),
+                Focus::Editor => Some(Action::EditorScroll {
+                    rows: -3,
+                    columns: 0,
+                }),
             }
         }
         _ => None,

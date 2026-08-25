@@ -37,6 +37,65 @@ impl Keymap {
             self.pending = None;
             return map_profile_manager(event, app);
         }
+        if matches!(app.overlay, Some(Overlay::SubstituteConfirm { .. })) {
+            self.pending = None;
+            return match event.code {
+                KeyCode::Char('y') => Some(Action::SubstituteYes),
+                KeyCode::Char('n') => Some(Action::SubstituteNo),
+                KeyCode::Char('a') => Some(Action::SubstituteAll),
+                KeyCode::Char('l') => Some(Action::SubstituteLast),
+                KeyCode::Char('q') | KeyCode::Esc => Some(Action::SubstituteQuit),
+                _ => None,
+            };
+        }
+        if matches!(app.overlay, Some(Overlay::ExecutionConfirm { .. })) {
+            self.pending = None;
+            return match event.code {
+                KeyCode::Enter | KeyCode::Char('e') | KeyCode::Char('y') => {
+                    Some(Action::ConfirmExecution)
+                }
+                KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('q') => {
+                    Some(Action::CancelExecution)
+                }
+                KeyCode::Tab | KeyCode::Left | KeyCode::Right => {
+                    Some(Action::ToggleExecutionConfirmationFocus)
+                }
+                _ => None,
+            };
+        }
+        if matches!(app.overlay, Some(Overlay::ManualCancelConfirm { .. })) {
+            self.pending = None;
+            return match event.code {
+                KeyCode::Enter | KeyCode::Char('c') => Some(Action::ConfirmManualCancellation),
+                KeyCode::Esc | KeyCode::Char('k') => Some(Action::CancelManualCancellation),
+                KeyCode::Tab | KeyCode::Left | KeyCode::Right => {
+                    Some(Action::ToggleManualCancellationFocus)
+                }
+                _ => None,
+            };
+        }
+        if matches!(app.overlay, Some(Overlay::TransactionExitConfirm { .. })) {
+            self.pending = None;
+            return match event.code {
+                KeyCode::Enter | KeyCode::Char('r') => Some(Action::ConfirmTransactionExit),
+                KeyCode::Char('c') => Some(Action::ConfirmTransactionExit),
+                KeyCode::Esc | KeyCode::Char('n') => Some(Action::CancelTransactionExit),
+                KeyCode::Tab | KeyCode::Left | KeyCode::Right => {
+                    Some(Action::ToggleTransactionExitChoice)
+                }
+                _ => None,
+            };
+        }
+        if matches!(app.overlay, Some(Overlay::ClearTransactionOutcome { .. })) {
+            self.pending = None;
+            return match event.code {
+                KeyCode::Enter | KeyCode::Char('y') => Some(Action::ConfirmClearTransactionOutcome),
+                KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('q') => {
+                    Some(Action::CancelClearTransactionOutcome)
+                }
+                _ => None,
+            };
+        }
         if app.overlay.is_some() {
             self.pending = None;
             return match event.code {
@@ -44,11 +103,27 @@ impl Keymap {
                 _ => None,
             };
         }
+        if app.active_console().completion.is_some() {
+            let completion_action = match event.code {
+                KeyCode::Char('n') if event.modifiers.contains(KeyModifiers::CONTROL) => {
+                    Some(Action::CompletionNext)
+                }
+                KeyCode::Char('p') if event.modifiers.contains(KeyModifiers::CONTROL) => {
+                    Some(Action::CompletionPrevious)
+                }
+                KeyCode::Enter => Some(Action::CompletionAccept),
+                KeyCode::Esc => Some(Action::CompletionDismiss),
+                _ => None,
+            };
+            if completion_action.is_some() {
+                return completion_action;
+            }
+        }
 
         if let Some((pending, started, focus, editor_mode, tab_id)) = self.pending.take()
             && started.elapsed() <= SEQUENCE_TIMEOUT
             && focus == app.focus
-            && editor_mode == app.active_console().editor.mode
+            && editor_mode == app.active_editor_mode()
             && tab_id == app.active_console().id
             && let Some(action) = map_pending(pending, event)
         {
@@ -57,6 +132,7 @@ impl Keymap {
 
         if event.modifiers.contains(KeyModifiers::CONTROL) {
             return match event.code {
+                KeyCode::Char('w') if app.focus == Focus::Editor => Some(Action::EditorKey(event)),
                 KeyCode::Char('w') => {
                     self.set_pending(Pending::Window, app);
                     None
@@ -67,30 +143,37 @@ impl Keymap {
                     {
                         Some(Action::CancelActiveQuery)
                     } else if app.focus == Focus::Editor
-                        && app.active_console().editor.mode == EditorMode::Insert
+                        && app.active_editor_mode() == EditorMode::Insert
                     {
-                        Some(Action::EnterNormalMode)
+                        Some(Action::EditorKey(event))
                     } else {
                         None
                     }
                 }
-                KeyCode::Char('h') if app.focus == Focus::Editor => Some(Action::Backspace),
+                KeyCode::Char('h') if app.focus == Focus::Editor => Some(Action::EditorKey(event)),
+                KeyCode::Char(' ') if app.focus == Focus::Editor => {
+                    Some(Action::CompletionExplicit)
+                }
                 _ => None,
             };
         }
         if event.code == KeyCode::F(5) {
-            return Some(Action::RunActiveSql);
+            return if event.modifiers.contains(KeyModifiers::SHIFT) {
+                Some(Action::RunAllSql)
+            } else {
+                Some(Action::RunActiveSql)
+            };
         }
         if event.code == KeyCode::F(1) {
             return Some(Action::ShowHelp);
         }
-        if event.code == KeyCode::Char('Q') {
+        if event.code == KeyCode::Char('Q')
+            && (app.focus != Focus::Editor || app.active_editor_mode() == EditorMode::Normal)
+        {
             return Some(Action::Quit);
         }
-
-        let editor = &app.active_console().editor;
-        if app.focus == Focus::Editor && editor.mode == EditorMode::Insert {
-            return map_insert(event.code);
+        if app.focus == Focus::Editor {
+            return Some(Action::EditorKey(event));
         }
 
         if event.code == KeyCode::Tab {
@@ -102,7 +185,6 @@ impl Keymap {
 
         match event.code {
             KeyCode::Char('?') => return Some(Action::ShowHelp),
-            KeyCode::Esc if app.focus == Focus::Editor => return Some(Action::EnterNormalMode),
             KeyCode::Char(' ') => {
                 self.set_pending(Pending::Leader, app);
                 return None;
@@ -120,7 +202,7 @@ impl Keymap {
 
         match app.focus {
             Focus::Explorer => map_explorer(event.code),
-            Focus::Editor => map_normal_editor(event.code),
+            Focus::Editor => None,
             Focus::Results => map_results(event.code),
         }
     }
@@ -130,7 +212,7 @@ impl Keymap {
             pending,
             Instant::now(),
             app.focus,
-            app.active_console().editor.mode,
+            app.active_editor_mode(),
             app.active_console().id,
         ));
     }
@@ -142,6 +224,9 @@ impl Keymap {
 
 fn map_pending(pending: Pending, event: KeyEvent) -> Option<Action> {
     let valid_modifiers = event.modifiers.is_empty()
+        || (pending == Pending::Leader
+            && event.modifiers == KeyModifiers::SHIFT
+            && event.code == KeyCode::Char('R'))
         || (pending == Pending::Window && event.modifiers == KeyModifiers::CONTROL);
     if !valid_modifiers {
         return None;
@@ -150,6 +235,7 @@ fn map_pending(pending: Pending, event: KeyEvent) -> Option<Action> {
         (Pending::Leader, KeyCode::Char('c')) => Some(Action::OpenProfileManager),
         (Pending::Leader, KeyCode::Char('n')) => Some(Action::NewConsole),
         (Pending::Leader, KeyCode::Char('r')) => Some(Action::RunActiveSql),
+        (Pending::Leader, KeyCode::Char('R')) => Some(Action::RunAllSql),
         (Pending::Window, KeyCode::Char('h')) => Some(Action::Focus(Focus::Explorer)),
         (Pending::Window, KeyCode::Char('j')) => Some(Action::Focus(Focus::Results)),
         (Pending::Window, KeyCode::Char('k' | 'l')) => Some(Action::Focus(Focus::Editor)),
@@ -174,19 +260,10 @@ pub fn map_paste(value: String, app: &App) -> Vec<Action> {
     if app.overlay.is_some() {
         return Vec::new();
     }
-    if app.focus != Focus::Editor || app.active_console().editor.mode != EditorMode::Insert {
+    if app.focus != Focus::Editor || app.active_editor_mode() != EditorMode::Insert {
         return Vec::new();
     }
-    value
-        .chars()
-        .map(|character| {
-            if character == '\n' {
-                Action::InsertNewline
-            } else {
-                Action::InsertCharacter(character)
-            }
-        })
-        .collect()
+    vec![Action::EditorPaste(value)]
 }
 
 fn map_profile_manager(event: KeyEvent, app: &App) -> Option<Action> {
@@ -323,40 +400,6 @@ fn is_toggle_field(field: ProfileField) -> bool {
         field,
         ProfileField::ReadOnly | ProfileField::RememberPassword | ProfileField::SqliteMemory
     )
-}
-
-fn map_insert(code: KeyCode) -> Option<Action> {
-    match code {
-        KeyCode::Esc => Some(Action::EnterNormalMode),
-        KeyCode::Char(character) => Some(Action::InsertCharacter(character)),
-        KeyCode::Tab => Some(Action::InsertCharacter('\t')),
-        KeyCode::Enter => Some(Action::InsertNewline),
-        KeyCode::Backspace => Some(Action::Backspace),
-        KeyCode::Delete => Some(Action::Delete),
-        KeyCode::Left => Some(Action::MoveLeft),
-        KeyCode::Right => Some(Action::MoveRight),
-        KeyCode::Up => Some(Action::MoveUp),
-        KeyCode::Down => Some(Action::MoveDown),
-        KeyCode::Home => Some(Action::MoveHome),
-        KeyCode::End => Some(Action::MoveEnd),
-        _ => None,
-    }
-}
-
-fn map_normal_editor(code: KeyCode) -> Option<Action> {
-    match code {
-        KeyCode::Char('h') | KeyCode::Left => Some(Action::MoveLeft),
-        KeyCode::Char('j') | KeyCode::Down => Some(Action::MoveDown),
-        KeyCode::Char('k') | KeyCode::Up => Some(Action::MoveUp),
-        KeyCode::Char('l') | KeyCode::Right => Some(Action::MoveRight),
-        KeyCode::Char('i') => Some(Action::EnterInsertMode),
-        KeyCode::Char('a') => Some(Action::EnterAppendMode),
-        KeyCode::Char('o') => Some(Action::OpenLineBelow),
-        KeyCode::Char('x') | KeyCode::Delete => Some(Action::Delete),
-        KeyCode::Char('0') | KeyCode::Home => Some(Action::MoveHome),
-        KeyCode::Char('$') | KeyCode::End => Some(Action::MoveEnd),
-        _ => None,
-    }
 }
 
 fn map_explorer(code: KeyCode) -> Option<Action> {

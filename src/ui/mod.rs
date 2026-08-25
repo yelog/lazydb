@@ -19,7 +19,7 @@ use crate::{
     app::App,
     db::{catalog::CatalogKind, query::ResultSet},
     model::{
-        editor::EditorMode,
+        editor::{EditorHighlightKind, EditorMode, EditorViewport},
         profile_manager::ProfileField,
         tab::{OutputKind, ResultView},
         workspace::{ConnectionStatus, Focus, Overlay, QueryStatus},
@@ -73,6 +73,8 @@ pub struct HitRegion {
 pub struct UiState {
     pub hit_regions: Vec<HitRegion>,
     pub effects: UiEffects,
+    pub editor_viewport: Option<EditorViewport>,
+    pub completion_popup: Option<Rect>,
     last_focus: Option<Focus>,
 }
 
@@ -87,6 +89,8 @@ impl UiState {
         Self {
             hit_regions: Vec::new(),
             effects: UiEffects::new(reduced_motion),
+            editor_viewport: None,
+            completion_popup: None,
             last_focus: None,
         }
     }
@@ -111,6 +115,8 @@ pub fn render_with_state(frame: &mut Frame<'_>, app: &App, state: &mut UiState) 
     frame.render_widget(Block::new().style(theme.base()), area);
     let layout = AppLayout::calculate(area, app.focus);
     state.hit_regions.clear();
+    state.editor_viewport = None;
+    state.completion_popup = None;
 
     if layout.mode == LayoutMode::TooSmall {
         render_too_small(frame, area, theme);
@@ -127,7 +133,8 @@ pub fn render_with_state(frame: &mut Frame<'_>, app: &App, state: &mut UiState) 
         render_explorer(frame, area, app, theme, state);
     }
     if let Some(area) = layout.editor {
-        render_editor(frame, area, app, theme);
+        let completion_anchor = render_editor(frame, area, app, theme, state);
+        render_completion_popup(frame, app, theme, state, completion_anchor);
         state.hit_regions.push(HitRegion {
             area,
             target: HitTarget::Focus(Focus::Editor),
@@ -164,6 +171,102 @@ pub fn render_with_state(frame: &mut Frame<'_>, app: &App, state: &mut UiState) 
     state.effects.render(frame, layout.body);
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CompletionAnchor {
+    viewport: Rect,
+    cursor: Position,
+}
+
+fn render_completion_popup(
+    frame: &mut Frame<'_>,
+    app: &App,
+    theme: Theme,
+    state: &mut UiState,
+    anchor: Option<CompletionAnchor>,
+) {
+    let Some(popup) = &app.active_console().completion else {
+        return;
+    };
+    let Some(anchor) = anchor else {
+        return;
+    };
+    if popup.candidates.is_empty() {
+        return;
+    }
+    let desired_height = popup.candidates.len().min(10) as u16;
+    let desired_width = popup
+        .candidates
+        .iter()
+        .map(|candidate| {
+            let detail = candidate.detail.as_deref().unwrap_or("");
+            format!("{}  {}", candidate.label, detail)
+                .as_str()
+                .cell_width()
+                .saturating_add(1)
+        })
+        .max()
+        .unwrap_or(4)
+        .max(4);
+    let Some(area) = completion_popup_rect(anchor, desired_width, desired_height) else {
+        return;
+    };
+    state.completion_popup = Some(area);
+    let items = popup
+        .candidates
+        .iter()
+        .take(10)
+        .enumerate()
+        .map(|(index, candidate)| {
+            let detail = candidate.detail.as_deref().unwrap_or("");
+            let text = sanitize_terminal_text(&format!("{}  {}", candidate.label, detail));
+            ListItem::new(text).style(if index == popup.selected {
+                Style::new().fg(theme.background).bg(theme.accent)
+            } else {
+                Style::new().fg(theme.text).bg(theme.surface_raised)
+            })
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Clear, area);
+    frame.render_widget(List::new(items), area);
+}
+
+fn completion_popup_rect(
+    anchor: CompletionAnchor,
+    desired_width: u16,
+    desired_height: u16,
+) -> Option<Rect> {
+    let viewport = anchor.viewport;
+    if viewport.is_empty() || desired_height == 0 {
+        return None;
+    }
+
+    let width = desired_width.min(viewport.width).max(1);
+    let x = anchor
+        .cursor
+        .x
+        .clamp(viewport.x, viewport.right().saturating_sub(1))
+        .min(viewport.right().saturating_sub(width));
+    let below_y = anchor.cursor.y.saturating_add(1);
+    let below = viewport.bottom().saturating_sub(below_y);
+    let above = anchor.cursor.y.saturating_sub(viewport.y);
+    let (height, y) = if below >= desired_height {
+        (desired_height, below_y)
+    } else if above >= desired_height {
+        (
+            desired_height,
+            anchor.cursor.y.saturating_sub(desired_height),
+        )
+    } else if below >= above && below > 0 {
+        (below, below_y)
+    } else if above > 0 {
+        (above, viewport.y)
+    } else {
+        return None;
+    };
+
+    Some(Rect::new(x, y, width, height))
+}
+
 fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, state: &mut UiState) {
     let profile = app.active_profile().map_or_else(
         || "NO PROFILE".to_owned(),
@@ -185,6 +288,28 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, sta
         QueryStatus::Running => ("RUNNING", theme.action),
         QueryStatus::Cancelled => ("CANCELLED", theme.warning),
         QueryStatus::Failed => ("ERROR", theme.error),
+    };
+    let transaction = match (
+        app.active_console().transaction_mode,
+        app.active_console().transaction_state,
+    ) {
+        (crate::model::transaction::TransactionMode::Auto, _) => "TX AUTO",
+        (
+            crate::model::transaction::TransactionMode::Manual,
+            crate::model::transaction::TransactionState::Idle,
+        ) => "TX MANUAL:IDLE",
+        (
+            crate::model::transaction::TransactionMode::Manual,
+            crate::model::transaction::TransactionState::Starting,
+        ) => "TX MANUAL:STARTING",
+        (
+            crate::model::transaction::TransactionMode::Manual,
+            crate::model::transaction::TransactionState::Active,
+        ) => "TX MANUAL:ACTIVE",
+        (_, crate::model::transaction::TransactionState::Aborted) => "TX ABORTED",
+        (_, crate::model::transaction::TransactionState::Committing) => "TX COMMITTING",
+        (_, crate::model::transaction::TransactionState::RollingBack) => "TX ROLLING BACK",
+        (_, crate::model::transaction::TransactionState::OutcomeUnknown) => "TX OUTCOME UNKNOWN",
     };
     let lines = vec![
         Line::from(vec![
@@ -215,7 +340,7 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, sta
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "  TX AUTO  ",
+                format!("  {transaction}  "),
                 Style::new().fg(theme.muted).bg(theme.surface),
             ),
             Span::styled(
@@ -357,49 +482,153 @@ fn render_explorer(
     );
 }
 
-fn render_editor(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
-    let mode = match app.active_console().editor.mode {
+fn render_editor(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    theme: Theme,
+    state: &mut UiState,
+) -> Option<CompletionAnchor> {
+    let inner = panel_block(" SQL EDITOR ", app.focus == Focus::Editor, theme).inner(area);
+    let number_width = app
+        .active_editor_render_snapshot(EditorViewport {
+            width: 0,
+            height: 0,
+        })
+        .map(|snapshot| snapshot.total_lines.max(1).to_string().len().max(2))
+        .unwrap_or(2);
+    let gutter = number_width.saturating_add(4);
+    let viewport = EditorViewport {
+        width: inner.width.saturating_sub(gutter as u16) as usize,
+        height: inner.height as usize,
+    };
+    state.editor_viewport = Some(viewport);
+    let Ok(snapshot) = app.active_editor_render_snapshot(viewport) else {
+        return None;
+    };
+    let text_viewport = Rect::new(
+        inner.x.saturating_add(gutter as u16),
+        inner.y,
+        viewport.width.min(u16::MAX as usize) as u16,
+        viewport.height.min(u16::MAX as usize) as u16,
+    );
+    let completion_anchor = snapshot
+        .prompt
+        .is_none()
+        .then_some(snapshot.cursor_screen_cell)
+        .flatten()
+        .map(|(x, y)| CompletionAnchor {
+            viewport: text_viewport,
+            cursor: Position::new(
+                text_viewport.x.saturating_add(x),
+                text_viewport.y.saturating_add(y),
+            ),
+        });
+    let mode = match snapshot.mode {
         EditorMode::Normal => "NORMAL",
         EditorMode::Insert => "INSERT",
+        EditorMode::Replace => "REPLACE",
+        EditorMode::VisualChar => "VISUAL",
+        EditorMode::VisualLine => "VISUAL LINE",
+        EditorMode::VisualBlock => "VISUAL BLOCK",
     };
-    let title = format!(" SQL EDITOR  {mode} ");
-    let block = panel_block(&title, app.focus == Focus::Editor, theme);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let editor = &app.active_console().editor;
-    let number_width = editor.lines().len().max(1).to_string().len().max(2);
-    let lines = editor
-        .lines()
-        .iter()
-        .enumerate()
-        .take(inner.height as usize)
-        .map(|(index, text)| {
-            let mut spans = vec![Span::styled(
-                format!(" {:>width$} │ ", index + 1, width = number_width),
-                Style::new().fg(theme.border).bg(theme.surface),
-            )];
-            spans.extend(highlight_sql(text, theme));
-            Line::from(spans)
-        })
-        .collect::<Vec<_>>();
     frame.render_widget(
-        Paragraph::new(lines).style(Style::new().fg(theme.text).bg(theme.surface)),
-        inner,
+        panel_block(
+            &format!(" SQL EDITOR  {mode} "),
+            app.focus == Focus::Editor,
+            theme,
+        ),
+        area,
     );
+    for (row, line) in snapshot.lines.iter().take(viewport.height).enumerate() {
+        let y = inner.y.saturating_add(row as u16);
+        let selected = snapshot.selections.iter().any(|selection| {
+            line.line >= selection.start.line.min(selection.end.line)
+                && line.line <= selection.start.line.max(selection.end.line)
+        });
+        let line_style = Style::new().fg(theme.border).bg(if selected {
+            theme.selection
+        } else {
+            theme.surface
+        });
+        frame.render_widget(
+            Paragraph::new(format!(" {:>number_width$} │ ", line.line + 1)).style(line_style),
+            Rect::new(inner.x, y, gutter as u16, 1),
+        );
+        let content = line
+            .spans
+            .iter()
+            .map(|span| {
+                let foreground = match span.kind {
+                    EditorHighlightKind::Keyword => theme.accent,
+                    EditorHighlightKind::Identifier => theme.action,
+                    EditorHighlightKind::String => theme.warning,
+                    EditorHighlightKind::Number | EditorHighlightKind::Parameter => theme.action,
+                    EditorHighlightKind::Comment => theme.muted,
+                    EditorHighlightKind::Operator | EditorHighlightKind::Punctuation => theme.text,
+                    EditorHighlightKind::Plain => theme.text,
+                };
+                Span::styled(
+                    span.text.clone(),
+                    Style::new().fg(foreground).bg(if selected {
+                        theme.selection
+                    } else {
+                        theme.surface
+                    }),
+                )
+            })
+            .collect::<Vec<_>>();
+        frame.render_widget(
+            Paragraph::new(Line::from(content))
+                .style(Style::new().bg(if selected {
+                    theme.selection
+                } else {
+                    theme.surface
+                }))
+                .scroll((0, snapshot.horizontal_offset.min(u16::MAX as usize) as u16)),
+            Rect::new(
+                inner.x.saturating_add(gutter as u16),
+                y,
+                viewport.width as u16,
+                1,
+            ),
+        );
+    }
 
-    if app.overlay.is_none() && app.focus == Focus::Editor && editor.row < inner.height as usize {
-        let prefix = number_width as u16 + 4;
+    if app.overlay.is_none()
+        && app.focus == Focus::Editor
+        && let Some(prompt) = snapshot.prompt.as_ref()
+    {
+        let prompt_text = match prompt.error.as_deref() {
+            Some(error) => format!("{}{}  [{}]", prompt.prefix, prompt.text, error),
+            None => format!("{}{}", prompt.prefix, prompt.text),
+        };
+        let prompt_area = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
+        frame.render_widget(
+            Paragraph::new(prompt_text).style(Style::new().fg(theme.accent).bg(theme.surface)),
+            prompt_area,
+        );
+        let cursor_x = inner
+            .x
+            .saturating_add(prompt.prefix.chars().count() as u16)
+            .saturating_add(prompt.cursor as u16)
+            .min(prompt_area.right().saturating_sub(1));
+        frame.set_cursor_position(Position::new(cursor_x, prompt_area.y));
+    } else if app.overlay.is_none()
+        && app.focus == Focus::Editor
+        && let Some((x, y)) = snapshot.cursor_screen_cell
+    {
         let x = inner
             .x
-            .saturating_add(prefix)
-            .saturating_add(editor.column as u16)
+            .saturating_add(gutter as u16)
+            .saturating_add(x)
             .min(inner.right().saturating_sub(1));
-        let y = inner.y.saturating_add(editor.row as u16);
+        let y = inner.y.saturating_add(y);
         if y < inner.bottom() {
             frame.set_cursor_position(Position::new(x, y));
         }
     }
+    completion_anchor
 }
 
 fn render_result_tabs(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
@@ -543,7 +772,7 @@ fn render_result_table(
                 crate::db::value::CellValue::Unsupported { .. } => Style::new().fg(theme.warning),
                 _ => Style::new().fg(theme.text),
             };
-            Cell::from(preview.text).style(style)
+            Cell::from(sanitize_terminal_text(&preview.text)).style(style)
         }))
     });
     let table = Table::new(rows, widths)
@@ -608,9 +837,13 @@ fn render_output(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
     let (mode, mode_color) = match app.focus {
-        Focus::Editor => match app.active_console().editor.mode {
+        Focus::Editor => match app.active_editor_mode() {
             EditorMode::Normal => ("NORMAL", theme.accent),
             EditorMode::Insert => ("INSERT", theme.action),
+            EditorMode::Replace => ("REPLACE", theme.action),
+            EditorMode::VisualChar => ("VISUAL", theme.accent),
+            EditorMode::VisualLine => ("VISUAL LINE", theme.accent),
+            EditorMode::VisualBlock => ("VISUAL BLOCK", theme.accent),
         },
         Focus::Explorer => ("EXPLORE", theme.accent),
         Focus::Results => ("DATA", theme.warning),
@@ -633,12 +866,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
             Style::new().fg(theme.muted).bg(theme.surface),
         ),
         Span::styled(
-            if app.focus == Focus::Editor && app.active_console().editor.mode == EditorMode::Insert
-            {
-                "   F1 help "
-            } else {
-                "   ? help "
-            },
+            "   F1 help ",
             Style::new()
                 .fg(theme.action)
                 .bg(theme.surface)
@@ -673,7 +901,199 @@ fn render_overlay(
         Overlay::Help(focus) => render_help(frame, area, *focus, theme),
         Overlay::ProfileManager => profiles::render_profile_manager(frame, area, app, state, theme),
         Overlay::Message { title, body } => render_message(frame, area, title, body, theme),
+        Overlay::SubstituteConfirm { remaining } => {
+            render_substitute_confirm(frame, area, *remaining, theme)
+        }
+        Overlay::ExecutionConfirm { draft, focus } => {
+            render_execution_confirm(frame, area, draft, *focus, app, theme)
+        }
+        Overlay::ManualCancelConfirm { focus, .. } => {
+            use crate::model::workspace::ManualCancelFocus;
+            let popup = centered(area, 76, 12);
+            frame.render_widget(Clear, popup);
+            let cancel = *focus == ManualCancelFocus::CancelQueryAndRollback;
+            let lines = vec![
+                Line::from(Span::styled(" CANCEL ACTIVE QUERY? ", theme.title(true))),
+                Line::raw("Cancelling rolls back all uncommitted work in this transaction"),
+                Line::raw(""),
+                Line::raw(format!(
+                    "{}   {}",
+                    if cancel {
+                        " Keep Running "
+                    } else {
+                        "[Keep Running]"
+                    },
+                    if cancel {
+                        "[Cancel Query + Roll Back]"
+                    } else {
+                        " Cancel Query + Roll Back "
+                    }
+                )),
+                Line::raw("Tab/Left/Right focus, Enter confirm, Esc keep running"),
+            ];
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .block(panel_block(" CANCELLATION CONFIRMATION ", true, theme))
+                    .style(Style::new().fg(theme.text).bg(theme.surface_raised)),
+                popup,
+            );
+        }
+        Overlay::TransactionExitConfirm { prompt, choice } => {
+            use crate::model::transaction::TransactionExitChoice;
+            let popup = centered(area, 78, 12);
+            frame.render_widget(Clear, popup);
+            let tab = app.tabs.iter().find(|tab| tab.id == prompt.console_id);
+            let state = tab
+                .map(|tab| format!("{:?}", tab.transaction_state))
+                .unwrap_or_else(|| "gone".into());
+            let running = tab.is_some_and(|tab| tab.query_status == QueryStatus::Running);
+            let commit_disabled = tab.is_some_and(|tab| {
+                tab.transaction_state == crate::model::transaction::TransactionState::Aborted
+            });
+            let buttons = if running {
+                "Query running: wait or Ctrl-C to cancel"
+            } else {
+                &format!(
+                    "{}   {}   {}",
+                    if *choice == TransactionExitChoice::Commit && !commit_disabled {
+                        "[Commit]"
+                    } else {
+                        " Commit "
+                    },
+                    if *choice == TransactionExitChoice::Rollback {
+                        "[Rollback]"
+                    } else {
+                        " Rollback "
+                    },
+                    " Cancel "
+                )
+            };
+            let lines = vec![
+                Line::from(Span::styled(" TRANSACTION EXIT ", theme.title(true))),
+                Line::raw(format!(
+                    "console: {}   state: {state}",
+                    tab.map(|tab| tab.name.as_str()).unwrap_or("unknown")
+                )),
+                Line::raw(buttons),
+                Line::raw(
+                    "Rollback is the default. Tab/Left/Right choose; Enter confirms; Esc cancels",
+                ),
+            ];
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .block(panel_block(" TRANSACTION EXIT CONFIRMATION ", true, theme))
+                    .style(Style::new().fg(theme.text).bg(theme.surface_raised)),
+                popup,
+            );
+        }
+        Overlay::ClearTransactionOutcome { .. } => {
+            let popup = centered(area, 78, 12);
+            frame.render_widget(Clear, popup);
+            frame.render_widget(
+                Paragraph::new(vec![
+                    Line::from(Span::styled(" VERIFY UNKNOWN OUTCOME ", theme.title(true))),
+                    Line::raw("LazyDB cannot know whether commit/rollback reached the server."),
+                    Line::raw("Verify externally before clearing this transaction state."),
+                    Line::raw("Cancel (default)   [Clear after verification]"),
+                    Line::raw("Enter confirms clear; Esc cancels"),
+                ])
+                .block(panel_block(" TRANSACTION OUTCOME UNKNOWN ", true, theme))
+                .style(Style::new().fg(theme.text).bg(theme.surface_raised)),
+                popup,
+            );
+        }
     }
+}
+
+fn render_execution_confirm(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    draft: &crate::sql::ExecutionDraft,
+    focus: crate::model::workspace::ExecutionConfirmFocus,
+    app: &App,
+    theme: Theme,
+) {
+    use crate::model::workspace::ExecutionConfirmFocus;
+
+    let popup = centered(area, 86, 24);
+    frame.render_widget(Clear, popup);
+    let risk = draft
+        .risks
+        .iter()
+        .map(|risk| format!("{risk:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let database = app
+        .active_profile()
+        .map(|profile| profile.name.as_str())
+        .unwrap_or("disconnected");
+    let mut lines = vec![
+        Line::from(Span::styled(" EXECUTE SQL? ", theme.title(true))),
+        Line::raw(format!(
+            "scope: {:?}   lines: {}   statements: {}",
+            draft.scope,
+            draft.sql.lines().count().max(1),
+            draft.statement_count
+        )),
+        Line::raw(format!("risk: {risk}   database: {database}")),
+        Line::raw(format!(
+            "transaction: {:?}/{:?}",
+            draft.transaction_mode, draft.transaction_state
+        )),
+    ];
+    if draft.dialect == crate::sql::SqlDialect::MySql
+        && draft.transaction_mode == crate::model::transaction::TransactionMode::Manual
+        && draft.risks.contains(&crate::sql::SqlRisk::Ddl)
+    {
+        lines.push(Line::from(Span::styled(
+            "WARNING: MySQL DDL may implicitly commit before and after execution",
+            Style::new().fg(theme.warning).add_modifier(Modifier::BOLD),
+        )));
+    }
+    lines.push(Line::raw(""));
+    let sanitized_sql = sanitize_terminal_text(&draft.sql);
+    lines.extend(sanitized_sql.lines().map(Line::raw));
+    lines.push(Line::raw(""));
+    lines.push(Line::raw(format!(
+        "{}   {}   (Tab/Left/Right focus)",
+        if focus == ExecutionConfirmFocus::Cancel {
+            "[Cancel]"
+        } else {
+            " Cancel "
+        },
+        if focus == ExecutionConfirmFocus::Execute {
+            "[Execute]"
+        } else {
+            " Execute "
+        }
+    )));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(panel_block(" EXECUTION CONFIRMATION ", true, theme))
+            .style(Style::new().fg(theme.text).bg(theme.surface_raised))
+            .scroll((0, 0))
+            .wrap(Wrap { trim: false }),
+        popup,
+    );
+}
+
+fn render_substitute_confirm(frame: &mut Frame<'_>, area: Rect, remaining: usize, theme: Theme) {
+    let popup = centered(area, 56, 7);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(" SUBSTITUTE CONFIRM ", theme.title(true))),
+            Line::raw(format!("{remaining} match(es) remaining")),
+            Line::raw("y yes   n no   a all   l yes and stop   q quit"),
+        ])
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .style(Style::new().fg(theme.text).bg(theme.surface)),
+        ),
+        popup,
+    );
 }
 
 fn render_help(frame: &mut Frame<'_>, area: Rect, focus: Focus, theme: Theme) {
@@ -773,116 +1193,6 @@ fn panel_block<'a>(title: &'a str, focused: bool, theme: Theme) -> Block<'a> {
         .style(Style::new().bg(theme.surface))
 }
 
-fn highlight_sql(value: &str, theme: Theme) -> Vec<Span<'static>> {
-    let mut spans = Vec::new();
-    let chars = value.chars().collect::<Vec<_>>();
-    let mut index = 0;
-    while index < chars.len() {
-        if chars[index] == '-' && chars.get(index + 1) == Some(&'-') {
-            spans.push(Span::styled(
-                chars[index..].iter().collect::<String>(),
-                Style::new().fg(theme.muted).add_modifier(Modifier::ITALIC),
-            ));
-            break;
-        }
-        if matches!(chars[index], '\'' | '"') {
-            let quote = chars[index];
-            let start = index;
-            index += 1;
-            while index < chars.len() {
-                if chars[index] == quote {
-                    index += 1;
-                    break;
-                }
-                index += 1;
-            }
-            spans.push(Span::styled(
-                chars[start..index].iter().collect::<String>(),
-                Style::new().fg(theme.warning),
-            ));
-            continue;
-        }
-        if chars[index].is_ascii_alphanumeric() || chars[index] == '_' {
-            let start = index;
-            while index < chars.len()
-                && (chars[index].is_ascii_alphanumeric() || chars[index] == '_')
-            {
-                index += 1;
-            }
-            let token = chars[start..index].iter().collect::<String>();
-            let keyword = is_sql_keyword(&token);
-            spans.push(Span::styled(
-                token,
-                if keyword {
-                    Style::new().fg(theme.accent).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::new().fg(theme.text)
-                },
-            ));
-            continue;
-        }
-        spans.push(Span::styled(
-            chars[index].to_string(),
-            Style::new().fg(if ",;()=*<>.+-/".contains(chars[index]) {
-                theme.action
-            } else {
-                theme.text
-            }),
-        ));
-        index += 1;
-    }
-    spans
-}
-
-fn is_sql_keyword(value: &str) -> bool {
-    matches!(
-        value.to_ascii_uppercase().as_str(),
-        "SELECT"
-            | "FROM"
-            | "WHERE"
-            | "JOIN"
-            | "LEFT"
-            | "RIGHT"
-            | "INNER"
-            | "OUTER"
-            | "ON"
-            | "AS"
-            | "AND"
-            | "OR"
-            | "NOT"
-            | "NULL"
-            | "TRUE"
-            | "FALSE"
-            | "INSERT"
-            | "INTO"
-            | "VALUES"
-            | "UPDATE"
-            | "SET"
-            | "DELETE"
-            | "CREATE"
-            | "ALTER"
-            | "DROP"
-            | "TABLE"
-            | "VIEW"
-            | "INDEX"
-            | "ORDER"
-            | "BY"
-            | "GROUP"
-            | "HAVING"
-            | "LIMIT"
-            | "OFFSET"
-            | "WITH"
-            | "UNION"
-            | "ALL"
-            | "DISTINCT"
-            | "RETURNING"
-            | "BEGIN"
-            | "COMMIT"
-            | "ROLLBACK"
-            | "EXPLAIN"
-    )
-}
-
 fn key_line<'a>(key: &'a str, description: &'a str, theme: Theme) -> Line<'a> {
     Line::from(vec![
         Span::styled(
@@ -954,4 +1264,48 @@ fn centered(area: Rect, max_width: u16, max_height: u16) -> Rect {
 
 fn contains(area: Rect, column: u16, row: u16) -> bool {
     column >= area.x && column < area.right() && row >= area.y && row < area.bottom()
+}
+
+#[cfg(test)]
+mod completion_popup_tests {
+    use super::*;
+
+    #[test]
+    fn places_popup_below_the_cursor_when_it_fits() {
+        let anchor = CompletionAnchor {
+            viewport: Rect::new(10, 5, 40, 10),
+            cursor: Position::new(12, 6),
+        };
+
+        assert_eq!(
+            completion_popup_rect(anchor, 20, 4),
+            Some(Rect::new(12, 7, 20, 4))
+        );
+    }
+
+    #[test]
+    fn places_popup_above_the_cursor_when_below_is_too_short() {
+        let anchor = CompletionAnchor {
+            viewport: Rect::new(10, 5, 40, 10),
+            cursor: Position::new(12, 13),
+        };
+
+        assert_eq!(
+            completion_popup_rect(anchor, 20, 4),
+            Some(Rect::new(12, 9, 20, 4))
+        );
+    }
+
+    #[test]
+    fn clamps_popup_to_the_text_viewport() {
+        let anchor = CompletionAnchor {
+            viewport: Rect::new(10, 5, 40, 10),
+            cursor: Position::new(48, 6),
+        };
+
+        assert_eq!(
+            completion_popup_rect(anchor, 20, 4),
+            Some(Rect::new(30, 7, 20, 4))
+        );
+    }
 }

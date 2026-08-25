@@ -8,6 +8,7 @@ fn quotes_mysql_identifiers_and_uses_information_schema() {
     assert_eq!(mysql::quote_identifier("odd`name"), "`odd``name`");
     assert!(mysql::CATALOG_TABLES_SQL.contains("information_schema.tables"));
     assert!(mysql::CATALOG_INDEXES_SQL.contains("information_schema.statistics"));
+    assert!(mysql::CATALOG_ROUTINES_SQL.contains("information_schema.routines"));
 }
 
 #[tokio::test]
@@ -35,6 +36,26 @@ async fn connects_and_decodes_common_mysql_values_when_configured() {
     ));
     assert_eq!(row[2], CellValue::Text("Ada".into()));
     assert_eq!(row[3], CellValue::Null);
+    let multiple = database
+        .execute("SELECT 1 AS first; SELECT 2 AS second")
+        .await
+        .unwrap();
+    assert_eq!(multiple.result_sets.len(), 2);
+    assert!(multiple.stats.total() >= multiple.stats.execution);
+    let affected = database
+        .execute(
+            "CREATE TEMPORARY TABLE lazydb_task14_affected (value INTEGER); \
+             INSERT INTO lazydb_task14_affected VALUES (1), (2); \
+             UPDATE lazydb_task14_affected SET value = value",
+        )
+        .await
+        .unwrap();
+    assert_eq!(affected.result_sets.last().unwrap().affected_rows, 2);
+    let error = database
+        .execute("SELECT * FROM missing_task14_table")
+        .await
+        .unwrap_err();
+    assert_eq!(error.category, lazydb::db::ErrorCategory::Sql);
     assert!(!database.load_catalog().await.unwrap().is_empty());
     database.close().await;
 }

@@ -2,21 +2,30 @@ use uuid::Uuid;
 
 use crate::{
     action::{Action, Command},
+    cli::ConfirmationPolicy,
+    editor::{EditorEffect, EditorError, EditorWorkspace},
     model::{
-        editor::EditorMode,
+        editor::{EditorMode, EditorRenderSnapshot, EditorViewport},
         profile_manager::{
             ProfileField, ProfileManagerPage, ProfileManagerState, ProfileOperation,
         },
-        tab::{ConsoleTab, OutputEntry, OutputKind, ResultView},
+        tab::{
+            CompletionPopup, ConsoleTab, ExecutionResult, LastExecution, OutputEntry, OutputKind,
+            ResultView,
+        },
+        transaction::{
+            self, DeferredIntent, DeferredIntentQueue, DeferredTransactionPrompt, TransactionEvent,
+            TransactionExitChoice, TransactionMode, TransactionState,
+        },
         workspace::{
-            ConnectionIdentity, ConnectionState, ConnectionStatus, ExplorerState, Focus, Overlay,
-            QueryStatus,
+            ConnectionIdentity, ConnectionState, ConnectionStatus, ExecutionConfirmFocus,
+            ExplorerState, Focus, ManualCancelFocus, Overlay, QueryStatus,
         },
     },
     profile::{ConnectionProfile, DatabaseKind},
+    sql::{self, CompletionScheduleKey, ScopeSource, SqlDialect},
 };
 
-#[derive(Clone, Debug)]
 pub struct App {
     pub profiles: Vec<ConnectionProfile>,
     pub connection: ConnectionState,
@@ -30,15 +39,30 @@ pub struct App {
     next_console_number: usize,
     connection_request_generation: u64,
     connection_terminal_generation: u64,
+    editor: EditorWorkspace,
+    confirmation_policy: ConfirmationPolicy,
+    deferred: DeferredIntentQueue,
+    resolving_deferred: Option<DeferredTransactionPrompt>,
 }
 
 impl App {
     pub fn new(profiles: Vec<ConnectionProfile>) -> Self {
+        Self::with_confirmation_policy(profiles, ConfirmationPolicy::RiskyOnly)
+    }
+
+    pub fn with_confirmation_policy(
+        profiles: Vec<ConnectionProfile>,
+        confirmation_policy: ConfirmationPolicy,
+    ) -> Self {
+        let tab = ConsoleTab::new("console");
+        let tab_id = tab.id;
+        let mut editor = EditorWorkspace::new();
+        editor.open_console(tab_id, "");
         Self {
             profiles,
             connection: ConnectionState::default(),
             explorer: ExplorerState::default(),
-            tabs: vec![ConsoleTab::new("console")],
+            tabs: vec![tab],
             active_tab: 0,
             focus: Focus::Editor,
             overlay: None,
@@ -47,7 +71,15 @@ impl App {
             next_console_number: 2,
             connection_request_generation: 0,
             connection_terminal_generation: 0,
+            editor,
+            confirmation_policy,
+            deferred: DeferredIntentQueue::default(),
+            resolving_deferred: None,
         }
+    }
+
+    pub fn set_confirmation_policy(&mut self, policy: ConfirmationPolicy) {
+        self.confirmation_policy = policy;
     }
 
     pub fn active_console(&self) -> &ConsoleTab {
@@ -56,6 +88,41 @@ impl App {
 
     pub fn active_console_mut(&mut self) -> &mut ConsoleTab {
         &mut self.tabs[self.active_tab]
+    }
+
+    pub fn active_editor_text(&self) -> Result<String, EditorError> {
+        self.editor_text(self.active_console().id)
+    }
+
+    pub fn editor_text(&self, tab_id: Uuid) -> Result<String, EditorError> {
+        self.editor.text(tab_id)
+    }
+
+    pub fn active_editor_revision(&self) -> u64 {
+        self.editor
+            .revision(self.active_console().id)
+            .unwrap_or_default()
+    }
+
+    pub fn active_editor_mode(&self) -> EditorMode {
+        self.editor
+            .mode(self.active_console().id)
+            .unwrap_or(EditorMode::Normal)
+    }
+
+    pub fn active_editor_viewport(&self) -> Result<EditorViewport, EditorError> {
+        self.editor.viewport(self.active_console().id)
+    }
+
+    pub fn active_editor_render_snapshot(
+        &self,
+        viewport: EditorViewport,
+    ) -> Result<EditorRenderSnapshot, EditorError> {
+        self.editor.render_snapshot_with_dialect(
+            self.active_console().id,
+            viewport,
+            self.sql_dialect(),
+        )
     }
 
     pub fn active_profile(&self) -> Option<&ConnectionProfile> {
@@ -70,14 +137,22 @@ impl App {
             Action::NewConsole => {
                 let name = format!("console_{}", self.next_console_number);
                 self.next_console_number += 1;
-                self.tabs.push(ConsoleTab::new(name));
+                let tab = ConsoleTab::new(name);
+                let id = tab.id;
+                self.tabs.push(tab);
+                self.editor.open_console(id, "");
                 self.active_tab = self.tabs.len() - 1;
                 self.focus = Focus::Editor;
                 vec![Command::PersistWorkspace]
             }
             Action::CloseActiveTab => {
                 if self.tabs.len() > 1 {
+                    let id = self.active_console().id;
+                    if self.transaction_needs_exit(id) {
+                        return self.defer_intent(DeferredIntent::CloseConsole, [id]);
+                    }
                     self.tabs.remove(self.active_tab);
+                    self.editor.close_console(id);
                     self.active_tab = self.active_tab.saturating_sub(1);
                     vec![Command::PersistWorkspace]
                 } else {
@@ -118,12 +193,48 @@ impl App {
                 Vec::new()
             }
             Action::DismissOverlay => {
+                if matches!(self.overlay, Some(Overlay::ExecutionConfirm { .. })) {
+                    if let Some(Overlay::ExecutionConfirm { draft, .. }) = self.overlay.take() {
+                        self.retain_execution(draft, ExecutionResult::Cancelled);
+                    }
+                    return Vec::new();
+                }
+                if matches!(self.overlay, Some(Overlay::SubstituteConfirm { .. })) {
+                    self.editor.cancel_substitute();
+                    self.overlay = None;
+                    return Vec::new();
+                }
                 if self.overlay == Some(Overlay::ProfileManager) {
                     self.close_profile_manager();
                 } else {
                     self.overlay = None;
                 }
                 Vec::new()
+            }
+            Action::SubstituteYes
+            | Action::SubstituteNo
+            | Action::SubstituteAll
+            | Action::SubstituteLast
+            | Action::SubstituteQuit => {
+                let action = action.clone();
+                if matches!(action, Action::SubstituteQuit) {
+                    self.editor.cancel_substitute();
+                    self.overlay = None;
+                    return Vec::new();
+                }
+                self.overlay = None;
+                let result = self.editor.substitute_confirm(
+                    matches!(
+                        action,
+                        Action::SubstituteYes | Action::SubstituteAll | Action::SubstituteLast
+                    ),
+                    matches!(action, Action::SubstituteAll),
+                    matches!(action, Action::SubstituteLast),
+                );
+                if result.is_err() {
+                    self.overlay = None;
+                }
+                self.apply_editor_effects()
             }
             Action::OpenProfileManager => {
                 if self.profile_manager.is_some() {
@@ -406,75 +517,100 @@ impl App {
                 };
                 Vec::new()
             }
+            Action::EditorKey(key) => {
+                let id = self.active_console().id;
+                self.active_console_mut().completion = None;
+                if self.editor.key(id, key).is_err() {
+                    return Vec::new();
+                }
+                self.apply_editor_effects()
+            }
+            Action::EditorPaste(text) => {
+                let id = self.active_console().id;
+                self.active_console_mut().completion = None;
+                if self.editor.paste(id, &text).is_err() {
+                    return Vec::new();
+                }
+                self.apply_editor_effects()
+            }
+            Action::EditorViewportChanged(viewport) => {
+                let id = self.active_console().id;
+                let _ = self.editor.set_viewport(id, viewport);
+                Vec::new()
+            }
+            Action::EditorScroll { rows, columns } => {
+                let id = self.active_console().id;
+                let _ = self.editor.scroll(id, rows, columns);
+                Vec::new()
+            }
             Action::ReplaceEditor(text) => {
-                self.active_console_mut().editor.set_text(text);
+                let id = self.active_console().id;
+                let _ = self.editor.set_text(id, &text);
                 vec![Command::PersistWorkspace]
             }
-            Action::InsertCharacter(character) => {
-                self.active_console_mut().editor.insert(character);
+            Action::CompletionExplicit => self.complete_now(),
+            Action::CompletionDue(key) => {
+                if self.completion_key() == Some(key) {
+                    self.complete_now()
+                } else {
+                    Vec::new()
+                }
+            }
+            Action::CompletionNext => {
+                if let Some(popup) = &mut self.active_console_mut().completion {
+                    popup.selected = (popup.selected + 1) % popup.candidates.len().max(1);
+                }
                 Vec::new()
             }
-            Action::InsertNewline => {
-                self.active_console_mut().editor.newline();
+            Action::CompletionPrevious => {
+                if let Some(popup) = &mut self.active_console_mut().completion {
+                    popup.selected = popup
+                        .selected
+                        .checked_sub(1)
+                        .unwrap_or(popup.candidates.len().saturating_sub(1));
+                }
                 Vec::new()
             }
-            Action::Backspace => {
-                self.active_console_mut().editor.backspace();
+            Action::CompletionDismiss => {
+                self.active_console_mut().completion = None;
                 Vec::new()
             }
-            Action::Delete => {
-                self.active_console_mut().editor.delete();
+            Action::CompletionAccept => self.accept_completion(),
+            Action::RunActiveSql => self.run_active_sql(false),
+            Action::RunAllSql => self.run_active_sql(true),
+            Action::ConfirmExecution => self.confirm_execution(),
+            Action::CancelExecution => self.cancel_execution(),
+            Action::ToggleExecutionConfirmationFocus => {
+                if let Some(Overlay::ExecutionConfirm { focus, .. }) = self.overlay.as_mut() {
+                    *focus = match *focus {
+                        ExecutionConfirmFocus::Cancel => ExecutionConfirmFocus::Execute,
+                        ExecutionConfirmFocus::Execute => ExecutionConfirmFocus::Cancel,
+                    };
+                }
                 Vec::new()
             }
-            Action::MoveLeft => {
-                self.active_console_mut().editor.move_left();
-                Vec::new()
-            }
-            Action::MoveRight => {
-                self.active_console_mut().editor.move_right();
-                Vec::new()
-            }
-            Action::MoveUp => {
-                self.active_console_mut().editor.move_up();
-                Vec::new()
-            }
-            Action::MoveDown => {
-                self.active_console_mut().editor.move_down();
-                Vec::new()
-            }
-            Action::MoveHome => {
-                self.active_console_mut().editor.move_home();
-                Vec::new()
-            }
-            Action::MoveEnd => {
-                self.active_console_mut().editor.move_end();
-                Vec::new()
-            }
-            Action::EnterNormalMode => {
-                self.active_console_mut().editor.mode = EditorMode::Normal;
-                Vec::new()
-            }
-            Action::EnterInsertMode => {
-                self.active_console_mut().editor.mode = EditorMode::Insert;
-                Vec::new()
-            }
-            Action::EnterAppendMode => {
-                let editor = &mut self.active_console_mut().editor;
-                editor.move_right();
-                editor.mode = EditorMode::Insert;
-                Vec::new()
-            }
-            Action::OpenLineBelow => {
-                let editor = &mut self.active_console_mut().editor;
-                editor.move_end();
-                editor.newline();
-                editor.mode = EditorMode::Insert;
-                Vec::new()
-            }
-            Action::RunActiveSql => self.run_active_sql(),
             Action::CancelActiveQuery => {
+                let active_connection = self.connection.active_identity();
                 let tab = self.active_console_mut();
                 if tab.query_status != QueryStatus::Running {
+                    return Vec::new();
+                }
+                if tab.transaction_mode == TransactionMode::Manual
+                    && tab.transaction_state == TransactionState::Active
+                {
+                    let intent = transaction::CancellationIntent {
+                        console_id: tab.id,
+                        query_generation: tab.generation,
+                        transaction_generation: tab.transaction_generation,
+                        connection: active_connection.unwrap_or(ConnectionIdentity {
+                            profile_id: Uuid::nil(),
+                            generation: 0,
+                        }),
+                    };
+                    self.overlay = Some(Overlay::ManualCancelConfirm {
+                        intent,
+                        focus: ManualCancelFocus::KeepRunning,
+                    });
                     return Vec::new();
                 }
                 tab.query_status = QueryStatus::Cancelled;
@@ -482,11 +618,100 @@ impl App {
                     kind: OutputKind::Cancelled,
                     message: "Query cancellation requested".to_owned(),
                 });
+                if let Some(last) = tab.last_execution.as_mut() {
+                    last.result = ExecutionResult::Cancelled;
+                }
                 vec![Command::CancelQuery {
                     tab_id: tab.id,
                     generation: tab.generation,
                 }]
             }
+            Action::ToggleManualCancellationFocus => {
+                if let Some(Overlay::ManualCancelConfirm { focus, .. }) = self.overlay.as_mut() {
+                    *focus = match *focus {
+                        ManualCancelFocus::KeepRunning => ManualCancelFocus::CancelQueryAndRollback,
+                        ManualCancelFocus::CancelQueryAndRollback => ManualCancelFocus::KeepRunning,
+                    };
+                }
+                Vec::new()
+            }
+            Action::CancelManualCancellation => {
+                self.overlay = None;
+                Vec::new()
+            }
+            Action::ConfirmTransactionExit => {
+                self.resolve_transaction_exit(TransactionExitChoice::Commit)
+            }
+            Action::CancelTransactionExit => {
+                self.resolve_transaction_exit(TransactionExitChoice::Cancel)
+            }
+            Action::ToggleTransactionExitChoice => {
+                if let Some(Overlay::TransactionExitConfirm { choice, .. }) = self.overlay.as_mut()
+                {
+                    *choice = match choice {
+                        TransactionExitChoice::Commit => TransactionExitChoice::Rollback,
+                        TransactionExitChoice::Rollback => TransactionExitChoice::Commit,
+                        TransactionExitChoice::Cancel => TransactionExitChoice::Rollback,
+                    };
+                }
+                Vec::new()
+            }
+            Action::ConfirmClearTransactionOutcome => self.confirm_clear_outcome(),
+            Action::CancelClearTransactionOutcome => {
+                if matches!(self.overlay, Some(Overlay::ClearTransactionOutcome { .. })) {
+                    self.overlay = None;
+                }
+                Vec::new()
+            }
+            Action::ConfirmManualCancellation => {
+                let Some(Overlay::ManualCancelConfirm { intent, focus }) = self.overlay.take()
+                else {
+                    return Vec::new();
+                };
+                if focus != ManualCancelFocus::CancelQueryAndRollback {
+                    return Vec::new();
+                }
+                let current = self.tabs.iter().find(|tab| tab.id == intent.console_id);
+                if self.connection.active_identity() != Some(intent.connection)
+                    || current.is_none_or(|tab| {
+                        tab.generation != intent.query_generation
+                            || tab.transaction_generation != intent.transaction_generation
+                            || tab.query_status != QueryStatus::Running
+                    })
+                {
+                    self.status_message("Stale cancellation request discarded");
+                    return Vec::new();
+                }
+                let tab = self
+                    .tabs
+                    .iter_mut()
+                    .find(|tab| tab.id == intent.console_id)
+                    .unwrap();
+                tab.generation = tab.generation.saturating_add(1);
+                tab.query_status = QueryStatus::Cancelled;
+                tab.output.push(OutputEntry {
+                    kind: OutputKind::Cancelled,
+                    message: "Cancelling rolls back all uncommitted work in this transaction"
+                        .to_owned(),
+                });
+                vec![Command::CancelManual {
+                    connection: intent.connection,
+                    tab_id: intent.console_id,
+                    query_generation: intent.query_generation,
+                    transaction_generation: intent.transaction_generation,
+                }]
+            }
+            Action::SetTransactionMode(mode) => {
+                if mode == TransactionMode::Auto
+                    && self.transaction_needs_exit(self.active_console().id)
+                {
+                    return self
+                        .defer_intent(DeferredIntent::SetMode(mode), [self.active_console().id]);
+                }
+                self.set_transaction_mode(mode)
+            }
+            Action::CommitTransaction => self.transaction_control(true),
+            Action::RollbackTransaction => self.transaction_control(false),
             Action::RefreshCatalog => {
                 let Some(connection) = self.database_command_identity() else {
                     return Vec::new();
@@ -499,6 +724,7 @@ impl App {
             Action::PreviewSelected => self.preview_selected(),
             Action::DdlSelected => self.ddl_selected(),
             Action::RequestConnect(profile_id) => self.request_connection(profile_id),
+            Action::ClearTransactionOutcome => self.request_clear_outcome(),
             Action::ConnectionSucceeded {
                 profile_id,
                 generation,
@@ -529,7 +755,21 @@ impl App {
                 };
                 self.connection.server = Some(server);
                 self.connection.error = None;
-                self.explorer = ExplorerState::default();
+                self.explorer.connection_changed();
+                for tab in &mut self.tabs {
+                    if tab.transaction_state == TransactionState::OutcomeUnknown
+                        && let Ok(next) = transaction::transition(
+                            tab_snapshot(tab),
+                            TransactionEvent::ClearOutcome,
+                        )
+                    {
+                        apply_transaction_snapshot(tab, next);
+                        tab.output.push(OutputEntry {
+                                kind: OutputKind::Info,
+                                message: "Transaction outcome cleared after reconnect; the prior operation was not retried".to_owned(),
+                            });
+                    }
+                }
                 if pending_matches
                     && let Some(manager) = self.profile_manager.as_mut()
                     && manager.operation == Some(ProfileOperation::Connecting)
@@ -590,12 +830,15 @@ impl App {
             Action::QueryFinished {
                 tab_id,
                 generation,
+                connection,
                 outcome,
             } => {
                 let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
                     return Vec::new();
                 };
-                if tab.generation != generation {
+                if tab.generation != generation
+                    || self.connection.active_identity() != Some(connection)
+                {
                     return Vec::new();
                 }
                 let total_ms = outcome.stats.total().as_millis();
@@ -607,17 +850,25 @@ impl App {
                 });
                 tab.outcome = Some(outcome);
                 tab.result_view = ResultView::Data;
+                if let Some(last) = tab.last_execution.as_mut()
+                    && last.draft.query_generation + 1 == generation
+                {
+                    last.result = ExecutionResult::Succeeded;
+                }
                 Vec::new()
             }
             Action::QueryFailed {
                 tab_id,
                 generation,
+                connection,
                 message,
             } => {
                 let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
                     return Vec::new();
                 };
-                if tab.generation != generation {
+                if tab.generation != generation
+                    || self.connection.active_identity() != Some(connection)
+                {
                     return Vec::new();
                 }
                 tab.query_status = QueryStatus::Failed;
@@ -626,6 +877,283 @@ impl App {
                     message,
                 });
                 tab.result_view = ResultView::Output;
+                if let Some(last) = tab.last_execution.as_mut()
+                    && last.draft.query_generation + 1 == generation
+                {
+                    last.result = ExecutionResult::Failed;
+                }
+                Vec::new()
+            }
+            Action::ManualStarted {
+                tab_id,
+                query_generation,
+                transaction_generation,
+                connection,
+            } => {
+                if self.manual_matches(
+                    tab_id,
+                    query_generation,
+                    transaction_generation,
+                    connection,
+                    TransactionState::Starting,
+                ) {
+                    let tab = self.tabs.iter_mut().find(|tab| tab.id == tab_id).unwrap();
+                    if let Ok(next) =
+                        transaction::transition(tab_snapshot(tab), TransactionEvent::Started)
+                    {
+                        apply_transaction_snapshot(tab, next);
+                    }
+                }
+                Vec::new()
+            }
+            Action::ManualStartFailed {
+                tab_id,
+                query_generation,
+                transaction_generation,
+                connection,
+                message,
+            } => {
+                if self.manual_matches(
+                    tab_id,
+                    query_generation,
+                    transaction_generation,
+                    connection,
+                    TransactionState::Starting,
+                ) {
+                    let tab = self.tabs.iter_mut().find(|tab| tab.id == tab_id).unwrap();
+                    if let Ok(next) =
+                        transaction::transition(tab_snapshot(tab), TransactionEvent::StartFailed)
+                    {
+                        apply_transaction_snapshot(tab, next);
+                    }
+                    tab.query_status = QueryStatus::Failed;
+                    tab.output.push(OutputEntry {
+                        kind: OutputKind::Error,
+                        message,
+                    });
+                }
+                Vec::new()
+            }
+            Action::ManualQueryFinished {
+                tab_id,
+                query_generation,
+                transaction_generation,
+                connection,
+                outcome,
+            } => {
+                if self.manual_matches(
+                    tab_id,
+                    query_generation,
+                    transaction_generation,
+                    connection,
+                    TransactionState::Active,
+                ) {
+                    self.finish_query(tab_id, query_generation, outcome, true);
+                }
+                Vec::new()
+            }
+            Action::ManualQueryFailed {
+                tab_id,
+                query_generation,
+                transaction_generation,
+                connection,
+                message,
+            } => {
+                if self.manual_matches(
+                    tab_id,
+                    query_generation,
+                    transaction_generation,
+                    connection,
+                    TransactionState::Active,
+                ) {
+                    let postgres = self
+                        .active_profile()
+                        .is_some_and(|profile| profile.kind == DatabaseKind::Postgres);
+                    let tab = self.tabs.iter_mut().find(|tab| tab.id == tab_id).unwrap();
+                    tab.query_status = QueryStatus::Failed;
+                    tab.output.push(OutputEntry {
+                        kind: OutputKind::Error,
+                        message,
+                    });
+                    if postgres
+                        && let Ok(next) = transaction::transition(
+                            tab_snapshot(tab),
+                            TransactionEvent::StatementFailed,
+                        )
+                    {
+                        apply_transaction_snapshot(tab, next);
+                    }
+                } else if self.connection.active_identity() == Some(connection)
+                    && let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id)
+                    && tab.transaction_generation == transaction_generation
+                    && tab.query_status == QueryStatus::Cancelled
+                {
+                    let event = if message.contains("acknowledgement was lost") {
+                        TransactionEvent::OutcomeUnknown
+                    } else {
+                        TransactionEvent::RolledBack
+                    };
+                    if tab.transaction_state == TransactionState::Active
+                        && let Ok(next) = transaction::transition(
+                            tab_snapshot(tab),
+                            if event == TransactionEvent::RolledBack {
+                                TransactionEvent::Rollback
+                            } else {
+                                TransactionEvent::OutcomeUnknown
+                            },
+                        )
+                    {
+                        apply_transaction_snapshot(tab, next);
+                        if event == TransactionEvent::RolledBack
+                            && let Ok(next) = transaction::transition(
+                                tab_snapshot(tab),
+                                TransactionEvent::RolledBack,
+                            )
+                        {
+                            apply_transaction_snapshot(tab, next);
+                        }
+                    }
+                }
+                Vec::new()
+            }
+            Action::ManualImplicitlyEnded {
+                tab_id,
+                query_generation,
+                transaction_generation,
+                connection,
+            } => {
+                if self.manual_matches(
+                    tab_id,
+                    query_generation,
+                    transaction_generation,
+                    connection,
+                    TransactionState::Active,
+                ) {
+                    let tab = self.tabs.iter_mut().find(|tab| tab.id == tab_id).unwrap();
+                    if let Ok(next) = transaction::transition(
+                        tab_snapshot(tab),
+                        TransactionEvent::ImplicitlyEnded,
+                    ) {
+                        apply_transaction_snapshot(tab, next);
+                    }
+                    tab.output.push(OutputEntry {
+                        kind: OutputKind::Info,
+                        message: "Transaction ended implicitly; prior work may have committed"
+                            .to_owned(),
+                    });
+                }
+                Vec::new()
+            }
+            Action::ManualCommitted {
+                tab_id,
+                query_generation,
+                transaction_generation,
+                connection,
+            } => {
+                if self.manual_matches(
+                    tab_id,
+                    query_generation,
+                    transaction_generation,
+                    connection,
+                    TransactionState::Committing,
+                ) {
+                    let tab = self.tabs.iter_mut().find(|tab| tab.id == tab_id).unwrap();
+                    if let Ok(next) =
+                        transaction::transition(tab_snapshot(tab), TransactionEvent::Committed)
+                    {
+                        apply_transaction_snapshot(tab, next);
+                        return self.finish_deferred(tab_id);
+                    }
+                }
+                self.retain_failed_deferred();
+                Vec::new()
+            }
+            Action::ManualCommitFailed {
+                tab_id,
+                query_generation,
+                transaction_generation,
+                connection,
+                message,
+                unknown,
+            } => {
+                if self.manual_matches(
+                    tab_id,
+                    query_generation,
+                    transaction_generation,
+                    connection,
+                    TransactionState::Committing,
+                ) {
+                    let tab = self.tabs.iter_mut().find(|tab| tab.id == tab_id).unwrap();
+                    let event = if unknown {
+                        TransactionEvent::OutcomeUnknown
+                    } else {
+                        TransactionEvent::CommitFailed
+                    };
+                    if let Ok(next) = transaction::transition(tab_snapshot(tab), event) {
+                        apply_transaction_snapshot(tab, next);
+                    }
+                    tab.output.push(OutputEntry {
+                        kind: OutputKind::Error,
+                        message,
+                    });
+                    self.retain_failed_deferred();
+                }
+                Vec::new()
+            }
+            Action::ManualRolledBack {
+                tab_id,
+                query_generation,
+                transaction_generation,
+                connection,
+            } => {
+                if self.manual_matches(
+                    tab_id,
+                    query_generation,
+                    transaction_generation,
+                    connection,
+                    TransactionState::RollingBack,
+                ) {
+                    let tab = self.tabs.iter_mut().find(|tab| tab.id == tab_id).unwrap();
+                    if let Ok(next) =
+                        transaction::transition(tab_snapshot(tab), TransactionEvent::RolledBack)
+                    {
+                        apply_transaction_snapshot(tab, next);
+                        return self.finish_deferred(tab_id);
+                    }
+                }
+                self.retain_failed_deferred();
+                Vec::new()
+            }
+            Action::ManualRollbackFailed {
+                tab_id,
+                query_generation,
+                transaction_generation,
+                connection,
+                message,
+                unknown,
+            } => {
+                if self.manual_matches(
+                    tab_id,
+                    query_generation,
+                    transaction_generation,
+                    connection,
+                    TransactionState::RollingBack,
+                ) {
+                    let tab = self.tabs.iter_mut().find(|tab| tab.id == tab_id).unwrap();
+                    let event = if unknown {
+                        TransactionEvent::OutcomeUnknown
+                    } else {
+                        TransactionEvent::RollbackFailed
+                    };
+                    if let Ok(next) = transaction::transition(tab_snapshot(tab), event) {
+                        apply_transaction_snapshot(tab, next);
+                    }
+                    tab.output.push(OutputEntry {
+                        kind: OutputKind::Error,
+                        message,
+                    });
+                    self.retain_failed_deferred();
+                }
                 Vec::new()
             }
             Action::PreviewFinished {
@@ -640,8 +1168,8 @@ impl App {
                 if tab.generation != generation {
                     return Vec::new();
                 }
-                tab.editor.set_text(sql);
-                tab.editor.mode = EditorMode::Normal;
+                let _ = self.editor.set_text(tab_id, &sql);
+                let _ = self.editor.set_mode(tab_id, EditorMode::Normal);
                 let rows = outcome.stats.row_count;
                 let total_ms = outcome.stats.total().as_millis();
                 tab.outcome = Some(outcome);
@@ -664,8 +1192,8 @@ impl App {
                 if tab.generation != generation {
                     return Vec::new();
                 }
-                tab.editor.set_text(ddl);
-                tab.editor.mode = EditorMode::Normal;
+                let _ = self.editor.set_text(tab_id, &ddl);
+                let _ = self.editor.set_mode(tab_id, EditorMode::Normal);
                 tab.query_status = QueryStatus::Idle;
                 tab.output.push(OutputEntry {
                     kind: OutputKind::Success,
@@ -721,8 +1249,18 @@ impl App {
                 Vec::new()
             }
             Action::Quit => {
-                self.should_quit = true;
-                vec![Command::Quit]
+                let ids = self
+                    .tabs
+                    .iter()
+                    .filter(|tab| self.transaction_needs_exit(tab.id))
+                    .map(|tab| tab.id)
+                    .collect::<Vec<_>>();
+                if ids.is_empty() {
+                    self.should_quit = true;
+                    vec![Command::Quit]
+                } else {
+                    self.defer_intent(DeferredIntent::Quit, ids)
+                }
             }
         }
     }
@@ -745,6 +1283,234 @@ impl App {
         if self.overlay == Some(Overlay::ProfileManager) {
             self.overlay = None;
         }
+    }
+
+    fn transaction_needs_exit(&self, console_id: Uuid) -> bool {
+        self.tabs
+            .iter()
+            .find(|tab| tab.id == console_id)
+            .is_some_and(|tab| tab.transaction_state != TransactionState::Idle)
+    }
+
+    fn defer_intent<I>(&mut self, intent: DeferredIntent, console_ids: I) -> Vec<Command>
+    where
+        I: IntoIterator<Item = Uuid>,
+    {
+        for console_id in console_ids {
+            let Some(tab) = self.tabs.iter().find(|tab| tab.id == console_id) else {
+                continue;
+            };
+            self.deferred.push(DeferredTransactionPrompt {
+                console_id,
+                transaction_generation: tab.transaction_generation,
+                intent,
+            });
+        }
+        self.show_next_deferred();
+        Vec::new()
+    }
+
+    fn show_next_deferred(&mut self) {
+        if self.overlay.is_some() {
+            return;
+        }
+        let Some(prompt) = self.deferred.pop() else {
+            return;
+        };
+        self.overlay = Some(Overlay::TransactionExitConfirm {
+            prompt,
+            choice: TransactionExitChoice::Rollback,
+        });
+    }
+
+    fn resolve_transaction_exit(&mut self, choice: TransactionExitChoice) -> Vec<Command> {
+        let Some(Overlay::TransactionExitConfirm { prompt, .. }) = self.overlay.take() else {
+            return Vec::new();
+        };
+        let Some(tab) = self.tabs.iter().find(|tab| tab.id == prompt.console_id) else {
+            self.show_next_deferred();
+            return self.replay_deferred(prompt.intent);
+        };
+        if tab.transaction_generation != prompt.transaction_generation {
+            self.status_message("Stale transaction exit prompt discarded");
+            self.show_next_deferred();
+            return Vec::new();
+        }
+        if tab.query_status == QueryStatus::Running {
+            self.overlay = Some(Overlay::TransactionExitConfirm {
+                prompt,
+                choice: TransactionExitChoice::Rollback,
+            });
+            self.status_message("Wait for the query to finish or cancel it before resolving");
+            return Vec::new();
+        }
+        if choice == TransactionExitChoice::Cancel {
+            self.show_next_deferred();
+            return Vec::new();
+        }
+        if choice == TransactionExitChoice::Commit
+            && tab.transaction_state == TransactionState::Aborted
+        {
+            self.overlay = Some(Overlay::TransactionExitConfirm {
+                prompt,
+                choice: TransactionExitChoice::Rollback,
+            });
+            self.status_message("COMMIT is unavailable for an aborted transaction");
+            return Vec::new();
+        }
+        let commit = choice == TransactionExitChoice::Commit;
+        let Some(connection) = self.database_command_identity() else {
+            self.overlay = Some(Overlay::TransactionExitConfirm { prompt, choice });
+            return Vec::new();
+        };
+        let tab = self
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.id == prompt.console_id)
+            .unwrap();
+        let event = if commit {
+            TransactionEvent::Commit
+        } else {
+            TransactionEvent::Rollback
+        };
+        let Ok(next) = transaction::transition(tab_snapshot(tab), event) else {
+            self.overlay = Some(Overlay::TransactionExitConfirm { prompt, choice });
+            return Vec::new();
+        };
+        tab.generation = tab.generation.saturating_add(1);
+        let query_generation = tab.generation;
+        let transaction_generation = tab.transaction_generation;
+        apply_transaction_snapshot(tab, next);
+        self.resolving_deferred = Some(prompt);
+        if commit {
+            vec![Command::ManualCommit {
+                connection,
+                tab_id: prompt.console_id,
+                query_generation,
+                transaction_generation,
+            }]
+        } else {
+            vec![Command::ManualRollback {
+                connection,
+                tab_id: prompt.console_id,
+                query_generation,
+                transaction_generation,
+            }]
+        }
+    }
+
+    fn finish_deferred(&mut self, _console_id: Uuid) -> Vec<Command> {
+        let Some(prompt) = self.resolving_deferred.take() else {
+            return Vec::new();
+        };
+        if self
+            .deferred
+            .prompts
+            .front()
+            .is_some_and(|next| next.intent == prompt.intent)
+        {
+            self.show_next_deferred();
+            return Vec::new();
+        }
+        self.replay_deferred(prompt.intent)
+    }
+
+    fn retain_failed_deferred(&mut self) {
+        if let Some(prompt) = self.resolving_deferred.take() {
+            self.deferred.prompts.push_front(prompt);
+            self.show_next_deferred();
+        }
+    }
+
+    fn replay_deferred(&mut self, intent: DeferredIntent) -> Vec<Command> {
+        match intent {
+            DeferredIntent::CloseConsole => {
+                if self.tabs.len() > 1 {
+                    let id = self.active_console().id;
+                    if let Some(index) = self.tabs.iter().position(|tab| tab.id == id) {
+                        self.tabs.remove(index);
+                        self.editor.close_console(id);
+                        self.active_tab = self.active_tab.min(self.tabs.len().saturating_sub(1));
+                    }
+                }
+                vec![Command::PersistWorkspace]
+            }
+            DeferredIntent::SetMode(TransactionMode::Auto) => {
+                self.set_transaction_mode(TransactionMode::Auto)
+            }
+            DeferredIntent::SwitchConnection { profile_id, .. } => {
+                self.request_connection(profile_id)
+            }
+            DeferredIntent::DeleteProfile {
+                profile_id,
+                request_id,
+            } => vec![Command::DeleteProfile {
+                request_id,
+                profile_id,
+            }],
+            DeferredIntent::Disconnect { connection } => vec![Command::Disconnect { connection }],
+            DeferredIntent::Quit => {
+                self.should_quit = true;
+                vec![Command::Quit]
+            }
+            DeferredIntent::SetMode(TransactionMode::Manual) => {
+                self.set_transaction_mode(TransactionMode::Manual)
+            }
+        }
+    }
+
+    fn request_clear_outcome(&mut self) -> Vec<Command> {
+        let tab = self.active_console();
+        if tab.transaction_state != TransactionState::OutcomeUnknown {
+            return Vec::new();
+        }
+        let Some(connection) = self.connection.active_identity() else {
+            return Vec::new();
+        };
+        self.overlay = Some(Overlay::ClearTransactionOutcome {
+            console_id: tab.id,
+            connection,
+            transaction_generation: tab.transaction_generation,
+        });
+        Vec::new()
+    }
+
+    fn confirm_clear_outcome(&mut self) -> Vec<Command> {
+        let Some(Overlay::ClearTransactionOutcome {
+            console_id,
+            connection,
+            transaction_generation,
+        }) = self.overlay.take()
+        else {
+            return Vec::new();
+        };
+        let valid = self.connection.active_identity() == Some(connection)
+            && self
+                .tabs
+                .iter()
+                .find(|tab| tab.id == console_id)
+                .is_some_and(|tab| {
+                    tab.transaction_generation == transaction_generation
+                        && tab.transaction_state == TransactionState::OutcomeUnknown
+                });
+        if !valid {
+            self.status_message("Stale transaction outcome verification discarded");
+            return Vec::new();
+        }
+        let tab = self
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.id == console_id)
+            .unwrap();
+        if let Ok(next) = transaction::transition(tab_snapshot(tab), TransactionEvent::ClearOutcome)
+        {
+            apply_transaction_snapshot(tab, next);
+            tab.output.push(OutputEntry {
+                kind: OutputKind::Info,
+                message: "Transaction outcome cleared after external verification; no operation was retried".to_owned(),
+            });
+        }
+        Vec::new()
     }
 
     fn idle_profile_manager_mut(
@@ -786,6 +1552,15 @@ impl App {
             return Vec::new();
         };
         let blocked = self.connection.profile_id == Some(profile_id) && self.has_running_query();
+        let active_console_id = self.active_console().id;
+        let should_defer = self.connection.profile_id == Some(profile_id)
+            && self.transaction_needs_exit(active_console_id);
+        let deferred_console_ids = self
+            .tabs
+            .iter()
+            .filter(|tab| self.transaction_needs_exit(tab.id))
+            .map(|tab| tab.id)
+            .collect::<Vec<_>>();
         let Some(manager) = self.idle_profile_manager_mut(ProfileManagerPage::ConfirmDelete) else {
             return Vec::new();
         };
@@ -795,6 +1570,15 @@ impl App {
             return Vec::new();
         }
         let request_id = next_profile_request(manager);
+        if should_defer {
+            return self.defer_intent(
+                DeferredIntent::DeleteProfile {
+                    profile_id,
+                    request_id,
+                },
+                deferred_console_ids,
+            );
+        }
         manager.operation = Some(ProfileOperation::Deleting);
         manager.message = None;
         vec![Command::DeleteProfile {
@@ -821,6 +1605,23 @@ impl App {
                 manager.message = Some("Cancel the running query before switching profiles".into());
             }
             return Vec::new();
+        }
+        if self.connection.profile_id != Some(profile_id) {
+            let ids = self
+                .tabs
+                .iter()
+                .filter(|tab| self.transaction_needs_exit(tab.id))
+                .map(|tab| tab.id)
+                .collect::<Vec<_>>();
+            if !ids.is_empty() {
+                return self.defer_intent(
+                    DeferredIntent::SwitchConnection {
+                        profile_id,
+                        generation: 0,
+                    },
+                    ids,
+                );
+            }
         }
         if self
             .idle_profile_manager_mut(ProfileManagerPage::List)
@@ -1135,27 +1936,482 @@ impl App {
             .any(|tab| tab.query_status == QueryStatus::Running)
     }
 
-    fn run_active_sql(&mut self) -> Vec<Command> {
-        let Some(connection) = self.database_command_identity() else {
+    fn apply_editor_effects(&mut self) -> Vec<Command> {
+        let effects = self.editor.drain_effects();
+        let mut commands = Vec::new();
+        for effect in effects {
+            let action = match effect {
+                EditorEffect::Changed { .. } => {
+                    if self
+                        .active_editor_text()
+                        .is_ok_and(|text| text.ends_with('.'))
+                    {
+                        self.complete_now();
+                    } else if let Some(key) = self.completion_key() {
+                        commands.push(Command::ScheduleCompletion(key));
+                    }
+                    continue;
+                }
+                EditorEffect::Message(_)
+                | EditorEffect::BackwardSearch
+                | EditorEffect::ToggleTransaction
+                | EditorEffect::ClearTransactionOutcome => continue,
+                EditorEffect::SetTransactionModeRequested { manual } => {
+                    Action::SetTransactionMode(if manual {
+                        TransactionMode::Manual
+                    } else {
+                        TransactionMode::Auto
+                    })
+                }
+                EditorEffect::Commit => Action::CommitTransaction,
+                EditorEffect::Rollback => Action::RollbackTransaction,
+                EditorEffect::SubstituteConfirmRequested { count } => {
+                    self.overlay = Some(Overlay::SubstituteConfirm { remaining: count });
+                    continue;
+                }
+                EditorEffect::FormatCurrent => {
+                    self.format_current();
+                    continue;
+                }
+                EditorEffect::RunCurrent => Action::RunActiveSql,
+                EditorEffect::RunAll => Action::RunAllSql,
+                EditorEffect::NewConsole => Action::NewConsole,
+                EditorEffect::CloseConsole => Action::CloseActiveTab,
+                EditorEffect::FocusPane(focus) => Action::Focus(focus),
+                EditorEffect::NextTab => Action::NextTab,
+                EditorEffect::PreviousTab => Action::PreviousTab,
+                EditorEffect::ShowHelp => Action::ShowHelp,
+                EditorEffect::Quit => Action::Quit,
+            };
+            commands.extend(self.update(action));
+        }
+        commands
+    }
+
+    fn completion_key(&self) -> Option<CompletionScheduleKey> {
+        Some(CompletionScheduleKey {
+            console_id: self.active_console().id,
+            document_revision: self.active_editor_revision(),
+            connection: self.connection.active_identity()?,
+            catalog_generation: self.explorer.catalog_generation,
+        })
+    }
+
+    fn complete_now(&mut self) -> Vec<Command> {
+        let text = self.active_editor_text().unwrap_or_default();
+        let snapshot = self
+            .active_editor_render_snapshot(EditorViewport {
+                width: 0,
+                height: 0,
+            })
+            .ok();
+        let cursor = snapshot
+            .as_ref()
+            .map(|snapshot| cursor_byte(&text, snapshot.cursor.line, snapshot.cursor.column))
+            .unwrap_or(text.len());
+        let candidates = sql::complete(
+            &text,
+            cursor,
+            self.sql_dialect(),
+            &self.explorer.completion_index,
+            None,
+        );
+        self.active_console_mut().completion =
+            (!candidates.is_empty()).then_some(CompletionPopup {
+                candidates,
+                selected: 0,
+            });
+        Vec::new()
+    }
+
+    fn accept_completion(&mut self) -> Vec<Command> {
+        let id = self.active_console().id;
+        let Some(popup) = self.active_console_mut().completion.take() else {
             return Vec::new();
         };
+        let Some(candidate) = popup.candidates.get(popup.selected).cloned() else {
+            return Vec::new();
+        };
+        let _ = self
+            .editor
+            .replace_range(id, candidate.replace, &candidate.insert_text);
+        self.apply_editor_effects()
+    }
+
+    fn sql_dialect(&self) -> SqlDialect {
+        match self.active_profile().map(|profile| profile.kind) {
+            Some(DatabaseKind::Postgres) => SqlDialect::Postgres,
+            Some(DatabaseKind::MySql) => SqlDialect::MySql,
+            Some(DatabaseKind::Sqlite) => SqlDialect::Sqlite,
+            None => SqlDialect::Generic,
+        }
+    }
+
+    fn format_current(&mut self) {
+        let id = self.active_console().id;
+        let dialect = self.sql_dialect();
+        let scope = match self.editor.current_scope(id, dialect) {
+            Ok(Some(scope)) => scope,
+            _ => {
+                self.overlay = Some(Overlay::Message {
+                    title: "FORMAT".into(),
+                    body: "No SQL scope at cursor".into(),
+                });
+                return;
+            }
+        };
+        if scope.kind == sql::ScopeKind::VisualBlock
+            || matches!(scope.source, ScopeSource::Block(_))
+        {
+            self.overlay = Some(Overlay::Message {
+                title: "FORMAT".into(),
+                body: "Visual Block formatting is unsupported; select a contiguous range".into(),
+            });
+            return;
+        }
+        let formatted = match sql::format_sql(&scope.sql, dialect) {
+            Ok(formatted) => formatted,
+            Err(error) => {
+                self.overlay = Some(Overlay::Message {
+                    title: "FORMAT".into(),
+                    body: error.to_string(),
+                });
+                return;
+            }
+        };
+        let ScopeSource::Contiguous(range) = scope.source else {
+            return;
+        };
+        if let Err(error) = self.editor.replace_range(id, range, &formatted) {
+            self.overlay = Some(Overlay::Message {
+                title: "FORMAT".into(),
+                body: error.to_string(),
+            });
+        }
+    }
+
+    fn set_transaction_mode(&mut self, mode: TransactionMode) -> Vec<Command> {
         let tab = self.active_console_mut();
-        let sql = tab.editor.text();
-        if sql.trim().is_empty() || tab.query_status == QueryStatus::Running {
+        let event = match mode {
+            TransactionMode::Manual => TransactionEvent::EnterManual,
+            TransactionMode::Auto => TransactionEvent::SetAuto,
+        };
+        if let Ok(next) = transaction::transition(tab_snapshot(tab), event) {
+            apply_transaction_snapshot(tab, next);
+        }
+        Vec::new()
+    }
+
+    fn transaction_control(&mut self, commit: bool) -> Vec<Command> {
+        let tab = self.active_console();
+        if tab.transaction_mode != TransactionMode::Manual {
+            return Vec::new();
+        }
+        let event = if commit {
+            TransactionEvent::Commit
+        } else {
+            TransactionEvent::Rollback
+        };
+        let Ok(next) = transaction::transition(tab_snapshot(tab), event) else {
+            return Vec::new();
+        };
+        let id = tab.id;
+        let query_generation = tab.generation.saturating_add(1);
+        let transaction_generation = tab.transaction_generation;
+        let connection = self.database_command_identity();
+        let tab = self.active_console_mut();
+        tab.generation = query_generation;
+        apply_transaction_snapshot(tab, next);
+        let Some(connection) = connection else {
+            return Vec::new();
+        };
+        if commit {
+            vec![Command::ManualCommit {
+                connection,
+                tab_id: id,
+                query_generation,
+                transaction_generation,
+            }]
+        } else {
+            vec![Command::ManualRollback {
+                connection,
+                tab_id: id,
+                query_generation,
+                transaction_generation,
+            }]
+        }
+    }
+
+    fn run_active_sql(&mut self, full_buffer: bool) -> Vec<Command> {
+        let Some(connection) = self.database_command_identity() else {
+            self.status_message("No active database connection");
+            return Vec::new();
+        };
+        let tab_id = self.active_console().id;
+        let sql = self.editor_text(tab_id).unwrap_or_default();
+        let dialect = self.sql_dialect();
+        let scope = if full_buffer {
+            (!sql.trim().is_empty()).then(|| sql::ResolvedScope {
+                kind: sql::ScopeKind::FullBuffer,
+                source: ScopeSource::Contiguous(sql::TextRange::new(0, sql.len())),
+                sql: sql.clone(),
+            })
+        } else {
+            self.editor.current_scope(tab_id, dialect).ok().flatten()
+        };
+        let Some(scope) = scope else {
+            self.status_message("No SQL scope at cursor");
+            return Vec::new();
+        };
+        match sql::classify_transaction_sql(&scope.sql, dialect) {
+            sql::TransactionSqlClassification::Control(control) => {
+                return self.dispatch_transaction_sql(tab_id, connection, control);
+            }
+            sql::TransactionSqlClassification::Unsupported(_) => {}
+            sql::TransactionSqlClassification::Data { .. } => {}
+        }
+        let tab = self.active_console();
+        if tab.query_status == QueryStatus::Running {
+            return Vec::new();
+        }
+        let draft = sql::ExecutionDraft::new(
+            tab_id,
+            tab.generation,
+            connection,
+            tab.transaction_generation,
+            self.active_editor_revision(),
+            scope.kind,
+            scope.source,
+            scope.sql,
+            dialect,
+            tab.transaction_mode,
+            tab.transaction_state,
+        );
+        if draft.has_mixed_transaction_control() {
+            self.status_message("Mixed transaction-control and data SQL is rejected");
+            return Vec::new();
+        }
+        if draft.requires_confirmation(self.confirmation_policy == ConfirmationPolicy::Always) {
+            self.overlay = Some(Overlay::ExecutionConfirm {
+                draft,
+                focus: ExecutionConfirmFocus::Cancel,
+            });
+            return Vec::new();
+        }
+        self.dispatch_draft(draft)
+    }
+
+    fn dispatch_transaction_sql(
+        &mut self,
+        tab_id: Uuid,
+        connection: ConnectionIdentity,
+        control: sql::TransactionControl,
+    ) -> Vec<Command> {
+        use sql::TransactionControl;
+        let tab = self.active_console();
+        match control {
+            TransactionControl::Begin(_)
+                if tab.transaction_mode == TransactionMode::Auto
+                    && tab.transaction_state == TransactionState::Idle =>
+            {
+                let next =
+                    transaction::transition(tab_snapshot(tab), TransactionEvent::EnterManual)
+                        .and_then(|s| transaction::transition(s, TransactionEvent::Start));
+                let Ok(next) = next else { return Vec::new() };
+                let query_generation = tab.generation.saturating_add(1);
+                let transaction_generation = next.generation;
+                let tab = self.active_console_mut();
+                tab.generation = query_generation;
+                apply_transaction_snapshot(tab, next);
+                vec![Command::ManualBegin {
+                    connection,
+                    tab_id,
+                    query_generation,
+                    transaction_generation,
+                }]
+            }
+            TransactionControl::Commit => self.transaction_control(true),
+            TransactionControl::Rollback => self.transaction_control(false),
+            TransactionControl::Savepoint(_)
+            | TransactionControl::ReleaseSavepoint(_)
+            | TransactionControl::RollbackToSavepoint(_)
+                if tab.transaction_mode == TransactionMode::Manual
+                    && tab.transaction_state == TransactionState::Active =>
+            {
+                self.dispatch_manual_sql(
+                    tab_id,
+                    connection,
+                    self.editor_text(tab_id).unwrap_or_default(),
+                )
+            }
+            _ => {
+                self.status_message(
+                    "Transaction control is unavailable in the current transaction state",
+                );
+                Vec::new()
+            }
+        }
+    }
+
+    fn dispatch_manual_sql(
+        &mut self,
+        tab_id: Uuid,
+        connection: ConnectionIdentity,
+        sql: String,
+    ) -> Vec<Command> {
+        let tab = self.active_console();
+        if tab.transaction_state != TransactionState::Idle
+            && tab.transaction_state != TransactionState::Active
+        {
+            return Vec::new();
+        }
+        let mut next = tab_snapshot(tab);
+        let starting = next.state == TransactionState::Idle;
+        if starting {
+            next = match transaction::transition(next, TransactionEvent::Start) {
+                Ok(next) => next,
+                Err(_) => return Vec::new(),
+            };
+        }
+        let query_generation = tab.generation.saturating_add(1);
+        let transaction_generation = next.generation;
+        let tab = self.active_console_mut();
+        tab.generation = query_generation;
+        apply_transaction_snapshot(tab, next);
+        vec![Command::ManualExecute {
+            connection,
+            tab_id,
+            query_generation,
+            transaction_generation,
+            sql,
+        }]
+    }
+
+    fn confirm_execution(&mut self) -> Vec<Command> {
+        let Some(Overlay::ExecutionConfirm { draft, focus }) = self.overlay.take() else {
+            return Vec::new();
+        };
+        if focus == ExecutionConfirmFocus::Cancel {
+            self.retain_execution(draft, ExecutionResult::Cancelled);
+            return Vec::new();
+        }
+        if let Err(message) = self.validate_draft(&draft) {
+            self.status_message(&message);
+            self.retain_execution(draft, ExecutionResult::Cancelled);
+            return Vec::new();
+        }
+        if draft.has_transaction_control() {
+            self.status_message("Transaction-control execution is unavailable until Task 16");
+            self.retain_execution(draft, ExecutionResult::Cancelled);
+            return Vec::new();
+        }
+        self.dispatch_draft(draft)
+    }
+
+    fn cancel_execution(&mut self) -> Vec<Command> {
+        let Some(Overlay::ExecutionConfirm { draft, .. }) = self.overlay.take() else {
+            return Vec::new();
+        };
+        self.retain_execution(draft, ExecutionResult::Cancelled);
+        Vec::new()
+    }
+
+    fn validate_draft(&self, draft: &sql::ExecutionDraft) -> Result<(), String> {
+        let Some(tab) = self.tabs.iter().find(|tab| tab.id == draft.console_id) else {
+            return Err("Console no longer exists".to_owned());
+        };
+        if tab.generation != draft.query_generation {
+            return Err("Execution draft is stale: query generation changed".to_owned());
+        }
+        if self.active_editor_revision_for(draft.console_id) != draft.document_revision {
+            return Err("Execution draft is stale: document changed".to_owned());
+        }
+        if self.connection.active_identity() != Some(draft.connection) {
+            return Err("Execution draft is stale: connection changed".to_owned());
+        }
+        if tab.transaction_generation != draft.transaction_generation
+            || tab.transaction_mode != draft.transaction_mode
+            || tab.transaction_state != draft.transaction_state
+        {
+            return Err("Execution draft is stale: transaction state changed".to_owned());
+        }
+        if tab.query_status == QueryStatus::Running {
+            return Err("A query is already running in this console".to_owned());
+        }
+        Ok(())
+    }
+
+    fn dispatch_draft(&mut self, draft: sql::ExecutionDraft) -> Vec<Command> {
+        if let Err(message) = self.validate_draft(&draft) {
+            self.status_message(&message);
+            return Vec::new();
+        }
+        let tab = self.tabs.iter_mut().find(|tab| tab.id == draft.console_id);
+        let Some(tab) = tab else {
+            return Vec::new();
+        };
+        if draft.transaction_mode == TransactionMode::Manual {
+            let connection = draft.connection;
+            let tab_id = draft.console_id;
+            let sql = draft.sql.clone();
+            let mode_state = tab.transaction_state;
+            if mode_state == TransactionState::Idle || mode_state == TransactionState::Active {
+                let mut snapshot = tab_snapshot(tab);
+                if mode_state == TransactionState::Idle {
+                    snapshot = match transaction::transition(snapshot, TransactionEvent::Start) {
+                        Ok(snapshot) => snapshot,
+                        Err(_) => return Vec::new(),
+                    };
+                }
+                tab.generation += 1;
+                let query_generation = tab.generation;
+                apply_transaction_snapshot(tab, snapshot);
+                tab.query_status = QueryStatus::Running;
+                tab.last_execution = Some(LastExecution {
+                    draft,
+                    result: ExecutionResult::Dispatched,
+                });
+                return vec![Command::ManualExecute {
+                    connection,
+                    tab_id,
+                    query_generation,
+                    transaction_generation: tab.transaction_generation,
+                    sql,
+                }];
+            }
             return Vec::new();
         }
         tab.generation += 1;
+        let generation = tab.generation;
         tab.query_status = QueryStatus::Running;
         tab.output.push(OutputEntry {
             kind: OutputKind::Info,
             message: "Executing SQL".to_owned(),
         });
+        tab.last_execution = Some(LastExecution {
+            draft: draft.clone(),
+            result: ExecutionResult::Dispatched,
+        });
         vec![Command::RunQuery {
-            connection,
-            tab_id: tab.id,
-            generation: tab.generation,
-            sql,
+            connection: draft.connection,
+            tab_id: draft.console_id,
+            generation,
+            sql: draft.sql,
         }]
+    }
+
+    fn retain_execution(&mut self, draft: sql::ExecutionDraft, result: ExecutionResult) {
+        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == draft.console_id) {
+            tab.last_execution = Some(LastExecution { draft, result });
+        }
+    }
+
+    fn active_editor_revision_for(&self, id: Uuid) -> u64 {
+        self.editor.revision(id).unwrap_or_default()
+    }
+
+    fn status_message(&mut self, message: &str) {
+        self.connection.error = Some(message.to_owned());
     }
 
     fn preview_selected(&mut self) -> Vec<Command> {
@@ -1183,12 +2439,14 @@ impl App {
         let mut tab = ConsoleTab::new(format!("{} data", node.name));
         tab.generation = 1;
         tab.query_status = QueryStatus::Running;
-        tab.editor
-            .set_text(format!("-- Loading preview for {schema}.{}", node.name));
-        tab.editor.mode = EditorMode::Normal;
         let tab_id = tab.id;
         let generation = tab.generation;
         self.tabs.push(tab);
+        self.editor.open_console(
+            tab_id,
+            &format!("-- Loading preview for {schema}.{}", node.name),
+        );
+        let _ = self.editor.set_mode(tab_id, EditorMode::Normal);
         self.active_tab = self.tabs.len() - 1;
         self.focus = Focus::Results;
         vec![Command::PreviewTable {
@@ -1230,6 +2488,7 @@ impl App {
         let tab_id = tab.id;
         let generation = tab.generation;
         self.tabs.push(tab);
+        self.editor.open_console(tab_id, "");
         self.active_tab = self.tabs.len() - 1;
         self.focus = Focus::Editor;
         vec![Command::LoadDdl {
@@ -1246,10 +2505,86 @@ impl App {
         self.connection.profile_id == Some(profile_id) && self.connection.generation == generation
     }
 
+    fn manual_matches(
+        &self,
+        tab_id: Uuid,
+        query_generation: u64,
+        transaction_generation: u64,
+        connection: ConnectionIdentity,
+        state: TransactionState,
+    ) -> bool {
+        self.connection.active_identity() == Some(connection)
+            && self
+                .tabs
+                .iter()
+                .find(|tab| tab.id == tab_id)
+                .is_some_and(|tab| {
+                    tab.generation == query_generation
+                        && tab.transaction_generation == transaction_generation
+                        && tab.transaction_state == state
+                })
+    }
+
+    fn finish_query(
+        &mut self,
+        tab_id: Uuid,
+        generation: u64,
+        outcome: crate::db::query::QueryOutcome,
+        _manual: bool,
+    ) {
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+            return;
+        };
+        let rows = outcome.stats.row_count;
+        let total_ms = outcome.stats.total().as_millis();
+        tab.query_status = QueryStatus::Idle;
+        tab.output.push(OutputEntry {
+            kind: OutputKind::Success,
+            message: format!("{rows} row(s) retrieved in {total_ms} ms"),
+        });
+        tab.outcome = Some(outcome);
+        tab.result_view = ResultView::Data;
+        if let Some(last) = tab.last_execution.as_mut()
+            && last.draft.query_generation + 1 == generation
+        {
+            last.result = ExecutionResult::Succeeded;
+        }
+    }
+
     fn pending_connection_matches(&self, profile_id: Uuid, generation: u64) -> bool {
         self.connection.pending_profile_id == Some(profile_id)
             && self.connection.pending_generation == Some(generation)
     }
+}
+
+fn tab_snapshot(tab: &ConsoleTab) -> transaction::TransactionSnapshot {
+    transaction::TransactionSnapshot {
+        mode: tab.transaction_mode,
+        state: tab.transaction_state,
+        generation: tab.transaction_generation,
+    }
+}
+
+fn apply_transaction_snapshot(tab: &mut ConsoleTab, snapshot: transaction::TransactionSnapshot) {
+    tab.transaction_mode = snapshot.mode;
+    tab.transaction_state = snapshot.state;
+    tab.transaction_generation = snapshot.generation;
+}
+
+fn cursor_byte(text: &str, line: usize, column: usize) -> usize {
+    let mut offset = 0;
+    for (index, value) in text.split('\n').enumerate() {
+        if index == line {
+            return offset
+                + value
+                    .char_indices()
+                    .nth(column)
+                    .map(|(index, _)| index)
+                    .unwrap_or(value.len());
+        }
+        offset += value.len() + 1;
+    }
+    text.len()
 }
 
 fn next_profile_request(manager: &mut ProfileManagerState) -> u64 {
@@ -1374,6 +2709,7 @@ mod tests {
         app.update(Action::QueryFinished {
             tab_id,
             generation: generation.saturating_sub(1),
+            connection: app.connection.active_identity().unwrap(),
             outcome: empty_outcome(),
         });
         assert!(app.active_console().outcome.is_none());
@@ -1381,6 +2717,7 @@ mod tests {
         app.update(Action::QueryFinished {
             tab_id,
             generation,
+            connection: app.connection.active_identity().unwrap(),
             outcome: empty_outcome(),
         });
         assert!(app.active_console().outcome.is_some());

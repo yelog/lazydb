@@ -135,3 +135,42 @@ async fn enforces_sqlite_read_only_at_connection_level() {
     assert!(error.to_string().to_ascii_lowercase().contains("readonly"));
     read_only.close().await;
 }
+
+#[tokio::test]
+async fn preserves_result_sets_counts_timing_empty_values_and_errors() {
+    let imported = import_connection_url("sqlite://:memory:", Some("results")).unwrap();
+    let database = DatabaseConnection::connect(&imported.profile, None)
+        .await
+        .unwrap();
+
+    let outcome = database
+        .execute("SELECT '' AS empty_value, NULL AS missing_value; SELECT 7 AS second_result")
+        .await
+        .unwrap();
+    assert_eq!(outcome.result_sets.len(), 2);
+    assert_eq!(outcome.stats.row_count, 2);
+    assert!(outcome.stats.total() >= outcome.stats.execution);
+    assert_eq!(
+        outcome.result_sets[0].rows[0][0],
+        CellValue::Text(String::new())
+    );
+    assert_eq!(outcome.result_sets[0].rows[0][1], CellValue::Null);
+    assert_eq!(outcome.result_sets[1].rows[0][0], CellValue::Integer(7));
+
+    database
+        .execute("CREATE TABLE affected (value TEXT); INSERT INTO affected VALUES ('x'), ('y')")
+        .await
+        .unwrap();
+    let affected = database
+        .execute("UPDATE affected SET value = value")
+        .await
+        .unwrap();
+    assert_eq!(affected.result_sets.last().unwrap().affected_rows, 2);
+
+    let error = database
+        .execute("SELECT * FROM missing_table")
+        .await
+        .unwrap_err();
+    assert_eq!(error.category, lazydb::db::ErrorCategory::Sql);
+    database.close().await;
+}

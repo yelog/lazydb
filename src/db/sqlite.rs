@@ -1,18 +1,24 @@
-use std::time::Instant;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use futures_util::TryStreamExt;
 use sqlx::{
-    AssertSqlSafe, Column, Either, Row, SqlitePool, TypeInfo, ValueRef,
-    sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow},
+    AssertSqlSafe, Column, Connection, Either, Row, Sqlite, SqlitePool, TypeInfo, ValueRef,
+    pool::PoolConnection,
+    sqlite::{SqliteConnectOptions, SqliteConnection, SqlitePoolOptions, SqliteRow},
 };
+use sqlx_core::transaction::TransactionManager;
 use uuid::Uuid;
 
 use crate::profile::{ConnectionProfile, DatabaseKind};
 
+use super::transaction::{TransactionBackend, TransactionError};
 use super::{
     DatabaseError, ErrorCategory, ServerInfo,
     catalog::{CatalogId, CatalogKind, CatalogNode},
-    query::{ColumnMeta, QueryOutcome, QueryStats, ResultSet},
+    query::{ColumnMeta, QueryOutcome, QueryOutcomeAccumulator},
     value::CellValue,
 };
 
@@ -24,6 +30,28 @@ pub struct SqliteAdapter {
 }
 
 impl SqliteAdapter {
+    pub(crate) async fn transaction_backend(
+        &self,
+    ) -> Result<SqliteTransactionBackend, DatabaseError> {
+        let mut connection = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Network))?;
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&cancelled);
+        connection
+            .lock_handle()
+            .await
+            .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Internal))?
+            .set_progress_handler(1000, move || !flag.load(Ordering::Relaxed));
+        Ok(SqliteTransactionBackend {
+            connection,
+            cancelled,
+            adapter: self.clone(),
+        })
+    }
+
     pub async fn connect(profile: &ConnectionProfile) -> Result<Self, DatabaseError> {
         if profile.kind != DatabaseKind::Sqlite {
             return Err(DatabaseError::configuration("profile is not SQLite"));
@@ -73,47 +101,46 @@ impl SqliteAdapter {
     }
 
     pub async fn execute(&self, sql: &str) -> Result<QueryOutcome, DatabaseError> {
-        let started = Instant::now();
-        let mut first_event_at = None;
-        let mut stream = sqlx::raw_sql(AssertSqlSafe(sql)).fetch_many(&self.pool);
-        let mut result_sets = Vec::new();
-        let mut current: Option<ResultSet> = None;
+        self.execute_pool(sql).await
+    }
 
+    pub(crate) async fn execute_pool(&self, sql: &str) -> Result<QueryOutcome, DatabaseError> {
+        let mut stream = sqlx::raw_sql(AssertSqlSafe(sql)).fetch_many(&self.pool);
+        self.collect_stream(&mut stream).await
+    }
+
+    pub(crate) async fn execute_connection(
+        &self,
+        connection: &mut SqliteConnection,
+        sql: &str,
+    ) -> Result<QueryOutcome, DatabaseError> {
+        let mut stream = sqlx::raw_sql(AssertSqlSafe(sql)).fetch_many(&mut *connection);
+        self.collect_stream(&mut stream).await
+    }
+
+    async fn collect_stream<E>(&self, stream: &mut E) -> Result<QueryOutcome, DatabaseError>
+    where
+        E: futures_util::TryStream<
+                Ok = Either<sqlx::sqlite::SqliteQueryResult, SqliteRow>,
+                Error = sqlx::Error,
+            > + Unpin,
+    {
+        let mut accumulator = QueryOutcomeAccumulator::new();
         while let Some(event) = stream
             .try_next()
             .await
             .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Sql))?
         {
-            first_event_at.get_or_insert_with(|| started.elapsed());
             match event {
                 Either::Right(row) => {
-                    let result = current.get_or_insert_with(|| ResultSet {
-                        columns: columns(&row),
-                        rows: Vec::new(),
-                        affected_rows: 0,
-                    });
-                    result.rows.push(decode_row(&row));
+                    accumulator.row(columns(&row), decode_row(&row));
                 }
                 Either::Left(done) => {
-                    let mut result = current.take().unwrap_or_default();
-                    result.affected_rows = done.rows_affected();
-                    result_sets.push(result);
+                    accumulator.done(done.rows_affected());
                 }
             }
         }
-
-        if let Some(result) = current {
-            result_sets.push(result);
-        }
-        let total = started.elapsed();
-        let execution = first_event_at.unwrap_or(total);
-        let fetch = total.saturating_sub(execution);
-        let row_count = result_sets.iter().map(|result| result.rows.len()).sum();
-
-        Ok(QueryOutcome {
-            result_sets,
-            stats: QueryStats::new(execution, fetch, row_count),
-        })
+        Ok(accumulator.finish())
     }
 
     pub async fn load_catalog(&self) -> Result<Vec<CatalogNode>, DatabaseError> {
@@ -368,6 +395,66 @@ impl SqliteAdapter {
 
     pub async fn close(self) {
         self.pool.close().await;
+    }
+}
+
+pub(crate) struct SqliteTransactionBackend {
+    connection: PoolConnection<Sqlite>,
+    cancelled: Arc<AtomicBool>,
+    adapter: SqliteAdapter,
+}
+
+#[async_trait::async_trait]
+impl TransactionBackend for SqliteTransactionBackend {
+    async fn begin(&mut self) -> Result<(), TransactionError> {
+        <Sqlite as sqlx::Database>::TransactionManager::begin(&mut self.connection, None)
+            .await
+            .map_err(|error| TransactionError(error.to_string()))
+    }
+    async fn execute(&mut self, sql: &str) -> Result<QueryOutcome, TransactionError> {
+        let result = self
+            .adapter
+            .execute_connection(&mut self.connection, sql)
+            .await
+            .map_err(Into::into);
+        self.connection
+            .lock_handle()
+            .await
+            .map_err(|error| TransactionError(error.to_string()))?
+            .remove_progress_handler();
+        self.cancelled.store(false, Ordering::Relaxed);
+        result
+    }
+    async fn commit(&mut self) -> Result<(), TransactionError> {
+        <Sqlite as sqlx::Database>::TransactionManager::commit(&mut self.connection)
+            .await
+            .map_err(|error| TransactionError(error.to_string()))
+    }
+    async fn rollback(&mut self) -> Result<(), TransactionError> {
+        <Sqlite as sqlx::Database>::TransactionManager::rollback(&mut self.connection)
+            .await
+            .map_err(|error| TransactionError(error.to_string()))
+    }
+    async fn cancel(&mut self) -> Result<(), TransactionError> {
+        self.cancelled.store(true, Ordering::Relaxed);
+        // The progress callback is connection-local. The worker will quarantine this
+        // connection if the in-flight future cannot report its terminal interrupt.
+        Err(TransactionError(
+            "SQLite cancellation requires forced close".into(),
+        ))
+    }
+    fn depth(&self) -> usize {
+        <Sqlite as sqlx::Database>::TransactionManager::get_transaction_depth(&self.connection)
+    }
+    fn force_close(self) -> futures_util::future::BoxFuture<'static, Result<(), TransactionError>> {
+        Box::pin(async move {
+            self.cancelled.store(true, Ordering::Relaxed);
+            let connection = self.connection.detach();
+            connection
+                .close()
+                .await
+                .map_err(|error| TransactionError(error.to_string()))
+        })
     }
 }
 

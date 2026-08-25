@@ -1,8 +1,8 @@
 # Keybindings
 
-This document lists bindings that are operational in M0. The in-app footer shows
-the shortest relevant subset; `F1` works everywhere and `?` works outside editor
-Insert mode.
+This document lists the operational keyboard contract. The in-app footer shows
+the shortest relevant subset; `F1` works everywhere and `?` is backward search in
+Editor Normal mode but contextual help outside the editor.
 
 ## Global
 
@@ -17,7 +17,7 @@ Insert mode.
 | `[t`, `]t` | Previous/next LazyDB tab |
 | `Space n` | New SQL console |
 | `Ctrl-c` | Cancel active query; otherwise leave Insert mode |
-| `Q` | Quit LazyDB |
+| `Q` | Quit LazyDB in Normal mode |
 | `Space c` | Open the connection Profile Manager |
 
 ## Profile Manager
@@ -57,7 +57,16 @@ Normal mode:
 | `o` | Open line below |
 | `x`, `Delete` | Delete character |
 | `0`, `$`, `Home`, `End` | Start/end of line |
-| `F5`, `Space r` | Execute the complete buffer |
+| `F5`, `Space r` | Execute the selected/current statement |
+| `Shift-F5`, `Space R` | Preview and execute the complete buffer |
+| `Space f` | Format the selected/current statement |
+| `Ctrl-Space` | Trigger completion |
+| `Ctrl-N/P` | Move through an open completion popup |
+| `?`, `n`, `N` | Backward search and repeat |
+| `F1`, `Space ?` | Editor help |
+| `Space tt` | Toggle AUTO/MANUAL transactions |
+| `Space tc` | Commit the active MANUAL transaction |
+| `Space tr` | Roll back the active MANUAL transaction |
 
 Insert mode:
 
@@ -67,9 +76,15 @@ Insert mode:
 | `Tab` | Insert a tab character |
 | arrows, Home, End | Move cursor |
 | Backspace, Delete, Enter | Edit text |
+| `Ctrl-W/U/H` | Delete word/to line start/backspace |
 
-M0 intentionally executes the complete buffer. Current statement and visual
-selection execution will be added only with reliable statement-boundary support.
+Visual selection takes precedence over the cursor statement. Empty selections do
+not fall back to the whole buffer. Full-buffer execution is explicit and always
+requires confirmation. `:run`, `:runall`, `:format`, `:s`, `:tx auto`, `:tx manual`,
+`:tx clear`, `:commit`, and `:rollback` provide command-line equivalents.
+
+MANUAL transactions use one pinned physical connection per console. Cancelling a
+MANUAL query rolls back the complete transaction; MySQL DDL may implicitly commit.
 
 ## Results
 

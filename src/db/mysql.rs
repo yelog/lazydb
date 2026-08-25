@@ -1,19 +1,24 @@
-use std::{collections::HashMap, time::Instant};
+use std::collections::HashMap;
 
 use futures_util::TryStreamExt;
 use secrecy::{ExposeSecret, SecretString};
 use sqlx::{
-    AssertSqlSafe, Column, Either, Executor, MySqlPool, Row, TypeInfo, ValueRef,
-    mysql::{MySqlConnectOptions, MySqlPoolOptions, MySqlRow, MySqlSslMode},
+    AssertSqlSafe, Column, Connection, Either, Executor, MySqlPool, Row, TypeInfo, ValueRef,
+    mysql::{
+        MySql, MySqlConnectOptions, MySqlConnection, MySqlPoolOptions, MySqlRow, MySqlSslMode,
+    },
+    pool::PoolConnection,
 };
+use sqlx_core::transaction::TransactionManager;
 use uuid::Uuid;
 
 use crate::profile::{ConnectionProfile, DatabaseKind, SslMode};
 
+use super::transaction::{TransactionBackend, TransactionError};
 use super::{
     DatabaseError, ErrorCategory, ServerInfo,
     catalog::{CatalogId, CatalogKind, CatalogNode},
-    query::{ColumnMeta, QueryOutcome, QueryStats, ResultSet},
+    query::{ColumnMeta, QueryOutcome, QueryOutcomeAccumulator},
     value::CellValue,
 };
 
@@ -29,6 +34,13 @@ SELECT table_schema, table_name, column_name, column_type, is_nullable, column_k
 FROM information_schema.columns
 WHERE table_schema = DATABASE()
 ORDER BY table_name, ordinal_position
+"#;
+
+pub const CATALOG_ROUTINES_SQL: &str = r#"
+SELECT routine_schema, routine_name, routine_type, data_type, dtd_identifier
+FROM information_schema.routines
+WHERE routine_schema = DATABASE()
+ORDER BY routine_name, routine_type
 "#;
 
 pub const CATALOG_INDEXES_SQL: &str = r#"
@@ -58,6 +70,26 @@ pub struct MySqlAdapter {
 }
 
 impl MySqlAdapter {
+    pub(crate) async fn transaction_backend(
+        &self,
+    ) -> Result<MySqlTransactionBackend, DatabaseError> {
+        let mut connection = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Network))?;
+        let connection_id = sqlx::query_scalar::<_, u64>("SELECT CONNECTION_ID()")
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Network))?;
+        Ok(MySqlTransactionBackend {
+            connection,
+            control: self.pool.clone(),
+            connection_id,
+            adapter: self.clone(),
+        })
+    }
+
     pub async fn connect(
         profile: &ConnectionProfile,
         password: Option<&SecretString>,
@@ -120,41 +152,46 @@ impl MySqlAdapter {
     }
 
     pub async fn execute(&self, sql: &str) -> Result<QueryOutcome, DatabaseError> {
-        let started = Instant::now();
-        let mut first_event_at = None;
-        let mut stream = sqlx::raw_sql(AssertSqlSafe(sql)).fetch_many(&self.pool);
-        let mut result_sets = Vec::new();
-        let mut current: Option<ResultSet> = None;
+        self.execute_pool(sql).await
+    }
 
+    pub(crate) async fn execute_pool(&self, sql: &str) -> Result<QueryOutcome, DatabaseError> {
+        let mut stream = sqlx::raw_sql(AssertSqlSafe(sql)).fetch_many(&self.pool);
+        self.collect_stream(&mut stream).await
+    }
+
+    pub(crate) async fn execute_connection(
+        &self,
+        connection: &mut MySqlConnection,
+        sql: &str,
+    ) -> Result<QueryOutcome, DatabaseError> {
+        let mut stream = sqlx::raw_sql(AssertSqlSafe(sql)).fetch_many(&mut *connection);
+        self.collect_stream(&mut stream).await
+    }
+
+    async fn collect_stream<E>(&self, stream: &mut E) -> Result<QueryOutcome, DatabaseError>
+    where
+        E: futures_util::TryStream<
+                Ok = Either<sqlx::mysql::MySqlQueryResult, MySqlRow>,
+                Error = sqlx::Error,
+            > + Unpin,
+    {
+        let mut accumulator = QueryOutcomeAccumulator::new();
         while let Some(event) = stream
             .try_next()
             .await
             .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Sql))?
         {
-            first_event_at.get_or_insert_with(|| started.elapsed());
             match event {
                 Either::Right(row) => {
-                    let result = current.get_or_insert_with(|| ResultSet {
-                        columns: columns(&row),
-                        rows: Vec::new(),
-                        affected_rows: 0,
-                    });
-                    result.rows.push(decode_row(&row));
+                    accumulator.row(columns(&row), decode_row(&row));
                 }
                 Either::Left(done) => {
-                    let mut result = current.take().unwrap_or_default();
-                    result.affected_rows = done.rows_affected();
-                    result_sets.push(result);
+                    accumulator.done(done.rows_affected());
                 }
             }
         }
-        let total = started.elapsed();
-        let execution = first_event_at.unwrap_or(total);
-        let row_count = result_sets.iter().map(|result| result.rows.len()).sum();
-        Ok(QueryOutcome {
-            result_sets,
-            stats: QueryStats::new(execution, total.saturating_sub(execution), row_count),
-        })
+        Ok(accumulator.finish())
     }
 
     pub async fn load_catalog(&self) -> Result<Vec<CatalogNode>, DatabaseError> {
@@ -192,6 +229,46 @@ impl MySqlAdapter {
             ),
         ];
         let mut object_ids = HashMap::new();
+        for row in sqlx::query(CATALOG_ROUTINES_SQL)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Sql))?
+        {
+            let schema: String = row.try_get("routine_schema").map_err(decode_error)?;
+            let name: String = row.try_get("routine_name").map_err(decode_error)?;
+            let routine_type: String = row.try_get("routine_type").map_err(decode_error)?;
+            let data_type: Option<String> = row.try_get("data_type").map_err(decode_error)?;
+            let signature: Option<String> = row.try_get("dtd_identifier").map_err(decode_error)?;
+            let kind = if routine_type.eq_ignore_ascii_case("PROCEDURE") {
+                CatalogKind::Procedure
+            } else {
+                CatalogKind::Function
+            };
+            let id = CatalogId::new(
+                self.connection_id,
+                kind,
+                [
+                    database.clone(),
+                    schema.clone(),
+                    name.clone(),
+                    signature.clone().unwrap_or_default(),
+                ],
+            );
+            nodes.push(CatalogNode::new(
+                id,
+                Some(schema_id.clone()),
+                name,
+                routine_type,
+                Some(format!(
+                    "{}{}",
+                    signature.unwrap_or_default(),
+                    data_type
+                        .map(|value| format!(" -> {value}"))
+                        .unwrap_or_default()
+                )),
+                false,
+            ));
+        }
         for row in sqlx::query(CATALOG_TABLES_SQL)
             .fetch_all(&self.pool)
             .await
@@ -287,6 +364,59 @@ impl MySqlAdapter {
 
     pub async fn close(self) {
         self.pool.close().await;
+    }
+}
+
+pub(crate) struct MySqlTransactionBackend {
+    connection: PoolConnection<MySql>,
+    control: MySqlPool,
+    connection_id: u64,
+    adapter: MySqlAdapter,
+}
+
+#[async_trait::async_trait]
+impl TransactionBackend for MySqlTransactionBackend {
+    async fn begin(&mut self) -> Result<(), TransactionError> {
+        <MySql as sqlx::Database>::TransactionManager::begin(&mut self.connection, None)
+            .await
+            .map_err(|error| TransactionError(error.to_string()))
+    }
+    async fn execute(&mut self, sql: &str) -> Result<QueryOutcome, TransactionError> {
+        self.adapter
+            .execute_connection(&mut self.connection, sql)
+            .await
+            .map_err(Into::into)
+    }
+    async fn commit(&mut self) -> Result<(), TransactionError> {
+        <MySql as sqlx::Database>::TransactionManager::commit(&mut self.connection)
+            .await
+            .map_err(|error| TransactionError(error.to_string()))
+    }
+    async fn rollback(&mut self) -> Result<(), TransactionError> {
+        <MySql as sqlx::Database>::TransactionManager::rollback(&mut self.connection)
+            .await
+            .map_err(|error| TransactionError(error.to_string()))
+    }
+    async fn cancel(&mut self) -> Result<(), TransactionError> {
+        let sql = format!("KILL QUERY {}", self.connection_id);
+        sqlx::query(AssertSqlSafe(sql))
+            .execute(&self.control)
+            .await
+            .map_err(|error| TransactionError(error.to_string()))?;
+        Ok(())
+    }
+    fn depth(&self) -> usize {
+        <MySql as sqlx::Database>::TransactionManager::get_transaction_depth(&self.connection)
+    }
+    fn force_close(self) -> futures_util::future::BoxFuture<'static, Result<(), TransactionError>> {
+        Box::pin(async move {
+            // SQLx 0.9 has no close_hard; detaching before closing is the safe equivalent.
+            let connection = self.connection.detach();
+            connection
+                .close()
+                .await
+                .map_err(|error| TransactionError(error.to_string()))
+        })
     }
 }
 

@@ -6,6 +6,11 @@ use crate::db::{
     ServerInfo,
     catalog::{CatalogId, CatalogKind, CatalogNode},
 };
+use crate::model::transaction::{
+    CancellationIntent, DeferredTransactionPrompt, TransactionExitChoice,
+};
+use crate::sql::CompletionIndex;
+use crate::sql::ExecutionDraft;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Focus {
@@ -37,7 +42,44 @@ impl Focus {
 pub enum Overlay {
     Help(Focus),
     ProfileManager,
-    Message { title: String, body: String },
+    Message {
+        title: String,
+        body: String,
+    },
+    SubstituteConfirm {
+        remaining: usize,
+    },
+    ExecutionConfirm {
+        draft: ExecutionDraft,
+        focus: ExecutionConfirmFocus,
+    },
+    ManualCancelConfirm {
+        intent: CancellationIntent,
+        focus: ManualCancelFocus,
+    },
+    TransactionExitConfirm {
+        prompt: DeferredTransactionPrompt,
+        choice: TransactionExitChoice,
+    },
+    ClearTransactionOutcome {
+        console_id: Uuid,
+        connection: ConnectionIdentity,
+        transaction_generation: u64,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ExecutionConfirmFocus {
+    #[default]
+    Cancel,
+    Execute,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ManualCancelFocus {
+    #[default]
+    KeepRunning,
+    CancelQueryAndRollback,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -103,10 +145,23 @@ pub struct ExplorerState {
     pub expanded: HashSet<CatalogId>,
     pub selected: usize,
     pub scroll: usize,
+    pub catalog_generation: u64,
+    pub completion_index: CompletionIndex,
 }
 
 impl ExplorerState {
+    pub fn connection_changed(&mut self) {
+        self.catalog_generation = self.catalog_generation.wrapping_add(1);
+        self.nodes.clear();
+        self.expanded.clear();
+        self.completion_index = CompletionIndex::default();
+        self.selected = 0;
+        self.scroll = 0;
+    }
+
     pub fn set_nodes(&mut self, nodes: Vec<CatalogNode>) {
+        self.catalog_generation = self.catalog_generation.wrapping_add(1);
+        self.completion_index = CompletionIndex::new(&nodes);
         self.nodes = nodes;
         self.expanded.clear();
         for node in &self.nodes {

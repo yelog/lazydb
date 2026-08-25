@@ -5,9 +5,9 @@ It aims to bring the core JetBrains Database Tools workflow to a fast,
 standalone TUI with a distinctive deep-space visual system and a thin Neovim
 integration.
 
-> Project status: M0 runnable foundation. The current build is useful for
-> connection, catalog, query, preview, and DDL exploration, but it is not yet a
-> production-ready replacement for DataGrip.
+> Project status: M1 editor and transaction foundation. The current build is
+> useful for connection, catalog, scoped SQL editing/execution, and transaction
+> exploration, but it is not yet a production-ready replacement for DataGrip.
 
 ## What Works
 
@@ -17,6 +17,12 @@ integration.
 - PostgreSQL/MySQL databases, schemas, tables, views, columns, indexes, and
   foreign keys.
 - Multiple SQL console tabs with a compact Vim-style Normal/Insert editor.
+- Unicode-safe Vim modes, search, Ex commands, substitution, formatting,
+  highlighting, and catalog-backed completion.
+- Scoped execution with immutable previews, risk confirmation, and read-only
+  adapter enforcement.
+- Per-console AUTO/MANUAL transactions on pinned PostgreSQL, MySQL, and SQLite
+  sessions, including cancellation rollback and unknown-outcome handling.
 - Multi-statement execution, typed result decoding, Output history, and
   generation-safe asynchronous updates.
 - Runtime profile manager for creating, testing, saving, editing, deleting, and
@@ -34,12 +40,9 @@ integration.
 The following items are in M1/M2 and have no fake controls in the current UI:
 
 - Persistent console recovery and renaming.
-- Current-statement/visual-selection execution.
 - Where/Order By controls and selectable paging sizes.
-- Manual transaction sessions and commit/rollback controls.
 - Staged grid editing, optimistic conflict detection, insert, and delete.
-- Semantic completion, SQL formatting, plans, native cancellation, SSH, import,
-  and export.
+- Plans, SSH, import, and export.
 
 See [the product design](docs/plans/2026-08-24-lazydb-design.md) and
 [M0 implementation plan](docs/plans/2026-08-24-lazydb-m0-implementation.md).
@@ -96,6 +99,7 @@ not supported as a safe credential mechanism.
 ```text
 lazydb [--config PATH] [--profile NAME] [--read-only]
        [--mouse auto|on|off] [--color auto|always|never]
+       [--confirm-execution risky|always]
 
 lazydb version --json
 lazydb capabilities --json
@@ -112,12 +116,13 @@ selects a saved profile by name; if both are supplied, `--url` wins.
 | Global | `F1` help, `Ctrl-w h/j/k/l` panels, `[t`/`]t` tabs, `Space n` new console, `Q` quit |
 | Profiles | `Space c` open manager; `j/k` select; `Enter` connect/edit; `n` new; `t` test; `s` save; `d` delete; `Esc` close |
 | Explorer | `j/k` move, `h/l/Enter` collapse/expand, `r` refresh, `p` preview, `D` DDL |
-| Editor Normal | `h/j/k/l`, `i/a/o`, `x`, `0/$`, `F5` or `Space r` run |
-| Editor Insert | `Esc` or idle `Ctrl-c` Normal mode, Tab insert, arrows, Backspace/Delete |
+| Editor Normal | `h/j/k/l`, `i/a/o`, `x`, `0/$`, `F5` scoped run, `Shift-F5` full run |
+| Editor Insert | `Esc` or idle `Ctrl-c` Normal mode, Tab insert, `Ctrl-W/U/H`, arrows, Backspace/Delete |
 | Results | `h/j/k/l` cell movement, `o` switch Data/Output |
 
-The footer and `?`/`F1` help show the active context. Lowercase `q` is never a
-global exit, so it remains available for future Vim macro semantics.
+The footer and `?`/`F1` help show the active context. In Editor Normal mode `?`
+is backward search; F1 and `Space ?` open help. Lowercase `q` is never a global
+exit, so it remains available for future Vim macro semantics.
 
 ## Neovim
 

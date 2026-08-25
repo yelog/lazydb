@@ -297,9 +297,14 @@ starts a transaction lazily on the first execution. Commit and rollback return
 to MANUAL Idle.
 
 Runtime maintains one serial transaction worker per active MANUAL console. The
-worker owns a concrete SQLx transaction enum for PostgreSQL, MySQL, or SQLite.
-All statements and transaction operations for that console pass through the
-worker and therefore the same physical connection.
+worker owns a concrete pooled connection for PostgreSQL, MySQL, or SQLite and
+drives that backend's SQLx `TransactionManager` directly on the connection. All
+statements and transaction operations for that console pass through the worker
+and therefore the same physical connection. This non-consuming transaction
+protocol lets SQLite retain a live transaction after a retryable COMMIT BUSY;
+`sqlx::Transaction::commit(self)` cannot provide that behavior because it
+consumes the wrapper. An armed connection guard detaches and closes any session
+whose worker exits without a known commit or rollback acknowledgement.
 
 Database result collection is shared between pool and transaction executors; the
 SQLx concrete types remain inside adapter modules.
@@ -323,13 +328,19 @@ database session.
 
 PostgreSQL statement errors move the transaction to Aborted and only rollback is
 allowed. MySQL and SQLite keep Active after ordinary database or constraint
-errors. A network, protocol, or lost-connection error drops the worker and relies
-on SQLx transaction ownership to start rollback rather than returning a
-potentially dirty connection as active.
+errors. A network, protocol, or lost-connection error leaves the armed connection
+guard in control: it detaches and backend-specifically closes or quarantines the
+physical connection rather than returning a potentially dirty session to the
+pool or claiming it remains Active.
 
 Cancelling a MANUAL query terminates its worker and rolls back the complete
 current transaction. The UI warns that all earlier uncommitted work in that
-transaction will also be lost.
+transaction will also be lost. Cancellation reaches the backend operation:
+PostgreSQL uses the recorded backend PID, MySQL uses the recorded connection ID,
+and SQLite uses a connection-local progress handler. If cancellation cannot be
+acknowledged, PostgreSQL/MySQL detach and hard-close the physical connection;
+SQLite interrupts and awaits connection close so its worker thread terminates.
+Dropping only the client query future is not considered cancellation.
 
 MySQL DDL can implicitly commit before and after execution. Once such DDL is sent,
 the worker treats the transaction as ended, releases the session, returns to

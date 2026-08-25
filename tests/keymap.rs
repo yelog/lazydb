@@ -6,6 +6,7 @@ use lazydb::{
     model::{
         editor::EditorMode,
         profile_manager::ProfileField,
+        tab::CompletionPopup,
         workspace::{Focus, Overlay, QueryStatus},
     },
     profile::{ConnectionProfile, import_connection_url},
@@ -63,68 +64,106 @@ fn maps_global_sequences_and_function_keys() {
 }
 
 #[test]
+fn maps_explicit_full_buffer_execution_separately() {
+    let mut keymap = Keymap::default();
+    let mut app = App::new(Vec::new());
+    app.focus = Focus::Explorer;
+
+    assert_eq!(
+        keymap.map(KeyEvent::new(KeyCode::F(5), KeyModifiers::SHIFT), &app,),
+        Some(Action::RunAllSql)
+    );
+    assert_eq!(keymap.map(key(KeyCode::Char(' ')), &app), None);
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('R')), &app),
+        Some(Action::RunAllSql)
+    );
+}
+
+#[test]
 fn insert_mode_preserves_printable_characters() {
     let mut keymap = Keymap::default();
     let app = App::new(Vec::new());
-    assert_eq!(app.active_console().editor.mode, EditorMode::Insert);
+    assert_eq!(app.active_editor_mode(), EditorMode::Insert);
 
     assert_eq!(
         keymap.map(key(KeyCode::Char('?')), &app),
-        Some(Action::InsertCharacter('?'))
+        Some(Action::EditorKey(key(KeyCode::Char('?'))))
     );
     assert_eq!(
         keymap.map(key(KeyCode::Char('q')), &app),
-        Some(Action::InsertCharacter('q'))
+        Some(Action::EditorKey(key(KeyCode::Char('q'))))
     );
     assert_eq!(
         keymap.map(key(KeyCode::Esc), &app),
-        Some(Action::EnterNormalMode)
+        Some(Action::EditorKey(key(KeyCode::Esc)))
     );
     assert_eq!(
         keymap.map(key(KeyCode::Tab), &app),
-        Some(Action::InsertCharacter('\t'))
+        Some(Action::EditorKey(key(KeyCode::Tab)))
     );
-    assert_eq!(keymap.map(ctrl('c'), &app), Some(Action::EnterNormalMode));
+    assert_eq!(
+        keymap.map(ctrl('c'), &app),
+        Some(Action::EditorKey(ctrl('c')))
+    );
+}
+
+#[test]
+fn printable_input_passes_through_an_open_completion_popup() {
+    let mut keymap = Keymap::default();
+    let mut app = App::new(Vec::new());
+    app.active_console_mut().completion = Some(CompletionPopup::default());
+
+    let event = key(KeyCode::Char('e'));
+    assert_eq!(keymap.map(event, &app), Some(Action::EditorKey(event)));
+    assert_eq!(keymap.map(ctrl('n'), &app), Some(Action::CompletionNext));
+    assert_eq!(
+        keymap.map(key(KeyCode::Enter), &app),
+        Some(Action::CompletionAccept)
+    );
 }
 
 #[test]
 fn maps_vim_editor_navigation_in_normal_mode() {
     let mut keymap = Keymap::default();
     let mut app = App::new(Vec::new());
-    app.active_console_mut().editor.mode = EditorMode::Normal;
+    app.update(Action::EditorKey(key(KeyCode::Esc)));
 
     assert_eq!(
         keymap.map(key(KeyCode::Char('h')), &app),
-        Some(Action::MoveLeft)
+        Some(Action::EditorKey(key(KeyCode::Char('h'))))
     );
     assert_eq!(
         keymap.map(key(KeyCode::Char('j')), &app),
-        Some(Action::MoveDown)
+        Some(Action::EditorKey(key(KeyCode::Char('j'))))
     );
     assert_eq!(
         keymap.map(key(KeyCode::Char('k')), &app),
-        Some(Action::MoveUp)
+        Some(Action::EditorKey(key(KeyCode::Char('k'))))
     );
     assert_eq!(
         keymap.map(key(KeyCode::Char('l')), &app),
-        Some(Action::MoveRight)
+        Some(Action::EditorKey(key(KeyCode::Char('l'))))
     );
     assert_eq!(
         keymap.map(key(KeyCode::Char('i')), &app),
-        Some(Action::EnterInsertMode)
+        Some(Action::EditorKey(key(KeyCode::Char('i'))))
     );
     assert_eq!(
         keymap.map(key(KeyCode::Char('a')), &app),
-        Some(Action::EnterAppendMode)
+        Some(Action::EditorKey(key(KeyCode::Char('a'))))
     );
     assert_eq!(
         keymap.map(key(KeyCode::Char('o')), &app),
-        Some(Action::OpenLineBelow)
+        Some(Action::EditorKey(key(KeyCode::Char('o'))))
     );
-    assert_eq!(keymap.map(key(KeyCode::Char(' ')), &app), None);
+    assert_eq!(
+        keymap.map(key(KeyCode::Char(' ')), &app),
+        Some(Action::EditorKey(key(KeyCode::Char(' '))))
+    );
     assert_eq!(
         keymap.map(key(KeyCode::Char('r')), &app),
-        Some(Action::RunActiveSql)
+        Some(Action::EditorKey(key(KeyCode::Char('r'))))
     );
 }
 
@@ -173,9 +212,22 @@ fn maps_explorer_and_result_actions_by_context() {
 fn never_uses_lowercase_q_as_a_global_exit() {
     let mut keymap = Keymap::default();
     let mut app = App::new(Vec::new());
-    app.focus = Focus::Results;
+    app.focus = Focus::Editor;
 
-    assert_eq!(keymap.map(key(KeyCode::Char('q')), &app), None);
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('q')), &app),
+        Some(Action::EditorKey(key(KeyCode::Char('q'))))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('Q')), &app),
+        Some(Action::EditorKey(key(KeyCode::Char('Q'))))
+    );
+    app.update(Action::EditorKey(key(KeyCode::Esc)));
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('Q')), &app),
+        Some(Action::Quit)
+    );
+    app.focus = Focus::Explorer;
     assert_eq!(
         keymap.map(key(KeyCode::Char('Q')), &app),
         Some(Action::Quit)
@@ -187,13 +239,24 @@ fn space_c_opens_profiles_from_every_normal_mode_focus() {
     for focus in [Focus::Explorer, Focus::Editor, Focus::Results] {
         let mut app = App::new(Vec::new());
         app.focus = focus;
-        app.active_console_mut().editor.mode = EditorMode::Normal;
+        app.update(Action::EditorKey(key(KeyCode::Esc)));
         let mut keymap = Keymap::default();
 
-        assert_eq!(keymap.map(key(KeyCode::Char(' ')), &app), None);
+        assert_eq!(
+            keymap.map(key(KeyCode::Char(' ')), &app),
+            if focus == Focus::Editor {
+                Some(Action::EditorKey(key(KeyCode::Char(' '))))
+            } else {
+                None
+            }
+        );
         assert_eq!(
             keymap.map(key(KeyCode::Char('c')), &app),
-            Some(Action::OpenProfileManager)
+            if focus == Focus::Editor {
+                Some(Action::EditorKey(key(KeyCode::Char('c'))))
+            } else {
+                Some(Action::OpenProfileManager)
+            }
         );
     }
 
@@ -201,43 +264,55 @@ fn space_c_opens_profiles_from_every_normal_mode_focus() {
     let mut keymap = Keymap::default();
     assert_eq!(
         keymap.map(key(KeyCode::Char(' ')), &app),
-        Some(Action::InsertCharacter(' '))
+        Some(Action::EditorKey(key(KeyCode::Char(' '))))
     );
     assert_eq!(
         keymap.map(key(KeyCode::Char('c')), &app),
-        Some(Action::InsertCharacter('c'))
+        Some(Action::EditorKey(key(KeyCode::Char('c'))))
     );
 
-    app.active_console_mut().editor.mode = EditorMode::Normal;
+    app.update(Action::EditorKey(key(KeyCode::Esc)));
     app.focus = Focus::Explorer;
     assert_eq!(keymap.map(key(KeyCode::Char(' ')), &app), None);
     app.focus = Focus::Editor;
-    app.active_console_mut().editor.mode = EditorMode::Insert;
+    app.update(Action::EditorKey(key(KeyCode::Char('i'))));
     assert_eq!(
         keymap.map(key(KeyCode::Char('c')), &app),
-        Some(Action::InsertCharacter('c'))
+        Some(Action::EditorKey(key(KeyCode::Char('c'))))
     );
 
     app.focus = Focus::Results;
-    app.active_console_mut().editor.mode = EditorMode::Normal;
+    app.update(Action::EditorKey(key(KeyCode::Esc)));
     app.active_console_mut().query_status = QueryStatus::Running;
     assert_eq!(keymap.map(key(KeyCode::Char(' ')), &app), None);
     assert_eq!(keymap.map(ctrl('c'), &app), Some(Action::CancelActiveQuery));
 
     app.active_console_mut().query_status = QueryStatus::Idle;
     app.focus = Focus::Editor;
-    app.active_console_mut().editor.mode = EditorMode::Normal;
+    app.update(Action::EditorKey(key(KeyCode::Esc)));
     let first_tab = app.active_tab;
     app.update(Action::NewConsole);
-    app.active_console_mut().editor.mode = EditorMode::Normal;
+    app.update(Action::EditorKey(key(KeyCode::Esc)));
     let second_tab = app.active_tab;
     app.update(Action::ActivateTab(first_tab));
-    assert_eq!(keymap.map(key(KeyCode::Char(' ')), &app), None);
+    assert_eq!(
+        keymap.map(key(KeyCode::Char(' ')), &app),
+        Some(Action::EditorKey(key(KeyCode::Char(' '))))
+    );
     app.update(Action::ActivateTab(second_tab));
-    assert_eq!(keymap.map(key(KeyCode::Char('r')), &app), None);
-    assert_eq!(keymap.map(key(KeyCode::Char(' ')), &app), None);
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('r')), &app),
+        Some(Action::EditorKey(key(KeyCode::Char('r'))))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char(' ')), &app),
+        Some(Action::EditorKey(key(KeyCode::Char(' '))))
+    );
     keymap.clear_pending();
-    assert_eq!(keymap.map(key(KeyCode::Char('r')), &app), None);
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('r')), &app),
+        Some(Action::EditorKey(key(KeyCode::Char('r'))))
+    );
 }
 
 #[test]
@@ -395,7 +470,7 @@ fn profile_confirmation_and_paste_are_contextual_and_redacted() {
     app.update(Action::CloseProfileManager);
     app.update(Action::CloseProfileManager);
     app.focus = Focus::Editor;
-    app.active_console_mut().editor.mode = EditorMode::Insert;
+    app.update(Action::EditorKey(key(KeyCode::Char('i'))));
     app.overlay = Some(Overlay::Help(Focus::Editor));
     assert!(map_paste("hidden".into(), &app).is_empty());
     app.overlay = Some(Overlay::Message {
@@ -406,10 +481,6 @@ fn profile_confirmation_and_paste_are_contextual_and_redacted() {
     app.overlay = None;
     assert_eq!(
         map_paste("a\nb".into(), &app),
-        [
-            Action::InsertCharacter('a'),
-            Action::InsertNewline,
-            Action::InsertCharacter('b'),
-        ]
+        [Action::EditorPaste("a\nb".into()),]
     );
 }

@@ -3,6 +3,7 @@ pub mod mysql;
 pub mod postgres;
 pub mod query;
 mod sqlite;
+pub mod transaction;
 pub mod value;
 
 use secrecy::SecretString;
@@ -98,6 +99,22 @@ pub enum DatabaseConnection {
 }
 
 impl DatabaseConnection {
+    pub(crate) async fn start_transaction_worker(
+        &self,
+    ) -> Result<crate::runtime::transaction::TransactionWorkerHandle, DatabaseError> {
+        match self {
+            Self::Postgres(adapter) => Ok(crate::runtime::transaction::spawn_transaction_worker(
+                adapter.transaction_backend().await?,
+            )),
+            Self::MySql(adapter) => Ok(crate::runtime::transaction::spawn_transaction_worker(
+                adapter.transaction_backend().await?,
+            )),
+            Self::Sqlite(adapter) => Ok(crate::runtime::transaction::spawn_transaction_worker(
+                adapter.transaction_backend().await?,
+            )),
+        }
+    }
+
     pub async fn connect(
         profile: &ConnectionProfile,
         password: Option<&SecretString>,
@@ -139,9 +156,9 @@ impl DatabaseConnection {
 
     pub async fn execute(&self, sql: &str) -> Result<QueryOutcome, DatabaseError> {
         match self {
-            Self::Postgres(adapter) => adapter.execute(sql).await,
-            Self::MySql(adapter) => adapter.execute(sql).await,
-            Self::Sqlite(adapter) => adapter.execute(sql).await,
+            Self::Postgres(adapter) => adapter.execute_pool(sql).await,
+            Self::MySql(adapter) => adapter.execute_pool(sql).await,
+            Self::Sqlite(adapter) => adapter.execute_pool(sql).await,
         }
     }
 

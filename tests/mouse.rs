@@ -25,6 +25,9 @@ fn maps_tabs_tree_rows_and_result_cells_from_rendered_hit_regions() {
     let mut app = App::new(Vec::new());
     app.update(Action::NewConsole);
     let connection_id = Uuid::new_v4();
+    app.connection.profile_id = Some(connection_id);
+    app.connection.generation = 1;
+    app.connection.status = lazydb::model::workspace::ConnectionStatus::Connected;
     app.explorer.set_nodes(vec![CatalogNode::new(
         CatalogId::new(connection_id, CatalogKind::Database, ["demo"]),
         None,
@@ -38,6 +41,7 @@ fn maps_tabs_tree_rows_and_result_cells_from_rendered_hit_regions() {
     app.update(Action::QueryFinished {
         tab_id,
         generation,
+        connection: app.connection.active_identity().unwrap(),
         outcome: QueryOutcome {
             result_sets: vec![ResultSet {
                 columns: vec![ColumnMeta {
@@ -190,6 +194,34 @@ fn maps_profile_rows_fields_toggles_buttons_and_scroll() {
             &app,
         ),
         None
+    );
+}
+
+#[test]
+fn editor_mouse_scroll_is_a_viewport_action() {
+    let app = App::new(Vec::new());
+    let mut state = UiState::new(true);
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| ui::render_with_state(frame, &app, &mut state))
+        .unwrap();
+    let action = map_mouse(
+        MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 40,
+            row: 8,
+            modifiers: KeyModifiers::NONE,
+        },
+        &state,
+        &app,
+    );
+    assert_eq!(
+        action,
+        Some(Action::EditorScroll {
+            rows: 3,
+            columns: 0
+        })
     );
 }
 

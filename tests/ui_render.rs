@@ -1,8 +1,10 @@
 use std::time::Duration;
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lazydb::{
     action::Action,
     app::App,
+    cli::ConfirmationPolicy,
     db::{
         ServerInfo,
         query::{ColumnMeta, QueryOutcome, QueryStats, ResultSet},
@@ -10,10 +12,12 @@ use lazydb::{
     },
     model::{
         profile_manager::{ProfileField, ProfileManagerPage, ProfileOperation},
+        tab::CompletionPopup,
         workspace::{ConnectionStatus, Focus},
     },
     persistence::secrets::keyring_ref,
     profile::{DatabaseKind, Environment, import_connection_url},
+    sql::{CompletionCandidate, CompletionKind, CompletionScore, TextRange},
     ui::{self, HitTarget, ProfileButton, UiState},
 };
 use ratatui::{Terminal, backend::TestBackend};
@@ -38,6 +42,7 @@ fn fixture() -> App {
     app.update(Action::QueryFinished {
         tab_id,
         generation,
+        connection: app.connection.active_identity().unwrap(),
         outcome: QueryOutcome {
             result_sets: vec![ResultSet {
                 columns: vec![
@@ -87,6 +92,86 @@ fn render_with_state(app: &App, width: u16, height: u16) -> (String, UiState) {
         output.push('\n');
     }
     (output, state)
+}
+
+#[test]
+fn editor_prompt_is_rendered_as_inert_display_text() {
+    let mut app = fixture();
+    app.update(Action::EditorKey(KeyEvent::new(
+        KeyCode::Esc,
+        KeyModifiers::NONE,
+    )));
+    app.update(Action::EditorKey(KeyEvent::new(
+        KeyCode::Char(':'),
+        KeyModifiers::NONE,
+    )));
+    app.update(Action::EditorPaste("run\x1b[31m".into()));
+    let rendered = render(&app, 120, 30);
+    assert!(rendered.contains(":run<ESC>[31m"));
+    assert!(!rendered.contains('\x1b'));
+}
+
+#[test]
+fn execution_confirmation_preview_is_sanitized_and_shows_scope() {
+    let profile = import_connection_url("sqlite::memory:", Some("preview-db"))
+        .unwrap()
+        .profile;
+    let mut app = App::with_confirmation_policy(vec![profile.clone()], ConfirmationPolicy::Always);
+    app.connection.profile_id = Some(profile.id);
+    app.connection.generation = 1;
+    app.connection.status = ConnectionStatus::Connected;
+    app.update(Action::ReplaceEditor("SELECT 1;\x1b]8;;bad\x07".into()));
+    app.update(Action::RunAllSql);
+
+    let output = render(&app, 120, 36);
+    assert!(output.contains("EXECUTION CONFIRMATION"));
+    assert!(output.contains("FullBuffer"));
+    assert!(!output.contains('\x1b'));
+}
+
+#[test]
+fn completion_popup_is_anchored_below_the_editor_cursor() {
+    let mut app = fixture();
+    app.focus = Focus::Editor;
+    app.update(Action::ReplaceEditor(String::new()));
+    app.update(Action::EditorKey(KeyEvent::new(
+        KeyCode::Char('i'),
+        KeyModifiers::NONE,
+    )));
+    app.update(Action::EditorKey(KeyEvent::new(
+        KeyCode::Char('s'),
+        KeyModifiers::NONE,
+    )));
+    app.active_console_mut().completion = Some(CompletionPopup {
+        candidates: vec![CompletionCandidate {
+            label: "SELECT".into(),
+            insert_text: "SELECT".into(),
+            kind: CompletionKind::Keyword,
+            detail: Some("keyword".into()),
+            replace: TextRange::new(0, 1),
+            score: CompletionScore {
+                context: 4,
+                prefix: 1,
+                schema: 0,
+            },
+        }],
+        selected: 0,
+    });
+
+    let (_, state) = render_with_state(&app, 120, 36);
+    let editor = state
+        .hit_regions
+        .iter()
+        .find_map(|region| {
+            (region.target == HitTarget::Focus(Focus::Editor)).then_some(region.area)
+        })
+        .unwrap();
+    let popup = state.completion_popup.unwrap();
+
+    assert_eq!(popup.y, editor.y + 2);
+    assert!(popup.x < editor.x + editor.width / 2);
+    assert!(popup.right() <= editor.right());
+    assert!(popup.bottom() <= editor.bottom());
 }
 
 #[test]
@@ -441,7 +526,12 @@ fn hostile_and_long_form_values_render_safely_at_the_cursor() {
 #[test]
 fn profile_modal_hides_the_workspace_cursor_unless_editing_text() {
     let mut list = fixture();
-    list.active_console_mut().editor.mode = lazydb::model::editor::EditorMode::Insert;
+    list.update(lazydb::action::Action::EditorKey(
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+    ));
     list.update(Action::OpenProfileManager);
     let backend = TestBackend::new(120, 36);
     let mut terminal = Terminal::new(backend).unwrap();
@@ -488,4 +578,83 @@ fn empty_profile_list_only_exposes_actionable_buttons() {
             )
         )
     }));
+}
+
+#[test]
+fn editor_snapshot_projects_hostile_controls_to_inert_display_text() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::ReplaceEditor(
+        "safe\u{1b}]52;c;secret\u{7}\u{1b}[2J\u{00}\tend".into(),
+    ));
+    let snapshot = app
+        .active_editor_render_snapshot(lazydb::model::editor::EditorViewport {
+            width: 80,
+            height: 4,
+        })
+        .unwrap();
+    let display = snapshot.lines[0].spans[0].text.as_str();
+    assert!(!display.contains('\u{1b}'));
+    assert!(display.contains("<ESC>"));
+    assert!(display.contains("<0x07>"));
+    assert!(display.contains("<0x00>"));
+    assert!(display.ends_with("end"));
+    let output = render(&app, 80, 24);
+    assert!(!output.contains('\u{1b}'));
+    assert!(!output.contains('\u{7}'));
+    assert!(output.contains("<ESC>"));
+}
+
+#[test]
+fn editor_snapshot_maps_cjk_emoji_and_tabs_to_display_cells() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::ReplaceEditor("数据🙂\tX".into()));
+    let snapshot = app
+        .active_editor_render_snapshot(lazydb::model::editor::EditorViewport {
+            width: 40,
+            height: 4,
+        })
+        .unwrap();
+    assert_eq!(
+        snapshot.lines[0].source_to_display_cells,
+        vec![0, 2, 4, 6, 8, 9]
+    );
+    assert_eq!(snapshot.cursor_screen_cell, Some((0, 0)));
+
+    for _ in 0..3 {
+        app.update(Action::EditorKey(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('l'),
+            crossterm::event::KeyModifiers::NONE,
+        )));
+    }
+    let snapshot = app
+        .active_editor_render_snapshot(lazydb::model::editor::EditorViewport {
+            width: 40,
+            height: 4,
+        })
+        .unwrap();
+    assert_eq!(snapshot.cursor_screen_cell, Some((6, 0)));
+}
+
+#[test]
+fn editor_snapshot_scrolls_without_projecting_offscreen_lines() {
+    let mut app = App::new(Vec::new());
+    let text = (0..10_000)
+        .map(|line| format!("line-{line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    app.update(Action::ReplaceEditor(text));
+    app.update(Action::EditorScroll {
+        rows: 5_000,
+        columns: 0,
+    });
+    let snapshot = app
+        .active_editor_render_snapshot(lazydb::model::editor::EditorViewport {
+            width: 40,
+            height: 3,
+        })
+        .unwrap();
+    assert_eq!(snapshot.first_line, 5_000);
+    assert_eq!(snapshot.lines.len(), 5);
+    assert_eq!(snapshot.lines[0].line, 5_000);
+    assert!(!snapshot.lines[0].spans[0].text.contains("line-4999"));
 }
