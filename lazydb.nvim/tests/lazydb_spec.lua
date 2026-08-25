@@ -307,7 +307,7 @@ test("health checks capabilities through the non-connecting CLI command", functi
       wait = function()
         return {
           code = 0,
-          stdout = '{"version":"0.1.0","cli_api":1,"features":[],"drivers":[]}',
+          stdout = '{"version":"0.1.0","cli_api":1,"features":["mouse","read-only","context-help","profile-manager","system-keyring"],"drivers":["postgres","mysql","sqlite"]}',
           stderr = "",
         }
       end,

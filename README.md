@@ -19,6 +19,10 @@ integration.
 - Multiple SQL console tabs with a compact Vim-style Normal/Insert editor.
 - Multi-statement execution, typed result decoding, Output history, and
   generation-safe asynchronous updates.
+- Runtime profile manager for creating, testing, saving, editing, deleting, and
+  switching PostgreSQL, MySQL, and SQLite connections.
+- Optional remembered passwords in the native system keyring, with explicit
+  session-only fallback when the keyring is unavailable.
 - Object tree refresh, table preview with a 500-row limit, and DDL in a new tab.
 - Responsive 80-column focus mode, standard split layout, truecolor theme,
   contextual help, bounded TachyonFX transitions, and mouse hit regions.
@@ -75,8 +79,17 @@ LAZYDB_PASSWORD='session-only-password' \
 ```
 
 Do not include passwords in `--url`; command-line arguments may be visible to
-other local processes. M0 supports a session-only `LAZYDB_PASSWORD`. OS keyring
-resolution for persisted profiles is part of the next security milestone.
+other local processes. `LAZYDB_PASSWORD` is read only at startup and is bound to
+the selected persisted profile (or the ad-hoc `--url` connection). It is never
+written to disk or reused for another profile.
+
+On first launch with no saved profiles, LazyDB opens a new Profile Manager form.
+Press `Space c` from any normal-mode workspace to open the manager later. Use
+`Test Connection` to validate a draft without persistence, `Save` to persist
+metadata, and `Save & Connect` to persist and activate it. `Remember Password`
+stores only in the native macOS Keychain or Linux Secret Service; if that store
+is unavailable, LazyDB reports a session-only downgrade. Passwords in URLs are
+not supported as a safe credential mechanism.
 
 ## CLI Contract
 
@@ -89,14 +102,15 @@ lazydb capabilities --json
 lazydb doctor --json [--profile NAME]
 ```
 
-`--url` is an M0 ad-hoc connection option and is intentionally hidden from the
-normal help surface until the profile manager is complete.
+`--url` creates an ad-hoc connection and never writes a profile. `--profile`
+selects a saved profile by name; if both are supplied, `--url` wins.
 
 ## Essential Keys
 
 | Context | Keys |
 | --- | --- |
 | Global | `F1` help, `Ctrl-w h/j/k/l` panels, `[t`/`]t` tabs, `Space n` new console, `Q` quit |
+| Profiles | `Space c` open manager; `j/k` select; `Enter` connect/edit; `n` new; `t` test; `s` save; `d` delete; `Esc` close |
 | Explorer | `j/k` move, `h/l/Enter` collapse/expand, `r` refresh, `p` preview, `D` DDL |
 | Editor Normal | `h/j/k/l`, `i/a/o`, `x`, `0/$`, `F5` or `Space r` run |
 | Editor Insert | `Esc` or idle `Ctrl-c` Normal mode, Tab insert, arrows, Backspace/Delete |
@@ -127,6 +141,10 @@ Terminal-Normal mode.
 ## Security Boundary
 
 - Persisted profile models contain `secret_ref`, never a password field.
+- `secret_ref` uses `keyring:dev.lazydb.lazydb/<profile-uuid>`; the native
+  keyring service is `dev.lazydb.lazydb` and the account is the profile UUID.
+- Delete removes the profile metadata and remembered keyring entry. Manual
+  keyring cleanup is only needed for orphaned entries after external file edits.
 - Imported passwords are wrapped in `secrecy` and remain process-local.
 - Database error/value text is stripped of terminal control sequences.
 - Dynamic SQL uses SQLx 0.9's explicit `AssertSqlSafe` marker and remains user

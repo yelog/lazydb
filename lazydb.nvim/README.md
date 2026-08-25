@@ -36,6 +36,11 @@ The plugin passes an argv list and an explicit `cwd` to `jobstart`; it never
 constructs a shell command. Configuration changes apply to sessions started or
 restarted afterward.
 
+The embedded LazyDB process owns connection profiles. On first launch with no
+profiles it opens the new-profile form; `Space c` opens the manager later.
+Profile metadata is stored by LazyDB, while remembered passwords use the native
+OS keyring. The Neovim plugin never reads, stores, or transmits credentials.
+
 ## Commands
 
 | Command | Action |

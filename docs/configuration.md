@@ -9,6 +9,17 @@ Use `lazydb --config /path/to/connections.toml` to override the profile file for
 the current run. This option will point to a broader app configuration in a later
 migration; M0 treats it as the connection-profile file.
 
+## Startup Selection
+
+If the profile file is empty, LazyDB opens a new Profile Manager form instead of
+creating an implicit connection. `--profile NAME` selects a saved profile by
+name. `--url URL` creates an ad-hoc profile for the current process and takes
+precedence over `--profile`; it is never persisted.
+
+`Space c` opens the manager while LazyDB is running. `Test Connection` does not
+save metadata or change the active connection. `Save` persists the profile, and
+`Save & Connect` persists it and activates the new pool.
+
 ## Ad-hoc Connections
 
 `--url` accepts:
@@ -22,8 +33,9 @@ mysql://user@host:3306/database?sslMode=REQUIRED
 jdbc:mysql://host:3306/database?useSSL=true
 ```
 
-Supply a session password through `LAZYDB_PASSWORD`. Avoid URL passwords because
-process arguments can be inspected by other local users.
+Supply a session password through `LAZYDB_PASSWORD`. It is read at startup only,
+bound to the selected profile, and is not reused for a different profile. Avoid
+URL passwords because process arguments can be inspected by other local users.
 
 ## Persisted Profile Shape
 
@@ -42,16 +54,19 @@ user = "app_user"
 database = "app"
 default_schema = "public"
 ssl_mode = "require"
-secret_ref = "keyring:lazydb/local-app"
+secret_ref = "keyring:dev.lazydb.lazydb/1c73c7c0-f944-4adc-a73a-1265fe1260a9"
 read_only = false
 environment = "development"
 include_databases = []
 include_schemas = []
 ```
 
-`secret_ref` is persisted for the upcoming keyring integration. M0 does not yet
-resolve it, so authenticated persisted profiles also require the session-only
-`LAZYDB_PASSWORD` environment variable.
+`secret_ref` points to the native keyring service `dev.lazydb.lazydb` and account
+equal to the profile UUID. The password is never stored in TOML. `Remember
+Password` writes this entry to macOS Keychain or Linux Secret Service. If the
+native store is unavailable, LazyDB falls back to a session-only password and
+shows a warning. Delete removes the entry; manually edited or orphaned files
+may require manual keyring cleanup.
 
 An empty `include_databases` or `include_schemas` means all visible objects. TLS
 mode maps to native driver modes. `verify-full`/`verify-identity` is recommended

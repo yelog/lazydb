@@ -14,7 +14,8 @@ CONTENTS                                                    *lazydb-contents*
 1. Introduction                                                *lazydb-intro*
 
 lazydb.nvim is a thin floating-terminal wrapper around the LazyDB CLI. It owns
-no database connections, SQL parsing, credentials, or LazyDB keymaps. There is
+no database connections, SQL parsing, credentials, or LazyDB keymaps. The
+embedded LazyDB TUI owns its Profile Manager and native keyring integration. There is
 at most one process per Neovim tabpage handle.
 
 Requirements: Neovim 0.10 or newer and a LazyDB executable with CLI API 1.
@@ -54,6 +55,8 @@ window          Floating-window width, height, border, and zindex.
 
 Width and height accept an absolute size or a fraction from 0 through 1. LazyDB
 is started with an argv list and explicit cwd; no shell command is constructed.
+When no profiles exist, LazyDB opens its new-profile form. Use Space c inside
+the terminal to open the Profile Manager. The plugin never stores credentials.
 
 ==============================================================================
 3. Commands                                                   *lazydb-commands*

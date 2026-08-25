@@ -82,7 +82,7 @@ pub struct VersionInfo<'a> {
 pub struct Capabilities<'a> {
     pub version: &'a str,
     pub cli_api: u16,
-    pub features: [&'a str; 3],
+    pub features: [&'a str; 5],
     pub drivers: [&'a str; 3],
 }
 
@@ -113,7 +113,13 @@ pub fn capabilities() -> Capabilities<'static> {
     Capabilities {
         version: env!("CARGO_PKG_VERSION"),
         cli_api: CLI_API_VERSION,
-        features: ["mouse", "read-only", "context-help"],
+        features: [
+            "mouse",
+            "read-only",
+            "context-help",
+            "profile-manager",
+            "system-keyring",
+        ],
         drivers: ["postgres", "mysql", "sqlite"],
     }
 }
@@ -155,7 +161,7 @@ pub fn render_command(command: &Command) -> Result<String, serde_json::Error> {
         Command::Version { json: false } => Ok(format!("lazydb {}", env!("CARGO_PKG_VERSION"))),
         Command::Capabilities { json: true } => serde_json::to_string(&capabilities()),
         Command::Capabilities { json: false } => Ok(format!(
-            "lazydb {} (cli api {})\ndrivers: postgres, mysql, sqlite\nfeatures: mouse, read-only, context-help",
+            "lazydb {} (cli api {})\ndrivers: postgres, mysql, sqlite\nfeatures: mouse, read-only, context-help, profile-manager, system-keyring",
             env!("CARGO_PKG_VERSION"),
             CLI_API_VERSION
         )),
@@ -213,7 +219,13 @@ mod tests {
         );
         assert_eq!(
             value["features"],
-            serde_json::json!(["mouse", "read-only", "context-help"])
+            serde_json::json!([
+                "mouse",
+                "read-only",
+                "context-help",
+                "profile-manager",
+                "system-keyring"
+            ])
         );
     }
 

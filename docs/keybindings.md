@@ -18,6 +18,21 @@ Insert mode.
 | `Space n` | New SQL console |
 | `Ctrl-c` | Cancel active query; otherwise leave Insert mode |
 | `Q` | Quit LazyDB |
+| `Space c` | Open the connection Profile Manager |
+
+## Profile Manager
+
+| Key | Action |
+| --- | --- |
+| `j/k`, arrows | Select a profile or field |
+| `Enter` | Connect selected profile, or edit the selected form field |
+| `n` | Create a new profile |
+| `t` | Test Connection without saving |
+| `s` | Save the profile without connecting |
+| `c` | Save & Connect |
+| `d` | Delete after confirmation |
+| `Space` | Toggle checkboxes and SQLite memory mode |
+| `Esc` | Close, cancel, or leave the manager |
 
 ## Explorer
 

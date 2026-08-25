@@ -31,6 +31,15 @@ connection generation prevents a late connection result from replacing a newer
 connection. Each console has its own generation so a cancelled or old query
 cannot overwrite a newer run.
 
+## Profile and Credential Boundary
+
+`ProfileStore` atomically persists versioned connection metadata in TOML without
+passwords. `Runtime` owns profile CRUD, native keyring operations, session-only
+secrets, and connection identity validation. Native keyring calls run in
+blocking tasks; references use `keyring:dev.lazydb.lazydb/<profile-uuid>`.
+`App` applies profile state only after matching runtime completion actions, so a
+failed save or switch can compensate without exposing a password.
+
 ## Database Boundary
 
 `DatabaseConnection` dispatches to concrete `PostgresAdapter`, `MySqlAdapter`, or
@@ -56,7 +65,8 @@ diagnostic state. Future clipboard/export paths must retain the same boundary.
 
 `lazydb.nvim` owns only a scratch terminal buffer, floating window, argv/cwd,
 one process per Neovim tab handle, and lifecycle/health checks. It does not parse
-SQL, connect to databases, or store credentials.
+SQL, connect to databases, or store credentials. The embedded LazyDB TUI
+provides the same Profile Manager and keyring behavior when launched by Neovim.
 
 ## Next Architectural Steps
 
