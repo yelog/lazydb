@@ -338,6 +338,14 @@ impl App {
                 };
                 self.connection.status = ConnectionStatus::Failed;
                 self.connection.error = Some(message.clone());
+                if let Some(manager) = self.profile_manager.as_mut()
+                    && manager
+                        .operation
+                        .is_some_and(|operation| operation != ProfileOperation::Connecting)
+                {
+                    manager.message = Some(message);
+                    return Vec::new();
+                }
                 let has_stored_credential = profile.secret_ref.is_some();
                 let mut manager = ProfileManagerState::default();
                 manager.start_edit(&profile, has_stored_credential);
@@ -870,7 +878,13 @@ impl App {
         }
 
         if !connect {
-            return Vec::new();
+            return if self.connection.profile_id == Some(profile_id)
+                && self.connection.status == ConnectionStatus::Connecting
+            {
+                vec![Command::Disconnect { profile_id }]
+            } else {
+                Vec::new()
+            };
         }
         if self.connection.profile_id != Some(profile_id) && self.has_running_query() {
             if let Some(manager) = self.profile_manager.as_mut() {
@@ -905,7 +919,7 @@ impl App {
             manager.operation = None;
             manager.message = Some("Profile deleted".into());
         }
-        if was_active {
+        if was_active || self.connection.profile_id == Some(profile_id) {
             vec![Command::Disconnect { profile_id }]
         } else {
             Vec::new()

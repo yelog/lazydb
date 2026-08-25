@@ -357,6 +357,68 @@ fn delete_success_removes_the_profile_and_clamps_selection() {
 }
 
 #[test]
+fn deleting_or_saving_a_pending_profile_clears_its_connection_state() {
+    let profile = sqlite_profile("pending");
+    let profile_id = profile.id;
+    let mut deleting = App::new(vec![profile.clone()]);
+    deleting.connection.profile_id = Some(profile_id);
+    deleting.connection.status = ConnectionStatus::Connecting;
+    deleting.update(Action::OpenProfileManager);
+    deleting.update(Action::ProfileRequestDelete);
+    let request_id = match deleting.update(Action::ProfileConfirmDelete).as_slice() {
+        [Command::DeleteProfile { request_id, .. }] => *request_id,
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+    assert!(matches!(
+        deleting
+            .update(Action::ProfileDeleted {
+                request_id,
+                profile_id,
+                was_active: false,
+            })
+            .as_slice(),
+        [Command::Disconnect { profile_id: disconnected }] if *disconnected == profile_id
+    ));
+
+    let mut saving = App::new(vec![profile]);
+    saving.connection.profile_id = Some(profile_id);
+    saving.connection.status = ConnectionStatus::Connecting;
+    saving.update(Action::OpenProfileManager);
+    saving.update(Action::ProfileStartEdit);
+    let request_id = match saving
+        .update(Action::ProfileSave { connect: false })
+        .as_slice()
+    {
+        [Command::SaveProfile { request_id, .. }] => *request_id,
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+    let saved = saving
+        .profile_manager
+        .as_ref()
+        .unwrap()
+        .draft
+        .as_ref()
+        .unwrap()
+        .validate(&saving.profiles)
+        .unwrap()
+        .profile;
+    assert!(matches!(
+        saving
+            .update(Action::ProfileSaved {
+                request_id,
+                profile: saved,
+                warning: None,
+                connect: false,
+            })
+            .as_slice(),
+        [Command::Disconnect { profile_id: disconnected }] if *disconnected == profile_id
+    ));
+    saving.update(Action::DisconnectCompleted { profile_id });
+    assert_eq!(saving.connection.status, ConnectionStatus::Disconnected);
+    assert!(saving.connection.profile_id.is_none());
+}
+
+#[test]
 fn running_queries_block_switching_and_active_profile_deletion() {
     let active = sqlite_profile("active");
     let other = sqlite_profile("other");
@@ -413,4 +475,35 @@ fn credentials_required_opens_the_matching_profile_at_password() {
     assert_eq!(manager.page, ProfileManagerPage::Form);
     assert_eq!(manager.selected_field, ProfileField::Password);
     assert_eq!(manager.message.as_deref(), Some("Password required"));
+}
+
+#[test]
+fn credentials_required_does_not_replace_an_in_flight_profile_operation() {
+    let profile = sqlite_profile("primary");
+    let profile_id = profile.id;
+    let mut app = App::new(vec![profile]);
+    app.connection.profile_id = Some(profile_id);
+    app.connection.generation = 4;
+    app.connection.status = ConnectionStatus::Connecting;
+    app.update(Action::OpenProfileManager);
+    app.update(Action::ProfileStartEdit);
+    let request_id = match app.update(Action::ProfileTest).as_slice() {
+        [Command::TestProfile { request_id, .. }] => *request_id,
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+
+    app.update(Action::CredentialsRequired {
+        profile_id,
+        generation: 4,
+        message: "Password required".into(),
+    });
+    let manager = app.profile_manager.as_ref().unwrap();
+    assert_eq!(manager.operation, Some(ProfileOperation::Testing));
+    assert_eq!(manager.request_generation, request_id);
+
+    app.update(Action::ProfileTestSucceeded {
+        request_id,
+        server: server(),
+    });
+    assert_eq!(app.profile_manager.as_ref().unwrap().operation, None);
 }

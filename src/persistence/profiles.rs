@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
@@ -27,6 +28,8 @@ pub enum PersistenceError {
     Encode(#[from] toml::ser::Error),
     #[error("profile file version {0} is not supported")]
     UnsupportedVersion(u16),
+    #[error("profile UUID {0} appears more than once")]
+    DuplicateProfileId(Uuid),
     #[error("profile path has no parent directory")]
     MissingParent,
 }
@@ -56,10 +59,12 @@ impl ProfileStore {
         if file.version != PROFILE_FILE_VERSION {
             return Err(PersistenceError::UnsupportedVersion(file.version));
         }
+        validate_profile_ids(&file.profiles)?;
         Ok(file.profiles)
     }
 
     pub fn save(&self, profiles: &[ConnectionProfile]) -> Result<(), PersistenceError> {
+        validate_profile_ids(profiles)?;
         let parent = self.path.parent().ok_or(PersistenceError::MissingParent)?;
         fs::create_dir_all(parent)?;
         set_private_dir_permissions(parent)?;
@@ -91,6 +96,16 @@ impl ProfileStore {
         }
         result
     }
+}
+
+fn validate_profile_ids(profiles: &[ConnectionProfile]) -> Result<(), PersistenceError> {
+    let mut ids = HashSet::with_capacity(profiles.len());
+    for profile in profiles {
+        if !ids.insert(profile.id) {
+            return Err(PersistenceError::DuplicateProfileId(profile.id));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(unix)]

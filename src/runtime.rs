@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, hash_map::Entry},
+    collections::{HashMap, HashSet},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -13,7 +13,7 @@ use futures_util::StreamExt;
 use secrecy::SecretString;
 use tokio::{
     sync::{Mutex, mpsc},
-    task::JoinHandle,
+    task::{self, JoinHandle},
     time::{MissedTickBehavior, interval},
 };
 use uuid::Uuid;
@@ -24,9 +24,19 @@ use crate::{
     cli::{Cli, MouseMode},
     db::DatabaseConnection,
     input::{keymap::Keymap, mouse::map_mouse},
-    model::workspace::QueryStatus,
-    persistence::{paths::AppPaths, profiles::ProfileStore},
+    model::{
+        profile_manager::{CredentialUpdate, ProfileSubmission},
+        workspace::QueryStatus,
+    },
+    persistence::{
+        paths::AppPaths,
+        profiles::ProfileStore,
+        secrets::{
+            NativeSecretStore, SecretStore, SecretStoreError, keyring_ref, profile_id_from_ref,
+        },
+    },
     profile::{ConnectionProfile, import_connection_url},
+    security::sanitize_terminal_text,
     terminal::TerminalSession,
     ui::{self, UiState},
 };
@@ -38,44 +48,98 @@ struct ActiveConnection {
     database: DatabaseConnection,
 }
 
-pub struct Runtime {
+#[derive(Clone)]
+struct ProfileRegistry {
+    order: Vec<Uuid>,
     profiles: HashMap<Uuid, ConnectionProfile>,
-    secrets: HashMap<Uuid, SecretString>,
+    revisions: HashMap<Uuid, u64>,
+    persisted: HashSet<Uuid>,
+    session_secrets: HashMap<Uuid, SecretString>,
+    startup_password_profile: Option<Uuid>,
+    startup_password: Option<SecretString>,
+}
+
+pub struct Runtime {
+    registry: Arc<Mutex<ProfileRegistry>>,
+    profile_store: ProfileStore,
+    secret_store: Arc<dyn SecretStore>,
+    profile_mutation: Arc<Mutex<()>>,
     event_sender: mpsc::UnboundedSender<Action>,
     connection: Arc<Mutex<Option<ActiveConnection>>>,
     latest_connection_generation: Arc<AtomicU64>,
     query_tasks: HashMap<(Uuid, u64), JoinHandle<()>>,
     background_tasks: Vec<JoinHandle<()>>,
+    profile_tasks: Vec<JoinHandle<()>>,
 }
 
 impl Runtime {
     pub fn new(
         profiles: Vec<ConnectionProfile>,
-        secrets: HashMap<Uuid, SecretString>,
+        persisted: HashSet<Uuid>,
+        session_secrets: HashMap<Uuid, SecretString>,
+        startup_password: Option<(Uuid, SecretString)>,
+        profile_store: ProfileStore,
+        secret_store: Arc<dyn SecretStore>,
         event_sender: mpsc::UnboundedSender<Action>,
     ) -> Self {
+        let mut order = Vec::with_capacity(profiles.len());
+        let mut profiles_by_id = HashMap::with_capacity(profiles.len());
+        for profile in profiles {
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                profiles_by_id.entry(profile.id)
+            {
+                order.push(profile.id);
+                entry.insert(profile);
+            }
+        }
+        let revisions = profiles_by_id
+            .keys()
+            .map(|profile_id| (*profile_id, 0))
+            .collect();
+        let (startup_password_profile, startup_password) = startup_password
+            .map(|(profile_id, password)| (Some(profile_id), Some(password)))
+            .unwrap_or((None, None));
         Self {
-            profiles: profiles
-                .into_iter()
-                .map(|profile| (profile.id, profile))
-                .collect(),
-            secrets,
+            registry: Arc::new(Mutex::new(ProfileRegistry {
+                order,
+                profiles: profiles_by_id,
+                revisions,
+                persisted,
+                session_secrets,
+                startup_password_profile,
+                startup_password,
+            })),
+            profile_store,
+            secret_store,
+            profile_mutation: Arc::new(Mutex::new(())),
             event_sender,
             connection: Arc::new(Mutex::new(None)),
             latest_connection_generation: Arc::new(AtomicU64::new(0)),
             query_tasks: HashMap::new(),
             background_tasks: Vec::new(),
+            profile_tasks: Vec::new(),
         }
     }
 
     pub fn dispatch(&mut self, command: Command) {
         self.query_tasks.retain(|_, task| !task.is_finished());
         self.background_tasks.retain(|task| !task.is_finished());
+        self.profile_tasks.retain(|task| !task.is_finished());
         match command {
-            Command::TestProfile { .. }
-            | Command::SaveProfile { .. }
-            | Command::DeleteProfile { .. }
-            | Command::Disconnect { .. } => {}
+            Command::TestProfile {
+                request_id,
+                submission,
+            } => self.test_profile(request_id, submission),
+            Command::SaveProfile {
+                request_id,
+                submission,
+                connect,
+            } => self.save_profile(request_id, submission, connect),
+            Command::DeleteProfile {
+                request_id,
+                profile_id,
+            } => self.delete_profile(request_id, profile_id),
+            Command::Disconnect { profile_id } => self.disconnect(profile_id),
             Command::Connect {
                 profile_id,
                 generation,
@@ -111,25 +175,190 @@ impl Runtime {
         }
     }
 
-    fn connect(&mut self, profile_id: Uuid, generation: u64) {
-        let Some(profile) = self.profiles.get(&profile_id).cloned() else {
-            let _ = self.event_sender.send(Action::ConnectionFailed {
+    fn test_profile(&mut self, request_id: u64, submission: ProfileSubmission) {
+        let registry = Arc::clone(&self.registry);
+        let secret_store = Arc::clone(&self.secret_store);
+        let sender = self.event_sender.clone();
+        self.background_tasks.push(tokio::spawn(async move {
+            let ProfileSubmission {
+                profile,
+                credential,
+            } = submission;
+            let password =
+                match resolve_submission_password(&registry, &secret_store, &profile, credential)
+                    .await
+                {
+                    Ok(password) => password,
+                    Err(message) => {
+                        let _ = sender.send(Action::ProfileTestFailed {
+                            request_id,
+                            message,
+                        });
+                        return;
+                    }
+                };
+            match DatabaseConnection::connect(&profile, password.as_ref()).await {
+                Ok(database) => {
+                    let result = database.probe().await;
+                    database.close().await;
+                    match result {
+                        Ok(server) => {
+                            let _ =
+                                sender.send(Action::ProfileTestSucceeded { request_id, server });
+                        }
+                        Err(error) => {
+                            let _ = sender.send(Action::ProfileTestFailed {
+                                request_id,
+                                message: sanitize_terminal_text(&error.to_string()),
+                            });
+                        }
+                    }
+                }
+                Err(error) => {
+                    let _ = sender.send(Action::ProfileTestFailed {
+                        request_id,
+                        message: sanitize_terminal_text(&error.to_string()),
+                    });
+                }
+            }
+        }));
+    }
+
+    fn save_profile(&mut self, request_id: u64, submission: ProfileSubmission, connect: bool) {
+        let registry = Arc::clone(&self.registry);
+        let mutation = Arc::clone(&self.profile_mutation);
+        let profile_store = self.profile_store.clone();
+        let secret_store = Arc::clone(&self.secret_store);
+        let sender = self.event_sender.clone();
+        self.profile_tasks.push(tokio::spawn(async move {
+            let _mutation_guard = mutation.lock().await;
+            match save_profile_transaction(registry, profile_store, secret_store, submission).await
+            {
+                Ok(saved) => {
+                    let _ = sender.send(Action::ProfileSaved {
+                        request_id,
+                        profile: saved.profile,
+                        warning: saved.warning,
+                        connect,
+                    });
+                }
+                Err(message) => {
+                    let _ = sender.send(Action::ProfileSaveFailed {
+                        request_id,
+                        message,
+                    });
+                }
+            }
+        }));
+    }
+
+    fn delete_profile(&mut self, request_id: u64, profile_id: Uuid) {
+        let registry = Arc::clone(&self.registry);
+        let mutation = Arc::clone(&self.profile_mutation);
+        let profile_store = self.profile_store.clone();
+        let secret_store = Arc::clone(&self.secret_store);
+        let connection = Arc::clone(&self.connection);
+        let sender = self.event_sender.clone();
+        self.profile_tasks.push(tokio::spawn(async move {
+            let _mutation_guard = mutation.lock().await;
+            match delete_profile_transaction(
+                registry,
+                profile_store,
+                secret_store,
+                connection,
                 profile_id,
-                generation,
-                message: "Connection profile no longer exists".to_owned(),
-            });
-            return;
-        };
-        let password = self.secrets.get(&profile_id).cloned();
+            )
+            .await
+            {
+                Ok(was_active) => {
+                    let _ = sender.send(Action::ProfileDeleted {
+                        request_id,
+                        profile_id,
+                        was_active,
+                    });
+                }
+                Err(message) => {
+                    let _ = sender.send(Action::ProfileDeleteFailed {
+                        request_id,
+                        message,
+                    });
+                }
+            }
+        }));
+    }
+
+    fn disconnect(&mut self, profile_id: Uuid) {
+        let connection = Arc::clone(&self.connection);
+        let latest = Arc::clone(&self.latest_connection_generation);
+        let sender = self.event_sender.clone();
+        self.background_tasks.push(tokio::spawn(async move {
+            latest.store(u64::MAX, Ordering::SeqCst);
+            let active = {
+                let mut guard = connection.lock().await;
+                if guard.as_ref().map(|active| active.profile_id) == Some(profile_id) {
+                    guard.take()
+                } else {
+                    None
+                }
+            };
+            if let Some(active) = active {
+                active.database.close().await;
+            }
+            let _ = sender.send(Action::DisconnectCompleted { profile_id });
+        }));
+    }
+
+    fn connect(&mut self, profile_id: Uuid, generation: u64) {
+        let registry = Arc::clone(&self.registry);
+        let mutation = Arc::clone(&self.profile_mutation);
+        let secret_store = Arc::clone(&self.secret_store);
         let sender = self.event_sender.clone();
         let connection = Arc::clone(&self.connection);
         let latest = Arc::clone(&self.latest_connection_generation);
         latest.store(generation, Ordering::SeqCst);
         self.background_tasks.push(tokio::spawn(async move {
+            let mutation_guard = mutation.lock().await;
+            let profile = {
+                let registry = registry.lock().await;
+                registry.profiles.get(&profile_id).cloned().map(|profile| {
+                    let revision = registry.revisions.get(&profile_id).copied().unwrap_or(0);
+                    (profile, revision)
+                })
+            };
+            let Some((profile, profile_revision)) = profile else {
+                let _ = sender.send(Action::ConnectionFailed {
+                    profile_id,
+                    generation,
+                    message: "Connection profile no longer exists".to_owned(),
+                });
+                return;
+            };
+            let password = match resolve_profile_password(&registry, &secret_store, &profile).await
+            {
+                Ok(password) => password,
+                Err(message) => {
+                    let _ = sender.send(Action::CredentialsRequired {
+                        profile_id,
+                        generation,
+                        message,
+                    });
+                    return;
+                }
+            };
+            drop(mutation_guard);
             match DatabaseConnection::connect(&profile, password.as_ref()).await {
                 Ok(database) => match database.probe().await {
                     Ok(server) => {
-                        if latest.load(Ordering::SeqCst) != generation {
+                        let mutation_guard = mutation.lock().await;
+                        if !connection_attempt_is_current(
+                            &registry,
+                            &latest,
+                            &profile,
+                            profile_revision,
+                            generation,
+                        )
+                        .await
+                        {
                             database.close().await;
                             return;
                         }
@@ -138,30 +367,53 @@ impl Runtime {
                             generation,
                             database,
                         });
-                        if let Some(previous) = previous {
-                            previous.database.close().await;
-                        }
                         let _ = sender.send(Action::ConnectionSucceeded {
                             profile_id,
                             generation,
                             server,
                         });
+                        drop(mutation_guard);
+                        if let Some(previous) = previous {
+                            previous.database.close().await;
+                        }
                     }
                     Err(error) => {
                         database.close().await;
+                        let _mutation_guard = mutation.lock().await;
+                        if connection_attempt_is_current(
+                            &registry,
+                            &latest,
+                            &profile,
+                            profile_revision,
+                            generation,
+                        )
+                        .await
+                        {
+                            let _ = sender.send(Action::ConnectionFailed {
+                                profile_id,
+                                generation,
+                                message: error.to_string(),
+                            });
+                        }
+                    }
+                },
+                Err(error) => {
+                    let _mutation_guard = mutation.lock().await;
+                    if connection_attempt_is_current(
+                        &registry,
+                        &latest,
+                        &profile,
+                        profile_revision,
+                        generation,
+                    )
+                    .await
+                    {
                         let _ = sender.send(Action::ConnectionFailed {
                             profile_id,
                             generation,
                             message: error.to_string(),
                         });
                     }
-                },
-                Err(error) => {
-                    let _ = sender.send(Action::ConnectionFailed {
-                        profile_id,
-                        generation,
-                        message: error.to_string(),
-                    });
                 }
             }
         }));
@@ -322,14 +574,374 @@ impl Runtime {
     pub async fn shutdown(mut self) {
         for (_, task) in self.query_tasks.drain() {
             task.abort();
+            let _ = task.await;
         }
         for task in self.background_tasks.drain(..) {
             task.abort();
+            let _ = task.await;
+        }
+        for task in self.profile_tasks.drain(..) {
+            let _ = task.await;
         }
         if let Some(connection) = self.connection.lock().await.take() {
             connection.database.close().await;
         }
     }
+}
+
+struct SavedProfile {
+    profile: ConnectionProfile,
+    warning: Option<String>,
+}
+
+async fn save_profile_transaction(
+    registry: Arc<Mutex<ProfileRegistry>>,
+    profile_store: ProfileStore,
+    secret_store: Arc<dyn SecretStore>,
+    submission: ProfileSubmission,
+) -> Result<SavedProfile, String> {
+    let snapshot = registry.lock().await.clone();
+    let ProfileSubmission {
+        mut profile,
+        credential,
+    } = submission;
+    let profile_id = profile.id;
+    let old_profile = snapshot.profiles.get(&profile_id).cloned();
+    let mut next = snapshot;
+    let mut previous_secret = None;
+    let mut warning = None;
+
+    match credential {
+        CredentialUpdate::Preserve => {
+            profile.secret_ref = if let Some(old_profile) = old_profile.as_ref() {
+                validate_secret_reference(old_profile)?;
+                old_profile.secret_ref.clone()
+            } else {
+                None
+            };
+        }
+        CredentialUpdate::Session(password) => {
+            if let Some(old_profile) = old_profile.as_ref()
+                && old_profile.secret_ref.is_some()
+            {
+                validate_secret_reference(old_profile)?;
+                let previous = read_secret(&secret_store, profile_id)
+                    .await
+                    .map_err(|error| secret_error("Unable to read the previous password", error))?;
+                delete_secret(&secret_store, profile_id)
+                    .await
+                    .map_err(|error| {
+                        secret_error("Unable to forget the previous password", error)
+                    })?;
+                previous_secret = Some(previous);
+            }
+            profile.secret_ref = None;
+            next.session_secrets.insert(profile_id, password);
+        }
+        CredentialUpdate::Remember(password) => {
+            if let Some(old_profile) = old_profile.as_ref()
+                && old_profile.secret_ref.is_some()
+            {
+                validate_secret_reference(old_profile)?;
+            }
+            match remember_secret(&secret_store, profile_id, &password).await? {
+                RememberResult::Stored { previous } => {
+                    previous_secret = Some(previous);
+                    profile.secret_ref = Some(keyring_ref(profile_id));
+                }
+                RememberResult::SessionOnly => {
+                    profile.secret_ref = None;
+                    warning = Some(
+                        if old_profile
+                            .as_ref()
+                            .is_some_and(|profile| profile.secret_ref.is_some())
+                        {
+                            "Native password store is unavailable; the password is session-only and the previous stored password could not be removed"
+                            .to_owned()
+                        } else {
+                            "Native password store is unavailable; the password is available for this session only"
+                            .to_owned()
+                        },
+                    );
+                }
+            }
+            next.session_secrets.insert(profile_id, password);
+        }
+        CredentialUpdate::Forget => {
+            if let Some(old_profile) = old_profile.as_ref()
+                && old_profile.secret_ref.is_some()
+            {
+                validate_secret_reference(old_profile)?;
+                let previous = read_secret(&secret_store, profile_id)
+                    .await
+                    .map_err(|error| secret_error("Unable to read the previous password", error))?;
+                delete_secret(&secret_store, profile_id)
+                    .await
+                    .map_err(|error| secret_error("Unable to forget the password", error))?;
+                previous_secret = Some(previous);
+            }
+            profile.secret_ref = None;
+            next.session_secrets.remove(&profile_id);
+        }
+    }
+
+    if !next.profiles.contains_key(&profile_id) {
+        next.order.push(profile_id);
+    }
+    next.profiles.insert(profile_id, profile.clone());
+    *next.revisions.entry(profile_id).or_default() += 1;
+    next.persisted.insert(profile_id);
+    let persisted_profiles = next.ordered_persisted_profiles();
+    if let Err(primary) = save_profiles(profile_store, persisted_profiles).await {
+        return Err(
+            rollback_after_failure(&secret_store, profile_id, previous_secret, primary).await,
+        );
+    }
+
+    *registry.lock().await = next;
+    Ok(SavedProfile { profile, warning })
+}
+
+async fn delete_profile_transaction(
+    registry: Arc<Mutex<ProfileRegistry>>,
+    profile_store: ProfileStore,
+    secret_store: Arc<dyn SecretStore>,
+    connection: Arc<Mutex<Option<ActiveConnection>>>,
+    profile_id: Uuid,
+) -> Result<bool, String> {
+    let snapshot = registry.lock().await.clone();
+    let profile = snapshot
+        .profiles
+        .get(&profile_id)
+        .cloned()
+        .ok_or_else(|| "Connection profile no longer exists".to_owned())?;
+    let mut previous_secret = None;
+    if profile.secret_ref.is_some() {
+        validate_secret_reference(&profile)?;
+        let previous = read_secret(&secret_store, profile_id)
+            .await
+            .map_err(|error| secret_error("Unable to read the stored password", error))?;
+        delete_secret(&secret_store, profile_id)
+            .await
+            .map_err(|error| secret_error("Unable to delete the stored password", error))?;
+        previous_secret = Some(previous);
+    }
+
+    let mut next = snapshot;
+    next.order.retain(|id| *id != profile_id);
+    next.profiles.remove(&profile_id);
+    next.revisions.remove(&profile_id);
+    let was_persisted = next.persisted.remove(&profile_id);
+    next.session_secrets.remove(&profile_id);
+    if next.startup_password_profile == Some(profile_id) {
+        next.startup_password_profile = None;
+        next.startup_password = None;
+    }
+
+    if was_persisted {
+        let persisted_profiles = next.ordered_persisted_profiles();
+        if let Err(primary) = save_profiles(profile_store, persisted_profiles).await {
+            return Err(rollback_after_failure(
+                &secret_store,
+                profile_id,
+                previous_secret,
+                primary,
+            )
+            .await);
+        }
+    }
+
+    let was_active = connection
+        .lock()
+        .await
+        .as_ref()
+        .is_some_and(|active| active.profile_id == profile_id);
+    *registry.lock().await = next;
+    Ok(was_active)
+}
+
+impl ProfileRegistry {
+    fn ordered_persisted_profiles(&self) -> Vec<ConnectionProfile> {
+        self.order
+            .iter()
+            .filter(|profile_id| self.persisted.contains(profile_id))
+            .filter_map(|profile_id| self.profiles.get(profile_id).cloned())
+            .collect()
+    }
+}
+
+enum RememberResult {
+    Stored { previous: Option<SecretString> },
+    SessionOnly,
+}
+
+async fn remember_secret(
+    secret_store: &Arc<dyn SecretStore>,
+    profile_id: Uuid,
+    password: &SecretString,
+) -> Result<RememberResult, String> {
+    match secret_store.available().await {
+        Ok(()) => {}
+        Err(error) if secret_store_unavailable(error) => return Ok(RememberResult::SessionOnly),
+        Err(error) => {
+            return Err(secret_error(
+                "Unable to access the native password store",
+                error,
+            ));
+        }
+    }
+    let previous = match read_secret(secret_store, profile_id).await {
+        Ok(previous) => previous,
+        Err(error) if secret_store_unavailable(error) => return Ok(RememberResult::SessionOnly),
+        Err(error) => return Err(secret_error("Unable to read the previous password", error)),
+    };
+    match secret_store.set(profile_id, password).await {
+        Ok(()) => Ok(RememberResult::Stored { previous }),
+        Err(error) if secret_store_unavailable(error) => Ok(RememberResult::SessionOnly),
+        Err(error) => Err(secret_error("Unable to remember the password", error)),
+    }
+}
+
+async fn resolve_submission_password(
+    registry: &Arc<Mutex<ProfileRegistry>>,
+    secret_store: &Arc<dyn SecretStore>,
+    profile: &ConnectionProfile,
+    credential: CredentialUpdate,
+) -> Result<Option<SecretString>, String> {
+    match credential {
+        CredentialUpdate::Session(password) | CredentialUpdate::Remember(password) => {
+            Ok(Some(password))
+        }
+        CredentialUpdate::Forget => Ok(None),
+        CredentialUpdate::Preserve => {
+            resolve_profile_password(registry, secret_store, profile).await
+        }
+    }
+}
+
+async fn resolve_profile_password(
+    registry: &Arc<Mutex<ProfileRegistry>>,
+    secret_store: &Arc<dyn SecretStore>,
+    profile: &ConnectionProfile,
+) -> Result<Option<SecretString>, String> {
+    let (session_password, startup_password) = {
+        let registry = registry.lock().await;
+        let session_password = registry.session_secrets.get(&profile.id).cloned();
+        let startup_password = (registry.startup_password_profile == Some(profile.id))
+            .then(|| registry.startup_password.clone())
+            .flatten();
+        (session_password, startup_password)
+    };
+    if session_password.is_some() {
+        return Ok(session_password);
+    }
+    if startup_password.is_some() {
+        return Ok(startup_password);
+    }
+    if profile.secret_ref.is_none() {
+        return Ok(None);
+    }
+    validate_secret_reference(profile)?;
+    match read_secret(secret_store, profile.id).await {
+        Ok(Some(password)) => Ok(Some(password)),
+        Ok(None) => Err("Stored password is missing; enter a password to continue".to_owned()),
+        Err(SecretStoreError::Locked | SecretStoreError::Unavailable) => {
+            Err("Stored password is unavailable; enter a password to continue".to_owned())
+        }
+        Err(error) => Err(secret_error("Unable to read the stored password", error)),
+    }
+}
+
+fn validate_secret_reference(profile: &ConnectionProfile) -> Result<(), String> {
+    let Some(reference) = profile.secret_ref.as_deref() else {
+        return Ok(());
+    };
+    let referenced_profile = profile_id_from_ref(reference)
+        .map_err(|error| secret_error("Invalid stored password reference", error))?;
+    if referenced_profile != profile.id {
+        return Err("Invalid stored password reference".to_owned());
+    }
+    Ok(())
+}
+
+async fn read_secret(
+    secret_store: &Arc<dyn SecretStore>,
+    profile_id: Uuid,
+) -> Result<Option<SecretString>, SecretStoreError> {
+    match secret_store.get(profile_id).await {
+        Err(SecretStoreError::Missing) => Ok(None),
+        result => result,
+    }
+}
+
+async fn delete_secret(
+    secret_store: &Arc<dyn SecretStore>,
+    profile_id: Uuid,
+) -> Result<(), SecretStoreError> {
+    match secret_store.delete(profile_id).await {
+        Err(SecretStoreError::Missing) => Ok(()),
+        result => result,
+    }
+}
+
+async fn rollback_after_failure(
+    secret_store: &Arc<dyn SecretStore>,
+    profile_id: Uuid,
+    previous_secret: Option<Option<SecretString>>,
+    primary: String,
+) -> String {
+    let Some(previous_secret) = previous_secret else {
+        return primary;
+    };
+    let rollback = match previous_secret {
+        Some(password) => secret_store.set(profile_id, &password).await,
+        None => delete_secret(secret_store, profile_id).await,
+    };
+    match rollback {
+        Ok(()) => primary,
+        Err(error) => format!(
+            "{primary}; restoring the previous password also failed: {}",
+            sanitize_terminal_text(&error.to_string())
+        ),
+    }
+}
+
+async fn save_profiles(
+    profile_store: ProfileStore,
+    profiles: Vec<ConnectionProfile>,
+) -> Result<(), String> {
+    task::spawn_blocking(move || profile_store.save(&profiles))
+        .await
+        .map_err(|_| "Profile persistence task failed".to_owned())?
+        .map_err(|error| {
+            sanitize_terminal_text(&format!("Unable to save connection profiles: {error}"))
+        })
+}
+
+fn secret_store_unavailable(error: SecretStoreError) -> bool {
+    matches!(
+        error,
+        SecretStoreError::Locked | SecretStoreError::Unavailable
+    )
+}
+
+fn secret_error(context: &str, error: SecretStoreError) -> String {
+    sanitize_terminal_text(&format!("{context}: {error}"))
+}
+
+async fn connection_attempt_is_current(
+    registry: &Arc<Mutex<ProfileRegistry>>,
+    latest: &Arc<AtomicU64>,
+    profile: &ConnectionProfile,
+    profile_revision: u64,
+    generation: u64,
+) -> bool {
+    if latest.load(Ordering::SeqCst) != generation {
+        return false;
+    }
+    let registry = registry.lock().await;
+    registry.profiles.get(&profile.id) == Some(profile)
+        && registry.revisions.get(&profile.id) == Some(&profile_revision)
 }
 
 async fn active_database(
@@ -343,10 +955,18 @@ async fn active_database(
 }
 
 pub async fn run_tui(cli: Cli) -> Result<()> {
-    let (profiles, secrets, selected_profile) = load_startup_profiles(&cli)?;
-    let mut app = App::new(profiles.clone());
+    let startup = load_startup_profiles(&cli)?;
+    let mut app = App::new(startup.profiles.clone());
     let (event_sender, mut event_receiver) = mpsc::unbounded_channel();
-    let mut runtime = Runtime::new(profiles, secrets, event_sender);
+    let mut runtime = Runtime::new(
+        startup.profiles,
+        startup.persisted,
+        startup.session_secrets,
+        startup.startup_password,
+        startup.profile_store,
+        Arc::new(NativeSecretStore),
+        event_sender,
+    );
     let mut terminal = TerminalSession::enter(cli.mouse != MouseMode::Off)
         .context("failed to initialize terminal")?;
     let mut terminal_events = EventStream::new();
@@ -355,67 +975,72 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
     let mut ticker = interval(Duration::from_millis(33));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
-    apply_action(
-        &mut app,
-        &mut runtime,
-        Action::RequestConnect(selected_profile),
-    );
-    terminal.draw(|frame| ui::render_with_state(frame, &app, &mut ui_state))?;
+    let result: Result<()> = async {
+        apply_action(
+            &mut app,
+            &mut runtime,
+            Action::RequestConnect(startup.selected_profile),
+        );
+        terminal.draw(|frame| ui::render_with_state(frame, &app, &mut ui_state))?;
 
-    while !app.should_quit {
-        let mut redraw = false;
-        tokio::select! {
-            terminal_event = terminal_events.next() => {
-                let Some(terminal_event) = terminal_event else { break; };
-                match terminal_event.context("terminal input failed")? {
-                    Event::Key(key) => {
-                        if let Some(action) = keymap.map(key, &app) {
-                            apply_action(&mut app, &mut runtime, action);
-                            redraw = true;
-                        }
-                    }
-                    Event::Mouse(mouse) => {
-                        if let Some(action) = map_mouse(mouse, &ui_state, &app) {
-                            apply_action(&mut app, &mut runtime, action);
-                            redraw = true;
-                        }
-                    }
-                    Event::Paste(value) => {
-                        if app.focus == crate::model::workspace::Focus::Editor
-                            && app.active_console().editor.mode
-                                == crate::model::editor::EditorMode::Insert
-                        {
-                            for character in value.chars() {
-                                let action = if character == '\n' {
-                                    Action::InsertNewline
-                                } else {
-                                    Action::InsertCharacter(character)
-                                };
+        while !app.should_quit {
+            let mut redraw = false;
+            tokio::select! {
+                terminal_event = terminal_events.next() => {
+                    let Some(terminal_event) = terminal_event else { break; };
+                    match terminal_event.context("terminal input failed")? {
+                        Event::Key(key) => {
+                            if let Some(action) = keymap.map(key, &app) {
                                 apply_action(&mut app, &mut runtime, action);
+                                redraw = true;
                             }
-                            redraw = true;
                         }
+                        Event::Mouse(mouse) => {
+                            if let Some(action) = map_mouse(mouse, &ui_state, &app) {
+                                apply_action(&mut app, &mut runtime, action);
+                                redraw = true;
+                            }
+                        }
+                        Event::Paste(value) => {
+                            if app.focus == crate::model::workspace::Focus::Editor
+                                && app.active_console().editor.mode
+                                    == crate::model::editor::EditorMode::Insert
+                            {
+                                for character in value.chars() {
+                                    let action = if character == '\n' {
+                                        Action::InsertNewline
+                                    } else {
+                                        Action::InsertCharacter(character)
+                                    };
+                                    apply_action(&mut app, &mut runtime, action);
+                                }
+                                redraw = true;
+                            }
+                        }
+                        Event::Resize(_, _) | Event::FocusGained | Event::FocusLost => redraw = true,
                     }
-                    Event::Resize(_, _) | Event::FocusGained | Event::FocusLost => redraw = true,
+                }
+                Some(action) = event_receiver.recv() => {
+                    apply_action(&mut app, &mut runtime, action);
+                    redraw = true;
+                }
+                _ = ticker.tick() => {
+                    redraw = ui_state.effects.is_active()
+                        || app.tabs.iter().any(|tab| tab.query_status == QueryStatus::Running);
                 }
             }
-            Some(action) = event_receiver.recv() => {
-                apply_action(&mut app, &mut runtime, action);
-                redraw = true;
-            }
-            _ = ticker.tick() => {
-                redraw = ui_state.effects.is_active()
-                    || app.tabs.iter().any(|tab| tab.query_status == QueryStatus::Running);
+
+            if redraw && !app.should_quit {
+                terminal.draw(|frame| ui::render_with_state(frame, &app, &mut ui_state))?;
             }
         }
 
-        if redraw && !app.should_quit {
-            terminal.draw(|frame| ui::render_with_state(frame, &app, &mut ui_state))?;
-        }
+        Ok(())
     }
+    .await;
 
     runtime.shutdown().await;
-    Ok(())
+    result
 }
 
 fn apply_action(app: &mut App, runtime: &mut Runtime, action: Action) {
@@ -424,7 +1049,14 @@ fn apply_action(app: &mut App, runtime: &mut Runtime, action: Action) {
     }
 }
 
-type StartupProfiles = (Vec<ConnectionProfile>, HashMap<Uuid, SecretString>, Uuid);
+struct StartupProfiles {
+    profiles: Vec<ConnectionProfile>,
+    persisted: HashSet<Uuid>,
+    session_secrets: HashMap<Uuid, SecretString>,
+    startup_password: Option<(Uuid, SecretString)>,
+    selected_profile: Uuid,
+    profile_store: ProfileStore,
+}
 
 fn load_startup_profiles(cli: &Cli) -> Result<StartupProfiles> {
     let profile_path = if let Some(path) = &cli.config {
@@ -434,7 +1066,8 @@ fn load_startup_profiles(cli: &Cli) -> Result<StartupProfiles> {
     };
     let store = ProfileStore::new(profile_path);
     let mut profiles = store.load().context("failed to load connection profiles")?;
-    let mut secrets = HashMap::new();
+    let persisted = profiles.iter().map(|profile| profile.id).collect();
+    let mut session_secrets = HashMap::new();
 
     let direct_profile = if let Some(url) = &cli.url {
         let mut imported = import_connection_url(url, cli.profile.as_deref())?;
@@ -442,7 +1075,7 @@ fn load_startup_profiles(cli: &Cli) -> Result<StartupProfiles> {
             imported.profile.read_only = true;
         }
         if let Some(password) = imported.transient_password {
-            secrets.insert(imported.profile.id, password);
+            session_secrets.insert(imported.profile.id, password);
         }
         let profile_id = imported.profile.id;
         profiles.push(imported.profile);
@@ -469,12 +1102,21 @@ fn load_startup_profiles(cli: &Cli) -> Result<StartupProfiles> {
         selected
     };
 
-    if let Entry::Vacant(entry) = secrets.entry(selected)
-        && let Ok(password) = std::env::var("LAZYDB_PASSWORD")
-        && !password.is_empty()
-    {
-        entry.insert(SecretString::from(password));
-    }
+    let startup_password = if session_secrets.contains_key(&selected) {
+        None
+    } else {
+        std::env::var("LAZYDB_PASSWORD")
+            .ok()
+            .filter(|password| !password.is_empty())
+            .map(|password| (selected, SecretString::from(password)))
+    };
 
-    Ok((profiles, secrets, selected))
+    Ok(StartupProfiles {
+        profiles,
+        persisted,
+        session_secrets,
+        startup_password,
+        selected_profile: selected,
+        profile_store: store,
+    })
 }

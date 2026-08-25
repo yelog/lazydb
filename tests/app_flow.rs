@@ -1,7 +1,15 @@
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use lazydb::{
-    action::Action, app::App, model::workspace::ConnectionStatus, profile::import_connection_url,
+    action::Action,
+    app::App,
+    model::workspace::ConnectionStatus,
+    persistence::{profiles::ProfileStore, secrets::NativeSecretStore},
+    profile::import_connection_url,
     runtime::Runtime,
 };
 use tempfile::TempDir;
@@ -17,7 +25,15 @@ async fn connects_loads_catalog_and_executes_through_runtime() {
     let profile_id = profile.id;
     let mut app = App::new(vec![profile.clone()]);
     let (events, mut receiver) = mpsc::unbounded_channel();
-    let mut runtime = Runtime::new(vec![profile], HashMap::new(), events);
+    let mut runtime = Runtime::new(
+        vec![profile],
+        HashSet::from([profile_id]),
+        HashMap::new(),
+        None,
+        ProfileStore::new(temp.path().join("connections.toml")),
+        Arc::new(NativeSecretStore),
+        events,
+    );
 
     dispatch(&mut app, &mut runtime, Action::RequestConnect(profile_id));
     let action = timeout(Duration::from_secs(3), receiver.recv())

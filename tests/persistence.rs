@@ -65,3 +65,28 @@ fn successful_save_leaves_no_temporary_file() {
         .collect::<Vec<_>>();
     assert_eq!(names, vec!["connections.toml"]);
 }
+
+#[test]
+fn rejects_duplicate_profile_uuids_on_save_and_load() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("connections.toml");
+    let store = ProfileStore::new(path.clone());
+    let profile = import_connection_url(":memory:", Some("duplicate"))
+        .unwrap()
+        .profile;
+
+    assert!(store.save(&[profile.clone(), profile.clone()]).is_err());
+    assert!(!path.exists());
+
+    let profile_toml = toml::to_string(&profile).unwrap();
+    fs::write(
+        &path,
+        format!(
+            "version = 1\n\n[[profiles]]\n{}\n[[profiles]]\n{}",
+            profile_toml, profile_toml
+        ),
+    )
+    .unwrap();
+
+    assert!(store.load().is_err());
+}
