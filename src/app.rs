@@ -4,12 +4,15 @@ use crate::{
     action::{Action, Command},
     model::{
         editor::EditorMode,
+        profile_manager::{
+            ProfileField, ProfileManagerPage, ProfileManagerState, ProfileOperation,
+        },
         tab::{ConsoleTab, OutputEntry, OutputKind, ResultView},
         workspace::{
             ConnectionState, ConnectionStatus, ExplorerState, Focus, Overlay, QueryStatus,
         },
     },
-    profile::ConnectionProfile,
+    profile::{ConnectionProfile, DatabaseKind},
 };
 
 #[derive(Clone, Debug)]
@@ -21,6 +24,7 @@ pub struct App {
     pub active_tab: usize,
     pub focus: Focus,
     pub overlay: Option<Overlay>,
+    pub profile_manager: Option<ProfileManagerState>,
     pub should_quit: bool,
     next_console_number: usize,
 }
@@ -35,6 +39,7 @@ impl App {
             active_tab: 0,
             focus: Focus::Editor,
             overlay: None,
+            profile_manager: None,
             should_quit: false,
             next_console_number: 2,
         }
@@ -108,7 +113,245 @@ impl App {
                 Vec::new()
             }
             Action::DismissOverlay => {
-                self.overlay = None;
+                if self.overlay == Some(Overlay::ProfileManager) {
+                    self.close_profile_manager();
+                } else {
+                    self.overlay = None;
+                }
+                Vec::new()
+            }
+            Action::OpenProfileManager => {
+                if self.profile_manager.is_some() {
+                    self.overlay = Some(Overlay::ProfileManager);
+                    return Vec::new();
+                }
+                let mut manager = ProfileManagerState::default();
+                if self.profiles.is_empty() {
+                    manager.start_new(DatabaseKind::Postgres);
+                }
+                self.profile_manager = Some(manager);
+                self.overlay = Some(Overlay::ProfileManager);
+                Vec::new()
+            }
+            Action::CloseProfileManager => {
+                self.close_profile_manager();
+                Vec::new()
+            }
+            Action::ProfileMove(delta) => {
+                let profile_count = self.profiles.len();
+                if let Some(manager) = self.idle_profile_manager_mut(ProfileManagerPage::List) {
+                    manager.move_selection(delta, profile_count);
+                    manager.message = None;
+                }
+                Vec::new()
+            }
+            Action::ProfileStartNew => {
+                if let Some(manager) = self.idle_profile_manager_mut(ProfileManagerPage::List) {
+                    manager.start_new(DatabaseKind::Postgres);
+                }
+                Vec::new()
+            }
+            Action::ProfileStartEdit => {
+                let profile = self.selected_profile().cloned();
+                if let (Some(profile), Some(manager)) = (
+                    profile,
+                    self.idle_profile_manager_mut(ProfileManagerPage::List),
+                ) {
+                    let has_stored_credential = profile.secret_ref.is_some();
+                    manager.start_edit(&profile, has_stored_credential);
+                }
+                Vec::new()
+            }
+            Action::ProfileRequestDelete => {
+                self.request_profile_delete();
+                Vec::new()
+            }
+            Action::ProfileConfirmDelete => self.confirm_profile_delete(),
+            Action::ProfileCancelDelete => {
+                if let Some(manager) =
+                    self.idle_profile_manager_mut(ProfileManagerPage::ConfirmDelete)
+                {
+                    manager.page = ProfileManagerPage::List;
+                    manager.message = None;
+                }
+                Vec::new()
+            }
+            Action::ProfileConnectSelected => self.connect_selected_profile(),
+            Action::ProfileFieldNext => {
+                if let Some(manager) = self.editable_profile_manager_mut() {
+                    manager.move_field(1);
+                }
+                Vec::new()
+            }
+            Action::ProfileFieldPrevious => {
+                if let Some(manager) = self.editable_profile_manager_mut() {
+                    manager.move_field(-1);
+                }
+                Vec::new()
+            }
+            Action::ProfileFocusField(field) => {
+                if let Some(manager) = self.editable_profile_manager_mut() {
+                    manager.focus_field(field);
+                }
+                Vec::new()
+            }
+            Action::ProfileInsert(input) => {
+                if let Some(manager) = self.editable_profile_manager_mut() {
+                    manager.paste(input.value());
+                }
+                Vec::new()
+            }
+            Action::ProfilePaste(input) => {
+                if let Some(manager) = self.editable_profile_manager_mut() {
+                    manager.paste(input.value());
+                }
+                Vec::new()
+            }
+            Action::ProfileBackspace => {
+                if let Some(manager) = self.editable_profile_manager_mut() {
+                    manager.backspace();
+                }
+                Vec::new()
+            }
+            Action::ProfileDeleteCharacter => {
+                if let Some(manager) = self.editable_profile_manager_mut() {
+                    manager.delete();
+                }
+                Vec::new()
+            }
+            Action::ProfileMoveLeft => {
+                if let Some(manager) = self.editable_profile_manager_mut() {
+                    manager.move_cursor_left();
+                }
+                Vec::new()
+            }
+            Action::ProfileMoveRight => {
+                if let Some(manager) = self.editable_profile_manager_mut() {
+                    manager.move_cursor_right();
+                }
+                Vec::new()
+            }
+            Action::ProfileMoveHome => {
+                if let Some(manager) = self.editable_profile_manager_mut() {
+                    manager.move_cursor_home();
+                }
+                Vec::new()
+            }
+            Action::ProfileMoveEnd => {
+                if let Some(manager) = self.editable_profile_manager_mut() {
+                    manager.move_cursor_end();
+                }
+                Vec::new()
+            }
+            Action::ProfileCycle(delta) => {
+                if let Some(manager) = self.editable_profile_manager_mut() {
+                    manager.cycle(delta);
+                }
+                Vec::new()
+            }
+            Action::ProfileToggle => {
+                if let Some(manager) = self.editable_profile_manager_mut() {
+                    manager.toggle();
+                }
+                Vec::new()
+            }
+            Action::ProfileTest => self.test_profile_draft(),
+            Action::ProfileSave { connect } => self.save_profile_draft(connect),
+            Action::ProfileTestSucceeded { request_id, server } => {
+                if let Some(manager) =
+                    self.matching_profile_operation(request_id, &[ProfileOperation::Testing])
+                {
+                    manager.operation = None;
+                    manager.message = Some(format!(
+                        "Connection succeeded: {} ({})",
+                        server.version, server.database
+                    ));
+                }
+                Vec::new()
+            }
+            Action::ProfileTestFailed {
+                request_id,
+                message,
+            } => {
+                if let Some(manager) =
+                    self.matching_profile_operation(request_id, &[ProfileOperation::Testing])
+                {
+                    manager.operation = None;
+                    manager.message = Some(message);
+                }
+                Vec::new()
+            }
+            Action::ProfileSaved {
+                request_id,
+                profile,
+                warning,
+                connect,
+            } => self.profile_saved(request_id, profile, warning, connect),
+            Action::ProfileSaveFailed {
+                request_id,
+                message,
+            } => {
+                if let Some(manager) = self.matching_profile_operation(
+                    request_id,
+                    &[
+                        ProfileOperation::Saving,
+                        ProfileOperation::SavingAndConnecting,
+                    ],
+                ) {
+                    manager.operation = None;
+                    manager.message = Some(message);
+                }
+                Vec::new()
+            }
+            Action::ProfileDeleted {
+                request_id,
+                profile_id,
+                was_active,
+            } => self.profile_deleted(request_id, profile_id, was_active),
+            Action::ProfileDeleteFailed {
+                request_id,
+                message,
+            } => {
+                if let Some(manager) =
+                    self.matching_profile_operation(request_id, &[ProfileOperation::Deleting])
+                {
+                    manager.operation = None;
+                    manager.message = Some(message);
+                }
+                Vec::new()
+            }
+            Action::CredentialsRequired {
+                profile_id,
+                generation,
+                message,
+            } => {
+                if !self.connection_matches(profile_id, generation) {
+                    return Vec::new();
+                }
+                let Some(profile) = self
+                    .profiles
+                    .iter()
+                    .find(|profile| profile.id == profile_id)
+                    .cloned()
+                else {
+                    return Vec::new();
+                };
+                self.connection.status = ConnectionStatus::Failed;
+                self.connection.error = Some(message.clone());
+                let has_stored_credential = profile.secret_ref.is_some();
+                let mut manager = ProfileManagerState::default();
+                manager.start_edit(&profile, has_stored_credential);
+                manager.selected_field = ProfileField::Password;
+                manager.message = Some(message);
+                self.profile_manager = Some(manager);
+                self.overlay = Some(Overlay::ProfileManager);
+                Vec::new()
+            }
+            Action::DisconnectCompleted { profile_id } => {
+                if self.connection.profile_id == Some(profile_id) {
+                    self.connection = ConnectionState::default();
+                    self.explorer = ExplorerState::default();
+                }
                 Vec::new()
             }
             Action::ReplaceEditor(text) => {
@@ -205,20 +448,7 @@ impl App {
             }
             Action::PreviewSelected => self.preview_selected(),
             Action::DdlSelected => self.ddl_selected(),
-            Action::RequestConnect(profile_id) => {
-                if !self.profiles.iter().any(|profile| profile.id == profile_id) {
-                    return Vec::new();
-                }
-                self.connection.generation += 1;
-                self.connection.profile_id = Some(profile_id);
-                self.connection.status = ConnectionStatus::Connecting;
-                self.connection.server = None;
-                self.connection.error = None;
-                vec![Command::Connect {
-                    profile_id,
-                    generation: self.connection.generation,
-                }]
-            }
+            Action::RequestConnect(profile_id) => self.request_connection(profile_id),
             Action::ConnectionSucceeded {
                 profile_id,
                 generation,
@@ -230,6 +460,12 @@ impl App {
                 self.connection.status = ConnectionStatus::Connected;
                 self.connection.server = Some(server);
                 self.connection.error = None;
+                if let Some(manager) = self.profile_manager.as_mut()
+                    && manager.operation == Some(ProfileOperation::Connecting)
+                {
+                    manager.operation = None;
+                    manager.message = Some("Connected".to_owned());
+                }
                 vec![Command::LoadCatalog {
                     profile_id,
                     generation,
@@ -242,7 +478,13 @@ impl App {
             } => {
                 if self.connection_matches(profile_id, generation) {
                     self.connection.status = ConnectionStatus::Failed;
-                    self.connection.error = Some(message);
+                    self.connection.error = Some(message.clone());
+                    if let Some(manager) = self.profile_manager.as_mut()
+                        && manager.operation == Some(ProfileOperation::Connecting)
+                    {
+                        manager.operation = None;
+                        manager.message = Some(message);
+                    }
                 }
                 Vec::new()
             }
@@ -406,6 +648,315 @@ impl App {
         }
     }
 
+    fn close_profile_manager(&mut self) {
+        let Some(manager) = self.profile_manager.as_mut() else {
+            return;
+        };
+        if manager.operation.is_some() {
+            return;
+        }
+        if manager.page != ProfileManagerPage::List && !self.profiles.is_empty() {
+            manager.page = ProfileManagerPage::List;
+            manager.draft = None;
+            manager.selected_field = ProfileField::Kind;
+            manager.message = None;
+            return;
+        }
+        self.profile_manager = None;
+        if self.overlay == Some(Overlay::ProfileManager) {
+            self.overlay = None;
+        }
+    }
+
+    fn idle_profile_manager_mut(
+        &mut self,
+        page: ProfileManagerPage,
+    ) -> Option<&mut ProfileManagerState> {
+        self.profile_manager
+            .as_mut()
+            .filter(|manager| manager.page == page && manager.operation.is_none())
+    }
+
+    fn editable_profile_manager_mut(&mut self) -> Option<&mut ProfileManagerState> {
+        self.idle_profile_manager_mut(ProfileManagerPage::Form)
+    }
+
+    fn selected_profile(&self) -> Option<&ConnectionProfile> {
+        let selected = self.profile_manager.as_ref()?.selected;
+        self.profiles.get(selected)
+    }
+
+    fn request_profile_delete(&mut self) {
+        let Some(profile_id) = self.selected_profile().map(|profile| profile.id) else {
+            return;
+        };
+        let blocked = self.connection.profile_id == Some(profile_id) && self.has_running_query();
+        let Some(manager) = self.idle_profile_manager_mut(ProfileManagerPage::List) else {
+            return;
+        };
+        if blocked {
+            manager.message = Some("Cancel the running query before deleting this profile".into());
+        } else {
+            manager.page = ProfileManagerPage::ConfirmDelete;
+            manager.message = None;
+        }
+    }
+
+    fn confirm_profile_delete(&mut self) -> Vec<Command> {
+        let Some(profile_id) = self.selected_profile().map(|profile| profile.id) else {
+            return Vec::new();
+        };
+        let blocked = self.connection.profile_id == Some(profile_id) && self.has_running_query();
+        let Some(manager) = self.idle_profile_manager_mut(ProfileManagerPage::ConfirmDelete) else {
+            return Vec::new();
+        };
+        if blocked {
+            manager.page = ProfileManagerPage::List;
+            manager.message = Some("Cancel the running query before deleting this profile".into());
+            return Vec::new();
+        }
+        let request_id = next_profile_request(manager);
+        manager.operation = Some(ProfileOperation::Deleting);
+        manager.message = None;
+        vec![Command::DeleteProfile {
+            request_id,
+            profile_id,
+        }]
+    }
+
+    fn connect_selected_profile(&mut self) -> Vec<Command> {
+        let Some(profile_id) = self.selected_profile().map(|profile| profile.id) else {
+            return Vec::new();
+        };
+        if self.connection.profile_id == Some(profile_id)
+            && self.connection.status == ConnectionStatus::Connected
+        {
+            if let Some(manager) = self.idle_profile_manager_mut(ProfileManagerPage::List) {
+                manager.message = Some("Profile is already connected".into());
+            }
+            return Vec::new();
+        }
+        if self.connection.profile_id != Some(profile_id) && self.has_running_query() {
+            if let Some(manager) = self.idle_profile_manager_mut(ProfileManagerPage::List) {
+                manager.message = Some("Cancel the running query before switching profiles".into());
+            }
+            return Vec::new();
+        }
+        if self
+            .idle_profile_manager_mut(ProfileManagerPage::List)
+            .is_none()
+        {
+            return Vec::new();
+        }
+        let commands = self.request_connection(profile_id);
+        if !commands.is_empty()
+            && let Some(manager) = self.profile_manager.as_mut()
+        {
+            manager.operation = Some(ProfileOperation::Connecting);
+            manager.message = Some("Connecting...".into());
+        }
+        commands
+    }
+
+    fn test_profile_draft(&mut self) -> Vec<Command> {
+        let profiles = &self.profiles;
+        let Some(manager) = self.profile_manager.as_mut().filter(|manager| {
+            manager.page == ProfileManagerPage::Form && manager.operation.is_none()
+        }) else {
+            return Vec::new();
+        };
+        let Some(draft) = manager.draft.as_ref() else {
+            return Vec::new();
+        };
+        let submission = match draft.validate(profiles) {
+            Ok(submission) => submission,
+            Err(error) => {
+                manager.selected_field = error.field;
+                manager.message = Some(error.message);
+                return Vec::new();
+            }
+        };
+        let request_id = next_profile_request(manager);
+        manager.operation = Some(ProfileOperation::Testing);
+        manager.message = Some("Testing connection...".into());
+        vec![Command::TestProfile {
+            request_id,
+            submission,
+        }]
+    }
+
+    fn save_profile_draft(&mut self, connect: bool) -> Vec<Command> {
+        let target_profile_id = self
+            .profile_manager
+            .as_ref()
+            .and_then(|manager| manager.draft.as_ref())
+            .map(|draft| draft.profile_id());
+        if connect && target_profile_id != self.connection.profile_id && self.has_running_query() {
+            if let Some(manager) = self.editable_profile_manager_mut() {
+                manager.message = Some("Cancel the running query before switching profiles".into());
+            }
+            return Vec::new();
+        }
+
+        let profiles = &self.profiles;
+        let Some(manager) = self.profile_manager.as_mut().filter(|manager| {
+            manager.page == ProfileManagerPage::Form && manager.operation.is_none()
+        }) else {
+            return Vec::new();
+        };
+        let Some(draft) = manager.draft.as_ref() else {
+            return Vec::new();
+        };
+        let submission = match draft.validate(profiles) {
+            Ok(submission) => submission,
+            Err(error) => {
+                manager.selected_field = error.field;
+                manager.message = Some(error.message);
+                return Vec::new();
+            }
+        };
+        let request_id = next_profile_request(manager);
+        manager.operation = Some(if connect {
+            ProfileOperation::SavingAndConnecting
+        } else {
+            ProfileOperation::Saving
+        });
+        manager.message = Some("Saving profile...".into());
+        vec![Command::SaveProfile {
+            request_id,
+            submission,
+            connect,
+        }]
+    }
+
+    fn profile_saved(
+        &mut self,
+        request_id: u64,
+        profile: ConnectionProfile,
+        warning: Option<String>,
+        connect: bool,
+    ) -> Vec<Command> {
+        let expected = if connect {
+            ProfileOperation::SavingAndConnecting
+        } else {
+            ProfileOperation::Saving
+        };
+        if !self.profile_operation_matches(request_id, &[expected]) {
+            return Vec::new();
+        }
+
+        let profile_id = profile.id;
+        if let Some(existing) = self
+            .profiles
+            .iter_mut()
+            .find(|existing| existing.id == profile_id)
+        {
+            *existing = profile;
+        } else {
+            self.profiles.push(profile);
+        }
+        let selected = self
+            .profiles
+            .iter()
+            .position(|profile| profile.id == profile_id)
+            .unwrap_or(0);
+        if let Some(manager) = self.profile_manager.as_mut() {
+            manager.page = ProfileManagerPage::List;
+            manager.selected = selected;
+            manager.draft = None;
+            manager.selected_field = ProfileField::Kind;
+            manager.operation = None;
+            manager.message = warning.or_else(|| Some("Profile saved".into()));
+        }
+
+        if !connect {
+            return Vec::new();
+        }
+        if self.connection.profile_id != Some(profile_id) && self.has_running_query() {
+            if let Some(manager) = self.profile_manager.as_mut() {
+                manager.message =
+                    Some("Profile saved; cancel the running query before connecting".into());
+            }
+            return Vec::new();
+        }
+        let commands = self.request_connection(profile_id);
+        if !commands.is_empty()
+            && let Some(manager) = self.profile_manager.as_mut()
+        {
+            manager.operation = Some(ProfileOperation::Connecting);
+        }
+        commands
+    }
+
+    fn profile_deleted(
+        &mut self,
+        request_id: u64,
+        profile_id: Uuid,
+        was_active: bool,
+    ) -> Vec<Command> {
+        if !self.profile_operation_matches(request_id, &[ProfileOperation::Deleting]) {
+            return Vec::new();
+        }
+        self.profiles.retain(|profile| profile.id != profile_id);
+        if let Some(manager) = self.profile_manager.as_mut() {
+            manager.page = ProfileManagerPage::List;
+            manager.selected = manager.selected.min(self.profiles.len().saturating_sub(1));
+            manager.draft = None;
+            manager.operation = None;
+            manager.message = Some("Profile deleted".into());
+        }
+        if was_active {
+            vec![Command::Disconnect { profile_id }]
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn profile_operation_matches(&self, request_id: u64, operations: &[ProfileOperation]) -> bool {
+        self.profile_manager.as_ref().is_some_and(|manager| {
+            manager.request_generation == request_id
+                && manager
+                    .operation
+                    .is_some_and(|operation| operations.contains(&operation))
+        })
+    }
+
+    fn matching_profile_operation(
+        &mut self,
+        request_id: u64,
+        operations: &[ProfileOperation],
+    ) -> Option<&mut ProfileManagerState> {
+        self.profile_manager.as_mut().filter(|manager| {
+            manager.request_generation == request_id
+                && manager
+                    .operation
+                    .is_some_and(|operation| operations.contains(&operation))
+        })
+    }
+
+    fn request_connection(&mut self, profile_id: Uuid) -> Vec<Command> {
+        if !self.profiles.iter().any(|profile| profile.id == profile_id)
+            || (self.connection.profile_id != Some(profile_id) && self.has_running_query())
+        {
+            return Vec::new();
+        }
+        self.connection.generation += 1;
+        self.connection.profile_id = Some(profile_id);
+        self.connection.status = ConnectionStatus::Connecting;
+        self.connection.server = None;
+        self.connection.error = None;
+        vec![Command::Connect {
+            profile_id,
+            generation: self.connection.generation,
+        }]
+    }
+
+    fn has_running_query(&self) -> bool {
+        self.tabs
+            .iter()
+            .any(|tab| tab.query_status == QueryStatus::Running)
+    }
+
     fn run_active_sql(&mut self) -> Vec<Command> {
         let tab = self.active_console_mut();
         let sql = tab.editor.text();
@@ -504,6 +1055,11 @@ impl App {
     fn connection_matches(&self, profile_id: Uuid, generation: u64) -> bool {
         self.connection.profile_id == Some(profile_id) && self.connection.generation == generation
     }
+}
+
+fn next_profile_request(manager: &mut ProfileManagerState) -> u64 {
+    manager.request_generation = manager.request_generation.wrapping_add(1);
+    manager.request_generation
 }
 
 fn move_bounded(current: usize, delta: isize, count: usize) -> usize {

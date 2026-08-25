@@ -72,6 +72,10 @@ impl Runtime {
         self.query_tasks.retain(|_, task| !task.is_finished());
         self.background_tasks.retain(|task| !task.is_finished());
         match command {
+            Command::TestProfile { .. }
+            | Command::SaveProfile { .. }
+            | Command::DeleteProfile { .. }
+            | Command::Disconnect { .. } => {}
             Command::Connect {
                 profile_id,
                 generation,

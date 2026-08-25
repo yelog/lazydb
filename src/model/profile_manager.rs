@@ -1,11 +1,52 @@
 use std::{fmt, path::PathBuf};
 
-use secrecy::{ExposeSecret, SecretString};
+use secrecy::{ExposeSecret, SecretString, zeroize::Zeroizing};
 use uuid::Uuid;
 
 use crate::profile::{ConnectionProfile, DatabaseKind, Environment, SslMode};
 
 use super::text_input::TextInput;
+
+#[derive(Clone, Default)]
+pub struct ProfileInput(SecretString);
+
+impl ProfileInput {
+    pub(crate) fn value(&self) -> &str {
+        self.0.expose_secret()
+    }
+}
+
+impl fmt::Debug for ProfileInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("[REDACTED]")
+    }
+}
+
+impl PartialEq for ProfileInput {
+    fn eq(&self, other: &Self) -> bool {
+        self.value() == other.value()
+    }
+}
+
+impl Eq for ProfileInput {}
+
+impl From<char> for ProfileInput {
+    fn from(value: char) -> Self {
+        Self(SecretString::from(value.to_string()))
+    }
+}
+
+impl From<String> for ProfileInput {
+    fn from(value: String) -> Self {
+        Self(SecretString::from(value))
+    }
+}
+
+impl From<&str> for ProfileInput {
+    fn from(value: &str) -> Self {
+        Self(SecretString::from(value.to_owned()))
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProfileManagerPage {
@@ -112,6 +153,7 @@ pub struct ProfileDraft {
     pub port: TextInput,
     pub user: TextInput,
     password: SecretString,
+    password_cursor: usize,
     pub database: TextInput,
     pub schema: TextInput,
     pub ssl_mode: SslMode,
@@ -142,6 +184,7 @@ impl ProfileDraft {
             port: TextInput::from(port),
             user: TextInput::default(),
             password: SecretString::from(String::new()),
+            password_cursor: 0,
             database: TextInput::default(),
             schema: TextInput::from(schema),
             ssl_mode,
@@ -185,6 +228,7 @@ impl ProfileDraft {
             ),
             user: TextInput::from(profile.user.clone().unwrap_or_default()),
             password: SecretString::from(String::new()),
+            password_cursor: 0,
             database: TextInput::from(profile.database.clone().unwrap_or_default()),
             schema: TextInput::from(profile.default_schema.clone().unwrap_or_default()),
             ssl_mode: profile.ssl_mode,
@@ -209,11 +253,100 @@ impl ProfileDraft {
     }
 
     pub fn set_password(&mut self, password: impl Into<String>) {
-        self.password = SecretString::from(password.into());
+        let password = password.into();
+        self.password_cursor = password.chars().count();
+        self.password = SecretString::from(password);
     }
 
     pub fn password_len(&self) -> usize {
         self.password.expose_secret().chars().count()
+    }
+
+    pub fn insert(&mut self, field: ProfileField, character: char) {
+        if field == ProfileField::Password {
+            let mut password = Zeroizing::new(self.password.expose_secret().to_owned());
+            let byte_index = character_byte_index(&password, self.password_cursor);
+            password.insert(byte_index, character);
+            self.password_cursor += 1;
+            self.password = SecretString::from(std::mem::take(&mut *password));
+        } else if let Some(input) = self.text_input_mut(field) {
+            input.insert(character);
+        }
+    }
+
+    pub fn paste(&mut self, field: ProfileField, text: &str) {
+        if field == ProfileField::Password {
+            let mut password = Zeroizing::new(self.password.expose_secret().to_owned());
+            let byte_index = character_byte_index(&password, self.password_cursor);
+            password.insert_str(byte_index, text);
+            self.password_cursor += text.chars().count();
+            self.password = SecretString::from(std::mem::take(&mut *password));
+        } else if let Some(input) = self.text_input_mut(field) {
+            input.paste(text);
+        }
+    }
+
+    pub fn backspace(&mut self, field: ProfileField) {
+        if field == ProfileField::Password {
+            if self.password_cursor == 0 {
+                return;
+            }
+            let mut password = Zeroizing::new(self.password.expose_secret().to_owned());
+            let start = character_byte_index(&password, self.password_cursor - 1);
+            let end = character_byte_index(&password, self.password_cursor);
+            password.replace_range(start..end, "");
+            self.password_cursor -= 1;
+            self.password = SecretString::from(std::mem::take(&mut *password));
+        } else if let Some(input) = self.text_input_mut(field) {
+            input.backspace();
+        }
+    }
+
+    pub fn delete(&mut self, field: ProfileField) {
+        if field == ProfileField::Password {
+            let mut password = Zeroizing::new(self.password.expose_secret().to_owned());
+            let start = character_byte_index(&password, self.password_cursor);
+            if start == password.len() {
+                return;
+            }
+            let end = character_byte_index(&password, self.password_cursor + 1);
+            password.replace_range(start..end, "");
+            self.password = SecretString::from(std::mem::take(&mut *password));
+        } else if let Some(input) = self.text_input_mut(field) {
+            input.delete();
+        }
+    }
+
+    pub fn move_left(&mut self, field: ProfileField) {
+        if field == ProfileField::Password {
+            self.password_cursor = self.password_cursor.saturating_sub(1);
+        } else if let Some(input) = self.text_input_mut(field) {
+            input.move_left();
+        }
+    }
+
+    pub fn move_right(&mut self, field: ProfileField) {
+        if field == ProfileField::Password {
+            self.password_cursor = (self.password_cursor + 1).min(self.password_len());
+        } else if let Some(input) = self.text_input_mut(field) {
+            input.move_right();
+        }
+    }
+
+    pub fn move_home(&mut self, field: ProfileField) {
+        if field == ProfileField::Password {
+            self.password_cursor = 0;
+        } else if let Some(input) = self.text_input_mut(field) {
+            input.move_home();
+        }
+    }
+
+    pub fn move_end(&mut self, field: ProfileField) {
+        if field == ProfileField::Password {
+            self.password_cursor = self.password_len();
+        } else if let Some(input) = self.text_input_mut(field) {
+            input.move_end();
+        }
     }
 
     pub fn visible_fields(&self) -> &'static [ProfileField] {
@@ -349,6 +482,63 @@ impl ProfileDraft {
             CredentialUpdate::Preserve
         }
     }
+
+    fn text_input_mut(&mut self, field: ProfileField) -> Option<&mut TextInput> {
+        match field {
+            ProfileField::Name => Some(&mut self.name),
+            ProfileField::Host => Some(&mut self.host),
+            ProfileField::Port => Some(&mut self.port),
+            ProfileField::User => Some(&mut self.user),
+            ProfileField::Database => Some(&mut self.database),
+            ProfileField::Schema => Some(&mut self.schema),
+            ProfileField::SqlitePath => Some(&mut self.sqlite_path),
+            _ => None,
+        }
+    }
+
+    fn set_kind(&mut self, kind: DatabaseKind) {
+        if self.kind == kind {
+            return;
+        }
+
+        let previous = self.kind;
+        self.kind = kind;
+        match kind {
+            DatabaseKind::Postgres => {
+                if self.host.value().trim().is_empty() {
+                    self.host.set("localhost");
+                }
+                if self.port.value().trim().is_empty()
+                    || (previous == DatabaseKind::MySql && self.port.value() == "3306")
+                {
+                    self.port.set("5432");
+                }
+                if self.schema.value().trim().is_empty() || self.schema.value() == "main" {
+                    self.schema.set("public");
+                }
+                if previous == DatabaseKind::Sqlite && self.ssl_mode == SslMode::Disable {
+                    self.ssl_mode = SslMode::Prefer;
+                }
+            }
+            DatabaseKind::MySql => {
+                if self.host.value().trim().is_empty() {
+                    self.host.set("localhost");
+                }
+                if self.port.value().trim().is_empty()
+                    || (previous == DatabaseKind::Postgres && self.port.value() == "5432")
+                {
+                    self.port.set("3306");
+                }
+                if self.schema.value() == "public" || self.schema.value() == "main" {
+                    self.schema.set("");
+                }
+                if previous == DatabaseKind::Sqlite && self.ssl_mode == SslMode::Disable {
+                    self.ssl_mode = SslMode::Prefer;
+                }
+            }
+            DatabaseKind::Sqlite => self.ssl_mode = SslMode::Disable,
+        }
+    }
 }
 
 impl fmt::Debug for ProfileDraft {
@@ -425,6 +615,149 @@ impl ProfileManagerState {
             .as_ref()
             .map_or(&[], ProfileDraft::visible_fields)
     }
+
+    pub fn move_selection(&mut self, delta: isize, profile_count: usize) {
+        self.selected = move_bounded(self.selected, delta, profile_count);
+    }
+
+    pub fn move_field(&mut self, delta: isize) {
+        let fields = self.visible_fields();
+        if fields.is_empty() {
+            return;
+        }
+        let current = fields
+            .iter()
+            .position(|field| *field == self.selected_field)
+            .unwrap_or(0);
+        let next = (current as isize + delta).rem_euclid(fields.len() as isize) as usize;
+        self.selected_field = fields[next];
+    }
+
+    pub fn focus_field(&mut self, field: ProfileField) {
+        if self.visible_fields().contains(&field) {
+            self.selected_field = field;
+        }
+    }
+
+    pub fn insert(&mut self, character: char) {
+        let field = self.selected_field;
+        if let Some(draft) = self.draft.as_mut() {
+            draft.insert(field, character);
+            self.message = None;
+        }
+    }
+
+    pub fn paste(&mut self, text: &str) {
+        let field = self.selected_field;
+        if let Some(draft) = self.draft.as_mut() {
+            draft.paste(field, text);
+            self.message = None;
+        }
+    }
+
+    pub fn backspace(&mut self) {
+        let field = self.selected_field;
+        if let Some(draft) = self.draft.as_mut() {
+            draft.backspace(field);
+            self.message = None;
+        }
+    }
+
+    pub fn delete(&mut self) {
+        let field = self.selected_field;
+        if let Some(draft) = self.draft.as_mut() {
+            draft.delete(field);
+            self.message = None;
+        }
+    }
+
+    pub fn move_cursor_left(&mut self) {
+        let field = self.selected_field;
+        if let Some(draft) = self.draft.as_mut() {
+            draft.move_left(field);
+        }
+    }
+
+    pub fn move_cursor_right(&mut self) {
+        let field = self.selected_field;
+        if let Some(draft) = self.draft.as_mut() {
+            draft.move_right(field);
+        }
+    }
+
+    pub fn move_cursor_home(&mut self) {
+        let field = self.selected_field;
+        if let Some(draft) = self.draft.as_mut() {
+            draft.move_home(field);
+        }
+    }
+
+    pub fn move_cursor_end(&mut self) {
+        let field = self.selected_field;
+        if let Some(draft) = self.draft.as_mut() {
+            draft.move_end(field);
+        }
+    }
+
+    pub fn cycle(&mut self, delta: i8) {
+        let field = self.selected_field;
+        let Some(draft) = self.draft.as_mut() else {
+            return;
+        };
+        match field {
+            ProfileField::Kind => draft.set_kind(cycle_value(
+                draft.kind,
+                &[
+                    DatabaseKind::Postgres,
+                    DatabaseKind::MySql,
+                    DatabaseKind::Sqlite,
+                ],
+                delta,
+            )),
+            ProfileField::SslMode => {
+                draft.ssl_mode = cycle_value(
+                    draft.ssl_mode,
+                    &[
+                        SslMode::Disable,
+                        SslMode::Prefer,
+                        SslMode::Require,
+                        SslMode::VerifyCa,
+                        SslMode::VerifyFull,
+                    ],
+                    delta,
+                );
+            }
+            ProfileField::Environment => {
+                draft.environment = cycle_value(
+                    draft.environment,
+                    &[
+                        Environment::Development,
+                        Environment::Staging,
+                        Environment::Production,
+                    ],
+                    delta,
+                );
+            }
+            _ => return,
+        }
+        self.message = None;
+    }
+
+    pub fn toggle(&mut self) {
+        let field = self.selected_field;
+        let Some(draft) = self.draft.as_mut() else {
+            return;
+        };
+        match field {
+            ProfileField::ReadOnly => draft.read_only = !draft.read_only,
+            ProfileField::RememberPassword => {
+                draft.remember_password = !draft.remember_password;
+            }
+            ProfileField::SqliteMemory => draft.sqlite_memory = !draft.sqlite_memory,
+            _ => return,
+        }
+        self.message = None;
+    }
 }
 
 impl Default for ProfileManagerState {
@@ -449,6 +782,32 @@ fn required(
 fn optional(input: &TextInput) -> Option<String> {
     let value = input.value().trim();
     (!value.is_empty()).then(|| value.to_owned())
+}
+
+fn character_byte_index(value: &str, character_index: usize) -> usize {
+    value
+        .char_indices()
+        .nth(character_index)
+        .map_or(value.len(), |(byte_index, _)| byte_index)
+}
+
+fn cycle_value<T: Copy + PartialEq>(current: T, values: &[T], delta: i8) -> T {
+    let current = values
+        .iter()
+        .position(|value| *value == current)
+        .unwrap_or(0);
+    let next = (current as isize + isize::from(delta)).rem_euclid(values.len() as isize) as usize;
+    values[next]
+}
+
+fn move_bounded(current: usize, delta: isize, count: usize) -> usize {
+    if count == 0 {
+        0
+    } else {
+        current
+            .saturating_add_signed(delta)
+            .min(count.saturating_sub(1))
+    }
 }
 
 const SERVER_FIELDS: [ProfileField; 16] = [

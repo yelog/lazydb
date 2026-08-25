@@ -5,8 +5,13 @@ use crate::db::{
     catalog::{CatalogKind, CatalogNode},
     query::QueryOutcome,
 };
-
-use crate::model::workspace::Focus;
+use crate::{
+    model::{
+        profile_manager::{ProfileField, ProfileInput, ProfileSubmission},
+        workspace::Focus,
+    },
+    profile::ConnectionProfile,
+};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
@@ -20,6 +25,67 @@ pub enum Action {
     Focus(Focus),
     ShowHelp,
     DismissOverlay,
+    OpenProfileManager,
+    CloseProfileManager,
+    ProfileMove(isize),
+    ProfileStartNew,
+    ProfileStartEdit,
+    ProfileRequestDelete,
+    ProfileConfirmDelete,
+    ProfileCancelDelete,
+    ProfileConnectSelected,
+    ProfileFieldNext,
+    ProfileFieldPrevious,
+    ProfileFocusField(ProfileField),
+    ProfileInsert(ProfileInput),
+    ProfilePaste(ProfileInput),
+    ProfileBackspace,
+    ProfileDeleteCharacter,
+    ProfileMoveLeft,
+    ProfileMoveRight,
+    ProfileMoveHome,
+    ProfileMoveEnd,
+    ProfileCycle(i8),
+    ProfileToggle,
+    ProfileTest,
+    ProfileSave {
+        connect: bool,
+    },
+    ProfileTestSucceeded {
+        request_id: u64,
+        server: ServerInfo,
+    },
+    ProfileTestFailed {
+        request_id: u64,
+        message: String,
+    },
+    ProfileSaved {
+        request_id: u64,
+        profile: ConnectionProfile,
+        warning: Option<String>,
+        connect: bool,
+    },
+    ProfileSaveFailed {
+        request_id: u64,
+        message: String,
+    },
+    ProfileDeleted {
+        request_id: u64,
+        profile_id: Uuid,
+        was_active: bool,
+    },
+    ProfileDeleteFailed {
+        request_id: u64,
+        message: String,
+    },
+    CredentialsRequired {
+        profile_id: Uuid,
+        generation: u64,
+        message: String,
+    },
+    DisconnectCompleted {
+        profile_id: Uuid,
+    },
     ReplaceEditor(String),
     InsertCharacter(char),
     InsertNewline,
@@ -97,8 +163,24 @@ pub enum Action {
     Quit,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum Command {
+    TestProfile {
+        request_id: u64,
+        submission: ProfileSubmission,
+    },
+    SaveProfile {
+        request_id: u64,
+        submission: ProfileSubmission,
+        connect: bool,
+    },
+    DeleteProfile {
+        request_id: u64,
+        profile_id: Uuid,
+    },
+    Disconnect {
+        profile_id: Uuid,
+    },
     Connect {
         profile_id: Uuid,
         generation: u64,

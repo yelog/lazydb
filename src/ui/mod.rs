@@ -628,7 +628,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
 fn render_overlay(frame: &mut Frame<'_>, area: Rect, overlay: &Overlay, theme: Theme) {
     match overlay {
         Overlay::Help(focus) => render_help(frame, area, *focus, theme),
-        Overlay::ProfilePicker => render_message(
+        Overlay::ProfileManager => render_message(
             frame,
             area,
             "CONNECTIONS",

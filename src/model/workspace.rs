@@ -36,7 +36,7 @@ impl Focus {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Overlay {
     Help(Focus),
-    ProfilePicker,
+    ProfileManager,
     Message { title: String, body: String },
 }
 
