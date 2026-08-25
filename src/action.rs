@@ -1,0 +1,134 @@
+use uuid::Uuid;
+
+use crate::db::{
+    ServerInfo,
+    catalog::{CatalogKind, CatalogNode},
+    query::QueryOutcome,
+};
+
+use crate::model::workspace::Focus;
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Action {
+    NewConsole,
+    CloseActiveTab,
+    NextTab,
+    PreviousTab,
+    ActivateTab(usize),
+    FocusNext,
+    FocusPrevious,
+    Focus(Focus),
+    ShowHelp,
+    DismissOverlay,
+    ReplaceEditor(String),
+    InsertCharacter(char),
+    InsertNewline,
+    Backspace,
+    Delete,
+    MoveLeft,
+    MoveRight,
+    MoveUp,
+    MoveDown,
+    MoveHome,
+    MoveEnd,
+    EnterNormalMode,
+    EnterInsertMode,
+    EnterAppendMode,
+    OpenLineBelow,
+    RunActiveSql,
+    CancelActiveQuery,
+    RefreshCatalog,
+    PreviewSelected,
+    DdlSelected,
+    RequestConnect(Uuid),
+    ConnectionSucceeded {
+        profile_id: Uuid,
+        generation: u64,
+        server: ServerInfo,
+    },
+    ConnectionFailed {
+        profile_id: Uuid,
+        generation: u64,
+        message: String,
+    },
+    CatalogLoaded {
+        profile_id: Uuid,
+        generation: u64,
+        nodes: Vec<CatalogNode>,
+    },
+    CatalogFailed {
+        profile_id: Uuid,
+        generation: u64,
+        message: String,
+    },
+    QueryFinished {
+        tab_id: Uuid,
+        generation: u64,
+        outcome: QueryOutcome,
+    },
+    QueryFailed {
+        tab_id: Uuid,
+        generation: u64,
+        message: String,
+    },
+    PreviewFinished {
+        tab_id: Uuid,
+        generation: u64,
+        sql: String,
+        outcome: QueryOutcome,
+    },
+    DdlLoaded {
+        tab_id: Uuid,
+        generation: u64,
+        ddl: String,
+    },
+    ExplorerMove(isize),
+    ExplorerSelect(usize),
+    ExplorerToggle,
+    GridMove {
+        rows: isize,
+        columns: isize,
+    },
+    GridSelect {
+        row: usize,
+        column: usize,
+    },
+    ToggleResultView,
+    Quit,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Command {
+    Connect {
+        profile_id: Uuid,
+        generation: u64,
+    },
+    LoadCatalog {
+        profile_id: Uuid,
+        generation: u64,
+    },
+    RunQuery {
+        tab_id: Uuid,
+        generation: u64,
+        sql: String,
+    },
+    PreviewTable {
+        tab_id: Uuid,
+        generation: u64,
+        schema: String,
+        name: String,
+    },
+    LoadDdl {
+        tab_id: Uuid,
+        generation: u64,
+        kind: CatalogKind,
+        schema: String,
+        name: String,
+    },
+    CancelQuery {
+        tab_id: Uuid,
+        generation: u64,
+    },
+    PersistWorkspace,
+    Quit,
+}

@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo test --all-targets --all-features
+
+  databases:
+    name: PostgreSQL and MySQL adapters
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: lazydb_test
+          POSTGRES_DB: lazydb_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d lazydb_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: lazydb_test
+          MYSQL_DATABASE: lazydb_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -plazydb_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      LAZYDB_TEST_POSTGRES_URL: postgresql://postgres:lazydb_test@127.0.0.1:5432/lazydb_test
+      LAZYDB_TEST_MYSQL_URL: mysql://root:lazydb_test@127.0.0.1:3306/lazydb_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --test postgres_adapter --test mysql_adapter -- --nocapture
+
+  neovim:
+    name: Neovim plugin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rhysd/action-setup-vim@v1
+        with:
+          version: v0.10.4
+          neovim: true
+      - run: >-
+          nvim --headless -u lazydb.nvim/tests/minimal_init.lua
+          -c "lua require('lazydb_spec').run()" -c qa

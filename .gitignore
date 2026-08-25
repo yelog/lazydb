@@ -1,0 +1,41 @@
+# Rust build and coverage output
+/target/
+**/*.rs.bk
+*.profraw
+/coverage/
+lcov.info
+tarpaulin-report.html
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+.direnv/
+
+# Local database files
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+
+# Editors and temporary files
+/.idea/
+/.vscode/
+*.swp
+*.swo
+*.tmp
+*.bak
+*.orig
+*.rej
+*~
+
+# Logs and operating-system metadata
+*.log
+.DS_Store
+._*
+Thumbs.db

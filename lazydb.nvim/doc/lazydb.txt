@@ -1,0 +1,128 @@
+*lazydb.txt*                 LazyDB terminal integration                 *lazydb*
+
+==============================================================================
+CONTENTS                                                    *lazydb-contents*
+
+1. Introduction................................................|lazydb-intro|
+2. Setup.......................................................|lazydb-setup|
+3. Commands.................................................|lazydb-commands|
+4. Lua API.......................................................|lazydb-api|
+5. Lifecycle and keys.....................................|lazydb-lifecycle|
+6. Health.....................................................|lazydb-health|
+
+==============================================================================
+1. Introduction                                                *lazydb-intro*
+
+lazydb.nvim is a thin floating-terminal wrapper around the LazyDB CLI. It owns
+no database connections, SQL parsing, credentials, or LazyDB keymaps. There is
+at most one process per Neovim tabpage handle.
+
+Requirements: Neovim 0.10 or newer and a LazyDB executable with CLI API 1.
+
+==============================================================================
+2. Setup                                                        *lazydb-setup*
+
+Call setup() after adding the plugin to 'runtimepath': >lua
+
+  require("lazydb").setup({
+    executable = "lazydb",
+    cwd = nil,
+    config = nil,
+    profile = nil,
+    read_only = false,
+    mouse = nil,
+    color = nil,
+    window = {
+      width = 0.85,
+      height = 0.80,
+      border = "rounded",
+      zindex = 50,
+    },
+  })
+<
+Options: ~
+
+executable      Executable name or path. Default: "lazydb".
+cwd             Working directory string or function returning one. When nil,
+                the current working directory is resolved at process start.
+config          Value passed to --config.
+profile         Value passed to --profile.
+read_only       When true, pass --read-only.
+mouse           Optional "auto", "on", or "off" value for --mouse.
+color           Optional "auto", "always", or "never" value for --color.
+window          Floating-window width, height, border, and zindex.
+
+Width and height accept an absolute size or a fraction from 0 through 1. LazyDB
+is started with an argv list and explicit cwd; no shell command is constructed.
+
+==============================================================================
+3. Commands                                                   *lazydb-commands*
+
+                                                               *:LazyDB*
+:LazyDB          Open or reveal the current tab's session.
+
+                                                         *:LazyDBToggle*
+:LazyDBToggle    Toggle the current tab's floating window.
+
+                                                           *:LazyDBHide*
+:LazyDBHide      Hide the float without stopping LazyDB.
+
+                                                           *:LazyDBStop*
+:LazyDBStop      Stop and remove the current tab's session.
+
+                                                        *:LazyDBRestart*
+:LazyDBRestart   Stop and replace the current tab's session.
+
+==============================================================================
+4. Lua API                                                        *lazydb-api*
+
+setup({options})                                            *lazydb.setup()*
+    Replace the plugin configuration with defaults merged with {options}.
+
+open()                                                       *lazydb.open()*
+    Open an existing session or start one for the current tab.
+
+toggle()                                                   *lazydb.toggle()*
+    Hide a visible session, or open a hidden or absent session.
+
+hide()                                                       *lazydb.hide()*
+    Hide the current tab's window. Returns true when a window was hidden.
+
+stop()                                                       *lazydb.stop()*
+    Stop and remove the current tab's session. Idempotent; returns false when
+    no session exists.
+
+restart()                                                 *lazydb.restart()*
+    Replace the current tab's session with a new process.
+
+status([{tabpage}])                                        *lazydb.status()*
+    Return a table for {tabpage}, or the current tab when omitted. The table
+    always has "tabpage", "state", and "visible". Active or retained sessions
+    may also have "job_id", "buffer", "window", and "exit_code". State is one
+    of "starting", "running", "exited", or "stopped".
+
+==============================================================================
+5. Lifecycle and keys                                      *lazydb-lifecycle*
+
+Closing a LazyDB floating window only hides it; the process and buffer remain.
+A zero process exit removes its session and buffer. A nonzero exit retains the
+terminal buffer for diagnostics until stop, restart, buffer wipe, tab close, or
+Neovim exit. Generation checks prevent callbacks from replaced jobs from
+cleaning a newer session.
+
+The plugin installs no terminal-mode mappings, including q, Escape, Ctrl-C,
+Ctrl-W, or Ctrl-Backslash. Use CTRL-\ CTRL-N to return to Normal mode; see
+|terminal-input|.
+
+==============================================================================
+6. Health                                                      *lazydb-health*
+
+Run: >vim
+
+  :checkhealth lazydb
+<
+The check covers Neovim, terminal jobs, executable discovery,
+"lazydb capabilities --json", CLI API compatibility, UTF-8 locale, and
+clipboard availability. It does not inspect a profile or connect to a database.
+
+vim:tw=78:ts=8:noet:ft=help:norl:
