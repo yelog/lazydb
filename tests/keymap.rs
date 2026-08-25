@@ -1,9 +1,14 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use lazydb::{
     action::Action,
     app::App,
-    input::keymap::Keymap,
-    model::{editor::EditorMode, workspace::Focus},
+    input::keymap::{Keymap, map_paste},
+    model::{
+        editor::EditorMode,
+        profile_manager::ProfileField,
+        workspace::{Focus, Overlay, QueryStatus},
+    },
+    profile::{ConnectionProfile, import_connection_url},
 };
 
 fn key(code: KeyCode) -> KeyEvent {
@@ -12,6 +17,12 @@ fn key(code: KeyCode) -> KeyEvent {
 
 fn ctrl(character: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL)
+}
+
+fn profile(name: &str) -> ConnectionProfile {
+    import_connection_url(":memory:", Some(name))
+        .unwrap()
+        .profile
 }
 
 #[test]
@@ -32,6 +43,11 @@ fn maps_global_sequences_and_function_keys() {
     assert_eq!(keymap.map(ctrl('w'), &app), None);
     assert_eq!(
         keymap.map(key(KeyCode::Char('h')), &app),
+        Some(Action::Focus(Focus::Explorer))
+    );
+    assert_eq!(keymap.map(ctrl('w'), &app), None);
+    assert_eq!(
+        keymap.map(ctrl('h'), &app),
         Some(Action::Focus(Focus::Explorer))
     );
     assert_eq!(keymap.map(key(KeyCode::Char(']')), &app), None);
@@ -163,5 +179,237 @@ fn never_uses_lowercase_q_as_a_global_exit() {
     assert_eq!(
         keymap.map(key(KeyCode::Char('Q')), &app),
         Some(Action::Quit)
+    );
+}
+
+#[test]
+fn space_c_opens_profiles_from_every_normal_mode_focus() {
+    for focus in [Focus::Explorer, Focus::Editor, Focus::Results] {
+        let mut app = App::new(Vec::new());
+        app.focus = focus;
+        app.active_console_mut().editor.mode = EditorMode::Normal;
+        let mut keymap = Keymap::default();
+
+        assert_eq!(keymap.map(key(KeyCode::Char(' ')), &app), None);
+        assert_eq!(
+            keymap.map(key(KeyCode::Char('c')), &app),
+            Some(Action::OpenProfileManager)
+        );
+    }
+
+    let mut app = App::new(Vec::new());
+    let mut keymap = Keymap::default();
+    assert_eq!(
+        keymap.map(key(KeyCode::Char(' ')), &app),
+        Some(Action::InsertCharacter(' '))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('c')), &app),
+        Some(Action::InsertCharacter('c'))
+    );
+
+    app.active_console_mut().editor.mode = EditorMode::Normal;
+    app.focus = Focus::Explorer;
+    assert_eq!(keymap.map(key(KeyCode::Char(' ')), &app), None);
+    app.focus = Focus::Editor;
+    app.active_console_mut().editor.mode = EditorMode::Insert;
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('c')), &app),
+        Some(Action::InsertCharacter('c'))
+    );
+
+    app.focus = Focus::Results;
+    app.active_console_mut().editor.mode = EditorMode::Normal;
+    app.active_console_mut().query_status = QueryStatus::Running;
+    assert_eq!(keymap.map(key(KeyCode::Char(' ')), &app), None);
+    assert_eq!(keymap.map(ctrl('c'), &app), Some(Action::CancelActiveQuery));
+
+    app.active_console_mut().query_status = QueryStatus::Idle;
+    app.focus = Focus::Editor;
+    app.active_console_mut().editor.mode = EditorMode::Normal;
+    let first_tab = app.active_tab;
+    app.update(Action::NewConsole);
+    app.active_console_mut().editor.mode = EditorMode::Normal;
+    let second_tab = app.active_tab;
+    app.update(Action::ActivateTab(first_tab));
+    assert_eq!(keymap.map(key(KeyCode::Char(' ')), &app), None);
+    app.update(Action::ActivateTab(second_tab));
+    assert_eq!(keymap.map(key(KeyCode::Char('r')), &app), None);
+    assert_eq!(keymap.map(key(KeyCode::Char(' ')), &app), None);
+    keymap.clear_pending();
+    assert_eq!(keymap.map(key(KeyCode::Char('r')), &app), None);
+}
+
+#[test]
+fn profile_list_overlay_routes_before_generic_dismissal() {
+    let mut app = App::new(vec![profile("first"), profile("second")]);
+    app.update(Action::OpenProfileManager);
+    let mut keymap = Keymap::default();
+
+    let mappings = [
+        (KeyCode::Char('j'), Action::ProfileMove(1)),
+        (KeyCode::Down, Action::ProfileMove(1)),
+        (KeyCode::Char('k'), Action::ProfileMove(-1)),
+        (KeyCode::Up, Action::ProfileMove(-1)),
+        (KeyCode::Enter, Action::ProfileConnectSelected),
+        (KeyCode::Char('n'), Action::ProfileStartNew),
+        (KeyCode::Char('e'), Action::ProfileStartEdit),
+        (KeyCode::Char('d'), Action::ProfileRequestDelete),
+        (KeyCode::Esc, Action::CloseProfileManager),
+        (KeyCode::Char('q'), Action::CloseProfileManager),
+    ];
+    for (code, expected) in mappings {
+        assert_eq!(keymap.map(key(code), &app), Some(expected));
+    }
+    assert_eq!(keymap.map(ctrl('d'), &app), None);
+    assert_eq!(keymap.map(key(KeyCode::Char('?')), &app), None);
+
+    app.overlay = Some(Overlay::Help(Focus::Editor));
+    assert_eq!(keymap.map(key(KeyCode::Char('?')), &app), None);
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('q')), &app),
+        Some(Action::DismissOverlay)
+    );
+    assert_eq!(
+        keymap.map(
+            KeyEvent::new_with_kind(KeyCode::Esc, KeyModifiers::NONE, KeyEventKind::Release,),
+            &app,
+        ),
+        None
+    );
+}
+
+#[test]
+fn profile_form_maps_navigation_editing_and_commands() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::OpenProfileManager);
+    let mut keymap = Keymap::default();
+
+    assert_eq!(
+        keymap.map(key(KeyCode::Tab), &app),
+        Some(Action::ProfileFieldNext)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::BackTab), &app),
+        Some(Action::ProfileFieldPrevious)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::F(5)), &app),
+        Some(Action::ProfileTest)
+    );
+    assert_eq!(
+        keymap.map(ctrl('s'), &app),
+        Some(Action::ProfileSave { connect: false })
+    );
+    assert_eq!(
+        keymap.map(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL), &app,),
+        Some(Action::ProfileSave { connect: true })
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Esc), &app),
+        Some(Action::CloseProfileManager)
+    );
+
+    app.profile_manager.as_mut().unwrap().selected_field = ProfileField::Name;
+    let text_mappings = [
+        (KeyCode::Char('据'), Action::ProfileInsert('据'.into())),
+        (KeyCode::Backspace, Action::ProfileBackspace),
+        (KeyCode::Delete, Action::ProfileDeleteCharacter),
+        (KeyCode::Left, Action::ProfileMoveLeft),
+        (KeyCode::Right, Action::ProfileMoveRight),
+        (KeyCode::Home, Action::ProfileMoveHome),
+        (KeyCode::End, Action::ProfileMoveEnd),
+    ];
+    for (code, expected) in text_mappings {
+        assert_eq!(keymap.map(key(code), &app), Some(expected));
+    }
+    assert_eq!(
+        keymap.map(
+            KeyEvent::new(
+                KeyCode::Char('@'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            ),
+            &app,
+        ),
+        Some(Action::ProfileInsert('@'.into()))
+    );
+
+    app.profile_manager.as_mut().unwrap().selected_field = ProfileField::Kind;
+    assert_eq!(
+        keymap.map(key(KeyCode::Left), &app),
+        Some(Action::ProfileCycle(-1))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Right), &app),
+        Some(Action::ProfileCycle(1))
+    );
+
+    app.profile_manager.as_mut().unwrap().selected_field = ProfileField::ReadOnly;
+    assert_eq!(
+        keymap.map(key(KeyCode::Char(' ')), &app),
+        Some(Action::ProfileToggle)
+    );
+
+    for (field, expected) in [
+        (ProfileField::Test, Action::ProfileTest),
+        (ProfileField::Save, Action::ProfileSave { connect: false }),
+        (
+            ProfileField::SaveAndConnect,
+            Action::ProfileSave { connect: true },
+        ),
+        (ProfileField::Cancel, Action::CloseProfileManager),
+    ] {
+        app.profile_manager.as_mut().unwrap().selected_field = field;
+        assert_eq!(keymap.map(key(KeyCode::Enter), &app), Some(expected));
+    }
+}
+
+#[test]
+fn profile_confirmation_and_paste_are_contextual_and_redacted() {
+    let profile = profile("delete");
+    let mut app = App::new(vec![profile]);
+    app.update(Action::OpenProfileManager);
+    app.update(Action::ProfileRequestDelete);
+    let mut keymap = Keymap::default();
+    assert_eq!(
+        keymap.map(key(KeyCode::Enter), &app),
+        Some(Action::ProfileConfirmDelete)
+    );
+    assert_eq!(
+        keymap.map(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL), &app,),
+        None
+    );
+    assert_eq!(keymap.map(ctrl('y'), &app), None);
+    assert_eq!(
+        keymap.map(key(KeyCode::Esc), &app),
+        Some(Action::ProfileCancelDelete)
+    );
+
+    app.update(Action::ProfileCancelDelete);
+    app.update(Action::ProfileStartEdit);
+    app.profile_manager.as_mut().unwrap().selected_field = ProfileField::Password;
+    let actions = map_paste("do-not-print".into(), &app);
+    assert_eq!(actions, [Action::ProfilePaste("do-not-print".into())]);
+    assert!(!format!("{actions:?}").contains("do-not-print"));
+
+    app.update(Action::CloseProfileManager);
+    app.update(Action::CloseProfileManager);
+    app.focus = Focus::Editor;
+    app.active_console_mut().editor.mode = EditorMode::Insert;
+    app.overlay = Some(Overlay::Help(Focus::Editor));
+    assert!(map_paste("hidden".into(), &app).is_empty());
+    app.overlay = Some(Overlay::Message {
+        title: "Notice".into(),
+        body: "Body".into(),
+    });
+    assert!(map_paste("hidden".into(), &app).is_empty());
+    app.overlay = None;
+    assert_eq!(
+        map_paste("a\nb".into(), &app),
+        [
+            Action::InsertCharacter('a'),
+            Action::InsertNewline,
+            Action::InsertCharacter('b'),
+        ]
     );
 }

@@ -260,6 +260,15 @@ impl App {
                 }
                 Vec::new()
             }
+            Action::ProfileToggleField(field) => {
+                if let Some(manager) = self.editable_profile_manager_mut()
+                    && manager.visible_fields().contains(&field)
+                {
+                    manager.focus_field(field);
+                    manager.toggle();
+                }
+                Vec::new()
+            }
             Action::ProfileTest => self.test_profile_draft(),
             Action::ProfileSave { connect } => self.save_profile_draft(connect),
             Action::ProfileTestSucceeded { request_id, server } => {

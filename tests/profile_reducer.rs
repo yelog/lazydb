@@ -174,8 +174,7 @@ fn cycle_and_toggle_actions_only_change_supported_fields() {
     app.update(Action::ProfileCycle(1));
     app.update(Action::ProfileFocusField(ProfileField::Environment));
     app.update(Action::ProfileCycle(1));
-    app.update(Action::ProfileFocusField(ProfileField::ReadOnly));
-    app.update(Action::ProfileToggle);
+    app.update(Action::ProfileToggleField(ProfileField::ReadOnly));
     app.update(Action::ProfileFocusField(ProfileField::RememberPassword));
     app.update(Action::ProfileToggle);
 

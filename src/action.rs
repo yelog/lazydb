@@ -47,6 +47,7 @@ pub enum Action {
     ProfileMoveEnd,
     ProfileCycle(i8),
     ProfileToggle,
+    ProfileToggleField(ProfileField),
     ProfileTest,
     ProfileSave {
         connect: bool,

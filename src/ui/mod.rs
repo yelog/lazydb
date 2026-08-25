@@ -4,6 +4,7 @@ pub mod theme;
 
 use ratatui::{
     Frame,
+    buffer::CellWidth,
     layout::{Alignment, Constraint, Direction, Layout, Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
@@ -18,9 +19,11 @@ use crate::{
     db::{catalog::CatalogKind, query::ResultSet},
     model::{
         editor::EditorMode,
+        profile_manager::ProfileField,
         tab::{OutputKind, ResultView},
         workspace::{ConnectionStatus, Focus, Overlay, QueryStatus},
     },
+    security::sanitize_terminal_text,
 };
 
 use self::{
@@ -28,6 +31,21 @@ use self::{
     layout::{AppLayout, LayoutMode},
     theme::Theme,
 };
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProfileButton {
+    New,
+    Edit,
+    Delete,
+    Connect,
+    Close,
+    Test,
+    Save,
+    SaveAndConnect,
+    Cancel,
+    ConfirmDelete,
+    CancelDelete,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum HitTarget {
@@ -37,6 +55,11 @@ pub enum HitTarget {
     ResultCell { row: usize, column: usize },
     Help,
     ToggleResultView,
+    HeaderProfile,
+    ProfileRow(usize),
+    ProfileField(ProfileField),
+    ProfileToggle(ProfileField),
+    ProfileButton(ProfileButton),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -93,7 +116,7 @@ pub fn render_with_state(frame: &mut Frame<'_>, app: &App, state: &mut UiState) 
         return;
     }
 
-    render_header(frame, layout.header, app, theme);
+    render_header(frame, layout.header, app, theme, state);
     render_tabs(frame, layout.tabs, app, theme, state);
     if let Some(area) = layout.explorer {
         state.hit_regions.push(HitRegion {
@@ -140,15 +163,16 @@ pub fn render_with_state(frame: &mut Frame<'_>, app: &App, state: &mut UiState) 
     state.effects.render(frame, layout.body);
 }
 
-fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
-    let profile = app
-        .active_profile()
-        .map_or("NO PROFILE", |profile| profile.name.as_str());
-    let database = app
-        .connection
-        .server
-        .as_ref()
-        .map_or("not connected", |server| server.database.as_str());
+fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, state: &mut UiState) {
+    let profile = app.active_profile().map_or_else(
+        || "NO PROFILE".to_owned(),
+        |profile| header_text(&profile.name),
+    );
+    let database = app.connection.server.as_ref().map_or_else(
+        || "not connected".to_owned(),
+        |server| header_text(&server.database),
+    );
+    let profile_width = profile.as_str().cell_width();
     let connection = match app.connection.status {
         ConnectionStatus::Disconnected => ("OFFLINE", theme.muted),
         ConnectionStatus::Connecting => ("LINKING", theme.warning),
@@ -172,17 +196,14 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
             ),
             Span::styled("  ", Style::new().bg(theme.surface)),
             Span::styled(
-                profile.to_owned(),
+                profile,
                 Style::new()
                     .fg(theme.text)
                     .bg(theme.surface)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled("  /  ", Style::new().fg(theme.border).bg(theme.surface)),
-            Span::styled(
-                database.to_owned(),
-                Style::new().fg(theme.action).bg(theme.surface),
-            ),
+            Span::styled(database, Style::new().fg(theme.action).bg(theme.surface)),
         ]),
         Line::from(vec![
             Span::styled(
@@ -206,6 +227,20 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
         Paragraph::new(lines).style(Style::new().bg(theme.surface)),
         area,
     );
+    let profile_x = area.x.saturating_add(10);
+    let profile_width = profile_width.min(area.right().saturating_sub(profile_x));
+    if profile_width > 0 {
+        state.hit_regions.push(HitRegion {
+            area: Rect::new(profile_x, area.y, profile_width, 1),
+            target: HitTarget::HeaderProfile,
+        });
+    }
+}
+
+fn header_text(value: &str) -> String {
+    sanitize_terminal_text(value)
+        .replace('\n', "<LF>")
+        .replace('\t', "<TAB>")
 }
 
 fn render_tabs(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, state: &mut UiState) {

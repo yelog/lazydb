@@ -20,7 +20,10 @@ use crate::{
     app::App,
     cli::{Cli, MouseMode},
     db::DatabaseConnection,
-    input::{keymap::Keymap, mouse::map_mouse},
+    input::{
+        keymap::{Keymap, map_paste},
+        mouse::map_mouse,
+    },
     model::{
         profile_manager::{CredentialUpdate, ProfileSubmission},
         workspace::{ConnectionIdentity, QueryStatus},
@@ -1056,28 +1059,26 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                             }
                         }
                         Event::Mouse(mouse) => {
+                            keymap.clear_pending();
                             if let Some(action) = map_mouse(mouse, &ui_state, &app) {
                                 apply_action(&mut app, &mut runtime, action);
                                 redraw = true;
                             }
                         }
                         Event::Paste(value) => {
-                            if app.focus == crate::model::workspace::Focus::Editor
-                                && app.active_console().editor.mode
-                                    == crate::model::editor::EditorMode::Insert
-                            {
-                                for character in value.chars() {
-                                    let action = if character == '\n' {
-                                        Action::InsertNewline
-                                    } else {
-                                        Action::InsertCharacter(character)
-                                    };
+                            keymap.clear_pending();
+                            let actions = map_paste(value, &app);
+                            if !actions.is_empty() {
+                                for action in actions {
                                     apply_action(&mut app, &mut runtime, action);
                                 }
                                 redraw = true;
                             }
                         }
-                        Event::Resize(_, _) | Event::FocusGained | Event::FocusLost => redraw = true,
+                        Event::Resize(_, _) | Event::FocusGained | Event::FocusLost => {
+                            keymap.clear_pending();
+                            redraw = true;
+                        }
                     }
                 }
                 Some(action) = event_receiver.recv() => {
