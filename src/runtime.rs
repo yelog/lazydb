@@ -1042,7 +1042,9 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
         apply_action(
             &mut app,
             &mut runtime,
-            Action::RequestConnect(startup.selected_profile),
+            startup
+                .selected
+                .map_or(Action::OpenProfileManager, Action::RequestConnect),
         );
         terminal.draw(|frame| ui::render_with_state(frame, &app, &mut ui_state))?;
 
@@ -1110,16 +1112,16 @@ fn apply_action(app: &mut App, runtime: &mut Runtime, action: Action) {
     }
 }
 
-struct StartupProfiles {
-    profiles: Vec<ConnectionProfile>,
-    persisted: HashSet<Uuid>,
-    session_secrets: HashMap<Uuid, SecretString>,
-    startup_password: Option<(Uuid, SecretString)>,
-    selected_profile: Uuid,
-    profile_store: ProfileStore,
+pub struct StartupProfiles {
+    pub profiles: Vec<ConnectionProfile>,
+    pub persisted: HashSet<Uuid>,
+    pub session_secrets: HashMap<Uuid, SecretString>,
+    pub startup_password: Option<(Uuid, SecretString)>,
+    pub selected: Option<Uuid>,
+    pub profile_store: ProfileStore,
 }
 
-fn load_startup_profiles(cli: &Cli) -> Result<StartupProfiles> {
+pub fn load_startup_profiles(cli: &Cli) -> Result<StartupProfiles> {
     let profile_path = if let Some(path) = &cli.config {
         path.clone()
     } else {
@@ -1145,6 +1147,7 @@ fn load_startup_profiles(cli: &Cli) -> Result<StartupProfiles> {
         None
     };
 
+    let has_direct_profile = direct_profile.is_some();
     let selected = direct_profile.or_else(|| {
         cli.profile.as_deref().and_then(|name| {
             profiles
@@ -1153,23 +1156,26 @@ fn load_startup_profiles(cli: &Cli) -> Result<StartupProfiles> {
                 .map(|profile| profile.id)
         })
     });
-    let selected = if let Some(selected) = selected.or_else(|| profiles.first().map(|p| p.id)) {
-        selected
-    } else {
-        let mut imported = import_connection_url("sqlite::memory:", Some("local-memory"))?;
-        imported.profile.read_only = cli.read_only;
-        let selected = imported.profile.id;
-        profiles.push(imported.profile);
-        selected
-    };
+    if cli.profile.is_some() && !has_direct_profile && selected.is_none() {
+        anyhow::bail!(
+            "connection profile not found: {}",
+            cli.profile.as_deref().unwrap_or_default()
+        );
+    }
+    let selected = selected.or_else(|| profiles.first().map(|profile| profile.id));
 
-    let startup_password = if session_secrets.contains_key(&selected) {
+    let startup_password = if session_secrets
+        .keys()
+        .copied()
+        .any(|profile_id| Some(profile_id) == selected)
+    {
         None
     } else {
         std::env::var("LAZYDB_PASSWORD")
             .ok()
             .filter(|password| !password.is_empty())
-            .map(|password| (selected, SecretString::from(password)))
+            .zip(selected)
+            .map(|(password, profile_id)| (profile_id, SecretString::from(password)))
     };
 
     Ok(StartupProfiles {
@@ -1177,7 +1183,7 @@ fn load_startup_profiles(cli: &Cli) -> Result<StartupProfiles> {
         persisted,
         session_secrets,
         startup_password,
-        selected_profile: selected,
+        selected,
         profile_store: store,
     })
 }

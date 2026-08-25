@@ -294,7 +294,7 @@ fn render_explorer(
         } else if app.connection.status == ConnectionStatus::Connected {
             "No visible objects"
         } else {
-            "No active connection\n\nStart with --url or choose a profile"
+            "No active connection\n\nPress Space c to create or choose a profile"
         };
         frame.render_widget(
             Paragraph::new(message)

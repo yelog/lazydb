@@ -369,6 +369,14 @@ fn tiny_terminal_wins_over_profile_overlay() {
 }
 
 #[test]
+fn disconnected_explorer_points_to_the_profile_manager() {
+    let output = render(&App::new(Vec::new()), 120, 36);
+    assert!(output.contains("Press Space c"));
+    assert!(output.contains("create"));
+    assert!(output.contains("profile"));
+}
+
+#[test]
 fn narrow_profile_list_scrolls_to_keep_the_selection_visible() {
     let profiles = (0..7)
         .map(|index| {
