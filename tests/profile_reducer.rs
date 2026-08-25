@@ -4,7 +4,7 @@ use lazydb::{
     db::ServerInfo,
     model::{
         profile_manager::{ProfileField, ProfileManagerPage, ProfileOperation},
-        workspace::{ConnectionStatus, Overlay, QueryStatus},
+        workspace::{ConnectionIdentity, ConnectionStatus, Overlay, QueryStatus},
     },
     profile::{ConnectionProfile, DatabaseKind, import_connection_url},
 };
@@ -346,7 +346,7 @@ fn delete_success_removes_the_profile_and_clamps_selection() {
     app.update(Action::ProfileDeleted {
         request_id,
         profile_id: second_id,
-        was_active: false,
+        active_connection: None,
     });
     assert_eq!(app.profiles.len(), 1);
     assert_eq!(app.profile_manager.as_ref().unwrap().selected, 0);
@@ -361,7 +361,8 @@ fn deleting_or_saving_a_pending_profile_clears_its_connection_state() {
     let profile = sqlite_profile("pending");
     let profile_id = profile.id;
     let mut deleting = App::new(vec![profile.clone()]);
-    deleting.connection.profile_id = Some(profile_id);
+    deleting.connection.pending_profile_id = Some(profile_id);
+    deleting.connection.pending_generation = Some(1);
     deleting.connection.status = ConnectionStatus::Connecting;
     deleting.update(Action::OpenProfileManager);
     deleting.update(Action::ProfileRequestDelete);
@@ -374,14 +375,18 @@ fn deleting_or_saving_a_pending_profile_clears_its_connection_state() {
             .update(Action::ProfileDeleted {
                 request_id,
                 profile_id,
-                was_active: false,
+                active_connection: None,
             })
             .as_slice(),
-        [Command::Disconnect { profile_id: disconnected }] if *disconnected == profile_id
+        [Command::Disconnect { connection }] if *connection == ConnectionIdentity {
+            profile_id,
+            generation: 1,
+        }
     ));
 
     let mut saving = App::new(vec![profile]);
-    saving.connection.profile_id = Some(profile_id);
+    saving.connection.pending_profile_id = Some(profile_id);
+    saving.connection.pending_generation = Some(1);
     saving.connection.status = ConnectionStatus::Connecting;
     saving.update(Action::OpenProfileManager);
     saving.update(Action::ProfileStartEdit);
@@ -411,15 +416,159 @@ fn deleting_or_saving_a_pending_profile_clears_its_connection_state() {
                 connect: false,
             })
             .as_slice(),
-        [Command::Disconnect { profile_id: disconnected }] if *disconnected == profile_id
+        [Command::Disconnect { connection }] if *connection == ConnectionIdentity {
+            profile_id,
+            generation: 1,
+        }
     ));
-    saving.update(Action::DisconnectCompleted { profile_id });
+    saving.update(Action::DisconnectCompleted {
+        connection: ConnectionIdentity {
+            profile_id,
+            generation: 1,
+        },
+    });
     assert_eq!(saving.connection.status, ConnectionStatus::Disconnected);
     assert!(saving.connection.profile_id.is_none());
 }
 
 #[test]
-fn running_queries_block_switching_and_active_profile_deletion() {
+fn saving_an_active_profile_retires_the_old_connection() {
+    let profile = sqlite_profile("active");
+    let profile_id = profile.id;
+    let connection = ConnectionIdentity {
+        profile_id,
+        generation: 9,
+    };
+    let mut app = App::new(vec![profile]);
+    app.connection.profile_id = Some(profile_id);
+    app.connection.generation = connection.generation;
+    app.connection.status = ConnectionStatus::Connected;
+    app.update(Action::OpenProfileManager);
+    app.update(Action::ProfileStartEdit);
+    let request_id = match app
+        .update(Action::ProfileSave { connect: false })
+        .as_slice()
+    {
+        [Command::SaveProfile { request_id, .. }] => *request_id,
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+    app.update(Action::ReplaceEditor("SELECT 1".into()));
+    assert!(app.update(Action::RunActiveSql).is_empty());
+    let saved = app
+        .profile_manager
+        .as_ref()
+        .unwrap()
+        .draft
+        .as_ref()
+        .unwrap()
+        .validate(&app.profiles)
+        .unwrap()
+        .profile;
+
+    let commands = app.update(Action::ProfileSaved {
+        request_id,
+        profile: saved,
+        warning: None,
+        connect: false,
+    });
+    assert!(matches!(
+        commands.as_slice(),
+        [Command::Disconnect { connection: disconnected }] if *disconnected == connection
+    ));
+    assert!(app.connection.profile_id.is_none());
+    assert_eq!(app.connection.status, ConnectionStatus::Disconnected);
+    assert!(app.update(Action::RunActiveSql).is_empty());
+}
+
+#[test]
+fn query_started_while_save_is_in_flight_preserves_the_active_connection() {
+    let profile = sqlite_profile("active");
+    let profile_id = profile.id;
+    let mut app = App::new(vec![profile]);
+    app.connection.profile_id = Some(profile_id);
+    app.connection.generation = 3;
+    app.connection.status = ConnectionStatus::Connected;
+    app.update(Action::OpenProfileManager);
+    app.update(Action::ProfileStartEdit);
+    let request_id = match app
+        .update(Action::ProfileSave { connect: false })
+        .as_slice()
+    {
+        [Command::SaveProfile { request_id, .. }] => *request_id,
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+    let saved = app
+        .profile_manager
+        .as_ref()
+        .unwrap()
+        .draft
+        .as_ref()
+        .unwrap()
+        .validate(&app.profiles)
+        .unwrap()
+        .profile;
+    app.active_console_mut().query_status = QueryStatus::Running;
+
+    assert!(
+        app.update(Action::ProfileSaved {
+            request_id,
+            profile: saved,
+            warning: None,
+            connect: false,
+        })
+        .is_empty()
+    );
+    assert_eq!(app.connection.profile_id, Some(profile_id));
+    assert_eq!(app.connection.status, ConnectionStatus::Connected);
+    assert!(
+        app.profile_manager
+            .as_ref()
+            .unwrap()
+            .message
+            .as_deref()
+            .unwrap()
+            .contains("running")
+    );
+}
+
+#[test]
+fn deleting_an_active_profile_retires_it_before_disconnect_completes() {
+    let profile = sqlite_profile("active");
+    let profile_id = profile.id;
+    let connection = ConnectionIdentity {
+        profile_id,
+        generation: 7,
+    };
+    let mut app = App::new(vec![profile]);
+    app.connection.profile_id = Some(profile_id);
+    app.connection.generation = connection.generation;
+    app.connection.status = ConnectionStatus::Connected;
+    app.update(Action::OpenProfileManager);
+    app.update(Action::ProfileRequestDelete);
+    let request_id = match app.update(Action::ProfileConfirmDelete).as_slice() {
+        [Command::DeleteProfile { request_id, .. }] => *request_id,
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+    app.update(Action::ReplaceEditor("SELECT 1".into()));
+    assert!(app.update(Action::RunActiveSql).is_empty());
+
+    let commands = app.update(Action::ProfileDeleted {
+        request_id,
+        profile_id,
+        active_connection: Some(connection),
+    });
+    assert!(matches!(
+        commands.as_slice(),
+        [Command::Disconnect { connection: disconnected }] if *disconnected == connection
+    ));
+    assert!(app.connection.profile_id.is_none());
+    assert_eq!(app.connection.status, ConnectionStatus::Disconnected);
+    assert!(app.explorer.nodes.is_empty());
+    assert!(app.update(Action::RunActiveSql).is_empty());
+}
+
+#[test]
+fn running_queries_block_switching_active_profile_saves_and_deletion() {
     let active = sqlite_profile("active");
     let other = sqlite_profile("other");
     let active_id = active.id;
@@ -447,6 +596,21 @@ fn running_queries_block_switching_and_active_profile_deletion() {
         app.profile_manager.as_ref().unwrap().page,
         ProfileManagerPage::List
     );
+
+    app.update(Action::ProfileStartEdit);
+    assert!(
+        app.update(Action::ProfileSave { connect: false })
+            .is_empty()
+    );
+    assert!(
+        app.profile_manager
+            .as_ref()
+            .unwrap()
+            .message
+            .as_deref()
+            .unwrap()
+            .contains("running")
+    );
 }
 
 #[test]
@@ -454,8 +618,8 @@ fn credentials_required_opens_the_matching_profile_at_password() {
     let profile = sqlite_profile("primary");
     let profile_id = profile.id;
     let mut app = App::new(vec![profile]);
-    app.connection.profile_id = Some(profile_id);
-    app.connection.generation = 7;
+    app.connection.pending_profile_id = Some(profile_id);
+    app.connection.pending_generation = Some(7);
     app.connection.status = ConnectionStatus::Connecting;
 
     app.update(Action::CredentialsRequired {
@@ -482,8 +646,8 @@ fn credentials_required_does_not_replace_an_in_flight_profile_operation() {
     let profile = sqlite_profile("primary");
     let profile_id = profile.id;
     let mut app = App::new(vec![profile]);
-    app.connection.profile_id = Some(profile_id);
-    app.connection.generation = 4;
+    app.connection.pending_profile_id = Some(profile_id);
+    app.connection.pending_generation = Some(4);
     app.connection.status = ConnectionStatus::Connecting;
     app.update(Action::OpenProfileManager);
     app.update(Action::ProfileStartEdit);

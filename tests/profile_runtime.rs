@@ -9,7 +9,10 @@ use async_trait::async_trait;
 use lazydb::{
     action::{Action, Command},
     app::App,
-    model::profile_manager::{CredentialUpdate, ProfileSubmission},
+    model::{
+        profile_manager::{CredentialUpdate, ProfileSubmission},
+        workspace::ConnectionIdentity,
+    },
     persistence::{
         profiles::ProfileStore,
         secrets::{SecretStore, SecretStoreError, keyring_ref},
@@ -507,7 +510,7 @@ async fn delete_removes_metadata_and_keyring_value() {
         Action::ProfileDeleted {
             request_id: 8,
             profile_id: deleted,
-            was_active: false,
+            active_connection: None,
         } if deleted == profile_id
     ));
     assert!(!fake.contains(profile_id));
@@ -578,15 +581,27 @@ async fn deleting_the_active_profile_requests_an_explicit_disconnect() {
         Action::ProfileDeleted {
             request_id: 10,
             profile_id: deleted,
-            was_active: true,
-        } if deleted == profile_id
+            active_connection: Some(ConnectionIdentity {
+                profile_id: active,
+                generation: 1,
+            }),
+        } if deleted == profile_id && active == profile_id
     ));
 
-    runtime.dispatch(Command::Disconnect { profile_id });
+    runtime.dispatch(Command::Disconnect {
+        connection: ConnectionIdentity {
+            profile_id,
+            generation: 1,
+        },
+    });
     assert!(matches!(
         next_action(&mut receiver).await,
-        Action::DisconnectCompleted { profile_id: disconnected }
-            if disconnected == profile_id
+        Action::DisconnectCompleted {
+            connection: ConnectionIdentity {
+                profile_id: disconnected,
+                generation: 1,
+            },
+        } if disconnected == profile_id
     ));
     runtime.shutdown().await;
 }
@@ -634,7 +649,7 @@ async fn deleting_a_profile_invalidates_its_in_flight_connection() {
         Action::ProfileDeleted {
             request_id: 11,
             profile_id: deleted,
-            was_active: false,
+            active_connection: None,
         } if deleted == profile_id
     ));
 

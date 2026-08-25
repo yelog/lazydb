@@ -1,9 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, Mutex as StdMutex},
     time::Duration,
 };
 
@@ -26,7 +23,7 @@ use crate::{
     input::{keymap::Keymap, mouse::map_mouse},
     model::{
         profile_manager::{CredentialUpdate, ProfileSubmission},
-        workspace::QueryStatus,
+        workspace::{ConnectionIdentity, QueryStatus},
     },
     persistence::{
         paths::AppPaths,
@@ -48,6 +45,12 @@ struct ActiveConnection {
     database: DatabaseConnection,
 }
 
+#[derive(Default)]
+struct ConnectionAttemptTracker {
+    latest: Option<ConnectionIdentity>,
+    cancelled: Option<ConnectionIdentity>,
+}
+
 #[derive(Clone)]
 struct ProfileRegistry {
     order: Vec<Uuid>,
@@ -66,7 +69,7 @@ pub struct Runtime {
     profile_mutation: Arc<Mutex<()>>,
     event_sender: mpsc::UnboundedSender<Action>,
     connection: Arc<Mutex<Option<ActiveConnection>>>,
-    latest_connection_generation: Arc<AtomicU64>,
+    connection_attempts: Arc<StdMutex<ConnectionAttemptTracker>>,
     query_tasks: HashMap<(Uuid, u64), JoinHandle<()>>,
     background_tasks: Vec<JoinHandle<()>>,
     profile_tasks: Vec<JoinHandle<()>>,
@@ -114,7 +117,7 @@ impl Runtime {
             profile_mutation: Arc::new(Mutex::new(())),
             event_sender,
             connection: Arc::new(Mutex::new(None)),
-            latest_connection_generation: Arc::new(AtomicU64::new(0)),
+            connection_attempts: Arc::new(StdMutex::new(ConnectionAttemptTracker::default())),
             query_tasks: HashMap::new(),
             background_tasks: Vec::new(),
             profile_tasks: Vec::new(),
@@ -139,7 +142,7 @@ impl Runtime {
                 request_id,
                 profile_id,
             } => self.delete_profile(request_id, profile_id),
-            Command::Disconnect { profile_id } => self.disconnect(profile_id),
+            Command::Disconnect { connection } => self.disconnect(connection),
             Command::Connect {
                 profile_id,
                 generation,
@@ -149,23 +152,26 @@ impl Runtime {
                 generation,
             } => self.load_catalog(profile_id, generation),
             Command::RunQuery {
+                connection,
                 tab_id,
                 generation,
                 sql,
-            } => self.run_query(tab_id, generation, sql),
+            } => self.run_query(connection, tab_id, generation, sql),
             Command::PreviewTable {
+                connection,
                 tab_id,
                 generation,
                 schema,
                 name,
-            } => self.preview_table(tab_id, generation, schema, name),
+            } => self.preview_table(connection, tab_id, generation, schema, name),
             Command::LoadDdl {
+                connection,
                 tab_id,
                 generation,
                 kind,
                 schema,
                 name,
-            } => self.load_ddl(tab_id, generation, kind, schema, name),
+            } => self.load_ddl(connection, tab_id, generation, kind, schema, name),
             Command::CancelQuery { tab_id, generation } => {
                 if let Some(task) = self.query_tasks.remove(&(tab_id, generation)) {
                     task.abort();
@@ -270,11 +276,11 @@ impl Runtime {
             )
             .await
             {
-                Ok(was_active) => {
+                Ok(active_connection) => {
                     let _ = sender.send(Action::ProfileDeleted {
                         request_id,
                         profile_id,
-                        was_active,
+                        active_connection,
                     });
                 }
                 Err(message) => {
@@ -287,15 +293,25 @@ impl Runtime {
         }));
     }
 
-    fn disconnect(&mut self, profile_id: Uuid) {
+    fn disconnect(&mut self, expected: ConnectionIdentity) {
         let connection = Arc::clone(&self.connection);
-        let latest = Arc::clone(&self.latest_connection_generation);
+        let mutation = Arc::clone(&self.profile_mutation);
+        let attempts = Arc::clone(&self.connection_attempts);
         let sender = self.event_sender.clone();
+        {
+            let mut attempts = attempts.lock().expect("connection attempt mutex poisoned");
+            if attempts.latest == Some(expected) {
+                attempts.cancelled = Some(expected);
+            }
+        }
         self.background_tasks.push(tokio::spawn(async move {
-            latest.store(u64::MAX, Ordering::SeqCst);
+            let _mutation_guard = mutation.lock().await;
             let active = {
                 let mut guard = connection.lock().await;
-                if guard.as_ref().map(|active| active.profile_id) == Some(profile_id) {
+                if guard.as_ref().is_some_and(|active| {
+                    active.profile_id == expected.profile_id
+                        && active.generation == expected.generation
+                }) {
                     guard.take()
                 } else {
                     None
@@ -304,7 +320,9 @@ impl Runtime {
             if let Some(active) = active {
                 active.database.close().await;
             }
-            let _ = sender.send(Action::DisconnectCompleted { profile_id });
+            let _ = sender.send(Action::DisconnectCompleted {
+                connection: expected,
+            });
         }));
     }
 
@@ -314,8 +332,22 @@ impl Runtime {
         let secret_store = Arc::clone(&self.secret_store);
         let sender = self.event_sender.clone();
         let connection = Arc::clone(&self.connection);
-        let latest = Arc::clone(&self.latest_connection_generation);
-        latest.store(generation, Ordering::SeqCst);
+        let attempts = Arc::clone(&self.connection_attempts);
+        let expected = ConnectionIdentity {
+            profile_id,
+            generation,
+        };
+        {
+            let mut attempts = attempts.lock().expect("connection attempt mutex poisoned");
+            if attempts
+                .latest
+                .is_some_and(|latest| generation <= latest.generation)
+            {
+                return;
+            }
+            attempts.latest = Some(expected);
+            attempts.cancelled = None;
+        }
         self.background_tasks.push(tokio::spawn(async move {
             let mutation_guard = mutation.lock().await;
             let profile = {
@@ -350,23 +382,38 @@ impl Runtime {
                 Ok(database) => match database.probe().await {
                     Ok(server) => {
                         let mutation_guard = mutation.lock().await;
-                        if !connection_attempt_is_current(
-                            &registry,
-                            &latest,
-                            &profile,
-                            profile_revision,
-                            generation,
-                        )
-                        .await
+                        if !profile_revision_is_current(&registry, &profile, profile_revision).await
                         {
                             database.close().await;
                             return;
                         }
-                        let previous = connection.lock().await.replace(ActiveConnection {
-                            profile_id,
-                            generation,
-                            database,
-                        });
+                        let mut active = connection.lock().await;
+                        let mut candidate = Some(database);
+                        let installation = {
+                            let attempt_guard =
+                                attempts.lock().expect("connection attempt mutex poisoned");
+                            if attempt_guard.latest != Some(expected)
+                                || attempt_guard.cancelled == Some(expected)
+                            {
+                                None
+                            } else {
+                                Some(active.replace(ActiveConnection {
+                                    profile_id,
+                                    generation,
+                                    database:
+                                        candidate.take().expect("connection candidate exists"),
+                                }))
+                            }
+                        };
+                        drop(active);
+                        let Some(previous) = installation else {
+                            candidate
+                                .take()
+                                .expect("connection candidate exists")
+                                .close()
+                                .await;
+                            return;
+                        };
                         let _ = sender.send(Action::ConnectionSucceeded {
                             profile_id,
                             generation,
@@ -380,14 +427,8 @@ impl Runtime {
                     Err(error) => {
                         database.close().await;
                         let _mutation_guard = mutation.lock().await;
-                        if connection_attempt_is_current(
-                            &registry,
-                            &latest,
-                            &profile,
-                            profile_revision,
-                            generation,
-                        )
-                        .await
+                        if profile_revision_is_current(&registry, &profile, profile_revision).await
+                            && connection_attempt_is_current(&attempts, expected)
                         {
                             let _ = sender.send(Action::ConnectionFailed {
                                 profile_id,
@@ -399,14 +440,8 @@ impl Runtime {
                 },
                 Err(error) => {
                     let _mutation_guard = mutation.lock().await;
-                    if connection_attempt_is_current(
-                        &registry,
-                        &latest,
-                        &profile,
-                        profile_revision,
-                        generation,
-                    )
-                    .await
+                    if profile_revision_is_current(&registry, &profile, profile_revision).await
+                        && connection_attempt_is_current(&attempts, expected)
                     {
                         let _ = sender.send(Action::ConnectionFailed {
                             profile_id,
@@ -454,11 +489,17 @@ impl Runtime {
         }));
     }
 
-    fn run_query(&mut self, tab_id: Uuid, generation: u64, sql: String) {
+    fn run_query(
+        &mut self,
+        expected: ConnectionIdentity,
+        tab_id: Uuid,
+        generation: u64,
+        sql: String,
+    ) {
         let sender = self.event_sender.clone();
         let connection = Arc::clone(&self.connection);
         let task = tokio::spawn(async move {
-            let database = active_database(connection).await;
+            let database = active_database(connection, expected).await;
             let Some(database) = database else {
                 let _ = sender.send(Action::QueryFailed {
                     tab_id,
@@ -487,11 +528,18 @@ impl Runtime {
         self.query_tasks.insert((tab_id, generation), task);
     }
 
-    fn preview_table(&mut self, tab_id: Uuid, generation: u64, schema: String, name: String) {
+    fn preview_table(
+        &mut self,
+        expected: ConnectionIdentity,
+        tab_id: Uuid,
+        generation: u64,
+        schema: String,
+        name: String,
+    ) {
         let sender = self.event_sender.clone();
         let connection = Arc::clone(&self.connection);
         let task = tokio::spawn(async move {
-            let Some(database) = active_database(connection).await else {
+            let Some(database) = active_database(connection, expected).await else {
                 let _ = sender.send(Action::QueryFailed {
                     tab_id,
                     generation,
@@ -527,6 +575,7 @@ impl Runtime {
 
     fn load_ddl(
         &mut self,
+        expected: ConnectionIdentity,
         tab_id: Uuid,
         generation: u64,
         kind: crate::db::catalog::CatalogKind,
@@ -536,7 +585,7 @@ impl Runtime {
         let sender = self.event_sender.clone();
         let connection = Arc::clone(&self.connection);
         let task = tokio::spawn(async move {
-            let Some(database) = active_database(connection).await else {
+            let Some(database) = active_database(connection, expected).await else {
                 let _ = sender.send(Action::QueryFailed {
                     tab_id,
                     generation,
@@ -708,7 +757,7 @@ async fn delete_profile_transaction(
     secret_store: Arc<dyn SecretStore>,
     connection: Arc<Mutex<Option<ActiveConnection>>>,
     profile_id: Uuid,
-) -> Result<bool, String> {
+) -> Result<Option<ConnectionIdentity>, String> {
     let snapshot = registry.lock().await.clone();
     let profile = snapshot
         .profiles
@@ -751,13 +800,17 @@ async fn delete_profile_transaction(
         }
     }
 
-    let was_active = connection
+    let active_connection = connection
         .lock()
         .await
         .as_ref()
-        .is_some_and(|active| active.profile_id == profile_id);
+        .filter(|active| active.profile_id == profile_id)
+        .map(|active| ConnectionIdentity {
+            profile_id: active.profile_id,
+            generation: active.generation,
+        });
     *registry.lock().await = next;
-    Ok(was_active)
+    Ok(active_connection)
 }
 
 impl ProfileRegistry {
@@ -929,28 +982,35 @@ fn secret_error(context: &str, error: SecretStoreError) -> String {
     sanitize_terminal_text(&format!("{context}: {error}"))
 }
 
-async fn connection_attempt_is_current(
+async fn profile_revision_is_current(
     registry: &Arc<Mutex<ProfileRegistry>>,
-    latest: &Arc<AtomicU64>,
     profile: &ConnectionProfile,
     profile_revision: u64,
-    generation: u64,
 ) -> bool {
-    if latest.load(Ordering::SeqCst) != generation {
-        return false;
-    }
     let registry = registry.lock().await;
     registry.profiles.get(&profile.id) == Some(profile)
         && registry.revisions.get(&profile.id) == Some(&profile_revision)
 }
 
+fn connection_attempt_is_current(
+    attempts: &StdMutex<ConnectionAttemptTracker>,
+    expected: ConnectionIdentity,
+) -> bool {
+    let attempts = attempts.lock().expect("connection attempt mutex poisoned");
+    attempts.latest == Some(expected) && attempts.cancelled != Some(expected)
+}
+
 async fn active_database(
     connection: Arc<Mutex<Option<ActiveConnection>>>,
+    expected: ConnectionIdentity,
 ) -> Option<DatabaseConnection> {
     connection
         .lock()
         .await
         .as_ref()
+        .filter(|active| {
+            active.profile_id == expected.profile_id && active.generation == expected.generation
+        })
         .map(|active| active.database.clone())
 }
 

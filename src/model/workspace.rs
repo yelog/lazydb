@@ -62,9 +62,33 @@ pub enum ConnectionStatus {
 pub struct ConnectionState {
     pub profile_id: Option<Uuid>,
     pub generation: u64,
+    pub pending_profile_id: Option<Uuid>,
+    pub pending_generation: Option<u64>,
     pub status: ConnectionStatus,
     pub server: Option<ServerInfo>,
     pub error: Option<String>,
+}
+
+impl ConnectionState {
+    pub fn active_identity(&self) -> Option<ConnectionIdentity> {
+        Some(ConnectionIdentity {
+            profile_id: self.profile_id?,
+            generation: self.generation,
+        })
+    }
+
+    pub fn pending_identity(&self) -> Option<ConnectionIdentity> {
+        Some(ConnectionIdentity {
+            profile_id: self.pending_profile_id?,
+            generation: self.pending_generation?,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ConnectionIdentity {
+    pub profile_id: Uuid,
+    pub generation: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

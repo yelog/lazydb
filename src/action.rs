@@ -8,7 +8,7 @@ use crate::db::{
 use crate::{
     model::{
         profile_manager::{ProfileField, ProfileInput, ProfileSubmission},
-        workspace::Focus,
+        workspace::{ConnectionIdentity, Focus},
     },
     profile::ConnectionProfile,
 };
@@ -72,7 +72,7 @@ pub enum Action {
     ProfileDeleted {
         request_id: u64,
         profile_id: Uuid,
-        was_active: bool,
+        active_connection: Option<ConnectionIdentity>,
     },
     ProfileDeleteFailed {
         request_id: u64,
@@ -84,7 +84,7 @@ pub enum Action {
         message: String,
     },
     DisconnectCompleted {
-        profile_id: Uuid,
+        connection: ConnectionIdentity,
     },
     ReplaceEditor(String),
     InsertCharacter(char),
@@ -179,7 +179,7 @@ pub enum Command {
         profile_id: Uuid,
     },
     Disconnect {
-        profile_id: Uuid,
+        connection: ConnectionIdentity,
     },
     Connect {
         profile_id: Uuid,
@@ -190,17 +190,20 @@ pub enum Command {
         generation: u64,
     },
     RunQuery {
+        connection: ConnectionIdentity,
         tab_id: Uuid,
         generation: u64,
         sql: String,
     },
     PreviewTable {
+        connection: ConnectionIdentity,
         tab_id: Uuid,
         generation: u64,
         schema: String,
         name: String,
     },
     LoadDdl {
+        connection: ConnectionIdentity,
         tab_id: Uuid,
         generation: u64,
         kind: CatalogKind,

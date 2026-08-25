@@ -9,7 +9,8 @@ use crate::{
         },
         tab::{ConsoleTab, OutputEntry, OutputKind, ResultView},
         workspace::{
-            ConnectionState, ConnectionStatus, ExplorerState, Focus, Overlay, QueryStatus,
+            ConnectionIdentity, ConnectionState, ConnectionStatus, ExplorerState, Focus, Overlay,
+            QueryStatus,
         },
     },
     profile::{ConnectionProfile, DatabaseKind},
@@ -27,6 +28,8 @@ pub struct App {
     pub profile_manager: Option<ProfileManagerState>,
     pub should_quit: bool,
     next_console_number: usize,
+    connection_request_generation: u64,
+    connection_terminal_generation: u64,
 }
 
 impl App {
@@ -42,6 +45,8 @@ impl App {
             profile_manager: None,
             should_quit: false,
             next_console_number: 2,
+            connection_request_generation: 0,
+            connection_terminal_generation: 0,
         }
     }
 
@@ -306,8 +311,8 @@ impl App {
             Action::ProfileDeleted {
                 request_id,
                 profile_id,
-                was_active,
-            } => self.profile_deleted(request_id, profile_id, was_active),
+                active_connection,
+            } => self.profile_deleted(request_id, profile_id, active_connection),
             Action::ProfileDeleteFailed {
                 request_id,
                 message,
@@ -325,7 +330,7 @@ impl App {
                 generation,
                 message,
             } => {
-                if !self.connection_matches(profile_id, generation) {
+                if !self.pending_connection_matches(profile_id, generation) {
                     return Vec::new();
                 }
                 let Some(profile) = self
@@ -336,7 +341,15 @@ impl App {
                 else {
                     return Vec::new();
                 };
-                self.connection.status = ConnectionStatus::Failed;
+                self.connection_terminal_generation =
+                    self.connection_terminal_generation.max(generation);
+                self.connection.pending_profile_id = None;
+                self.connection.pending_generation = None;
+                self.connection.status = if self.connection.profile_id.is_some() {
+                    ConnectionStatus::Connected
+                } else {
+                    ConnectionStatus::Failed
+                };
                 self.connection.error = Some(message.clone());
                 if let Some(manager) = self.profile_manager.as_mut()
                     && manager
@@ -355,11 +368,33 @@ impl App {
                 self.overlay = Some(Overlay::ProfileManager);
                 Vec::new()
             }
-            Action::DisconnectCompleted { profile_id } => {
-                if self.connection.profile_id == Some(profile_id) {
-                    self.connection = ConnectionState::default();
+            Action::DisconnectCompleted { connection } => {
+                let pending_matches = self.connection.pending_identity() == Some(connection);
+                let active_matches = self.connection.active_identity() == Some(connection);
+                if !pending_matches && !active_matches {
+                    return Vec::new();
+                }
+                self.connection_terminal_generation = self
+                    .connection_terminal_generation
+                    .max(connection.generation);
+                if pending_matches {
+                    self.connection.pending_profile_id = None;
+                    self.connection.pending_generation = None;
+                }
+                if active_matches {
+                    self.connection.profile_id = None;
+                    self.connection.generation = 0;
+                    self.connection.server = None;
+                    self.connection.error = None;
                     self.explorer = ExplorerState::default();
                 }
+                self.connection.status = if self.connection.pending_profile_id.is_some() {
+                    ConnectionStatus::Connecting
+                } else if self.connection.profile_id.is_some() {
+                    ConnectionStatus::Connected
+                } else {
+                    ConnectionStatus::Disconnected
+                };
                 Vec::new()
             }
             Action::ReplaceEditor(text) => {
@@ -444,14 +479,12 @@ impl App {
                 }]
             }
             Action::RefreshCatalog => {
-                let (Some(profile_id), ConnectionStatus::Connected) =
-                    (self.connection.profile_id, self.connection.status)
-                else {
+                let Some(connection) = self.database_command_identity() else {
                     return Vec::new();
                 };
                 vec![Command::LoadCatalog {
-                    profile_id,
-                    generation: self.connection.generation,
+                    profile_id: connection.profile_id,
+                    generation: connection.generation,
                 }]
             }
             Action::PreviewSelected => self.preview_selected(),
@@ -462,13 +495,34 @@ impl App {
                 generation,
                 server,
             } => {
-                if !self.connection_matches(profile_id, generation) {
+                let active_generation = self
+                    .connection
+                    .profile_id
+                    .map(|_| self.connection.generation)
+                    .unwrap_or(0);
+                if generation <= self.connection_terminal_generation.max(active_generation) {
                     return Vec::new();
                 }
-                self.connection.status = ConnectionStatus::Connected;
+                let pending_matches = self.pending_connection_matches(profile_id, generation);
+                self.connection_terminal_generation = generation;
+                self.connection.profile_id = Some(profile_id);
+                self.connection.generation = generation;
+                self.connection_request_generation =
+                    self.connection_request_generation.max(generation);
+                if pending_matches {
+                    self.connection.pending_profile_id = None;
+                    self.connection.pending_generation = None;
+                }
+                self.connection.status = if self.connection.pending_profile_id.is_some() {
+                    ConnectionStatus::Connecting
+                } else {
+                    ConnectionStatus::Connected
+                };
                 self.connection.server = Some(server);
                 self.connection.error = None;
-                if let Some(manager) = self.profile_manager.as_mut()
+                self.explorer = ExplorerState::default();
+                if pending_matches
+                    && let Some(manager) = self.profile_manager.as_mut()
                     && manager.operation == Some(ProfileOperation::Connecting)
                 {
                     manager.operation = None;
@@ -484,8 +538,16 @@ impl App {
                 generation,
                 message,
             } => {
-                if self.connection_matches(profile_id, generation) {
-                    self.connection.status = ConnectionStatus::Failed;
+                if self.pending_connection_matches(profile_id, generation) {
+                    self.connection_terminal_generation =
+                        self.connection_terminal_generation.max(generation);
+                    self.connection.pending_profile_id = None;
+                    self.connection.pending_generation = None;
+                    self.connection.status = if self.connection.profile_id.is_some() {
+                        ConnectionStatus::Connected
+                    } else {
+                        ConnectionStatus::Failed
+                    };
                     self.connection.error = Some(message.clone());
                     if let Some(manager) = self.profile_manager.as_mut()
                         && manager.operation == Some(ProfileOperation::Connecting)
@@ -501,7 +563,7 @@ impl App {
                 generation,
                 nodes,
             } => {
-                if self.connection_matches(profile_id, generation) {
+                if self.active_connection_matches(profile_id, generation) {
                     self.explorer.set_nodes(nodes);
                 }
                 Vec::new()
@@ -511,7 +573,7 @@ impl App {
                 generation,
                 message,
             } => {
-                if self.connection_matches(profile_id, generation) {
+                if self.active_connection_matches(profile_id, generation) {
                     self.connection.error = Some(message);
                 }
                 Vec::new()
@@ -738,6 +800,7 @@ impl App {
         };
         if self.connection.profile_id == Some(profile_id)
             && self.connection.status == ConnectionStatus::Connected
+            && self.connection.pending_profile_id.is_none()
         {
             if let Some(manager) = self.idle_profile_manager_mut(ProfileManagerPage::List) {
                 manager.message = Some("Profile is already connected".into());
@@ -799,9 +862,13 @@ impl App {
             .as_ref()
             .and_then(|manager| manager.draft.as_ref())
             .map(|draft| draft.profile_id());
-        if connect && target_profile_id != self.connection.profile_id && self.has_running_query() {
+        let requires_idle_connection = target_profile_id
+            .is_some_and(|profile_id| connect || self.connection.profile_id == Some(profile_id));
+        if requires_idle_connection && self.has_running_query() {
             if let Some(manager) = self.editable_profile_manager_mut() {
-                manager.message = Some("Cancel the running query before switching profiles".into());
+                manager.message = Some(
+                    "Cancel the running query before saving or connecting this profile".into(),
+                );
             }
             return Vec::new();
         }
@@ -878,15 +945,16 @@ impl App {
         }
 
         if !connect {
-            return if self.connection.profile_id == Some(profile_id)
-                && self.connection.status == ConnectionStatus::Connecting
-            {
-                vec![Command::Disconnect { profile_id }]
-            } else {
-                Vec::new()
-            };
+            if self.connection.profile_id == Some(profile_id) && self.has_running_query() {
+                if let Some(manager) = self.profile_manager.as_mut() {
+                    manager.message =
+                        Some("Profile saved; cancel the running query before reconnecting".into());
+                }
+                return Vec::new();
+            }
+            return self.retire_profile_connections(profile_id, None);
         }
-        if self.connection.profile_id != Some(profile_id) && self.has_running_query() {
+        if self.has_running_query() {
             if let Some(manager) = self.profile_manager.as_mut() {
                 manager.message =
                     Some("Profile saved; cancel the running query before connecting".into());
@@ -906,7 +974,7 @@ impl App {
         &mut self,
         request_id: u64,
         profile_id: Uuid,
-        was_active: bool,
+        active_connection: Option<ConnectionIdentity>,
     ) -> Vec<Command> {
         if !self.profile_operation_matches(request_id, &[ProfileOperation::Deleting]) {
             return Vec::new();
@@ -919,11 +987,7 @@ impl App {
             manager.operation = None;
             manager.message = Some("Profile deleted".into());
         }
-        if was_active || self.connection.profile_id == Some(profile_id) {
-            vec![Command::Disconnect { profile_id }]
-        } else {
-            Vec::new()
-        }
+        self.retire_profile_connections(profile_id, active_connection)
     }
 
     fn profile_operation_matches(&self, request_id: u64, operations: &[ProfileOperation]) -> bool {
@@ -949,20 +1013,111 @@ impl App {
     }
 
     fn request_connection(&mut self, profile_id: Uuid) -> Vec<Command> {
-        if !self.profiles.iter().any(|profile| profile.id == profile_id)
-            || (self.connection.profile_id != Some(profile_id) && self.has_running_query())
+        if !self.profiles.iter().any(|profile| profile.id == profile_id) || self.has_running_query()
         {
             return Vec::new();
         }
-        self.connection.generation += 1;
-        self.connection.profile_id = Some(profile_id);
+        let latest_generation = self
+            .connection_request_generation
+            .max(self.connection_terminal_generation)
+            .max(self.connection.generation)
+            .max(self.connection.pending_generation.unwrap_or(0));
+        let Some(generation) = latest_generation.checked_add(1) else {
+            self.connection.error =
+                Some("Connection generation exhausted; restart LazyDB to reconnect".into());
+            return Vec::new();
+        };
+        self.connection_request_generation = generation;
+        self.connection.pending_profile_id = Some(profile_id);
+        self.connection.pending_generation = Some(generation);
         self.connection.status = ConnectionStatus::Connecting;
-        self.connection.server = None;
         self.connection.error = None;
         vec![Command::Connect {
             profile_id,
-            generation: self.connection.generation,
+            generation,
         }]
+    }
+
+    fn retire_profile_connections(
+        &mut self,
+        profile_id: Uuid,
+        runtime_active: Option<ConnectionIdentity>,
+    ) -> Vec<Command> {
+        let active = self
+            .connection
+            .active_identity()
+            .filter(|connection| connection.profile_id == profile_id);
+        let pending = self
+            .connection
+            .pending_identity()
+            .filter(|connection| connection.profile_id == profile_id);
+        let mut identities = Vec::new();
+        if let Some(connection) = active {
+            identities.push(connection);
+            self.connection.profile_id = None;
+            self.connection.generation = 0;
+            self.connection.server = None;
+            self.explorer = ExplorerState::default();
+        }
+        if let Some(connection) = pending {
+            identities.push(connection);
+            self.connection.pending_profile_id = None;
+            self.connection.pending_generation = None;
+        }
+        if let Some(connection) =
+            runtime_active.filter(|connection| connection.profile_id == profile_id)
+            && !identities.contains(&connection)
+        {
+            identities.push(connection);
+        }
+        if let Some(generation) = identities
+            .iter()
+            .map(|connection| connection.generation)
+            .max()
+        {
+            self.connection_terminal_generation =
+                self.connection_terminal_generation.max(generation);
+            self.connection.error = None;
+            self.connection.status = if self.connection.pending_profile_id.is_some() {
+                ConnectionStatus::Connecting
+            } else if self.connection.profile_id.is_some() {
+                ConnectionStatus::Connected
+            } else {
+                ConnectionStatus::Disconnected
+            };
+        }
+        identities
+            .into_iter()
+            .map(|connection| Command::Disconnect { connection })
+            .collect()
+    }
+
+    fn database_command_identity(&self) -> Option<ConnectionIdentity> {
+        if self.connection.status != ConnectionStatus::Connected
+            || self.connection.pending_profile_id.is_some()
+            || self.profile_operation_blocks_database_commands()
+        {
+            return None;
+        }
+        self.connection.active_identity()
+    }
+
+    fn profile_operation_blocks_database_commands(&self) -> bool {
+        let Some(manager) = self.profile_manager.as_ref() else {
+            return false;
+        };
+        match manager.operation {
+            Some(ProfileOperation::SavingAndConnecting) => true,
+            Some(ProfileOperation::Saving) => manager
+                .draft
+                .as_ref()
+                .is_some_and(|draft| Some(draft.profile_id()) == self.connection.profile_id),
+            Some(ProfileOperation::Deleting) => self
+                .profiles
+                .get(manager.selected)
+                .is_some_and(|profile| Some(profile.id) == self.connection.profile_id),
+            _ => false,
+        }
     }
 
     fn has_running_query(&self) -> bool {
@@ -972,6 +1127,9 @@ impl App {
     }
 
     fn run_active_sql(&mut self) -> Vec<Command> {
+        let Some(connection) = self.database_command_identity() else {
+            return Vec::new();
+        };
         let tab = self.active_console_mut();
         let sql = tab.editor.text();
         if sql.trim().is_empty() || tab.query_status == QueryStatus::Running {
@@ -984,6 +1142,7 @@ impl App {
             message: "Executing SQL".to_owned(),
         });
         vec![Command::RunQuery {
+            connection,
             tab_id: tab.id,
             generation: tab.generation,
             sql,
@@ -991,6 +1150,9 @@ impl App {
     }
 
     fn preview_selected(&mut self) -> Vec<Command> {
+        let Some(connection) = self.database_command_identity() else {
+            return Vec::new();
+        };
         let Some(node) = self.explorer.selected_node().cloned() else {
             return Vec::new();
         };
@@ -1021,6 +1183,7 @@ impl App {
         self.active_tab = self.tabs.len() - 1;
         self.focus = Focus::Results;
         vec![Command::PreviewTable {
+            connection,
             tab_id,
             generation,
             schema,
@@ -1029,6 +1192,9 @@ impl App {
     }
 
     fn ddl_selected(&mut self) -> Vec<Command> {
+        let Some(connection) = self.database_command_identity() else {
+            return Vec::new();
+        };
         let Some(node) = self.explorer.selected_node().cloned() else {
             return Vec::new();
         };
@@ -1058,6 +1224,7 @@ impl App {
         self.active_tab = self.tabs.len() - 1;
         self.focus = Focus::Editor;
         vec![Command::LoadDdl {
+            connection,
             tab_id,
             generation,
             kind: node.kind,
@@ -1066,8 +1233,13 @@ impl App {
         }]
     }
 
-    fn connection_matches(&self, profile_id: Uuid, generation: u64) -> bool {
+    fn active_connection_matches(&self, profile_id: Uuid, generation: u64) -> bool {
         self.connection.profile_id == Some(profile_id) && self.connection.generation == generation
+    }
+
+    fn pending_connection_matches(&self, profile_id: Uuid, generation: u64) -> bool {
+        self.connection.pending_profile_id == Some(profile_id)
+            && self.connection.pending_generation == Some(generation)
     }
 }
 
@@ -1093,9 +1265,10 @@ mod tests {
     use crate::{
         action::{Action, Command},
         db::query::{QueryOutcome, QueryStats, ResultSet},
-        model::workspace::{Focus, Overlay, QueryStatus},
+        model::workspace::{ConnectionStatus, Focus, Overlay, QueryStatus},
         profile::import_connection_url,
     };
+    use uuid::Uuid;
 
     use super::App;
 
@@ -1176,6 +1349,9 @@ mod tests {
     #[test]
     fn stale_query_results_cannot_replace_newer_runs() {
         let mut app = App::new(Vec::new());
+        app.connection.profile_id = Some(Uuid::new_v4());
+        app.connection.generation = 1;
+        app.connection.status = ConnectionStatus::Connected;
         app.update(Action::ReplaceEditor("SELECT 1".into()));
         let commands = app.update(Action::RunActiveSql);
         let (tab_id, generation) = match &commands[0] {
