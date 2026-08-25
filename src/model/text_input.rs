@@ -1,0 +1,93 @@
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct TextInput {
+    value: String,
+    cursor: usize,
+}
+
+impl TextInput {
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    pub fn set(&mut self, value: impl Into<String>) {
+        self.value = value.into();
+        self.cursor = self.value.chars().count();
+    }
+
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    pub fn insert(&mut self, character: char) {
+        let byte_index = self.byte_index(self.cursor);
+        self.value.insert(byte_index, character);
+        self.cursor += 1;
+    }
+
+    pub fn paste(&mut self, text: impl AsRef<str>) {
+        let text = text.as_ref();
+        let byte_index = self.byte_index(self.cursor);
+        self.value.insert_str(byte_index, text);
+        self.cursor += text.chars().count();
+    }
+
+    pub fn backspace(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+
+        let start = self.byte_index(self.cursor - 1);
+        let end = self.byte_index(self.cursor);
+        self.value.replace_range(start..end, "");
+        self.cursor -= 1;
+    }
+
+    pub fn delete(&mut self) {
+        let start = self.byte_index(self.cursor);
+        if start == self.value.len() {
+            return;
+        }
+
+        let end = self.byte_index(self.cursor + 1);
+        self.value.replace_range(start..end, "");
+    }
+
+    pub fn move_left(&mut self) {
+        self.cursor = self.cursor.saturating_sub(1);
+    }
+
+    pub fn move_right(&mut self) {
+        self.cursor = (self.cursor + 1).min(self.value.chars().count());
+    }
+
+    pub fn move_home(&mut self) {
+        self.cursor = 0;
+    }
+
+    pub fn move_end(&mut self) {
+        self.cursor = self.value.chars().count();
+    }
+
+    fn byte_index(&self, character_index: usize) -> usize {
+        self.value
+            .char_indices()
+            .nth(character_index)
+            .map_or(self.value.len(), |(byte_index, _)| byte_index)
+    }
+}
+
+impl From<&str> for TextInput {
+    fn from(value: &str) -> Self {
+        let mut input = Self::default();
+        input.set(value);
+        input
+    }
+}
+
+impl From<String> for TextInput {
+    fn from(value: String) -> Self {
+        let mut input = Self::default();
+        input.set(value);
+        input
+    }
+}
