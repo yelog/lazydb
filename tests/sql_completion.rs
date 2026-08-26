@@ -1,6 +1,9 @@
 use lazydb::{
     db::catalog::{CatalogId, CatalogKind, CatalogNode},
-    sql::{CompletionIndex, CompletionKind, SqlDialect, complete, quote_identifier},
+    sql::{
+        CompletionIndex, CompletionKind, SqlDialect, complete, quote_identifier,
+        should_offer_completion,
+    },
 };
 use uuid::Uuid;
 
@@ -104,4 +107,25 @@ fn general_sql_keywords_rank_before_matching_catalog_names() {
             Some(CompletionKind::Keyword)
         );
     }
+}
+
+#[test]
+fn automatic_completion_stops_at_delimiters_and_closed_quotes() {
+    for text in [
+        "tools.\"sys_config\"",
+        "tools.`sys_config`",
+        "SELECT * FROM tools;",
+        "tools.sys ",
+        "tools.sys)",
+    ] {
+        assert!(!should_offer_completion(text, text.len()), "{text:?}");
+    }
+    assert!(should_offer_completion("tools.sys", "tools.sys".len()));
+    assert!(should_offer_completion("tools.", "tools.".len()));
+}
+
+#[test]
+fn accepted_quoted_identifier_does_not_reopen_automatic_completion() {
+    let text = "SELECT * FROM tools.\"sys_config\"";
+    assert!(!should_offer_completion(text, text.len()));
 }

@@ -109,6 +109,37 @@ fn insert_mode_preserves_printable_characters() {
 }
 
 #[test]
+fn normal_mode_global_keys_win_over_editor_and_completion() {
+    for popup in [false, true] {
+        let mut keymap = Keymap::default();
+        let mut app = App::new(Vec::new());
+        app.update(Action::EditorKey(key(KeyCode::Esc)));
+        if popup {
+            app.active_console_mut().completion = Some(CompletionPopup::default());
+        }
+
+        assert_eq!(
+            keymap.map(key(KeyCode::Char('?')), &app),
+            Some(Action::ShowHelp)
+        );
+        assert_eq!(keymap.map(key(KeyCode::Tab), &app), Some(Action::FocusNext));
+        assert_eq!(
+            keymap.map(key(KeyCode::BackTab), &app),
+            Some(Action::FocusPrevious)
+        );
+    }
+}
+
+#[test]
+fn insert_escape_bypasses_completion_dismiss() {
+    let mut keymap = Keymap::default();
+    let mut app = App::new(Vec::new());
+    app.active_console_mut().completion = Some(CompletionPopup::default());
+    let escape = key(KeyCode::Esc);
+    assert_eq!(keymap.map(escape, &app), Some(Action::EditorKey(escape)));
+}
+
+#[test]
 fn printable_input_passes_through_an_open_completion_popup() {
     let mut keymap = Keymap::default();
     let mut app = App::new(Vec::new());

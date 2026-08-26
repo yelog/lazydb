@@ -2122,12 +2122,24 @@ impl App {
         for effect in effects {
             let action = match effect {
                 EditorEffect::Changed { .. } => {
-                    if self
-                        .active_editor_text()
-                        .is_ok_and(|text| text.ends_with('.'))
-                    {
+                    let cursor_state = self
+                        .active_editor_render_snapshot(EditorViewport {
+                            width: 0,
+                            height: 0,
+                        })
+                        .ok()
+                        .zip(self.active_editor_text().ok());
+                    let eligible = cursor_state.as_ref().is_some_and(|(snapshot, text)| {
+                        let cursor =
+                            cursor_byte(text, snapshot.cursor.line, snapshot.cursor.column);
+                        sql::should_offer_completion(text, cursor)
+                    });
+                    let immediate = cursor_state
+                        .as_ref()
+                        .is_some_and(|(_, text)| text.ends_with('.'));
+                    if immediate {
                         self.complete_now();
-                    } else if let Some(key) = self.completion_key() {
+                    } else if eligible && let Some(key) = self.completion_key() {
                         commands.push(Command::ScheduleCompletion(key));
                     }
                     continue;

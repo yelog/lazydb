@@ -111,6 +111,20 @@ impl Keymap {
                 _ => None,
             };
         }
+        if app.focus == Focus::Editor && app.active_editor_mode() == EditorMode::Normal {
+            match event.code {
+                KeyCode::Char('?') => return Some(Action::ShowHelp),
+                KeyCode::Tab => return Some(Action::FocusNext),
+                KeyCode::BackTab => return Some(Action::FocusPrevious),
+                _ => {}
+            }
+        }
+        if app.focus == Focus::Editor
+            && app.active_editor_mode() == EditorMode::Insert
+            && event.code == KeyCode::Esc
+        {
+            return Some(Action::EditorKey(event));
+        }
         if app.overlay.is_some() {
             self.pending = None;
             return match event.code {

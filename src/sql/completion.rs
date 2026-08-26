@@ -197,6 +197,17 @@ pub fn complete(
     candidates
 }
 
+pub fn should_offer_completion(text: &str, cursor: usize) -> bool {
+    let cursor = cursor.min(text.len());
+    let Some(previous) = cursor
+        .checked_sub(1)
+        .and_then(|index| text.as_bytes().get(index))
+    else {
+        return false;
+    };
+    *previous == b'.' || previous.is_ascii_alphanumeric() || *previous == b'_' || *previous >= 0x80
+}
+
 fn candidate_indices(
     index: &CompletionIndex,
     parent: Option<&CatalogId>,

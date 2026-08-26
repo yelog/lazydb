@@ -30,6 +30,23 @@ fn typing_dismisses_stale_completion_and_updates_the_editor() {
     assert!(app.active_console().completion.is_none());
 }
 
+#[test]
+fn insert_escape_closes_completion_and_exits_insert_mode() {
+    let mut app = App::new(Vec::new());
+    let original = app.active_editor_text().unwrap();
+    app.active_console_mut().completion = Some(CompletionPopup::default());
+    app.update(Action::EditorKey(KeyEvent::new(
+        KeyCode::Esc,
+        KeyModifiers::NONE,
+    )));
+    assert!(app.active_console().completion.is_none());
+    assert_eq!(
+        app.active_editor_mode(),
+        lazydb::model::editor::EditorMode::Normal
+    );
+    assert_eq!(app.active_editor_text().unwrap(), original);
+}
+
 fn editor_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
     app.update(Action::EditorKey(KeyEvent::new(code, modifiers)));
 }
