@@ -258,6 +258,20 @@ impl Runtime {
         }
     }
 
+    fn retire_manual_transaction(
+        &mut self,
+        tab_id: Uuid,
+        connection: ConnectionIdentity,
+        transaction_generation: u64,
+    ) {
+        let matches = self.manual_transactions.get(&tab_id).is_some_and(|entry| {
+            entry.connection == connection && entry.transaction_generation == transaction_generation
+        });
+        if matches {
+            self.manual_transactions.remove(&tab_id);
+        }
+    }
+
     fn test_profile(&mut self, request_id: u64, submission: ProfileSubmission) {
         let registry = Arc::clone(&self.registry);
         let secret_store = Arc::clone(&self.secret_store);
@@ -859,8 +873,39 @@ impl Runtime {
                 }
             };
             let crate::runtime::transaction::TransactionWorkerHandle {
-                requests, worker, ..
+                requests,
+                worker,
+                forced_close: _forced_close,
+                readiness,
+                ..
             } = worker;
+            match readiness.await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    let _ = sender.send(Action::ManualStartFailed {
+                        tab_id,
+                        query_generation,
+                        transaction_generation,
+                        connection,
+                        message: error.to_string(),
+                    });
+                    return worker
+                        .await
+                        .unwrap_or(crate::db::transaction::WorkerDisposition::Quarantine);
+                }
+                Err(_) => {
+                    let _ = sender.send(Action::ManualStartFailed {
+                        tab_id,
+                        query_generation,
+                        transaction_generation,
+                        connection,
+                        message: "Transaction worker readiness was lost".to_owned(),
+                    });
+                    return worker
+                        .await
+                        .unwrap_or(crate::db::transaction::WorkerDisposition::Quarantine);
+                }
+            }
             let _ = sender.send(Action::ManualStarted {
                 tab_id,
                 query_generation,
@@ -1512,6 +1557,27 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
 }
 
 fn apply_action(app: &mut App, runtime: &mut Runtime, action: Action) {
+    match &action {
+        Action::ManualCommitted {
+            tab_id,
+            transaction_generation,
+            connection,
+            ..
+        }
+        | Action::ManualRolledBack {
+            tab_id,
+            transaction_generation,
+            connection,
+            ..
+        }
+        | Action::ManualImplicitlyEnded {
+            tab_id,
+            transaction_generation,
+            connection,
+            ..
+        } => runtime.retire_manual_transaction(*tab_id, *connection, *transaction_generation),
+        _ => {}
+    }
     for command in app.update(action) {
         runtime.dispatch(command);
     }
