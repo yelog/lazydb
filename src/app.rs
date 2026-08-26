@@ -1986,6 +1986,18 @@ impl App {
                     },
                 ),
                 EditorEffect::ClearTransactionOutcome => Action::ClearTransactionOutcome,
+                EditorEffect::SetConnectionTarget(name) => {
+                    commands.extend(self.set_connection_target(&name));
+                    continue;
+                }
+                EditorEffect::SetDatabaseTarget(database) => {
+                    commands.extend(self.set_database_target(&database));
+                    continue;
+                }
+                EditorEffect::SetSchemaTarget(schema) => {
+                    commands.extend(self.set_schema_target(&schema));
+                    continue;
+                }
                 EditorEffect::SetTransactionModeRequested { manual } => {
                     Action::SetTransactionMode(if manual {
                         TransactionMode::Manual
@@ -2025,6 +2037,74 @@ impl App {
             connection: self.connection.active_identity()?,
             catalog_generation: self.explorer.catalog_generation,
         })
+    }
+
+    fn set_connection_target(&mut self, name: &str) -> Vec<Command> {
+        let Some(profile) = self
+            .profiles
+            .iter()
+            .find(|profile| profile.name == name)
+            .cloned()
+        else {
+            self.status_message(&format!("Connection profile not found: {name}"));
+            return Vec::new();
+        };
+        if self.transaction_needs_exit(self.active_console().id) {
+            self.status_message(
+                "Rollback or commit the active transaction before changing connection",
+            );
+            return Vec::new();
+        }
+        let target = crate::model::execution_target::ExecutionTarget::from_profile(&profile);
+        self.active_console_mut().execution_target = Some(target);
+        self.request_connection(profile.id)
+    }
+
+    fn set_database_target(&mut self, database: &str) -> Vec<Command> {
+        if database.is_empty() {
+            self.status_message("Database target cannot be empty");
+            return Vec::new();
+        }
+        if self.transaction_needs_exit(self.active_console().id) {
+            self.status_message(
+                "Rollback or commit the active transaction before changing database",
+            );
+            return Vec::new();
+        }
+        let target = self
+            .active_console_mut()
+            .execution_target
+            .get_or_insert_with(|| crate::model::execution_target::ExecutionTarget {
+                profile_id: Uuid::nil(),
+                database: String::new(),
+                schema: None,
+            });
+        target.database = database.to_owned();
+        target.schema = None;
+        self.status_message("Execution database target changed; reconnect before executing");
+        Vec::new()
+    }
+
+    fn set_schema_target(&mut self, schema: &str) -> Vec<Command> {
+        if schema.is_empty() {
+            self.status_message("Schema target cannot be empty");
+            return Vec::new();
+        }
+        if self.transaction_needs_exit(self.active_console().id) {
+            self.status_message("Rollback or commit the active transaction before changing schema");
+            return Vec::new();
+        }
+        let target = self
+            .active_console_mut()
+            .execution_target
+            .get_or_insert_with(|| crate::model::execution_target::ExecutionTarget {
+                profile_id: Uuid::nil(),
+                database: String::new(),
+                schema: None,
+            });
+        target.schema = Some(schema.to_owned());
+        self.status_message("Execution schema target changed; reconnect before executing");
+        Vec::new()
     }
 
     fn complete_now(&mut self) -> Vec<Command> {

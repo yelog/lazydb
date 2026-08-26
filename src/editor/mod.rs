@@ -53,6 +53,9 @@ pub(crate) enum EditorEffect {
     Commit,
     Rollback,
     ClearTransactionOutcome,
+    SetConnectionTarget(String),
+    SetDatabaseTarget(String),
+    SetSchemaTarget(String),
     Quit,
     Message(String),
     BackwardSearch,
@@ -1469,7 +1472,17 @@ impl EditorWorkspace {
 }
 
 fn parse_command(command: &str) -> Option<EditorEffect> {
-    match command.trim() {
+    let command = command.trim();
+    if let Some(value) = command.strip_prefix("connection ") {
+        return Some(EditorEffect::SetConnectionTarget(value.trim().to_owned()));
+    }
+    if let Some(value) = command.strip_prefix("database ") {
+        return Some(EditorEffect::SetDatabaseTarget(value.trim().to_owned()));
+    }
+    if let Some(value) = command.strip_prefix("schema ") {
+        return Some(EditorEffect::SetSchemaTarget(value.trim().to_owned()));
+    }
+    match command {
         "run" => Some(EditorEffect::RunCurrent),
         "runall" => Some(EditorEffect::RunAll),
         "format" => Some(EditorEffect::FormatCurrent),
