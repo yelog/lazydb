@@ -286,6 +286,23 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, sta
         || "not connected".to_owned(),
         |server| header_text(&server.database),
     );
+    let target = app
+        .active_console()
+        .execution_target
+        .as_ref()
+        .map(|target| {
+            format!(
+                "{} {}{}",
+                target.profile_id,
+                target.database,
+                target
+                    .schema
+                    .as_deref()
+                    .map(|schema| format!(".{schema}"))
+                    .unwrap_or_default()
+            )
+        })
+        .unwrap_or_else(|| "TARGET MISSING".to_owned());
     let profile_width = profile.as_str().cell_width();
     let connection = match app.connection.status {
         ConnectionStatus::Disconnected => ("OFFLINE", theme.muted),
@@ -340,6 +357,10 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, sta
             ),
             Span::styled("  /  ", Style::new().fg(theme.border).bg(theme.surface)),
             Span::styled(database, Style::new().fg(theme.action).bg(theme.surface)),
+            Span::styled(
+                format!("  /  {target}"),
+                Style::new().fg(theme.text).bg(theme.surface),
+            ),
         ]),
         Line::from(vec![
             Span::styled(

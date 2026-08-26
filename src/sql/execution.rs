@@ -4,6 +4,7 @@ use uuid::Uuid;
 
 use crate::{
     model::{
+        execution_target::ExecutionTarget,
         transaction::{TransactionMode, TransactionState},
         workspace::ConnectionIdentity,
     },
@@ -15,6 +16,7 @@ pub struct ExecutionDraft {
     pub console_id: Uuid,
     pub query_generation: u64,
     pub connection: ConnectionIdentity,
+    pub target: ExecutionTarget,
     pub transaction_generation: u64,
     pub document_revision: u64,
     pub scope: ScopeKind,
@@ -32,6 +34,7 @@ impl ExecutionDraft {
         console_id: Uuid,
         query_generation: u64,
         connection: ConnectionIdentity,
+        target: ExecutionTarget,
         transaction_generation: u64,
         document_revision: u64,
         scope: ScopeKind,
@@ -46,6 +49,7 @@ impl ExecutionDraft {
             console_id,
             query_generation,
             connection,
+            target,
             transaction_generation,
             document_revision,
             scope,

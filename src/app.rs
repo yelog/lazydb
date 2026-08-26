@@ -58,7 +58,7 @@ impl App {
         let tab_id = tab.id;
         let mut editor = EditorWorkspace::new();
         editor.open_console(tab_id, "");
-        Self {
+        let mut app = Self {
             profiles,
             connection: ConnectionState::default(),
             explorer: ExplorerState::default(),
@@ -75,7 +75,9 @@ impl App {
             confirmation_policy,
             deferred: DeferredIntentQueue::default(),
             resolving_deferred: None,
-        }
+        };
+        app.assign_default_target(tab_id);
+        app
     }
 
     pub fn set_confirmation_policy(&mut self, policy: ConfirmationPolicy) {
@@ -132,6 +134,16 @@ impl App {
             .find(|profile| profile.id == profile_id)
     }
 
+    fn assign_default_target(&mut self, tab_id: Uuid) {
+        let target = self
+            .profiles
+            .first()
+            .map(crate::model::execution_target::ExecutionTarget::from_profile);
+        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+            tab.execution_target = target;
+        }
+    }
+
     pub fn update(&mut self, action: Action) -> Vec<Command> {
         match action {
             Action::NewConsole => {
@@ -141,6 +153,7 @@ impl App {
                 let id = tab.id;
                 self.tabs.push(tab);
                 self.editor.open_console(id, "");
+                self.assign_default_target(id);
                 self.active_tab = self.tabs.len() - 1;
                 self.focus = Focus::Editor;
                 vec![Command::PersistWorkspace]
@@ -2204,6 +2217,13 @@ impl App {
             tab_id,
             tab.generation,
             connection,
+            tab.execution_target.clone().unwrap_or_else(|| {
+                crate::model::execution_target::ExecutionTarget {
+                    profile_id: connection.profile_id,
+                    database: String::new(),
+                    schema: None,
+                }
+            }),
             tab.transaction_generation,
             self.active_editor_revision(),
             scope.kind,
@@ -2351,6 +2371,22 @@ impl App {
         }
         if self.connection.active_identity() != Some(draft.connection) {
             return Err("Execution draft is stale: connection changed".to_owned());
+        }
+        let Some(profile) = self
+            .profiles
+            .iter()
+            .find(|profile| profile.id == draft.target.profile_id)
+        else {
+            return Err("Execution target profile no longer exists".to_owned());
+        };
+        if draft.target.profile_id != draft.connection.profile_id {
+            return Err("Execution target profile does not match active connection".to_owned());
+        }
+        if !draft.target.is_valid(profile) {
+            return Err("Execution target database or schema is invalid".to_owned());
+        }
+        if tab.execution_target.as_ref() != Some(&draft.target) {
+            return Err("Execution draft is stale: execution target changed".to_owned());
         }
         if tab.transaction_generation != draft.transaction_generation
             || tab.transaction_mode != draft.transaction_mode
