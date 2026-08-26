@@ -78,7 +78,7 @@ struct ManualTransactionEntry {
     request_sender: tokio::sync::mpsc::UnboundedSender<crate::db::transaction::TransactionRequest>,
     worker_handle: JoinHandle<crate::db::transaction::WorkerDisposition>,
     cancellation_sender: Option<tokio::sync::oneshot::Sender<()>>,
-    forced_close_handle: ForcedCloseHandle,
+    forced_close_handle: Arc<StdMutex<Option<ForcedCloseHandle>>>,
 }
 
 pub struct Runtime {
@@ -891,6 +891,8 @@ impl Runtime {
             return;
         }
         let (proxy, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let forced_close_slot = Arc::new(StdMutex::new(None));
+        let worker_forced_close_slot = Arc::clone(&forced_close_slot);
         let database = Arc::clone(&self.connection);
         let sender = self.event_sender.clone();
         let worker_handle = tokio::spawn(async move {
@@ -920,7 +922,7 @@ impl Runtime {
             let crate::runtime::transaction::TransactionWorkerHandle {
                 requests,
                 worker,
-                forced_close: _forced_close,
+                forced_close,
                 readiness,
                 ..
             } = worker;
@@ -951,6 +953,9 @@ impl Runtime {
                         .unwrap_or(crate::db::transaction::WorkerDisposition::Quarantine);
                 }
             }
+            *worker_forced_close_slot
+                .lock()
+                .expect("forced-close slot mutex poisoned") = Some(forced_close);
             let _ = sender.send(Action::ManualStarted {
                 tab_id,
                 query_generation,
@@ -984,7 +989,7 @@ impl Runtime {
                 request_sender: proxy,
                 worker_handle,
                 cancellation_sender: None,
-                forced_close_handle: ForcedCloseHandle::new(),
+                forced_close_handle: forced_close_slot,
             },
         );
         if let Some((sql, cancel, reply)) = request
@@ -1112,17 +1117,23 @@ impl Runtime {
             let _ = entry
                 .request_sender
                 .send(crate::db::transaction::TransactionRequest::Shutdown);
-            let forced_close = entry.forced_close_handle.clone();
+            let forced_close = entry
+                .forced_close_handle
+                .lock()
+                .expect("forced-close slot mutex poisoned")
+                .clone();
             let mut worker = entry.worker_handle;
             if timeout(Duration::from_secs(2), &mut worker).await.is_err() {
                 worker.abort();
                 let _ = worker.await;
-                let _ = timeout(Duration::from_secs(2), async {
-                    while !forced_close.completed() {
-                        tokio::time::sleep(Duration::from_millis(10)).await;
-                    }
-                })
-                .await;
+                if let Some(forced_close) = forced_close {
+                    let _ = timeout(Duration::from_secs(2), async {
+                        while !forced_close.completed() {
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                    })
+                    .await;
+                }
             }
         }
         if let Some(connection) = self.connection.lock().await.take() {

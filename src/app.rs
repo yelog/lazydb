@@ -596,7 +596,10 @@ impl App {
                     return Vec::new();
                 }
                 if tab.transaction_mode == TransactionMode::Manual
-                    && tab.transaction_state == TransactionState::Active
+                    && matches!(
+                        tab.transaction_state,
+                        TransactionState::Starting | TransactionState::Active
+                    )
                 {
                     let intent = transaction::CancellationIntent {
                         console_id: tab.id,
