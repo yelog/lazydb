@@ -1496,6 +1496,9 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
 
             if redraw && !app.should_quit {
                 terminal.draw(|frame| ui::render_with_state(frame, &app, &mut ui_state))?;
+                if let Some(style) = ui_state.cursor_style {
+                    terminal.set_cursor_style(style)?;
+                }
                 sync_editor_viewport(&mut app, &mut runtime, &ui_state);
             }
         }

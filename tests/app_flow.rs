@@ -88,6 +88,33 @@ fn vim_operator_text_object_visual_and_undo_sequences_use_app_pipeline() {
     assert_eq!(app.active_editor_text().unwrap(), "X two three");
 }
 
+#[test]
+fn accepting_completion_places_cursor_after_inserted_text() {
+    let mut app = App::new(Vec::new());
+    for character in ['s', 'e', 'l'] {
+        editor_key(&mut app, KeyCode::Char(character), KeyModifiers::NONE);
+    }
+    app.update(Action::CompletionExplicit);
+    assert!(app.active_console().completion.is_some());
+
+    app.update(Action::CompletionAccept);
+    assert_eq!(app.active_editor_text().unwrap(), "SELECT");
+    let snapshot = app
+        .active_editor_render_snapshot(lazydb::model::editor::EditorViewport {
+            width: 80,
+            height: 5,
+        })
+        .unwrap();
+    assert_eq!(
+        snapshot.cursor,
+        lazydb::model::editor::EditorPosition { line: 0, column: 6 }
+    );
+
+    editor_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+    editor_key(&mut app, KeyCode::Char('u'), KeyModifiers::NONE);
+    assert_eq!(app.active_editor_text().unwrap(), "sel");
+}
+
 #[tokio::test]
 async fn connects_loads_catalog_and_executes_through_runtime() {
     let temp = TempDir::new().unwrap();

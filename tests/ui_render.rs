@@ -175,6 +175,26 @@ fn completion_popup_is_anchored_below_the_editor_cursor() {
 }
 
 #[test]
+fn cursor_style_follows_editor_mode() {
+    let mut app = fixture();
+    let (_, normal_state) = render_with_state(&app, 120, 36);
+    assert_eq!(
+        normal_state.cursor_style,
+        Some(lazydb::ui::CursorStyle::Block)
+    );
+
+    app.update(Action::EditorKey(KeyEvent::new(
+        KeyCode::Char('i'),
+        KeyModifiers::NONE,
+    )));
+    let (_, insert_state) = render_with_state(&app, 120, 36);
+    assert_eq!(
+        insert_state.cursor_style,
+        Some(lazydb::ui::CursorStyle::Bar)
+    );
+}
+
+#[test]
 fn standard_layout_shows_stable_workspace_regions() {
     let output = render(&fixture(), 120, 36);
 

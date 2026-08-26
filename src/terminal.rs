@@ -4,6 +4,7 @@ use std::{
 };
 
 use crossterm::{
+    cursor::SetCursorStyle,
     event::{
         DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
         EnableFocusChange, EnableMouseCapture,
@@ -60,6 +61,15 @@ impl TerminalSession {
     {
         self.terminal.draw(render).map(|_| ())
     }
+
+    pub fn set_cursor_style(&mut self, style: crate::ui::CursorStyle) -> io::Result<()> {
+        let style = match style {
+            crate::ui::CursorStyle::Block => SetCursorStyle::SteadyBlock,
+            crate::ui::CursorStyle::Bar => SetCursorStyle::SteadyBar,
+            crate::ui::CursorStyle::Underline => SetCursorStyle::SteadyUnderScore,
+        };
+        execute!(self.terminal.backend_mut(), style)
+    }
 }
 
 impl Drop for TerminalSession {
@@ -76,6 +86,10 @@ impl Drop for TerminalSession {
         );
         let _ = disable_raw_mode();
         let _ = self.terminal.show_cursor();
+        let _ = execute!(
+            self.terminal.backend_mut(),
+            SetCursorStyle::DefaultUserShape
+        );
     }
 }
 

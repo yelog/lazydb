@@ -69,12 +69,20 @@ pub struct HitRegion {
     pub target: HitTarget,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CursorStyle {
+    Block,
+    Bar,
+    Underline,
+}
+
 #[derive(Debug)]
 pub struct UiState {
     pub hit_regions: Vec<HitRegion>,
     pub effects: UiEffects,
     pub editor_viewport: Option<EditorViewport>,
     pub completion_popup: Option<Rect>,
+    pub cursor_style: Option<CursorStyle>,
     last_focus: Option<Focus>,
 }
 
@@ -91,6 +99,7 @@ impl UiState {
             effects: UiEffects::new(reduced_motion),
             editor_viewport: None,
             completion_popup: None,
+            cursor_style: None,
             last_focus: None,
         }
     }
@@ -117,6 +126,7 @@ pub fn render_with_state(frame: &mut Frame<'_>, app: &App, state: &mut UiState) 
     state.hit_regions.clear();
     state.editor_viewport = None;
     state.completion_popup = None;
+    state.cursor_style = None;
 
     if layout.mode == LayoutMode::TooSmall {
         render_too_small(frame, area, theme);
@@ -532,6 +542,18 @@ fn render_editor(
         EditorMode::VisualLine => "VISUAL LINE",
         EditorMode::VisualBlock => "VISUAL BLOCK",
     };
+    state.cursor_style = Some(if snapshot.prompt.is_some() {
+        CursorStyle::Bar
+    } else {
+        match snapshot.mode {
+            EditorMode::Insert => CursorStyle::Bar,
+            EditorMode::Replace => CursorStyle::Underline,
+            EditorMode::Normal
+            | EditorMode::VisualChar
+            | EditorMode::VisualLine
+            | EditorMode::VisualBlock => CursorStyle::Block,
+        }
+    });
     frame.render_widget(
         panel_block(
             &format!(" SQL EDITOR  {mode} "),
@@ -542,10 +564,10 @@ fn render_editor(
     );
     for (row, line) in snapshot.lines.iter().take(viewport.height).enumerate() {
         let y = inner.y.saturating_add(row as u16);
-        let selected = snapshot.selections.iter().any(|selection| {
-            line.line >= selection.start.line.min(selection.end.line)
-                && line.line <= selection.start.line.max(selection.end.line)
-        });
+        let selected = snapshot
+            .selection_cells
+            .iter()
+            .any(|(selected_line, _, _)| *selected_line == line.line);
         let line_style = Style::new().fg(theme.border).bg(if selected {
             theme.selection
         } else {
@@ -570,11 +592,7 @@ fn render_editor(
                 };
                 Span::styled(
                     span.text.clone(),
-                    Style::new().fg(foreground).bg(if selected {
-                        theme.selection
-                    } else {
-                        theme.surface
-                    }),
+                    Style::new().fg(foreground).bg(theme.surface),
                 )
             })
             .collect::<Vec<_>>();
@@ -593,6 +611,25 @@ fn render_editor(
                 1,
             ),
         );
+        for (_, start, end) in snapshot
+            .selection_cells
+            .iter()
+            .filter(|(selected_line, _, _)| *selected_line == line.line)
+        {
+            let left = start.saturating_sub(snapshot.horizontal_offset);
+            let right = end.saturating_sub(snapshot.horizontal_offset);
+            for cell in left..right.min(viewport.width) {
+                let x = inner
+                    .x
+                    .saturating_add(gutter as u16)
+                    .saturating_add(cell as u16);
+                if x < inner.right()
+                    && let Some(cell_ref) = frame.buffer_mut().cell_mut((x, y))
+                {
+                    cell_ref.set_style(Style::new().bg(theme.selection));
+                }
+            }
+        }
     }
 
     if app.overlay.is_none()

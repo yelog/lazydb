@@ -138,6 +138,13 @@ pub(crate) enum EditorKey {
     Tab,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReplacementCursor {
+    Start,
+    EndOfInsertion,
+    PreserveRelative,
+}
+
 struct EditorSession {
     buffer: modalkit::editing::store::SharedBuffer<LazyDbApplicationInfo>,
     group_id: modalkit::editing::buffer::CursorGroupId,
@@ -502,6 +509,63 @@ impl EditorWorkspace {
                     },
                 });
         let selections = selection.into_iter().collect::<Vec<_>>();
+        let selection_cells = selections
+            .iter()
+            .flat_map(|selection| {
+                let first_line = selection.start.line.min(selection.end.line);
+                let last_line = selection.start.line.max(selection.end.line);
+                (first_line..=last_line).filter_map(|line| {
+                    let line_data = lines.iter().find(|item| item.line == line)?;
+                    let (start, end) =
+                        match selection.shape {
+                            EditorSelectionShape::Line => (
+                                0,
+                                line_data
+                                    .source_to_display_cells
+                                    .last()
+                                    .copied()
+                                    .unwrap_or(0),
+                            ),
+                            EditorSelectionShape::Block => {
+                                let start = selection.start.column.min(selection.end.column);
+                                let end = selection
+                                    .start
+                                    .column
+                                    .max(selection.end.column)
+                                    .saturating_add(1);
+                                (
+                                    *line_data.source_to_display_cells.get(start).unwrap_or(&0),
+                                    *line_data.source_to_display_cells.get(end).unwrap_or_else(
+                                        || line_data.source_to_display_cells.last().unwrap_or(&0),
+                                    ),
+                                )
+                            }
+                            EditorSelectionShape::Char => {
+                                let start = if line == selection.start.line {
+                                    selection.start.column
+                                } else {
+                                    0
+                                };
+                                let end = if line == selection.end.line {
+                                    selection.end.column.saturating_add(1)
+                                } else {
+                                    line_data.source_to_display_cells.len().saturating_sub(1)
+                                };
+                                (
+                                    *line_data
+                                        .source_to_display_cells
+                                        .get(start.min(end))
+                                        .unwrap_or(&0),
+                                    *line_data.source_to_display_cells.get(end).unwrap_or_else(
+                                        || line_data.source_to_display_cells.last().unwrap_or(&0),
+                                    ),
+                                )
+                            }
+                        };
+                    (end > start).then_some((line, start, end))
+                })
+            })
+            .collect();
         let cursor_screen_cell = lines
             .iter()
             .position(|line| line.line == session.position.line)
@@ -527,6 +591,7 @@ impl EditorWorkspace {
             cursor: session.position,
             cursor_screen_cell,
             selections,
+            selection_cells,
             prompt: self.prompt.as_ref().map(|prompt| EditorPromptSnapshot {
                 kind: prompt.kind,
                 prefix: match prompt.kind {
@@ -616,6 +681,7 @@ impl EditorWorkspace {
         id: Uuid,
         range: TextRange,
         replacement: &str,
+        cursor: ReplacementCursor,
     ) -> Result<(), EditorError> {
         let old = self.text(id)?;
         if range.get(&old).is_none() {
@@ -631,7 +697,12 @@ impl EditorWorkspace {
             .ok_or(EditorError::MissingSession(id))?;
         session.previous_text = Some(old);
         session.redo_text = None;
-        session.position = byte_to_char_position(&next, range.start);
+        let cursor_offset = match cursor {
+            ReplacementCursor::Start => range.start,
+            ReplacementCursor::EndOfInsertion => range.start + replacement.len(),
+            ReplacementCursor::PreserveRelative => range.start + replacement.len(),
+        };
+        session.position = byte_to_char_position(&next, cursor_offset);
         session
             .buffer
             .write()
@@ -722,6 +793,8 @@ impl EditorWorkspace {
             }
             (EditorMode::Normal, EditorKey::Character('n')) => self.repeat_search(id, false),
             (EditorMode::Normal, EditorKey::Character('N')) => self.repeat_search(id, true),
+            (EditorMode::Normal, EditorKey::Character('u')) => self.undo(id),
+            (EditorMode::Normal, EditorKey::Control('r')) => self.redo(id),
             (EditorMode::Normal, EditorKey::Character('.')) => {
                 let sequence = self
                     .sessions
@@ -790,7 +863,7 @@ impl EditorWorkspace {
         if self.mode(id)? == EditorMode::Insert {
             self.press(id, EditorKey::Escape)?;
         }
-        self.press(id, EditorKey::Character('u'))
+        self.input_vim_key(id, EditorKey::Character('u'))
     }
 
     pub(crate) fn substitute_confirm(
@@ -852,7 +925,7 @@ impl EditorWorkspace {
             session.revision = session.revision.saturating_add(1);
             return Ok(());
         }
-        self.press(id, EditorKey::Control('r'))
+        self.input_vim_key(id, EditorKey::Control('r'))
     }
 
     pub(crate) fn set_mode(&mut self, id: Uuid, mode: EditorMode) -> Result<(), EditorError> {

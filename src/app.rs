@@ -2032,9 +2032,12 @@ impl App {
         let Some(candidate) = popup.candidates.get(popup.selected).cloned() else {
             return Vec::new();
         };
-        let _ = self
-            .editor
-            .replace_range(id, candidate.replace, &candidate.insert_text);
+        let _ = self.editor.replace_range(
+            id,
+            candidate.replace,
+            &candidate.insert_text,
+            crate::editor::ReplacementCursor::EndOfInsertion,
+        );
         self.apply_editor_effects()
     }
 
@@ -2082,7 +2085,12 @@ impl App {
         let ScopeSource::Contiguous(range) = scope.source else {
             return;
         };
-        if let Err(error) = self.editor.replace_range(id, range, &formatted) {
+        if let Err(error) = self.editor.replace_range(
+            id,
+            range,
+            &formatted,
+            crate::editor::ReplacementCursor::Start,
+        ) {
             self.overlay = Some(Overlay::Message {
                 title: "FORMAT".into(),
                 body: error.to_string(),
