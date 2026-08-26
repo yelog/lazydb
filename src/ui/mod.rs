@@ -623,7 +623,7 @@ fn render_editor(
                 .iter()
                 .find(|profile| profile.id == target.profile_id)
                 .map(|profile| {
-                    format!(
+                    let target = format!(
                         "[{}] {}{}",
                         profile.name,
                         target.database,
@@ -632,10 +632,21 @@ fn render_editor(
                             .as_deref()
                             .map(|schema| format!(".{schema}"))
                             .unwrap_or_default()
-                    )
+                    );
+                    if app.connection.active_identity().is_some() {
+                        target
+                    } else {
+                        format!("{target} OFFLINE")
+                    }
                 })
         })
-        .unwrap_or_else(|| "TARGET MISSING".to_owned());
+        .unwrap_or_else(|| {
+            if app.connection.active_identity().is_some() {
+                "TARGET REQUIRED".to_owned()
+            } else {
+                "OFFLINE / NO TARGET".to_owned()
+            }
+        });
     let transaction = match app
         .active_console_opt()
         .map(|tab| (tab.transaction_mode, tab.transaction_state))
@@ -1148,11 +1159,57 @@ fn render_overlay(
                 popup,
             );
         }
-        Overlay::TargetSelector { .. } => {
-            let popup = centered(area, 60, 7);
+        Overlay::TargetSelector {
+            candidates,
+            selected,
+        } => {
+            let height = (candidates.len() as u16).saturating_add(6).clamp(8, 24);
+            let popup = centered(area, 68, height);
             frame.render_widget(Clear, popup);
+            let current = app
+                .active_console_opt()
+                .and_then(|tab| tab.execution_target.as_ref());
+            let mut lines = vec![Line::from(Span::styled(
+                " EXECUTION TARGET ",
+                theme.title(true),
+            ))];
+            lines.extend(candidates.iter().enumerate().map(|(index, target)| {
+                let marker = if index == *selected { ">" } else { " " };
+                let current_marker = if current == Some(target) {
+                    " current"
+                } else {
+                    ""
+                };
+                let label = format!(
+                    "{marker} {}{}{}",
+                    target.database,
+                    target
+                        .schema
+                        .as_deref()
+                        .map(|schema| format!(".{schema}"))
+                        .unwrap_or_default(),
+                    current_marker,
+                );
+                Line::from(Span::styled(
+                    label,
+                    if index == *selected {
+                        Style::new()
+                            .fg(theme.text)
+                            .bg(theme.selection)
+                            .add_modifier(Modifier::BOLD)
+                    } else if current == Some(target) {
+                        Style::new().fg(theme.accent)
+                    } else {
+                        Style::new().fg(theme.text)
+                    },
+                ))
+            }));
+            lines.push(Line::raw(""));
+            lines.push(Line::raw(
+                "j/k or Up/Down select  Enter confirm  Esc cancel",
+            ));
             frame.render_widget(
-                Paragraph::new("Target selector is available in the SQL Editor")
+                Paragraph::new(lines)
                     .block(panel_block(" TARGET SELECTOR ", true, theme))
                     .style(Style::new().fg(theme.text).bg(theme.surface_raised)),
                 popup,

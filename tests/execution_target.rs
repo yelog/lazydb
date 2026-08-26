@@ -25,7 +25,15 @@ fn profile(kind: DatabaseKind) -> ConnectionProfile {
         credential_policy: CredentialPolicy::None,
         read_only: false,
         environment: Environment::Development,
-        catalog_scope: lazydb::profile::CatalogScope::for_profile(kind, "app", Some("public")),
+        catalog_scope: lazydb::profile::CatalogScope::for_profile(
+            kind,
+            "app",
+            Some(if kind == DatabaseKind::Sqlite {
+                "main"
+            } else {
+                "public"
+            }),
+        ),
     }
 }
 
@@ -65,4 +73,54 @@ fn target_profile_identity_is_part_of_execution_target_equality() {
     let first_target = ExecutionTarget::from_profile(&first);
     let second_target = ExecutionTarget::from_profile(&second);
     assert_ne!(first_target, second_target);
+}
+
+#[test]
+fn postgres_target_validation_enforces_database_and_schema_scope() {
+    let mut profile = profile(DatabaseKind::Postgres);
+    profile.catalog_scope = lazydb::profile::CatalogScope {
+        databases: lazydb::profile::CatalogSelection::Selected(vec![
+            lazydb::profile::DatabaseScope {
+                name: "app".into(),
+                schemas: lazydb::profile::CatalogSelection::Selected(vec!["public".into()]),
+            },
+        ]),
+    };
+    let mut target = ExecutionTarget::from_profile(&profile);
+    assert!(target.is_valid(&profile));
+
+    target.schema = Some("private".into());
+    assert!(!target.is_valid(&profile));
+    target.schema = Some("public".into());
+    target.database = "other".into();
+    assert!(!target.is_valid(&profile));
+}
+
+#[test]
+fn target_override_changes_server_namespace_but_not_sqlite_file() {
+    let mut postgres = profile(DatabaseKind::Postgres);
+    postgres.catalog_scope = lazydb::profile::CatalogScope {
+        databases: lazydb::profile::CatalogSelection::All,
+    };
+    let target = ExecutionTarget {
+        profile_id: postgres.id,
+        database: "analytics".into(),
+        schema: Some("audit".into()),
+    };
+    let configured = target.apply_to_profile(&postgres).unwrap();
+    assert_eq!(configured.database.as_deref(), Some("analytics"));
+    assert_eq!(configured.default_schema.as_deref(), Some("audit"));
+
+    let mut sqlite = profile(DatabaseKind::Sqlite);
+    sqlite.catalog_scope = lazydb::profile::CatalogScope {
+        databases: lazydb::profile::CatalogSelection::All,
+    };
+    let alias = ExecutionTarget {
+        profile_id: sqlite.id,
+        database: "app".into(),
+        schema: Some("attached".into()),
+    };
+    let configured = alias.apply_to_profile(&sqlite).unwrap();
+    assert_eq!(configured.sqlite_path, sqlite.sqlite_path);
+    assert_eq!(configured.database, sqlite.database);
 }

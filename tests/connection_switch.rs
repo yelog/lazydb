@@ -10,9 +10,13 @@ use lazydb::{
     app::App,
     db::{
         DatabaseConnection, ServerInfo,
-        catalog::{CatalogKind, CatalogRequest, CatalogRequestKey, CatalogTarget},
+        catalog::{
+            CatalogEntry, CatalogId, CatalogKind, CatalogRequest, CatalogRequestKey, CatalogTarget,
+            OptionalMetadata, QualifiedName,
+        },
     },
     model::{
+        execution_target::ExecutionTarget,
         explorer::{ExplorerConnectionStatus, ExplorerNodeId},
         relation::{RelationKey, RelationRequest, RelationRequestKind},
         workspace::{ConnectionIdentity, ConnectionStatus, QueryStatus},
@@ -240,6 +244,140 @@ fn pending_switch_keeps_active_identity_and_rejects_new_queries() {
     assert_eq!(app.connection.status, ConnectionStatus::Connected);
     assert!(app.connection.pending_profile_id.is_none());
     assert_eq!(app.connection.server, active_server);
+}
+
+#[test]
+fn target_selector_switches_only_after_matching_connection_success() {
+    let mut profile = memory_profile("target");
+    profile.catalog_scope.databases = CatalogSelection::All;
+    let profile_id = profile.id;
+    let default = ExecutionTarget::from_profile(&profile);
+    let alias = ExecutionTarget {
+        profile_id,
+        database: ":memory:".into(),
+        schema: Some("attached".into()),
+    };
+    let mut app = App::new(vec![profile]);
+    app.connection.profile_id = Some(profile_id);
+    app.connection.generation = 1;
+    app.connection.status = ConnectionStatus::Connected;
+    app.connection.target = Some(default.clone());
+
+    let database = CatalogEntry::database(
+        CatalogId::new(profile_id, CatalogKind::Database, [":memory:"]),
+        QualifiedName {
+            database: Some(":memory:".into()),
+            schema: None,
+            object: ":memory:".into(),
+        },
+        "database",
+        OptionalMetadata::Supported(None),
+        true,
+    )
+    .unwrap();
+    let schema = CatalogEntry::schema(
+        CatalogId::new(profile_id, CatalogKind::Schema, [":memory:", "attached"]),
+        database.id.clone(),
+        QualifiedName {
+            database: Some(":memory:".into()),
+            schema: Some("attached".into()),
+            object: "attached".into(),
+        },
+        "schema",
+        OptionalMetadata::Supported(None),
+        true,
+    )
+    .unwrap();
+    app.explorer
+        .normalized
+        .profiles
+        .get_mut(&profile_id)
+        .unwrap()
+        .catalog
+        .insert_subtree(vec![database, schema])
+        .unwrap();
+
+    app.update(Action::OpenTargetSelector);
+    let lazydb::model::workspace::Overlay::TargetSelector {
+        candidates,
+        selected,
+    } = app.overlay.as_ref().unwrap()
+    else {
+        panic!("target selector did not open");
+    };
+    assert_eq!(candidates, &[alias.clone(), default.clone()]);
+    assert_eq!(*selected, 1);
+    app.update(Action::MoveTargetSelector(1));
+    let commands = app.update(Action::ConfirmTargetSelector);
+    let generation = match commands.as_slice() {
+        [
+            Command::Connect {
+                target, generation, ..
+            },
+        ] if target == &alias => *generation,
+        other => panic!("unexpected commands: {other:?}"),
+    };
+    assert_eq!(
+        app.active_console().execution_target.as_ref(),
+        Some(&default)
+    );
+
+    app.update(Action::ConnectionFailed {
+        profile_id,
+        generation,
+        message: "switch failed".into(),
+    });
+    assert_eq!(
+        app.active_console().execution_target.as_ref(),
+        Some(&default)
+    );
+    assert_eq!(app.connection.target.as_ref(), Some(&default));
+
+    app.update(Action::OpenTargetSelector);
+    app.update(Action::MoveTargetSelector(1));
+    let generation = match app.update(Action::ConfirmTargetSelector).as_slice() {
+        [Command::Connect { generation, .. }] => *generation,
+        other => panic!("unexpected commands: {other:?}"),
+    };
+    let commands = app.update(Action::ConnectionSucceeded {
+        profile_id,
+        generation,
+        server: server(":memory:"),
+    });
+    assert_eq!(app.active_console().execution_target.as_ref(), Some(&alias));
+    assert_eq!(app.connection.target.as_ref(), Some(&alias));
+    assert!(
+        commands
+            .iter()
+            .any(|command| matches!(command, Command::PersistWorkspace(_)))
+    );
+}
+
+#[test]
+fn target_selector_requires_an_active_connection_and_blocks_manual_transactions() {
+    let profile = memory_profile("target");
+    let profile_id = profile.id;
+    let mut app = App::new(vec![profile]);
+    app.connection.profile_id = None;
+    app.update(Action::OpenTargetSelector);
+    assert!(app.overlay.is_none());
+    assert!(
+        app.connection
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("No active connection")
+    );
+
+    app.connection.profile_id = Some(profile_id);
+    app.connection.generation = 1;
+    app.connection.status = ConnectionStatus::Connected;
+    app.connection.target = app.active_console().execution_target.clone();
+    app.update(Action::OpenTargetSelector);
+    app.active_console_mut().transaction_mode = lazydb::model::transaction::TransactionMode::Manual;
+    app.active_console_mut().transaction_state =
+        lazydb::model::transaction::TransactionState::Active;
+    assert!(app.update(Action::ConfirmTargetSelector).is_empty());
 }
 
 #[test]
@@ -534,6 +672,12 @@ async fn successful_switch_installs_the_new_database_and_rejects_stale_commands(
 
     runtime.dispatch(Command::RunQuery {
         connection: first_identity,
+        target: ExecutionTarget::from_profile(
+            app.profiles
+                .iter()
+                .find(|profile| profile.id == first_id)
+                .unwrap(),
+        ),
         tab_id: Uuid::new_v4(),
         generation: 1,
         sql: "SELECT value FROM marker".into(),
@@ -663,6 +807,7 @@ async fn runtime_rejects_a_reused_connection_generation() {
     let second = file_profile(&temp.path().join("second.db"), "second", "beta").await;
     let first_id = first.id;
     let second_id = second.id;
+    let second_target = ExecutionTarget::from_profile(&second);
     let profiles = vec![first, second];
     let (mut runtime, mut receiver) = runtime(
         &temp,
@@ -676,6 +821,7 @@ async fn runtime_rejects_a_reused_connection_generation() {
     runtime.dispatch(Command::Connect {
         profile_id: second_id,
         generation: first_identity.generation,
+        target: second_target,
     });
     assert!(
         timeout(Duration::from_millis(100), receiver.recv())
@@ -686,6 +832,52 @@ async fn runtime_rejects_a_reused_connection_generation() {
         run_marker_query(&mut app, &mut runtime, &mut receiver).await,
         "alpha"
     );
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn runtime_rejects_target_mismatch_before_query_io() {
+    let temp = TempDir::new().unwrap();
+    let mut profile = file_profile(&temp.path().join("target.db"), "target", "alpha").await;
+    profile.catalog_scope.databases = CatalogSelection::All;
+    let profile_id = profile.id;
+    let active_target = ExecutionTarget::from_profile(&profile);
+    let mismatched_target = ExecutionTarget {
+        profile_id,
+        database: active_target.database.clone(),
+        schema: Some("attached".into()),
+    };
+    let (mut runtime, mut receiver) = runtime(
+        &temp,
+        vec![profile],
+        Arc::new(MissingSecretStore::default()),
+        None,
+    );
+    runtime.dispatch(Command::Connect {
+        profile_id,
+        generation: 1,
+        target: active_target,
+    });
+    assert!(matches!(
+        next_action(&mut receiver).await,
+        Action::ConnectionSucceeded { .. }
+    ));
+
+    runtime.dispatch(Command::RunQuery {
+        connection: ConnectionIdentity {
+            profile_id,
+            generation: 1,
+        },
+        target: mismatched_target,
+        tab_id: Uuid::new_v4(),
+        generation: 1,
+        sql: "INSERT INTO marker VALUES ('must-not-run')".into(),
+    });
+    assert!(matches!(
+        next_action(&mut receiver).await,
+        Action::QueryFailed { message, .. }
+            if message.contains("does not match the execution target")
+    ));
     runtime.shutdown().await;
 }
 
@@ -750,6 +942,8 @@ async fn startup_password_is_never_reused_for_another_profile() {
     second.credential_policy = CredentialPolicy::Keyring(keyring_ref(second.id));
     let first_id = first.id;
     let second_id = second.id;
+    let first_target = ExecutionTarget::from_profile(&first);
+    let second_target = ExecutionTarget::from_profile(&second);
     let secrets = Arc::new(MissingSecretStore::default());
     let (mut runtime, mut receiver) = runtime(
         &temp,
@@ -761,6 +955,7 @@ async fn startup_password_is_never_reused_for_another_profile() {
     runtime.dispatch(Command::Connect {
         profile_id: second_id,
         generation: 1,
+        target: second_target,
     });
     assert!(matches!(
         next_action(&mut receiver).await,
@@ -779,6 +974,7 @@ async fn startup_password_is_never_reused_for_another_profile() {
     runtime.dispatch(Command::Connect {
         profile_id: first_id,
         generation: 2,
+        target: first_target,
     });
     assert!(matches!(
         next_action(&mut receiver).await,

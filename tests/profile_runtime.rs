@@ -11,6 +11,7 @@ use lazydb::{
     app::App,
     db::catalog::{NamespaceModel, ObjectGroup},
     model::{
+        execution_target::ExecutionTarget,
         profile_manager::{CredentialUpdate, ProfileSubmission},
         workspace::ConnectionIdentity,
     },
@@ -357,6 +358,7 @@ async fn prompt_policy_without_a_runtime_password_requests_credentials() {
     let mut profile = postgres_profile("prompt");
     let profile_id = profile.id;
     profile.credential_policy = CredentialPolicy::Prompt;
+    let target = ExecutionTarget::from_profile(&profile);
     let fake = Arc::new(FakeSecretStore::default());
     let (mut runtime, mut receiver) = runtime(
         vec![profile],
@@ -368,6 +370,7 @@ async fn prompt_policy_without_a_runtime_password_requests_credentials() {
     runtime.dispatch(Command::Connect {
         profile_id,
         generation: 1,
+        target,
     });
 
     assert!(matches!(
@@ -609,6 +612,7 @@ async fn deleting_the_active_profile_requests_an_explicit_disconnect() {
     let temp = TempDir::new().unwrap();
     let profile = sqlite_profile("active");
     let profile_id = profile.id;
+    let target = ExecutionTarget::from_profile(&profile);
     let store = ProfileStore::new(temp.path().join("connections.toml"));
     store.save(std::slice::from_ref(&profile)).unwrap();
     let fake = Arc::new(FakeSecretStore::default());
@@ -618,6 +622,7 @@ async fn deleting_the_active_profile_requests_an_explicit_disconnect() {
     runtime.dispatch(Command::Connect {
         profile_id,
         generation: 1,
+        target,
     });
     assert!(matches!(
         next_action(&mut receiver).await,
@@ -674,6 +679,7 @@ async fn deleting_a_profile_invalidates_its_in_flight_connection() {
     .unwrap()
     .profile;
     let profile_id = profile.id;
+    let target = ExecutionTarget::from_profile(&profile);
     let store = ProfileStore::new(temp.path().join("connections.toml"));
     store.save(std::slice::from_ref(&profile)).unwrap();
     let fake = Arc::new(FakeSecretStore::default());
@@ -691,6 +697,7 @@ async fn deleting_a_profile_invalidates_its_in_flight_connection() {
     runtime.dispatch(Command::Connect {
         profile_id,
         generation: 1,
+        target,
     });
     timeout(Duration::from_secs(3), accepted_receiver)
         .await

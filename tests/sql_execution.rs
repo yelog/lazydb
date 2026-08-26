@@ -20,6 +20,7 @@ fn connected_app(policy: ConfirmationPolicy) -> App {
     app.connection.profile_id = Some(identity.profile_id);
     app.connection.generation = identity.generation;
     app.connection.status = ConnectionStatus::Connected;
+    app.connection.target = app.active_console().execution_target.clone();
     app
 }
 
@@ -134,4 +135,29 @@ fn confirmation_keymap_accepts_enter_execute_and_escape_cancel() {
         keymap.map(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE), &app),
         Some(Action::ConfirmExecution)
     );
+}
+
+#[test]
+fn execution_fails_closed_when_console_target_is_missing_or_stale() {
+    let mut app = connected_app(ConfirmationPolicy::RiskyOnly);
+    app.update(Action::ReplaceEditor("SELECT 1".into()));
+    app.active_console_mut().execution_target = None;
+    assert!(app.update(Action::RunActiveSql).is_empty());
+    assert!(
+        app.connection
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("Select an execution target")
+    );
+
+    let profile_id = app.connection.profile_id.unwrap();
+    app.active_console_mut().execution_target =
+        Some(lazydb::model::execution_target::ExecutionTarget {
+            profile_id,
+            database: ":memory:".into(),
+            schema: Some("other".into()),
+        });
+    assert!(app.update(Action::RunActiveSql).is_empty());
+    assert!(app.connection.error.as_deref().unwrap().contains("target"));
 }

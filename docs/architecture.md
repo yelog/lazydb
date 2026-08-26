@@ -46,6 +46,12 @@ formatting, highlighting, completion, and execution drafts are pure projections
 over those snapshots. Confirmation dispatches the immutable SQL snapshot rather
 than rereading mutable editor text.
 
+Each SQL console owns an `ExecutionTarget` containing profile UUID, database, and
+schema. `Space d` derives stable, sorted candidates from the active profile's
+normalized catalog and `CatalogScope`. App keeps a target change pending until a
+generation-matched connection succeeds, then updates and persists the console;
+failure preserves both the old console target and old active pool.
+
 ## Profile and Credential Boundary
 
 `ProfileStore` atomically persists versioned connection metadata in TOML without
@@ -123,7 +129,11 @@ actions are no-ops there. Relation focus cycles between Explorer and Results.
 
 ## Transaction Boundary
 
-AUTO queries use the active pool and are tagged with `ConnectionIdentity`.
+AUTO queries carry both `ConnectionIdentity` and the exact `ExecutionTarget`.
+Runtime records both on the active connection and rejects a mismatch before any
+database I/O. PostgreSQL/MySQL target changes build a candidate pool before the
+old pool is closed. SQLite keeps the profile file and reuses its single pool so
+discovered attached aliases remain available while the active target changes.
 MANUAL mode owns one serial worker and one physical connection per console.
 Adapters drive SQLx's concrete `TransactionManager` directly on that connection;
 the worker never sends transaction controls through a random pool connection.

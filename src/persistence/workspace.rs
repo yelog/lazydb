@@ -33,7 +33,7 @@ pub struct WorkspaceFile {
     pub consoles: Vec<PersistedConsole>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct PersistedConsole {
     pub id: Uuid,
     pub name: String,
@@ -42,7 +42,7 @@ pub struct PersistedConsole {
     pub transaction_mode: TransactionMode,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct WorkspaceSnapshot {
     pub active_console: Uuid,
     pub consoles: Vec<PersistedConsole>,

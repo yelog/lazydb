@@ -88,6 +88,7 @@ Normal mode:
 | `Shift-F5`, `Space R` | Preview and execute the complete buffer |
 | `Space f` | Format the selected/current statement |
 | `Ctrl-Space` | Trigger completion |
+| `Space d` | Select the active console's database/schema execution target |
 | `Ctrl-N/P` | Move through an open completion popup |
 | `?`, `n`, `N` | Backward search and repeat |
 | `F1`, `Space ?` | Editor help |
@@ -112,6 +113,11 @@ requires confirmation. `:run`, `:runall`, `:format`, `:s`, `:tx auto`, `:tx manu
 
 MANUAL transactions use one pinned physical connection per console. Cancelling a
 MANUAL query rolls back the complete transaction; MySQL DDL may implicitly commit.
+`Space d` lists only targets discovered for the active profile and permitted by
+its catalog scope. Use `j/k` or Up/Down to wrap through targets, Enter to confirm,
+and Esc to cancel. Target changes are blocked while any query or MANUAL
+transaction is active; a failed target connection leaves the previous target and
+connection unchanged.
 
 ## Results
 

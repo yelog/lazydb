@@ -17,6 +17,7 @@ use crate::{
         mouse::map_mouse,
     },
     model::{
+        execution_target::ExecutionTarget,
         profile_manager::{CredentialUpdate, ProfileChange, ProfileSubmission},
         workspace::{ConnectionIdentity, QueryStatus},
     },
@@ -26,6 +27,7 @@ use crate::{
         secrets::{
             NativeSecretStore, SecretStore, SecretStoreError, keyring_ref, profile_id_from_ref,
         },
+        workspace::WorkspaceStore,
     },
     profile::{ConnectionProfile, CredentialPolicy, import_connection_url},
     security::sanitize_terminal_text,
@@ -51,6 +53,7 @@ use transaction::ForcedCloseHandle;
 struct ActiveConnection {
     profile_id: Uuid,
     generation: u64,
+    target: ExecutionTarget,
     database: DatabaseConnection,
 }
 
@@ -73,6 +76,7 @@ struct ProfileRegistry {
 
 struct ManualTransactionEntry {
     connection: ConnectionIdentity,
+    target: ExecutionTarget,
     transaction_generation: u64,
     request_sender: tokio::sync::mpsc::UnboundedSender<crate::db::transaction::TransactionRequest>,
     worker_handle: JoinHandle<crate::db::transaction::WorkerDisposition>,
@@ -83,6 +87,8 @@ struct ManualTransactionEntry {
 pub struct Runtime {
     registry: Arc<Mutex<ProfileRegistry>>,
     profile_store: ProfileStore,
+    workspace_store: Option<WorkspaceStore>,
+    workspace_mutation: Arc<Mutex<()>>,
     secret_store: Arc<dyn SecretStore>,
     profile_mutation: Arc<Mutex<()>>,
     event_sender: mpsc::UnboundedSender<Action>,
@@ -135,6 +141,8 @@ impl Runtime {
                 startup_password,
             })),
             profile_store,
+            workspace_store: None,
+            workspace_mutation: Arc::new(Mutex::new(())),
             secret_store,
             profile_mutation: Arc::new(Mutex::new(())),
             event_sender,
@@ -148,6 +156,10 @@ impl Runtime {
             completion_tasks: HashMap::new(),
             manual_transactions: HashMap::new(),
         }
+    }
+
+    pub fn set_workspace_store(&mut self, store: WorkspaceStore) {
+        self.workspace_store = Some(store);
     }
 
     pub fn dispatch(&mut self, command: Command) {
@@ -173,7 +185,8 @@ impl Runtime {
             Command::Connect {
                 profile_id,
                 generation,
-            } => self.connect(profile_id, generation),
+                target,
+            } => self.connect(profile_id, generation, target),
             Command::LoadCatalogPage(request) => self.load_catalog_page(request),
             Command::LoadRelationPreview(request) | Command::LoadRelationStructure(request) => {
                 self.load_relation(request)
@@ -185,24 +198,34 @@ impl Runtime {
             }
             Command::RunQuery {
                 connection,
+                target,
                 tab_id,
                 generation,
                 sql,
-            } => self.run_query(connection, tab_id, generation, sql),
+            } => self.run_query(connection, target, tab_id, generation, sql),
             Command::ManualBegin {
                 connection,
+                target,
                 tab_id,
                 query_generation,
                 transaction_generation,
-            } => self.manual_begin(connection, tab_id, query_generation, transaction_generation),
+            } => self.manual_begin(
+                connection,
+                target,
+                tab_id,
+                query_generation,
+                transaction_generation,
+            ),
             Command::ManualExecute {
                 connection,
+                target,
                 tab_id,
                 query_generation,
                 transaction_generation,
                 sql,
             } => self.manual_execute(
                 connection,
+                target,
                 tab_id,
                 query_generation,
                 transaction_generation,
@@ -248,7 +271,16 @@ impl Runtime {
                 });
                 self.completion_tasks.insert(key.console_id, task);
             }
-            Command::PersistWorkspace | Command::Quit => {}
+            Command::PersistWorkspace(snapshot) => {
+                if let Some(store) = self.workspace_store.clone() {
+                    let mutation = Arc::clone(&self.workspace_mutation);
+                    self.background_tasks.push(tokio::spawn(async move {
+                        let _guard = mutation.lock().await;
+                        let _ = tokio::task::spawn_blocking(move || store.save(&snapshot)).await;
+                    }));
+                }
+            }
+            Command::Quit => {}
         }
     }
 
@@ -411,7 +443,7 @@ impl Runtime {
         }));
     }
 
-    fn connect(&mut self, profile_id: Uuid, generation: u64) {
+    fn connect(&mut self, profile_id: Uuid, generation: u64, target: ExecutionTarget) {
         let registry = Arc::clone(&self.registry);
         let mutation = Arc::clone(&self.profile_mutation);
         let secret_store = Arc::clone(&self.secret_store);
@@ -464,7 +496,32 @@ impl Runtime {
                 }
             };
             drop(mutation_guard);
-            match DatabaseConnection::connect(&profile, password.as_ref()).await {
+            if !target.is_valid(&profile) {
+                let _ = sender.send(Action::ConnectionFailed {
+                    profile_id,
+                    generation,
+                    message: "Execution target is invalid for this profile".to_owned(),
+                });
+                return;
+            }
+            let reusable_sqlite = if profile.kind == crate::profile::DatabaseKind::Sqlite {
+                connection
+                    .lock()
+                    .await
+                    .as_ref()
+                    .filter(|active| active.profile_id == profile_id)
+                    .map(|active| active.database.clone())
+            } else {
+                None
+            };
+            let reused_sqlite = reusable_sqlite.is_some();
+            let candidate = match reusable_sqlite {
+                Some(database) => Ok(database),
+                None => {
+                    DatabaseConnection::connect_target(&profile, password.as_ref(), &target).await
+                }
+            };
+            match candidate {
                 Ok(database) => match database.probe().await {
                     Ok(server) => {
                         let mutation_guard = mutation.lock().await;
@@ -489,6 +546,7 @@ impl Runtime {
                                 Some(active.replace(ActiveConnection {
                                     profile_id,
                                     generation,
+                                    target: target.clone(),
                                     database:
                                         candidate.take().expect("connection candidate exists"),
                                 }))
@@ -496,11 +554,10 @@ impl Runtime {
                         };
                         drop(active);
                         let Some(previous) = installation else {
-                            candidate
-                                .take()
-                                .expect("connection candidate exists")
-                                .close()
-                                .await;
+                            let candidate = candidate.take().expect("connection candidate exists");
+                            if !reused_sqlite {
+                                candidate.close().await;
+                            }
                             return;
                         };
                         let _ = sender.send(Action::ConnectionSucceeded {
@@ -509,12 +566,16 @@ impl Runtime {
                             server,
                         });
                         drop(mutation_guard);
-                        if let Some(previous) = previous {
+                        if let Some(previous) = previous
+                            && !reused_sqlite
+                        {
                             previous.database.close().await;
                         }
                     }
                     Err(error) => {
-                        database.close().await;
+                        if !reused_sqlite {
+                            database.close().await;
+                        }
                         let _mutation_guard = mutation.lock().await;
                         if profile_revision_is_current(&registry, &profile, profile_revision).await
                             && connection_attempt_is_current(&attempts, expected)
@@ -684,6 +745,7 @@ impl Runtime {
     fn run_query(
         &mut self,
         expected: ConnectionIdentity,
+        target: ExecutionTarget,
         tab_id: Uuid,
         generation: u64,
         sql: String,
@@ -691,13 +753,13 @@ impl Runtime {
         let sender = self.event_sender.clone();
         let connection = Arc::clone(&self.connection);
         let task = tokio::spawn(async move {
-            let database = active_database(connection, expected).await;
+            let database = active_database_for_target(connection, expected, &target).await;
             let Some(database) = database else {
                 let _ = sender.send(Action::QueryFailed {
                     tab_id,
                     generation,
                     connection: expected,
-                    message: "No active database connection".to_owned(),
+                    message: "Active connection does not match the execution target".to_owned(),
                 });
                 return;
             };
@@ -726,6 +788,7 @@ impl Runtime {
     fn manual_begin(
         &mut self,
         connection: ConnectionIdentity,
+        target: ExecutionTarget,
         tab_id: Uuid,
         query_generation: u64,
         transaction_generation: u64,
@@ -733,6 +796,7 @@ impl Runtime {
         self.reap_finished_manual_worker(tab_id);
         self.ensure_manual_worker(
             connection,
+            target,
             tab_id,
             query_generation,
             transaction_generation,
@@ -743,6 +807,7 @@ impl Runtime {
     fn manual_execute(
         &mut self,
         connection: ConnectionIdentity,
+        target: ExecutionTarget,
         tab_id: Uuid,
         query_generation: u64,
         transaction_generation: u64,
@@ -753,6 +818,7 @@ impl Runtime {
         let (cancel, cancel_receiver) = tokio::sync::oneshot::channel();
         self.ensure_manual_worker(
             connection,
+            target,
             tab_id,
             query_generation,
             transaction_generation,
@@ -925,6 +991,7 @@ impl Runtime {
     fn ensure_manual_worker(
         &mut self,
         connection: ConnectionIdentity,
+        target: ExecutionTarget,
         tab_id: Uuid,
         query_generation: u64,
         transaction_generation: u64,
@@ -937,24 +1004,49 @@ impl Runtime {
         )>,
     ) {
         if let Some(entry) = self.manual_transactions.get(&tab_id) {
-            if entry.connection == connection
-                && entry.transaction_generation == transaction_generation
-                && let Some((sql, cancel, reply)) = request
-            {
-                let _ = entry.request_sender.send(TransactionRequest::Execute {
-                    query_generation,
-                    sql,
-                    cancel,
-                    reply,
-                });
+            let matches = entry.connection == connection
+                && entry.target == target
+                && entry.transaction_generation == transaction_generation;
+            match (matches, request) {
+                (true, Some((sql, cancel, reply))) => {
+                    let _ = entry.request_sender.send(TransactionRequest::Execute {
+                        query_generation,
+                        sql,
+                        cancel,
+                        reply,
+                    });
+                }
+                (true, None) => {}
+                (false, Some((_sql, _cancel, reply))) => {
+                    let message = "Manual transaction does not match the execution target";
+                    let _ = reply.send(Err(crate::db::transaction::TransactionError(
+                        message.to_owned(),
+                    )));
+                }
+                (false, None) => {
+                    let _ = self.event_sender.send(Action::ManualStartFailed {
+                        tab_id,
+                        query_generation,
+                        transaction_generation,
+                        connection,
+                        message: "Manual transaction does not match the execution target"
+                            .to_owned(),
+                    });
+                }
             }
             return;
         }
         let (proxy, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         let active_connection = Arc::clone(&self.connection);
         let sender = self.event_sender.clone();
+        let worker_target = target.clone();
         let worker_handle = tokio::spawn(async move {
-            let Some(database) = active_database(Arc::clone(&active_connection), connection).await
+            let Some(database) = active_database_for_target(
+                Arc::clone(&active_connection),
+                connection,
+                &worker_target,
+            )
+            .await
             else {
                 let _ = sender.send(Action::ManualStartFailed {
                     tab_id,
@@ -1032,6 +1124,7 @@ impl Runtime {
             tab_id,
             ManualTransactionEntry {
                 connection,
+                target,
                 transaction_generation,
                 request_sender: proxy,
                 worker_handle,
@@ -1509,6 +1602,23 @@ async fn active_database(
         .map(|active| active.database.clone())
 }
 
+async fn active_database_for_target(
+    connection: Arc<Mutex<Option<ActiveConnection>>>,
+    expected: ConnectionIdentity,
+    target: &ExecutionTarget,
+) -> Option<DatabaseConnection> {
+    connection
+        .lock()
+        .await
+        .as_ref()
+        .filter(|active| {
+            active.profile_id == expected.profile_id
+                && active.generation == expected.generation
+                && &active.target == target
+        })
+        .map(|active| active.database.clone())
+}
+
 fn take_active_connection(
     active: &mut Option<ActiveConnection>,
     expected: ConnectionIdentity,
@@ -1556,11 +1666,17 @@ async fn handle_quarantined_connection(
 
 pub async fn run_tui(cli: Cli) -> Result<()> {
     let startup = load_startup_profiles(&cli)?;
+    let paths = AppPaths::discover()?;
+    let workspace_store = WorkspaceStore::new(paths.workspace_file(), paths.workspace_sql_dir());
+    let workspace = workspace_store.load().context("failed to load workspace")?;
     let mut app = App::with_startup_profiles_and_confirmation_policy(
         startup.profiles.clone(),
         startup.persisted.clone(),
         cli.confirm_execution,
     );
+    if let Some(workspace) = workspace {
+        app.restore_workspace(workspace, startup.selected);
+    }
     let (event_sender, mut event_receiver) = mpsc::unbounded_channel();
     let mut runtime = Runtime::new(
         startup.profiles,
@@ -1571,6 +1687,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
         Arc::new(NativeSecretStore),
         event_sender,
     );
+    runtime.set_workspace_store(workspace_store);
     let mut terminal = TerminalSession::enter(cli.mouse != MouseMode::Off)
         .context("failed to initialize terminal")?;
     let mut terminal_events = EventStream::new();
@@ -1763,6 +1880,7 @@ mod tests {
         let mut active = Some(ActiveConnection {
             profile_id: profile.id,
             generation: 2,
+            target: ExecutionTarget::from_profile(&profile),
             database,
         });
 
@@ -1804,6 +1922,11 @@ mod tests {
                 connection: ConnectionIdentity {
                     profile_id,
                     generation: 1,
+                },
+                target: ExecutionTarget {
+                    profile_id,
+                    database: ":memory:".to_owned(),
+                    schema: Some("main".to_owned()),
                 },
                 transaction_generation: 1,
                 request_sender,

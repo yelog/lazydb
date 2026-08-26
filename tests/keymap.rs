@@ -277,7 +277,10 @@ fn transaction_exit_keys_carry_their_explicit_choice() {
 #[test]
 fn editor_leader_opens_connection_target_selector() {
     let mut keymap = Keymap::default();
-    let mut app = App::new(Vec::new());
+    let profile = profile("target");
+    let profile_id = profile.id;
+    let mut app = App::new(vec![profile]);
+    app.connection.profile_id = Some(profile_id);
     app.update(Action::EditorKey(key(KeyCode::Esc)));
     app.update(Action::EditorKey(key(KeyCode::Char(' '))));
     assert_eq!(
@@ -285,10 +288,13 @@ fn editor_leader_opens_connection_target_selector() {
         Some(Action::EditorKey(key(KeyCode::Char('d'))))
     );
     app.update(Action::EditorKey(key(KeyCode::Char('d'))));
-    assert_eq!(
+    assert!(matches!(
         app.overlay,
-        Some(lazydb::model::workspace::Overlay::TargetSelector { selected: 0 })
-    );
+        Some(lazydb::model::workspace::Overlay::TargetSelector {
+            ref candidates,
+            selected: 0,
+        }) if candidates.len() == 1 && candidates[0].profile_id == profile_id
+    ));
     assert_eq!(
         keymap.map(key(KeyCode::Esc), &app),
         Some(Action::CancelTargetSelector)

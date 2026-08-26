@@ -8,6 +8,7 @@ use crate::db::{
     ServerInfo,
     catalog::{CatalogEntry, CatalogId, CatalogKind, CatalogNode, OptionalMetadata},
 };
+use crate::model::execution_target::ExecutionTarget;
 use crate::model::explorer::{ExplorerNodeId, ExplorerTreeState, StatusRowKind};
 use crate::model::transaction::{
     CancellationIntent, DeferredTransactionPrompt, TransactionExitChoice,
@@ -70,6 +71,7 @@ pub enum Overlay {
         transaction_generation: u64,
     },
     TargetSelector {
+        candidates: Vec<ExecutionTarget>,
         selected: usize,
     },
 }
@@ -112,6 +114,8 @@ pub struct ConnectionState {
     pub generation: u64,
     pub pending_profile_id: Option<Uuid>,
     pub pending_generation: Option<u64>,
+    pub target: Option<ExecutionTarget>,
+    pub pending_target: Option<ExecutionTarget>,
     pub status: ConnectionStatus,
     pub server: Option<ServerInfo>,
     pub error: Option<String>,

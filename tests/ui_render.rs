@@ -559,6 +559,19 @@ fn standard_layout_shows_stable_workspace_regions() {
 }
 
 #[test]
+fn target_selector_renders_real_target_and_navigation_hint() {
+    let mut app = fixture();
+    app.update(Action::OpenTargetSelector);
+    let output = render(&app, 120, 36);
+
+    assert!(output.contains("EXECUTION TARGET"));
+    assert!(output.contains(":memory:.main"));
+    assert!(output.contains("current"));
+    assert!(output.contains("Enter confirm"));
+    assert!(!output.contains("Target selector is available"));
+}
+
+#[test]
 fn compact_layout_uses_the_focused_panel() {
     let mut app = fixture();
     app.focus = Focus::Editor;

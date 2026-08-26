@@ -11,6 +11,7 @@ use crate::db::{
 };
 use crate::{
     model::{
+        execution_target::ExecutionTarget,
         explorer::ExplorerNodeId,
         profile_manager::{
             DiscoveryFingerprint, ProfileChange, ProfileField, ProfileInput, ProfileSubmission,
@@ -307,6 +308,7 @@ pub enum Command {
     Connect {
         profile_id: Uuid,
         generation: u64,
+        target: ExecutionTarget,
     },
     LoadCatalogPage(CatalogRequest),
     LoadRelationPreview(crate::model::relation::RelationRequest),
@@ -314,18 +316,21 @@ pub enum Command {
     CancelRelationRequest(crate::model::relation::RelationRequest),
     RunQuery {
         connection: ConnectionIdentity,
+        target: ExecutionTarget,
         tab_id: Uuid,
         generation: u64,
         sql: String,
     },
     ManualBegin {
         connection: ConnectionIdentity,
+        target: ExecutionTarget,
         tab_id: Uuid,
         query_generation: u64,
         transaction_generation: u64,
     },
     ManualExecute {
         connection: ConnectionIdentity,
+        target: ExecutionTarget,
         tab_id: Uuid,
         query_generation: u64,
         transaction_generation: u64,
@@ -353,7 +358,7 @@ pub enum Command {
         query_generation: u64,
         transaction_generation: u64,
     },
-    PersistWorkspace,
+    PersistWorkspace(crate::persistence::workspace::WorkspaceSnapshot),
     ScheduleCompletion(crate::sql::CompletionScheduleKey),
     Quit,
 }

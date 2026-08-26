@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
+    model::execution_target::ExecutionTarget,
     profile::{ConnectionProfile, DatabaseKind},
     security::sanitize_terminal_text,
 };
@@ -159,6 +160,17 @@ impl DatabaseConnection {
                 .await
                 .map(Self::MySql),
         }
+    }
+
+    pub async fn connect_target(
+        profile: &ConnectionProfile,
+        password: Option<&SecretString>,
+        target: &ExecutionTarget,
+    ) -> Result<Self, DatabaseError> {
+        let configured = target.apply_to_profile(profile).ok_or_else(|| {
+            DatabaseError::configuration("execution target is invalid for this profile")
+        })?;
+        Self::connect(&configured, password).await
     }
 
     pub fn kind(&self) -> DatabaseKind {

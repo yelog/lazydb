@@ -224,7 +224,7 @@ fn scoped_index_deduplicates_replaces_removed_entries_and_rejects_out_of_scope_e
 }
 
 #[test]
-fn app_completion_uses_the_active_profiles_default_schema() {
+fn app_completion_prefers_the_active_console_target_schema() {
     let mut profile = import_connection_url("postgres://localhost/app", Some("app"))
         .unwrap()
         .profile;
@@ -247,18 +247,24 @@ fn app_completion_uses_the_active_profiles_default_schema() {
     let mut app = App::new(vec![profile]);
     app.connection.profile_id = Some(profile_id);
     app.connection.status = ConnectionStatus::Connected;
+    app.active_console_mut()
+        .execution_target
+        .as_mut()
+        .unwrap()
+        .schema = Some("public".into());
     app.explorer.completion_index = CompletionIndex::new(&entries);
     app.update(Action::ReplaceEditor("select * from or".into()));
 
     app.update(Action::CompletionExplicit);
 
     let popup = app.active_console().completion.as_ref().unwrap();
-    assert!(
-        popup
-            .candidates
-            .iter()
-            .any(|candidate| candidate.score.schema == 1)
-    );
+    let scores = popup
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.label == "orders")
+        .map(|candidate| candidate.score.schema)
+        .collect::<Vec<_>>();
+    assert_eq!(scores, [1]);
 }
 
 fn qualified(database: &str, schema: Option<&str>, object: &str) -> QualifiedName {

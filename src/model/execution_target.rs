@@ -35,18 +35,48 @@ impl ExecutionTarget {
     }
 
     pub fn is_valid(&self, profile: &ConnectionProfile) -> bool {
-        self.profile_id == profile.id
-            && !self.database.is_empty()
-            && match profile.kind {
-                DatabaseKind::MySql => self.schema.as_deref() == Some(self.database.as_str()),
-                DatabaseKind::Sqlite => self
-                    .schema
-                    .as_deref()
-                    .is_some_and(|schema| matches!(schema, "main" | "temp")),
-                DatabaseKind::Postgres => profile
-                    .database
-                    .as_deref()
-                    .is_some_and(|database| database == self.database),
+        if self.profile_id != profile.id
+            || self.database.is_empty()
+            || !profile.catalog_scope.allows_database(&self.database)
+        {
+            return false;
+        }
+        match profile.kind {
+            DatabaseKind::MySql => {
+                self.schema.as_deref() == Some(self.database.as_str())
+                    && profile
+                        .catalog_scope
+                        .allows_schema(&self.database, &self.database)
             }
+            DatabaseKind::Sqlite => {
+                profile.database.as_deref() == Some(self.database.as_str())
+                    && self.schema.as_deref().is_some_and(|schema| {
+                        profile.catalog_scope.allows_schema(&self.database, schema)
+                    })
+            }
+            DatabaseKind::Postgres => self
+                .schema
+                .as_deref()
+                .is_none_or(|schema| profile.catalog_scope.allows_schema(&self.database, schema)),
+        }
+    }
+
+    pub fn apply_to_profile(&self, profile: &ConnectionProfile) -> Option<ConnectionProfile> {
+        if !self.is_valid(profile) {
+            return None;
+        }
+        let mut configured = profile.clone();
+        match profile.kind {
+            DatabaseKind::Postgres => {
+                configured.database = Some(self.database.clone());
+                configured.default_schema = self.schema.clone();
+            }
+            DatabaseKind::MySql => {
+                configured.database = Some(self.database.clone());
+                configured.default_schema = Some(self.database.clone());
+            }
+            DatabaseKind::Sqlite => {}
+        }
+        Some(configured)
     }
 }

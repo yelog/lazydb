@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use uuid::Uuid;
 
@@ -14,6 +14,7 @@ use crate::{
     editor::{EditorEffect, EditorError, EditorWorkspace},
     model::{
         editor::{EditorMode, EditorRenderSnapshot, EditorViewport},
+        execution_target::ExecutionTarget,
         explorer::{
             CatalogGroupState, ExplorerConnectionStatus, ExplorerLoadState, ExplorerNodeId,
             ExplorerOwnerId, ProfileProvenance, owner_for_target,
@@ -39,6 +40,7 @@ use crate::{
             ExplorerState, Focus, ManualCancelFocus, Overlay, QueryStatus,
         },
     },
+    persistence::workspace::{PersistedConsole, WorkspaceSnapshot},
     profile::{ConnectionProfile, DatabaseKind},
     sql::{self, CompletionScheduleKey, ScopeSource, SqlDialect},
 };
@@ -86,6 +88,7 @@ pub struct App {
     confirmation_policy: ConfirmationPolicy,
     deferred: DeferredIntentQueue,
     resolving_deferred: Option<DeferredTransactionPrompt>,
+    pending_target_console: Option<Uuid>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -137,7 +140,8 @@ impl App {
         persisted: HashSet<Uuid>,
         confirmation_policy: ConfirmationPolicy,
     ) -> Self {
-        let tab = ConsoleTab::new("console");
+        let mut tab = ConsoleTab::new("console");
+        tab.execution_target = profiles.first().map(ExecutionTarget::from_profile);
         let tab_id = tab.id;
         let mut editor = EditorWorkspace::new();
         editor.open_console(tab_id, "");
@@ -170,6 +174,7 @@ impl App {
             confirmation_policy,
             deferred: DeferredIntentQueue::default(),
             resolving_deferred: None,
+            pending_target_console: None,
         }
     }
 
@@ -254,6 +259,89 @@ impl App {
             .find(|profile| profile.id == profile_id)
     }
 
+    pub fn workspace_snapshot(&self) -> WorkspaceSnapshot {
+        let consoles = self
+            .tabs
+            .iter()
+            .filter_map(WorkspaceTab::as_console)
+            .map(|tab| PersistedConsole {
+                id: tab.id,
+                name: tab.name.clone(),
+                sql_file: format!("{}.sql", tab.id).into(),
+                target: tab.execution_target.clone(),
+                transaction_mode: tab.transaction_mode,
+            })
+            .collect::<Vec<_>>();
+        let sql = consoles
+            .iter()
+            .map(|console| (console.id, self.editor_text(console.id).unwrap_or_default()))
+            .collect();
+        let active_console = self
+            .active_console_opt()
+            .map(|tab| tab.id)
+            .or_else(|| consoles.first().map(|console| console.id))
+            .unwrap_or(Uuid::nil());
+        WorkspaceSnapshot {
+            active_console,
+            consoles,
+            sql,
+        }
+    }
+
+    pub fn restore_workspace(
+        &mut self,
+        snapshot: WorkspaceSnapshot,
+        selected_profile: Option<Uuid>,
+    ) {
+        if snapshot.consoles.is_empty() {
+            return;
+        }
+        let selected =
+            selected_profile.and_then(|id| self.profiles.iter().find(|profile| profile.id == id));
+        self.tabs.clear();
+        self.editor = EditorWorkspace::new();
+        for persisted in snapshot.consoles {
+            let mut tab = ConsoleTab::new(persisted.name);
+            tab.id = persisted.id;
+            tab.transaction_mode = persisted.transaction_mode;
+            tab.execution_target = persisted.target.filter(|target| {
+                self.profiles
+                    .iter()
+                    .find(|profile| profile.id == target.profile_id)
+                    .is_some_and(|profile| {
+                        target.is_valid(profile)
+                            && (profile.kind != DatabaseKind::Sqlite
+                                || target
+                                    .schema
+                                    .as_deref()
+                                    .is_some_and(|schema| matches!(schema, "main" | "temp")))
+                    })
+            });
+            if tab.execution_target.is_none() {
+                tab.execution_target = selected.map(ExecutionTarget::from_profile);
+            }
+            let text = snapshot
+                .sql
+                .iter()
+                .find(|(id, _)| *id == tab.id)
+                .map(|(_, text)| text.as_str())
+                .unwrap_or_default();
+            self.editor.open_console(tab.id, text);
+            self.tabs.push(WorkspaceTab::Sql(tab));
+        }
+        self.active_tab = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id() == snapshot.active_console)
+            .unwrap_or(0);
+        self.next_console_number = self.tabs.len().saturating_add(1);
+        self.focus = Focus::Editor;
+    }
+
+    fn persist_workspace_command(&self) -> Command {
+        Command::PersistWorkspace(self.workspace_snapshot())
+    }
+
     pub fn update(&mut self, action: Action) -> Vec<Command> {
         if self.active_console_opt().is_none()
             && !(self.is_active_relation_tab()
@@ -297,13 +385,14 @@ impl App {
             Action::NewConsole => {
                 let name = format!("console_{}", self.next_console_number);
                 self.next_console_number += 1;
-                let tab = ConsoleTab::new(name);
+                let mut tab = ConsoleTab::new(name);
+                tab.execution_target = self.active_profile().map(ExecutionTarget::from_profile);
                 let id = tab.id;
                 self.tabs.push(WorkspaceTab::Sql(tab));
                 self.editor.open_console(id, "");
                 self.active_tab = self.tabs.len() - 1;
                 self.focus = Focus::Editor;
-                vec![Command::PersistWorkspace]
+                vec![self.persist_workspace_command()]
             }
             Action::CloseActiveTab => {
                 if self.tabs.len() > 1 {
@@ -340,7 +429,10 @@ impl App {
                         self.editor.close_console(id);
                     }
                     if is_final_console {
-                        let tab = ConsoleTab::new(format!("console_{}", self.next_console_number));
+                        let mut tab =
+                            ConsoleTab::new(format!("console_{}", self.next_console_number));
+                        tab.execution_target =
+                            self.active_profile().map(ExecutionTarget::from_profile);
                         self.next_console_number += 1;
                         let id = tab.id;
                         self.tabs.push(WorkspaceTab::Sql(tab));
@@ -349,7 +441,7 @@ impl App {
                     self.active_tab = self.active_tab.saturating_sub(1);
                     self.normalize_focus();
                     let mut commands = cancel;
-                    commands.push(Command::PersistWorkspace);
+                    commands.push(self.persist_workspace_command());
                     commands
                 } else {
                     Vec::new()
@@ -761,6 +853,8 @@ impl App {
                     self.connection_terminal_generation.max(generation);
                 self.connection.pending_profile_id = None;
                 self.connection.pending_generation = None;
+                self.connection.pending_target = None;
+                self.pending_target_console = None;
                 self.connection.status = if self.connection.profile_id.is_some() {
                     ConnectionStatus::Connected
                 } else {
@@ -801,11 +895,14 @@ impl App {
                 if pending_matches {
                     self.connection.pending_profile_id = None;
                     self.connection.pending_generation = None;
+                    self.connection.pending_target = None;
+                    self.pending_target_console = None;
                 }
                 if active_matches {
                     self.connection.profile_id = None;
                     self.connection.generation = 0;
                     self.connection.server = None;
+                    self.connection.target = None;
                     self.connection.error = None;
                     self.clear_active_catalog(connection.profile_id);
                     self.select_nearest_profile(connection.profile_id);
@@ -858,7 +955,7 @@ impl App {
                     return Vec::new();
                 };
                 let _ = self.editor.set_text(id, &text);
-                vec![Command::PersistWorkspace]
+                vec![self.persist_workspace_command()]
             }
             Action::CompletionExplicit => self.complete_now(),
             Action::CompletionDue(key) => {
@@ -977,17 +1074,79 @@ impl App {
                 Vec::new()
             }
             Action::OpenTargetSelector => {
-                self.overlay = Some(Overlay::TargetSelector { selected: 0 });
+                let Some(profile) = self.active_profile() else {
+                    self.status_message("No active connection; connect before selecting a target");
+                    return Vec::new();
+                };
+                let candidates = self.execution_target_candidates(profile);
+                let current = self.active_console().execution_target.as_ref();
+                let selected = current
+                    .and_then(|target| candidates.iter().position(|candidate| candidate == target))
+                    .unwrap_or(0);
+                self.overlay = Some(Overlay::TargetSelector {
+                    candidates,
+                    selected,
+                });
                 Vec::new()
             }
             Action::MoveTargetSelector(delta) => {
-                if let Some(Overlay::TargetSelector { selected }) = self.overlay.as_mut() {
-                    let count = self.profiles.len().max(1) as isize;
+                if let Some(Overlay::TargetSelector {
+                    candidates,
+                    selected,
+                }) = self.overlay.as_mut()
+                {
+                    let count = candidates.len().max(1) as isize;
                     *selected = (*selected as isize + delta).rem_euclid(count) as usize;
                 }
                 Vec::new()
             }
-            Action::ConfirmTargetSelector | Action::CancelTargetSelector => {
+            Action::ConfirmTargetSelector => {
+                let Some(Overlay::TargetSelector {
+                    candidates,
+                    selected,
+                }) = self.overlay.take()
+                else {
+                    return Vec::new();
+                };
+                let Some(target) = candidates.get(selected).cloned() else {
+                    return Vec::new();
+                };
+                let tab = self.active_console();
+                if tab.execution_target.as_ref() == Some(&target) {
+                    return Vec::new();
+                }
+                if tab.query_status == QueryStatus::Running {
+                    self.status_message("Cannot change target while a query is running");
+                    return Vec::new();
+                }
+                if tab.transaction_mode == TransactionMode::Manual
+                    && tab.transaction_state != TransactionState::Idle
+                {
+                    self.status_message(
+                        "Cannot change target while a manual transaction is active",
+                    );
+                    return Vec::new();
+                }
+                if self.has_running_query() {
+                    self.status_message("Cannot change target while another query is running");
+                    return Vec::new();
+                }
+                if self.tabs.iter().any(|workspace_tab| {
+                    workspace_tab.as_console().is_some_and(|console| {
+                        console.transaction_mode == TransactionMode::Manual
+                            && console.transaction_state != TransactionState::Idle
+                    })
+                }) {
+                    self.status_message(
+                        "Cannot change target while another manual transaction is active",
+                    );
+                    return Vec::new();
+                }
+                let console_id = tab.id;
+                self.pending_target_console = Some(console_id);
+                self.request_connection_target(target)
+            }
+            Action::CancelTargetSelector => {
                 self.overlay = None;
                 Vec::new()
             }
@@ -1121,10 +1280,27 @@ impl App {
                     return Vec::new();
                 }
                 let pending_matches = self.pending_connection_matches(profile_id, generation);
+                let target = if pending_matches {
+                    self.connection.pending_target.clone().or_else(|| {
+                        self.profiles
+                            .iter()
+                            .find(|profile| profile.id == profile_id)
+                            .map(ExecutionTarget::from_profile)
+                    })
+                } else {
+                    self.profiles
+                        .iter()
+                        .find(|profile| profile.id == profile_id)
+                        .map(ExecutionTarget::from_profile)
+                };
+                let Some(target) = target else {
+                    return Vec::new();
+                };
                 let old_profile_id = self.connection.profile_id;
                 self.connection_terminal_generation = generation;
                 self.connection.profile_id = Some(profile_id);
                 self.connection.generation = generation;
+                self.connection.target = Some(target.clone());
                 self.connection_request_generation =
                     self.connection_request_generation.max(generation);
                 if pending_matches {
@@ -1138,6 +1314,23 @@ impl App {
                 };
                 self.connection.server = Some(server);
                 self.connection.error = None;
+                let mut persist_target = false;
+                if pending_matches
+                    && self.connection.pending_target.as_ref() == Some(&target)
+                    && let Some(console_id) = self.pending_target_console.take()
+                    && let Some(tab) = self
+                        .tabs
+                        .iter_mut()
+                        .find(|tab| tab.id() == console_id)
+                        .and_then(WorkspaceTab::as_console_mut)
+                    && tab.execution_target.as_ref() != Some(&target)
+                {
+                    tab.execution_target = Some(target.clone());
+                    persist_target = true;
+                }
+                if pending_matches {
+                    self.connection.pending_target = None;
+                }
                 let relation_cancellations =
                     self.cancel_relation_requests_for_connection(Some(ConnectionIdentity {
                         profile_id,
@@ -1171,6 +1364,19 @@ impl App {
                     let Some(tab) = tab.as_console_mut() else {
                         continue;
                     };
+                    let should_default = tab.execution_target.as_ref().is_none_or(|target| {
+                        target.profile_id == profile_id
+                            && !target.is_valid(
+                                self.profiles
+                                    .iter()
+                                    .find(|profile| profile.id == profile_id)
+                                    .expect("connected profile exists"),
+                            )
+                    });
+                    if should_default {
+                        tab.execution_target = Some(target.clone());
+                        persist_target = true;
+                    }
                     if tab.transaction_state == TransactionState::OutcomeUnknown
                         && let Ok(next) = transaction::transition(
                             tab_snapshot(tab),
@@ -1204,6 +1410,9 @@ impl App {
                 }
                 let mut commands = relation_cancellations;
                 commands.extend(commands_for_catalog);
+                if persist_target {
+                    commands.push(self.persist_workspace_command());
+                }
                 commands
             }
             Action::ConnectionFailed {
@@ -1216,6 +1425,8 @@ impl App {
                         self.connection_terminal_generation.max(generation);
                     self.connection.pending_profile_id = None;
                     self.connection.pending_generation = None;
+                    self.connection.pending_target = None;
+                    self.pending_target_console = None;
                     self.connection.status = if self.connection.profile_id.is_some() {
                         ConnectionStatus::Connected
                     } else {
@@ -1250,10 +1461,13 @@ impl App {
                 self.connection.profile_id = None;
                 self.connection.generation = 0;
                 self.connection.server = None;
+                self.connection.target = None;
                 self.connection.error = Some(message.clone());
                 self.connection.status = if pending_profile_id.is_some() {
                     self.connection.pending_profile_id = None;
                     self.connection.pending_generation = None;
+                    self.connection.pending_target = None;
+                    self.pending_target_console = None;
                     ConnectionStatus::Failed
                 } else {
                     ConnectionStatus::Failed
@@ -1946,7 +2160,7 @@ impl App {
                         self.active_tab = self.active_tab.min(self.tabs.len().saturating_sub(1));
                     }
                 }
-                vec![Command::PersistWorkspace]
+                vec![self.persist_workspace_command()]
             }
             DeferredIntent::SetMode(TransactionMode::Auto) => {
                 self.set_transaction_mode(TransactionMode::Auto)
@@ -2335,6 +2549,47 @@ impl App {
         {
             return Vec::new();
         }
+        let Some(profile) = self
+            .profiles
+            .iter()
+            .find(|profile| profile.id == profile_id)
+        else {
+            return Vec::new();
+        };
+        let target = self
+            .active_console_opt()
+            .and_then(|tab| tab.execution_target.clone())
+            .filter(|target| target.profile_id == profile_id && target.is_valid(profile))
+            .unwrap_or_else(|| ExecutionTarget::from_profile(profile));
+        if self.active_console_opt().is_some_and(|tab| {
+            tab.execution_target.as_ref().is_none_or(|current| {
+                current.profile_id != profile_id || !current.is_valid(profile)
+            })
+        }) {
+            self.pending_target_console = self.active_console_opt().map(|tab| tab.id);
+        }
+        if self.connection.profile_id.is_none()
+            && self.tabs.len() == 1
+            && self.active_console_opt().is_some_and(|tab| {
+                tab.generation == 0
+                    && tab
+                        .execution_target
+                        .as_ref()
+                        .is_none_or(|old| old.profile_id != profile_id)
+            })
+        {
+            self.active_console_mut().execution_target = Some(target.clone());
+        }
+        self.request_connection_target(target)
+    }
+
+    fn request_connection_target(&mut self, target: ExecutionTarget) -> Vec<Command> {
+        let profile_id = target.profile_id;
+        if !self.profiles.iter().any(|profile| target.is_valid(profile)) || self.has_running_query()
+        {
+            self.pending_target_console = None;
+            return Vec::new();
+        }
         let latest_generation = self
             .connection_request_generation
             .max(self.connection_terminal_generation)
@@ -2348,6 +2603,7 @@ impl App {
         self.connection_request_generation = generation;
         self.connection.pending_profile_id = Some(profile_id);
         self.connection.pending_generation = Some(generation);
+        self.connection.pending_target = Some(target.clone());
         self.connection.status = ConnectionStatus::Connecting;
         self.connection.error = None;
         let mut commands = self.cancel_relation_requests_for_connection(Some(ConnectionIdentity {
@@ -2370,8 +2626,52 @@ impl App {
         commands.push(Command::Connect {
             profile_id,
             generation,
+            target,
         });
         commands
+    }
+
+    fn execution_target_candidates(&self, profile: &ConnectionProfile) -> Vec<ExecutionTarget> {
+        let default = ExecutionTarget::from_profile(profile);
+        let mut values = BTreeSet::new();
+        if default.is_valid(profile) {
+            values.insert((default.database.clone(), default.schema.clone()));
+        }
+        if let Some(state) = self.explorer.normalized.profiles.get(&profile.id) {
+            for entry in state.catalog.entries().values() {
+                let selectable = entry.kind == crate::db::catalog::CatalogKind::Schema
+                    || (profile.kind == DatabaseKind::MySql
+                        && entry.kind == crate::db::catalog::CatalogKind::Database);
+                if !selectable {
+                    continue;
+                }
+                let Some(database) = entry.qualified_name.database.clone() else {
+                    continue;
+                };
+                let schema = match profile.kind {
+                    DatabaseKind::MySql => Some(database.clone()),
+                    DatabaseKind::Postgres | DatabaseKind::Sqlite => {
+                        entry.qualified_name.schema.clone()
+                    }
+                };
+                let candidate = ExecutionTarget {
+                    profile_id: profile.id,
+                    database,
+                    schema,
+                };
+                if candidate.is_valid(profile) {
+                    values.insert((candidate.database, candidate.schema));
+                }
+            }
+        }
+        values
+            .into_iter()
+            .map(|(database, schema)| ExecutionTarget {
+                profile_id: profile.id,
+                database,
+                schema,
+            })
+            .collect()
     }
 
     fn cancel_relation_requests_for_connection(
@@ -2437,6 +2737,7 @@ impl App {
             self.connection.profile_id = None;
             self.connection.generation = 0;
             self.connection.server = None;
+            self.connection.target = None;
             self.clear_active_catalog(profile_id);
             self.select_nearest_profile(profile_id);
         }
@@ -2444,6 +2745,8 @@ impl App {
             identities.push(connection);
             self.connection.pending_profile_id = None;
             self.connection.pending_generation = None;
+            self.connection.pending_target = None;
+            self.pending_target_console = None;
         }
         if let Some(connection) =
             runtime_active.filter(|connection| connection.profile_id == profile_id)
@@ -2592,8 +2895,13 @@ impl App {
             .map(|snapshot| cursor_byte(&text, snapshot.cursor.line, snapshot.cursor.column))
             .unwrap_or(text.len());
         let default_schema = self
-            .active_profile()
-            .and_then(|profile| profile.default_schema.clone());
+            .active_console_opt()
+            .and_then(|tab| tab.execution_target.as_ref())
+            .and_then(|target| target.schema.clone())
+            .or_else(|| {
+                self.active_profile()
+                    .and_then(|profile| profile.default_schema.clone())
+            });
         let candidates = sql::complete(
             &text,
             cursor,
@@ -2775,17 +3083,15 @@ impl App {
         if tab.query_status == QueryStatus::Running {
             return Vec::new();
         }
+        let Some(target) = tab.execution_target.clone() else {
+            self.status_message("Select an execution target before running SQL");
+            return Vec::new();
+        };
         let draft = sql::ExecutionDraft::new(
             tab_id,
             tab.generation,
             connection,
-            tab.execution_target.clone().unwrap_or_else(|| {
-                crate::model::execution_target::ExecutionTarget {
-                    profile_id: connection.profile_id,
-                    database: String::new(),
-                    schema: None,
-                }
-            }),
+            target,
             tab.transaction_generation,
             self.active_editor_revision(),
             scope.kind,
@@ -2817,6 +3123,10 @@ impl App {
     ) -> Vec<Command> {
         use sql::TransactionControl;
         let tab = self.active_console();
+        let Some(target) = tab.execution_target.clone() else {
+            self.status_message("Select an execution target before running SQL");
+            return Vec::new();
+        };
         match control {
             TransactionControl::Begin(_)
                 if tab.transaction_mode == TransactionMode::Auto
@@ -2833,6 +3143,7 @@ impl App {
                 apply_transaction_snapshot(tab, next);
                 vec![Command::ManualBegin {
                     connection,
+                    target,
                     tab_id,
                     query_generation,
                     transaction_generation,
@@ -2868,6 +3179,10 @@ impl App {
         sql: String,
     ) -> Vec<Command> {
         let tab = self.active_console();
+        let Some(target) = tab.execution_target.clone() else {
+            self.status_message("Select an execution target before running SQL");
+            return Vec::new();
+        };
         if tab.transaction_state != TransactionState::Idle
             && tab.transaction_state != TransactionState::Active
         {
@@ -2888,6 +3203,7 @@ impl App {
         apply_transaction_snapshot(tab, next);
         vec![Command::ManualExecute {
             connection,
+            target,
             tab_id,
             query_generation,
             transaction_generation,
@@ -2942,6 +3258,12 @@ impl App {
         if self.connection.active_identity() != Some(draft.connection) {
             return Err("Execution draft is stale: connection changed".to_owned());
         }
+        if self.connection.target.as_ref() != Some(&draft.target) {
+            return Err("Execution draft is stale: active target changed".to_owned());
+        }
+        if tab.execution_target.as_ref() != Some(&draft.target) {
+            return Err("Execution draft is stale: console target changed".to_owned());
+        }
         if tab.transaction_generation != draft.transaction_generation
             || tab.transaction_mode != draft.transaction_mode
             || tab.transaction_state != draft.transaction_state
@@ -2968,6 +3290,7 @@ impl App {
         };
         if draft.transaction_mode == TransactionMode::Manual {
             let connection = draft.connection;
+            let target = draft.target.clone();
             let tab_id = draft.console_id;
             let sql = draft.sql.clone();
             let mode_state = tab.transaction_state;
@@ -2989,6 +3312,7 @@ impl App {
                 });
                 return vec![Command::ManualExecute {
                     connection,
+                    target,
                     tab_id,
                     query_generation,
                     transaction_generation: tab.transaction_generation,
@@ -3010,6 +3334,7 @@ impl App {
         });
         vec![Command::RunQuery {
             connection: draft.connection,
+            target: draft.target,
             tab_id: draft.console_id,
             generation,
             sql: draft.sql,
@@ -4097,6 +4422,7 @@ fn relation_grid_dimensions(load: &RelationLoad<crate::db::RelationPreview>) -> 
 mod tests {
     use std::time::Duration;
 
+    use super::App;
     use crate::{
         action::{Action, Command},
         db::query::{QueryOutcome, QueryStats, ResultSet},
@@ -4104,9 +4430,6 @@ mod tests {
         model::workspace::{ConnectionIdentity, ConnectionStatus, Focus, Overlay, QueryStatus},
         profile::import_connection_url,
     };
-    use uuid::Uuid;
-
-    use super::App;
 
     fn empty_outcome() -> QueryOutcome {
         QueryOutcome {
@@ -4184,10 +4507,15 @@ mod tests {
 
     #[test]
     fn stale_query_results_cannot_replace_newer_runs() {
-        let mut app = App::new(Vec::new());
-        app.connection.profile_id = Some(Uuid::new_v4());
+        let profile = import_connection_url(":memory:", Some("query"))
+            .unwrap()
+            .profile;
+        let profile_id = profile.id;
+        let mut app = App::new(vec![profile]);
+        app.connection.profile_id = Some(profile_id);
         app.connection.generation = 1;
         app.connection.status = ConnectionStatus::Connected;
+        app.connection.target = app.active_console().execution_target.clone();
         app.update(Action::ReplaceEditor("SELECT 1".into()));
         let commands = app.update(Action::RunActiveSql);
         let (tab_id, generation) = match &commands[0] {

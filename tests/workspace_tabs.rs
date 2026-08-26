@@ -1,3 +1,6 @@
+use lazydb::model::transaction::TransactionMode;
+use lazydb::persistence::workspace::{PersistedConsole, WorkspaceSnapshot};
+use lazydb::profile::import_connection_url;
 use lazydb::{
     action::{Action, Command},
     app::App,
@@ -5,6 +8,7 @@ use lazydb::{
     model::tab::{ConsoleTab, TabKind, WorkspaceTab},
     model::workspace::Focus,
 };
+use uuid::Uuid;
 
 #[test]
 fn workspace_tabs_expose_common_identity() {
@@ -74,7 +78,7 @@ fn closing_relation_tab_bypasses_transaction_exit() {
         commands.is_empty()
             || commands
                 .iter()
-                .any(|command| { matches!(command, lazydb::action::Command::PersistWorkspace) })
+                .any(|command| { matches!(command, lazydb::action::Command::PersistWorkspace(_)) })
     );
     assert_eq!(app.tabs.len(), 1);
 }
@@ -106,7 +110,7 @@ fn closing_final_sql_console_does_not_leave_relation_only_workspace() {
     assert!(
         commands
             .iter()
-            .any(|command| matches!(command, Command::PersistWorkspace))
+            .any(|command| matches!(command, Command::PersistWorkspace(_)))
     );
 }
 
@@ -140,4 +144,71 @@ fn sql_only_actions_are_noops_on_relation_tabs() {
     ] {
         assert!(app.update(action).is_empty());
     }
+}
+
+#[test]
+fn initial_and_new_consoles_use_the_active_profile_target() {
+    let profile = import_connection_url(":memory:", Some("active"))
+        .unwrap()
+        .profile;
+    let expected = lazydb::model::execution_target::ExecutionTarget::from_profile(&profile);
+    let mut app = App::new(vec![profile.clone()]);
+    assert_eq!(
+        app.active_console().execution_target.as_ref(),
+        Some(&expected)
+    );
+
+    app.connection.profile_id = Some(profile.id);
+    app.update(Action::NewConsole);
+    assert_eq!(
+        app.active_console().execution_target.as_ref(),
+        Some(&expected)
+    );
+}
+
+#[test]
+fn workspace_restore_preserves_valid_targets_and_defaults_missing_targets() {
+    let profile = import_connection_url(":memory:", Some("active"))
+        .unwrap()
+        .profile;
+    let expected = lazydb::model::execution_target::ExecutionTarget::from_profile(&profile);
+    let first = Uuid::new_v4();
+    let second = Uuid::new_v4();
+    let snapshot = WorkspaceSnapshot {
+        active_console: second,
+        consoles: vec![
+            PersistedConsole {
+                id: first,
+                name: "saved".into(),
+                sql_file: format!("{first}.sql").into(),
+                target: Some(expected.clone()),
+                transaction_mode: TransactionMode::Auto,
+            },
+            PersistedConsole {
+                id: second,
+                name: "missing".into(),
+                sql_file: format!("{second}.sql").into(),
+                target: None,
+                transaction_mode: TransactionMode::Manual,
+            },
+        ],
+        sql: vec![(first, "select 1".into()), (second, "select 2".into())],
+    };
+    let mut app = App::new(vec![profile.clone()]);
+    app.restore_workspace(snapshot, Some(profile.id));
+
+    assert_eq!(app.active_console().id, second);
+    assert_eq!(
+        app.active_console().execution_target.as_ref(),
+        Some(&expected)
+    );
+    assert_eq!(
+        app.active_console().transaction_mode,
+        TransactionMode::Manual
+    );
+    assert_eq!(app.active_editor_text().unwrap(), "select 2");
+    assert_eq!(
+        app.tabs[0].as_console().unwrap().execution_target.as_ref(),
+        Some(&expected)
+    );
 }
