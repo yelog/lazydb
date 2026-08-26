@@ -187,6 +187,70 @@ struct CompletionAnchor {
     cursor: Position,
 }
 
+struct EditorContextDisplay {
+    profile: Option<String>,
+    database: Option<String>,
+    schema: Option<String>,
+    transaction: &'static str,
+}
+
+fn editor_context_display(app: &App) -> EditorContextDisplay {
+    let target = app.active_console().execution_target.as_ref();
+    let profile = target.and_then(|target| {
+        app.profiles
+            .iter()
+            .find(|profile| profile.id == target.profile_id)
+            .map(|profile| header_text(&profile.name))
+    });
+    let transaction = match (
+        app.active_console().transaction_mode,
+        app.active_console().transaction_state,
+    ) {
+        (crate::model::transaction::TransactionMode::Auto, _) => "TX AUTO",
+        (_, crate::model::transaction::TransactionState::Idle) => "TX MANUAL:IDLE",
+        (_, crate::model::transaction::TransactionState::Starting) => "TX MANUAL:STARTING",
+        (_, crate::model::transaction::TransactionState::Active) => "TX MANUAL:ACTIVE",
+        (_, crate::model::transaction::TransactionState::Aborted) => "TX ABORTED",
+        (_, crate::model::transaction::TransactionState::Committing) => "TX COMMITTING",
+        (_, crate::model::transaction::TransactionState::RollingBack) => "TX ROLLING BACK",
+        (_, crate::model::transaction::TransactionState::OutcomeUnknown) => "TX OUTCOME UNKNOWN",
+    };
+    EditorContextDisplay {
+        profile,
+        database: target.map(|target| header_text(&target.database)),
+        schema: target.and_then(|target| target.schema.as_deref().map(header_text)),
+        transaction,
+    }
+}
+
+fn editor_context_title(context: &EditorContextDisplay, width: usize) -> String {
+    let candidates = [
+        context
+            .profile
+            .as_ref()
+            .zip(context.database.as_ref())
+            .zip(context.schema.as_ref())
+            .map(|((profile, database), schema)| {
+                format!("[{profile}] {database}.{schema}  {}", context.transaction)
+            }),
+        context
+            .database
+            .as_ref()
+            .zip(context.schema.as_ref())
+            .map(|(database, schema)| format!("{database}.{schema}  {}", context.transaction)),
+        context
+            .schema
+            .as_ref()
+            .map(|schema| format!("{schema}  {}", context.transaction)),
+        Some(context.transaction.to_owned()),
+    ];
+    candidates
+        .into_iter()
+        .flatten()
+        .find(|title| usize::from(title.cell_width()) <= width)
+        .unwrap_or_else(|| "TX".to_owned())
+}
+
 fn render_completion_popup(
     frame: &mut Frame<'_>,
     app: &App,
@@ -286,23 +350,6 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, sta
         || "not connected".to_owned(),
         |server| header_text(&server.database),
     );
-    let target = app
-        .active_console()
-        .execution_target
-        .as_ref()
-        .map(|target| {
-            format!(
-                "{} {}{}",
-                target.profile_id,
-                target.database,
-                target
-                    .schema
-                    .as_deref()
-                    .map(|schema| format!(".{schema}"))
-                    .unwrap_or_default()
-            )
-        })
-        .unwrap_or_else(|| "TARGET MISSING".to_owned());
     let profile_width = profile.as_str().cell_width();
     let connection = match app.connection.status {
         ConnectionStatus::Disconnected => ("OFFLINE", theme.muted),
@@ -315,28 +362,6 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, sta
         QueryStatus::Running => ("RUNNING", theme.action),
         QueryStatus::Cancelled => ("CANCELLED", theme.warning),
         QueryStatus::Failed => ("ERROR", theme.error),
-    };
-    let transaction = match (
-        app.active_console().transaction_mode,
-        app.active_console().transaction_state,
-    ) {
-        (crate::model::transaction::TransactionMode::Auto, _) => "TX AUTO",
-        (
-            crate::model::transaction::TransactionMode::Manual,
-            crate::model::transaction::TransactionState::Idle,
-        ) => "TX MANUAL:IDLE",
-        (
-            crate::model::transaction::TransactionMode::Manual,
-            crate::model::transaction::TransactionState::Starting,
-        ) => "TX MANUAL:STARTING",
-        (
-            crate::model::transaction::TransactionMode::Manual,
-            crate::model::transaction::TransactionState::Active,
-        ) => "TX MANUAL:ACTIVE",
-        (_, crate::model::transaction::TransactionState::Aborted) => "TX ABORTED",
-        (_, crate::model::transaction::TransactionState::Committing) => "TX COMMITTING",
-        (_, crate::model::transaction::TransactionState::RollingBack) => "TX ROLLING BACK",
-        (_, crate::model::transaction::TransactionState::OutcomeUnknown) => "TX OUTCOME UNKNOWN",
     };
     let lines = vec![
         Line::from(vec![
@@ -357,10 +382,6 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, sta
             ),
             Span::styled("  /  ", Style::new().fg(theme.border).bg(theme.surface)),
             Span::styled(database, Style::new().fg(theme.action).bg(theme.surface)),
-            Span::styled(
-                format!("  /  {target}"),
-                Style::new().fg(theme.text).bg(theme.surface),
-            ),
         ]),
         Line::from(vec![
             Span::styled(
@@ -369,10 +390,6 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, sta
                     .fg(connection.1)
                     .bg(theme.surface_raised)
                     .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("  {transaction}  "),
-                Style::new().fg(theme.muted).bg(theme.surface),
             ),
             Span::styled(
                 format!(" QUERY {} ", query.0),
@@ -520,7 +537,9 @@ fn render_editor(
     theme: Theme,
     state: &mut UiState,
 ) -> Option<CompletionAnchor> {
-    let inner = panel_block(" SQL EDITOR ", app.focus == Focus::Editor, theme).inner(area);
+    let context = editor_context_display(app);
+    let base_block = panel_block("", app.focus == Focus::Editor, theme);
+    let inner = base_block.inner(area);
     let number_width = app
         .active_editor_render_snapshot(EditorViewport {
             width: 0,
@@ -563,6 +582,21 @@ fn render_editor(
         EditorMode::VisualLine => "VISUAL LINE",
         EditorMode::VisualBlock => "VISUAL BLOCK",
     };
+    let left_title = format!(" SQL EDITOR  {mode} ");
+    let right_width = area
+        .width
+        .saturating_sub(left_title.cell_width() as u16 + 4) as usize;
+    let right_title = editor_context_title(&context, right_width);
+    let block = base_block
+        .title_top(Line::raw(left_title).left_aligned())
+        .title_top(
+            Line::from(Span::styled(
+                format!(" {right_title} "),
+                Style::new().fg(theme.action),
+            ))
+            .right_aligned(),
+        );
+    let inner = block.inner(area);
     state.cursor_style = Some(if snapshot.prompt.is_some() {
         CursorStyle::Bar
     } else {
@@ -575,14 +609,7 @@ fn render_editor(
             | EditorMode::VisualBlock => CursorStyle::Block,
         }
     });
-    frame.render_widget(
-        panel_block(
-            &format!(" SQL EDITOR  {mode} "),
-            app.focus == Focus::Editor,
-            theme,
-        ),
-        area,
-    );
+    frame.render_widget(block, area);
     for (row, line) in snapshot.lines.iter().take(viewport.height).enumerate() {
         let y = inner.y.saturating_add(row as u16);
         let selected = snapshot
@@ -1204,6 +1231,11 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, focus: Focus, theme: Theme) {
             key_line("Space tc / Space tr", "commit / rollback", theme),
             key_line(":tx auto/manual", "set transaction mode", theme),
             key_line(":commit / :rollback", "transaction controls", theme),
+            key_line("Space d", "choose editor connection target", theme),
+            key_line(":connection NAME", "set editor profile", theme),
+            key_line(":database NAME", "set editor database", theme),
+            key_line(":schema NAME", "set editor schema", theme),
+            key_line("Editor title", "shows target and transaction state", theme),
             key_line("F5 / Space r", "execute SQL buffer", theme),
         ]),
         Focus::Results => lines.extend([
