@@ -55,7 +55,10 @@ fn normal_mode_motions_do_not_insert_literal_keys_through_app() {
     }
 
     assert_eq!(app.active_editor_text().unwrap(), "one two\nthree");
-    assert_eq!(app.active_editor_mode(), lazydb::model::editor::EditorMode::Normal);
+    assert_eq!(
+        app.active_editor_mode(),
+        lazydb::model::editor::EditorMode::Normal
+    );
 }
 
 #[test]
@@ -74,7 +77,10 @@ fn vim_operator_text_object_visual_and_undo_sequences_use_app_pipeline() {
     editor_key(&mut app, KeyCode::Char('v'), KeyModifiers::NONE);
     editor_key(&mut app, KeyCode::Char('l'), KeyModifiers::NONE);
     editor_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
-    assert_eq!(app.active_editor_mode(), lazydb::model::editor::EditorMode::Normal);
+    assert_eq!(
+        app.active_editor_mode(),
+        lazydb::model::editor::EditorMode::Normal
+    );
 
     editor_key(&mut app, KeyCode::Char('u'), KeyModifiers::NONE);
     assert_eq!(app.active_editor_text().unwrap(), "one two three");

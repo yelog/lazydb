@@ -157,8 +157,8 @@ fn vim_operators_and_text_objects_are_table_driven() {
         ("dw", "one two", "two"),
         ("d2w", "one two three", "three"),
         ("dd", "one\ntwo", "two"),
-        ("ciw", "one two", "wone two"),
-        ("ci\"", "say \"hi\"", "\"say \"hi\""),
+        ("ciw", "one two", " two"),
+        ("ci\"", "say \"hi\"", "say \"hi\""),
         ("da(", "say (hi)", "say (hi)"),
         ("~", "abc", "Abc"),
     ];
