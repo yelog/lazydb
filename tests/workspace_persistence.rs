@@ -62,3 +62,16 @@ fn missing_workspace_is_empty_and_unsupported_version_is_rejected() {
         Err(lazydb::persistence::workspace::WorkspaceError::UnsupportedVersion { .. })
     ));
 }
+
+#[test]
+fn workspace_lock_allows_one_writer_and_releases_on_drop() {
+    let temp = TempDir::new().unwrap();
+    let store = WorkspaceStore::new(temp.path().join("workspace.toml"), temp.path().join("sql"));
+    let lock = store.lock().unwrap();
+    assert!(matches!(
+        store.lock(),
+        Err(lazydb::persistence::workspace::WorkspaceError::Locked)
+    ));
+    drop(lock);
+    assert!(store.lock().is_ok());
+}

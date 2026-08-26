@@ -1,4 +1,8 @@
-use std::{fs, path::PathBuf};
+use std::{
+    fs::{self, File, OpenOptions},
+    io::Write,
+    path::PathBuf,
+};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -21,6 +25,8 @@ pub enum WorkspaceError {
     Encode(#[from] toml::ser::Error),
     #[error("workspace version {found} is not supported; expected {expected}")]
     UnsupportedVersion { found: u16, expected: u16 },
+    #[error("workspace is already locked by another LazyDB process")]
+    Locked,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -50,6 +56,17 @@ pub struct WorkspaceSnapshot {
 pub struct WorkspaceStore {
     manifest: PathBuf,
     sql_dir: PathBuf,
+}
+
+pub struct WorkspaceLock {
+    path: PathBuf,
+    _file: File,
+}
+
+impl Drop for WorkspaceLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
 }
 
 pub(crate) fn snapshot(
@@ -82,6 +99,25 @@ pub(crate) fn snapshot(
 impl WorkspaceStore {
     pub fn new(manifest: PathBuf, sql_dir: PathBuf) -> Self {
         Self { manifest, sql_dir }
+    }
+
+    pub fn lock(&self) -> Result<WorkspaceLock, WorkspaceError> {
+        if let Some(parent) = self.manifest.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let path = self.manifest.with_extension("lock");
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    WorkspaceError::Locked
+                } else {
+                    WorkspaceError::Io(error)
+                }
+            })?;
+        Ok(WorkspaceLock { path, _file: file })
     }
 
     pub fn load(&self) -> Result<Option<WorkspaceSnapshot>, WorkspaceError> {
@@ -121,7 +157,9 @@ impl WorkspaceStore {
         for (id, text) in &snapshot.sql {
             let path = self.sql_dir.join(format!("{id}.sql"));
             let temporary = path.with_extension("sql.tmp");
-            fs::write(&temporary, text)?;
+            let mut file = File::create(&temporary)?;
+            file.write_all(text.as_bytes())?;
+            file.sync_all()?;
             fs::rename(temporary, path)?;
         }
         let file = WorkspaceFile {
@@ -130,7 +168,9 @@ impl WorkspaceStore {
             consoles: snapshot.consoles.clone(),
         };
         let temporary = self.manifest.with_extension("toml.tmp");
-        fs::write(&temporary, toml::to_string_pretty(&file)?)?;
+        let mut manifest_file = File::create(&temporary)?;
+        manifest_file.write_all(toml::to_string_pretty(&file)?.as_bytes())?;
+        manifest_file.sync_all()?;
         fs::rename(temporary, &self.manifest)?;
         Ok(())
     }

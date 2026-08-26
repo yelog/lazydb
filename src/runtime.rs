@@ -94,6 +94,7 @@ pub struct Runtime {
     profile_tasks: Vec<JoinHandle<()>>,
     completion_tasks: HashMap<Uuid, JoinHandle<()>>,
     manual_transactions: HashMap<Uuid, ManualTransactionEntry>,
+    workspace_lock: Option<crate::persistence::workspace::WorkspaceLock>,
 }
 
 impl Runtime {
@@ -144,6 +145,7 @@ impl Runtime {
             profile_tasks: Vec::new(),
             completion_tasks: HashMap::new(),
             manual_transactions: HashMap::new(),
+            workspace_lock: None,
         }
     }
 
@@ -263,6 +265,12 @@ impl Runtime {
                         paths.workspace_file(),
                         paths.workspace_sql_dir(),
                     );
+                    if self.workspace_lock.is_none() {
+                        self.workspace_lock = store.lock().ok();
+                    }
+                    if self.workspace_lock.is_none() {
+                        return;
+                    }
                     self.background_tasks.push(tokio::spawn(async move {
                         let _ = tokio::task::spawn_blocking(move || store.save(&snapshot)).await;
                     }));
