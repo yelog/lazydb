@@ -30,6 +30,58 @@ fn typing_dismisses_stale_completion_and_updates_the_editor() {
     assert!(app.active_console().completion.is_none());
 }
 
+fn editor_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+    app.update(Action::EditorKey(KeyEvent::new(code, modifiers)));
+}
+
+#[test]
+fn normal_mode_motions_do_not_insert_literal_keys_through_app() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::ReplaceEditor("one two\nthree".into()));
+
+    for code in [
+        KeyCode::Char('h'),
+        KeyCode::Char('j'),
+        KeyCode::Char('k'),
+        KeyCode::Char('l'),
+        KeyCode::Char('w'),
+        KeyCode::Char('b'),
+        KeyCode::Char('e'),
+        KeyCode::Char('0'),
+        KeyCode::Char('$'),
+        KeyCode::Char('G'),
+    ] {
+        editor_key(&mut app, code, KeyModifiers::NONE);
+    }
+
+    assert_eq!(app.active_editor_text().unwrap(), "one two\nthree");
+    assert_eq!(app.active_editor_mode(), lazydb::model::editor::EditorMode::Normal);
+}
+
+#[test]
+fn vim_operator_text_object_visual_and_undo_sequences_use_app_pipeline() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::ReplaceEditor("one two three".into()));
+
+    for code in [KeyCode::Char('c'), KeyCode::Char('i'), KeyCode::Char('w')] {
+        editor_key(&mut app, code, KeyModifiers::NONE);
+    }
+    for code in [KeyCode::Char('X'), KeyCode::Esc] {
+        editor_key(&mut app, code, KeyModifiers::NONE);
+    }
+    assert_eq!(app.active_editor_text().unwrap(), "X two three");
+
+    editor_key(&mut app, KeyCode::Char('v'), KeyModifiers::NONE);
+    editor_key(&mut app, KeyCode::Char('l'), KeyModifiers::NONE);
+    editor_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+    assert_eq!(app.active_editor_mode(), lazydb::model::editor::EditorMode::Normal);
+
+    editor_key(&mut app, KeyCode::Char('u'), KeyModifiers::NONE);
+    assert_eq!(app.active_editor_text().unwrap(), "one two three");
+    editor_key(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
+    assert_eq!(app.active_editor_text().unwrap(), "X two three");
+}
+
 #[tokio::test]
 async fn connects_loads_catalog_and_executes_through_runtime() {
     let temp = TempDir::new().unwrap();
