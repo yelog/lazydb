@@ -640,8 +640,13 @@ impl App {
                 Vec::new()
             }
             Action::ConfirmTransactionExit => {
-                self.resolve_transaction_exit(TransactionExitChoice::Commit)
+                let choice = match self.overlay.as_ref() {
+                    Some(Overlay::TransactionExitConfirm { choice, .. }) => *choice,
+                    _ => TransactionExitChoice::Cancel,
+                };
+                self.resolve_transaction_exit(choice)
             }
+            Action::ConfirmTransactionExitChoice(choice) => self.resolve_transaction_exit(choice),
             Action::CancelTransactionExit => {
                 self.resolve_transaction_exit(TransactionExitChoice::Cancel)
             }
@@ -2171,17 +2176,18 @@ impl App {
             self.status_message("No SQL scope at cursor");
             return Vec::new();
         };
+        if self.active_console().query_status == QueryStatus::Running {
+            self.status_message("A query is already running in this console");
+            return Vec::new();
+        }
         match sql::classify_transaction_sql(&scope.sql, dialect) {
             sql::TransactionSqlClassification::Control(control) => {
-                return self.dispatch_transaction_sql(tab_id, connection, control);
+                return self.dispatch_transaction_sql(tab_id, connection, control, scope.sql);
             }
             sql::TransactionSqlClassification::Unsupported(_) => {}
             sql::TransactionSqlClassification::Data { .. } => {}
         }
         let tab = self.active_console();
-        if tab.query_status == QueryStatus::Running {
-            return Vec::new();
-        }
         let draft = sql::ExecutionDraft::new(
             tab_id,
             tab.generation,
@@ -2214,6 +2220,7 @@ impl App {
         tab_id: Uuid,
         connection: ConnectionIdentity,
         control: sql::TransactionControl,
+        sql: String,
     ) -> Vec<Command> {
         use sql::TransactionControl;
         let tab = self.active_console();
@@ -2246,11 +2253,7 @@ impl App {
                 if tab.transaction_mode == TransactionMode::Manual
                     && tab.transaction_state == TransactionState::Active =>
             {
-                self.dispatch_manual_sql(
-                    tab_id,
-                    connection,
-                    self.editor_text(tab_id).unwrap_or_default(),
-                )
+                self.dispatch_manual_sql(tab_id, connection, sql)
             }
             _ => {
                 self.status_message(

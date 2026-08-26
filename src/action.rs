@@ -117,6 +117,7 @@ pub enum Action {
     CancelManualCancellation,
     ToggleManualCancellationFocus,
     ConfirmTransactionExit,
+    ConfirmTransactionExitChoice(crate::model::transaction::TransactionExitChoice),
     CancelTransactionExit,
     ToggleTransactionExitChoice,
     ConfirmClearTransactionOutcome,

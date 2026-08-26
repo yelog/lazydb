@@ -124,6 +124,38 @@ fn printable_input_passes_through_an_open_completion_popup() {
 }
 
 #[test]
+fn transaction_exit_keys_carry_their_explicit_choice() {
+    let mut keymap = Keymap::default();
+    let mut app = App::new(Vec::new());
+    let prompt = lazydb::model::transaction::DeferredTransactionPrompt {
+        console_id: app.active_console().id,
+        transaction_generation: 0,
+        intent: lazydb::model::transaction::DeferredIntent::CloseConsole,
+    };
+    app.overlay = Some(lazydb::model::workspace::Overlay::TransactionExitConfirm {
+        prompt,
+        choice: lazydb::model::transaction::TransactionExitChoice::Rollback,
+    });
+
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('r')), &app),
+        Some(Action::ConfirmTransactionExitChoice(
+            lazydb::model::transaction::TransactionExitChoice::Rollback,
+        ))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('c')), &app),
+        Some(Action::ConfirmTransactionExitChoice(
+            lazydb::model::transaction::TransactionExitChoice::Commit,
+        ))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Enter), &app),
+        Some(Action::ConfirmTransactionExit)
+    );
+}
+
+#[test]
 fn maps_vim_editor_navigation_in_normal_mode() {
     let mut keymap = Keymap::default();
     let mut app = App::new(Vec::new());

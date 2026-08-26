@@ -77,8 +77,13 @@ impl Keymap {
         if matches!(app.overlay, Some(Overlay::TransactionExitConfirm { .. })) {
             self.pending = None;
             return match event.code {
-                KeyCode::Enter | KeyCode::Char('r') => Some(Action::ConfirmTransactionExit),
-                KeyCode::Char('c') => Some(Action::ConfirmTransactionExit),
+                KeyCode::Enter => Some(Action::ConfirmTransactionExit),
+                KeyCode::Char('r') => Some(Action::ConfirmTransactionExitChoice(
+                    crate::model::transaction::TransactionExitChoice::Rollback,
+                )),
+                KeyCode::Char('c') => Some(Action::ConfirmTransactionExitChoice(
+                    crate::model::transaction::TransactionExitChoice::Commit,
+                )),
                 KeyCode::Esc | KeyCode::Char('n') => Some(Action::CancelTransactionExit),
                 KeyCode::Tab | KeyCode::Left | KeyCode::Right => {
                     Some(Action::ToggleTransactionExitChoice)
