@@ -182,7 +182,13 @@ impl App {
                 self.assign_default_target(id);
                 self.active_tab = self.tabs.len() - 1;
                 self.focus = Focus::Editor;
-                vec![Command::PersistWorkspace]
+                vec![Command::PersistWorkspace(
+                    crate::persistence::workspace::snapshot(
+                        &self.tabs,
+                        self.active_tab,
+                        &self.editor,
+                    ),
+                )]
             }
             Action::CloseActiveTab => {
                 if self.tabs.len() > 1 {
@@ -193,7 +199,13 @@ impl App {
                     self.tabs.remove(self.active_tab);
                     self.editor.close_console(id);
                     self.active_tab = self.active_tab.saturating_sub(1);
-                    vec![Command::PersistWorkspace]
+                    vec![Command::PersistWorkspace(
+                        crate::persistence::workspace::snapshot(
+                            &self.tabs,
+                            self.active_tab,
+                            &self.editor,
+                        ),
+                    )]
                 } else {
                     Vec::new()
                 }
@@ -580,7 +592,13 @@ impl App {
             Action::ReplaceEditor(text) => {
                 let id = self.active_console().id;
                 let _ = self.editor.set_text(id, &text);
-                vec![Command::PersistWorkspace]
+                vec![Command::PersistWorkspace(
+                    crate::persistence::workspace::snapshot(
+                        &self.tabs,
+                        self.active_tab,
+                        &self.editor,
+                    ),
+                )]
             }
             Action::CompletionExplicit => self.complete_now(),
             Action::CompletionDue(key) => {
@@ -1511,7 +1529,13 @@ impl App {
                         self.active_tab = self.active_tab.min(self.tabs.len().saturating_sub(1));
                     }
                 }
-                vec![Command::PersistWorkspace]
+                vec![Command::PersistWorkspace(
+                    crate::persistence::workspace::snapshot(
+                        &self.tabs,
+                        self.active_tab,
+                        &self.editor,
+                    ),
+                )]
             }
             DeferredIntent::SetMode(TransactionMode::Auto) => {
                 self.set_transaction_mode(TransactionMode::Auto)

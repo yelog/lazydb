@@ -331,7 +331,7 @@ pub enum Command {
         query_generation: u64,
         transaction_generation: u64,
     },
-    PersistWorkspace,
+    PersistWorkspace(crate::persistence::workspace::WorkspaceSnapshot),
     ScheduleCompletion(crate::sql::CompletionScheduleKey),
     Quit,
 }

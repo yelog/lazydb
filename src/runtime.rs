@@ -256,7 +256,19 @@ impl Runtime {
                 });
                 self.completion_tasks.insert(key.console_id, task);
             }
-            Command::PersistWorkspace | Command::Quit => {}
+            Command::PersistWorkspace(snapshot) => {
+                let paths = crate::persistence::paths::AppPaths::discover();
+                if let Ok(paths) = paths {
+                    let store = crate::persistence::workspace::WorkspaceStore::new(
+                        paths.workspace_file(),
+                        paths.workspace_sql_dir(),
+                    );
+                    self.background_tasks.push(tokio::spawn(async move {
+                        let _ = tokio::task::spawn_blocking(move || store.save(&snapshot)).await;
+                    }));
+                }
+            }
+            Command::Quit => {}
         }
     }
 

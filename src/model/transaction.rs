@@ -1,10 +1,12 @@
 use std::collections::VecDeque;
 
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::workspace::ConnectionIdentity;
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum TransactionMode {
     #[default]
     Auto,
