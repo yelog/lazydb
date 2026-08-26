@@ -104,6 +104,22 @@ fn replacement_resets_cursor_mode_and_history() {
 }
 
 #[test]
+fn replacement_cursor_controls_next_insert_position() {
+    let (mut workspace, id) = fixture("SELE");
+    workspace
+        .replace_range(
+            id,
+            crate::sql::TextRange::new(0, 4),
+            "SELECT",
+            super::ReplacementCursor::EndOfInsertion,
+        )
+        .unwrap();
+    assert_eq!(workspace.position(id).unwrap().column, 6);
+    workspace.paste(id, " ").unwrap();
+    assert_eq!(workspace.text(id).unwrap(), "SELECT ");
+}
+
+#[test]
 fn named_and_system_registers_are_shared() {
     let (mut workspace, first) = fixture("");
     let second = Uuid::new_v4();
@@ -157,8 +173,8 @@ fn vim_operators_and_text_objects_are_table_driven() {
         ("dw", "one two", "two"),
         ("d2w", "one two three", "three"),
         ("dd", "one\ntwo", "two"),
-        ("ciw", "one two", "wone two"),
-        ("ci\"", "say \"hi\"", "\"say \"hi\""),
+        ("ciw", "one two", " two"),
+        ("ci\"", "say \"hi\"", "say \"hi\""),
         ("da(", "say (hi)", "say (hi)"),
         ("~", "abc", "Abc"),
     ];

@@ -3,6 +3,7 @@ use uuid::Uuid;
 use crate::db::query::QueryOutcome;
 use crate::sql::CompletionCandidate;
 
+use super::execution_target::ExecutionTarget;
 use super::workspace::QueryStatus;
 use super::{transaction::TransactionMode, transaction::TransactionState};
 use crate::sql::ExecutionDraft;
@@ -103,6 +104,7 @@ pub struct ConsoleTab {
     pub transaction_mode: TransactionMode,
     pub transaction_state: TransactionState,
     pub last_execution: Option<LastExecution>,
+    pub execution_target: Option<ExecutionTarget>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -142,6 +144,7 @@ impl ConsoleTab {
             transaction_mode: TransactionMode::Auto,
             transaction_state: TransactionState::Idle,
             last_execution: None,
+            execution_target: None,
         }
     }
 }

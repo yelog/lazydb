@@ -282,6 +282,11 @@ impl App {
                     | Action::CompletionAccept
                     | Action::CompletionDismiss
                     | Action::ToggleResultView
+                    | Action::ConfirmTransactionExitChoice(_)
+                    | Action::OpenTargetSelector
+                    | Action::MoveTargetSelector(_)
+                    | Action::ConfirmTargetSelector
+                    | Action::CancelTargetSelector
                     | Action::ConfirmClearTransactionOutcome
                     | Action::CancelClearTransactionOutcome
             )
@@ -936,6 +941,7 @@ impl App {
             Action::ConfirmTransactionExit => {
                 self.resolve_transaction_exit(TransactionExitChoice::Commit)
             }
+            Action::ConfirmTransactionExitChoice(choice) => self.resolve_transaction_exit(choice),
             Action::CancelTransactionExit => {
                 self.resolve_transaction_exit(TransactionExitChoice::Cancel)
             }
@@ -955,6 +961,21 @@ impl App {
                 if matches!(self.overlay, Some(Overlay::ClearTransactionOutcome { .. })) {
                     self.overlay = None;
                 }
+                Vec::new()
+            }
+            Action::OpenTargetSelector => {
+                self.overlay = Some(Overlay::TargetSelector { selected: 0 });
+                Vec::new()
+            }
+            Action::MoveTargetSelector(delta) => {
+                if let Some(Overlay::TargetSelector { selected }) = self.overlay.as_mut() {
+                    let count = self.profiles.len().max(1) as isize;
+                    *selected = (*selected as isize + delta).rem_euclid(count) as usize;
+                }
+                Vec::new()
+            }
+            Action::ConfirmTargetSelector | Action::CancelTargetSelector => {
+                self.overlay = None;
                 Vec::new()
             }
             Action::ConfirmManualCancellation => {
@@ -2492,7 +2513,11 @@ impl App {
                 EditorEffect::Message(_)
                 | EditorEffect::BackwardSearch
                 | EditorEffect::ToggleTransaction
-                | EditorEffect::ClearTransactionOutcome => continue,
+                | EditorEffect::ClearTransactionOutcome
+                | EditorEffect::SetConnectionTarget(_)
+                | EditorEffect::SetDatabaseTarget(_)
+                | EditorEffect::SetSchemaTarget(_) => continue,
+                EditorEffect::OpenTargetSelector => Action::OpenTargetSelector,
                 EditorEffect::SetTransactionModeRequested { manual } => {
                     Action::SetTransactionMode(if manual {
                         TransactionMode::Manual
@@ -2574,9 +2599,12 @@ impl App {
         let Some(candidate) = popup.candidates.get(popup.selected).cloned() else {
             return Vec::new();
         };
-        let _ = self
-            .editor
-            .replace_range(id, candidate.replace, &candidate.insert_text);
+        let _ = self.editor.replace_range(
+            id,
+            candidate.replace,
+            &candidate.insert_text,
+            crate::editor::ReplacementCursor::EndOfInsertion,
+        );
         self.apply_editor_effects()
     }
 
@@ -2626,7 +2654,12 @@ impl App {
         let ScopeSource::Contiguous(range) = scope.source else {
             return;
         };
-        if let Err(error) = self.editor.replace_range(id, range, &formatted) {
+        if let Err(error) = self.editor.replace_range(
+            id,
+            range,
+            &formatted,
+            crate::editor::ReplacementCursor::Start,
+        ) {
             self.overlay = Some(Overlay::Message {
                 title: "FORMAT".into(),
                 body: error.to_string(),
@@ -2724,6 +2757,13 @@ impl App {
             tab_id,
             tab.generation,
             connection,
+            tab.execution_target.clone().unwrap_or_else(|| {
+                crate::model::execution_target::ExecutionTarget {
+                    profile_id: connection.profile_id,
+                    database: String::new(),
+                    schema: None,
+                }
+            }),
             tab.transaction_generation,
             self.active_editor_revision(),
             scope.kind,

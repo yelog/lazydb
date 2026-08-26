@@ -61,6 +61,7 @@ pub struct TransactionWorkerHandle {
     pub(crate) worker: JoinHandle<WorkerDisposition>,
     pub(crate) cancellation: Option<tokio::sync::oneshot::Sender<()>>,
     pub(crate) forced_close: ForcedCloseHandle,
+    pub(crate) readiness: tokio::sync::oneshot::Receiver<Result<(), TransactionError>>,
 }
 
 struct ArmedGuard<B: TransactionBackend> {
@@ -116,12 +117,16 @@ where
     B: TransactionBackend,
 {
     let (requests, mut receiver) = mpsc::unbounded_channel();
+    let (readiness_sender, readiness) = tokio::sync::oneshot::channel();
     let forced_close = ForcedCloseHandle::new();
     let worker_for_task = forced_close.clone();
     let worker = tokio::spawn(async move {
         let mut guard = ArmedGuard::new(backend, worker_for_task);
         guard.arm();
-        if guard.backend_mut().begin().await.is_err() {
+        let begin = guard.backend_mut().begin().await;
+        let begin_failed = begin.is_err();
+        let _ = readiness_sender.send(begin.map_err(|error| error.clone()));
+        if begin_failed {
             return WorkerDisposition::Quarantine;
         }
 
@@ -190,6 +195,7 @@ where
         worker,
         cancellation: None,
         forced_close,
+        readiness,
     }
 }
 

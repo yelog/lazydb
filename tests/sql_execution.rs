@@ -105,6 +105,11 @@ fn execution_draft_classifies_and_preserves_exact_sql() {
             profile_id: uuid::Uuid::nil(),
             generation: 2,
         },
+        lazydb::model::execution_target::ExecutionTarget {
+            profile_id: uuid::Uuid::nil(),
+            database: "db".into(),
+            schema: Some("main".into()),
+        },
         0,
         7,
         ScopeKind::CurrentStatement,

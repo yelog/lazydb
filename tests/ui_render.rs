@@ -471,6 +471,79 @@ fn completion_popup_is_anchored_below_the_editor_cursor() {
 }
 
 #[test]
+fn cursor_style_follows_editor_mode() {
+    let mut app = fixture();
+    let (_, normal_state) = render_with_state(&app, 120, 36);
+    assert_eq!(
+        normal_state.cursor_style,
+        Some(lazydb::ui::CursorStyle::Block)
+    );
+
+    app.update(Action::EditorKey(KeyEvent::new(
+        KeyCode::Char('i'),
+        KeyModifiers::NONE,
+    )));
+    let (_, insert_state) = render_with_state(&app, 120, 36);
+    assert_eq!(
+        insert_state.cursor_style,
+        Some(lazydb::ui::CursorStyle::Bar)
+    );
+}
+
+#[test]
+fn footer_and_header_show_transaction_state_and_controls() {
+    let mut app = fixture();
+    app.active_console_mut().transaction_mode = lazydb::model::transaction::TransactionMode::Manual;
+    app.active_console_mut().transaction_state =
+        lazydb::model::transaction::TransactionState::Active;
+    let (output, _) = render_with_state(&app, 120, 36);
+    assert!(output.contains("TX MANUAL:ACTIVE"));
+}
+
+#[test]
+fn editor_title_owns_target_and_transaction_context() {
+    let mut app = fixture();
+    app.active_console_mut().transaction_mode = lazydb::model::transaction::TransactionMode::Manual;
+    app.active_console_mut().transaction_state =
+        lazydb::model::transaction::TransactionState::Active;
+    let (output, _) = render_with_state(&app, 120, 36);
+    assert!(output.contains("orbital-lab"));
+    assert!(output.contains("TX MANUAL:ACTIVE"));
+    assert!(!output.contains("TX AUTO"));
+    assert!(!output.lines().take(2).any(|line| line.contains("TX ")));
+}
+
+#[test]
+fn editor_help_documents_target_context_controls() {
+    let mut app = fixture();
+    app.update(Action::ShowHelp);
+    let (output, _) = render_with_state(&app, 80, 24);
+    for text in [
+        "Space d",
+        ":connection",
+        ":database",
+        ":schema",
+        "Space tt",
+        "Space tc",
+        "Space tr",
+    ] {
+        assert!(output.contains(text), "missing {text}");
+    }
+}
+
+#[test]
+fn editor_context_keeps_transaction_visible_when_narrow() {
+    let mut app = fixture();
+    app.active_console_mut().transaction_mode = lazydb::model::transaction::TransactionMode::Manual;
+    app.active_console_mut().transaction_state =
+        lazydb::model::transaction::TransactionState::Active;
+    for width in [120, 80, 56] {
+        let output = render(&app, width, 24);
+        assert!(output.contains("TX MANUAL:ACTIVE"), "width={width}");
+    }
+}
+
+#[test]
 fn standard_layout_shows_stable_workspace_regions() {
     let output = render(&fixture(), 120, 36);
 

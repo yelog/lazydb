@@ -17,7 +17,7 @@ mod transaction;
 pub use analysis::{AnalysisKey, LineIndex};
 pub use completion::{
     CompletionCandidate, CompletionIndex, CompletionKind, CompletionScheduleKey, CompletionScore,
-    complete, quote_identifier,
+    complete, quote_identifier, should_offer_completion,
 };
 pub use dialect::SqlDialect;
 pub use execution::ExecutionDraft;

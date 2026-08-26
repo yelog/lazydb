@@ -93,6 +93,7 @@ pub struct EditorRenderSnapshot {
     pub cursor: EditorPosition,
     pub cursor_screen_cell: Option<(u16, u16)>,
     pub selections: Vec<EditorSelection>,
+    pub selection_cells: Vec<(usize, usize, usize)>,
     pub prompt: Option<EditorPromptSnapshot>,
 }
 

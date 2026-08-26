@@ -53,6 +53,10 @@ pub(crate) enum EditorEffect {
     Commit,
     Rollback,
     ClearTransactionOutcome,
+    SetConnectionTarget(String),
+    SetDatabaseTarget(String),
+    SetSchemaTarget(String),
+    OpenTargetSelector,
     Quit,
     Message(String),
     BackwardSearch,
@@ -138,10 +142,21 @@ pub(crate) enum EditorKey {
     Tab,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReplacementCursor {
+    Start,
+    EndOfInsertion,
+    PreserveRelative,
+}
+
 struct EditorSession {
     buffer: modalkit::editing::store::SharedBuffer<LazyDbApplicationInfo>,
     group_id: modalkit::editing::buffer::CursorGroupId,
     viewport: modalkit::prelude::ViewportContext<modalkit::editing::cursor::Cursor>,
+    keys: VimKeyManager,
+    pending_binding: Option<PendingBinding>,
+    current_sequence: Vec<EditorKey>,
+    last_sequence: Option<Vec<EditorKey>>,
     mode: EditorMode,
     position: EditorPosition,
     revision: u64,
@@ -149,16 +164,29 @@ struct EditorSession {
     redo_text: Option<String>,
 }
 
+type VimKeyManager = modalkit::editing::key::KeyManager<
+    modalkit::key::TerminalKey,
+    modalkit::actions::Action<LazyDbApplicationInfo>,
+    modalkit::prelude::RepeatType,
+>;
+
+fn mode_from_key_manager(keys: &VimKeyManager) -> EditorMode {
+    match keys.show_mode().as_deref() {
+        Some("-- INSERT --") => EditorMode::Insert,
+        Some("-- REPLACE --") => EditorMode::Replace,
+        Some("-- VISUAL LINE --") => EditorMode::VisualLine,
+        Some("-- VISUAL BLOCK --") => EditorMode::VisualBlock,
+        Some("-- VISUAL --") => EditorMode::VisualChar,
+        _ => EditorMode::Normal,
+    }
+}
+
 pub(crate) struct EditorWorkspace {
     store: modalkit::editing::store::Store<LazyDbApplicationInfo>,
     sessions: HashMap<Uuid, EditorSession>,
     registers: HashMap<char, String>,
-    keys: modalkit::editing::key::KeyManager<
-        modalkit::key::TerminalKey,
-        modalkit::actions::Action<LazyDbApplicationInfo>,
-        modalkit::prelude::RepeatType,
-    >,
     effects: Vec<EditorEffect>,
+    keys: VimKeyManager,
     pending_binding: Option<PendingBinding>,
     current_sequence: Vec<EditorKey>,
     last_sequence: Option<Vec<EditorKey>>,
@@ -198,10 +226,8 @@ impl EditorWorkspace {
             store: Default::default(),
             sessions: HashMap::new(),
             registers: HashMap::new(),
-            keys: modalkit::editing::key::KeyManager::new(
-                modalkit::env::vim::keybindings::default_vim_keys(),
-            ),
             effects: Vec::new(),
+            keys: VimKeyManager::new(modalkit::env::vim::keybindings::default_vim_keys()),
             pending_binding: None,
             current_sequence: Vec::new(),
             last_sequence: None,
@@ -223,12 +249,22 @@ impl EditorWorkspace {
         let group_id = buffer.create_group();
         buffer.set_leader(group_id, modalkit::editing::cursor::Cursor::new(0, 0));
         let buffer = std::sync::Arc::new(std::sync::RwLock::new(buffer));
+        let mut keys = VimKeyManager::new(modalkit::env::vim::keybindings::default_vim_keys());
+        keys.input_key(modalkit::key::TerminalKey::from(KeyEvent::new(
+            KeyCode::Char('i'),
+            KeyModifiers::NONE,
+        )));
+        while keys.pop().is_some() {}
         self.sessions.insert(
             id,
             EditorSession {
                 buffer,
                 group_id,
                 viewport: Default::default(),
+                keys,
+                pending_binding: None,
+                current_sequence: Vec::new(),
+                last_sequence: None,
                 mode: EditorMode::Insert,
                 position: EditorPosition { line: 0, column: 0 },
                 revision: 0,
@@ -305,17 +341,27 @@ impl EditorWorkspace {
     }
 
     pub(crate) fn mode(&self, id: Uuid) -> Result<EditorMode, EditorError> {
-        self.sessions
+        let session = self
+            .sessions
             .get(&id)
-            .map(|session| session.mode)
-            .ok_or(EditorError::MissingSession(id))
+            .ok_or(EditorError::MissingSession(id))?;
+        Ok(mode_from_key_manager(&session.keys))
     }
 
     pub(crate) fn position(&self, id: Uuid) -> Result<EditorPosition, EditorError> {
-        self.sessions
+        let session = self
+            .sessions
             .get(&id)
-            .map(|session| session.position)
-            .ok_or(EditorError::MissingSession(id))
+            .ok_or(EditorError::MissingSession(id))?;
+        let mut buffer = session
+            .buffer
+            .write()
+            .map_err(|_| EditorError::Operation("buffer lock poisoned".into()))?;
+        let cursor = buffer.get_leader(session.group_id);
+        Ok(EditorPosition {
+            line: cursor.get_y(),
+            column: cursor.get_x(),
+        })
     }
 
     pub(crate) fn revision(&self, id: Uuid) -> Result<u64, EditorError> {
@@ -467,6 +513,63 @@ impl EditorWorkspace {
                     },
                 });
         let selections = selection.into_iter().collect::<Vec<_>>();
+        let selection_cells = selections
+            .iter()
+            .flat_map(|selection| {
+                let first_line = selection.start.line.min(selection.end.line);
+                let last_line = selection.start.line.max(selection.end.line);
+                (first_line..=last_line).filter_map(|line| {
+                    let line_data = lines.iter().find(|item| item.line == line)?;
+                    let (start, end) =
+                        match selection.shape {
+                            EditorSelectionShape::Line => (
+                                0,
+                                line_data
+                                    .source_to_display_cells
+                                    .last()
+                                    .copied()
+                                    .unwrap_or(0),
+                            ),
+                            EditorSelectionShape::Block => {
+                                let start = selection.start.column.min(selection.end.column);
+                                let end = selection
+                                    .start
+                                    .column
+                                    .max(selection.end.column)
+                                    .saturating_add(1);
+                                (
+                                    *line_data.source_to_display_cells.get(start).unwrap_or(&0),
+                                    *line_data.source_to_display_cells.get(end).unwrap_or_else(
+                                        || line_data.source_to_display_cells.last().unwrap_or(&0),
+                                    ),
+                                )
+                            }
+                            EditorSelectionShape::Char => {
+                                let start = if line == selection.start.line {
+                                    selection.start.column
+                                } else {
+                                    0
+                                };
+                                let end = if line == selection.end.line {
+                                    selection.end.column.saturating_add(1)
+                                } else {
+                                    line_data.source_to_display_cells.len().saturating_sub(1)
+                                };
+                                (
+                                    *line_data
+                                        .source_to_display_cells
+                                        .get(start.min(end))
+                                        .unwrap_or(&0),
+                                    *line_data.source_to_display_cells.get(end).unwrap_or_else(
+                                        || line_data.source_to_display_cells.last().unwrap_or(&0),
+                                    ),
+                                )
+                            }
+                        };
+                    (end > start).then_some((line, start, end))
+                })
+            })
+            .collect();
         let cursor_screen_cell = lines
             .iter()
             .position(|line| line.line == session.position.line)
@@ -492,6 +595,7 @@ impl EditorWorkspace {
             cursor: session.position,
             cursor_screen_cell,
             selections,
+            selection_cells,
             prompt: self.prompt.as_ref().map(|prompt| EditorPromptSnapshot {
                 kind: prompt.kind,
                 prefix: match prompt.kind {
@@ -581,6 +685,7 @@ impl EditorWorkspace {
         id: Uuid,
         range: TextRange,
         replacement: &str,
+        cursor: ReplacementCursor,
     ) -> Result<(), EditorError> {
         let old = self.text(id)?;
         if range.get(&old).is_none() {
@@ -596,12 +701,21 @@ impl EditorWorkspace {
             .ok_or(EditorError::MissingSession(id))?;
         session.previous_text = Some(old);
         session.redo_text = None;
-        session.position = byte_to_char_position(&next, range.start);
-        session
+        let cursor_offset = match cursor {
+            ReplacementCursor::Start => range.start,
+            ReplacementCursor::EndOfInsertion => range.start + replacement.len(),
+            ReplacementCursor::PreserveRelative => range.start + replacement.len(),
+        };
+        session.position = byte_to_char_position(&next, cursor_offset);
+        let mut buffer = session
             .buffer
             .write()
-            .map_err(|_| EditorError::Operation("buffer lock poisoned".into()))?
-            .set_text(encode_editor_text(&next));
+            .map_err(|_| EditorError::Operation("buffer lock poisoned".into()))?;
+        buffer.set_text(encode_editor_text(&next));
+        buffer.set_leader(
+            session.group_id,
+            modalkit::editing::cursor::Cursor::new(session.position.line, session.position.column),
+        );
         session.revision = session.revision.saturating_add(1);
         self.effects.push(EditorEffect::Changed {
             console_id: id,
@@ -633,6 +747,7 @@ impl EditorWorkspace {
             .write()
             .map_err(|_| EditorError::Operation("buffer lock poisoned".into()))?;
         buffer.set_text(encode_editor_text(text));
+        session.keys.reset_mode();
         session.position = EditorPosition { line: 0, column: 0 };
         session.viewport = Default::default();
         session.mode = EditorMode::Normal;
@@ -649,10 +764,19 @@ impl EditorWorkspace {
             .get_mut(&id)
             .ok_or(EditorError::MissingSession(id))?;
         let value = text.rsplit('\n').next().unwrap_or_default();
-        session.position = EditorPosition {
+        let position = EditorPosition {
             line: text.matches('\n').count(),
             column: value.chars().count(),
         };
+        session.position = position;
+        session
+            .buffer
+            .write()
+            .map_err(|_| EditorError::Operation("buffer lock poisoned".into()))?
+            .set_leader(
+                session.group_id,
+                modalkit::editing::cursor::Cursor::new(position.line, position.column),
+            );
         Ok(())
     }
 
@@ -662,18 +786,6 @@ impl EditorWorkspace {
         }
         let mode = self.mode(id)?;
         match (mode, key) {
-            (_, EditorKey::Escape) => self.set_mode(id, EditorMode::Normal),
-            (EditorMode::Normal, EditorKey::Character('i')) => {
-                self.set_mode(id, EditorMode::Insert)
-            }
-            (EditorMode::Insert, EditorKey::Enter) => self.insert(id, "\n"),
-            (EditorMode::Insert, EditorKey::Backspace) => self.backspace(id),
-            (EditorMode::Insert, EditorKey::Control('h')) => self.backspace(id),
-            (EditorMode::Insert, EditorKey::Control('w')) => self.delete_previous_word(id),
-            (EditorMode::Insert, EditorKey::Control('u')) => self.delete_to_line_start(id),
-            (EditorMode::Insert, EditorKey::Control('c')) => self.set_mode(id, EditorMode::Normal),
-            (EditorMode::Insert, EditorKey::Character(c)) => self.insert(id, &c.to_string()),
-            (EditorMode::Insert, EditorKey::Control(c)) => self.insert(id, &c.to_string()),
             (EditorMode::Normal, EditorKey::Character('Q')) => {
                 self.effects.push(EditorEffect::Quit);
                 Ok(())
@@ -689,8 +801,14 @@ impl EditorWorkspace {
             }
             (EditorMode::Normal, EditorKey::Character('n')) => self.repeat_search(id, false),
             (EditorMode::Normal, EditorKey::Character('N')) => self.repeat_search(id, true),
+            (EditorMode::Normal, EditorKey::Character('u')) => self.undo(id),
+            (EditorMode::Normal, EditorKey::Control('r')) => self.redo(id),
             (EditorMode::Normal, EditorKey::Character('.')) => {
-                if let Some(sequence) = self.last_sequence.clone() {
+                let sequence = self
+                    .sessions
+                    .get(&id)
+                    .and_then(|session| session.last_sequence.clone());
+                if let Some(sequence) = sequence {
                     for key in sequence {
                         self.press(id, key)?;
                     }
@@ -698,11 +816,17 @@ impl EditorWorkspace {
                 Ok(())
             }
             (EditorMode::Normal, EditorKey::Character(' ' | '\\')) => {
-                self.pending_binding = Some(PendingBinding::Leader);
+                self.sessions
+                    .get_mut(&id)
+                    .ok_or(EditorError::MissingSession(id))?
+                    .pending_binding = Some(PendingBinding::Leader);
                 Ok(())
             }
             (EditorMode::Normal, EditorKey::Control('w')) => {
-                self.pending_binding = Some(PendingBinding::Window);
+                self.sessions
+                    .get_mut(&id)
+                    .ok_or(EditorError::MissingSession(id))?
+                    .pending_binding = Some(PendingBinding::Window);
                 Ok(())
             }
             (_, key) => self.input_vim_key(id, key),
@@ -723,22 +847,31 @@ impl EditorWorkspace {
 
     pub(crate) fn undo(&mut self, id: Uuid) -> Result<(), EditorError> {
         let current = self.text(id)?;
-        let session = self
+        if let Some(previous) = self
             .sessions
             .get_mut(&id)
-            .ok_or(EditorError::MissingSession(id))?;
-        let Some(previous) = session.previous_text.take() else {
+            .ok_or(EditorError::MissingSession(id))?
+            .previous_text
+            .take()
+        {
+            let session = self
+                .sessions
+                .get_mut(&id)
+                .ok_or(EditorError::MissingSession(id))?;
+            session.redo_text = Some(current);
+            session
+                .buffer
+                .write()
+                .map_err(|_| EditorError::Operation("buffer lock poisoned".into()))?
+                .set_text(encode_editor_text(&previous));
+            session.position = EditorPosition { line: 0, column: 0 };
+            session.revision = session.revision.saturating_add(1);
             return Ok(());
-        };
-        session.redo_text = Some(current);
-        let mut buffer = session
-            .buffer
-            .write()
-            .map_err(|_| EditorError::Operation("buffer lock poisoned".into()))?;
-        buffer.set_text(encode_editor_text(&previous));
-        session.revision = session.revision.saturating_add(1);
-        session.position = EditorPosition { line: 0, column: 0 };
-        Ok(())
+        }
+        if self.mode(id)? == EditorMode::Insert {
+            self.press(id, EditorKey::Escape)?;
+        }
+        self.input_vim_key(id, EditorKey::Character('u'))
     }
 
     pub(crate) fn substitute_confirm(
@@ -779,22 +912,28 @@ impl EditorWorkspace {
 
     pub(crate) fn redo(&mut self, id: Uuid) -> Result<(), EditorError> {
         let current = self.text(id)?;
-        let session = self
+        if let Some(next) = self
             .sessions
             .get_mut(&id)
-            .ok_or(EditorError::MissingSession(id))?;
-        let Some(next) = session.redo_text.take() else {
+            .ok_or(EditorError::MissingSession(id))?
+            .redo_text
+            .take()
+        {
+            let session = self
+                .sessions
+                .get_mut(&id)
+                .ok_or(EditorError::MissingSession(id))?;
+            session.previous_text = Some(current);
+            session
+                .buffer
+                .write()
+                .map_err(|_| EditorError::Operation("buffer lock poisoned".into()))?
+                .set_text(encode_editor_text(&next));
+            session.position = byte_to_char_position(&next, next.len());
+            session.revision = session.revision.saturating_add(1);
             return Ok(());
-        };
-        session.previous_text = Some(current);
-        let mut buffer = session
-            .buffer
-            .write()
-            .map_err(|_| EditorError::Operation("buffer lock poisoned".into()))?;
-        buffer.set_text(encode_editor_text(&next));
-        session.revision = session.revision.saturating_add(1);
-        session.position = byte_to_char_position(&next, next.len());
-        Ok(())
+        }
+        self.input_vim_key(id, EditorKey::Control('r'))
     }
 
     pub(crate) fn set_mode(&mut self, id: Uuid, mode: EditorMode) -> Result<(), EditorError> {
@@ -802,6 +941,16 @@ impl EditorWorkspace {
             .sessions
             .get_mut(&id)
             .ok_or(EditorError::MissingSession(id))?;
+        session.keys.reset_mode();
+        if mode == EditorMode::Insert {
+            session
+                .keys
+                .input_key(modalkit::key::TerminalKey::from(KeyEvent::new(
+                    KeyCode::Char('i'),
+                    KeyModifiers::NONE,
+                )));
+            while session.keys.pop().is_some() {}
+        }
         if mode == EditorMode::Insert && session.mode != EditorMode::Insert {
             session.previous_text = None;
         }
@@ -875,7 +1024,18 @@ impl EditorWorkspace {
             .sessions
             .get_mut(&id)
             .ok_or(EditorError::MissingSession(id))?;
-        let offset = char_position_to_byte(&old, session.position);
+        let position = {
+            let mut buffer = session
+                .buffer
+                .write()
+                .map_err(|_| EditorError::Operation("buffer lock poisoned".into()))?;
+            let cursor = buffer.get_leader(session.group_id);
+            EditorPosition {
+                line: cursor.get_y(),
+                column: cursor.get_x(),
+            }
+        };
+        let offset = char_position_to_byte(&old, position);
         let mut next = old.clone();
         let new_offset = edit(&mut next, offset);
         if session.previous_text.is_none() {
@@ -887,6 +1047,10 @@ impl EditorWorkspace {
             .write()
             .map_err(|_| EditorError::Operation("buffer lock poisoned".into()))?;
         buffer.set_text(encode_editor_text(&next));
+        buffer.set_leader(
+            session.group_id,
+            modalkit::editing::cursor::Cursor::new(session.position.line, session.position.column),
+        );
         session.revision = session.revision.saturating_add(1);
         session.redo_text = None;
         self.effects.push(EditorEffect::Changed {
@@ -898,9 +1062,13 @@ impl EditorWorkspace {
 
     fn input_vim_key(&mut self, id: Uuid, key: EditorKey) -> Result<(), EditorError> {
         let before = self.text(id)?;
-        self.current_sequence.push(key);
+        let session = self
+            .sessions
+            .get_mut(&id)
+            .ok_or(EditorError::MissingSession(id))?;
+        session.current_sequence.push(key);
         if let EditorKey::Character(character) = key
-            && let Some(binding) = self.pending_binding.take()
+            && let Some(binding) = session.pending_binding.take()
         {
             match (binding, character) {
                 (PendingBinding::Leader, 'r') => self.effects.push(EditorEffect::RunCurrent),
@@ -909,7 +1077,10 @@ impl EditorWorkspace {
                 (PendingBinding::Leader, 'n') => self.effects.push(EditorEffect::NewConsole),
                 (PendingBinding::Leader, '?') => self.effects.push(EditorEffect::ShowHelp),
                 (PendingBinding::Leader, 't') => {
-                    self.pending_binding = Some(PendingBinding::LeaderTransaction)
+                    session.pending_binding = Some(PendingBinding::LeaderTransaction)
+                }
+                (PendingBinding::Leader, 'd') => {
+                    self.effects.push(EditorEffect::OpenTargetSelector)
                 }
                 (PendingBinding::LeaderTransaction, 't') => {
                     self.effects.push(EditorEffect::ToggleTransaction)
@@ -932,20 +1103,33 @@ impl EditorWorkspace {
                 }
                 (_, _) => {}
             }
-            if self.pending_binding.is_some() {
+            if session.pending_binding.is_some() {
                 return Ok(());
             }
             return Ok(());
         }
         let terminal_key = key.to_terminal_key()?;
-        self.keys.input_key(terminal_key);
-        while let Some((action, context)) = self.keys.pop() {
+        session.keys.input_key(terminal_key);
+        let mut actions = Vec::new();
+        while let Some((action, context)) = session.keys.pop() {
+            actions.push((action, context));
+        }
+        for (action, context) in actions {
             self.apply_action(id, action, context)?;
         }
         self.sync_session_from_buffer(id)?;
         self.sync_registers();
         if before != self.text(id)? {
-            self.last_sequence = Some(std::mem::take(&mut self.current_sequence));
+            let session = self
+                .sessions
+                .get_mut(&id)
+                .ok_or(EditorError::MissingSession(id))?;
+            session.revision = session.revision.saturating_add(1);
+            session.last_sequence = Some(std::mem::take(&mut session.current_sequence));
+            self.effects.push(EditorEffect::Changed {
+                console_id: id,
+                revision: session.revision,
+            });
         }
         Ok(())
     }
@@ -998,14 +1182,7 @@ impl EditorWorkspace {
             line: cursor.get_y(),
             column: cursor.get_x(),
         };
-        session.mode = match self.keys.show_mode().as_deref() {
-            Some("-- INSERT --") => EditorMode::Insert,
-            Some("-- REPLACE --") => EditorMode::Replace,
-            Some("-- VISUAL LINE --") => EditorMode::VisualLine,
-            Some("-- VISUAL BLOCK --") => EditorMode::VisualBlock,
-            Some("-- VISUAL --") => EditorMode::VisualChar,
-            _ => EditorMode::Normal,
-        };
+        session.mode = mode_from_key_manager(&session.keys);
         Ok(())
     }
 
@@ -1170,7 +1347,20 @@ impl EditorWorkspace {
             .sessions
             .get(&id)
             .ok_or(EditorError::MissingSession(id))?;
-        let cursor = char_position_to_byte(&text, session.position);
+        let cursor = {
+            let mut buffer = session
+                .buffer
+                .write()
+                .map_err(|_| EditorError::Operation("buffer lock poisoned".into()))?;
+            let cursor = buffer.get_leader(session.group_id);
+            char_position_to_byte(
+                &text,
+                EditorPosition {
+                    line: cursor.get_y(),
+                    column: cursor.get_x(),
+                },
+            )
+        };
         let found = if backward {
             text[..cursor]
                 .rfind(pattern)
@@ -1189,6 +1379,17 @@ impl EditorWorkspace {
             .get_mut(&id)
             .ok_or(EditorError::MissingSession(id))?;
         session.position = byte_to_char_position(&text, offset);
+        session
+            .buffer
+            .write()
+            .map_err(|_| EditorError::Operation("buffer lock poisoned".into()))?
+            .set_leader(
+                session.group_id,
+                modalkit::editing::cursor::Cursor::new(
+                    session.position.line,
+                    session.position.column,
+                ),
+            );
         Ok(true)
     }
 
@@ -1209,10 +1410,17 @@ impl EditorWorkspace {
                 start: cursor.get_y().min(anchor.get_y()),
                 end: cursor.get_y().max(anchor.get_y()),
             });
+        let cursor_line = {
+            let mut buffer = session
+                .buffer
+                .write()
+                .map_err(|_| substitute::SubstituteError::Syntax)?;
+            buffer.get_leader(session.group_id).get_y()
+        };
         let (plan, flags) = substitute::plan(
             &source,
             raw,
-            session.position.line,
+            cursor_line,
             selection,
             self.previous_substitute_pattern.as_deref(),
         )?;
@@ -1254,6 +1462,14 @@ impl EditorWorkspace {
             .map_err(|_| EditorError::Operation("buffer lock poisoned".into()))?
             .set_text(encode_editor_text(&next));
         session.position = byte_to_char_position(&next, 0);
+        session
+            .buffer
+            .write()
+            .map_err(|_| EditorError::Operation("buffer lock poisoned".into()))?
+            .set_leader(
+                session.group_id,
+                modalkit::editing::cursor::Cursor::new(0, 0),
+            );
         session.revision = session.revision.saturating_add(1);
         self.effects.push(EditorEffect::Changed {
             console_id: id,
@@ -1264,7 +1480,17 @@ impl EditorWorkspace {
 }
 
 fn parse_command(command: &str) -> Option<EditorEffect> {
-    match command.trim() {
+    let command = command.trim();
+    if let Some(value) = command.strip_prefix("connection ") {
+        return Some(EditorEffect::SetConnectionTarget(value.trim().to_owned()));
+    }
+    if let Some(value) = command.strip_prefix("database ") {
+        return Some(EditorEffect::SetDatabaseTarget(value.trim().to_owned()));
+    }
+    if let Some(value) = command.strip_prefix("schema ") {
+        return Some(EditorEffect::SetSchemaTarget(value.trim().to_owned()));
+    }
+    match command {
         "run" => Some(EditorEffect::RunCurrent),
         "runall" => Some(EditorEffect::RunAll),
         "format" => Some(EditorEffect::FormatCurrent),

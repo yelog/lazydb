@@ -197,6 +197,37 @@ fn insert_mode_preserves_printable_characters() {
 }
 
 #[test]
+fn normal_mode_global_keys_win_over_editor_and_completion() {
+    for popup in [false, true] {
+        let mut keymap = Keymap::default();
+        let mut app = App::new(Vec::new());
+        app.update(Action::EditorKey(key(KeyCode::Esc)));
+        if popup {
+            app.active_console_mut().completion = Some(CompletionPopup::default());
+        }
+
+        assert_eq!(
+            keymap.map(key(KeyCode::Char('?')), &app),
+            Some(Action::ShowHelp)
+        );
+        assert_eq!(keymap.map(key(KeyCode::Tab), &app), Some(Action::FocusNext));
+        assert_eq!(
+            keymap.map(key(KeyCode::BackTab), &app),
+            Some(Action::FocusPrevious)
+        );
+    }
+}
+
+#[test]
+fn insert_escape_bypasses_completion_dismiss() {
+    let mut keymap = Keymap::default();
+    let mut app = App::new(Vec::new());
+    app.active_console_mut().completion = Some(CompletionPopup::default());
+    let escape = key(KeyCode::Esc);
+    assert_eq!(keymap.map(escape, &app), Some(Action::EditorKey(escape)));
+}
+
+#[test]
 fn printable_input_passes_through_an_open_completion_popup() {
     let mut keymap = Keymap::default();
     let mut app = App::new(Vec::new());
@@ -208,6 +239,59 @@ fn printable_input_passes_through_an_open_completion_popup() {
     assert_eq!(
         keymap.map(key(KeyCode::Enter), &app),
         Some(Action::CompletionAccept)
+    );
+}
+
+#[test]
+fn transaction_exit_keys_carry_their_explicit_choice() {
+    let mut keymap = Keymap::default();
+    let mut app = App::new(Vec::new());
+    let prompt = lazydb::model::transaction::DeferredTransactionPrompt {
+        console_id: app.active_console().id,
+        transaction_generation: 0,
+        intent: lazydb::model::transaction::DeferredIntent::CloseConsole,
+    };
+    app.overlay = Some(lazydb::model::workspace::Overlay::TransactionExitConfirm {
+        prompt,
+        choice: lazydb::model::transaction::TransactionExitChoice::Rollback,
+    });
+
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('r')), &app),
+        Some(Action::ConfirmTransactionExitChoice(
+            lazydb::model::transaction::TransactionExitChoice::Rollback,
+        ))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('c')), &app),
+        Some(Action::ConfirmTransactionExitChoice(
+            lazydb::model::transaction::TransactionExitChoice::Commit,
+        ))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Enter), &app),
+        Some(Action::ConfirmTransactionExit)
+    );
+}
+
+#[test]
+fn editor_leader_opens_connection_target_selector() {
+    let mut keymap = Keymap::default();
+    let mut app = App::new(Vec::new());
+    app.update(Action::EditorKey(key(KeyCode::Esc)));
+    app.update(Action::EditorKey(key(KeyCode::Char(' '))));
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('d')), &app),
+        Some(Action::EditorKey(key(KeyCode::Char('d'))))
+    );
+    app.update(Action::EditorKey(key(KeyCode::Char('d'))));
+    assert_eq!(
+        app.overlay,
+        Some(lazydb::model::workspace::Overlay::TargetSelector { selected: 0 })
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Esc), &app),
+        Some(Action::CancelTargetSelector)
     );
 }
 

@@ -77,8 +77,13 @@ impl Keymap {
         if matches!(app.overlay, Some(Overlay::TransactionExitConfirm { .. })) {
             self.pending = None;
             return match event.code {
-                KeyCode::Enter | KeyCode::Char('r') => Some(Action::ConfirmTransactionExit),
-                KeyCode::Char('c') => Some(Action::ConfirmTransactionExit),
+                KeyCode::Enter => Some(Action::ConfirmTransactionExit),
+                KeyCode::Char('r') => Some(Action::ConfirmTransactionExitChoice(
+                    crate::model::transaction::TransactionExitChoice::Rollback,
+                )),
+                KeyCode::Char('c') => Some(Action::ConfirmTransactionExitChoice(
+                    crate::model::transaction::TransactionExitChoice::Commit,
+                )),
                 KeyCode::Esc | KeyCode::Char('n') => Some(Action::CancelTransactionExit),
                 KeyCode::Tab | KeyCode::Left | KeyCode::Right => {
                     Some(Action::ToggleTransactionExitChoice)
@@ -95,6 +100,30 @@ impl Keymap {
                 }
                 _ => None,
             };
+        }
+        if matches!(app.overlay, Some(Overlay::TargetSelector { .. })) {
+            self.pending = None;
+            return match event.code {
+                KeyCode::Enter => Some(Action::ConfirmTargetSelector),
+                KeyCode::Esc => Some(Action::CancelTargetSelector),
+                KeyCode::Down | KeyCode::Char('j') => Some(Action::MoveTargetSelector(1)),
+                KeyCode::Up | KeyCode::Char('k') => Some(Action::MoveTargetSelector(-1)),
+                _ => None,
+            };
+        }
+        if app.focus == Focus::Editor && app.active_editor_mode() == EditorMode::Normal {
+            match event.code {
+                KeyCode::Char('?') => return Some(Action::ShowHelp),
+                KeyCode::Tab => return Some(Action::FocusNext),
+                KeyCode::BackTab => return Some(Action::FocusPrevious),
+                _ => {}
+            }
+        }
+        if app.focus == Focus::Editor
+            && app.active_editor_mode() == EditorMode::Insert
+            && event.code == KeyCode::Esc
+        {
+            return Some(Action::EditorKey(event));
         }
         if app.overlay.is_some() {
             self.pending = None;
@@ -256,6 +285,7 @@ fn map_pending(pending: Pending, event: KeyEvent) -> Option<Action> {
         (Pending::Leader, KeyCode::Char('n')) => Some(Action::NewConsole),
         (Pending::Leader, KeyCode::Char('r')) => Some(Action::RunActiveSql),
         (Pending::Leader, KeyCode::Char('R')) => Some(Action::RunAllSql),
+        (Pending::Leader, KeyCode::Char('d')) => Some(Action::OpenTargetSelector),
         (Pending::Window, KeyCode::Char('h')) => Some(Action::Focus(Focus::Explorer)),
         (Pending::Window, KeyCode::Char('j')) => Some(Action::Focus(Focus::Results)),
         (Pending::Window, KeyCode::Char('k' | 'l')) => Some(Action::Focus(Focus::Editor)),

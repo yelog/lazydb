@@ -40,4 +40,12 @@ impl AppPaths {
     pub fn profiles_file(&self) -> PathBuf {
         self.config_dir.join("connections.toml")
     }
+
+    pub fn workspace_file(&self) -> PathBuf {
+        self.state_dir.join("workspace.toml")
+    }
+
+    pub fn workspace_sql_dir(&self) -> PathBuf {
+        self.state_dir.join("sql")
+    }
 }
