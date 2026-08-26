@@ -43,35 +43,44 @@ Supply a session password through `LAZYDB_PASSWORD`. It is read at startup only,
 bound to the selected profile, and is not reused for a different profile. Avoid
 URL passwords because process arguments can be inspected by other local users.
 
+The Profile Manager also accepts these forms in its URL field. Changing the URL
+atomically fills the driver, host, port, user, database, default schema, SSL, and
+read-only settings. Changing those settings regenerates a password-free URL.
+Passwords parsed from URLs are moved into the secret-backed Password field and
+are never retained in the displayed URL.
+
 ## Persisted Profile Shape
 
 Profiles are versioned TOML and contain no password field:
 
 ```toml
-version = 2
+version = 3
 
 [[profiles]]
 id = "1c73c7c0-f944-4adc-a73a-1265fe1260a9"
 name = "local-app"
 kind = "postgres"
+url_format = "postgre-sql"
 host = "127.0.0.1"
 port = 5432
 user = "app_user"
 database = "app"
 default_schema = "public"
 ssl_mode = "require"
-secret_ref = "keyring:dev.lazydb.lazydb/1c73c7c0-f944-4adc-a73a-1265fe1260a9"
+credential_policy = { policy = "keyring", reference = "keyring:dev.lazydb.lazydb/1c73c7c0-f944-4adc-a73a-1265fe1260a9" }
 read_only = false
 environment = "development"
 catalog_scope = { databases = { mode = "selected", items = [{ name = "app", schemas = { mode = "selected", items = ["public"] } }] } }
 ```
 
-`secret_ref` points to the native keyring service `dev.lazydb.lazydb` and account
-equal to the profile UUID. The password is never stored in TOML. `Remember
-Password` writes this entry to macOS Keychain or Linux Secret Service. If the
-native store is unavailable, LazyDB falls back to a session-only password and
-shows a warning. Delete removes the entry; manually edited or orphaned files
-may require manual keyring cleanup.
+Credential policy is explicit: `none` permits a passwordless connection,
+`prompt` requires a current-process password, and `keyring` references the
+native service `dev.lazydb.lazydb` with the profile UUID as account. The password
+is never stored in TOML. `Remember Password` writes the keyring entry; if the
+native store is unavailable, LazyDB persists `prompt`, keeps the password only
+for the current session, and shows a warning. A later restart opens the profile
+form for a password instead of trying an empty password. Delete removes a
+keyring entry; externally edited or orphaned files may require manual cleanup.
 
 The current profile serializer stores scope under `catalog_scope`, with
 `databases` and `schemas` represented as `All` or `Selected` lists. PostgreSQL
@@ -79,6 +88,13 @@ and SQLite expose database then schema rows. MySQL treats each selected database
 as its own schema and mirrors that name in the picker; the mirrored schema
 cannot be toggled separately. If discovery is stale or unavailable, saved
 selections remain visible with a warning.
+
+PostgreSQL's optional `default_schema` is also the default derived visibility
+scope. If it is non-empty and Visible Objects has not been customized, Explorer
+loads only that database/schema. Clearing it allows all schemas in the selected
+database. Explicit Visible Objects selections are preserved and must include the
+configured default schema. MySQL has no separate default-schema field; SQLite
+uses `main` by default.
 
 TLS mode maps to native driver modes. `verify-full`/`verify-identity` is
 recommended for remote production connections.

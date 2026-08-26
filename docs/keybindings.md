@@ -24,8 +24,10 @@ Editor Normal mode but contextual help outside the editor.
 
 | Key | Action |
 | --- | --- |
-| `j/k`, arrows | Select a profile or field |
-| `Enter` | Connect selected profile, or edit the selected form field |
+| `j/k`, Up/Down | Previous/next non-text form field; Up/Down also leave text fields |
+| `Tab`, `Shift-Tab` | Next/previous form field |
+| `h/l`, Left/Right | Previous/next driver, URL format, SSL mode, or environment |
+| `Enter` | Apply the URL field or activate the selected form action |
 | `n` | Create a new profile |
 | `t` | Test Connection without saving |
 | `s` | Save the profile without connecting |
@@ -45,6 +47,12 @@ rows include loading, stale/retry, and permission-denied/retry states.
 success it discovers databases and schemas used by the hierarchical scope
 picker. The picker supports `All` and `Selected`; MySQL displays a read-only
 database-as-schema mirror rather than independently selectable schemas.
+
+DRIVER displays PostgreSQL, MySQL, and SQLite horizontally, with the current
+choice highlighted. In text fields, `h/j/k/l` remain literal input; Left/Right
+move the text cursor and Up/Down change fields. PostgreSQL exposes an optional
+default schema. URL FORMAT cycles only through formats compatible with the
+selected driver, and URL applies on Enter, field exit, Test, or Save.
 
 ## Explorer
 

@@ -1,13 +1,14 @@
 use lazydb::{
     model::{
         profile_manager::{
-            CredentialUpdate, ProfileDraft, ProfileField, ProfileManagerPage, ProfileManagerState,
+            CatalogScopeMode, CredentialUpdate, ProfileDraft, ProfileField, ProfileManagerPage,
+            ProfileManagerState,
         },
         text_input::TextInput,
     },
     profile::{
-        CatalogScope, CatalogSelection, ConnectionProfile, DatabaseKind, DatabaseScope,
-        Environment, SslMode,
+        CatalogScope, CatalogSelection, ConnectionProfile, ConnectionUrlFormat, CredentialPolicy,
+        DatabaseKind, DatabaseScope, Environment, SslMode,
     },
 };
 use secrecy::ExposeSecret;
@@ -110,6 +111,68 @@ fn new_profiles_derive_catalog_scope_defaults() {
     assert_eq!(
         sqlite.catalog_scope,
         CatalogScope::for_profile(DatabaseKind::Sqlite, "./data/lazy.db", Some("main"))
+    );
+}
+
+#[test]
+fn empty_postgres_schema_means_all_schemas_in_the_derived_scope() {
+    let mut draft = valid_postgres_draft();
+    draft.schema.set("");
+
+    let profile = draft.validate(&[]).unwrap().profile;
+
+    assert_eq!(profile.default_schema, None);
+    assert_eq!(
+        profile.catalog_scope,
+        CatalogScope::for_profile(DatabaseKind::Postgres, "lazydb", None)
+    );
+}
+
+#[test]
+fn derived_scope_follows_database_and_schema_edits() {
+    let mut state = ProfileManagerState::new(false);
+    state.start_new(DatabaseKind::Postgres);
+    let draft = state.draft.as_mut().unwrap();
+    draft.name.set("primary");
+
+    state.focus_field(ProfileField::Database);
+    state.paste("warehouse");
+    state.focus_field(ProfileField::Schema);
+    for _ in 0.."public".len() {
+        state.backspace();
+    }
+    state.paste("audit");
+
+    let draft = state.draft.as_ref().unwrap();
+    assert_eq!(draft.catalog_scope_mode, CatalogScopeMode::Derived);
+    assert_eq!(
+        draft.catalog_scope,
+        CatalogScope::for_profile(DatabaseKind::Postgres, "warehouse", Some("audit"))
+    );
+    assert_eq!(
+        draft.validate(&[]).unwrap().profile.catalog_scope,
+        draft.catalog_scope
+    );
+}
+
+#[test]
+fn edited_profiles_detect_derived_and_explicit_scopes() {
+    let profile = saved_postgres_profile();
+    assert_eq!(
+        ProfileDraft::edit(&profile, false).catalog_scope_mode,
+        CatalogScopeMode::Derived
+    );
+
+    let mut explicit = profile;
+    explicit.catalog_scope = CatalogScope {
+        databases: CatalogSelection::Selected(vec![DatabaseScope {
+            name: "lazydb".into(),
+            schemas: CatalogSelection::Selected(vec!["public".into(), "audit".into()]),
+        }]),
+    };
+    assert_eq!(
+        ProfileDraft::edit(&explicit, false).catalog_scope_mode,
+        CatalogScopeMode::Explicit
     );
 }
 
@@ -241,6 +304,7 @@ fn changing_unrelated_fields_does_not_reset_a_custom_scope() {
         }]),
     };
     draft.catalog_scope = custom_scope.clone();
+    draft.catalog_scope_mode = CatalogScopeMode::Explicit;
     draft.environment = Environment::Staging;
     draft.read_only = true;
 
@@ -260,6 +324,7 @@ fn excluding_the_default_schema_is_a_field_level_validation_error() {
             schemas: CatalogSelection::Selected(vec!["private".into()]),
         }]),
     };
+    draft.catalog_scope_mode = CatalogScopeMode::Explicit;
 
     let error = draft.validate(&[]).unwrap_err();
 
@@ -270,7 +335,7 @@ fn excluding_the_default_schema_is_a_field_level_validation_error() {
 #[test]
 fn credential_intent_preserves_forgets_or_replaces_stored_passwords() {
     let mut profile = saved_postgres_profile();
-    profile.secret_ref = Some(format!("keyring:test/{}", profile.id));
+    profile.credential_policy = CredentialPolicy::Keyring(format!("keyring:test/{}", profile.id));
 
     let draft = ProfileDraft::edit(&profile, true);
     assert!(matches!(
@@ -282,7 +347,7 @@ fn credential_intent_preserves_forgets_or_replaces_stored_passwords() {
     forget.remember_password = false;
     let submission = forget.validate(&[profile.clone()]).unwrap();
     assert!(matches!(submission.credential, CredentialUpdate::Forget));
-    assert!(submission.profile.secret_ref.is_none());
+    assert_eq!(submission.profile.credential_policy, CredentialPolicy::None);
 
     let mut session = draft.clone();
     session.remember_password = false;
@@ -294,16 +359,24 @@ fn credential_intent_preserves_forgets_or_replaces_stored_passwords() {
         }
         other => panic!("expected session credential, got {other:?}"),
     }
-    assert!(submission.profile.secret_ref.is_none());
+    assert_eq!(
+        submission.profile.credential_policy,
+        CredentialPolicy::Prompt
+    );
 
     let mut remember = draft;
     remember.set_password("remembered-password");
-    match remember.validate(&[profile]).unwrap().credential {
+    let submission = remember.validate(&[profile]).unwrap();
+    match submission.credential {
         CredentialUpdate::Remember(secret) => {
             assert_eq!(secret.expose_secret(), "remembered-password");
         }
         other => panic!("expected remembered credential, got {other:?}"),
     }
+    assert_eq!(
+        submission.profile.credential_policy,
+        CredentialPolicy::Prompt
+    );
 }
 
 #[test]
@@ -336,18 +409,106 @@ fn debug_output_redacts_passwords() {
 }
 
 #[test]
+fn url_commit_is_atomic_and_moves_password_to_secret() {
+    let mut state = ProfileManagerState::new(false);
+    state.start_new(DatabaseKind::Postgres);
+    let draft = state.draft.as_mut().unwrap();
+    draft.name.set("primary");
+    let old_host = draft.host.value().to_owned();
+
+    state.focus_field(ProfileField::Url);
+    state.draft.as_mut().unwrap().move_home(ProfileField::Url);
+    state.paste("not-a-url");
+    assert!(state.commit_url().is_err());
+    let draft = state.draft.as_ref().unwrap();
+    assert_eq!(draft.host.value(), old_host);
+    assert!(draft.url_error().is_some());
+
+    state.start_new(DatabaseKind::Postgres);
+    let draft = state.draft.as_mut().unwrap();
+    while draft.url_cursor() > 0 {
+        draft.backspace(ProfileField::Url);
+    }
+    draft.paste(
+        ProfileField::Url,
+        "postgresql://alice:super-secret@db.example:5440/app?sslmode=require",
+    );
+    assert!(!draft.url_display().contains("super-secret"));
+    assert!(format!("{draft:?}").contains("[REDACTED]"));
+    draft.commit_url().unwrap();
+    assert_eq!(draft.host.value(), "db.example");
+    assert_eq!(draft.port.value(), "5440");
+    assert_eq!(draft.password().expose_secret(), "super-secret");
+    assert!(!draft.url_display().contains("super-secret"));
+    assert!(!draft.url_display().contains("***"));
+}
+
+#[test]
+fn structured_edits_refresh_url_and_invalid_port_keeps_last_valid_url() {
+    let mut state = ProfileManagerState::new(false);
+    state.start_new(DatabaseKind::Postgres);
+    let original = state.draft.as_ref().unwrap().url_display();
+    state.focus_field(ProfileField::Host);
+    state.paste("-changed");
+    let changed = state.draft.as_ref().unwrap().url_display();
+    assert_ne!(changed, original);
+
+    state.focus_field(ProfileField::Port);
+    state.paste("invalid");
+    assert_eq!(state.draft.as_ref().unwrap().url_display(), changed);
+    assert_eq!(
+        state
+            .draft
+            .as_ref()
+            .unwrap()
+            .validate(&[])
+            .unwrap_err()
+            .field,
+        ProfileField::Name
+    );
+}
+
+#[test]
+fn url_format_cycles_only_compatible_values_and_driver_resets_default() {
+    let mut state = ProfileManagerState::new(false);
+    state.start_new(DatabaseKind::Postgres);
+    state.focus_field(ProfileField::UrlFormat);
+    state.cycle(1);
+    assert_eq!(
+        state.draft.as_ref().unwrap().url_format,
+        ConnectionUrlFormat::JdbcPostgreSql
+    );
+    state.select_driver(DatabaseKind::MySql);
+    assert_eq!(
+        state.draft.as_ref().unwrap().url_format,
+        ConnectionUrlFormat::MySql
+    );
+    assert!(
+        state
+            .draft
+            .as_ref()
+            .unwrap()
+            .url_display()
+            .starts_with("mysql://")
+    );
+}
+
+#[test]
 fn visible_fields_follow_the_selected_driver_and_sqlite_mode() {
     let postgres = ProfileDraft::new(DatabaseKind::Postgres);
     assert_eq!(
         postgres.visible_fields(),
         &[
             ProfileField::Kind,
+            ProfileField::UrlFormat,
+            ProfileField::Url,
             ProfileField::Name,
             ProfileField::Host,
             ProfileField::Port,
             ProfileField::User,
             ProfileField::Password,
             ProfileField::Database,
+            ProfileField::Schema,
             ProfileField::VisibleObjects,
             ProfileField::SslMode,
             ProfileField::Environment,
@@ -359,6 +520,9 @@ fn visible_fields_follow_the_selected_driver_and_sqlite_mode() {
             ProfileField::Cancel,
         ]
     );
+
+    let mysql = ProfileDraft::new(DatabaseKind::MySql);
+    assert!(!mysql.visible_fields().contains(&ProfileField::Schema));
 
     let mut sqlite = ProfileDraft::new(DatabaseKind::Sqlite);
     assert!(sqlite.visible_fields().contains(&ProfileField::SqlitePath));
@@ -404,6 +568,34 @@ fn scope_picker_has_one_visible_objects_field_and_stable_summary() {
     );
     state.open_scope_picker();
     assert_eq!(state.page, ProfileManagerPage::Scope);
+    assert_eq!(
+        state.draft.as_ref().unwrap().catalog_scope_mode,
+        CatalogScopeMode::Derived
+    );
+}
+
+#[test]
+fn toggling_scope_makes_it_explicit_and_later_field_edits_preserve_it() {
+    let mut state = ProfileManagerState::new(false);
+    state.start_new(DatabaseKind::Postgres);
+    state.focus_field(ProfileField::Database);
+    state.paste("lazydb");
+    state.open_scope_picker();
+
+    assert!(state.toggle_scope_row("database:lazydb"));
+    let explicit_scope = state.draft.as_ref().unwrap().catalog_scope.clone();
+    assert_eq!(
+        state.draft.as_ref().unwrap().catalog_scope_mode,
+        CatalogScopeMode::Explicit
+    );
+
+    state.close_scope_picker();
+    state.focus_field(ProfileField::Database);
+    state.paste("-changed");
+    state.focus_field(ProfileField::Schema);
+    state.paste("-changed");
+
+    assert_eq!(state.draft.as_ref().unwrap().catalog_scope, explicit_scope);
 }
 
 #[test]
@@ -455,6 +647,7 @@ fn stale_discovery_preserves_custom_scope_and_unavailable_names() {
             schemas: CatalogSelection::Selected(vec!["missing_schema".into()]),
         }]),
     };
+    draft.catalog_scope_mode = CatalogScopeMode::Explicit;
     draft.invalidate_discovery_for_test();
     state.open_scope_picker();
 
@@ -563,6 +756,7 @@ fn discovered_and_saved_schema_rows_are_deduplicated() {
             schemas: CatalogSelection::Selected(vec!["public".into()]),
         }]),
     };
+    draft.catalog_scope_mode = CatalogScopeMode::Explicit;
     let profile = draft.validate(&[]).unwrap().profile;
     let fingerprint =
         lazydb::model::profile_manager::DiscoveryFingerprint::for_profile(&profile, false, 0);

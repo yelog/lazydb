@@ -23,6 +23,7 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                     || !matches!(
                         target,
                         HitTarget::ProfileField(_)
+                            | HitTarget::ProfileDriver(_)
                             | HitTarget::ProfileToggle(_)
                             | HitTarget::ProfileScopeRow(_)
                             | HitTarget::ProfileButton(_)
@@ -55,6 +56,7 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                     },
                 ),
                 HitTarget::ProfileField(field) => Some(Action::ProfileFocusField(field)),
+                HitTarget::ProfileDriver(kind) => Some(Action::ProfileSelectDriver(kind)),
                 HitTarget::ProfileToggle(field) => Some(Action::ProfileToggleField(field)),
                 HitTarget::ProfileScopeRow(id) => Some(Action::ProfileToggleScopeRow(id)),
                 HitTarget::ProfileButton(button) => Some(profile_button_action(button)),
@@ -131,6 +133,7 @@ fn focus_at(ui: &UiState, column: u16, row: u16) -> Option<Focus> {
         | HitTarget::Help
         | HitTarget::HeaderProfile
         | HitTarget::ProfileField(_)
+        | HitTarget::ProfileDriver(_)
         | HitTarget::ProfileToggle(_)
         | HitTarget::ProfileScopeRow(_)
         | HitTarget::ProfileButton(_) => None,

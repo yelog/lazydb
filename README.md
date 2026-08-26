@@ -101,11 +101,15 @@ Press `Space c` from any normal-mode workspace to open the manager later. Use
 connection. A successful test also discovers databases and schemas for the
 hierarchical scope picker. The picker supports `All` or `Selected` databases
 and schema selection. MySQL mirrors each database as its schema, so its schema
-rows are informational and not independently selectable. `Save` persists
-metadata, and `Save & Connect` persists and activates it. `Remember Password`
-stores only in the native macOS Keychain or Linux Secret Service; if that store
-is unavailable, LazyDB reports a session-only downgrade. Passwords in URLs are
-not supported as a safe credential mechanism.
+rows are informational and not independently selectable. PostgreSQL exposes an
+optional default schema; while visibility is not customized, it also limits the
+Explorer to that database and schema. The URL field accepts native and JDBC
+forms, fills the structured fields, and is regenerated when those fields change.
+Any URL password is moved into the secret-backed Password field and removed from
+the displayed URL. `Save` persists metadata, and `Save & Connect` persists and
+activates it. `Remember Password` stores only in the native macOS Keychain or
+Linux Secret Service; if that store is unavailable, LazyDB reports a
+session-only downgrade.
 
 ## CLI Contract
 
@@ -127,7 +131,7 @@ selects a saved profile by name; if both are supplied, `--url` wins.
 | Context | Keys |
 | --- | --- |
 | Global | `F1` help, `Ctrl-w h/j/k/l` panels, `[t`/`]t` tabs, `Space n` new console, `Q` quit |
-| Profiles | `Space c` open manager; `j/k` select; `Enter` connect/edit; `n` new; `t` test; `s` save; `d` delete; `Esc` close |
+| Profiles | `Space c` open manager; `j/k` or arrows select; `h/l` or left/right change choices; `Tab`/`Shift-Tab` move fields; `Esc` close |
 | Explorer | `j/k` move, `h/l/Enter` collapse/expand, `r` refresh, `p` preview, `D` DDL |
 | Editor Normal | `h/j/k/l`, `i/a/o`, `x`, `0/$`, `F5` scoped run, `Shift-F5` full run |
 | Editor Insert | `Esc` or idle `Ctrl-c` Normal mode, Tab insert, `Ctrl-W/U/H`, arrows, Backspace/Delete |
@@ -158,9 +162,12 @@ Terminal-Normal mode.
 
 ## Security Boundary
 
-- Persisted profile models contain `secret_ref`, never a password field.
-- `secret_ref` uses `keyring:dev.lazydb.lazydb/<profile-uuid>`; the native
-  keyring service is `dev.lazydb.lazydb` and the account is the profile UUID.
+- Persisted profiles contain an explicit `none`, `prompt`, or `keyring`
+  credential policy, never a password field or raw connection URL.
+- Keyring references use `keyring:dev.lazydb.lazydb/<profile-uuid>`; the native
+  service is `dev.lazydb.lazydb` and the account is the profile UUID.
+- A `prompt` profile without a current session password opens the profile form
+  instead of attempting an unauthenticated database connection.
 - Delete removes the profile metadata and remembered keyring entry. Manual
   keyring cleanup is only needed for orphaned entries after external file edits.
 - Imported passwords are wrapped in `secrecy` and remain process-local.

@@ -61,6 +61,7 @@ pub enum HitTarget {
     RelationCancel,
     HeaderProfile,
     ProfileField(ProfileField),
+    ProfileDriver(crate::profile::DatabaseKind),
     ProfileToggle(ProfileField),
     ProfileScopeRow(String),
     ProfileButton(ProfileButton),

@@ -15,7 +15,7 @@ use lazydb::{
         profile_manager::ProfileField,
         workspace::{Focus, Overlay},
     },
-    profile::import_connection_url,
+    profile::{DatabaseKind, import_connection_url},
     ui::{self, HitRegion, HitTarget, ProfileButton, UiState},
 };
 use ratatui::{Terminal, backend::TestBackend, layout::Rect};
@@ -281,6 +281,7 @@ fn maps_profile_fields_toggles_and_buttons() {
     let mut ui = UiState::new(true);
     let targets = [
         HitTarget::ProfileField(ProfileField::Name),
+        HitTarget::ProfileDriver(DatabaseKind::MySql),
         HitTarget::ProfileToggle(ProfileField::ReadOnly),
         HitTarget::ProfileButton(ProfileButton::Save),
         HitTarget::ProfileButton(ProfileButton::ConfirmDelete),
@@ -296,6 +297,12 @@ fn maps_profile_fields_toggles_and_buttons() {
         target: HitTarget::HeaderProfile,
     });
 
+    assert_click_maps(
+        &ui,
+        &app,
+        &HitTarget::ProfileDriver(DatabaseKind::MySql),
+        Action::ProfileSelectDriver(DatabaseKind::MySql),
+    );
     assert_click_maps(
         &ui,
         &app,
@@ -328,6 +335,43 @@ fn maps_profile_fields_toggles_and_buttons() {
             &app,
         ),
         None
+    );
+}
+
+#[test]
+fn rendered_driver_options_select_exact_kinds_and_are_disabled_while_busy() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::OpenProfileManager);
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut state = UiState::new(true);
+    terminal
+        .draw(|frame| ui::render_with_state(frame, &app, &mut state))
+        .unwrap();
+
+    for kind in [
+        DatabaseKind::Postgres,
+        DatabaseKind::MySql,
+        DatabaseKind::Sqlite,
+    ] {
+        assert_click_maps(
+            &state,
+            &app,
+            &HitTarget::ProfileDriver(kind),
+            Action::ProfileSelectDriver(kind),
+        );
+    }
+
+    app.profile_manager.as_mut().unwrap().operation =
+        Some(lazydb::model::profile_manager::ProfileOperation::Testing);
+    terminal
+        .draw(|frame| ui::render_with_state(frame, &app, &mut state))
+        .unwrap();
+    assert!(
+        !state
+            .hit_regions
+            .iter()
+            .any(|region| matches!(region.target, HitTarget::ProfileDriver(_)))
     );
 }
 

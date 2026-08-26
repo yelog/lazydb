@@ -1,9 +1,12 @@
 use lazydb::{
+    action::Action,
+    app::App,
     db::catalog::{
         CatalogEntry, CatalogId, CatalogKind, CatalogMetadata, ColumnMetadata, OptionalMetadata,
         QualifiedName,
     },
-    profile::{CatalogScope, CatalogSelection, DatabaseScope},
+    model::workspace::ConnectionStatus,
+    profile::{CatalogScope, CatalogSelection, DatabaseKind, DatabaseScope, import_connection_url},
     sql::{CompletionIndex, CompletionKind, SqlDialect, complete, quote_identifier},
 };
 use uuid::Uuid;
@@ -218,6 +221,44 @@ fn scoped_index_deduplicates_replaces_removed_entries_and_rejects_out_of_scope_e
 
     index.replace_scoped(&[entries[0].clone()], &scope);
     assert_eq!(index.entries().len(), 0);
+}
+
+#[test]
+fn app_completion_uses_the_active_profiles_default_schema() {
+    let mut profile = import_connection_url("postgres://localhost/app", Some("app"))
+        .unwrap()
+        .profile;
+    profile.default_schema = Some("audit".into());
+    profile.catalog_scope = CatalogScope::for_profile(DatabaseKind::Postgres, "app", Some("audit"));
+    let profile_id = profile.id;
+    let entries = ["public", "audit"]
+        .map(|schema| {
+            CatalogEntry::relation(
+                CatalogId::new(profile_id, CatalogKind::Table, ["app", schema, "orders"]),
+                CatalogId::new(profile_id, CatalogKind::Schema, ["app", schema]),
+                qualified("app", Some(schema), "orders"),
+                "table",
+                OptionalMetadata::Supported(None),
+                false,
+            )
+            .unwrap()
+        })
+        .to_vec();
+    let mut app = App::new(vec![profile]);
+    app.connection.profile_id = Some(profile_id);
+    app.connection.status = ConnectionStatus::Connected;
+    app.explorer.completion_index = CompletionIndex::new(&entries);
+    app.update(Action::ReplaceEditor("select * from or".into()));
+
+    app.update(Action::CompletionExplicit);
+
+    let popup = app.active_console().completion.as_ref().unwrap();
+    assert!(
+        popup
+            .candidates
+            .iter()
+            .any(|candidate| candidate.score.schema == 1)
+    );
 }
 
 fn qualified(database: &str, schema: Option<&str>, object: &str) -> QualifiedName {

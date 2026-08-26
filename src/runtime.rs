@@ -27,7 +27,7 @@ use crate::{
             NativeSecretStore, SecretStore, SecretStoreError, keyring_ref, profile_id_from_ref,
         },
     },
-    profile::{ConnectionProfile, import_connection_url},
+    profile::{ConnectionProfile, CredentialPolicy, import_connection_url},
     security::sanitize_terminal_text,
     terminal::TerminalSession,
     ui::{self, UiState},
@@ -1122,21 +1122,21 @@ async fn save_profile_transaction(
         CredentialUpdate::Session(_) | CredentialUpdate::Remember(_) => true,
         CredentialUpdate::Forget => old_profile
             .as_ref()
-            .is_some_and(|old| old.secret_ref.is_some()),
+            .is_some_and(|old| !matches!(old.credential_policy, CredentialPolicy::None)),
     };
 
     match credential {
         CredentialUpdate::Preserve => {
-            profile.secret_ref = if let Some(old_profile) = old_profile.as_ref() {
+            profile.credential_policy = if let Some(old_profile) = old_profile.as_ref() {
                 validate_secret_reference(old_profile)?;
-                old_profile.secret_ref.clone()
+                old_profile.credential_policy.clone()
             } else {
-                None
+                CredentialPolicy::None
             };
         }
         CredentialUpdate::Session(password) => {
             if let Some(old_profile) = old_profile.as_ref()
-                && old_profile.secret_ref.is_some()
+                && old_profile.credential_policy.keyring_reference().is_some()
             {
                 validate_secret_reference(old_profile)?;
                 let previous = read_secret(&secret_store, profile_id)
@@ -1149,27 +1149,26 @@ async fn save_profile_transaction(
                     })?;
                 previous_secret = Some(previous);
             }
-            profile.secret_ref = None;
+            profile.credential_policy = CredentialPolicy::Prompt;
             next.session_secrets.insert(profile_id, password);
         }
         CredentialUpdate::Remember(password) => {
             if let Some(old_profile) = old_profile.as_ref()
-                && old_profile.secret_ref.is_some()
+                && old_profile.credential_policy.keyring_reference().is_some()
             {
                 validate_secret_reference(old_profile)?;
             }
             match remember_secret(&secret_store, profile_id, &password).await? {
                 RememberResult::Stored { previous } => {
                     previous_secret = Some(previous);
-                    profile.secret_ref = Some(keyring_ref(profile_id));
+                    profile.credential_policy = CredentialPolicy::Keyring(keyring_ref(profile_id));
                 }
                 RememberResult::SessionOnly => {
-                    profile.secret_ref = None;
+                    profile.credential_policy = CredentialPolicy::Prompt;
                     warning = Some(
-                        if old_profile
-                            .as_ref()
-                            .is_some_and(|profile| profile.secret_ref.is_some())
-                        {
+                        if old_profile.as_ref().is_some_and(|profile| {
+                            profile.credential_policy.keyring_reference().is_some()
+                        }) {
                             "Native password store is unavailable; the password is session-only and the previous stored password could not be removed"
                             .to_owned()
                         } else {
@@ -1183,7 +1182,7 @@ async fn save_profile_transaction(
         }
         CredentialUpdate::Forget => {
             if let Some(old_profile) = old_profile.as_ref()
-                && old_profile.secret_ref.is_some()
+                && old_profile.credential_policy.keyring_reference().is_some()
             {
                 validate_secret_reference(old_profile)?;
                 let previous = read_secret(&secret_store, profile_id)
@@ -1194,7 +1193,7 @@ async fn save_profile_transaction(
                     .map_err(|error| secret_error("Unable to forget the password", error))?;
                 previous_secret = Some(previous);
             }
-            profile.secret_ref = None;
+            profile.credential_policy = CredentialPolicy::None;
             next.session_secrets.remove(&profile_id);
         }
     }
@@ -1256,7 +1255,7 @@ async fn delete_profile_transaction(
         .cloned()
         .ok_or_else(|| "Connection profile no longer exists".to_owned())?;
     let mut previous_secret = None;
-    if profile.secret_ref.is_some() {
+    if profile.credential_policy.keyring_reference().is_some() {
         validate_secret_reference(&profile)?;
         let previous = read_secret(&secret_store, profile_id)
             .await
@@ -1382,22 +1381,27 @@ async fn resolve_profile_password(
     if startup_password.is_some() {
         return Ok(startup_password);
     }
-    if profile.secret_ref.is_none() {
-        return Ok(None);
-    }
-    validate_secret_reference(profile)?;
-    match read_secret(secret_store, profile.id).await {
-        Ok(Some(password)) => Ok(Some(password)),
-        Ok(None) => Err("Stored password is missing; enter a password to continue".to_owned()),
-        Err(SecretStoreError::Locked | SecretStoreError::Unavailable) => {
-            Err("Stored password is unavailable; enter a password to continue".to_owned())
+    match &profile.credential_policy {
+        CredentialPolicy::None => Ok(None),
+        CredentialPolicy::Prompt => Err("Enter a password to continue".to_owned()),
+        CredentialPolicy::Keyring(_) => {
+            validate_secret_reference(profile)?;
+            match read_secret(secret_store, profile.id).await {
+                Ok(Some(password)) => Ok(Some(password)),
+                Ok(None) => {
+                    Err("Stored password is missing; enter a password to continue".to_owned())
+                }
+                Err(SecretStoreError::Locked | SecretStoreError::Unavailable) => {
+                    Err("Stored password is unavailable; enter a password to continue".to_owned())
+                }
+                Err(error) => Err(secret_error("Unable to read the stored password", error)),
+            }
         }
-        Err(error) => Err(secret_error("Unable to read the stored password", error)),
     }
 }
 
 fn validate_secret_reference(profile: &ConnectionProfile) -> Result<(), String> {
-    let Some(reference) = profile.secret_ref.as_deref() else {
+    let Some(reference) = profile.credential_policy.keyring_reference() else {
         return Ok(());
     };
     let referenced_profile = profile_id_from_ref(reference)

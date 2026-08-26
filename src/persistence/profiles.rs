@@ -9,9 +9,12 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::profile::ConnectionProfile;
+use crate::profile::{
+    CatalogScope, ConnectionProfile, ConnectionUrlFormat, CredentialPolicy, DatabaseKind,
+    Environment, SslMode,
+};
 
-const PROFILE_FILE_VERSION: u16 = 2;
+const PROFILE_FILE_VERSION: u16 = 3;
 
 #[derive(Clone, Debug)]
 pub struct ProfileStore {
@@ -42,6 +45,60 @@ struct ProfileFile {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileFileV2 {
+    #[serde(rename = "version")]
+    _version: u16,
+    profiles: Vec<ConnectionProfileV2>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConnectionProfileV2 {
+    id: Uuid,
+    name: String,
+    kind: DatabaseKind,
+    host: Option<String>,
+    port: Option<u16>,
+    user: Option<String>,
+    database: Option<String>,
+    default_schema: Option<String>,
+    sqlite_path: Option<PathBuf>,
+    #[serde(default)]
+    ssl_mode: SslMode,
+    secret_ref: Option<String>,
+    #[serde(default)]
+    read_only: bool,
+    #[serde(default)]
+    environment: Environment,
+    catalog_scope: CatalogScope,
+}
+
+impl From<ConnectionProfileV2> for ConnectionProfile {
+    fn from(profile: ConnectionProfileV2) -> Self {
+        Self {
+            id: profile.id,
+            name: profile.name,
+            kind: profile.kind,
+            url_format: ConnectionUrlFormat::default_for(profile.kind),
+            host: profile.host,
+            port: profile.port,
+            user: profile.user,
+            database: profile.database,
+            default_schema: profile.default_schema,
+            sqlite_path: profile.sqlite_path,
+            ssl_mode: profile.ssl_mode,
+            credential_policy: profile
+                .secret_ref
+                .map_or(CredentialPolicy::None, CredentialPolicy::Keyring),
+            read_only: profile.read_only,
+            environment: profile.environment,
+            catalog_scope: profile.catalog_scope,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
 struct ProfileFileHeader {
     version: u16,
 }
@@ -62,15 +119,27 @@ impl ProfileStore {
             Err(error) => return Err(error.into()),
         };
         let header: ProfileFileHeader = toml::from_str(&contents)?;
-        if header.version != PROFILE_FILE_VERSION {
-            return Err(PersistenceError::UnsupportedVersion {
-                found: header.version,
-                expected: PROFILE_FILE_VERSION,
-            });
+        let mut profiles = match header.version {
+            PROFILE_FILE_VERSION => toml::from_str::<ProfileFile>(&contents)?.profiles,
+            2 => toml::from_str::<ProfileFileV2>(&contents)?
+                .profiles
+                .into_iter()
+                .map(ConnectionProfile::from)
+                .collect(),
+            found => {
+                return Err(PersistenceError::UnsupportedVersion {
+                    found,
+                    expected: PROFILE_FILE_VERSION,
+                });
+            }
+        };
+        for profile in &mut profiles {
+            if !profile.url_format.is_compatible(profile.kind) {
+                profile.url_format = ConnectionUrlFormat::default_for(profile.kind);
+            }
         }
-        let file: ProfileFile = toml::from_str(&contents)?;
-        validate_profile_ids(&file.profiles)?;
-        Ok(file.profiles)
+        validate_profile_ids(&profiles)?;
+        Ok(profiles)
     }
 
     pub fn save(&self, profiles: &[ConnectionProfile]) -> Result<(), PersistenceError> {

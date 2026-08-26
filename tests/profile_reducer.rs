@@ -11,8 +11,8 @@ use lazydb::{
     model::{
         explorer::{ExplorerConnectionStatus, ExplorerNodeId},
         profile_manager::{
-            CatalogDiscoveryState, DiscoveryFingerprint, ProfileDraft, ProfileField,
-            ProfileManagerPage, ProfileOperation,
+            CatalogDiscoveryState, CatalogScopeMode, DiscoveryFingerprint, ProfileDraft,
+            ProfileField, ProfileManagerPage, ProfileOperation,
         },
         workspace::{ConnectionIdentity, ConnectionStatus, Overlay, QueryStatus},
     },
@@ -310,6 +310,83 @@ fn cycle_and_toggle_actions_only_change_supported_fields() {
 }
 
 #[test]
+fn direct_driver_selection_reuses_driver_migration_rules() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::OpenProfileManager);
+    app.update(Action::ProfileSelectDriver(DatabaseKind::MySql));
+
+    let draft = app
+        .profile_manager
+        .as_ref()
+        .unwrap()
+        .draft
+        .as_ref()
+        .unwrap();
+    assert_eq!(draft.kind, DatabaseKind::MySql);
+    assert_eq!(draft.port.value(), "3306");
+
+    app.update(Action::ProfileSelectDriver(DatabaseKind::Sqlite));
+    let draft = app
+        .profile_manager
+        .as_ref()
+        .unwrap()
+        .draft
+        .as_ref()
+        .unwrap();
+    assert_eq!(draft.kind, DatabaseKind::Sqlite);
+    assert_eq!(draft.ssl_mode, lazydb::profile::SslMode::Disable);
+
+    app.profile_manager.as_mut().unwrap().operation = Some(ProfileOperation::Testing);
+    app.update(Action::ProfileSelectDriver(DatabaseKind::Postgres));
+    assert_eq!(
+        app.profile_manager
+            .as_ref()
+            .unwrap()
+            .draft
+            .as_ref()
+            .unwrap()
+            .kind,
+        DatabaseKind::Sqlite
+    );
+}
+
+#[test]
+fn test_commits_pending_url_atomically_before_validation() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::OpenProfileManager);
+    let manager = app.profile_manager.as_mut().unwrap();
+    manager.draft.as_mut().unwrap().name.set("url-profile");
+    manager.focus_field(ProfileField::Url);
+    let draft = manager.draft.as_mut().unwrap();
+    draft.move_home(ProfileField::Url);
+    while draft.url_cursor() < draft.url_display().chars().count() {
+        draft.delete(ProfileField::Url);
+    }
+    draft.paste(
+        ProfileField::Url,
+        "postgresql://alice:secret@db.example:5440/app?sslmode=require",
+    );
+
+    let commands = app.update(Action::ProfileTest);
+    let [Command::TestProfile { submission, .. }] = commands.as_slice() else {
+        panic!("unexpected commands: {commands:?}");
+    };
+    assert_eq!(submission.profile.host.as_deref(), Some("db.example"));
+    assert_eq!(submission.profile.port, Some(5440));
+    assert!(!format!("{submission:?}").contains("secret"));
+    assert!(
+        !app.profile_manager
+            .as_ref()
+            .unwrap()
+            .draft
+            .as_ref()
+            .unwrap()
+            .url_display()
+            .contains("secret")
+    );
+}
+
+#[test]
 fn test_rejects_invalid_drafts_and_tracks_matching_results() {
     let mut app = App::new(Vec::new());
     app.update(Action::OpenProfileManager);
@@ -382,6 +459,13 @@ fn profile_test_discovery_failure_is_success_with_a_warning_and_preserves_scope(
         .as_mut()
         .unwrap()
         .catalog_scope = scope.clone();
+    app.profile_manager
+        .as_mut()
+        .unwrap()
+        .draft
+        .as_mut()
+        .unwrap()
+        .catalog_scope_mode = CatalogScopeMode::Explicit;
     let (request_id, fingerprint) = match app.update(Action::ProfileTest).as_slice() {
         [
             Command::TestProfile {
@@ -514,6 +598,13 @@ fn profile_test_connection_edits_mark_discovery_stale_and_preserve_scope() {
         .as_mut()
         .unwrap()
         .catalog_scope = scope.clone();
+    app.profile_manager
+        .as_mut()
+        .unwrap()
+        .draft
+        .as_mut()
+        .unwrap()
+        .catalog_scope_mode = CatalogScopeMode::Explicit;
     let (request_id, fingerprint) = match app.update(Action::ProfileTest).as_slice() {
         [
             Command::TestProfile {

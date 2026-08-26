@@ -1,6 +1,9 @@
 use lazydb::{
     model::execution_target::ExecutionTarget,
-    profile::{ConnectionProfile, DatabaseKind, Environment, SslMode},
+    profile::{
+        ConnectionProfile, ConnectionUrlFormat, CredentialPolicy, DatabaseKind, Environment,
+        SslMode,
+    },
 };
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -11,6 +14,7 @@ fn profile(kind: DatabaseKind) -> ConnectionProfile {
         id,
         name: "target".into(),
         kind,
+        url_format: ConnectionUrlFormat::default_for(kind),
         host: Some("localhost".into()),
         port: None,
         user: Some("user".into()),
@@ -18,7 +22,7 @@ fn profile(kind: DatabaseKind) -> ConnectionProfile {
         default_schema: Some("public".into()),
         sqlite_path: (kind == DatabaseKind::Sqlite).then(|| PathBuf::from("app.db")),
         ssl_mode: SslMode::Prefer,
-        secret_ref: None,
+        credential_policy: CredentialPolicy::None,
         read_only: false,
         environment: Environment::Development,
         catalog_scope: lazydb::profile::CatalogScope::for_profile(kind, "app", Some("public")),

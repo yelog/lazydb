@@ -11,11 +11,12 @@ use crate::{
     app::App,
     model::{
         profile_manager::{
-            ProfileDraft, ProfileField, ProfileManagerPage, ProfileManagerState, ProfileOperation,
+            DRIVER_ORDER, ProfileDraft, ProfileField, ProfileManagerPage, ProfileManagerState,
+            ProfileOperation,
         },
         text_input::TextInput,
     },
-    profile::{DatabaseKind, Environment, SslMode},
+    profile::{ConnectionUrlFormat, DatabaseKind, Environment, SslMode},
     security::sanitize_terminal_text,
 };
 
@@ -107,9 +108,10 @@ fn render_form(
             field,
             manager.selected_field,
             busy,
+            state,
             theme,
         );
-        if !busy {
+        if !busy && field != ProfileField::Kind {
             state.hit_regions.push(HitRegion {
                 area: row,
                 target: if is_toggle_field(field) {
@@ -309,6 +311,7 @@ fn render_panel(frame: &mut Frame<'_>, area: Rect, title: &str, theme: Theme) ->
     inner
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_field(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -316,6 +319,7 @@ fn render_field(
     field: ProfileField,
     selected: ProfileField,
     busy: bool,
+    state: &mut UiState,
     theme: Theme,
 ) {
     let active = field == selected;
@@ -353,6 +357,10 @@ fn render_field(
         .style(row_style),
         label_area,
     );
+    if field == ProfileField::Kind {
+        render_driver_options(frame, value_area, draft.kind, busy, state, theme);
+        return;
+    }
     let value = field_value(draft, field);
     frame.render_widget(
         Paragraph::new(value)
@@ -366,6 +374,43 @@ fn render_field(
     );
 }
 
+fn render_driver_options(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    selected: DatabaseKind,
+    busy: bool,
+    state: &mut UiState,
+    theme: Theme,
+) {
+    let mut x = area.x;
+    for kind in DRIVER_ORDER {
+        let label = kind_name(kind);
+        let width = label.cell_width();
+        if width > area.right().saturating_sub(x) {
+            break;
+        }
+        let option_area = Rect::new(x, area.y, width, 1);
+        let style = if kind == selected {
+            Style::new()
+                .fg(if busy { theme.muted } else { theme.background })
+                .bg(theme.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::new()
+                .fg(if busy { theme.muted } else { theme.text })
+                .bg(theme.surface)
+        };
+        frame.render_widget(Paragraph::new(label).style(style), option_area);
+        if !busy {
+            state.hit_regions.push(HitRegion {
+                area: option_area,
+                target: HitTarget::ProfileDriver(kind),
+            });
+        }
+        x = x.saturating_add(width).saturating_add(1);
+    }
+}
+
 fn render_field_cursor(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -373,6 +418,17 @@ fn render_field_cursor(
     field: ProfileField,
 ) {
     if field == ProfileField::Password {
+        return;
+    }
+    if field == ProfileField::Url {
+        let value_width = area.width.saturating_sub(22);
+        let offset = field_scroll_offset(draft, field, value_width);
+        let x = area
+            .x
+            .saturating_add(22)
+            .saturating_add((draft.url_cursor() as u16).saturating_sub(offset))
+            .min(area.right().saturating_sub(1));
+        frame.set_cursor_position(Position::new(x, area.y));
         return;
     }
     let Some(input) = text_input(draft, field) else {
@@ -395,6 +451,9 @@ fn render_field_cursor(
 }
 
 fn field_scroll_offset(draft: &ProfileDraft, field: ProfileField, width: u16) -> u16 {
+    if field == ProfileField::Url {
+        return (draft.url_cursor() as u16).saturating_sub(width.saturating_sub(1));
+    }
     let Some(input) = text_input(draft, field) else {
         return 0;
     };
@@ -528,6 +587,8 @@ fn text_input(draft: &ProfileDraft, field: ProfileField) -> Option<&TextInput> {
 fn field_value(draft: &ProfileDraft, field: ProfileField) -> String {
     match field {
         ProfileField::Kind => kind_name(draft.kind).to_owned(),
+        ProfileField::UrlFormat => url_format_name(draft.url_format).to_owned(),
+        ProfileField::Url => safe_line(&draft.url_display()),
         ProfileField::Name => safe_line(draft.name.value()),
         ProfileField::Host => safe_line(draft.host.value()),
         ProfileField::Port => safe_line(draft.port.value()),
@@ -560,13 +621,15 @@ fn field_value(draft: &ProfileDraft, field: ProfileField) -> String {
 fn field_label(field: ProfileField) -> &'static str {
     match field {
         ProfileField::Kind => "DRIVER",
+        ProfileField::UrlFormat => "URL FORMAT",
+        ProfileField::Url => "URL",
         ProfileField::Name => "NAME",
         ProfileField::Host => "HOST",
         ProfileField::Port => "PORT",
         ProfileField::User => "USER",
         ProfileField::Password => "PASSWORD",
         ProfileField::Database => "DATABASE",
-        ProfileField::Schema => "SCHEMA",
+        ProfileField::Schema => "DEFAULT SCHEMA",
         ProfileField::VisibleObjects => "VISIBLE OBJECTS",
         ProfileField::SslMode => "SSL MODE",
         ProfileField::Environment => "ENVIRONMENT",
@@ -611,6 +674,19 @@ fn kind_name(kind: DatabaseKind) -> &'static str {
         DatabaseKind::Postgres => "POSTGRES",
         DatabaseKind::MySql => "MYSQL",
         DatabaseKind::Sqlite => "SQLITE",
+    }
+}
+
+fn url_format_name(format: ConnectionUrlFormat) -> &'static str {
+    match format {
+        ConnectionUrlFormat::Postgres => "postgres://",
+        ConnectionUrlFormat::PostgreSql => "postgresql://",
+        ConnectionUrlFormat::JdbcPostgreSql => "jdbc:postgresql://",
+        ConnectionUrlFormat::MySql => "mysql://",
+        ConnectionUrlFormat::JdbcMySql => "jdbc:mysql://",
+        ConnectionUrlFormat::Sqlite => "sqlite:",
+        ConnectionUrlFormat::FileUri => "file:",
+        ConnectionUrlFormat::JdbcSqlite => "jdbc:sqlite:",
     }
 }
 

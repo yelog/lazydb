@@ -346,7 +346,7 @@ fn map_profile_manager(event: KeyEvent, app: &App) -> Option<Action> {
         return Some(Action::ProfileTest);
     }
     match manager.page {
-        ProfileManagerPage::Form => map_profile_form(event.code, manager.selected_field),
+        ProfileManagerPage::Form => map_profile_form(event, manager.selected_field),
         ProfileManagerPage::Scope => match event.code {
             KeyCode::Esc | KeyCode::Enter => Some(Action::ProfileScopeBack),
             KeyCode::Up | KeyCode::Char('k') => Some(Action::ProfileScopeMove(-1)),
@@ -361,45 +361,71 @@ fn map_profile_manager(event: KeyEvent, app: &App) -> Option<Action> {
     }
 }
 
-fn map_profile_form(code: KeyCode, field: ProfileField) -> Option<Action> {
+fn map_profile_form(event: KeyEvent, field: ProfileField) -> Option<Action> {
+    let code = event.code;
     match code {
         KeyCode::Esc => return Some(Action::CloseProfileManager),
+        KeyCode::Tab if event.modifiers.contains(KeyModifiers::SHIFT) => {
+            return Some(Action::ProfileFieldPrevious);
+        }
         KeyCode::Tab => return Some(Action::ProfileFieldNext),
         KeyCode::BackTab => return Some(Action::ProfileFieldPrevious),
         _ => {}
     }
     if is_text_field(field) {
         return match code {
+            KeyCode::Enter if field == ProfileField::Url => Some(Action::ProfileCommitUrl),
             KeyCode::Char(character) => Some(Action::ProfileInsert(ProfileInput::from(character))),
             KeyCode::Backspace => Some(Action::ProfileBackspace),
             KeyCode::Delete => Some(Action::ProfileDeleteCharacter),
             KeyCode::Left => Some(Action::ProfileMoveLeft),
             KeyCode::Right => Some(Action::ProfileMoveRight),
+            KeyCode::Up => Some(Action::ProfileFieldPrevious),
+            KeyCode::Down => Some(Action::ProfileFieldNext),
             KeyCode::Home => Some(Action::ProfileMoveHome),
             KeyCode::End => Some(Action::ProfileMoveEnd),
             _ => None,
         };
     }
     if field == ProfileField::VisibleObjects {
-        return matches!(code, KeyCode::Enter | KeyCode::Char(' '))
-            .then_some(Action::ProfileOpenScope);
+        return match code {
+            KeyCode::Enter | KeyCode::Char(' ') => Some(Action::ProfileOpenScope),
+            KeyCode::Up | KeyCode::Char('k') => Some(Action::ProfileFieldPrevious),
+            KeyCode::Down | KeyCode::Char('j') => Some(Action::ProfileFieldNext),
+            _ => None,
+        };
+    }
+    if field == ProfileField::Kind {
+        return match code {
+            KeyCode::Left | KeyCode::Char('h') => Some(Action::ProfileCycle(-1)),
+            KeyCode::Right | KeyCode::Char('l') => Some(Action::ProfileCycle(1)),
+            KeyCode::Up | KeyCode::Char('k') => Some(Action::ProfileFieldPrevious),
+            KeyCode::Down | KeyCode::Char('j') => Some(Action::ProfileFieldNext),
+            _ => None,
+        };
     }
     if is_cycle_field(field) {
         return match code {
-            KeyCode::Left | KeyCode::Up | KeyCode::Char('h' | 'k') => {
-                Some(Action::ProfileCycle(-1))
-            }
-            KeyCode::Right | KeyCode::Down | KeyCode::Enter | KeyCode::Char(' ' | 'j' | 'l') => {
+            KeyCode::Left | KeyCode::Char('h') => Some(Action::ProfileCycle(-1)),
+            KeyCode::Right | KeyCode::Enter | KeyCode::Char(' ' | 'l') => {
                 Some(Action::ProfileCycle(1))
             }
+            KeyCode::Up | KeyCode::Char('k') => Some(Action::ProfileFieldPrevious),
+            KeyCode::Down | KeyCode::Char('j') => Some(Action::ProfileFieldNext),
             _ => None,
         };
     }
     if is_toggle_field(field) {
-        return matches!(code, KeyCode::Enter | KeyCode::Char(' '))
-            .then_some(Action::ProfileToggle);
+        return match code {
+            KeyCode::Enter | KeyCode::Char(' ') => Some(Action::ProfileToggle),
+            KeyCode::Up | KeyCode::Char('k') => Some(Action::ProfileFieldPrevious),
+            KeyCode::Down | KeyCode::Char('j') => Some(Action::ProfileFieldNext),
+            _ => None,
+        };
     }
     match (field, code) {
+        (_, KeyCode::Up | KeyCode::Char('k')) => Some(Action::ProfileFieldPrevious),
+        (_, KeyCode::Down | KeyCode::Char('j')) => Some(Action::ProfileFieldNext),
         (ProfileField::Test, KeyCode::Enter | KeyCode::Char(' ')) => Some(Action::ProfileTest),
         (ProfileField::Save, KeyCode::Enter | KeyCode::Char(' ')) => {
             Some(Action::ProfileSave { connect: false })
@@ -430,6 +456,7 @@ fn is_text_field(field: ProfileField) -> bool {
             | ProfileField::Port
             | ProfileField::User
             | ProfileField::Password
+            | ProfileField::Url
             | ProfileField::Database
             | ProfileField::Schema
             | ProfileField::SqlitePath
@@ -439,7 +466,7 @@ fn is_text_field(field: ProfileField) -> bool {
 fn is_cycle_field(field: ProfileField) -> bool {
     matches!(
         field,
-        ProfileField::Kind | ProfileField::SslMode | ProfileField::Environment
+        ProfileField::UrlFormat | ProfileField::SslMode | ProfileField::Environment
     )
 }
 

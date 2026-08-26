@@ -646,12 +646,15 @@ fn server_profile_form_shows_all_fields_and_never_reveals_passwords() {
     let (output, state) = render_with_state(&app, 120, 36);
     for label in [
         "DRIVER",
+        "URL FORMAT",
+        "URL",
         "NAME",
         "HOST",
         "PORT",
         "USER",
         "PASSWORD",
         "DATABASE",
+        "DEFAULT SCHEMA",
         "VISIBLE OBJECTS",
         "SSL MODE",
         "ENVIRONMENT",
@@ -678,12 +681,35 @@ fn server_profile_form_shows_all_fields_and_never_reveals_passwords() {
 }
 
 #[test]
+fn pending_url_redacts_an_embedded_password_before_commit() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::OpenProfileManager);
+    app.update(Action::ProfileFocusField(ProfileField::Url));
+    let draft = app
+        .profile_manager
+        .as_mut()
+        .unwrap()
+        .draft
+        .as_mut()
+        .unwrap();
+    draft.move_home(ProfileField::Url);
+    draft.paste(
+        ProfileField::Url,
+        "postgresql://alice:never-render-this@db.example/app?sslmode=require",
+    );
+
+    let output = render(&app, 120, 36);
+    assert!(!output.contains("never-render-this"));
+    assert!(output.contains("[REDACTED]"));
+}
+
+#[test]
 fn stored_password_is_described_without_rendering_a_secret() {
     let mut profile =
         import_connection_url("postgres://alice@db.example.com/app", Some("remembered"))
             .unwrap()
             .profile;
-    profile.secret_ref = Some(keyring_ref(profile.id));
+    profile.credential_policy = lazydb::profile::CredentialPolicy::Keyring(keyring_ref(profile.id));
     let mut app = App::new(vec![profile]);
     app.update(Action::OpenProfileManager);
     app.update(Action::ProfileStartEdit {
@@ -703,6 +729,7 @@ fn mysql_and_sqlite_forms_only_show_relevant_fields() {
     let mysql_output = render(&mysql, 120, 36);
     assert!(mysql_output.contains("MYSQL"));
     assert!(mysql_output.contains("HOST"));
+    assert!(!mysql_output.contains("DEFAULT SCHEMA"));
     assert!(!mysql_output.contains("MEMORY DATABASE"));
 
     let mut sqlite_file = App::new(Vec::new());
@@ -729,10 +756,54 @@ fn profile_form_remains_actionable_in_compact_layout() {
     let output = render(&app, 80, 24);
 
     assert!(output.contains("NEW CONNECTION"));
+    assert!(output.contains("POSTGRES MYSQL SQLITE"), "{output}");
     assert!(output.contains("HOST"));
     assert!(output.contains("PASSWORD"));
     assert!(output.contains("SAVE & CONNECT"));
     assert!(output.contains("Esc cancel"));
+}
+
+#[test]
+fn driver_options_have_individual_targets_and_selected_style_survives_field_blur() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::OpenProfileManager);
+    app.update(Action::ProfileFocusField(ProfileField::Name));
+
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut state = UiState::new(true);
+    terminal
+        .draw(|frame| ui::render_with_state(frame, &app, &mut state))
+        .unwrap();
+
+    let options = [
+        DatabaseKind::Postgres,
+        DatabaseKind::MySql,
+        DatabaseKind::Sqlite,
+    ]
+    .map(|kind| {
+        state
+            .hit_regions
+            .iter()
+            .find(|region| region.target == HitTarget::ProfileDriver(kind))
+            .unwrap()
+    });
+    assert!(
+        options
+            .windows(2)
+            .all(|pair| pair[0].area.right() < pair[1].area.x)
+    );
+    let selected = options[0].area;
+    let unselected = options[1].area;
+    let buffer = terminal.backend().buffer();
+    assert_eq!(
+        buffer[(selected.x, selected.y)].bg,
+        ui::theme::Theme::default().accent
+    );
+    assert_ne!(
+        buffer[(unselected.x, unselected.y)].bg,
+        ui::theme::Theme::default().accent
+    );
 }
 
 #[test]
@@ -769,7 +840,10 @@ fn profile_manager_renders_confirmation_busy_errors_and_warnings() {
     assert!(!busy_state.hit_regions.iter().any(|region| {
         matches!(
             region.target,
-            HitTarget::ProfileField(_) | HitTarget::ProfileToggle(_) | HitTarget::ProfileButton(_)
+            HitTarget::ProfileField(_)
+                | HitTarget::ProfileDriver(_)
+                | HitTarget::ProfileToggle(_)
+                | HitTarget::ProfileButton(_)
         )
     }));
 

@@ -17,7 +17,7 @@ use crate::{
         },
         workspace::{ConnectionIdentity, Focus},
     },
-    profile::ConnectionProfile,
+    profile::{ConnectionProfile, DatabaseKind},
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -59,7 +59,9 @@ pub enum Action {
     ProfileMoveRight,
     ProfileMoveHome,
     ProfileMoveEnd,
+    ProfileCommitUrl,
     ProfileCycle(i8),
+    ProfileSelectDriver(DatabaseKind),
     ProfileToggle,
     ProfileToggleField(ProfileField),
     ProfileOpenScope,

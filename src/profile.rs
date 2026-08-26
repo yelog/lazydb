@@ -1,6 +1,6 @@
 use std::{collections::HashSet, path::PathBuf};
 
-use percent_encoding::percent_decode_str;
+use percent_encoding::{AsciiSet, CONTROLS, percent_decode_str, utf8_percent_encode};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -13,6 +13,52 @@ pub enum DatabaseKind {
     Postgres,
     MySql,
     Sqlite,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ConnectionUrlFormat {
+    Postgres,
+    #[default]
+    PostgreSql,
+    JdbcPostgreSql,
+    MySql,
+    JdbcMySql,
+    Sqlite,
+    FileUri,
+    JdbcSqlite,
+}
+
+impl ConnectionUrlFormat {
+    pub const fn default_for(kind: DatabaseKind) -> Self {
+        match kind {
+            DatabaseKind::Postgres => Self::PostgreSql,
+            DatabaseKind::MySql => Self::MySql,
+            DatabaseKind::Sqlite => Self::Sqlite,
+        }
+    }
+
+    pub const fn is_compatible(self, kind: DatabaseKind) -> bool {
+        matches!(
+            (self, kind),
+            (
+                Self::Postgres | Self::PostgreSql | Self::JdbcPostgreSql,
+                DatabaseKind::Postgres
+            ) | (Self::MySql | Self::JdbcMySql, DatabaseKind::MySql)
+                | (
+                    Self::Sqlite | Self::FileUri | Self::JdbcSqlite,
+                    DatabaseKind::Sqlite
+                )
+        )
+    }
+
+    pub const fn compatible_formats(kind: DatabaseKind) -> &'static [Self] {
+        match kind {
+            DatabaseKind::Postgres => &[Self::Postgres, Self::PostgreSql, Self::JdbcPostgreSql],
+            DatabaseKind::MySql => &[Self::MySql, Self::JdbcMySql],
+            DatabaseKind::Sqlite => &[Self::Sqlite, Self::FileUri, Self::JdbcSqlite],
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
@@ -169,12 +215,32 @@ pub enum Environment {
     Production,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "policy", content = "reference", rename_all = "lowercase")]
+pub enum CredentialPolicy {
+    #[default]
+    None,
+    Prompt,
+    Keyring(String),
+}
+
+impl CredentialPolicy {
+    pub fn keyring_reference(&self) -> Option<&str> {
+        match self {
+            Self::Keyring(reference) => Some(reference),
+            Self::None | Self::Prompt => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConnectionProfile {
     pub id: Uuid,
     pub name: String,
     pub kind: DatabaseKind,
+    #[serde(default)]
+    pub url_format: ConnectionUrlFormat,
     pub host: Option<String>,
     pub port: Option<u16>,
     pub user: Option<String>,
@@ -183,7 +249,8 @@ pub struct ConnectionProfile {
     pub sqlite_path: Option<PathBuf>,
     #[serde(default)]
     pub ssl_mode: SslMode,
-    pub secret_ref: Option<String>,
+    #[serde(default)]
+    pub credential_policy: CredentialPolicy,
     #[serde(default)]
     pub read_only: bool,
     #[serde(default)]
@@ -209,47 +276,138 @@ pub enum ProfileError {
     MissingHost,
     #[error("SQLite URL is missing a database path")]
     MissingSqlitePath,
+    #[error("connection URL contains unknown query parameter `{0}`")]
+    UnknownQueryParameter(String),
+    #[error("connection URL contains conflicting query parameter `{0}`")]
+    ConflictingQueryParameter(String),
+    #[error("connection URL has an invalid value for query parameter `{0}`")]
+    InvalidQueryParameter(String),
+    #[error("connection URL format is incompatible with the database driver")]
+    IncompatibleFormat,
+}
+
+#[derive(Debug)]
+pub struct ParsedConnectionUrl {
+    pub kind: DatabaseKind,
+    pub format: ConnectionUrlFormat,
+    pub host: Option<String>,
+    pub port: Option<u16>,
+    pub user: Option<String>,
+    pub password: Option<SecretString>,
+    pub database: Option<String>,
+    pub default_schema: Option<String>,
+    pub sqlite_path: Option<PathBuf>,
+    pub sqlite_memory: bool,
+    pub ssl_mode: SslMode,
+    pub read_only: bool,
+}
+
+pub fn parse_connection_url(input: &str) -> Result<ParsedConnectionUrl, ProfileError> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Err(ProfileError::Empty);
+    }
+    let (normalized, jdbc) = input
+        .strip_prefix("jdbc:")
+        .map_or((input, false), |value| (value, true));
+    if normalized == ":memory:"
+        || normalized == "sqlite::memory:"
+        || normalized.starts_with("sqlite::memory:?")
+        || normalized == "file::memory:"
+        || normalized.starts_with("file::memory:?")
+    {
+        let format = if jdbc {
+            ConnectionUrlFormat::JdbcSqlite
+        } else if normalized.starts_with("file:") {
+            ConnectionUrlFormat::FileUri
+        } else {
+            ConnectionUrlFormat::Sqlite
+        };
+        let query = normalized.split_once('?').map_or("", |(_, query)| query);
+        let read_only = parse_sqlite_query(query)?;
+        return Ok(ParsedConnectionUrl {
+            kind: DatabaseKind::Sqlite,
+            format,
+            host: None,
+            port: None,
+            user: None,
+            password: None,
+            database: Some(":memory:".to_owned()),
+            default_schema: Some("main".to_owned()),
+            sqlite_path: None,
+            sqlite_memory: true,
+            ssl_mode: SslMode::Disable,
+            read_only,
+        });
+    }
+    if normalized.starts_with("sqlite:") || normalized.starts_with("file:") {
+        return parse_sqlite_url(normalized, jdbc);
+    }
+
+    let url = Url::parse(normalized)?;
+    let (kind, format) = match (url.scheme().to_ascii_lowercase().as_str(), jdbc) {
+        ("postgres", false) => (DatabaseKind::Postgres, ConnectionUrlFormat::Postgres),
+        ("postgresql", false) => (DatabaseKind::Postgres, ConnectionUrlFormat::PostgreSql),
+        ("postgresql", true) => (DatabaseKind::Postgres, ConnectionUrlFormat::JdbcPostgreSql),
+        ("mysql", false) => (DatabaseKind::MySql, ConnectionUrlFormat::MySql),
+        ("mysql", true) => (DatabaseKind::MySql, ConnectionUrlFormat::JdbcMySql),
+        (scheme, _) => return Err(ProfileError::UnsupportedScheme(scheme.to_owned())),
+    };
+    parse_server_url(url, kind, format)
 }
 
 pub fn import_connection_url(
     input: &str,
     preferred_name: Option<&str>,
 ) -> Result<ImportedProfile, ProfileError> {
-    let input = input.trim();
-    if input.is_empty() {
-        return Err(ProfileError::Empty);
-    }
-
-    let normalized = input.strip_prefix("jdbc:").unwrap_or(input);
-    if normalized == ":memory:"
-        || normalized == "sqlite::memory:"
-        || normalized.starts_with("sqlite::memory:?")
-    {
-        return Ok(sqlite_profile(
-            None,
-            true,
-            preferred_name.unwrap_or("memory"),
-            false,
-        ));
-    }
-
-    if normalized.starts_with("sqlite:") || normalized.starts_with("file:") {
-        return import_sqlite(normalized, preferred_name);
-    }
-
-    let url = Url::parse(normalized)?;
-    match url.scheme().to_ascii_lowercase().as_str() {
-        "postgres" | "postgresql" => import_server_url(url, DatabaseKind::Postgres, preferred_name),
-        "mysql" => import_server_url(url, DatabaseKind::MySql, preferred_name),
-        scheme => Err(ProfileError::UnsupportedScheme(scheme.to_owned())),
-    }
+    let parsed = parse_connection_url(input)?;
+    let derived_name = if parsed.sqlite_memory {
+        "memory".to_owned()
+    } else if let Some(path) = &parsed.sqlite_path {
+        path.file_name()
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.is_empty())
+            .unwrap_or("sqlite")
+            .to_owned()
+    } else {
+        parsed
+            .database
+            .clone()
+            .or_else(|| parsed.host.clone())
+            .unwrap_or_else(|| "connection".to_owned())
+    };
+    let catalog_scope = CatalogScope::for_profile(
+        parsed.kind,
+        parsed.database.as_deref().unwrap_or_default(),
+        parsed.default_schema.as_deref(),
+    );
+    Ok(ImportedProfile {
+        profile: ConnectionProfile {
+            id: Uuid::new_v4(),
+            name: choose_name(preferred_name, &derived_name),
+            kind: parsed.kind,
+            url_format: parsed.format,
+            host: parsed.host,
+            port: parsed.port,
+            user: parsed.user,
+            database: parsed.database,
+            default_schema: parsed.default_schema,
+            sqlite_path: parsed.sqlite_path,
+            ssl_mode: parsed.ssl_mode,
+            credential_policy: CredentialPolicy::None,
+            read_only: parsed.read_only,
+            environment: Environment::Development,
+            catalog_scope,
+        },
+        transient_password: parsed.password,
+    })
 }
 
-fn import_server_url(
+fn parse_server_url(
     url: Url,
     kind: DatabaseKind,
-    preferred_name: Option<&str>,
-) -> Result<ImportedProfile, ProfileError> {
+    format: ConnectionUrlFormat,
+) -> Result<ParsedConnectionUrl, ProfileError> {
     let host = url.host_str().ok_or(ProfileError::MissingHost)?.to_owned();
     let database = decode(url.path().trim_start_matches('/'));
     let database = (!database.is_empty()).then_some(database);
@@ -259,20 +417,35 @@ fn import_server_url(
         .map(|value| SecretString::from(decode(value)));
     let mut default_schema = None;
     let mut ssl_mode = SslMode::Prefer;
+    let mut read_only = false;
+    let mut seen_schema = false;
+    let mut seen_ssl = false;
+    let mut seen_read_only = false;
 
     for (key, value) in url.query_pairs() {
-        if key.eq_ignore_ascii_case("currentSchema") {
+        if key.eq_ignore_ascii_case("currentSchema") && kind == DatabaseKind::Postgres {
+            reject_duplicate(&mut seen_schema, "currentSchema")?;
             default_schema = Some(value.into_owned());
-        } else if key.eq_ignore_ascii_case("sslmode") {
-            ssl_mode = parse_ssl_mode(&value, ssl_mode);
-        } else if key.eq_ignore_ascii_case("useSSL") {
-            ssl_mode = if value.eq_ignore_ascii_case("true") {
+        } else if key.eq_ignore_ascii_case("sslmode") && kind == DatabaseKind::Postgres {
+            reject_duplicate(&mut seen_ssl, "ssl")?;
+            ssl_mode = parse_ssl_mode(&value)
+                .ok_or_else(|| ProfileError::InvalidQueryParameter("sslmode".into()))?;
+        } else if key.eq_ignore_ascii_case("useSSL") && kind == DatabaseKind::MySql {
+            reject_duplicate(&mut seen_ssl, "ssl")?;
+            ssl_mode = if parse_bool(&value, "useSSL")? {
                 SslMode::Require
             } else {
                 SslMode::Disable
             };
-        } else if key.eq_ignore_ascii_case("sslMode") {
-            ssl_mode = parse_ssl_mode(&value, ssl_mode);
+        } else if key.eq_ignore_ascii_case("sslMode") && kind == DatabaseKind::MySql {
+            reject_duplicate(&mut seen_ssl, "ssl")?;
+            ssl_mode = parse_ssl_mode(&value)
+                .ok_or_else(|| ProfileError::InvalidQueryParameter("sslMode".into()))?;
+        } else if key.eq_ignore_ascii_case("readOnly") || key.eq_ignore_ascii_case("read_only") {
+            reject_duplicate(&mut seen_read_only, "readOnly")?;
+            read_only = parse_bool(&value, "readOnly")?;
+        } else {
+            return Err(ProfileError::UnknownQueryParameter(key.into_owned()));
         }
     }
 
@@ -281,109 +454,212 @@ fn import_server_url(
         DatabaseKind::MySql => 3306,
         DatabaseKind::Sqlite => unreachable!("server URL cannot be SQLite"),
     };
-    let derived_name = database.as_deref().unwrap_or(&host);
-    let catalog_scope = CatalogScope::for_profile(
+    Ok(ParsedConnectionUrl {
         kind,
-        database.as_deref().unwrap_or_default(),
-        default_schema.as_deref(),
-    );
-
-    Ok(ImportedProfile {
-        profile: ConnectionProfile {
-            id: Uuid::new_v4(),
-            name: choose_name(preferred_name, derived_name),
-            kind,
-            host: Some(host),
-            port: Some(url.port().unwrap_or(default_port)),
-            user,
-            database,
-            default_schema,
-            sqlite_path: None,
-            ssl_mode,
-            secret_ref: None,
-            read_only: false,
-            environment: Environment::Development,
-            catalog_scope,
-        },
-        transient_password: password,
+        format,
+        host: Some(host),
+        port: Some(url.port().unwrap_or(default_port)),
+        user,
+        password,
+        database,
+        default_schema,
+        sqlite_path: None,
+        sqlite_memory: false,
+        ssl_mode,
+        read_only,
     })
 }
 
-fn import_sqlite(
-    input: &str,
-    preferred_name: Option<&str>,
-) -> Result<ImportedProfile, ProfileError> {
+fn parse_sqlite_url(input: &str, jdbc: bool) -> Result<ParsedConnectionUrl, ProfileError> {
     let (path_and_prefix, query) = input.split_once('?').unwrap_or((input, ""));
     let raw_path = if let Some(rest) = path_and_prefix.strip_prefix("sqlite:") {
         rest.strip_prefix("//").unwrap_or(rest)
     } else {
-        path_and_prefix
+        let rest = path_and_prefix
             .strip_prefix("file:")
-            .unwrap_or(path_and_prefix)
+            .unwrap_or(path_and_prefix);
+        rest.strip_prefix("//").unwrap_or(rest)
     };
     let decoded = decode(raw_path);
     if decoded.is_empty() {
         return Err(ProfileError::MissingSqlitePath);
     }
-    if decoded == ":memory:" {
-        return Ok(sqlite_profile(
-            None,
-            true,
-            preferred_name.unwrap_or("memory"),
-            false,
-        ));
-    }
-
-    let read_only = url::form_urlencoded::parse(query.as_bytes())
-        .any(|(key, value)| key.eq_ignore_ascii_case("mode") && value.eq_ignore_ascii_case("ro"));
+    let read_only = parse_sqlite_query(query)?;
     let path = PathBuf::from(decoded);
-    let derived_name = path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .filter(|value| !value.is_empty())
-        .unwrap_or("sqlite")
-        .to_owned();
-    let name = choose_name(preferred_name, &derived_name);
-
-    Ok(sqlite_profile(Some(path), false, &name, read_only))
+    let database = path.to_string_lossy().into_owned();
+    Ok(ParsedConnectionUrl {
+        kind: DatabaseKind::Sqlite,
+        format: if jdbc {
+            ConnectionUrlFormat::JdbcSqlite
+        } else if input.starts_with("file:") {
+            ConnectionUrlFormat::FileUri
+        } else {
+            ConnectionUrlFormat::Sqlite
+        },
+        host: None,
+        port: None,
+        user: None,
+        password: None,
+        database: Some(database),
+        default_schema: Some("main".to_owned()),
+        sqlite_path: Some(path),
+        sqlite_memory: false,
+        ssl_mode: SslMode::Disable,
+        read_only,
+    })
 }
 
-fn sqlite_profile(
-    path: Option<PathBuf>,
-    in_memory: bool,
-    name: &str,
-    read_only: bool,
-) -> ImportedProfile {
-    let database = if in_memory {
-        Some(":memory:".to_owned())
-    } else {
-        path.as_ref()
-            .map(|value| value.to_string_lossy().into_owned())
-    };
-    let catalog_scope = CatalogScope::for_profile(
-        DatabaseKind::Sqlite,
-        database.as_deref().unwrap_or(":memory:"),
-        Some("main"),
-    );
+const URL_COMPONENT: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'/')
+    .add(b':')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'@')
+    .add(b'[')
+    .add(b'\\')
+    .add(b']')
+    .add(b'^')
+    .add(b'`')
+    .add(b'{')
+    .add(b'|')
+    .add(b'}');
 
-    ImportedProfile {
-        profile: ConnectionProfile {
-            id: Uuid::new_v4(),
-            name: name.to_owned(),
-            kind: DatabaseKind::Sqlite,
-            host: None,
-            port: None,
-            user: None,
-            database,
-            default_schema: Some("main".to_owned()),
-            sqlite_path: path,
-            ssl_mode: SslMode::Disable,
-            secret_ref: None,
-            read_only,
-            environment: Environment::Development,
-            catalog_scope,
-        },
-        transient_password: None,
+const SQLITE_PATH: &AsciiSet = &URL_COMPONENT.remove(b'/').remove(b':');
+const QUERY_VALUE: &AsciiSet = &URL_COMPONENT.add(b'&').add(b'=').add(b'+');
+
+pub fn format_connection_url(
+    profile: &ConnectionProfile,
+    format: ConnectionUrlFormat,
+) -> Result<String, ProfileError> {
+    if !format.is_compatible(profile.kind) {
+        return Err(ProfileError::IncompatibleFormat);
+    }
+    if profile.kind == DatabaseKind::Sqlite {
+        let memory =
+            profile.sqlite_path.is_none() && profile.database.as_deref() == Some(":memory:");
+        let value = if memory {
+            ":memory:".to_owned()
+        } else {
+            let path = profile
+                .sqlite_path
+                .as_ref()
+                .ok_or(ProfileError::MissingSqlitePath)?;
+            utf8_percent_encode(&path.to_string_lossy(), SQLITE_PATH).to_string()
+        };
+        let prefix = match format {
+            ConnectionUrlFormat::Sqlite => "sqlite:",
+            ConnectionUrlFormat::FileUri => "file:",
+            ConnectionUrlFormat::JdbcSqlite => "jdbc:sqlite:",
+            _ => return Err(ProfileError::IncompatibleFormat),
+        };
+        let mut output = format!("{prefix}{value}");
+        if profile.read_only {
+            output.push_str("?mode=ro");
+        }
+        return Ok(output);
+    }
+    let scheme = match format {
+        ConnectionUrlFormat::Postgres => "postgres",
+        ConnectionUrlFormat::PostgreSql | ConnectionUrlFormat::JdbcPostgreSql => "postgresql",
+        ConnectionUrlFormat::MySql | ConnectionUrlFormat::JdbcMySql => "mysql",
+        _ => return Err(ProfileError::IncompatibleFormat),
+    };
+    let host = profile.host.as_deref().ok_or(ProfileError::MissingHost)?;
+    let mut output = String::new();
+    if matches!(
+        format,
+        ConnectionUrlFormat::JdbcPostgreSql | ConnectionUrlFormat::JdbcMySql
+    ) {
+        output.push_str("jdbc:");
+    }
+    output.push_str(scheme);
+    output.push_str("://");
+    if let Some(user) = profile.user.as_deref().filter(|value| !value.is_empty()) {
+        output.push_str(&utf8_percent_encode(user, URL_COMPONENT).to_string());
+        output.push('@');
+    }
+    if host.contains(':') && !host.starts_with('[') {
+        output.push('[');
+        output.push_str(host);
+        output.push(']');
+    } else {
+        output.push_str(host);
+    }
+    if let Some(port) = profile.port {
+        output.push(':');
+        output.push_str(&port.to_string());
+    }
+    if let Some(database) = profile
+        .database
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        output.push('/');
+        output.push_str(&utf8_percent_encode(database, URL_COMPONENT).to_string());
+    }
+    let mut query = Vec::new();
+    if profile.kind == DatabaseKind::Postgres {
+        if let Some(schema) = profile
+            .default_schema
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            query.push(format!(
+                "currentSchema={}",
+                utf8_percent_encode(schema, QUERY_VALUE)
+            ));
+        }
+        query.push(format!("sslmode={}", ssl_mode_value(profile.ssl_mode)));
+    } else {
+        query.push(format!("sslMode={}", ssl_mode_value(profile.ssl_mode)));
+    }
+    if profile.read_only {
+        query.push("readOnly=true".to_owned());
+    }
+    if !query.is_empty() {
+        output.push('?');
+        output.push_str(&query.join("&"));
+    }
+    Ok(output)
+}
+
+fn parse_sqlite_query(query: &str) -> Result<bool, ProfileError> {
+    let mut seen_mode = false;
+    let mut read_only = false;
+    for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+        if key.eq_ignore_ascii_case("mode") {
+            reject_duplicate(&mut seen_mode, "mode")?;
+            match value.to_ascii_lowercase().as_str() {
+                "ro" => read_only = true,
+                "rw" | "rwc" => read_only = false,
+                _ => return Err(ProfileError::InvalidQueryParameter("mode".into())),
+            }
+        } else {
+            return Err(ProfileError::UnknownQueryParameter(key.into_owned()));
+        }
+    }
+    Ok(read_only)
+}
+
+fn reject_duplicate(seen: &mut bool, name: &str) -> Result<(), ProfileError> {
+    if *seen {
+        Err(ProfileError::ConflictingQueryParameter(name.to_owned()))
+    } else {
+        *seen = true;
+        Ok(())
+    }
+}
+
+fn parse_bool(value: &str, name: &str) -> Result<bool, ProfileError> {
+    match value.to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" => Ok(true),
+        "false" | "0" | "no" => Ok(false),
+        _ => Err(ProfileError::InvalidQueryParameter(name.to_owned())),
     }
 }
 
@@ -399,14 +675,24 @@ fn decode(value: &str) -> String {
     percent_decode_str(value).decode_utf8_lossy().into_owned()
 }
 
-fn parse_ssl_mode(value: &str, fallback: SslMode) -> SslMode {
+fn parse_ssl_mode(value: &str) -> Option<SslMode> {
     match value.to_ascii_lowercase().replace('_', "-").as_str() {
-        "disable" | "disabled" | "false" => SslMode::Disable,
-        "prefer" | "preferred" => SslMode::Prefer,
-        "require" | "required" | "true" => SslMode::Require,
-        "verify-ca" | "verify-ca-certificate" => SslMode::VerifyCa,
-        "verify-full" | "verify-identity" => SslMode::VerifyFull,
-        _ => fallback,
+        "disable" | "disabled" | "false" => Some(SslMode::Disable),
+        "prefer" | "preferred" => Some(SslMode::Prefer),
+        "require" | "required" | "true" => Some(SslMode::Require),
+        "verify-ca" | "verify-ca-certificate" => Some(SslMode::VerifyCa),
+        "verify-full" | "verify-identity" => Some(SslMode::VerifyFull),
+        _ => None,
+    }
+}
+
+fn ssl_mode_value(value: SslMode) -> &'static str {
+    match value {
+        SslMode::Disable => "disable",
+        SslMode::Prefer => "prefer",
+        SslMode::Require => "require",
+        SslMode::VerifyCa => "verify-ca",
+        SslMode::VerifyFull => "verify-full",
     }
 }
 

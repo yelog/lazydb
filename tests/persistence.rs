@@ -3,8 +3,8 @@ use std::fs;
 use lazydb::{
     persistence::profiles::{PersistenceError, ProfileStore},
     profile::{
-        CatalogScope, CatalogSelection, ConnectionProfile, DatabaseScope, Environment,
-        import_connection_url,
+        CatalogScope, CatalogSelection, ConnectionProfile, ConnectionUrlFormat, CredentialPolicy,
+        DatabaseScope, Environment, import_connection_url,
     },
 };
 use tempfile::TempDir;
@@ -16,7 +16,7 @@ struct ProfileFileFixture<'a> {
 }
 
 #[test]
-fn version_two_profiles_round_trip_hierarchical_scope() {
+fn version_two_profiles_migrate_credential_policy_and_save_as_version_three() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("connections.toml");
     let store = ProfileStore::new(path.clone());
@@ -26,7 +26,6 @@ fn version_two_profiles_round_trip_hierarchical_scope() {
     )
     .unwrap()
     .profile;
-    first.secret_ref = Some("keyring:profile-id".into());
     first.environment = Environment::Production;
     first.catalog_scope = CatalogScope {
         databases: CatalogSelection::Selected(vec![
@@ -44,17 +43,53 @@ fn version_two_profiles_round_trip_hierarchical_scope() {
         .unwrap()
         .profile;
 
-    store.save(&[first.clone(), second.clone()]).unwrap();
+    let mut legacy = toml::Value::try_from(ProfileFileFixture {
+        version: 3,
+        profiles: &[first.clone(), second.clone()],
+    })
+    .unwrap();
+    let root = legacy.as_table_mut().unwrap();
+    root.insert("version".into(), toml::Value::Integer(2));
+    let profiles = root.get_mut("profiles").unwrap().as_array_mut().unwrap();
+    profiles[0]
+        .as_table_mut()
+        .unwrap()
+        .remove("credential_policy");
+    profiles[0].as_table_mut().unwrap().remove("url_format");
+    profiles[0].as_table_mut().unwrap().insert(
+        "secret_ref".into(),
+        toml::Value::String("keyring:profile-id".into()),
+    );
+    profiles[1]
+        .as_table_mut()
+        .unwrap()
+        .remove("credential_policy");
+    profiles[1].as_table_mut().unwrap().remove("url_format");
+    fs::write(&path, toml::to_string_pretty(&legacy).unwrap()).unwrap();
+
     let loaded = store.load().unwrap();
 
+    assert_eq!(
+        loaded[0].credential_policy,
+        CredentialPolicy::Keyring("keyring:profile-id".into())
+    );
+    assert_eq!(loaded[1].credential_policy, CredentialPolicy::None);
+    first.credential_policy = CredentialPolicy::Keyring("keyring:profile-id".into());
+    first.url_format = ConnectionUrlFormat::PostgreSql;
     assert_eq!(loaded, vec![first, second]);
+
+    store.save(&loaded).unwrap();
     let serialized = fs::read_to_string(path).unwrap();
-    assert!(serialized.contains("version = 2"));
+    assert!(serialized.contains("version = 3"));
+    assert!(serialized.contains("policy = \"keyring\""));
+    assert!(!serialized.contains("secret_ref"));
     assert!(serialized.contains("catalog_scope"));
     assert!(!serialized.contains("include_databases"));
     assert!(!serialized.contains("include_schemas"));
     assert!(serialized.contains("keyring:profile-id"));
     assert!(!serialized.contains("alice-password-42"));
+    assert!(serialized.contains("url_format"));
+    assert!(!serialized.contains("postgresql://"));
 }
 
 #[test]
@@ -89,7 +124,7 @@ include_schemas = ["public"]
         error,
         PersistenceError::UnsupportedVersion {
             found: 1,
-            expected: 2
+            expected: 3
         }
     ));
 }
@@ -144,7 +179,7 @@ fn rejects_duplicate_profile_uuids_on_save_and_load() {
     fs::write(
         &path,
         toml::to_string(&ProfileFileFixture {
-            version: 2,
+            version: 3,
             profiles: &duplicates,
         })
         .unwrap(),

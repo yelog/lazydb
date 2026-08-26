@@ -21,7 +21,9 @@ use lazydb::{
         profiles::ProfileStore,
         secrets::{SecretStore, SecretStoreError, keyring_ref},
     },
-    profile::{CatalogSelection, ConnectionProfile, DatabaseKind, import_connection_url},
+    profile::{
+        CatalogSelection, ConnectionProfile, CredentialPolicy, DatabaseKind, import_connection_url,
+    },
     runtime::Runtime,
 };
 use secrecy::SecretString;
@@ -744,8 +746,8 @@ async fn startup_password_is_never_reused_for_another_profile() {
     )
     .unwrap()
     .profile;
-    first.secret_ref = Some(keyring_ref(first.id));
-    second.secret_ref = Some(keyring_ref(second.id));
+    first.credential_policy = CredentialPolicy::Keyring(keyring_ref(first.id));
+    second.credential_policy = CredentialPolicy::Keyring(keyring_ref(second.id));
     let first_id = first.id;
     let second_id = second.id;
     let secrets = Arc::new(MissingSecretStore::default());

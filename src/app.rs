@@ -495,7 +495,8 @@ impl App {
                     .cloned()
                 {
                     let mut manager = ProfileManagerState::default();
-                    let has_stored_credential = profile.secret_ref.is_some();
+                    let has_stored_credential =
+                        profile.credential_policy.keyring_reference().is_some();
                     manager.start_edit(&profile, has_stored_credential);
                     self.profile_manager = Some(manager);
                     self.overlay = Some(Overlay::ProfileManager);
@@ -583,9 +584,21 @@ impl App {
                 }
                 Vec::new()
             }
+            Action::ProfileCommitUrl => {
+                if let Some(manager) = self.editable_profile_manager_mut() {
+                    let _ = manager.commit_url();
+                }
+                Vec::new()
+            }
             Action::ProfileCycle(delta) => {
                 if let Some(manager) = self.editable_profile_manager_mut() {
                     manager.cycle(delta);
+                }
+                Vec::new()
+            }
+            Action::ProfileSelectDriver(kind) => {
+                if let Some(manager) = self.editable_profile_manager_mut() {
+                    manager.select_driver(kind);
                 }
                 Vec::new()
             }
@@ -767,7 +780,7 @@ impl App {
                     manager.message = Some(message);
                     return Vec::new();
                 }
-                let has_stored_credential = profile.secret_ref.is_some();
+                let has_stored_credential = profile.credential_policy.keyring_reference().is_some();
                 let mut manager = ProfileManagerState::default();
                 manager.start_edit(&profile, has_stored_credential);
                 manager.selected_field = ProfileField::Password;
@@ -2095,6 +2108,9 @@ impl App {
         }) else {
             return Vec::new();
         };
+        if manager.commit_url().is_err() {
+            return Vec::new();
+        }
         let Some(draft) = manager.draft.as_ref() else {
             return Vec::new();
         };
@@ -2141,6 +2157,9 @@ impl App {
         }) else {
             return Vec::new();
         };
+        if manager.commit_url().is_err() {
+            return Vec::new();
+        }
         let Some(draft) = manager.draft.as_ref() else {
             return Vec::new();
         };
@@ -2572,12 +2591,15 @@ impl App {
             .as_ref()
             .map(|snapshot| cursor_byte(&text, snapshot.cursor.line, snapshot.cursor.column))
             .unwrap_or(text.len());
+        let default_schema = self
+            .active_profile()
+            .and_then(|profile| profile.default_schema.clone());
         let candidates = sql::complete(
             &text,
             cursor,
             self.sql_dialect(),
             &self.explorer.completion_index,
-            None,
+            default_schema.as_deref(),
         );
         let Some(tab) = self.active_console_opt_mut() else {
             return Vec::new();

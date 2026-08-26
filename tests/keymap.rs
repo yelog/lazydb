@@ -586,6 +586,10 @@ fn profile_form_maps_navigation_editing_and_commands() {
         Some(Action::ProfileFieldPrevious)
     );
     assert_eq!(
+        keymap.map(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT), &app),
+        Some(Action::ProfileFieldPrevious)
+    );
+    assert_eq!(
         keymap.map(key(KeyCode::F(5)), &app),
         Some(Action::ProfileTest)
     );
@@ -615,6 +619,20 @@ fn profile_form_maps_navigation_editing_and_commands() {
     for (code, expected) in text_mappings {
         assert_eq!(keymap.map(key(code), &app), Some(expected));
     }
+    for character in ['h', 'j', 'k', 'l'] {
+        assert_eq!(
+            keymap.map(key(KeyCode::Char(character)), &app),
+            Some(Action::ProfileInsert(character.into()))
+        );
+    }
+    assert_eq!(
+        keymap.map(key(KeyCode::Up), &app),
+        Some(Action::ProfileFieldPrevious)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Down), &app),
+        Some(Action::ProfileFieldNext)
+    );
     assert_eq!(
         keymap.map(
             KeyEvent::new(
@@ -626,6 +644,12 @@ fn profile_form_maps_navigation_editing_and_commands() {
         Some(Action::ProfileInsert('@'.into()))
     );
 
+    app.profile_manager.as_mut().unwrap().selected_field = ProfileField::Url;
+    assert_eq!(
+        keymap.map(key(KeyCode::Enter), &app),
+        Some(Action::ProfileCommitUrl)
+    );
+
     app.profile_manager.as_mut().unwrap().selected_field = ProfileField::Kind;
     assert_eq!(
         keymap.map(key(KeyCode::Left), &app),
@@ -635,6 +659,46 @@ fn profile_form_maps_navigation_editing_and_commands() {
         keymap.map(key(KeyCode::Right), &app),
         Some(Action::ProfileCycle(1))
     );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('h')), &app),
+        Some(Action::ProfileCycle(-1))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('l')), &app),
+        Some(Action::ProfileCycle(1))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Up), &app),
+        Some(Action::ProfileFieldPrevious)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Down), &app),
+        Some(Action::ProfileFieldNext)
+    );
+    assert_eq!(keymap.map(key(KeyCode::Enter), &app), None);
+    assert_eq!(keymap.map(key(KeyCode::Char(' ')), &app), None);
+
+    for field in [
+        ProfileField::UrlFormat,
+        ProfileField::SslMode,
+        ProfileField::Environment,
+    ] {
+        app.profile_manager.as_mut().unwrap().selected_field = field;
+        for (code, expected) in [
+            (KeyCode::Left, Action::ProfileCycle(-1)),
+            (KeyCode::Char('h'), Action::ProfileCycle(-1)),
+            (KeyCode::Right, Action::ProfileCycle(1)),
+            (KeyCode::Char('l'), Action::ProfileCycle(1)),
+            (KeyCode::Enter, Action::ProfileCycle(1)),
+            (KeyCode::Char(' '), Action::ProfileCycle(1)),
+            (KeyCode::Up, Action::ProfileFieldPrevious),
+            (KeyCode::Char('k'), Action::ProfileFieldPrevious),
+            (KeyCode::Down, Action::ProfileFieldNext),
+            (KeyCode::Char('j'), Action::ProfileFieldNext),
+        ] {
+            assert_eq!(keymap.map(key(code), &app), Some(expected));
+        }
+    }
 
     app.profile_manager.as_mut().unwrap().selected_field = ProfileField::ReadOnly;
     assert_eq!(

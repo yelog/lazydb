@@ -49,9 +49,11 @@ than rereading mutable editor text.
 ## Profile and Credential Boundary
 
 `ProfileStore` atomically persists versioned connection metadata in TOML without
-passwords. `Runtime` owns profile CRUD, native keyring operations, session-only
-secrets, and connection identity validation. Native keyring calls run in
-blocking tasks; references use `keyring:dev.lazydb.lazydb/<profile-uuid>`.
+passwords or raw URLs. Profiles use an explicit credential policy: passwordless,
+prompt for a process-local secret, or native keyring. `Runtime` owns profile
+CRUD, native keyring operations, session-only secrets, and connection identity
+validation. Native keyring calls run in blocking tasks; references use
+`keyring:dev.lazydb.lazydb/<profile-uuid>`.
 `App` applies profile state only after matching runtime completion actions, so a
 failed save or switch can compensate without exposing a password.
 
@@ -62,6 +64,17 @@ Scope is `All` or `Selected`; MySQL's database-is-schema namespace is represente
 as a mirrored, non-toggleable schema row. Discovery is fingerprinted by the
 connection fields and credential revision; edits make a previous discovery
 stale and late test results are ignored.
+
+Structured profile fields are the sole connection source of truth. The form URL
+is a secret-backed editing projection with a persisted format preference. URL
+parsing applies fields atomically; field changes only format a new URL and never
+trigger reverse parsing. Parsed passwords move to `SecretString` storage and are
+omitted from the canonical URL.
+
+`default_schema` controls the default namespace and completion ranking, while
+`CatalogScope` remains the sole Explorer and metadata visibility policy. A draft
+tracks whether scope is derived or explicitly customized so default database and
+schema changes only rewrite derived visibility.
 
 ## Database Boundary
 

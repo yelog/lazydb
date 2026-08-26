@@ -18,7 +18,7 @@ use lazydb::{
         profiles::ProfileStore,
         secrets::{SecretStore, SecretStoreError, keyring_ref},
     },
-    profile::{ConnectionProfile, import_connection_url},
+    profile::{ConnectionProfile, CredentialPolicy, import_connection_url},
     runtime::Runtime,
 };
 use secrecy::{ExposeSecret, SecretString};
@@ -253,7 +253,7 @@ async fn session_password_is_never_persisted_or_sent_to_keyring() {
         action => panic!("unexpected action: {action:?}"),
     };
     assert_eq!(saved.id, profile_id);
-    assert!(saved.secret_ref.is_none());
+    assert_eq!(saved.credential_policy, CredentialPolicy::Prompt);
     assert!(!fake.contains(profile_id));
     assert_eq!(fake.calls(), (0, 0, 0, 0));
     let contents = fs::read_to_string(path).unwrap();
@@ -298,7 +298,7 @@ async fn remember_writes_keyring_reference_but_never_password_text() {
         action => panic!("unexpected action: {action:?}"),
     };
     assert_eq!(
-        saved.secret_ref.as_deref(),
+        saved.credential_policy.keyring_reference(),
         Some(keyring_ref(profile_id).as_str())
     );
     assert!(fake.matches(profile_id, password_text));
@@ -340,7 +340,7 @@ async fn unavailable_keyring_downgrades_remember_to_session_only() {
             warning,
             ..
         } => {
-            assert!(profile.secret_ref.is_none());
+            assert_eq!(profile.credential_policy, CredentialPolicy::Prompt);
             assert!(warning.unwrap().contains("session"));
         }
         action => panic!("unexpected action: {action:?}"),
@@ -352,12 +352,43 @@ async fn unavailable_keyring_downgrades_remember_to_session_only() {
 }
 
 #[tokio::test]
+async fn prompt_policy_without_a_runtime_password_requests_credentials() {
+    let temp = TempDir::new().unwrap();
+    let mut profile = postgres_profile("prompt");
+    let profile_id = profile.id;
+    profile.credential_policy = CredentialPolicy::Prompt;
+    let fake = Arc::new(FakeSecretStore::default());
+    let (mut runtime, mut receiver) = runtime(
+        vec![profile],
+        HashSet::from([profile_id]),
+        ProfileStore::new(temp.path().join("connections.toml")),
+        Arc::clone(&fake),
+    );
+
+    runtime.dispatch(Command::Connect {
+        profile_id,
+        generation: 1,
+    });
+
+    assert!(matches!(
+        next_action(&mut receiver).await,
+        Action::CredentialsRequired {
+            profile_id: required,
+            generation: 1,
+            ..
+        } if required == profile_id
+    ));
+    assert_eq!(fake.calls(), (0, 0, 0, 0));
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
 async fn preserve_derives_secret_references_from_runtime_state() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("connections.toml");
     let mut existing = postgres_profile("existing");
     let existing_id = existing.id;
-    existing.secret_ref = Some(keyring_ref(existing_id));
+    existing.credential_policy = CredentialPolicy::Keyring(keyring_ref(existing_id));
     let store = ProfileStore::new(path.clone());
     store.save(std::slice::from_ref(&existing)).unwrap();
     let fake = Arc::new(FakeSecretStore::default());
@@ -369,7 +400,7 @@ async fn preserve_derives_secret_references_from_runtime_state() {
         Arc::clone(&fake),
     );
 
-    existing.secret_ref = None;
+    existing.credential_policy = CredentialPolicy::None;
     runtime.dispatch(Command::SaveProfile {
         request_id: 5,
         submission: submission(existing, CredentialUpdate::Preserve),
@@ -381,7 +412,7 @@ async fn preserve_derives_secret_references_from_runtime_state() {
             profile,
             ..
         } => assert_eq!(
-            profile.secret_ref.as_deref(),
+            profile.credential_policy.keyring_reference(),
             Some(keyring_ref(existing_id).as_str())
         ),
         action => panic!("unexpected action: {action:?}"),
@@ -389,7 +420,7 @@ async fn preserve_derives_secret_references_from_runtime_state() {
 
     let mut new_profile = postgres_profile("new");
     let new_id = new_profile.id;
-    new_profile.secret_ref = Some(keyring_ref(new_id));
+    new_profile.credential_policy = CredentialPolicy::Keyring(keyring_ref(new_id));
     runtime.dispatch(Command::SaveProfile {
         request_id: 6,
         submission: submission(new_profile, CredentialUpdate::Preserve),
@@ -400,7 +431,7 @@ async fn preserve_derives_secret_references_from_runtime_state() {
             request_id: 6,
             profile,
             ..
-        } => assert!(profile.secret_ref.is_none()),
+        } => assert_eq!(profile.credential_policy, CredentialPolicy::None),
         action => panic!("unexpected action: {action:?}"),
     }
     assert_eq!(fake.calls(), (0, 0, 0, 0));
@@ -413,7 +444,7 @@ async fn edits_preserve_profile_order_and_can_replace_then_forget_a_secret() {
     let path = temp.path().join("connections.toml");
     let first = postgres_profile("first");
     let mut second = postgres_profile("second");
-    second.secret_ref = Some(keyring_ref(second.id));
+    second.credential_policy = CredentialPolicy::Keyring(keyring_ref(second.id));
     let second_id = second.id;
     let ids = [first.id, second.id];
     let store = ProfileStore::new(path.clone());
@@ -462,7 +493,7 @@ async fn edits_preserve_profile_order_and_can_replace_then_forget_a_secret() {
             request_id: 8,
             profile,
             ..
-        } => assert!(profile.secret_ref.is_none()),
+        } => assert_eq!(profile.credential_policy, CredentialPolicy::None),
         action => panic!("unexpected action: {action:?}"),
     }
     assert!(!fake.contains(second_id));
@@ -476,7 +507,7 @@ async fn profile_save_failure_restores_the_previous_keyring_value() {
     fs::write(&blocked_parent, "not a directory").unwrap();
     let mut profile = postgres_profile("rollback");
     let profile_id = profile.id;
-    profile.secret_ref = Some(keyring_ref(profile_id));
+    profile.credential_policy = CredentialPolicy::Keyring(keyring_ref(profile_id));
     let fake = Arc::new(FakeSecretStore::default());
     fake.seed(profile_id, "old-password");
     let (mut runtime, mut receiver) = runtime(
@@ -513,7 +544,7 @@ async fn delete_removes_metadata_and_keyring_value() {
     let path = temp.path().join("connections.toml");
     let mut profile = postgres_profile("delete");
     let profile_id = profile.id;
-    profile.secret_ref = Some(keyring_ref(profile_id));
+    profile.credential_policy = CredentialPolicy::Keyring(keyring_ref(profile_id));
     let store = ProfileStore::new(path.clone());
     store.save(std::slice::from_ref(&profile)).unwrap();
     let fake = Arc::new(FakeSecretStore::default());
@@ -550,7 +581,7 @@ async fn delete_persistence_failure_restores_the_keyring_value() {
     fs::write(&blocked_parent, "not a directory").unwrap();
     let mut profile = postgres_profile("delete-rollback");
     let profile_id = profile.id;
-    profile.secret_ref = Some(keyring_ref(profile_id));
+    profile.credential_policy = CredentialPolicy::Keyring(keyring_ref(profile_id));
     let fake = Arc::new(FakeSecretStore::default());
     fake.seed(profile_id, "stored-password");
     let (mut runtime, mut receiver) = runtime(

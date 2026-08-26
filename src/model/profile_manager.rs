@@ -16,7 +16,8 @@ use crate::{
     },
     profile::{
         CatalogScope, CatalogScopeValidationError, CatalogSelection, ConnectionProfile,
-        DatabaseKind, DatabaseScope, Environment, SslMode,
+        ConnectionUrlFormat, CredentialPolicy, DatabaseKind, DatabaseScope, Environment, SslMode,
+        format_connection_url, parse_connection_url,
     },
 };
 
@@ -73,6 +74,8 @@ pub enum ProfileManagerPage {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ProfileField {
     Kind,
+    UrlFormat,
+    Url,
     Name,
     Host,
     Port,
@@ -101,6 +104,18 @@ pub enum ProfileOperation {
     Deleting,
     Connecting,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CatalogScopeMode {
+    Derived,
+    Explicit,
+}
+
+pub const DRIVER_ORDER: [DatabaseKind; 3] = [
+    DatabaseKind::Postgres,
+    DatabaseKind::MySql,
+    DatabaseKind::Sqlite,
+];
 
 #[derive(Clone)]
 pub enum CredentialUpdate {
@@ -170,7 +185,9 @@ impl ProfileSubmission {
         credential_revision: u64,
     ) -> Self {
         let credential_present = match &credential {
-            CredentialUpdate::Preserve => profile.secret_ref.is_some(),
+            CredentialUpdate::Preserve => {
+                !matches!(profile.credential_policy, CredentialPolicy::None)
+            }
             CredentialUpdate::Session(_) | CredentialUpdate::Remember(_) => true,
             CredentialUpdate::Forget => false,
         };
@@ -267,6 +284,11 @@ impl fmt::Debug for CatalogDiscoveryState {
 pub struct ProfileDraft {
     profile_id: Uuid,
     pub kind: DatabaseKind,
+    pub url_format: ConnectionUrlFormat,
+    url: SecretString,
+    url_cursor: usize,
+    url_pending: bool,
+    url_error: Option<String>,
     pub name: TextInput,
     pub host: TextInput,
     pub port: TextInput,
@@ -281,9 +303,10 @@ pub struct ProfileDraft {
     pub remember_password: bool,
     pub sqlite_memory: bool,
     pub sqlite_path: TextInput,
-    pub original_secret_ref: Option<String>,
+    pub original_credential_policy: CredentialPolicy,
     pub has_stored_credential: bool,
     pub catalog_scope: CatalogScope,
+    pub catalog_scope_mode: CatalogScopeMode,
     pub catalog_discovery: CatalogDiscoveryState,
     pub discovery_fingerprint: Option<DiscoveryFingerprint>,
     credential_revision: u64,
@@ -307,9 +330,14 @@ impl ProfileDraft {
             DatabaseKind::Sqlite => ("", "", "main", SslMode::Disable),
         };
 
-        Self {
+        let mut draft = Self {
             profile_id: Uuid::new_v4(),
             kind,
+            url_format: ConnectionUrlFormat::default_for(kind),
+            url: SecretString::from(String::new()),
+            url_cursor: 0,
+            url_pending: false,
+            url_error: None,
             name: TextInput::default(),
             host: TextInput::from(host),
             port: TextInput::from(port),
@@ -324,13 +352,16 @@ impl ProfileDraft {
             remember_password: false,
             sqlite_memory: false,
             sqlite_path: TextInput::default(),
-            original_secret_ref: None,
+            original_credential_policy: CredentialPolicy::None,
             has_stored_credential: false,
             catalog_scope: CatalogScope::for_profile(kind, "", Some(schema)),
+            catalog_scope_mode: CatalogScopeMode::Derived,
             catalog_discovery: CatalogDiscoveryState::NotRequested,
             discovery_fingerprint: None,
             credential_revision: 0,
-        }
+        };
+        draft.refresh_url();
+        draft
     }
 
     pub fn edit(profile: &ConnectionProfile, has_stored_credential: bool) -> Self {
@@ -347,10 +378,24 @@ impl ProfileDraft {
                     .flatten()
             })
             .unwrap_or_default();
+        let derived_scope = CatalogScope::for_profile(
+            profile.kind,
+            profile.database.as_deref().unwrap_or_default(),
+            profile.default_schema.as_deref(),
+        );
 
-        Self {
+        let mut draft = Self {
             profile_id: profile.id,
             kind: profile.kind,
+            url_format: if profile.url_format.is_compatible(profile.kind) {
+                profile.url_format
+            } else {
+                ConnectionUrlFormat::default_for(profile.kind)
+            },
+            url: SecretString::from(String::new()),
+            url_cursor: 0,
+            url_pending: false,
+            url_error: None,
             name: TextInput::from(profile.name.clone()),
             host: TextInput::from(profile.host.clone().unwrap_or_default()),
             port: TextInput::from(
@@ -367,16 +412,23 @@ impl ProfileDraft {
             ssl_mode: profile.ssl_mode,
             environment: profile.environment,
             read_only: profile.read_only,
-            remember_password: profile.secret_ref.is_some(),
+            remember_password: matches!(profile.credential_policy, CredentialPolicy::Keyring(_)),
             sqlite_memory,
             sqlite_path: TextInput::from(sqlite_path),
-            original_secret_ref: profile.secret_ref.clone(),
+            original_credential_policy: profile.credential_policy.clone(),
             has_stored_credential,
             catalog_scope: profile.catalog_scope.clone(),
+            catalog_scope_mode: if profile.catalog_scope == derived_scope {
+                CatalogScopeMode::Derived
+            } else {
+                CatalogScopeMode::Explicit
+            },
             catalog_discovery: CatalogDiscoveryState::NotRequested,
             discovery_fingerprint: None,
             credential_revision: 0,
-        }
+        };
+        draft.refresh_url();
+        draft
     }
 
     pub fn profile_id(&self) -> Uuid {
@@ -385,6 +437,75 @@ impl ProfileDraft {
 
     pub fn password(&self) -> &SecretString {
         &self.password
+    }
+
+    pub fn url_display(&self) -> String {
+        redact_url_password(self.url.expose_secret()).0
+    }
+
+    pub fn url_cursor(&self) -> usize {
+        let raw = self.url.expose_secret();
+        let (display, password_range) = redact_url_password(raw);
+        let Some((start, end)) = password_range else {
+            return self.url_cursor.min(display.chars().count());
+        };
+        let raw_cursor = self.url_cursor.min(raw.chars().count());
+        let redacted_len = "[REDACTED]".chars().count();
+        if raw_cursor <= start {
+            raw_cursor
+        } else if raw_cursor <= end {
+            start + redacted_len
+        } else {
+            raw_cursor - (end - start) + redacted_len
+        }
+    }
+
+    pub fn url_is_pending(&self) -> bool {
+        self.url_pending
+    }
+
+    pub fn url_error(&self) -> Option<&str> {
+        self.url_error.as_deref()
+    }
+
+    pub fn commit_url(&mut self) -> Result<(), ProfileValidationError> {
+        if !self.url_pending {
+            return self.url_error.as_ref().map_or(Ok(()), |error| {
+                Err(ProfileValidationError::new(ProfileField::Url, error))
+            });
+        }
+        let parsed = parse_connection_url(self.url.expose_secret()).map_err(|error| {
+            let message = error.to_string();
+            self.url_error = Some(message.clone());
+            ProfileValidationError::new(ProfileField::Url, message)
+        })?;
+
+        self.kind = parsed.kind;
+        self.url_format = parsed.format;
+        self.host.set(parsed.host.unwrap_or_default());
+        self.port
+            .set(parsed.port.map(|port| port.to_string()).unwrap_or_default());
+        self.user.set(parsed.user.unwrap_or_default());
+        self.database.set(parsed.database.unwrap_or_default());
+        self.schema.set(parsed.default_schema.unwrap_or_default());
+        self.ssl_mode = parsed.ssl_mode;
+        self.read_only = parsed.read_only;
+        self.sqlite_memory = parsed.sqlite_memory;
+        self.sqlite_path.set(
+            parsed
+                .sqlite_path
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        );
+        if let Some(password) = parsed.password {
+            self.set_password(password.expose_secret().to_owned());
+        }
+        self.url_pending = false;
+        self.url_error = None;
+        self.invalidate_catalog_discovery();
+        self.sync_derived_catalog_scope();
+        self.refresh_url();
+        Ok(())
     }
 
     pub fn set_password(&mut self, password: impl Into<String>) {
@@ -399,7 +520,14 @@ impl ProfileDraft {
     }
 
     pub fn insert(&mut self, field: ProfileField, character: char) {
-        if field == ProfileField::Password {
+        if field == ProfileField::Url {
+            let cursor = self.url_cursor;
+            self.edit_url(|url| {
+                let byte_index = character_byte_index(url, cursor);
+                url.insert(byte_index, character);
+            });
+            self.url_cursor += 1;
+        } else if field == ProfileField::Password {
             let mut password = Zeroizing::new(self.password.expose_secret().to_owned());
             let byte_index = character_byte_index(&password, self.password_cursor);
             password.insert(byte_index, character);
@@ -412,7 +540,14 @@ impl ProfileDraft {
     }
 
     pub fn paste(&mut self, field: ProfileField, text: &str) {
-        if field == ProfileField::Password {
+        if field == ProfileField::Url {
+            let cursor = self.url_cursor;
+            self.edit_url(|url| {
+                let byte_index = character_byte_index(url, cursor);
+                url.insert_str(byte_index, text);
+            });
+            self.url_cursor += text.chars().count();
+        } else if field == ProfileField::Password {
             let mut password = Zeroizing::new(self.password.expose_secret().to_owned());
             let byte_index = character_byte_index(&password, self.password_cursor);
             password.insert_str(byte_index, text);
@@ -425,7 +560,18 @@ impl ProfileDraft {
     }
 
     pub fn backspace(&mut self, field: ProfileField) {
-        if field == ProfileField::Password {
+        if field == ProfileField::Url {
+            if self.url_cursor == 0 {
+                return;
+            }
+            let cursor = self.url_cursor;
+            self.edit_url(|url| {
+                let start = character_byte_index(url, cursor - 1);
+                let end = character_byte_index(url, cursor);
+                url.replace_range(start..end, "");
+            });
+            self.url_cursor -= 1;
+        } else if field == ProfileField::Password {
             if self.password_cursor == 0 {
                 return;
             }
@@ -442,7 +588,16 @@ impl ProfileDraft {
     }
 
     pub fn delete(&mut self, field: ProfileField) {
-        if field == ProfileField::Password {
+        if field == ProfileField::Url {
+            let cursor = self.url_cursor;
+            self.edit_url(|url| {
+                let start = character_byte_index(url, cursor);
+                if start < url.len() {
+                    let end = character_byte_index(url, cursor + 1);
+                    url.replace_range(start..end, "");
+                }
+            });
+        } else if field == ProfileField::Password {
             let mut password = Zeroizing::new(self.password.expose_secret().to_owned());
             let start = character_byte_index(&password, self.password_cursor);
             if start == password.len() {
@@ -502,9 +657,19 @@ impl ProfileDraft {
                 | ProfileField::Port
                 | ProfileField::User
                 | ProfileField::Database
+                | ProfileField::Schema
                 | ProfileField::SqlitePath
         ) {
             self.invalidate_catalog_discovery();
+        }
+        if matches!(
+            field,
+            ProfileField::Database | ProfileField::Schema | ProfileField::SqlitePath
+        ) {
+            self.sync_derived_catalog_scope();
+        }
+        if field != ProfileField::Url && field != ProfileField::Password {
+            self.refresh_url();
         }
     }
 
@@ -514,7 +679,9 @@ impl ProfileDraft {
     }
 
     pub fn move_left(&mut self, field: ProfileField) {
-        if field == ProfileField::Password {
+        if field == ProfileField::Url {
+            self.url_cursor = self.url_cursor.saturating_sub(1);
+        } else if field == ProfileField::Password {
             self.password_cursor = self.password_cursor.saturating_sub(1);
         } else if let Some(input) = self.text_input_mut(field) {
             input.move_left();
@@ -522,7 +689,9 @@ impl ProfileDraft {
     }
 
     pub fn move_right(&mut self, field: ProfileField) {
-        if field == ProfileField::Password {
+        if field == ProfileField::Url {
+            self.url_cursor = (self.url_cursor + 1).min(self.url.expose_secret().chars().count());
+        } else if field == ProfileField::Password {
             self.password_cursor = (self.password_cursor + 1).min(self.password_len());
         } else if let Some(input) = self.text_input_mut(field) {
             input.move_right();
@@ -530,7 +699,9 @@ impl ProfileDraft {
     }
 
     pub fn move_home(&mut self, field: ProfileField) {
-        if field == ProfileField::Password {
+        if field == ProfileField::Url {
+            self.url_cursor = 0;
+        } else if field == ProfileField::Password {
             self.password_cursor = 0;
         } else if let Some(input) = self.text_input_mut(field) {
             input.move_home();
@@ -538,7 +709,9 @@ impl ProfileDraft {
     }
 
     pub fn move_end(&mut self, field: ProfileField) {
-        if field == ProfileField::Password {
+        if field == ProfileField::Url {
+            self.url_cursor = self.url.expose_secret().chars().count();
+        } else if field == ProfileField::Password {
             self.password_cursor = self.password_len();
         } else if let Some(input) = self.text_input_mut(field) {
             input.move_end();
@@ -547,7 +720,8 @@ impl ProfileDraft {
 
     pub fn visible_fields(&self) -> &'static [ProfileField] {
         match (self.kind, self.sqlite_memory) {
-            (DatabaseKind::Postgres | DatabaseKind::MySql, _) => &SERVER_FIELDS,
+            (DatabaseKind::Postgres, _) => &POSTGRES_FIELDS,
+            (DatabaseKind::MySql, _) => &MYSQL_FIELDS,
             (DatabaseKind::Sqlite, false) => &SQLITE_FILE_FIELDS,
             (DatabaseKind::Sqlite, true) => &SQLITE_MEMORY_FIELDS,
         }
@@ -557,6 +731,15 @@ impl ProfileDraft {
         &self,
         profiles: &[ConnectionProfile],
     ) -> Result<ProfileSubmission, ProfileValidationError> {
+        if self.url_pending {
+            return Err(ProfileValidationError::new(
+                ProfileField::Url,
+                "connection URL has uncommitted changes",
+            ));
+        }
+        if let Some(error) = &self.url_error {
+            return Err(ProfileValidationError::new(ProfileField::Url, error));
+        }
         let name = required(&self.name, ProfileField::Name, "profile name is required")?;
         let normalized_name = name.to_lowercase();
         if profiles.iter().any(|profile| {
@@ -594,7 +777,9 @@ impl ProfileDraft {
                     Some(port),
                     optional(&self.user),
                     Some(database),
-                    optional(&self.schema),
+                    (self.kind == DatabaseKind::Postgres)
+                        .then(|| optional(&self.schema))
+                        .flatten(),
                     None,
                     self.ssl_mode,
                 )
@@ -627,19 +812,20 @@ impl ProfileDraft {
         };
 
         let credential = self.credential_update();
-        let secret_ref = if matches!(credential, CredentialUpdate::Preserve) {
-            self.original_secret_ref.clone()
-        } else {
-            None
+        let credential_policy = match &credential {
+            CredentialUpdate::Preserve => self.original_credential_policy.clone(),
+            CredentialUpdate::Session(_) | CredentialUpdate::Remember(_) => {
+                CredentialPolicy::Prompt
+            }
+            CredentialUpdate::Forget => CredentialPolicy::None,
         };
-        let catalog_scope = if self.catalog_scope_is_pending_default() {
-            CatalogScope::for_profile(
+        let catalog_scope = match self.catalog_scope_mode {
+            CatalogScopeMode::Derived => CatalogScope::for_profile(
                 self.kind,
                 database.as_deref().unwrap_or_default(),
                 default_schema.as_deref(),
-            )
-        } else {
-            self.catalog_scope.clone()
+            ),
+            CatalogScopeMode::Explicit => self.catalog_scope.clone(),
         };
         catalog_scope
             .validate(
@@ -655,6 +841,7 @@ impl ProfileDraft {
                 id: self.profile_id,
                 name,
                 kind: self.kind,
+                url_format: self.url_format,
                 host,
                 port,
                 user,
@@ -662,7 +849,7 @@ impl ProfileDraft {
                 default_schema,
                 sqlite_path,
                 ssl_mode,
-                secret_ref,
+                credential_policy,
                 read_only: self.read_only,
                 environment: self.environment,
                 catalog_scope,
@@ -674,7 +861,7 @@ impl ProfileDraft {
 
     fn credential_update(&self) -> CredentialUpdate {
         if self.kind == DatabaseKind::Sqlite {
-            return if self.original_secret_ref.is_some() {
+            return if !matches!(self.original_credential_policy, CredentialPolicy::None) {
                 CredentialUpdate::Forget
             } else {
                 CredentialUpdate::Preserve
@@ -689,19 +876,35 @@ impl ProfileDraft {
             };
         }
 
-        if self.original_secret_ref.is_some() && !self.remember_password {
+        if matches!(
+            self.original_credential_policy,
+            CredentialPolicy::Keyring(_)
+        ) && !self.remember_password
+        {
             CredentialUpdate::Forget
         } else {
             CredentialUpdate::Preserve
         }
     }
 
-    fn catalog_scope_is_pending_default(&self) -> bool {
-        matches!(
-            &self.catalog_scope.databases,
-            CatalogSelection::Selected(databases)
-                if matches!(databases.as_slice(), [DatabaseScope { name, .. }] if name.is_empty())
-        )
+    fn sync_derived_catalog_scope(&mut self) {
+        if self.catalog_scope_mode != CatalogScopeMode::Derived {
+            return;
+        }
+        let (database, default_schema) = match self.kind {
+            DatabaseKind::Postgres => (self.database.value(), optional(&self.schema)),
+            DatabaseKind::MySql => (self.database.value(), None),
+            DatabaseKind::Sqlite => (
+                if self.sqlite_memory {
+                    ":memory:"
+                } else {
+                    self.sqlite_path.value()
+                },
+                Some("main".to_owned()),
+            ),
+        };
+        self.catalog_scope =
+            CatalogScope::for_profile(self.kind, database, default_schema.as_deref());
     }
 
     fn text_input_mut(&mut self, field: ProfileField) -> Option<&mut TextInput> {
@@ -725,6 +928,7 @@ impl ProfileDraft {
         self.invalidate_catalog_discovery();
         let previous = self.kind;
         self.kind = kind;
+        self.url_format = ConnectionUrlFormat::default_for(kind);
         match kind {
             DatabaseKind::Postgres => {
                 if self.host.value().trim().is_empty() {
@@ -760,6 +964,88 @@ impl ProfileDraft {
             }
             DatabaseKind::Sqlite => self.ssl_mode = SslMode::Disable,
         }
+        self.sync_derived_catalog_scope();
+        self.refresh_url();
+    }
+
+    fn edit_url(&mut self, edit: impl FnOnce(&mut String)) {
+        let mut url = Zeroizing::new(self.url.expose_secret().to_owned());
+        edit(&mut url);
+        self.url = SecretString::from(std::mem::take(&mut *url));
+        self.url_pending = true;
+        self.url_error = None;
+    }
+
+    fn refresh_url(&mut self) {
+        let Ok(profile) = self.connection_profile_for_url() else {
+            return;
+        };
+        let Ok(url) = format_connection_url(&profile, self.url_format) else {
+            return;
+        };
+        self.url_cursor = url.chars().count();
+        self.url = SecretString::from(url);
+        self.url_pending = false;
+        self.url_error = None;
+    }
+
+    fn connection_profile_for_url(&self) -> Result<ConnectionProfile, ()> {
+        let (host, port, user, database, default_schema, sqlite_path) = match self.kind {
+            DatabaseKind::Postgres | DatabaseKind::MySql => {
+                let host = optional(&self.host).ok_or(())?;
+                let port = self.port.value().trim().parse::<u16>().map_err(|_| ())?;
+                if port == 0 {
+                    return Err(());
+                }
+                (
+                    Some(host),
+                    Some(port),
+                    optional(&self.user),
+                    optional(&self.database),
+                    (self.kind == DatabaseKind::Postgres)
+                        .then(|| optional(&self.schema))
+                        .flatten(),
+                    None,
+                )
+            }
+            DatabaseKind::Sqlite => {
+                let path = (!self.sqlite_memory)
+                    .then(|| optional(&self.sqlite_path).map(PathBuf::from))
+                    .flatten();
+                if !self.sqlite_memory && path.is_none() {
+                    return Err(());
+                }
+                (
+                    None,
+                    None,
+                    None,
+                    Some(if self.sqlite_memory {
+                        ":memory:".to_owned()
+                    } else {
+                        path.as_ref().unwrap().to_string_lossy().into_owned()
+                    }),
+                    Some("main".to_owned()),
+                    path,
+                )
+            }
+        };
+        Ok(ConnectionProfile {
+            id: self.profile_id,
+            name: String::new(),
+            kind: self.kind,
+            url_format: self.url_format,
+            host,
+            port,
+            user,
+            database,
+            default_schema,
+            sqlite_path,
+            ssl_mode: self.ssl_mode,
+            credential_policy: CredentialPolicy::None,
+            read_only: self.read_only,
+            environment: self.environment,
+            catalog_scope: self.catalog_scope.clone(),
+        })
     }
 }
 
@@ -769,6 +1055,8 @@ impl fmt::Debug for ProfileDraft {
             .debug_struct("ProfileDraft")
             .field("profile_id", &self.profile_id)
             .field("kind", &self.kind)
+            .field("url_format", &self.url_format)
+            .field("url", &"[REDACTED]")
             .field("name", &self.name)
             .field("host", &self.host)
             .field("port", &self.port)
@@ -782,9 +1070,13 @@ impl fmt::Debug for ProfileDraft {
             .field("remember_password", &self.remember_password)
             .field("sqlite_memory", &self.sqlite_memory)
             .field("sqlite_path", &self.sqlite_path)
-            .field("original_secret_ref", &self.original_secret_ref)
+            .field(
+                "original_credential_policy",
+                &self.original_credential_policy,
+            )
             .field("has_stored_credential", &self.has_stored_credential)
             .field("catalog_scope", &self.catalog_scope)
+            .field("catalog_scope_mode", &self.catalog_scope_mode)
             .field("catalog_discovery", &self.catalog_discovery)
             .field("discovery_fingerprint", &self.discovery_fingerprint)
             .field("credential_revision", &self.credential_revision)
@@ -848,14 +1140,7 @@ impl ProfileManagerState {
 
     pub fn open_scope_picker(&mut self) {
         if let Some(draft) = self.draft.as_mut() {
-            if matches!(&draft.catalog_scope.databases, CatalogSelection::Selected(items) if items.len() == 1 && items[0].name.is_empty())
-            {
-                draft.catalog_scope = CatalogScope::for_profile(
-                    draft.kind,
-                    draft.database.value(),
-                    optional(&draft.schema).as_deref(),
-                );
-            }
+            draft.sync_derived_catalog_scope();
             self.page = ProfileManagerPage::Scope;
             self.scope_selected_row = self
                 .scope_rows_for_render()
@@ -918,6 +1203,7 @@ impl ProfileManagerState {
         };
         let changed = toggle_scope(&mut draft.catalog_scope, draft.kind, &row);
         if changed {
+            draft.catalog_scope_mode = CatalogScopeMode::Explicit;
             self.scope_warning = self.scope_unavailable_warning();
         }
         changed
@@ -1060,6 +1346,12 @@ impl ProfileManagerState {
     }
 
     pub fn move_field(&mut self, delta: isize) {
+        if self.selected_field == ProfileField::Url
+            && let Err(error) = self.commit_url()
+        {
+            self.message = Some(error.message);
+            return;
+        }
         let fields = self.visible_fields();
         if fields.is_empty() {
             return;
@@ -1073,6 +1365,13 @@ impl ProfileManagerState {
     }
 
     pub fn focus_field(&mut self, field: ProfileField) {
+        if self.selected_field == ProfileField::Url
+            && field != ProfileField::Url
+            && let Err(error) = self.commit_url()
+        {
+            self.message = Some(error.message);
+            return;
+        }
         if self.visible_fields().contains(&field) {
             self.selected_field = field;
         }
@@ -1144,15 +1443,15 @@ impl ProfileManagerState {
             return;
         };
         match field {
-            ProfileField::Kind => draft.set_kind(cycle_value(
-                draft.kind,
-                &[
-                    DatabaseKind::Postgres,
-                    DatabaseKind::MySql,
-                    DatabaseKind::Sqlite,
-                ],
-                delta,
-            )),
+            ProfileField::Kind => draft.set_kind(cycle_value(draft.kind, &DRIVER_ORDER, delta)),
+            ProfileField::UrlFormat => {
+                draft.url_format = cycle_value(
+                    draft.url_format,
+                    ConnectionUrlFormat::compatible_formats(draft.kind),
+                    delta,
+                );
+                draft.refresh_url();
+            }
             ProfileField::SslMode => {
                 draft.ssl_mode = cycle_value(
                     draft.ssl_mode,
@@ -1166,6 +1465,7 @@ impl ProfileManagerState {
                     delta,
                 );
                 draft.invalidate_catalog_discovery();
+                draft.refresh_url();
             }
             ProfileField::Environment => {
                 draft.environment = cycle_value(
@@ -1183,6 +1483,14 @@ impl ProfileManagerState {
         self.message = None;
     }
 
+    pub fn select_driver(&mut self, kind: DatabaseKind) {
+        let Some(draft) = self.draft.as_mut() else {
+            return;
+        };
+        draft.set_kind(kind);
+        self.message = None;
+    }
+
     pub fn toggle(&mut self) {
         let field = self.selected_field;
         let Some(draft) = self.draft.as_mut() else {
@@ -1197,10 +1505,26 @@ impl ProfileManagerState {
             ProfileField::SqliteMemory => {
                 draft.sqlite_memory = !draft.sqlite_memory;
                 draft.invalidate_catalog_discovery();
+                draft.sync_derived_catalog_scope();
             }
             _ => return,
         }
+        if matches!(field, ProfileField::ReadOnly | ProfileField::SqliteMemory) {
+            draft.refresh_url();
+        }
         self.message = None;
+    }
+
+    pub fn commit_url(&mut self) -> Result<(), ProfileValidationError> {
+        let result = self.draft.as_mut().map_or(Ok(()), ProfileDraft::commit_url);
+        match &result {
+            Ok(()) => self.message = None,
+            Err(error) => {
+                self.selected_field = ProfileField::Url;
+                self.message = Some(error.message.clone());
+            }
+        }
+        result
     }
 }
 
@@ -1348,8 +1672,63 @@ fn toggle_scope(scope: &mut CatalogScope, kind: DatabaseKind, row: &ScopeRow) ->
     true
 }
 
-const SERVER_FIELDS: [ProfileField; 16] = [
+fn redact_url_password(value: &str) -> (String, Option<(usize, usize)>) {
+    let Some(scheme_end) = value.find("://") else {
+        return (value.to_owned(), None);
+    };
+    let authority_start = scheme_end + 3;
+    let authority_end = value[authority_start..]
+        .find(['/', '?', '#'])
+        .map_or(value.len(), |offset| authority_start + offset);
+    let authority = &value[authority_start..authority_end];
+    let Some(at) = authority.rfind('@') else {
+        return (value.to_owned(), None);
+    };
+    let Some(colon) = authority[..at].find(':') else {
+        return (value.to_owned(), None);
+    };
+    let password_start = authority_start + colon + 1;
+    let password_end = authority_start + at;
+    let password_chars = (
+        value[..password_start].chars().count(),
+        value[..password_end].chars().count(),
+    );
+    (
+        format!(
+            "{}[REDACTED]{}",
+            &value[..password_start],
+            &value[password_end..]
+        ),
+        Some(password_chars),
+    )
+}
+
+const POSTGRES_FIELDS: [ProfileField; 19] = [
     ProfileField::Kind,
+    ProfileField::UrlFormat,
+    ProfileField::Url,
+    ProfileField::Name,
+    ProfileField::Host,
+    ProfileField::Port,
+    ProfileField::User,
+    ProfileField::Password,
+    ProfileField::Database,
+    ProfileField::Schema,
+    ProfileField::VisibleObjects,
+    ProfileField::SslMode,
+    ProfileField::Environment,
+    ProfileField::ReadOnly,
+    ProfileField::RememberPassword,
+    ProfileField::Test,
+    ProfileField::Save,
+    ProfileField::SaveAndConnect,
+    ProfileField::Cancel,
+];
+
+const MYSQL_FIELDS: [ProfileField; 18] = [
+    ProfileField::Kind,
+    ProfileField::UrlFormat,
+    ProfileField::Url,
     ProfileField::Name,
     ProfileField::Host,
     ProfileField::Port,
@@ -1367,8 +1746,10 @@ const SERVER_FIELDS: [ProfileField; 16] = [
     ProfileField::Cancel,
 ];
 
-const SQLITE_FILE_FIELDS: [ProfileField; 10] = [
+const SQLITE_FILE_FIELDS: [ProfileField; 12] = [
     ProfileField::Kind,
+    ProfileField::UrlFormat,
+    ProfileField::Url,
     ProfileField::Name,
     ProfileField::SqliteMemory,
     ProfileField::SqlitePath,
@@ -1380,8 +1761,10 @@ const SQLITE_FILE_FIELDS: [ProfileField; 10] = [
     ProfileField::Cancel,
 ];
 
-const SQLITE_MEMORY_FIELDS: [ProfileField; 9] = [
+const SQLITE_MEMORY_FIELDS: [ProfileField; 11] = [
     ProfileField::Kind,
+    ProfileField::UrlFormat,
+    ProfileField::Url,
     ProfileField::Name,
     ProfileField::SqliteMemory,
     ProfileField::VisibleObjects,
