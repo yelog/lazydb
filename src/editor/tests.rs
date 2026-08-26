@@ -104,6 +104,22 @@ fn replacement_resets_cursor_mode_and_history() {
 }
 
 #[test]
+fn replacement_cursor_controls_next_insert_position() {
+    let (mut workspace, id) = fixture("SELE");
+    workspace
+        .replace_range(
+            id,
+            crate::sql::TextRange::new(0, 4),
+            "SELECT",
+            super::ReplacementCursor::EndOfInsertion,
+        )
+        .unwrap();
+    assert_eq!(workspace.position(id).unwrap().column, 6);
+    workspace.paste(id, " ").unwrap();
+    assert_eq!(workspace.text(id).unwrap(), "SELECT ");
+}
+
+#[test]
 fn named_and_system_registers_are_shared() {
     let (mut workspace, first) = fixture("");
     let second = Uuid::new_v4();

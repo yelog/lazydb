@@ -707,11 +707,15 @@ impl EditorWorkspace {
             ReplacementCursor::PreserveRelative => range.start + replacement.len(),
         };
         session.position = byte_to_char_position(&next, cursor_offset);
-        session
+        let mut buffer = session
             .buffer
             .write()
-            .map_err(|_| EditorError::Operation("buffer lock poisoned".into()))?
-            .set_text(encode_editor_text(&next));
+            .map_err(|_| EditorError::Operation("buffer lock poisoned".into()))?;
+        buffer.set_text(encode_editor_text(&next));
+        buffer.set_leader(
+            session.group_id,
+            modalkit::editing::cursor::Cursor::new(session.position.line, session.position.column),
+        );
         session.revision = session.revision.saturating_add(1);
         self.effects.push(EditorEffect::Changed {
             console_id: id,

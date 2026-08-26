@@ -116,6 +116,7 @@ fn accepting_completion_places_cursor_after_inserted_text() {
 
     app.update(Action::CompletionAccept);
     assert_eq!(app.active_editor_text().unwrap(), "SELECT");
+    assert!(app.active_console().completion.is_none());
     let snapshot = app
         .active_editor_render_snapshot(lazydb::model::editor::EditorViewport {
             width: 80,
@@ -127,6 +128,8 @@ fn accepting_completion_places_cursor_after_inserted_text() {
         lazydb::model::editor::EditorPosition { line: 0, column: 6 }
     );
 
+    editor_key(&mut app, KeyCode::Char(' '), KeyModifiers::NONE);
+    assert_eq!(app.active_editor_text().unwrap(), "SELECT ");
     editor_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
     editor_key(&mut app, KeyCode::Char('u'), KeyModifiers::NONE);
     assert_eq!(app.active_editor_text().unwrap(), "sel");

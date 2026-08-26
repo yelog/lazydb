@@ -49,6 +49,12 @@ pub struct App {
     )>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EditorEffectPolicy {
+    Normal,
+    SuppressCompletionRefresh,
+}
+
 impl App {
     pub fn new(profiles: Vec<ConnectionProfile>) -> Self {
         Self::with_confirmation_policy(profiles, ConfirmationPolicy::RiskyOnly)
@@ -2117,6 +2123,10 @@ impl App {
     }
 
     fn apply_editor_effects(&mut self) -> Vec<Command> {
+        self.apply_editor_effects_with_policy(EditorEffectPolicy::Normal)
+    }
+
+    fn apply_editor_effects_with_policy(&mut self, policy: EditorEffectPolicy) -> Vec<Command> {
         let effects = self.editor.drain_effects();
         let mut commands = Vec::new();
         for effect in effects {
@@ -2137,7 +2147,9 @@ impl App {
                     let immediate = cursor_state
                         .as_ref()
                         .is_some_and(|(_, text)| text.ends_with('.'));
-                    if immediate {
+                    if policy == EditorEffectPolicy::SuppressCompletionRefresh {
+                        self.active_console_mut().completion = None;
+                    } else if immediate {
                         self.complete_now();
                     } else if eligible && let Some(key) = self.completion_key() {
                         commands.push(Command::ScheduleCompletion(key));
@@ -2320,7 +2332,7 @@ impl App {
             &candidate.insert_text,
             crate::editor::ReplacementCursor::EndOfInsertion,
         );
-        self.apply_editor_effects()
+        self.apply_editor_effects_with_policy(EditorEffectPolicy::SuppressCompletionRefresh)
     }
 
     fn sql_dialect(&self) -> SqlDialect {
