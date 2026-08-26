@@ -53,3 +53,13 @@ fn sqlite_rejects_unknown_schema_aliases() {
     target.schema = Some("attached".into());
     assert!(!target.is_valid(&profile));
 }
+
+#[test]
+fn target_profile_identity_is_part_of_execution_target_equality() {
+    let first = profile(DatabaseKind::Sqlite);
+    let mut second = profile(DatabaseKind::Sqlite);
+    second.database = first.database.clone();
+    let first_target = ExecutionTarget::from_profile(&first);
+    let second_target = ExecutionTarget::from_profile(&second);
+    assert_ne!(first_target, second_target);
+}

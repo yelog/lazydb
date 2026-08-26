@@ -43,6 +43,10 @@ pub struct App {
     confirmation_policy: ConfirmationPolicy,
     deferred: DeferredIntentQueue,
     resolving_deferred: Option<DeferredTransactionPrompt>,
+    pending_tab_activation: Option<(
+        usize,
+        Option<crate::model::execution_target::ExecutionTarget>,
+    )>,
 }
 
 impl App {
@@ -75,6 +79,7 @@ impl App {
             confirmation_policy,
             deferred: DeferredIntentQueue::default(),
             resolving_deferred: None,
+            pending_tab_activation: None,
         };
         app.assign_default_target(tab_id);
         app
@@ -144,6 +149,27 @@ impl App {
         }
     }
 
+    fn activate_tab(&mut self, index: usize) -> Vec<Command> {
+        if index >= self.tabs.len() || index == self.active_tab {
+            return Vec::new();
+        }
+        if self.has_running_query() || self.transaction_needs_exit(self.active_console().id) {
+            self.status_message("Finish the active query or transaction before switching tabs");
+            return Vec::new();
+        }
+        let Some(target) = self.tabs[index].execution_target.clone() else {
+            self.status_message("Selected SQL Editor has no execution target");
+            return Vec::new();
+        };
+        if self.connection.profile_id == Some(target.profile_id) {
+            self.active_tab = index;
+            return Vec::new();
+        }
+        let previous_target = self.active_console().execution_target.clone();
+        self.pending_tab_activation = Some((index, previous_target));
+        self.request_connection(target.profile_id)
+    }
+
     pub fn update(&mut self, action: Action) -> Vec<Command> {
         match action {
             Action::NewConsole => {
@@ -173,22 +199,17 @@ impl App {
                 }
             }
             Action::NextTab => {
-                self.active_tab = (self.active_tab + 1) % self.tabs.len();
-                Vec::new()
+                let index = (self.active_tab + 1) % self.tabs.len();
+                self.activate_tab(index)
             }
             Action::PreviousTab => {
-                self.active_tab = self
+                let index = self
                     .active_tab
                     .checked_sub(1)
                     .unwrap_or(self.tabs.len() - 1);
-                Vec::new()
+                self.activate_tab(index)
             }
-            Action::ActivateTab(index) => {
-                if index < self.tabs.len() {
-                    self.active_tab = index;
-                }
-                Vec::new()
-            }
+            Action::ActivateTab(index) => self.activate_tab(index),
             Action::FocusNext => {
                 self.focus = self.focus.next();
                 Vec::new()
@@ -744,7 +765,20 @@ impl App {
             }
             Action::PreviewSelected => self.preview_selected(),
             Action::DdlSelected => self.ddl_selected(),
-            Action::RequestConnect(profile_id) => self.request_connection(profile_id),
+            Action::RequestConnect(profile_id) => {
+                if self.pending_tab_activation.is_none()
+                    && let Some(profile) = self
+                        .profiles
+                        .iter()
+                        .find(|profile| profile.id == profile_id)
+                        .cloned()
+                {
+                    self.active_console_mut().execution_target = Some(
+                        crate::model::execution_target::ExecutionTarget::from_profile(&profile),
+                    );
+                }
+                self.request_connection(profile_id)
+            }
             Action::ClearTransactionOutcome => self.request_clear_outcome(),
             Action::ConnectionSucceeded {
                 profile_id,
@@ -776,6 +810,16 @@ impl App {
                 };
                 self.connection.server = Some(server);
                 self.connection.error = None;
+                if let Some((index, _previous_target)) = self.pending_tab_activation.take()
+                    && index < self.tabs.len()
+                    && self.tabs[index]
+                        .execution_target
+                        .as_ref()
+                        .is_some_and(|target| target.profile_id == profile_id)
+                {
+                    self.active_tab = index;
+                    self.focus = Focus::Editor;
+                }
                 self.explorer.connection_changed();
                 for tab in &mut self.tabs {
                     if tab.transaction_state == TransactionState::OutcomeUnknown
@@ -809,6 +853,19 @@ impl App {
                 message,
             } => {
                 if self.pending_connection_matches(profile_id, generation) {
+                    if let Some((_index, previous_target)) = self.pending_tab_activation.take() {
+                        self.active_console_mut().execution_target = previous_target;
+                    } else if let Some(active_profile_id) = self.connection.profile_id
+                        && let Some(profile) = self
+                            .profiles
+                            .iter()
+                            .find(|profile| profile.id == active_profile_id)
+                            .cloned()
+                    {
+                        self.active_console_mut().execution_target = Some(
+                            crate::model::execution_target::ExecutionTarget::from_profile(&profile),
+                        );
+                    }
                     self.connection_terminal_generation =
                         self.connection_terminal_generation.max(generation);
                     self.connection.pending_profile_id = None;
