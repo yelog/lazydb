@@ -1543,6 +1543,15 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
         Arc::new(NativeSecretStore),
         event_sender,
     );
+    if let Ok(paths) = AppPaths::discover()
+        && let Ok(Some(snapshot)) = crate::persistence::workspace::WorkspaceStore::new(
+            paths.workspace_file(),
+            paths.workspace_sql_dir(),
+        )
+        .load()
+    {
+        app.restore_workspace(snapshot);
+    }
     let mut terminal = TerminalSession::enter(cli.mouse != MouseMode::Off)
         .context("failed to initialize terminal")?;
     let mut terminal_events = EventStream::new();
