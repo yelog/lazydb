@@ -195,6 +195,16 @@ fn cursor_style_follows_editor_mode() {
 }
 
 #[test]
+fn footer_and_header_show_transaction_state_and_controls() {
+    let mut app = fixture();
+    app.active_console_mut().transaction_mode = lazydb::model::transaction::TransactionMode::Manual;
+    app.active_console_mut().transaction_state =
+        lazydb::model::transaction::TransactionState::Active;
+    let (output, _) = render_with_state(&app, 120, 36);
+    assert!(output.contains("TX MANUAL:ACTIVE"));
+}
+
+#[test]
 fn standard_layout_shows_stable_workspace_regions() {
     let output = render(&fixture(), 120, 36);
 

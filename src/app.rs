@@ -1960,10 +1960,19 @@ impl App {
                     }
                     continue;
                 }
-                EditorEffect::Message(_)
-                | EditorEffect::BackwardSearch
-                | EditorEffect::ToggleTransaction
-                | EditorEffect::ClearTransactionOutcome => continue,
+                EditorEffect::Message(message) => {
+                    self.status_message(&message);
+                    continue;
+                }
+                EditorEffect::BackwardSearch => continue,
+                EditorEffect::ToggleTransaction => Action::SetTransactionMode(
+                    if self.active_console().transaction_mode == TransactionMode::Manual {
+                        TransactionMode::Auto
+                    } else {
+                        TransactionMode::Manual
+                    },
+                ),
+                EditorEffect::ClearTransactionOutcome => Action::ClearTransactionOutcome,
                 EditorEffect::SetTransactionModeRequested { manual } => {
                     Action::SetTransactionMode(if manual {
                         TransactionMode::Manual

@@ -1153,6 +1153,14 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, focus: Focus, theme: Theme) {
         Focus::Editor => lines.extend([
             key_line("i / Esc", "Insert / Normal mode", theme),
             key_line("h j k l", "move cursor in Normal mode", theme),
+            key_line("w b e  0 $  gg G", "word and line motions", theme),
+            key_line("d y c r", "operators and replacement", theme),
+            key_line("v V Ctrl-v", "Visual Char / Line / Block", theme),
+            key_line("u / Ctrl-r", "undo / redo", theme),
+            key_line("Space tt", "toggle AUTO / MANUAL", theme),
+            key_line("Space tc / Space tr", "commit / rollback", theme),
+            key_line(":tx auto/manual", "set transaction mode", theme),
+            key_line(":commit / :rollback", "transaction controls", theme),
             key_line("F5 / Space r", "execute SQL buffer", theme),
         ]),
         Focus::Results => lines.extend([
