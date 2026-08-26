@@ -831,6 +831,31 @@ impl App {
                 self.request_connection(profile_id)
             }
             Action::ClearTransactionOutcome => self.request_clear_outcome(),
+            Action::OpenTargetSelector => {
+                self.overlay = Some(Overlay::TargetSelector { selected: 0 });
+                Vec::new()
+            }
+            Action::MoveTargetSelector(delta) => {
+                if let Some(Overlay::TargetSelector { selected }) = self.overlay.as_mut() {
+                    let count = self.profiles.len().max(1) as isize;
+                    *selected = (*selected as isize + delta).rem_euclid(count) as usize;
+                }
+                Vec::new()
+            }
+            Action::ConfirmTargetSelector => {
+                let Some(Overlay::TargetSelector { selected }) = self.overlay.take() else {
+                    return Vec::new();
+                };
+                let name = self
+                    .profiles
+                    .get(selected)
+                    .map(|profile| profile.name.clone());
+                name.map_or_else(Vec::new, |name| self.set_connection_target(&name))
+            }
+            Action::CancelTargetSelector => {
+                self.overlay = None;
+                Vec::new()
+            }
             Action::ConnectionSucceeded {
                 profile_id,
                 generation,
@@ -2132,6 +2157,7 @@ impl App {
                     commands.extend(self.set_schema_target(&schema));
                     continue;
                 }
+                EditorEffect::OpenTargetSelector => Action::OpenTargetSelector,
                 EditorEffect::SetTransactionModeRequested { manual } => {
                     Action::SetTransactionMode(if manual {
                         TransactionMode::Manual

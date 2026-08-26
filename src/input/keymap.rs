@@ -101,6 +101,16 @@ impl Keymap {
                 _ => None,
             };
         }
+        if matches!(app.overlay, Some(Overlay::TargetSelector { .. })) {
+            self.pending = None;
+            return match event.code {
+                KeyCode::Enter => Some(Action::ConfirmTargetSelector),
+                KeyCode::Esc => Some(Action::CancelTargetSelector),
+                KeyCode::Down | KeyCode::Char('j') => Some(Action::MoveTargetSelector(1)),
+                KeyCode::Up | KeyCode::Char('k') => Some(Action::MoveTargetSelector(-1)),
+                _ => None,
+            };
+        }
         if app.overlay.is_some() {
             self.pending = None;
             return match event.code {

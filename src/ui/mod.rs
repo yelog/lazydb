@@ -1060,6 +1060,28 @@ fn render_overlay(
                 popup,
             );
         }
+        Overlay::TargetSelector { selected } => {
+            let popup = centered(area, 60, (app.profiles.len() as u16 + 4).min(area.height));
+            frame.render_widget(Clear, popup);
+            let mut lines = vec![Line::from(Span::styled(
+                " CONNECTION TARGET ",
+                theme.title(true),
+            ))];
+            lines.extend(app.profiles.iter().enumerate().map(|(index, profile)| {
+                Line::raw(format!(
+                    "{} {}",
+                    if index == *selected { ">" } else { " " },
+                    profile.name
+                ))
+            }));
+            lines.push(Line::raw("j/k move   Enter select   Esc cancel"));
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .block(panel_block(" TARGET SELECTOR ", true, theme))
+                    .style(Style::new().fg(theme.text).bg(theme.surface_raised)),
+                popup,
+            );
+        }
     }
 }
 

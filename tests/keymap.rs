@@ -156,6 +156,27 @@ fn transaction_exit_keys_carry_their_explicit_choice() {
 }
 
 #[test]
+fn editor_leader_opens_connection_target_selector() {
+    let mut keymap = Keymap::default();
+    let mut app = App::new(Vec::new());
+    app.update(Action::EditorKey(key(KeyCode::Esc)));
+    app.update(Action::EditorKey(key(KeyCode::Char(' '))));
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('d')), &app),
+        Some(Action::EditorKey(key(KeyCode::Char('d'))))
+    );
+    app.update(Action::EditorKey(key(KeyCode::Char('d'))));
+    assert_eq!(
+        app.overlay,
+        Some(lazydb::model::workspace::Overlay::TargetSelector { selected: 0 })
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Esc), &app),
+        Some(Action::CancelTargetSelector)
+    );
+}
+
+#[test]
 fn maps_vim_editor_navigation_in_normal_mode() {
     let mut keymap = Keymap::default();
     let mut app = App::new(Vec::new());

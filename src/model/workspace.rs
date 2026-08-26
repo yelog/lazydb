@@ -66,6 +66,9 @@ pub enum Overlay {
         connection: ConnectionIdentity,
         transaction_generation: u64,
     },
+    TargetSelector {
+        selected: usize,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

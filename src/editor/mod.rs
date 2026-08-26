@@ -56,6 +56,7 @@ pub(crate) enum EditorEffect {
     SetConnectionTarget(String),
     SetDatabaseTarget(String),
     SetSchemaTarget(String),
+    OpenTargetSelector,
     Quit,
     Message(String),
     BackwardSearch,
@@ -1073,6 +1074,9 @@ impl EditorWorkspace {
                 (PendingBinding::Leader, '?') => self.effects.push(EditorEffect::ShowHelp),
                 (PendingBinding::Leader, 't') => {
                     session.pending_binding = Some(PendingBinding::LeaderTransaction)
+                }
+                (PendingBinding::Leader, 'd') => {
+                    self.effects.push(EditorEffect::OpenTargetSelector)
                 }
                 (PendingBinding::LeaderTransaction, 't') => {
                     self.effects.push(EditorEffect::ToggleTransaction)
