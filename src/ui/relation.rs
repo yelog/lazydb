@@ -3,10 +3,11 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Paragraph, Wrap},
+    widgets::{Cell, Paragraph, Row, Table, Wrap},
 };
+use unicode_width::UnicodeWidthStr;
 
-use super::{panel_block, render_result_table, theme::Theme};
+use super::{panel_block, theme::Theme};
 use crate::{
     app::App,
     db::catalog::{CatalogMetadata, ConstraintMetadata, IndexMetadata, OptionalMetadata},
@@ -106,35 +107,46 @@ fn render_data(
             .last()
             .cloned()
             .unwrap_or_default();
+        let query_height = if tab.query.error.is_some() { 3 } else { 2 };
         let body = if status.is_some() {
             Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Length(2), Constraint::Min(1)])
+                .constraints([
+                    Constraint::Length(query_height),
+                    Constraint::Length(2),
+                    Constraint::Min(1),
+                ])
                 .split(area)
         } else {
             Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Length(0), Constraint::Min(1)])
+                .constraints([
+                    Constraint::Length(query_height),
+                    Constraint::Length(0),
+                    Constraint::Min(1),
+                ])
                 .split(area)
         };
+        render_query_inputs(frame, body[0], tab, theme, state);
         if let Some((message, retry, cancel)) = status {
-            render_status(frame, body[0], message, retry, cancel, theme, state);
+            render_status(frame, body[1], message, retry, cancel, theme, state);
         }
         let block = panel_block(" RELATION DATA ", app.focus == Focus::Results, theme);
-        render_result_table(
+        render_relation_result_table(
             frame,
-            body[1],
+            body[2],
             &result,
             tab.grid.clone(),
+            &tab.column_widths,
             theme,
             block,
             state,
         );
         let sql = sanitize_terminal_text(&snapshot.value.sql);
         let footer = Rect::new(
-            body[1].x,
-            body[1].bottom().saturating_sub(1),
-            body[1].width,
+            body[2].x,
+            body[2].bottom().saturating_sub(1),
+            body[2].width,
             1,
         );
         let provenance = tab
@@ -154,7 +166,234 @@ fn render_data(
             footer,
         );
     } else if let Some((message, retry, cancel)) = status {
-        render_status(frame, area, message, retry, cancel, theme, state);
+        let body = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(2), Constraint::Min(1)])
+            .split(area);
+        render_query_inputs(frame, body[0], tab, theme, state);
+        render_status(frame, body[1], message, retry, cancel, theme, state);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_relation_result_table(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    result: &crate::db::query::ResultSet,
+    grid: crate::model::tab::GridState,
+    overrides: &[Option<u16>],
+    theme: Theme,
+    block: ratatui::widgets::Block<'_>,
+    state: &mut super::UiState,
+) {
+    if result.columns.is_empty() {
+        super::render_result_table(frame, area, result, grid, theme, block, state);
+        return;
+    }
+    let auto = crate::model::relation::automatic_relation_column_widths(result);
+    let widths = auto
+        .iter()
+        .enumerate()
+        .map(|(index, width)| {
+            overrides
+                .get(index)
+                .and_then(|value| *value)
+                .unwrap_or(*width)
+        })
+        .collect::<Vec<_>>();
+    let available = area.width.saturating_sub(4).max(1);
+    let first = visible_column_start(&widths, grid.selected_column, available);
+    let visible = widths
+        .iter()
+        .enumerate()
+        .skip(first)
+        .scan(0u16, |used, (index, width)| {
+            let next = used.saturating_add(*width).saturating_add(1);
+            if *used == 0 || next <= available {
+                *used = next;
+                Some(index)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    let constraints = visible
+        .iter()
+        .map(|index| Constraint::Length(widths[*index]))
+        .collect::<Vec<_>>();
+    let row_y = area.y.saturating_add(3);
+    for (row_index, _row) in result
+        .rows
+        .iter()
+        .take(area.height.saturating_sub(4) as usize)
+        .enumerate()
+    {
+        let mut x = area.x.saturating_add(2);
+        for column_index in &visible {
+            let width = widths[*column_index];
+            if x >= area.right() {
+                break;
+            }
+            state.hit_regions.push(HitRegion {
+                area: Rect::new(
+                    x,
+                    row_y + row_index as u16,
+                    width.min(area.right().saturating_sub(x)),
+                    1,
+                ),
+                target: HitTarget::ResultCell {
+                    row: row_index,
+                    column: *column_index,
+                },
+            });
+            x = x.saturating_add(width).saturating_add(1);
+        }
+        let mut boundary_x = area.x.saturating_add(2);
+        for column_index in &visible {
+            boundary_x = boundary_x.saturating_add(widths[*column_index]);
+            if boundary_x < area.right().saturating_sub(1) {
+                state.hit_regions.push(HitRegion {
+                    area: Rect::new(boundary_x, row_y, 1, 1),
+                    target: HitTarget::RelationColumnResize {
+                        column: *column_index,
+                        width: widths[*column_index],
+                    },
+                });
+            }
+            boundary_x = boundary_x.saturating_add(1);
+        }
+    }
+    let header = Row::new(visible.iter().map(|index| {
+        let column = &result.columns[*index];
+        Cell::from(sanitize_terminal_text(&column.name))
+            .style(Style::new().fg(theme.accent).add_modifier(Modifier::BOLD))
+    }))
+    .height(1)
+    .bottom_margin(1);
+    let rows = result.rows.iter().map(|row| {
+        Row::new(visible.iter().map(|index| {
+            let value = row
+                .get(*index)
+                .unwrap_or(&crate::db::value::CellValue::Null);
+            let width = widths[*index];
+            let preview = value.preview(width.saturating_sub(2) as usize);
+            let style = match value {
+                crate::db::value::CellValue::Null => {
+                    Style::new().fg(theme.muted).add_modifier(Modifier::ITALIC)
+                }
+                crate::db::value::CellValue::Unsupported { .. } => Style::new().fg(theme.warning),
+                _ => Style::new().fg(theme.text),
+            };
+            Cell::from(sanitize_terminal_text(&preview.text)).style(style)
+        }))
+    });
+    let table = Table::new(rows, constraints)
+        .header(header)
+        .block(block)
+        .column_spacing(1)
+        .row_highlight_style(Style::new().bg(theme.selection).fg(theme.text))
+        .cell_highlight_style(
+            Style::new()
+                .bg(theme.accent)
+                .fg(theme.background)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("▌");
+    let selected_column = visible
+        .iter()
+        .position(|index| *index == grid.selected_column)
+        .unwrap_or(0);
+    let mut table_state = ratatui::widgets::TableState::new()
+        .with_selected_cell(Some((grid.selected_row, selected_column)));
+    frame.render_stateful_widget(table, area, &mut table_state);
+}
+
+fn visible_column_start(widths: &[u16], selected: usize, available: u16) -> usize {
+    if widths.is_empty() {
+        return 0;
+    }
+    let mut start = selected.min(widths.len() - 1);
+    loop {
+        let total = widths[start..].iter().fold(0u16, |sum, width| {
+            sum.saturating_add(*width).saturating_add(1)
+        });
+        if total <= available || start + 1 >= widths.len() {
+            return start;
+        }
+        start += 1;
+    }
+}
+
+fn render_query_inputs(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    tab: &crate::model::relation::RelationTab,
+    theme: Theme,
+    state: &mut super::UiState,
+) {
+    if area.height == 0 {
+        return;
+    }
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+    let fields = [
+        (
+            crate::model::relation::RelationQueryInput::Where,
+            "WHERE",
+            tab.query.where_input.value(),
+        ),
+        (
+            crate::model::relation::RelationQueryInput::OrderBy,
+            "ORDER BY",
+            tab.query.order_by_input.value(),
+        ),
+    ];
+    let input_area = Rect::new(area.x, area.y, area.width, 1);
+    for ((input, label, value), chunk) in fields.into_iter().zip(chunks.iter().copied()) {
+        let active = tab.query.focus == Some(input);
+        let text = format!("{label}  {value}");
+        frame.render_widget(
+            Paragraph::new(text).style(if active { theme.accent } else { theme.muted }),
+            chunk,
+        );
+        state.hit_regions.push(HitRegion {
+            area: chunk,
+            target: HitTarget::RelationQueryInput(input),
+        });
+        if active {
+            let cursor_index = match input {
+                crate::model::relation::RelationQueryInput::Where => tab.query.where_input.cursor(),
+                crate::model::relation::RelationQueryInput::OrderBy => {
+                    tab.query.order_by_input.cursor()
+                }
+            };
+            let cursor = UnicodeWidthStr::width(
+                &value[..value
+                    .char_indices()
+                    .nth(cursor_index)
+                    .map_or(value.len(), |(index, _)| index)],
+            );
+            frame.set_cursor_position(ratatui::layout::Position::new(
+                chunk
+                    .x
+                    .saturating_add(UnicodeWidthStr::width(label) as u16)
+                    .saturating_add(2)
+                    .saturating_add(cursor as u16)
+                    .min(chunk.right().saturating_sub(1)),
+                input_area.y,
+            ));
+        }
+    }
+    if let Some(error) = &tab.query.error
+        && area.height > 2
+    {
+        let error_area = Rect::new(area.x, area.y.saturating_add(2), area.width, 1);
+        frame.render_widget(
+            Paragraph::new(clean(error)).style(Style::new().fg(theme.warning)),
+            error_area,
+        );
     }
 }
 

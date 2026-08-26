@@ -39,6 +39,7 @@ fn request() -> RelationRequest {
         },
         kind: RelationRequestKind::Preview,
         scope: CatalogScope::for_profile(DatabaseKind::Sqlite, "db", None),
+        options: Default::default(),
     }
 }
 

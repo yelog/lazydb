@@ -20,7 +20,7 @@ use lazydb::{
         relation::RelationTab,
         tab::CompletionPopup,
         tab::WorkspaceTab,
-        workspace::{ConnectionStatus, Focus},
+        workspace::{ConnectionStatus, Focus, Overlay},
     },
     persistence::secrets::keyring_ref,
     profile::{DatabaseKind, Environment, import_connection_url},
@@ -299,6 +299,7 @@ fn relation_loading_with_previous_snapshot_keeps_data_visible_and_exposes_cancel
             relation: relation.descriptor.key.clone(),
             kind: lazydb::model::relation::RelationRequestKind::Preview,
             scope: lazydb::profile::CatalogScope::for_profile(DatabaseKind::Sqlite, "db", None),
+            options: lazydb::model::relation::RelationPreviewOptions::default(),
         },
         previous: Some(lazydb::model::relation::OwnedSnapshot::new(
             lazydb::db::RelationPreview {
@@ -339,6 +340,21 @@ fn relation_page_renders_data_structure_selectors_and_relation_layout() {
         assert!(state.hit_regions.iter().any(|region| region.target
             == HitTarget::RelationView(lazydb::model::relation::RelationView::Structure)));
     }
+}
+
+#[test]
+fn relation_page_renders_contextual_help_overlay() {
+    let mut app = App::new(Vec::new());
+    app.tabs
+        .push(WorkspaceTab::Relation(RelationTab::new("users")));
+    app.active_tab = 1;
+    app.focus = Focus::Results;
+    app.overlay = Some(Overlay::Help(Focus::Results));
+
+    let (output, state) = render_with_state(&app, 120, 36);
+
+    assert!(output.contains("KEYMAP // RESULTS"), "{output}");
+    assert!(!state.hit_regions.is_empty());
 }
 
 #[test]

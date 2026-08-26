@@ -59,6 +59,8 @@ pub enum HitTarget {
     RelationView(crate::model::relation::RelationView),
     RelationRetry,
     RelationCancel,
+    RelationQueryInput(crate::model::relation::RelationQueryInput),
+    RelationColumnResize { column: usize, width: u16 },
     HeaderProfile,
     ProfileField(ProfileField),
     ProfileDriver(crate::profile::DatabaseKind),
@@ -89,6 +91,7 @@ pub struct UiState {
     pub cursor_style: Option<CursorStyle>,
     last_focus: Option<Focus>,
     pub click_tracker: RefCell<Option<(crate::model::explorer::ExplorerNodeId, Instant)>>,
+    pub relation_resize: RefCell<Option<(usize, u16, u16)>>,
 }
 
 impl Default for UiState {
@@ -107,6 +110,7 @@ impl UiState {
             cursor_style: None,
             last_focus: None,
             click_tracker: RefCell::new(None),
+            relation_resize: RefCell::new(None),
         }
     }
 
@@ -191,42 +195,42 @@ pub fn render_with_state(frame: &mut Frame<'_>, app: &App, state: &mut UiState) 
             area: layout.footer,
             target: HitTarget::Help,
         });
-        return;
-    }
-    if let Some(area) = layout.explorer {
+    } else {
+        if let Some(area) = layout.explorer {
+            state.hit_regions.push(HitRegion {
+                area,
+                target: HitTarget::Focus(Focus::Explorer),
+            });
+            render_explorer(frame, area, app, theme, state);
+        }
+        if let Some(area) = layout.editor {
+            let completion_anchor = render_editor(frame, area, app, theme, state);
+            render_completion_popup(frame, app, theme, state, completion_anchor);
+            state.hit_regions.push(HitRegion {
+                area,
+                target: HitTarget::Focus(Focus::Editor),
+            });
+        }
+        if let Some(area) = layout.result_tabs {
+            render_result_tabs(frame, area, app, theme);
+            state.hit_regions.push(HitRegion {
+                area,
+                target: HitTarget::ToggleResultView,
+            });
+        }
+        if let Some(area) = layout.results {
+            state.hit_regions.push(HitRegion {
+                area,
+                target: HitTarget::Focus(Focus::Results),
+            });
+            render_results(frame, area, app, theme, state);
+        }
+        render_footer(frame, layout.footer, app, theme);
         state.hit_regions.push(HitRegion {
-            area,
-            target: HitTarget::Focus(Focus::Explorer),
-        });
-        render_explorer(frame, area, app, theme, state);
-    }
-    if let Some(area) = layout.editor {
-        let completion_anchor = render_editor(frame, area, app, theme, state);
-        render_completion_popup(frame, app, theme, state, completion_anchor);
-        state.hit_regions.push(HitRegion {
-            area,
-            target: HitTarget::Focus(Focus::Editor),
+            area: layout.footer,
+            target: HitTarget::Help,
         });
     }
-    if let Some(area) = layout.result_tabs {
-        render_result_tabs(frame, area, app, theme);
-        state.hit_regions.push(HitRegion {
-            area,
-            target: HitTarget::ToggleResultView,
-        });
-    }
-    if let Some(area) = layout.results {
-        state.hit_regions.push(HitRegion {
-            area,
-            target: HitTarget::Focus(Focus::Results),
-        });
-        render_results(frame, area, app, theme, state);
-    }
-    render_footer(frame, layout.footer, app, theme);
-    state.hit_regions.push(HitRegion {
-        area: layout.footer,
-        target: HitTarget::Help,
-    });
 
     if let Some(overlay) = &app.overlay {
         render_overlay(frame, area, overlay, app, state, theme);
@@ -1049,7 +1053,7 @@ fn render_overlay(
     theme: Theme,
 ) {
     match overlay {
-        Overlay::Help(focus) => render_help(frame, area, *focus, theme),
+        Overlay::Help(focus) => render_help(frame, area, *focus, app, theme),
         Overlay::ProfileManager => profiles::render_profile_manager(frame, area, app, state, theme),
         Overlay::Message { title, body } => render_message(frame, area, title, body, theme),
         Overlay::SubstituteConfirm { remaining } => {
@@ -1309,7 +1313,7 @@ fn render_substitute_confirm(frame: &mut Frame<'_>, area: Rect, remaining: usize
     );
 }
 
-fn render_help(frame: &mut Frame<'_>, area: Rect, focus: Focus, theme: Theme) {
+fn render_help(frame: &mut Frame<'_>, area: Rect, focus: Focus, app: &App, theme: Theme) {
     let popup = centered(area, 74, 22);
     frame.render_widget(Clear, popup);
     let title = format!(" KEYMAP // {} ", focus_name(focus));
@@ -1321,6 +1325,11 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, focus: Focus, theme: Theme) {
         key_line("Space n", "new SQL console", theme),
         Line::raw(""),
     ];
+    let relation_data = matches!(
+        app.tabs.get(app.active_tab),
+        Some(WorkspaceTab::Relation(tab))
+            if tab.view == crate::model::relation::RelationView::Data
+    );
     match focus {
         Focus::Explorer => lines.extend([
             key_line("j / k", "move selection", theme),
@@ -1342,10 +1351,21 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, focus: Focus, theme: Theme) {
             key_line("Editor title", "shows target and transaction state", theme),
             key_line("F5 / Space r", "execute SQL buffer", theme),
         ]),
-        Focus::Results => lines.extend([
-            key_line("h j k l", "move through cells", theme),
-            key_line("Tab", "switch Data / Output", theme),
-        ]),
+        Focus::Results => {
+            lines.extend([
+                key_line("h j k l", "move through cells", theme),
+                key_line("Tab", "switch Data / Output", theme),
+            ]);
+            if relation_data {
+                lines.extend([
+                    key_line("/", "focus WHERE filter", theme),
+                    key_line("s", "focus ORDER BY", theme),
+                    key_line("Enter / Esc", "apply / cancel preview inputs", theme),
+                    key_line("[ ] / =", "resize / reset selected column", theme),
+                    key_line("r", "refresh relation preview", theme),
+                ]);
+            }
+        }
     }
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled(

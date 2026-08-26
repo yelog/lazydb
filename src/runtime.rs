@@ -714,7 +714,7 @@ impl Runtime {
             };
             let result = match task_request.kind {
                 crate::model::relation::RelationRequestKind::Preview => database
-                    .preview_relation(&task_request.relation.object_id)
+                    .preview_relation(&task_request.relation.object_id, &task_request.options)
                     .await
                     .map(crate::model::relation::RelationSnapshot::Preview),
                 crate::model::relation::RelationRequestKind::Structure => database

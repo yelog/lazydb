@@ -1,10 +1,9 @@
 use sqlparser::{
     ast::{Query, Select, SetExpr, Statement, TableFactor},
-    dialect::{Dialect, GenericDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect},
     parser::Parser,
 };
 
-use super::SqlDialect;
+use super::{SqlDialect, dialect::parser_dialect};
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum SqlRisk {
@@ -30,7 +29,7 @@ pub struct SqlRiskAnalysis {
 }
 
 pub fn classify_sql(sql: &str, dialect: SqlDialect) -> SqlRiskAnalysis {
-    let parsed = Parser::parse_sql(dialect_ref(dialect), sql);
+    let parsed = Parser::parse_sql(parser_dialect(dialect), sql);
     let risks = match parsed {
         Ok(statements) => statements.iter().map(classify_statement).collect(),
         Err(_) => vec![SqlRisk::Unknown],
@@ -45,15 +44,6 @@ pub fn classify_sql(sql: &str, dialect: SqlDialect) -> SqlRiskAnalysis {
         statement_count,
         risks,
         aggregate,
-    }
-}
-
-fn dialect_ref(dialect: SqlDialect) -> &'static dyn Dialect {
-    match dialect {
-        SqlDialect::Postgres => &PostgreSqlDialect {},
-        SqlDialect::MySql => &MySqlDialect {},
-        SqlDialect::Sqlite => &SQLiteDialect {},
-        SqlDialect::Generic => &GenericDialect {},
     }
 }
 

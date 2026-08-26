@@ -1,3 +1,4 @@
+use unicode_width::UnicodeWidthStr;
 use uuid::Uuid;
 
 use super::tab::GridState;
@@ -21,6 +22,47 @@ pub enum RelationView {
     Structure,
 }
 
+#[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
+pub struct RelationPreviewOptions {
+    pub where_clause: Option<String>,
+    pub order_by_clause: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RelationQueryInput {
+    Where,
+    OrderBy,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RelationQueryState {
+    pub where_input: crate::model::text_input::TextInput,
+    pub order_by_input: crate::model::text_input::TextInput,
+    pub submitted: RelationPreviewOptions,
+    pub focus: Option<RelationQueryInput>,
+    pub error: Option<String>,
+}
+
+pub fn automatic_relation_column_widths(result: &crate::db::query::ResultSet) -> Vec<u16> {
+    result
+        .columns
+        .iter()
+        .enumerate()
+        .map(|(column_index, column)| {
+            let header = crate::security::sanitize_terminal_text(&column.name);
+            let content = result
+                .rows
+                .iter()
+                .filter_map(|row| row.get(column_index))
+                .map(|value| value.preview(40).text)
+                .map(|text| UnicodeWidthStr::width(text.as_str()))
+                .max()
+                .unwrap_or(0);
+            (UnicodeWidthStr::width(header.as_str()).max(content) + 2).clamp(6, 40) as u16
+        })
+        .collect()
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum RelationRequestKind {
     Preview,
@@ -36,6 +78,7 @@ pub struct RelationRequest {
     pub relation: RelationKey,
     pub kind: RelationRequestKind,
     pub scope: CatalogScope,
+    pub options: RelationPreviewOptions,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -116,6 +159,8 @@ pub struct RelationTab {
     pub data: RelationPreviewLoad,
     pub structure: RelationStructureLoad,
     pub grid: GridState,
+    pub query: RelationQueryState,
+    pub column_widths: Vec<Option<u16>>,
 }
 
 impl RelationTab {
@@ -205,6 +250,8 @@ impl RelationTab {
             data: RelationLoad::Empty,
             structure: RelationLoad::Empty,
             grid: GridState::default(),
+            query: RelationQueryState::default(),
+            column_widths: Vec::new(),
         }
     }
 
