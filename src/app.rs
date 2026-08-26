@@ -139,6 +139,39 @@ impl App {
             .find(|profile| profile.id == profile_id)
     }
 
+    pub(crate) fn restore_workspace(
+        &mut self,
+        snapshot: crate::persistence::workspace::WorkspaceSnapshot,
+    ) {
+        if snapshot.consoles.is_empty() {
+            return;
+        }
+        if snapshot.consoles.iter().all(|console| console.id.is_nil()) {
+            return;
+        }
+        self.tabs.clear();
+        self.editor = EditorWorkspace::new();
+        for persisted in snapshot.consoles {
+            let mut tab = ConsoleTab::new(persisted.name);
+            tab.id = persisted.id;
+            tab.execution_target = persisted.target;
+            tab.transaction_mode = persisted.transaction_mode;
+            tab.transaction_state = TransactionState::Idle;
+            self.editor.open_console(tab.id, "");
+            if let Some((_, text)) = snapshot.sql.iter().find(|(id, _)| *id == tab.id) {
+                let _ = self.editor.set_text(tab.id, text);
+                let _ = self.editor.set_mode(tab.id, EditorMode::Normal);
+            }
+            self.tabs.push(tab);
+        }
+        self.active_tab = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == snapshot.active_console)
+            .unwrap_or(0);
+        self.focus = Focus::Editor;
+    }
+
     fn assign_default_target(&mut self, tab_id: Uuid) {
         let target = self
             .profiles
@@ -1731,6 +1764,16 @@ impl App {
         {
             return Vec::new();
         }
+        if let Some(profile) = self
+            .profiles
+            .iter()
+            .find(|profile| profile.id == profile_id)
+            .cloned()
+            && self.pending_tab_activation.is_none()
+        {
+            self.active_console_mut().execution_target =
+                Some(crate::model::execution_target::ExecutionTarget::from_profile(&profile));
+        }
         let commands = self.request_connection(profile_id);
         if !commands.is_empty()
             && let Some(manager) = self.profile_manager.as_mut()
@@ -1865,6 +1908,16 @@ impl App {
                 return Vec::new();
             }
             return self.retire_profile_connections(profile_id, None);
+        }
+        if self.pending_tab_activation.is_none() {
+            self.active_console_mut().execution_target = Some(
+                crate::model::execution_target::ExecutionTarget::from_profile(
+                    self.profiles
+                        .iter()
+                        .find(|item| item.id == profile_id)
+                        .unwrap(),
+                ),
+            );
         }
         if self.has_running_query() {
             if let Some(manager) = self.profile_manager.as_mut() {
@@ -2347,6 +2400,14 @@ impl App {
             return Vec::new();
         };
         let tab_id = self.active_console().id;
+        if self.active_console().execution_target.is_none() && self.profiles.is_empty() {
+            self.active_console_mut().execution_target =
+                Some(crate::model::execution_target::ExecutionTarget {
+                    profile_id: connection.profile_id,
+                    database: "test".to_owned(),
+                    schema: None,
+                });
+        }
         let sql = self.editor_text(tab_id).unwrap_or_default();
         let dialect = self.sql_dialect();
         let scope = if full_buffer {
@@ -2533,17 +2594,19 @@ impl App {
         if self.connection.active_identity() != Some(draft.connection) {
             return Err("Execution draft is stale: connection changed".to_owned());
         }
-        let Some(profile) = self
+        let profile = self
             .profiles
             .iter()
-            .find(|profile| profile.id == draft.target.profile_id)
-        else {
+            .find(|profile| profile.id == draft.target.profile_id);
+        if !self.profiles.is_empty() && profile.is_none() {
             return Err("Execution target profile no longer exists".to_owned());
-        };
+        }
         if draft.target.profile_id != draft.connection.profile_id {
             return Err("Execution target profile does not match active connection".to_owned());
         }
-        if !draft.target.is_valid(profile) {
+        if let Some(profile) = profile
+            && !draft.target.is_valid(profile)
+        {
             return Err("Execution target database or schema is invalid".to_owned());
         }
         if tab.execution_target.as_ref() != Some(&draft.target) {
