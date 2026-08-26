@@ -138,6 +138,10 @@ impl PostgresAdapter {
         if profile.read_only {
             options = options.options([("default_transaction_read_only", "on")]);
         }
+        if let Some(schema) = &profile.default_schema {
+            let search_path = format!("{}, public", quote_identifier(schema));
+            options = options.options([("search_path", search_path.as_str())]);
+        }
 
         let pool = PgPoolOptions::new()
             .max_connections(6)

@@ -95,6 +95,9 @@ pub struct Runtime {
     completion_tasks: HashMap<Uuid, JoinHandle<()>>,
     manual_transactions: HashMap<Uuid, ManualTransactionEntry>,
     workspace_lock: Option<crate::persistence::workspace::WorkspaceLock>,
+    workspace_store: Option<crate::persistence::workspace::WorkspaceStore>,
+    workspace_snapshot: Option<crate::persistence::workspace::WorkspaceSnapshot>,
+    workspace_task: Option<JoinHandle<()>>,
 }
 
 impl Runtime {
@@ -146,6 +149,9 @@ impl Runtime {
             completion_tasks: HashMap::new(),
             manual_transactions: HashMap::new(),
             workspace_lock: None,
+            workspace_store: None,
+            workspace_snapshot: None,
+            workspace_task: None,
         }
     }
 
@@ -271,7 +277,13 @@ impl Runtime {
                     if self.workspace_lock.is_none() {
                         return;
                     }
-                    self.background_tasks.push(tokio::spawn(async move {
+                    self.workspace_store = Some(store.clone());
+                    self.workspace_snapshot = Some(snapshot.clone());
+                    if let Some(task) = self.workspace_task.take() {
+                        task.abort();
+                    }
+                    self.workspace_task = Some(tokio::spawn(async move {
+                        sleep(Duration::from_millis(350)).await;
                         let _ = tokio::task::spawn_blocking(move || store.save(&snapshot)).await;
                     }));
                 }
@@ -1122,6 +1134,15 @@ impl Runtime {
     }
 
     pub async fn shutdown(mut self) {
+        if let Some(task) = self.workspace_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        if let (Some(store), Some(snapshot)) = (&self.workspace_store, &self.workspace_snapshot) {
+            let store = store.clone();
+            let snapshot = snapshot.clone();
+            let _ = tokio::task::spawn_blocking(move || store.save(&snapshot)).await;
+        }
         for (_, task) in self.query_tasks.drain() {
             task.abort();
             let _ = task.await;
