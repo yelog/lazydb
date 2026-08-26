@@ -233,10 +233,12 @@ impl Runtime {
             }
             Command::CancelManual {
                 tab_id,
+                connection,
                 transaction_generation,
                 ..
             } => {
                 if let Some(entry) = self.manual_transactions.get_mut(&tab_id)
+                    && entry.connection == connection
                     && entry.transaction_generation == transaction_generation
                     && let Some(cancel) = entry.cancellation_sender.take()
                 {
@@ -270,6 +272,17 @@ impl Runtime {
         if matches {
             self.manual_transactions.remove(&tab_id);
         }
+    }
+
+    fn manual_entry_matches(
+        &self,
+        tab_id: Uuid,
+        connection: ConnectionIdentity,
+        transaction_generation: u64,
+    ) -> bool {
+        self.manual_transactions.get(&tab_id).is_some_and(|entry| {
+            entry.connection == connection && entry.transaction_generation == transaction_generation
+        })
     }
 
     fn test_profile(&mut self, request_id: u64, submission: ProfileSubmission) {
@@ -702,9 +715,21 @@ impl Runtime {
         query_generation: u64,
         transaction_generation: u64,
     ) {
-        let Some(entry) = self.manual_transactions.get(&tab_id) else {
+        if !self.manual_entry_matches(tab_id, connection, transaction_generation) {
+            let _ = self.event_sender.send(Action::ManualCommitFailed {
+                tab_id,
+                query_generation,
+                transaction_generation,
+                connection,
+                message: "Stale or missing manual transaction identity".to_owned(),
+                unknown: false,
+            });
             return;
-        };
+        }
+        let entry = self
+            .manual_transactions
+            .get(&tab_id)
+            .expect("entry was validated");
         let (reply, result) = tokio::sync::oneshot::channel();
         if entry
             .request_sender
@@ -763,9 +788,21 @@ impl Runtime {
         query_generation: u64,
         transaction_generation: u64,
     ) {
-        let Some(entry) = self.manual_transactions.get(&tab_id) else {
+        if !self.manual_entry_matches(tab_id, connection, transaction_generation) {
+            let _ = self.event_sender.send(Action::ManualRollbackFailed {
+                tab_id,
+                query_generation,
+                transaction_generation,
+                connection,
+                message: "Stale or missing manual transaction identity".to_owned(),
+                unknown: false,
+            });
             return;
-        };
+        }
+        let entry = self
+            .manual_transactions
+            .get(&tab_id)
+            .expect("entry was validated");
         let (reply, result) = tokio::sync::oneshot::channel();
         if entry
             .request_sender
@@ -832,16 +869,24 @@ impl Runtime {
         )>,
     ) {
         if let Some(entry) = self.manual_transactions.get(&tab_id) {
-            if entry.connection == connection
-                && entry.transaction_generation == transaction_generation
-                && let Some((sql, cancel, reply)) = request
-            {
-                let _ = entry.request_sender.send(TransactionRequest::Execute {
-                    query_generation,
-                    sql,
-                    cancel,
-                    reply,
-                });
+            match request {
+                Some((sql, cancel, reply))
+                    if entry.connection == connection
+                        && entry.transaction_generation == transaction_generation =>
+                {
+                    let _ = entry.request_sender.send(TransactionRequest::Execute {
+                        query_generation,
+                        sql,
+                        cancel,
+                        reply,
+                    });
+                }
+                Some((_, _, reply)) => {
+                    let _ = reply.send(Err(crate::db::transaction::TransactionError(
+                        "Stale or mismatched manual transaction identity".to_owned(),
+                    )));
+                }
+                None => {}
             }
             return;
         }
