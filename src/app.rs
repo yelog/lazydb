@@ -23,8 +23,9 @@ use crate::{
             ProfileOperation,
         },
         relation::{
-            RelationDescriptor, RelationKey, RelationLoad, RelationRequest, RelationRequestKind,
-            RelationSnapshot, RelationTab, RelationView,
+            RelationDescriptor, RelationKey, RelationLoad, RelationQueryInput, RelationRequest,
+            RelationRequestKind, RelationSnapshot, RelationTab, RelationView,
+            automatic_relation_column_widths,
         },
         tab::{
             CompletionPopup, ConsoleTab, ExecutionResult, LastExecution, OutputEntry, OutputKind,
@@ -1080,6 +1081,82 @@ impl App {
                     .into_iter()
                     .collect()
             }
+            Action::FocusRelationQueryInput(input) => {
+                if let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab)
+                    && tab.view == RelationView::Data
+                {
+                    tab.query.focus = Some(input);
+                    tab.query.error = None;
+                }
+                Vec::new()
+            }
+            Action::RelationQueryInsert(character) => {
+                self.with_active_relation_query(|input| input.insert(character));
+                Vec::new()
+            }
+            Action::RelationQueryBackspace => {
+                self.with_active_relation_query(|input| input.backspace());
+                Vec::new()
+            }
+            Action::RelationQueryDelete => {
+                self.with_active_relation_query(|input| input.delete());
+                Vec::new()
+            }
+            Action::RelationQueryMoveLeft => {
+                self.with_active_relation_query(|input| input.move_left());
+                Vec::new()
+            }
+            Action::RelationQueryMoveRight => {
+                self.with_active_relation_query(|input| input.move_right());
+                Vec::new()
+            }
+            Action::RelationQueryMoveHome => {
+                self.with_active_relation_query(|input| input.move_home());
+                Vec::new()
+            }
+            Action::RelationQueryMoveEnd => {
+                self.with_active_relation_query(|input| input.move_end());
+                Vec::new()
+            }
+            Action::RelationQueryClear => {
+                self.with_active_relation_query(|input| input.set(""));
+                Vec::new()
+            }
+            Action::CancelRelationQueryInput => {
+                if let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab) {
+                    tab.query.focus = None;
+                    tab.query.error = None;
+                    tab.query
+                        .where_input
+                        .set(tab.query.submitted.where_clause.clone().unwrap_or_default());
+                    tab.query.order_by_input.set(
+                        tab.query
+                            .submitted
+                            .order_by_clause
+                            .clone()
+                            .unwrap_or_default(),
+                    );
+                }
+                Vec::new()
+            }
+            Action::SubmitRelationQuery => self.submit_relation_query(),
+            Action::ResizeRelationColumn(delta) => {
+                self.resize_relation_column(delta);
+                Vec::new()
+            }
+            Action::ResetRelationColumnWidth => {
+                self.reset_relation_column_width();
+                Vec::new()
+            }
+            Action::StartRelationColumnResize { column, width } => {
+                self.set_relation_column_width(column, width);
+                Vec::new()
+            }
+            Action::SetRelationColumnWidth { column, width } => {
+                self.set_relation_column_width(column, width);
+                Vec::new()
+            }
+            Action::EndRelationColumnResize => Vec::new(),
             Action::PreviewSelected => self.open_selected_relation(RelationView::Data),
             Action::DdlSelected => self.ddl_selected(),
             Action::RelationSucceeded { request, snapshot } => {
@@ -3701,6 +3778,109 @@ impl App {
         self.open_selected_relation(RelationView::Structure)
     }
 
+    fn with_active_relation_query<F>(&mut self, edit: F)
+    where
+        F: FnOnce(&mut crate::model::text_input::TextInput),
+    {
+        if let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab)
+            && tab.view == RelationView::Data
+            && let Some(input) = tab.query.focus
+        {
+            match input {
+                RelationQueryInput::Where => edit(&mut tab.query.where_input),
+                RelationQueryInput::OrderBy => edit(&mut tab.query.order_by_input),
+            }
+            tab.query.error = None;
+        }
+    }
+
+    fn submit_relation_query(&mut self) -> Vec<Command> {
+        let dialect = self.sql_dialect();
+        let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab) else {
+            return Vec::new();
+        };
+        if tab.view != RelationView::Data {
+            return Vec::new();
+        }
+        let where_clause = tab.query.where_input.value().to_owned();
+        let order_by_clause = tab.query.order_by_input.value().to_owned();
+        match sql::validate_relation_preview_options(&where_clause, &order_by_clause, dialect) {
+            Ok(options) => {
+                tab.query.submitted = options;
+                tab.query.error = None;
+                tab.query.focus = None;
+                self.load_active_relation(true)
+            }
+            Err(error) => {
+                tab.query.error = Some(error.to_string());
+                Vec::new()
+            }
+        }
+    }
+
+    fn relation_result(&self) -> Option<crate::db::query::ResultSet> {
+        let Some(WorkspaceTab::Relation(tab)) = self.tabs.get(self.active_tab) else {
+            return None;
+        };
+        let load = match tab.view {
+            RelationView::Data => &tab.data,
+            RelationView::Structure => return None,
+        };
+        match load {
+            RelationLoad::Ready(snapshot) => snapshot.value.result.result_sets.last().cloned(),
+            RelationLoad::Loading { previous, .. }
+            | RelationLoad::Failed { previous, .. }
+            | RelationLoad::Cancelled { previous } => previous
+                .as_ref()
+                .and_then(|snapshot| snapshot.value.result.result_sets.last().cloned()),
+            RelationLoad::Empty => None,
+        }
+    }
+
+    fn resize_relation_column(&mut self, delta: i16) {
+        let widths = self
+            .relation_result()
+            .map(|result| automatic_relation_column_widths(&result));
+        let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab) else {
+            return;
+        };
+        if tab.view != RelationView::Data {
+            return;
+        }
+        let Some(base) = widths else { return };
+        let column = tab.grid.selected_column;
+        if column >= base.len() {
+            return;
+        }
+        if tab.column_widths.len() < base.len() {
+            tab.column_widths.resize(base.len(), None);
+        }
+        let current = tab.column_widths[column].unwrap_or(base[column]);
+        tab.column_widths[column] = Some((current as i16 + delta).clamp(6, 80) as u16);
+    }
+
+    fn reset_relation_column_width(&mut self) {
+        if let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab)
+            && tab.view == RelationView::Data
+            && tab.grid.selected_column < tab.column_widths.len()
+        {
+            tab.column_widths[tab.grid.selected_column] = None;
+        }
+    }
+
+    fn set_relation_column_width(&mut self, column: usize, width: u16) {
+        let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab) else {
+            return;
+        };
+        if tab.view != RelationView::Data {
+            return;
+        }
+        if tab.column_widths.len() <= column {
+            tab.column_widths.resize(column + 1, None);
+        }
+        tab.column_widths[column] = Some(width.clamp(6, 80));
+    }
+
     fn load_active_relation(&mut self, refresh: bool) -> Vec<Command> {
         let Some(connection) = self.database_command_identity() else {
             return Vec::new();
@@ -3760,6 +3940,7 @@ impl App {
             relation: tab.descriptor.key.clone(),
             kind,
             scope: profile.catalog_scope.clone(),
+            options: tab.query.submitted.clone(),
         };
         tab.next_request_id = tab.next_request_id.saturating_add(1);
         match kind {

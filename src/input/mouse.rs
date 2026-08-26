@@ -10,7 +10,23 @@ use crate::{
 
 pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
     match event.kind {
+        MouseEventKind::Drag(MouseButton::Left) => {
+            if app.overlay.is_some() {
+                ui.relation_resize.borrow_mut().take();
+                return None;
+            }
+            let (column, start_width, start_x) = (*ui.relation_resize.borrow())?;
+            Some(Action::SetRelationColumnWidth {
+                column,
+                width: start_width.saturating_add_signed(event.column as i16 - start_x as i16),
+            })
+        }
+        MouseEventKind::Up(MouseButton::Left) => {
+            ui.relation_resize.borrow_mut().take();
+            Some(Action::EndRelationColumnResize)
+        }
         MouseEventKind::Down(MouseButton::Left) => {
+            ui.relation_resize.borrow_mut().take();
             let Some(target) = ui.target_at(event.column, event.row).cloned() else {
                 ui.clear_click_tracker();
                 return None;
@@ -46,6 +62,13 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                 HitTarget::RelationView(view) => Some(Action::SetRelationView(view)),
                 HitTarget::RelationRetry => Some(Action::RefreshActiveRelation),
                 HitTarget::RelationCancel => Some(Action::CancelActiveRelationRequest),
+                HitTarget::RelationQueryInput(input) => {
+                    Some(Action::FocusRelationQueryInput(input))
+                }
+                HitTarget::RelationColumnResize { column, width } => {
+                    *ui.relation_resize.borrow_mut() = Some((column, width, event.column));
+                    Some(Action::StartRelationColumnResize { column, width })
+                }
                 HitTarget::HeaderProfile => app.connection.profile_id.map_or(
                     Some(Action::Focus(Focus::Explorer)),
                     |profile_id| {
@@ -125,7 +148,9 @@ fn focus_at(ui: &UiState, column: u16, row: u16) -> Option<Focus> {
         HitTarget::ResultCell { .. }
         | HitTarget::ToggleResultView
         | HitTarget::RelationView(_)
-        | HitTarget::RelationRetry => Some(Focus::Results),
+        | HitTarget::RelationRetry
+        | HitTarget::RelationQueryInput(_)
+        | HitTarget::RelationColumnResize { .. } => Some(Focus::Results),
         HitTarget::RelationCancel => Some(Focus::Results),
         HitTarget::Tab(_)
         | HitTarget::Help

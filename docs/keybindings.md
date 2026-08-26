@@ -112,6 +112,11 @@ MANUAL query rolls back the complete transaction; MySQL DDL may implicitly commi
 | `h/j/k/l`, arrows | Move selected cell |
 | `o` | Switch Data/Output |
 
+Relation Data previews additionally support `/` to focus the `WHERE` input and
+`s` to focus `ORDER BY`. Press `Enter` to apply both clauses, or `Esc` to leave
+the inputs without applying drafts. `[` and `]` resize the selected column and
+`=` restores its automatic width. Preview queries retain the hard 500-row limit.
+
 Selecting a relation or one of its supported descendants opens a relation tab.
 Relation tabs have `DATA` and `STRUCTURE` pages. Data uses an adapter-generated,
 read-only preview with a hard `LIMIT 500`; the adapter owns the SQL and the

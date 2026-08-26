@@ -10,6 +10,7 @@ mod execution;
 mod format;
 mod highlight;
 mod range;
+mod relation_filter;
 mod risk;
 mod scope;
 mod transaction;
@@ -24,6 +25,7 @@ pub use execution::ExecutionDraft;
 pub use format::{FormatError, format_sql};
 pub use highlight::{HighlightKind, HighlightSpan, highlight_sql};
 pub use range::TextRange;
+pub use relation_filter::{RelationFilterError, validate_relation_preview_options};
 pub use risk::{SqlRisk, SqlRiskAggregate, SqlRiskAnalysis, classify_sql};
 pub use scope::{
     ResolvedScope, ScopeKind, ScopeSelection, ScopeSource, resolve_scope, scan_statements,

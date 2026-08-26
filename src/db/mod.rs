@@ -215,11 +215,12 @@ impl DatabaseConnection {
     pub async fn preview_relation(
         &self,
         relation: &CatalogId,
+        options: &crate::model::relation::RelationPreviewOptions,
     ) -> Result<RelationPreview, DatabaseError> {
         match self {
-            Self::Postgres(adapter) => adapter.preview_relation(relation).await,
-            Self::MySql(adapter) => adapter.preview_relation(relation).await,
-            Self::Sqlite(adapter) => adapter.preview_relation(relation).await,
+            Self::Postgres(adapter) => adapter.preview_relation(relation, options).await,
+            Self::MySql(adapter) => adapter.preview_relation(relation, options).await,
+            Self::Sqlite(adapter) => adapter.preview_relation(relation, options).await,
         }
     }
 

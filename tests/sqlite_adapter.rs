@@ -47,7 +47,10 @@ async fn relation_preview_preserves_metadata_limits_quotes_and_rejects_forged_id
         CatalogKind::Table,
         [":memory:", "main", "empty"],
     );
-    let preview = database.preview_relation(&empty).await.unwrap();
+    let preview = database
+        .preview_relation(&empty, &Default::default())
+        .await
+        .unwrap();
     assert!(preview.sql.contains("LIMIT 500"));
     assert_eq!(preview.result.stats.row_count, 0);
     assert_eq!(
@@ -60,7 +63,10 @@ async fn relation_preview_preserves_metadata_limits_quotes_and_rejects_forged_id
     );
 
     let many = CatalogId::new(profile_id, CatalogKind::Table, [":memory:", "main", "many"]);
-    let many_preview = database.preview_relation(&many).await.unwrap();
+    let many_preview = database
+        .preview_relation(&many, &Default::default())
+        .await
+        .unwrap();
     assert_eq!(many_preview.result.stats.row_count, 500);
     assert_eq!(many_preview.result.result_sets[0].rows.len(), 500);
 
@@ -69,7 +75,10 @@ async fn relation_preview_preserves_metadata_limits_quotes_and_rejects_forged_id
         CatalogKind::Table,
         [":memory:", "main", "odd\"table"],
     );
-    let hostile_preview = database.preview_relation(&hostile).await.unwrap();
+    let hostile_preview = database
+        .preview_relation(&hostile, &Default::default())
+        .await
+        .unwrap();
     assert!(hostile_preview.sql.contains("\"odd\"\"table\""));
     assert!(hostile_preview.sql.contains("LIMIT 500"));
 
@@ -78,7 +87,10 @@ async fn relation_preview_preserves_metadata_limits_quotes_and_rejects_forged_id
         CatalogKind::View,
         [":memory:", "main", "odd\"view"],
     );
-    let view_preview = database.preview_relation(&view).await.unwrap();
+    let view_preview = database
+        .preview_relation(&view, &Default::default())
+        .await
+        .unwrap();
     assert_eq!(view_preview.result.stats.row_count, 0);
 
     for id in [
@@ -98,7 +110,10 @@ async fn relation_preview_preserves_metadata_limits_quotes_and_rejects_forged_id
             [":memory:", "main", "missing"],
         ),
     ] {
-        let error = database.preview_relation(&id).await.unwrap_err();
+        let error = database
+            .preview_relation(&id, &Default::default())
+            .await
+            .unwrap_err();
         assert_eq!(error.category, ErrorCategory::Configuration);
     }
     database.close().await;

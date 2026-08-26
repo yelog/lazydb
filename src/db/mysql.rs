@@ -1024,6 +1024,7 @@ impl MySqlAdapter {
     pub async fn preview_relation(
         &self,
         relation: &CatalogId,
+        options: &crate::model::relation::RelationPreviewOptions,
     ) -> Result<crate::db::RelationPreview, DatabaseError> {
         let mut connection = self.pool.acquire().await.map_err(sql_error)?;
         let target = CatalogTarget::RelationChildren {
@@ -1039,12 +1040,13 @@ impl MySqlAdapter {
         if !self.catalog_scope.allows_schema(&database, &database) {
             return Err(catalog_target_not_found(&target));
         }
-        let sql = format!(
-            "SELECT * FROM {}.{} LIMIT {}",
+        let mut sql = format!(
+            "SELECT * FROM {}.{}",
             quote_identifier(&database),
-            quote_identifier(&name),
-            RELATION_PREVIEW_LIMIT
+            quote_identifier(&name)
         );
+        append_preview_options(&mut sql, options);
+        sql.push_str(&format!(" LIMIT {RELATION_PREVIEW_LIMIT}"));
         let started = Instant::now();
         let statement = connection
             .prepare(AssertSqlSafe(sql.clone()).into_sql_str())
@@ -1269,6 +1271,20 @@ impl MySqlAdapter {
 
     pub async fn close(self) {
         self.pool.close().await;
+    }
+}
+
+fn append_preview_options(
+    sql: &mut String,
+    options: &crate::model::relation::RelationPreviewOptions,
+) {
+    if let Some(clause) = &options.where_clause {
+        sql.push_str(" WHERE ");
+        sql.push_str(clause);
+    }
+    if let Some(clause) = &options.order_by_clause {
+        sql.push_str(" ORDER BY ");
+        sql.push_str(clause);
     }
 }
 

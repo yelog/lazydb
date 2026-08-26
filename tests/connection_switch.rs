@@ -555,6 +555,7 @@ async fn successful_switch_installs_the_new_database_and_rejects_stale_commands(
         },
         kind: RelationRequestKind::Preview,
         scope: first.catalog_scope.clone(),
+        options: Default::default(),
     };
     runtime.dispatch(Command::LoadRelationPreview(relation_request.clone()));
     assert!(matches!(
