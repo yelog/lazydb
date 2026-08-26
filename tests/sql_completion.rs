@@ -1,30 +1,57 @@
 use lazydb::{
-    db::catalog::{CatalogId, CatalogKind, CatalogNode},
+    db::catalog::{
+        CatalogEntry, CatalogId, CatalogKind, CatalogMetadata, ColumnMetadata, OptionalMetadata,
+        QualifiedName,
+    },
     sql::{CompletionIndex, CompletionKind, SqlDialect, complete, quote_identifier},
 };
 use uuid::Uuid;
 
-fn fixture() -> Vec<CatalogNode> {
+fn fixture() -> Vec<CatalogEntry> {
     let connection = Uuid::new_v4();
     let database = CatalogId::new(connection, CatalogKind::Database, ["app"]);
     let schema = CatalogId::new(connection, CatalogKind::Schema, ["app", "public"]);
     let table = CatalogId::new(connection, CatalogKind::Table, ["app", "public", "users"]);
     vec![
-        CatalogNode::new(database, None, "app", "database", None, true),
-        CatalogNode::new(schema.clone(), None, "public", "schema", None, true),
-        CatalogNode::new(table.clone(), Some(schema), "users", "table", None, true),
-        CatalogNode::new(
+        CatalogEntry::database(
+            database.clone(),
+            qualified("app", None, "app"),
+            "database",
+            OptionalMetadata::Supported(None),
+            true,
+        )
+        .unwrap(),
+        CatalogEntry::schema(
+            schema.clone(),
+            database,
+            qualified("app", Some("public"), "public"),
+            "schema",
+            OptionalMetadata::Supported(None),
+            true,
+        )
+        .unwrap(),
+        CatalogEntry::relation(
+            table.clone(),
+            schema,
+            qualified("app", Some("public"), "users"),
+            "table",
+            OptionalMetadata::Supported(None),
+            true,
+        )
+        .unwrap(),
+        CatalogEntry::relation_child(
             CatalogId::new(
                 connection,
                 CatalogKind::Column,
                 ["app", "public", "users", "odd name"],
             ),
-            Some(table),
-            "odd name",
+            table,
+            qualified("app", Some("public"), "odd name"),
             "column",
-            Some("text\x1b[31m".into()),
-            false,
-        ),
+            OptionalMetadata::Unsupported,
+            CatalogMetadata::Column(ColumnMetadata::new(1, "text\x1b[31m", true)),
+        )
+        .unwrap(),
     ]
 }
 
@@ -57,14 +84,23 @@ fn completion_is_contextual_and_quotes_raw_names() {
 #[test]
 fn hostile_display_text_does_not_change_insertion() {
     let mut nodes = fixture();
-    nodes.push(CatalogNode::new(
-        CatalogId::new(Uuid::new_v4(), CatalogKind::Table, ["x", "\x1b[2J"]),
-        None,
-        "\x1b[2J",
-        "table",
-        Some("\x00detail".into()),
-        false,
-    ));
+    let hostile_profile = Uuid::new_v4();
+    let hostile_schema = CatalogId::new(hostile_profile, CatalogKind::Schema, ["x", "public"]);
+    nodes.push(
+        CatalogEntry::relation(
+            CatalogId::new(
+                hostile_profile,
+                CatalogKind::Table,
+                ["x", "public", "\x1b[2J"],
+            ),
+            hostile_schema,
+            qualified("x", Some("public"), "\x1b[2J"),
+            "table",
+            OptionalMetadata::Supported(Some("\x00detail".into())),
+            false,
+        )
+        .unwrap(),
+    );
     let index = CompletionIndex::new(&nodes);
     let candidates = complete("from ", 5, SqlDialect::Postgres, &index, None);
     let candidate = candidates
@@ -81,14 +117,15 @@ fn general_sql_keywords_rank_before_matching_catalog_names() {
     let nodes = [("sales", "s"), ("data", "d"), ("facts", "f")]
         .into_iter()
         .map(|(name, _)| {
-            CatalogNode::new(
+            CatalogEntry::relation(
                 CatalogId::new(connection, CatalogKind::Table, ["app", "public", name]),
-                None,
-                name,
+                CatalogId::new(connection, CatalogKind::Schema, ["app", "public"]),
+                qualified("app", Some("public"), name),
                 "table",
-                None,
+                OptionalMetadata::Supported(None),
                 false,
             )
+            .unwrap()
         })
         .collect::<Vec<_>>();
     let index = CompletionIndex::new(&nodes);
@@ -103,5 +140,41 @@ fn general_sql_keywords_rank_before_matching_catalog_names() {
             candidates.first().map(|candidate| candidate.kind),
             Some(CompletionKind::Keyword)
         );
+    }
+}
+
+#[test]
+fn index_retains_only_completion_relevant_entries() {
+    let mut entries = fixture();
+    let profile = entries[0].id.profile_id();
+    entries.push(
+        CatalogEntry::object(
+            CatalogId::new(profile, CatalogKind::Sequence, ["app", "public", "seq"]),
+            CatalogId::new(profile, CatalogKind::Schema, ["app", "public"]),
+            qualified("app", Some("public"), "seq"),
+            "sequence",
+            OptionalMetadata::Supported(None),
+            false,
+        )
+        .unwrap(),
+    );
+    let index = CompletionIndex::new(&entries);
+    assert!(index.entries().iter().all(|entry| matches!(
+        entry.kind,
+        CatalogKind::Schema
+            | CatalogKind::Table
+            | CatalogKind::View
+            | CatalogKind::MaterializedView
+            | CatalogKind::Column
+            | CatalogKind::Function
+            | CatalogKind::Procedure
+    )));
+}
+
+fn qualified(database: &str, schema: Option<&str>, object: &str) -> QualifiedName {
+    QualifiedName {
+        database: Some(database.into()),
+        schema: schema.map(str::to_owned),
+        object: object.into(),
     }
 }

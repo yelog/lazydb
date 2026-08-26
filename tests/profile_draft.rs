@@ -5,7 +5,10 @@ use lazydb::{
         },
         text_input::TextInput,
     },
-    profile::{ConnectionProfile, DatabaseKind, Environment, SslMode},
+    profile::{
+        CatalogScope, CatalogSelection, ConnectionProfile, DatabaseKind, DatabaseScope,
+        Environment, SslMode,
+    },
 };
 use secrecy::ExposeSecret;
 
@@ -81,6 +84,33 @@ fn new_mysql_and_sqlite_use_driver_defaults() {
     assert!(!sqlite.sqlite_memory);
     assert!(sqlite.sqlite_path.value().is_empty());
     assert_eq!(sqlite.ssl_mode, SslMode::Disable);
+}
+
+#[test]
+fn new_profiles_derive_catalog_scope_defaults() {
+    let postgres = valid_postgres_draft().validate(&[]).unwrap().profile;
+    assert_eq!(
+        postgres.catalog_scope,
+        CatalogScope::for_profile(DatabaseKind::Postgres, "lazydb", Some("public"))
+    );
+
+    let mut mysql = ProfileDraft::new(DatabaseKind::MySql);
+    mysql.name.set("mysql");
+    mysql.database.set("sales");
+    let mysql = mysql.validate(&[]).unwrap().profile;
+    assert_eq!(
+        mysql.catalog_scope,
+        CatalogScope::for_profile(DatabaseKind::MySql, "sales", None)
+    );
+
+    let mut sqlite = ProfileDraft::new(DatabaseKind::Sqlite);
+    sqlite.name.set("sqlite");
+    sqlite.sqlite_path.set("./data/lazy.db");
+    let sqlite = sqlite.validate(&[]).unwrap().profile;
+    assert_eq!(
+        sqlite.catalog_scope,
+        CatalogScope::for_profile(DatabaseKind::Sqlite, "./data/lazy.db", Some("main"))
+    );
 }
 
 #[test]
@@ -174,12 +204,22 @@ fn draft_uuid_is_stable_across_validation() {
 }
 
 #[test]
-fn editing_preserves_uuid_and_unedited_profile_metadata() {
+fn editing_preserves_uuid_and_structured_catalog_scope() {
     let mut profile = saved_postgres_profile();
     profile.environment = Environment::Production;
     profile.read_only = true;
-    profile.include_databases = vec!["app".into()];
-    profile.include_schemas = vec!["public".into()];
+    profile.catalog_scope = CatalogScope {
+        databases: CatalogSelection::Selected(vec![
+            DatabaseScope {
+                name: "lazydb".into(),
+                schemas: CatalogSelection::Selected(vec!["public".into(), "audit".into()]),
+            },
+            DatabaseScope {
+                name: "warehouse".into(),
+                schemas: CatalogSelection::All,
+            },
+        ]),
+    };
 
     let mut draft = ProfileDraft::edit(&profile, false);
     draft.name.set("renamed");
@@ -188,8 +228,43 @@ fn editing_preserves_uuid_and_unedited_profile_metadata() {
     assert_eq!(edited.id, profile.id);
     assert_eq!(edited.environment, Environment::Production);
     assert!(edited.read_only);
-    assert_eq!(edited.include_databases, vec!["app"]);
-    assert_eq!(edited.include_schemas, vec!["public"]);
+    assert_eq!(edited.catalog_scope, profile.catalog_scope);
+}
+
+#[test]
+fn changing_unrelated_fields_does_not_reset_a_custom_scope() {
+    let mut draft = valid_postgres_draft();
+    let custom_scope = CatalogScope {
+        databases: CatalogSelection::Selected(vec![DatabaseScope {
+            name: "lazydb".into(),
+            schemas: CatalogSelection::Selected(vec!["public".into(), "audit".into()]),
+        }]),
+    };
+    draft.catalog_scope = custom_scope.clone();
+    draft.environment = Environment::Staging;
+    draft.read_only = true;
+
+    let profile = draft.validate(&[]).unwrap().profile;
+
+    assert_eq!(profile.catalog_scope, custom_scope);
+    assert_eq!(profile.environment, Environment::Staging);
+    assert!(profile.read_only);
+}
+
+#[test]
+fn excluding_the_default_schema_is_a_field_level_validation_error() {
+    let mut draft = valid_postgres_draft();
+    draft.catalog_scope = CatalogScope {
+        databases: CatalogSelection::Selected(vec![DatabaseScope {
+            name: "lazydb".into(),
+            schemas: CatalogSelection::Selected(vec!["private".into()]),
+        }]),
+    };
+
+    let error = draft.validate(&[]).unwrap_err();
+
+    assert_eq!(error.field, ProfileField::Schema);
+    assert!(error.message.contains("default schema `public`"));
 }
 
 #[test]
@@ -273,7 +348,7 @@ fn visible_fields_follow_the_selected_driver_and_sqlite_mode() {
             ProfileField::User,
             ProfileField::Password,
             ProfileField::Database,
-            ProfileField::Schema,
+            ProfileField::VisibleObjects,
             ProfileField::SslMode,
             ProfileField::Environment,
             ProfileField::ReadOnly,
@@ -295,7 +370,7 @@ fn visible_fields_follow_the_selected_driver_and_sqlite_mode() {
 #[test]
 fn manager_state_initializes_new_and_edit_forms() {
     let mut state = ProfileManagerState::new(true);
-    assert_eq!(state.page, ProfileManagerPage::List);
+    assert_eq!(state.page, ProfileManagerPage::Form);
     assert!(state.opened_automatically);
 
     state.start_new(DatabaseKind::MySql);
@@ -310,4 +385,213 @@ fn manager_state_initializes_new_and_edit_forms() {
         state.visible_fields(),
         state.draft.as_ref().unwrap().visible_fields()
     );
+}
+
+#[test]
+fn scope_picker_has_one_visible_objects_field_and_stable_summary() {
+    let mut state = ProfileManagerState::new(false);
+    state.start_new(DatabaseKind::Postgres);
+    state.draft.as_mut().unwrap().name.set("primary");
+
+    assert!(
+        state
+            .visible_fields()
+            .contains(&ProfileField::VisibleObjects)
+    );
+    assert_eq!(
+        state.draft.as_ref().unwrap().visible_objects_summary(),
+        "1 database"
+    );
+    state.open_scope_picker();
+    assert_eq!(state.page, ProfileManagerPage::Scope);
+}
+
+#[test]
+fn scope_picker_keeps_all_and_selected_schema_modes_exclusive() {
+    let mut state = ProfileManagerState::new(false);
+    state.start_new(DatabaseKind::Postgres);
+    state.draft.as_mut().unwrap().database.set("localhost");
+    state.open_scope_picker();
+
+    state.toggle_scope_row("database:lazydb:schema:all");
+    state.toggle_scope_row("database:lazydb:schema:public");
+
+    let scope = &state.draft.as_ref().unwrap().catalog_scope;
+    let CatalogSelection::Selected(databases) = &scope.databases else {
+        panic!("expected selected database");
+    };
+    assert!(matches!(
+        databases[0].schemas,
+        CatalogSelection::Selected(_)
+    ));
+}
+
+#[test]
+fn mysql_mirrored_schema_row_is_selected_and_read_only() {
+    let mut state = ProfileManagerState::new(false);
+    state.start_new(DatabaseKind::MySql);
+    state.draft.as_mut().unwrap().database.set("sales");
+    state.open_scope_picker();
+
+    let row = state
+        .scope_row("database:sales:schema:sales")
+        .expect("mirror row");
+    assert!(row.selected);
+    assert!(row.read_only);
+    assert!(!state.toggle_scope_row("database:sales:schema:sales"));
+}
+
+#[test]
+fn stale_discovery_preserves_custom_scope_and_unavailable_names() {
+    let mut state = ProfileManagerState::new(false);
+    state.start_new(DatabaseKind::Postgres);
+    let draft = state.draft.as_mut().unwrap();
+    draft.name.set("primary");
+    draft.database.set("db");
+    draft.database.set("missing_db");
+    draft.catalog_scope = CatalogScope {
+        databases: CatalogSelection::Selected(vec![DatabaseScope {
+            name: "missing_db".into(),
+            schemas: CatalogSelection::Selected(vec!["missing_schema".into()]),
+        }]),
+    };
+    draft.invalidate_discovery_for_test();
+    state.open_scope_picker();
+
+    assert!(state.scope_warning().is_some());
+    assert!(state.scope_row("database:missing_db").is_some());
+    assert!(
+        state
+            .scope_row("database:missing_db:schema:missing_schema")
+            .is_some()
+    );
+}
+
+#[test]
+fn sqlite_forms_include_visible_objects_picker() {
+    let mut draft = ProfileDraft::new(DatabaseKind::Sqlite);
+    assert!(
+        draft
+            .visible_fields()
+            .contains(&ProfileField::VisibleObjects)
+    );
+    draft.sqlite_memory = true;
+    assert!(
+        draft
+            .visible_fields()
+            .contains(&ProfileField::VisibleObjects)
+    );
+}
+
+#[test]
+fn scope_picker_navigation_updates_selected_row_and_viewport() {
+    let mut state = ProfileManagerState::new(false);
+    state.start_new(DatabaseKind::Postgres);
+    state.draft.as_mut().unwrap().database.set("localhost");
+    state.open_scope_picker();
+    let first = state.scope_selected_row.clone().unwrap();
+    state.move_scope_selection(1);
+    assert_ne!(state.scope_selected_row.as_deref(), Some(first.as_str()));
+    state.move_scope_selection(-1);
+    assert_eq!(state.scope_selected_row.as_deref(), Some(first.as_str()));
+    state.set_scope_viewport_for_test(1);
+    assert_eq!(state.scope_viewport, 1);
+}
+
+#[test]
+fn database_scope_toggle_is_actionable_without_creating_empty_selection() {
+    let mut state = ProfileManagerState::new(false);
+    state.start_new(DatabaseKind::Postgres);
+    state.draft.as_mut().unwrap().database.set("localhost");
+    state.open_scope_picker();
+    assert!(!state.toggle_scope_row("database:"));
+    assert!(state.toggle_scope_row("database:localhost"));
+    assert!(
+        state
+            .draft
+            .as_ref()
+            .unwrap()
+            .catalog_scope
+            .validate("localhost", Some("public"))
+            .is_ok()
+    );
+}
+
+#[test]
+fn discovery_failure_warning_is_preserved_when_picker_reopens() {
+    let mut state = ProfileManagerState::new(false);
+    state.start_new(DatabaseKind::Postgres);
+    let draft = state.draft.as_mut().unwrap();
+    draft.name.set("primary");
+    draft.database.set("db");
+    let profile = draft.validate(&[]).unwrap().profile;
+    let fingerprint =
+        lazydb::model::profile_manager::DiscoveryFingerprint::for_profile(&profile, false, 0);
+    draft.begin_catalog_discovery(fingerprint);
+    draft.apply_catalog_discovery(lazydb::model::profile_manager::ProfileCatalogDiscovery {
+        fingerprint,
+        server: lazydb::db::ServerInfo {
+            kind: DatabaseKind::Postgres,
+            version: "16".into(),
+            database: "db".into(),
+        },
+        capabilities: lazydb::db::catalog::CatalogCapabilities {
+            namespace_model: lazydb::db::catalog::NamespaceModel::DatabaseAndSchema,
+            top_level_groups: vec![],
+            column_metadata: Default::default(),
+            supports_lazy_children: false,
+        },
+        discovery: Err("permission denied".into()),
+    });
+    state.open_scope_picker();
+    assert!(state.scope_warning().unwrap().contains("permission denied"));
+    state.close_scope_picker();
+    state.open_scope_picker();
+    assert!(state.scope_warning().unwrap().contains("permission denied"));
+}
+
+#[test]
+fn discovered_and_saved_schema_rows_are_deduplicated() {
+    let mut state = ProfileManagerState::new(false);
+    state.start_new(DatabaseKind::Postgres);
+    let draft = state.draft.as_mut().unwrap();
+    draft.name.set("primary");
+    draft.database.set("db");
+    draft.catalog_scope = CatalogScope {
+        databases: CatalogSelection::Selected(vec![DatabaseScope {
+            name: "db".into(),
+            schemas: CatalogSelection::Selected(vec!["public".into()]),
+        }]),
+    };
+    let profile = draft.validate(&[]).unwrap().profile;
+    let fingerprint =
+        lazydb::model::profile_manager::DiscoveryFingerprint::for_profile(&profile, false, 0);
+    draft.begin_catalog_discovery(fingerprint);
+    draft.apply_catalog_discovery(lazydb::model::profile_manager::ProfileCatalogDiscovery {
+        fingerprint,
+        server: lazydb::db::ServerInfo {
+            kind: DatabaseKind::Postgres,
+            version: "16".into(),
+            database: "db".into(),
+        },
+        capabilities: lazydb::db::catalog::CatalogCapabilities {
+            namespace_model: lazydb::db::catalog::NamespaceModel::DatabaseAndSchema,
+            top_level_groups: vec![],
+            column_metadata: Default::default(),
+            supports_lazy_children: false,
+        },
+        discovery: Ok(lazydb::db::catalog::CatalogDiscovery {
+            databases: vec![lazydb::db::catalog::DiscoveredDatabase {
+                name: "db".into(),
+                schemas: vec!["public".into()],
+            }],
+        }),
+    });
+    state.open_scope_picker();
+    let rows = state
+        .scope_rows_for_render()
+        .into_iter()
+        .filter(|row| row.id == "database:db:schema:public")
+        .count();
+    assert_eq!(rows, 1);
 }

@@ -16,7 +16,10 @@ use crate::{
 };
 
 use self::{
-    catalog::{CatalogKind, CatalogNode},
+    catalog::{
+        CatalogCapabilities, CatalogDiscovery, CatalogKind, CatalogPage, CatalogRequest,
+        CatalogTarget, CatalogValidationError,
+    },
     mysql::MySqlAdapter,
     postgres::PostgresAdapter,
     query::QueryOutcome,
@@ -38,6 +41,7 @@ pub enum ErrorCategory {
     Permission,
     Sql,
     Constraint,
+    Unsupported,
     Cancelled,
     Internal,
 }
@@ -56,6 +60,25 @@ impl DatabaseError {
             category: ErrorCategory::Configuration,
             code: None,
             message: sanitize_terminal_text(message.as_ref()),
+        }
+    }
+
+    fn invalid_catalog_request(error: CatalogValidationError) -> Self {
+        Self {
+            category: ErrorCategory::Configuration,
+            code: Some("invalid_catalog_request".to_owned()),
+            message: sanitize_terminal_text(&format!("invalid catalog request: {error}")),
+        }
+    }
+
+    fn unsupported_catalog_target(kind: DatabaseKind, target: &CatalogTarget) -> Self {
+        Self {
+            category: ErrorCategory::Unsupported,
+            code: Some("catalog_target_unsupported".to_owned()),
+            message: format!(
+                "{} catalog target is not implemented for {kind:?}",
+                target.description()
+            ),
         }
     }
 
@@ -138,6 +161,14 @@ impl DatabaseConnection {
         }
     }
 
+    pub fn catalog_capabilities(&self) -> CatalogCapabilities {
+        match self {
+            Self::Postgres(_) => PostgresAdapter::catalog_capabilities(),
+            Self::MySql(_) => MySqlAdapter::catalog_capabilities(),
+            Self::Sqlite(_) => SqliteAdapter::catalog_capabilities(),
+        }
+    }
+
     pub async fn probe(&self) -> Result<ServerInfo, DatabaseError> {
         match self {
             Self::Postgres(adapter) => adapter.probe().await,
@@ -146,11 +177,22 @@ impl DatabaseConnection {
         }
     }
 
-    pub async fn load_catalog(&self) -> Result<Vec<CatalogNode>, DatabaseError> {
+    pub async fn discover_catalog_scope(&self) -> Result<CatalogDiscovery, DatabaseError> {
         match self {
-            Self::Postgres(adapter) => adapter.load_catalog().await,
-            Self::MySql(adapter) => adapter.load_catalog().await,
-            Self::Sqlite(adapter) => adapter.load_catalog().await,
+            Self::Postgres(adapter) => adapter.discover_catalog_scope().await,
+            Self::MySql(adapter) => adapter.discover_catalog_scope().await,
+            Self::Sqlite(adapter) => adapter.discover_catalog_scope().await,
+        }
+    }
+
+    pub async fn load_catalog_page(
+        &self,
+        request: &CatalogRequest,
+    ) -> Result<CatalogPage, DatabaseError> {
+        match self {
+            Self::Postgres(adapter) => adapter.load_catalog_page(request).await,
+            Self::MySql(adapter) => adapter.load_catalog_page(request).await,
+            Self::Sqlite(adapter) => adapter.load_catalog_page(request).await,
         }
     }
 

@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use lazydb::{
     action::{Action, Command},
     app::App,
+    db::catalog::{NamespaceModel, ObjectGroup},
     model::{
         profile_manager::{CredentialUpdate, ProfileSubmission},
         workspace::ConnectionIdentity,
@@ -131,10 +132,7 @@ fn sqlite_profile(name: &str) -> ConnectionProfile {
 }
 
 fn submission(profile: ConnectionProfile, credential: CredentialUpdate) -> ProfileSubmission {
-    ProfileSubmission {
-        profile,
-        credential,
-    }
+    ProfileSubmission::new(profile, credential, 0)
 }
 
 fn runtime(
@@ -166,7 +164,7 @@ async fn next_action(receiver: &mut mpsc::UnboundedReceiver<Action>) -> Action {
 }
 
 #[tokio::test]
-async fn tests_a_profile_without_mutating_or_persisting_it() {
+async fn profile_test_discovers_scope_without_mutating_or_persisting_it() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("connections.toml");
     let profile = sqlite_profile("scratch");
@@ -178,15 +176,42 @@ async fn tests_a_profile_without_mutating_or_persisting_it() {
         fake,
     );
 
+    let submission = submission(profile, CredentialUpdate::Preserve);
+    let expected_fingerprint = submission.discovery_fingerprint;
     runtime.dispatch(Command::TestProfile {
         request_id: 1,
-        submission: submission(profile, CredentialUpdate::Preserve),
+        submission,
     });
 
-    assert!(matches!(
-        next_action(&mut receiver).await,
-        Action::ProfileTestSucceeded { request_id: 1, .. }
-    ));
+    match next_action(&mut receiver).await {
+        Action::ProfileTestSucceeded {
+            request_id: 1,
+            fingerprint,
+            server,
+            capabilities,
+            discovery: Ok(discovery),
+        } => {
+            assert_eq!(fingerprint, expected_fingerprint);
+            assert_eq!(server.database, ":memory:");
+            assert_eq!(
+                capabilities.namespace_model,
+                NamespaceModel::DatabaseAndSchema
+            );
+            assert_eq!(
+                capabilities.top_level_groups,
+                [
+                    ObjectGroup::Tables,
+                    ObjectGroup::Views,
+                    ObjectGroup::Triggers
+                ]
+            );
+            assert!(capabilities.supports_lazy_children);
+            assert_eq!(discovery.databases.len(), 1);
+            assert_eq!(discovery.databases[0].name, ":memory:");
+            assert_eq!(discovery.databases[0].schemas, ["main"]);
+        }
+        action => panic!("unexpected action: {action:?}"),
+    }
     assert!(!path.exists());
     runtime.shutdown().await;
 }

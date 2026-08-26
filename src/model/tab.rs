@@ -7,6 +7,64 @@ use super::workspace::QueryStatus;
 use super::{transaction::TransactionMode, transaction::TransactionState};
 use crate::sql::ExecutionDraft;
 
+use super::relation::RelationTab;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TabKind {
+    Sql,
+    Relation,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct GridState {
+    pub selected_row: usize,
+    pub selected_column: usize,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[allow(clippy::large_enum_variant)]
+pub enum WorkspaceTab {
+    Sql(ConsoleTab),
+    Relation(RelationTab),
+}
+
+impl WorkspaceTab {
+    pub fn id(&self) -> Uuid {
+        match self {
+            Self::Sql(tab) => tab.id,
+            Self::Relation(tab) => tab.id,
+        }
+    }
+
+    pub fn title(&self) -> &str {
+        match self {
+            Self::Sql(tab) => &tab.name,
+            Self::Relation(tab) => &tab.title,
+        }
+    }
+
+    pub fn kind(&self) -> TabKind {
+        match self {
+            Self::Sql(_) => TabKind::Sql,
+            Self::Relation(_) => TabKind::Relation,
+        }
+    }
+
+    pub fn as_console(&self) -> Option<&ConsoleTab> {
+        match self {
+            Self::Sql(tab) => Some(tab),
+            Self::Relation(_) => None,
+        }
+    }
+
+    pub fn as_console_mut(&mut self) -> Option<&mut ConsoleTab> {
+        match self {
+            Self::Sql(tab) => Some(tab),
+            Self::Relation(_) => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ResultView {
     #[default]

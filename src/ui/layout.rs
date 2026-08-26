@@ -99,12 +99,10 @@ impl AppLayout {
         } else {
             LayoutMode::Standard
         };
+        let explorer_width = (area.width / 3).clamp(34, 56);
         let horizontal = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Length(if mode == LayoutMode::Wide { 34 } else { 28 }),
-                Constraint::Min(60),
-            ])
+            .constraints([Constraint::Length(explorer_width), Constraint::Min(60)])
             .split(body);
         let main = Layout::default()
             .direction(Direction::Vertical)

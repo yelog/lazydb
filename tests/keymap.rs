@@ -5,6 +5,7 @@ use lazydb::{
     input::keymap::{Keymap, map_paste},
     model::{
         editor::EditorMode,
+        explorer::ExplorerNodeId,
         profile_manager::ProfileField,
         tab::CompletionPopup,
         workspace::{Focus, Overlay, QueryStatus},
@@ -64,6 +65,34 @@ fn maps_global_sequences_and_function_keys() {
 }
 
 #[test]
+fn maps_scope_picker_navigation_and_toggle() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::OpenProfileManager);
+    app.update(Action::ProfileOpenScope);
+    let mut keymap = Keymap::default();
+    assert_eq!(
+        keymap.map(key(KeyCode::Down), &app),
+        Some(Action::ProfileScopeMove(1))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('j')), &app),
+        Some(Action::ProfileScopeMove(1))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Up), &app),
+        Some(Action::ProfileScopeMove(-1))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('k')), &app),
+        Some(Action::ProfileScopeMove(-1))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char(' ')), &app),
+        Some(Action::ProfileToggleScopeRow("database:".into()))
+    );
+}
+
+#[test]
 fn maps_explicit_full_buffer_execution_separately() {
     let mut keymap = Keymap::default();
     let mut app = App::new(Vec::new());
@@ -77,6 +106,65 @@ fn maps_explicit_full_buffer_execution_separately() {
     assert_eq!(
         keymap.map(key(KeyCode::Char('R')), &app),
         Some(Action::RunAllSql)
+    );
+}
+
+#[test]
+fn maps_selected_profile_root_actions_by_stable_id() {
+    let profile = profile("root");
+    let profile_id = profile.id;
+    let mut app = App::new(vec![profile]);
+    app.focus = Focus::Explorer;
+    app.explorer.normalized.selected = Some(ExplorerNodeId::Profile(profile_id));
+    let mut keymap = Keymap::default();
+
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('e')), &app),
+        Some(Action::ProfileStartEdit { profile_id })
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('d')), &app),
+        Some(Action::ProfileRequestDelete { profile_id })
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('x')), &app),
+        Some(Action::RequestProfileDisconnect { profile_id })
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Enter), &app),
+        Some(Action::ExplorerPrimary)
+    );
+}
+
+#[test]
+fn maps_profile_actions_from_a_catalog_node_to_its_owner() {
+    let profile = profile("owner");
+    let profile_id = profile.id;
+    let mut app = App::new(vec![profile]);
+    app.focus = Focus::Explorer;
+    let node = ExplorerNodeId::Catalog(lazydb::db::catalog::CatalogId::new(
+        profile_id,
+        lazydb::db::catalog::CatalogKind::Database,
+        ["app"],
+    ));
+    app.explorer.normalized.selected = Some(node);
+    let mut keymap = Keymap::default();
+
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('e')), &app),
+        Some(Action::ProfileStartEdit { profile_id })
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('d')), &app),
+        Some(Action::ProfileRequestDelete { profile_id })
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('c')), &app),
+        Some(Action::RequestProfileConnect { profile_id })
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('x')), &app),
+        Some(Action::RequestProfileDisconnect { profile_id })
     );
 }
 
@@ -179,7 +267,7 @@ fn maps_explorer_and_result_actions_by_context() {
     );
     assert_eq!(
         keymap.map(key(KeyCode::Char('l')), &app),
-        Some(Action::ExplorerToggle)
+        Some(Action::ExplorerExpand)
     );
     assert_eq!(
         keymap.map(key(KeyCode::Char('p')), &app),
@@ -191,7 +279,7 @@ fn maps_explorer_and_result_actions_by_context() {
     );
     assert_eq!(
         keymap.map(key(KeyCode::Char('r')), &app),
-        Some(Action::RefreshCatalog)
+        Some(Action::ExplorerRefresh)
     );
 
     app.focus = Focus::Results;
@@ -235,7 +323,7 @@ fn never_uses_lowercase_q_as_a_global_exit() {
 }
 
 #[test]
-fn space_c_opens_profiles_from_every_normal_mode_focus() {
+fn space_c_focuses_explorer_from_every_normal_mode_focus() {
     for focus in [Focus::Explorer, Focus::Editor, Focus::Results] {
         let mut app = App::new(Vec::new());
         app.focus = focus;
@@ -255,7 +343,7 @@ fn space_c_opens_profiles_from_every_normal_mode_focus() {
             if focus == Focus::Editor {
                 Some(Action::EditorKey(key(KeyCode::Char('c'))))
             } else {
-                Some(Action::OpenProfileManager)
+                Some(Action::Focus(Focus::Explorer))
             }
         );
     }
@@ -316,22 +404,15 @@ fn space_c_opens_profiles_from_every_normal_mode_focus() {
 }
 
 #[test]
-fn profile_list_overlay_routes_before_generic_dismissal() {
+fn profile_form_overlay_routes_before_generic_dismissal() {
     let mut app = App::new(vec![profile("first"), profile("second")]);
     app.update(Action::OpenProfileManager);
     let mut keymap = Keymap::default();
 
     let mappings = [
-        (KeyCode::Char('j'), Action::ProfileMove(1)),
-        (KeyCode::Down, Action::ProfileMove(1)),
-        (KeyCode::Char('k'), Action::ProfileMove(-1)),
-        (KeyCode::Up, Action::ProfileMove(-1)),
-        (KeyCode::Enter, Action::ProfileConnectSelected),
-        (KeyCode::Char('n'), Action::ProfileStartNew),
-        (KeyCode::Char('e'), Action::ProfileStartEdit),
-        (KeyCode::Char('d'), Action::ProfileRequestDelete),
+        (KeyCode::Tab, Action::ProfileFieldNext),
+        (KeyCode::BackTab, Action::ProfileFieldPrevious),
         (KeyCode::Esc, Action::CloseProfileManager),
-        (KeyCode::Char('q'), Action::CloseProfileManager),
     ];
     for (code, expected) in mappings {
         assert_eq!(keymap.map(key(code), &app), Some(expected));
@@ -444,7 +525,9 @@ fn profile_confirmation_and_paste_are_contextual_and_redacted() {
     let profile = profile("delete");
     let mut app = App::new(vec![profile]);
     app.update(Action::OpenProfileManager);
-    app.update(Action::ProfileRequestDelete);
+    app.update(Action::ProfileRequestDelete {
+        profile_id: app.profiles[0].id,
+    });
     let mut keymap = Keymap::default();
     assert_eq!(
         keymap.map(key(KeyCode::Enter), &app),
@@ -461,7 +544,9 @@ fn profile_confirmation_and_paste_are_contextual_and_redacted() {
     );
 
     app.update(Action::ProfileCancelDelete);
-    app.update(Action::ProfileStartEdit);
+    app.update(Action::ProfileStartEdit {
+        profile_id: app.profiles[0].id,
+    });
     app.profile_manager.as_mut().unwrap().selected_field = ProfileField::Password;
     let actions = map_paste("do-not-print".into(), &app);
     assert_eq!(actions, [Action::ProfilePaste("do-not-print".into())]);

@@ -1,7 +1,7 @@
 use ratatui::{
     Frame,
     buffer::CellWidth,
-    layout::{Constraint, Direction, Layout, Position, Rect},
+    layout::{Position, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
@@ -15,7 +15,7 @@ use crate::{
         },
         text_input::TextInput,
     },
-    profile::{ConnectionProfile, DatabaseKind, Environment, SslMode},
+    profile::{DatabaseKind, Environment, SslMode},
     security::sanitize_terminal_text,
 };
 
@@ -32,150 +32,12 @@ pub fn render_profile_manager(
         return;
     };
     match manager.page {
-        ProfileManagerPage::List => render_list(frame, area, app, manager, state, theme),
         ProfileManagerPage::Form => render_form(frame, area, app, manager, state, theme),
+        ProfileManagerPage::Scope => render_scope(frame, area, manager, state, theme),
         ProfileManagerPage::ConfirmDelete => {
             render_confirmation(frame, area, app, manager, state, theme);
         }
     }
-}
-
-fn render_list(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    app: &App,
-    manager: &ProfileManagerState,
-    state: &mut UiState,
-    theme: Theme,
-) {
-    let panel = manager_panel(area, 108, 32);
-    let title = format!(" CONNECTIONS // {} PROFILES ", app.profiles.len());
-    let inner = render_panel(frame, panel, &title, theme);
-    if inner.height < 5 {
-        return;
-    }
-
-    let header = Rect::new(inner.x, inner.y, inner.width, 1);
-    let compact = inner.width < 72;
-    if compact {
-        frame.render_widget(
-            Paragraph::new("PROFILE / DRIVER / ENDPOINT / POLICY")
-                .style(Style::new().fg(theme.muted).bg(theme.surface)),
-            header,
-        );
-    } else {
-        render_profile_columns(
-            frame,
-            header,
-            ["", "PROFILE", "DRIVER", "ENDPOINT", "ENVIRONMENT", "ACCESS"],
-            Style::new().fg(theme.muted).bg(theme.surface),
-        );
-    }
-
-    let buttons_y = inner.bottom().saturating_sub(2);
-    let message_y = buttons_y.saturating_sub(2);
-    let rows_start = inner.y.saturating_add(2);
-    let rows_height = message_y.saturating_sub(rows_start);
-    let row_height = if compact { 2 } else { 1 };
-    let row_capacity = usize::from(rows_height / row_height);
-    if app.profiles.is_empty() {
-        frame.render_widget(
-            Paragraph::new("No saved connections. Press n to create one.")
-                .style(Style::new().fg(theme.muted).bg(theme.surface))
-                .alignment(ratatui::layout::Alignment::Center),
-            Rect::new(inner.x, rows_start, inner.width, rows_height.max(1)),
-        );
-    } else {
-        let start = viewport_start(manager.selected, app.profiles.len(), row_capacity);
-        for (visible_index, (index, profile)) in app
-            .profiles
-            .iter()
-            .enumerate()
-            .skip(start)
-            .take(row_capacity)
-            .enumerate()
-        {
-            let row_area = Rect::new(
-                inner.x,
-                rows_start + visible_index as u16 * row_height,
-                inner.width,
-                row_height,
-            );
-            let selected = index == manager.selected;
-            let status = if app.connection.profile_id == Some(profile.id) {
-                "● ACTIVE"
-            } else if app.connection.pending_profile_id == Some(profile.id) {
-                "◌ LINKING"
-            } else {
-                "○"
-            };
-            let values = [
-                status.to_owned(),
-                safe_line(&profile.name),
-                kind_name(profile.kind).to_owned(),
-                profile_endpoint(profile),
-                environment_name(profile.environment).to_owned(),
-                if profile.read_only {
-                    "READ ONLY".to_owned()
-                } else {
-                    "READ WRITE".to_owned()
-                },
-            ];
-            let style = if selected {
-                Style::new()
-                    .fg(theme.text)
-                    .bg(theme.selection)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::new().fg(theme.text).bg(theme.surface)
-            };
-            if compact {
-                render_compact_profile_row(frame, row_area, &values, style, theme);
-            } else {
-                render_profile_columns_owned(frame, row_area, values, style);
-            }
-            if manager.operation.is_none() {
-                state.hit_regions.push(HitRegion {
-                    area: row_area,
-                    target: HitTarget::ProfileRow(index),
-                });
-            }
-        }
-    }
-
-    render_message_line(frame, manager, inner, message_y, theme);
-    let list_buttons: &[(ProfileButton, &str, bool)] = if app.profiles.is_empty() {
-        &[
-            (ProfileButton::New, "NEW", false),
-            (ProfileButton::Close, "CLOSE", false),
-        ]
-    } else {
-        &[
-            (ProfileButton::New, "NEW", false),
-            (ProfileButton::Edit, "EDIT", false),
-            (ProfileButton::Connect, "CONNECT", false),
-            (ProfileButton::Delete, "DELETE", false),
-            (ProfileButton::Close, "CLOSE", false),
-        ]
-    };
-    render_buttons(
-        frame,
-        Rect::new(inner.x, buttons_y, inner.width, 1),
-        list_buttons,
-        manager.operation.is_none(),
-        state,
-        theme,
-    );
-    render_hint(
-        frame,
-        Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
-        if compact {
-            "j/k move  Enter connect  n new  d delete  Esc close"
-        } else {
-            "j/k move   Enter connect   n new   e edit   d delete   Esc close"
-        },
-        theme,
-    );
 }
 
 fn render_form(
@@ -315,7 +177,9 @@ fn render_confirmation(
 ) {
     let panel = manager_panel(area, 68, 14);
     let inner = render_panel(frame, panel, " DELETE CONNECTION ", theme);
-    let profile = app.profiles.get(manager.selected);
+    let profile = manager
+        .delete_profile_id
+        .and_then(|profile_id| app.profiles.iter().find(|profile| profile.id == profile_id));
     let name = profile
         .map(|profile| safe_line(&profile.name))
         .unwrap_or_else(|| "selected connection".to_owned());
@@ -359,6 +223,73 @@ fn render_confirmation(
     );
 }
 
+fn render_scope(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    manager: &ProfileManagerState,
+    state: &mut UiState,
+    theme: Theme,
+) {
+    let inner = render_panel(
+        frame,
+        manager_panel(area, 96, 34),
+        " VISIBLE OBJECTS ",
+        theme,
+    );
+    let rows = manager.scope_rows_for_render();
+    for (offset, row) in rows
+        .iter()
+        .enumerate()
+        .skip(manager.scope_viewport)
+        .take(inner.height.saturating_sub(3) as usize)
+    {
+        let y = inner
+            .y
+            .saturating_add(offset.saturating_sub(manager.scope_viewport) as u16);
+        let active = manager.scope_selected_row.as_deref() == Some(row.id.as_str());
+        let marker = if row.selected { "[x]" } else { "[ ]" };
+        let prefix = if row.database { "" } else { "  " };
+        let text = format!(
+            "{prefix}{marker} {}{}",
+            row.name,
+            if row.read_only { " (mirrored)" } else { "" }
+        );
+        frame.render_widget(
+            Paragraph::new(text).style(
+                Style::new()
+                    .fg(if row.unavailable {
+                        theme.warning
+                    } else {
+                        theme.text
+                    })
+                    .bg(if active {
+                        theme.selection
+                    } else {
+                        theme.surface
+                    }),
+            ),
+            Rect::new(inner.x, y, inner.width, 1),
+        );
+        state.hit_regions.push(HitRegion {
+            area: Rect::new(inner.x, y, inner.width, 1),
+            target: HitTarget::ProfileScopeRow(row.id.clone()),
+        });
+    }
+    if let Some(warning) = manager.scope_warning() {
+        frame.render_widget(
+            Paragraph::new(sanitize_terminal_text(warning))
+                .style(Style::new().fg(theme.warning).bg(theme.surface)),
+            Rect::new(inner.x, inner.bottom().saturating_sub(2), inner.width, 1),
+        );
+    }
+    render_hint(
+        frame,
+        Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
+        "Space toggle   Enter back   Esc back",
+        theme,
+    );
+}
+
 fn render_panel(frame: &mut Frame<'_>, area: Rect, title: &str, theme: Theme) -> Rect {
     frame.render_widget(Clear, area);
     let block = Block::default()
@@ -376,85 +307,6 @@ fn render_panel(frame: &mut Frame<'_>, area: Rect, title: &str, theme: Theme) ->
     let inner = block.inner(area);
     frame.render_widget(block, area);
     inner
-}
-
-fn render_profile_columns(frame: &mut Frame<'_>, area: Rect, values: [&str; 6], style: Style) {
-    render_profile_columns_owned(frame, area, values.map(str::to_owned), style);
-}
-
-fn render_profile_columns_owned(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    values: [String; 6],
-    style: Style,
-) {
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(10),
-            Constraint::Length(18),
-            Constraint::Length(10),
-            Constraint::Min(12),
-            Constraint::Length(12),
-            Constraint::Length(11),
-        ])
-        .split(area);
-    for (column, value) in columns.iter().zip(values) {
-        frame.render_widget(
-            Paragraph::new(value)
-                .style(style)
-                .wrap(Wrap { trim: false }),
-            *column,
-        );
-    }
-}
-
-fn render_compact_profile_row(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    values: &[String; 6],
-    style: Style,
-    theme: Theme,
-) {
-    frame.render_widget(Block::new().style(style), area);
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(format!("{}  ", values[0]), style),
-            Span::styled(
-                format!("{}  ", values[1]),
-                style.add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                &values[2],
-                Style::new()
-                    .fg(theme.action)
-                    .bg(style.bg.unwrap_or(theme.surface)),
-            ),
-        ]))
-        .style(style),
-        Rect::new(area.x, area.y, area.width, 1),
-    );
-    if area.height > 1 {
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(
-                    format!("{}  ", values[4]),
-                    Style::new()
-                        .fg(theme.muted)
-                        .bg(style.bg.unwrap_or(theme.surface)),
-                ),
-                Span::styled(
-                    format!("{}  ", values[5]),
-                    Style::new()
-                        .fg(theme.warning)
-                        .bg(style.bg.unwrap_or(theme.surface)),
-                ),
-                Span::styled(&values[3], style),
-            ]))
-            .style(style),
-            Rect::new(area.x, area.y.saturating_add(1), area.width, 1),
-        );
-    }
 }
 
 fn render_field(
@@ -691,6 +543,7 @@ fn field_value(draft: &ProfileDraft, field: ProfileField) -> String {
         }
         ProfileField::Database => safe_line(draft.database.value()),
         ProfileField::Schema => safe_line(draft.schema.value()),
+        ProfileField::VisibleObjects => draft.visible_objects_summary(),
         ProfileField::SslMode => ssl_name(draft.ssl_mode).to_owned(),
         ProfileField::Environment => environment_name(draft.environment).to_owned(),
         ProfileField::ReadOnly => toggle_value(draft.read_only),
@@ -714,6 +567,7 @@ fn field_label(field: ProfileField) -> &'static str {
         ProfileField::Password => "PASSWORD",
         ProfileField::Database => "DATABASE",
         ProfileField::Schema => "SCHEMA",
+        ProfileField::VisibleObjects => "VISIBLE OBJECTS",
         ProfileField::SslMode => "SSL MODE",
         ProfileField::Environment => "ENVIRONMENT",
         ProfileField::ReadOnly => "READ ONLY",
@@ -785,30 +639,6 @@ fn operation_name(operation: ProfileOperation) -> &'static str {
         ProfileOperation::SavingAndConnecting => "SAVING & CONNECTING",
         ProfileOperation::Deleting => "DELETING PROFILE",
         ProfileOperation::Connecting => "CONNECTING",
-    }
-}
-
-fn profile_endpoint(profile: &ConnectionProfile) -> String {
-    match profile.kind {
-        DatabaseKind::Postgres | DatabaseKind::MySql => {
-            let host = profile.host.as_deref().unwrap_or("unknown");
-            let port = profile
-                .port
-                .map(|port| format!(":{port}"))
-                .unwrap_or_default();
-            let database = profile
-                .database
-                .as_deref()
-                .map(|database| format!("/{database}"))
-                .unwrap_or_default();
-            safe_line(&format!("{host}{port}{database}"))
-        }
-        DatabaseKind::Sqlite => profile
-            .sqlite_path
-            .as_ref()
-            .map(|path| safe_line(&path.to_string_lossy()))
-            .or_else(|| profile.database.as_deref().map(safe_line))
-            .unwrap_or_else(|| ":memory:".to_owned()),
     }
 }
 

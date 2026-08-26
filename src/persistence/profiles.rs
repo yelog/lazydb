@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::profile::ConnectionProfile;
 
-const PROFILE_FILE_VERSION: u16 = 1;
+const PROFILE_FILE_VERSION: u16 = 2;
 
 #[derive(Clone, Debug)]
 pub struct ProfileStore {
@@ -26,8 +26,8 @@ pub enum PersistenceError {
     Decode(#[from] toml::de::Error),
     #[error("profile serialization failed: {0}")]
     Encode(#[from] toml::ser::Error),
-    #[error("profile file version {0} is not supported")]
-    UnsupportedVersion(u16),
+    #[error("profile file version {found} is not supported; expected version {expected}")]
+    UnsupportedVersion { found: u16, expected: u16 },
     #[error("profile UUID {0} appears more than once")]
     DuplicateProfileId(Uuid),
     #[error("profile path has no parent directory")]
@@ -35,9 +35,15 @@ pub enum PersistenceError {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct ProfileFile {
     version: u16,
     profiles: Vec<ConnectionProfile>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProfileFileHeader {
+    version: u16,
 }
 
 impl ProfileStore {
@@ -55,10 +61,14 @@ impl ProfileStore {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(error.into()),
         };
-        let file: ProfileFile = toml::from_str(&contents)?;
-        if file.version != PROFILE_FILE_VERSION {
-            return Err(PersistenceError::UnsupportedVersion(file.version));
+        let header: ProfileFileHeader = toml::from_str(&contents)?;
+        if header.version != PROFILE_FILE_VERSION {
+            return Err(PersistenceError::UnsupportedVersion {
+                found: header.version,
+                expected: PROFILE_FILE_VERSION,
+            });
         }
+        let file: ProfileFile = toml::from_str(&contents)?;
         validate_profile_ids(&file.profiles)?;
         Ok(file.profiles)
     }

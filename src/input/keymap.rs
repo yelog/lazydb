@@ -103,7 +103,10 @@ impl Keymap {
                 _ => None,
             };
         }
-        if app.active_console().completion.is_some() {
+        if app
+            .active_console_opt()
+            .is_some_and(|tab| tab.completion.is_some())
+        {
             let completion_action = match event.code {
                 KeyCode::Char('n') if event.modifiers.contains(KeyModifiers::CONTROL) => {
                     Some(Action::CompletionNext)
@@ -124,7 +127,7 @@ impl Keymap {
             && started.elapsed() <= SEQUENCE_TIMEOUT
             && focus == app.focus
             && editor_mode == app.active_editor_mode()
-            && tab_id == app.active_console().id
+            && app.active_console_opt().is_some_and(|tab| tab_id == tab.id)
             && let Some(action) = map_pending(pending, event)
         {
             return Some(action);
@@ -138,9 +141,9 @@ impl Keymap {
                     None
                 }
                 KeyCode::Char('c') => {
-                    if app.active_console().query_status
-                        == crate::model::workspace::QueryStatus::Running
-                    {
+                    if app.active_console_opt().is_some_and(|tab| {
+                        tab.query_status == crate::model::workspace::QueryStatus::Running
+                    }) {
                         Some(Action::CancelActiveQuery)
                     } else if app.focus == Focus::Editor
                         && app.active_editor_mode() == EditorMode::Insert
@@ -201,7 +204,7 @@ impl Keymap {
         }
 
         match app.focus {
-            Focus::Explorer => map_explorer(event.code),
+            Focus::Explorer => map_explorer(event.code, app),
             Focus::Editor => None,
             Focus::Results => map_results(event.code),
         }
@@ -213,7 +216,9 @@ impl Keymap {
             Instant::now(),
             app.focus,
             app.active_editor_mode(),
-            app.active_console().id,
+            app.tabs
+                .get(app.active_tab)
+                .map_or(Uuid::nil(), |tab| tab.id()),
         ));
     }
 
@@ -232,7 +237,7 @@ fn map_pending(pending: Pending, event: KeyEvent) -> Option<Action> {
         return None;
     }
     match (pending, event.code) {
-        (Pending::Leader, KeyCode::Char('c')) => Some(Action::OpenProfileManager),
+        (Pending::Leader, KeyCode::Char('c')) => Some(Action::Focus(Focus::Explorer)),
         (Pending::Leader, KeyCode::Char('n')) => Some(Action::NewConsole),
         (Pending::Leader, KeyCode::Char('r')) => Some(Action::RunActiveSql),
         (Pending::Leader, KeyCode::Char('R')) => Some(Action::RunAllSql),
@@ -296,24 +301,18 @@ fn map_profile_manager(event: KeyEvent, app: &App) -> Option<Action> {
         return Some(Action::ProfileTest);
     }
     match manager.page {
-        ProfileManagerPage::List => map_profile_list(event.code),
         ProfileManagerPage::Form => map_profile_form(event.code, manager.selected_field),
+        ProfileManagerPage::Scope => match event.code {
+            KeyCode::Esc | KeyCode::Enter => Some(Action::ProfileScopeBack),
+            KeyCode::Up | KeyCode::Char('k') => Some(Action::ProfileScopeMove(-1)),
+            KeyCode::Down | KeyCode::Char('j') => Some(Action::ProfileScopeMove(1)),
+            KeyCode::Char(' ') => manager
+                .scope_selected_row
+                .clone()
+                .map(Action::ProfileToggleScopeRow),
+            _ => None,
+        },
         ProfileManagerPage::ConfirmDelete => map_profile_delete_confirmation(event.code),
-    }
-}
-
-fn map_profile_list(code: KeyCode) -> Option<Action> {
-    match code {
-        KeyCode::Char('j') | KeyCode::Down => Some(Action::ProfileMove(1)),
-        KeyCode::Char('k') | KeyCode::Up => Some(Action::ProfileMove(-1)),
-        KeyCode::Home => Some(Action::ProfileMove(isize::MIN)),
-        KeyCode::End => Some(Action::ProfileMove(isize::MAX)),
-        KeyCode::Enter => Some(Action::ProfileConnectSelected),
-        KeyCode::Char('n') => Some(Action::ProfileStartNew),
-        KeyCode::Char('e') => Some(Action::ProfileStartEdit),
-        KeyCode::Char('d') => Some(Action::ProfileRequestDelete),
-        KeyCode::Esc | KeyCode::Char('q') => Some(Action::CloseProfileManager),
-        _ => None,
     }
 }
 
@@ -335,6 +334,10 @@ fn map_profile_form(code: KeyCode, field: ProfileField) -> Option<Action> {
             KeyCode::End => Some(Action::ProfileMoveEnd),
             _ => None,
         };
+    }
+    if field == ProfileField::VisibleObjects {
+        return matches!(code, KeyCode::Enter | KeyCode::Char(' '))
+            .then_some(Action::ProfileOpenScope);
     }
     if is_cycle_field(field) {
         return match code {
@@ -402,16 +405,37 @@ fn is_toggle_field(field: ProfileField) -> bool {
     )
 }
 
-fn map_explorer(code: KeyCode) -> Option<Action> {
+fn map_explorer(code: KeyCode, app: &App) -> Option<Action> {
+    let selected_profile = app
+        .explorer
+        .normalized
+        .selected
+        .as_ref()
+        .and_then(|node| node.profile_id());
+    match code {
+        KeyCode::Char('n') => return Some(Action::ProfileStartNew),
+        KeyCode::Char('e') => {
+            return selected_profile.map(|profile_id| Action::ProfileStartEdit { profile_id });
+        }
+        KeyCode::Char('d') => {
+            return selected_profile.map(|profile_id| Action::ProfileRequestDelete { profile_id });
+        }
+        KeyCode::Char('c') => {
+            return selected_profile.map(|profile_id| Action::RequestProfileConnect { profile_id });
+        }
+        KeyCode::Char('x') => {
+            return selected_profile
+                .map(|profile_id| Action::RequestProfileDisconnect { profile_id });
+        }
+        _ => {}
+    }
     match code {
         KeyCode::Char('j') | KeyCode::Down => Some(Action::ExplorerMove(1)),
         KeyCode::Char('k') | KeyCode::Up => Some(Action::ExplorerMove(-1)),
-        KeyCode::Char('h')
-        | KeyCode::Char('l')
-        | KeyCode::Enter
-        | KeyCode::Right
-        | KeyCode::Left => Some(Action::ExplorerToggle),
-        KeyCode::Char('r') => Some(Action::RefreshCatalog),
+        KeyCode::Char('l') | KeyCode::Right => Some(Action::ExplorerExpand),
+        KeyCode::Char('h') | KeyCode::Left => Some(Action::ExplorerCollapse),
+        KeyCode::Enter => Some(Action::ExplorerPrimary),
+        KeyCode::Char('r') => Some(Action::ExplorerRefresh),
         KeyCode::Char('p') => Some(Action::PreviewSelected),
         KeyCode::Char('D') => Some(Action::DdlSelected),
         KeyCode::Home => Some(Action::ExplorerMove(isize::MIN)),

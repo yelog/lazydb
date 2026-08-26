@@ -5,17 +5,6 @@ use std::{
     sync::{Arc, Mutex as StdMutex},
     time::Duration,
 };
-
-use anyhow::{Context, Result};
-use crossterm::event::{Event, EventStream};
-use futures_util::StreamExt;
-use secrecy::SecretString;
-use tokio::{
-    sync::{Mutex, mpsc},
-    task::{self, JoinHandle},
-    time::sleep,
-    time::{MissedTickBehavior, interval, timeout},
-};
 use uuid::Uuid;
 
 use crate::{
@@ -28,7 +17,7 @@ use crate::{
         mouse::map_mouse,
     },
     model::{
-        profile_manager::{CredentialUpdate, ProfileSubmission},
+        profile_manager::{CredentialUpdate, ProfileChange, ProfileSubmission},
         workspace::{ConnectionIdentity, QueryStatus},
     },
     persistence::{
@@ -42,6 +31,16 @@ use crate::{
     security::sanitize_terminal_text,
     terminal::TerminalSession,
     ui::{self, UiState},
+};
+use anyhow::{Context, Result};
+use crossterm::event::{Event, EventStream};
+use futures_util::StreamExt;
+use secrecy::SecretString;
+use tokio::{
+    sync::{Mutex, mpsc},
+    task::{self, JoinHandle},
+    time::sleep,
+    time::{MissedTickBehavior, interval, timeout},
 };
 
 pub(crate) mod transaction;
@@ -170,10 +169,7 @@ impl Runtime {
                 profile_id,
                 generation,
             } => self.connect(profile_id, generation),
-            Command::LoadCatalog {
-                profile_id,
-                generation,
-            } => self.load_catalog(profile_id, generation),
+            Command::LoadCatalogPage(request) => self.load_catalog_page(request),
             Command::RunQuery {
                 connection,
                 tab_id,
@@ -266,6 +262,7 @@ impl Runtime {
             let ProfileSubmission {
                 profile,
                 credential,
+                discovery_fingerprint,
             } = submission;
             let password =
                 match resolve_submission_password(&registry, &secret_store, &profile, credential)
@@ -281,22 +278,30 @@ impl Runtime {
                     }
                 };
             match DatabaseConnection::connect(&profile, password.as_ref()).await {
-                Ok(database) => {
-                    let result = database.probe().await;
-                    database.close().await;
-                    match result {
-                        Ok(server) => {
-                            let _ =
-                                sender.send(Action::ProfileTestSucceeded { request_id, server });
-                        }
-                        Err(error) => {
-                            let _ = sender.send(Action::ProfileTestFailed {
-                                request_id,
-                                message: sanitize_terminal_text(&error.to_string()),
-                            });
-                        }
+                Ok(database) => match database.probe().await {
+                    Ok(server) => {
+                        let capabilities = database.catalog_capabilities();
+                        let discovery = database
+                            .discover_catalog_scope()
+                            .await
+                            .map_err(|error| sanitize_terminal_text(&error.to_string()));
+                        database.close().await;
+                        let _ = sender.send(Action::ProfileTestSucceeded {
+                            request_id,
+                            fingerprint: discovery_fingerprint,
+                            server,
+                            capabilities,
+                            discovery,
+                        });
                     }
-                }
+                    Err(error) => {
+                        database.close().await;
+                        let _ = sender.send(Action::ProfileTestFailed {
+                            request_id,
+                            message: sanitize_terminal_text(&error.to_string()),
+                        });
+                    }
+                },
                 Err(error) => {
                     let _ = sender.send(Action::ProfileTestFailed {
                         request_id,
@@ -322,6 +327,7 @@ impl Runtime {
                         request_id,
                         profile: saved.profile,
                         warning: saved.warning,
+                        change: saved.change,
                         connect,
                     });
                 }
@@ -531,34 +537,45 @@ impl Runtime {
         }));
     }
 
-    fn load_catalog(&mut self, profile_id: Uuid, generation: u64) {
+    fn load_catalog_page(&mut self, request: crate::db::catalog::CatalogRequest) {
         let sender = self.event_sender.clone();
         let connection = Arc::clone(&self.connection);
         self.background_tasks.push(tokio::spawn(async move {
+            let key = request.key.clone();
             let database = {
                 let guard = connection.lock().await;
                 guard
                     .as_ref()
                     .filter(|active| {
-                        active.profile_id == profile_id && active.generation == generation
+                        active.profile_id == key.connection.profile_id
+                            && active.generation == key.connection.generation
                     })
                     .map(|active| active.database.clone())
             };
             let Some(database) = database else {
+                let _ = sender.send(Action::CatalogPageFailed {
+                    key,
+                    category: crate::db::ErrorCategory::Internal,
+                    message: "catalog request connection is no longer active".to_owned(),
+                });
                 return;
             };
-            match database.load_catalog().await {
-                Ok(nodes) => {
-                    let _ = sender.send(Action::CatalogLoaded {
-                        profile_id,
-                        generation,
-                        nodes,
-                    });
+            match database.load_catalog_page(&request).await {
+                Ok(page) => {
+                    if let Err(error) = page.validate_for(&request) {
+                        let _ = sender.send(Action::CatalogPageFailed {
+                            key,
+                            category: crate::db::ErrorCategory::Internal,
+                            message: format!("adapter returned invalid catalog page: {error}"),
+                        });
+                    } else {
+                        let _ = sender.send(Action::CatalogPageLoaded(page));
+                    }
                 }
                 Err(error) => {
-                    let _ = sender.send(Action::CatalogFailed {
-                        profile_id,
-                        generation,
+                    let _ = sender.send(Action::CatalogPageFailed {
+                        key,
+                        category: error.category,
                         message: error.to_string(),
                     });
                 }
@@ -615,6 +632,7 @@ impl Runtime {
         query_generation: u64,
         transaction_generation: u64,
     ) {
+        self.reap_finished_manual_worker(tab_id);
         self.ensure_manual_worker(
             connection,
             tab_id,
@@ -632,6 +650,7 @@ impl Runtime {
         transaction_generation: u64,
         sql: String,
     ) {
+        self.reap_finished_manual_worker(tab_id);
         let (reply, result) = tokio::sync::oneshot::channel();
         let (cancel, cancel_receiver) = tokio::sync::oneshot::channel();
         self.ensure_manual_worker(
@@ -688,6 +707,7 @@ impl Runtime {
         query_generation: u64,
         transaction_generation: u64,
     ) {
+        self.reap_finished_manual_worker(tab_id);
         let Some(entry) = self.manual_transactions.get(&tab_id) else {
             return;
         };
@@ -749,6 +769,7 @@ impl Runtime {
         query_generation: u64,
         transaction_generation: u64,
     ) {
+        self.reap_finished_manual_worker(tab_id);
         let Some(entry) = self.manual_transactions.get(&tab_id) else {
             return;
         };
@@ -832,10 +853,11 @@ impl Runtime {
             return;
         }
         let (proxy, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let database = Arc::clone(&self.connection);
+        let active_connection = Arc::clone(&self.connection);
         let sender = self.event_sender.clone();
         let worker_handle = tokio::spawn(async move {
-            let Some(database) = active_database(database, connection).await else {
+            let Some(database) = active_database(Arc::clone(&active_connection), connection).await
+            else {
                 let _ = sender.send(Action::ManualStartFailed {
                     tab_id,
                     query_generation,
@@ -844,6 +866,10 @@ impl Runtime {
                     message: "No active database connection".to_owned(),
                 });
                 return crate::db::transaction::WorkerDisposition::Quarantine;
+            };
+            let quarantine_invalidates_connection = match &database {
+                DatabaseConnection::Sqlite(_) => true,
+                DatabaseConnection::Postgres(_) | DatabaseConnection::MySql(_) => false,
             };
             let worker = match database.start_transaction_worker().await {
                 Ok(worker) => worker,
@@ -875,16 +901,34 @@ impl Runtime {
                         if requests.send(request).is_err() { break; }
                     }
                     disposition = &mut worker => {
-                        if disposition.as_ref().is_ok_and(|d| *d == crate::db::transaction::WorkerDisposition::ImplicitlyEnded) {
+                        let disposition = disposition.unwrap_or(crate::db::transaction::WorkerDisposition::Quarantine);
+                        if disposition == crate::db::transaction::WorkerDisposition::ImplicitlyEnded {
                             let _ = sender.send(Action::ManualImplicitlyEnded { tab_id, query_generation, transaction_generation, connection });
                         }
-                        return disposition.unwrap_or(crate::db::transaction::WorkerDisposition::Quarantine);
+                        if disposition == crate::db::transaction::WorkerDisposition::Quarantine
+                            && quarantine_invalidates_connection
+                        {
+                            handle_quarantined_connection(
+                                Arc::clone(&active_connection),
+                                sender.clone(),
+                                connection,
+                            )
+                            .await;
+                        }
+                        return disposition;
                     }
                 }
             }
-            worker
+            let disposition = worker
                 .await
-                .unwrap_or(crate::db::transaction::WorkerDisposition::Quarantine)
+                .unwrap_or(crate::db::transaction::WorkerDisposition::Quarantine);
+            if disposition == crate::db::transaction::WorkerDisposition::Quarantine
+                && quarantine_invalidates_connection
+            {
+                handle_quarantined_connection(Arc::clone(&active_connection), sender, connection)
+                    .await;
+            }
+            disposition
         });
         self.manual_transactions.insert(
             tab_id,
@@ -907,6 +951,10 @@ impl Runtime {
                 reply,
             });
         }
+    }
+
+    fn reap_finished_manual_worker(&mut self, tab_id: Uuid) {
+        reap_finished_manual_worker(&mut self.manual_transactions, tab_id);
     }
 
     fn preview_table(
@@ -939,6 +987,7 @@ impl Runtime {
                     let _ = sender.send(Action::PreviewFinished {
                         tab_id,
                         generation,
+                        connection: expected,
                         sql,
                         outcome,
                     });
@@ -982,6 +1031,7 @@ impl Runtime {
                     let _ = sender.send(Action::DdlLoaded {
                         tab_id,
                         generation,
+                        connection: expected,
                         ddl,
                     });
                 }
@@ -1044,6 +1094,7 @@ impl Runtime {
 struct SavedProfile {
     profile: ConnectionProfile,
     warning: Option<String>,
+    change: ProfileChange,
 }
 
 async fn save_profile_transaction(
@@ -1056,12 +1107,20 @@ async fn save_profile_transaction(
     let ProfileSubmission {
         mut profile,
         credential,
+        ..
     } = submission;
     let profile_id = profile.id;
     let old_profile = snapshot.profiles.get(&profile_id).cloned();
     let mut next = snapshot;
     let mut previous_secret = None;
     let mut warning = None;
+    let credentials_changed = match &credential {
+        CredentialUpdate::Preserve => false,
+        CredentialUpdate::Session(_) | CredentialUpdate::Remember(_) => true,
+        CredentialUpdate::Forget => old_profile
+            .as_ref()
+            .is_some_and(|old| old.secret_ref.is_some()),
+    };
 
     match credential {
         CredentialUpdate::Preserve => {
@@ -1137,6 +1196,28 @@ async fn save_profile_transaction(
         }
     }
 
+    let change = ProfileChange {
+        connection_settings_changed: old_profile.as_ref().is_none_or(|old| {
+            old.kind != profile.kind
+                || old.host != profile.host
+                || old.port != profile.port
+                || old.user != profile.user
+                || old.database != profile.database
+                || old.default_schema != profile.default_schema
+                || old.sqlite_path != profile.sqlite_path
+                || old.ssl_mode != profile.ssl_mode
+        }),
+        catalog_scope_changed: old_profile
+            .as_ref()
+            .is_none_or(|old| old.catalog_scope != profile.catalog_scope),
+        display_only_changed: old_profile.as_ref().is_none_or(|old| {
+            old.name != profile.name
+                || old.read_only != profile.read_only
+                || old.environment != profile.environment
+        }),
+        credentials_changed,
+    };
+
     if !next.profiles.contains_key(&profile_id) {
         next.order.push(profile_id);
     }
@@ -1151,7 +1232,11 @@ async fn save_profile_transaction(
     }
 
     *registry.lock().await = next;
-    Ok(SavedProfile { profile, warning })
+    Ok(SavedProfile {
+        profile,
+        warning,
+        change,
+    })
 }
 
 async fn delete_profile_transaction(
@@ -1417,9 +1502,58 @@ async fn active_database(
         .map(|active| active.database.clone())
 }
 
+fn take_active_connection(
+    active: &mut Option<ActiveConnection>,
+    expected: ConnectionIdentity,
+) -> Option<ActiveConnection> {
+    if active.as_ref().is_some_and(|active| {
+        active.profile_id == expected.profile_id && active.generation == expected.generation
+    }) {
+        active.take()
+    } else {
+        None
+    }
+}
+
+fn reap_finished_manual_worker(
+    manual_transactions: &mut HashMap<Uuid, ManualTransactionEntry>,
+    tab_id: Uuid,
+) {
+    let finished = manual_transactions
+        .get(&tab_id)
+        .is_some_and(|entry| entry.worker_handle.is_finished());
+    if finished {
+        manual_transactions.remove(&tab_id);
+    }
+}
+
+async fn handle_quarantined_connection(
+    connection: Arc<Mutex<Option<ActiveConnection>>>,
+    sender: mpsc::UnboundedSender<Action>,
+    expected: ConnectionIdentity,
+) {
+    let active = {
+        let mut active = connection.lock().await;
+        take_active_connection(&mut active, expected)
+    };
+    let Some(active) = active else {
+        return;
+    };
+    active.database.close().await;
+    let _ = sender.send(Action::ConnectionInvalidated {
+        connection: expected,
+        message: "The SQLite transaction worker was quarantined and closed this connection. Reconnect before running more queries. The transaction outcome is unknown."
+            .to_owned(),
+    });
+}
+
 pub async fn run_tui(cli: Cli) -> Result<()> {
     let startup = load_startup_profiles(&cli)?;
-    let mut app = App::with_confirmation_policy(startup.profiles.clone(), cli.confirm_execution);
+    let mut app = App::with_startup_profiles_and_confirmation_policy(
+        startup.profiles.clone(),
+        startup.persisted.clone(),
+        cli.confirm_execution,
+    );
     let (event_sender, mut event_receiver) = mpsc::unbounded_channel();
     let mut runtime = Runtime::new(
         startup.profiles,
@@ -1439,13 +1573,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     let result: Result<()> = async {
-        apply_action(
-            &mut app,
-            &mut runtime,
-            startup
-                .selected
-                .map_or(Action::OpenProfileManager, Action::RequestConnect),
-        );
+        apply_startup_action_with_runtime(&mut app, &mut runtime, startup.selected);
         terminal.draw(|frame| ui::render_with_state(frame, &app, &mut ui_state))?;
         sync_editor_viewport(&mut app, &mut runtime, &ui_state);
 
@@ -1490,7 +1618,10 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                 }
                 _ = ticker.tick() => {
                     redraw = ui_state.effects.is_active()
-                        || app.tabs.iter().any(|tab| tab.query_status == QueryStatus::Running);
+                        || app.tabs.iter().any(|tab| {
+                            tab.as_console()
+                                .is_some_and(|tab| tab.query_status == QueryStatus::Running)
+                        });
                 }
             }
 
@@ -1506,6 +1637,18 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
 
     runtime.shutdown().await;
     result
+}
+
+pub fn apply_startup_action(app: &mut App, selected: Option<Uuid>) {
+    if let Some(profile_id) = selected {
+        app.update(Action::RequestProfileConnect { profile_id });
+    }
+}
+
+fn apply_startup_action_with_runtime(app: &mut App, runtime: &mut Runtime, selected: Option<Uuid>) {
+    if let Some(profile_id) = selected {
+        apply_action(app, runtime, Action::RequestProfileConnect { profile_id });
+    }
 }
 
 fn apply_action(app: &mut App, runtime: &mut Runtime, action: Action) {
@@ -1597,4 +1740,74 @@ pub fn load_startup_profiles(cli: &Cli) -> Result<StartupProfiles> {
         selected,
         profile_store: store,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{db::transaction::WorkerDisposition, profile::import_connection_url};
+
+    #[tokio::test]
+    async fn quarantine_removal_requires_exact_connection_identity() {
+        let profile = import_connection_url("sqlite::memory:", Some("runtime-test"))
+            .unwrap()
+            .profile;
+        let database = DatabaseConnection::connect(&profile, None).await.unwrap();
+        let mut active = Some(ActiveConnection {
+            profile_id: profile.id,
+            generation: 2,
+            database,
+        });
+
+        assert!(
+            take_active_connection(
+                &mut active,
+                ConnectionIdentity {
+                    profile_id: profile.id,
+                    generation: 1,
+                }
+            )
+            .is_none()
+        );
+        assert!(active.is_some());
+
+        let removed = take_active_connection(
+            &mut active,
+            ConnectionIdentity {
+                profile_id: profile.id,
+                generation: 2,
+            },
+        );
+        assert!(removed.is_some());
+        assert!(active.is_none());
+        removed.unwrap().database.close().await;
+    }
+
+    #[tokio::test]
+    async fn finished_manual_worker_entry_is_reaped() {
+        let tab_id = Uuid::new_v4();
+        let profile_id = Uuid::new_v4();
+        let (request_sender, _requests) = tokio::sync::mpsc::unbounded_channel();
+        let worker_handle = tokio::spawn(async { WorkerDisposition::Committed });
+        tokio::task::yield_now().await;
+        assert!(worker_handle.is_finished());
+        let mut entries = HashMap::from([(
+            tab_id,
+            ManualTransactionEntry {
+                connection: ConnectionIdentity {
+                    profile_id,
+                    generation: 1,
+                },
+                transaction_generation: 1,
+                request_sender,
+                worker_handle,
+                cancellation_sender: None,
+                forced_close_handle: ForcedCloseHandle::new(),
+            },
+        )]);
+
+        reap_finished_manual_worker(&mut entries, tab_id);
+
+        assert!(!entries.contains_key(&tab_id));
+    }
 }

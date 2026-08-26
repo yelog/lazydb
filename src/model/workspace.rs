@@ -2,10 +2,13 @@ use std::collections::HashSet;
 
 use uuid::Uuid;
 
+pub use crate::identity::ConnectionIdentity;
+
 use crate::db::{
     ServerInfo,
-    catalog::{CatalogId, CatalogKind, CatalogNode},
+    catalog::{CatalogEntry, CatalogId, CatalogKind, CatalogNode, OptionalMetadata},
 };
+use crate::model::explorer::{ExplorerNodeId, ExplorerTreeState, StatusRowKind};
 use crate::model::transaction::{
     CancellationIntent, DeferredTransactionPrompt, TransactionExitChoice,
 };
@@ -127,105 +130,342 @@ impl ConnectionState {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ConnectionIdentity {
-    pub profile_id: Uuid,
-    pub generation: u64,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VisibleCatalogNode {
-    pub node_index: usize,
+    pub id: ExplorerNodeId,
     pub depth: usize,
+    pub label: String,
+    pub detail: Option<String>,
+    pub kind: Option<CatalogKind>,
+    pub expandable: bool,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct ExplorerState {
+    pub normalized: ExplorerTreeState,
     pub nodes: Vec<CatalogNode>,
     pub expanded: HashSet<CatalogId>,
     pub selected: usize,
     pub scroll: usize,
     pub catalog_generation: u64,
     pub completion_index: CompletionIndex,
+    pub active_profile: Option<Uuid>,
 }
 
 impl ExplorerState {
     pub fn connection_changed(&mut self) {
-        self.catalog_generation = self.catalog_generation.wrapping_add(1);
+        self.catalog_generation = self.catalog_generation.saturating_add(1);
         self.nodes.clear();
         self.expanded.clear();
         self.completion_index = CompletionIndex::default();
         self.selected = 0;
         self.scroll = 0;
+        self.active_profile = None;
     }
 
-    pub fn set_nodes(&mut self, nodes: Vec<CatalogNode>) {
-        self.catalog_generation = self.catalog_generation.wrapping_add(1);
-        self.completion_index = CompletionIndex::new(&nodes);
-        self.nodes = nodes;
-        self.expanded.clear();
-        for node in &self.nodes {
-            if matches!(node.kind, CatalogKind::Database | CatalogKind::Schema) {
-                self.expanded.insert(node.id.clone());
-            }
-        }
-        self.selected = 0;
-        self.scroll = 0;
+    pub fn rebuild_projection(&mut self, profile_id: Uuid) {
+        let Some(profile) = self.normalized.profiles.get(&profile_id) else {
+            self.nodes.clear();
+            return;
+        };
+        self.active_profile = Some(profile_id);
+        self.nodes = profile
+            .catalog
+            .entries()
+            .values()
+            .map(project_entry)
+            .collect();
+        self.nodes.sort_by(|left, right| {
+            left.id
+                .native_path
+                .cmp(&right.id.native_path)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        self.expanded = self
+            .normalized
+            .expanded
+            .iter()
+            .filter_map(|node| match node {
+                ExplorerNodeId::Catalog(id) => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        self.selected = self
+            .normalized
+            .selected_visible_index_for_profile(profile_id)
+            .unwrap_or(0);
+        self.normalized.ensure_selected_visible(8);
+        self.scroll = self
+            .normalized
+            .scroll
+            .min(self.normalized.visible().len().saturating_sub(1));
+        self.normalized.scroll = self.scroll;
     }
 
     pub fn visible(&self) -> Vec<VisibleCatalogNode> {
-        let mut visible = Vec::new();
-        for (index, node) in self.nodes.iter().enumerate() {
-            if node.parent_id.is_none() {
-                self.append_visible(index, 0, &mut visible);
-            }
-        }
-        visible
+        self.normalized
+            .visible()
+            .into_iter()
+            .map(|row| {
+                let profile = row
+                    .id
+                    .profile_id()
+                    .and_then(|profile_id| self.normalized.profiles.get(&profile_id));
+                let (label, detail, kind, expandable) = match &row.id {
+                    ExplorerNodeId::Catalog(id) => profile
+                        .and_then(|profile| profile.catalog.get(id))
+                        .map_or_else(
+                            || ("Missing object".to_owned(), None, None, false),
+                            |entry| {
+                                (
+                                    entry_label(entry),
+                                    entry_display_detail(entry),
+                                    Some(entry.kind),
+                                    entry.expandable,
+                                )
+                            },
+                        ),
+                    ExplorerNodeId::Group { parent, group } => {
+                        let detail = profile
+                            .and_then(|profile| profile.catalog.group_state(parent, *group))
+                            .map(|state| format!("{:?}", state.count));
+                        (group_label(*group).to_owned(), detail, None, true)
+                    }
+                    ExplorerNodeId::Status { owner, kind } => (
+                        status_label(*kind).to_owned(),
+                        profile.and_then(|profile| profile.load_errors.get(owner).cloned()),
+                        None,
+                        false,
+                    ),
+                    ExplorerNodeId::LoadMore { .. } => {
+                        ("Load more...".to_owned(), None, None, false)
+                    }
+                    ExplorerNodeId::Empty { .. } => ("No objects".to_owned(), None, None, false),
+                    ExplorerNodeId::Profile(_profile_id) => profile.map_or_else(
+                        || ("Missing profile".to_owned(), None, None, false),
+                        |profile| {
+                            (
+                                profile.display_name.clone(),
+                                Some(format!(
+                                    "{} {}  {}",
+                                    match profile.provenance {
+                                        crate::model::explorer::ProfileProvenance::Saved => "SAVED",
+                                        crate::model::explorer::ProfileProvenance::Session =>
+                                            "SESSION",
+                                    },
+                                    explorer_status_label(profile.status),
+                                    profile.endpoint,
+                                )),
+                                None,
+                                true,
+                            )
+                        },
+                    ),
+                    ExplorerNodeId::EmptyProfiles => (
+                        "No profiles".to_owned(),
+                        Some("NEW".to_owned()),
+                        None,
+                        false,
+                    ),
+                };
+                VisibleCatalogNode {
+                    id: row.id,
+                    depth: row.depth,
+                    label,
+                    detail,
+                    kind,
+                    expandable,
+                }
+            })
+            .collect()
     }
 
-    pub fn selected_node(&self) -> Option<&CatalogNode> {
-        let visible = self.visible();
-        visible
-            .get(self.selected)
-            .and_then(|visible| self.nodes.get(visible.node_index))
+    pub fn selected_id(&self) -> Option<&ExplorerNodeId> {
+        self.normalized.selected.as_ref()
+    }
+
+    pub fn selected_entry(&self) -> Option<&CatalogEntry> {
+        let ExplorerNodeId::Catalog(id) = self.selected_id()? else {
+            return None;
+        };
+        self.normalized
+            .profiles
+            .get(&id.profile_id())?
+            .catalog
+            .get(id)
     }
 
     pub fn move_selection(&mut self, delta: isize) {
-        let count = self.visible().len();
-        if count == 0 {
+        let rows = self.visible();
+        if rows.is_empty() {
             self.selected = 0;
             return;
         }
-        self.selected = self
+        let current = self
+            .normalized
             .selected
+            .as_ref()
+            .and_then(|selected| rows.iter().position(|row| &row.id == selected))
+            .unwrap_or(0);
+        self.selected = current
             .saturating_add_signed(delta)
-            .min(count.saturating_sub(1));
+            .min(rows.len().saturating_sub(1));
+        self.normalized.selected = Some(rows[self.selected].id.clone());
+        self.normalized.ensure_selected_visible(8);
+        self.scroll = self.normalized.scroll;
     }
 
-    pub fn toggle_selected(&mut self) {
-        let Some(id) = self.selected_node().map(|node| node.id.clone()) else {
+    pub fn select_id(&mut self, id: ExplorerNodeId) -> bool {
+        let rows = self.visible();
+        let Some(index) = rows.iter().position(|row| row.id == id) else {
+            return false;
+        };
+        self.selected = index;
+        self.normalized.selected = Some(id);
+        self.normalized.ensure_selected_visible(8);
+        self.scroll = self.normalized.scroll;
+        true
+    }
+
+    pub fn toggle_selected(&mut self) -> bool {
+        let Some(id) = self.selected_id().cloned() else {
+            return false;
+        };
+        if !matches!(
+            id,
+            ExplorerNodeId::Profile(_) | ExplorerNodeId::Catalog(_) | ExplorerNodeId::Group { .. }
+        ) {
+            return false;
+        }
+        if !self.normalized.expanded.remove(&id) {
+            self.normalized.expanded.insert(id);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn sync_selected_index(&mut self) {
+        let Some(selected) = self.normalized.selected.as_ref() else {
             return;
         };
-        if !self.expanded.remove(&id) {
-            self.expanded.insert(id);
-        }
+        self.selected = self
+            .visible()
+            .iter()
+            .position(|row| &row.id == selected)
+            .unwrap_or(0);
+        self.scroll = self.normalized.scroll;
     }
+}
 
-    fn append_visible(
-        &self,
-        node_index: usize,
-        depth: usize,
-        visible: &mut Vec<VisibleCatalogNode>,
-    ) {
-        visible.push(VisibleCatalogNode { node_index, depth });
-        let node = &self.nodes[node_index];
-        if !self.expanded.contains(&node.id) {
-            return;
-        }
-        for (child_index, child) in self.nodes.iter().enumerate() {
-            if child.parent_id.as_ref() == Some(&node.id) {
-                self.append_visible(child_index, depth + 1, visible);
+impl ExplorerTreeState {
+    fn selected_visible_index_for_profile(&self, profile_id: Uuid) -> Option<usize> {
+        let selected = self.selected.as_ref()?;
+        self.visible_profile(profile_id)
+            .iter()
+            .position(|row| &row.id == selected)
+    }
+}
+
+fn project_entry(entry: &CatalogEntry) -> CatalogNode {
+    CatalogNode::new(
+        entry.id.clone(),
+        entry.parent_id.clone(),
+        entry.qualified_name.object.clone(),
+        entry.native_kind.clone(),
+        match &entry.comment {
+            OptionalMetadata::Supported(comment) => comment.clone(),
+            OptionalMetadata::Unsupported => None,
+        },
+        entry.expandable,
+    )
+}
+
+fn group_label(group: crate::db::catalog::ObjectGroup) -> &'static str {
+    use crate::db::catalog::ObjectGroup;
+    match group {
+        ObjectGroup::Tables => "Tables",
+        ObjectGroup::Views => "Views",
+        ObjectGroup::MaterializedViews => "Materialized views",
+        ObjectGroup::Sequences => "Sequences",
+        ObjectGroup::Functions => "Functions",
+        ObjectGroup::Procedures => "Procedures",
+        ObjectGroup::Types => "Types",
+        ObjectGroup::Triggers => "Triggers",
+    }
+}
+
+fn status_label(kind: StatusRowKind) -> &'static str {
+    match kind {
+        StatusRowKind::Loading => "Loading...",
+        StatusRowKind::Retry => "Retry",
+        StatusRowKind::Stale => "Stale - retry",
+        StatusRowKind::PermissionDenied => "Permission denied - retry",
+    }
+}
+
+fn explorer_status_label(status: crate::model::explorer::ExplorerConnectionStatus) -> &'static str {
+    match status {
+        crate::model::explorer::ExplorerConnectionStatus::Offline => "OFFLINE",
+        crate::model::explorer::ExplorerConnectionStatus::Linking => "LINKING",
+        crate::model::explorer::ExplorerConnectionStatus::Online => "ONLINE",
+        crate::model::explorer::ExplorerConnectionStatus::Syncing => "SYNCING",
+        crate::model::explorer::ExplorerConnectionStatus::Failed => "FAILED",
+    }
+}
+
+fn entry_detail(entry: &CatalogEntry) -> Option<String> {
+    use crate::db::catalog::{CatalogMetadata, ConstraintMetadata};
+    match &entry.metadata {
+        CatalogMetadata::Column(column) => {
+            let mut flags = Vec::new();
+            if !column.nullable {
+                flags.push("NOT NULL".to_owned());
             }
+            if let OptionalMetadata::Supported(Some(default)) = &column.default_expression {
+                flags.push(format!("DEFAULT {default}"));
+            }
+            (!flags.is_empty()).then(|| flags.join(" "))
         }
+        CatalogMetadata::Index(index) => Some(format!(
+            "{} ({})",
+            if index.unique { "UNIQUE" } else { "INDEX" },
+            index.columns.join(", ")
+        )),
+        CatalogMetadata::Constraint(constraint) => Some(match constraint {
+            ConstraintMetadata::PrimaryKey { columns } => {
+                format!("PRIMARY KEY ({})", columns.join(", "))
+            }
+            ConstraintMetadata::Unique { columns } => format!("UNIQUE ({})", columns.join(", ")),
+            ConstraintMetadata::ForeignKey {
+                columns,
+                referenced_relation,
+                ..
+            } => format!(
+                "FOREIGN KEY ({}) -> {}",
+                columns.join(", "),
+                referenced_relation.object
+            ),
+            ConstraintMetadata::Check { expression } => format!("CHECK ({expression})"),
+        }),
+        CatalogMetadata::None => None,
+    }
+}
+
+fn entry_label(entry: &CatalogEntry) -> String {
+    format!("{}  {}", entry.qualified_name.object, entry.native_kind)
+}
+
+fn entry_display_detail(entry: &CatalogEntry) -> Option<String> {
+    let metadata = entry_detail(entry);
+    let comment = match &entry.comment {
+        OptionalMetadata::Supported(comment) => comment.clone(),
+        OptionalMetadata::Unsupported => None,
+    };
+    match (metadata, comment) {
+        (Some(metadata), Some(comment)) => Some(format!("{metadata}  {comment}")),
+        (Some(metadata), None) => Some(metadata),
+        (None, Some(comment)) => Some(comment),
+        (None, None) => None,
     }
 }

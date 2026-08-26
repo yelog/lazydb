@@ -38,6 +38,23 @@ async fn apply_next(
     action
 }
 
+async fn drain_catalog(
+    app: &mut App,
+    runtime: &mut Runtime,
+    receiver: &mut mpsc::UnboundedReceiver<Action>,
+) {
+    loop {
+        let Ok(Some(action)) = timeout(Duration::from_millis(100), receiver.recv()).await else {
+            break;
+        };
+        assert!(matches!(
+            action,
+            Action::CatalogPageLoaded(_) | Action::CatalogPageFailed { .. }
+        ));
+        dispatch(app, runtime, action);
+    }
+}
+
 fn set_sqlite_draft(app: &mut App, name: &str, path: &std::path::Path) {
     app.update(Action::ProfileCycle(2));
     let manager = app.profile_manager.as_mut().unwrap();
@@ -74,10 +91,7 @@ async fn save_and_connect(
     assert!(matches!(saved, Action::ProfileSaved { connect: true, .. }));
     let connected = apply_next(app, runtime, receiver).await;
     assert!(matches!(connected, Action::ConnectionSucceeded { .. }));
-    assert!(matches!(
-        apply_next(app, runtime, receiver).await,
-        Action::CatalogLoaded { .. }
-    ));
+    drain_catalog(app, runtime, receiver).await;
 }
 
 async fn query(
@@ -147,17 +161,18 @@ async fn two_sqlite_profiles_complete_the_full_runtime_lifecycle() {
     )
     .await;
 
-    dispatch(&mut app, &mut runtime, Action::OpenProfileManager);
-    app.profile_manager.as_mut().unwrap().selected = 0;
-    dispatch(&mut app, &mut runtime, Action::ProfileConnectSelected);
+    dispatch(
+        &mut app,
+        &mut runtime,
+        Action::RequestProfileConnect {
+            profile_id: alpha_id,
+        },
+    );
     assert!(matches!(
         apply_next(&mut app, &mut runtime, &mut receiver).await,
         Action::ConnectionSucceeded { .. }
     ));
-    assert!(matches!(
-        apply_next(&mut app, &mut runtime, &mut receiver).await,
-        Action::CatalogLoaded { .. }
-    ));
+    drain_catalog(&mut app, &mut runtime, &mut receiver).await;
     assert_eq!(app.connection.profile_id, Some(alpha_id));
     query(
         &mut app,
@@ -180,8 +195,13 @@ async fn two_sqlite_profiles_complete_the_full_runtime_lifecycle() {
         "alpha"
     );
 
-    app.profile_manager.as_mut().unwrap().selected = 0;
-    dispatch(&mut app, &mut runtime, Action::ProfileStartEdit);
+    dispatch(
+        &mut app,
+        &mut runtime,
+        Action::ProfileStartEdit {
+            profile_id: alpha_id,
+        },
+    );
     app.profile_manager
         .as_mut()
         .unwrap()
@@ -204,10 +224,11 @@ async fn two_sqlite_profiles_complete_the_full_runtime_lifecycle() {
         apply_next(&mut app, &mut runtime, &mut receiver).await,
         Action::ProfileSaved { connect: false, .. }
     ));
-    assert!(matches!(
-        apply_next(&mut app, &mut runtime, &mut receiver).await,
-        Action::DisconnectCompleted { .. }
-    ));
+    assert_eq!(app.connection.profile_id, Some(alpha_id));
+    assert_eq!(
+        app.connection.status,
+        lazydb::model::workspace::ConnectionStatus::Connected
+    );
     assert_eq!(app.profiles[0].id, old_order[0]);
     assert_eq!(app.profiles[0].name, "alpha-renamed");
     let persisted_profiles = ProfileStore::new(store_path.clone()).load().unwrap();
@@ -236,21 +257,26 @@ async fn two_sqlite_profiles_complete_the_full_runtime_lifecycle() {
     );
     reloaded_runtime.shutdown().await;
 
-    dispatch(&mut app, &mut runtime, Action::OpenProfileManager);
-    app.profile_manager.as_mut().unwrap().selected = 0;
-    dispatch(&mut app, &mut runtime, Action::ProfileConnectSelected);
+    dispatch(
+        &mut app,
+        &mut runtime,
+        Action::RequestProfileConnect {
+            profile_id: alpha_id,
+        },
+    );
     assert!(matches!(
         apply_next(&mut app, &mut runtime, &mut receiver).await,
         Action::ConnectionSucceeded { .. }
     ));
-    assert!(matches!(
-        apply_next(&mut app, &mut runtime, &mut receiver).await,
-        Action::CatalogLoaded { .. }
-    ));
+    drain_catalog(&mut app, &mut runtime, &mut receiver).await;
 
-    dispatch(&mut app, &mut runtime, Action::OpenProfileManager);
-    app.profile_manager.as_mut().unwrap().selected = 1;
-    dispatch(&mut app, &mut runtime, Action::ProfileRequestDelete);
+    dispatch(
+        &mut app,
+        &mut runtime,
+        Action::ProfileRequestDelete {
+            profile_id: beta_id,
+        },
+    );
     dispatch(&mut app, &mut runtime, Action::ProfileConfirmDelete);
     let deleted = apply_next(&mut app, &mut runtime, &mut receiver).await;
     assert!(matches!(
@@ -267,8 +293,13 @@ async fn two_sqlite_profiles_complete_the_full_runtime_lifecycle() {
         1
     );
 
-    app.profile_manager.as_mut().unwrap().selected = 0;
-    dispatch(&mut app, &mut runtime, Action::ProfileRequestDelete);
+    dispatch(
+        &mut app,
+        &mut runtime,
+        Action::ProfileRequestDelete {
+            profile_id: alpha_id,
+        },
+    );
     dispatch(&mut app, &mut runtime, Action::ProfileConfirmDelete);
     let deleted = apply_next(&mut app, &mut runtime, &mut receiver).await;
     assert!(matches!(

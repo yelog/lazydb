@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{collections::HashSet, path::PathBuf};
 
 use percent_encoding::percent_decode_str;
 use secrecy::SecretString;
@@ -13,6 +13,140 @@ pub enum DatabaseKind {
     Postgres,
     MySql,
     Sqlite,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CatalogScope {
+    pub databases: CatalogSelection<DatabaseScope>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DatabaseScope {
+    pub name: String,
+    pub schemas: CatalogSelection<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "mode", content = "items", rename_all = "snake_case")]
+pub enum CatalogSelection<T> {
+    All,
+    Selected(Vec<T>),
+}
+
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+pub enum CatalogScopeValidationError {
+    #[error("catalog scope must select at least one database")]
+    EmptyDatabaseSelection,
+    #[error("catalog scope contains an empty database name")]
+    EmptyDatabaseName,
+    #[error("catalog scope contains duplicate database name `{0}`")]
+    DuplicateDatabase(String),
+    #[error("catalog scope for database `{database}` must select at least one schema")]
+    EmptySchemaSelection { database: String },
+    #[error("catalog scope for database `{database}` contains an empty schema name")]
+    EmptySchemaName { database: String },
+    #[error("catalog scope for database `{database}` contains duplicate schema name `{schema}`")]
+    DuplicateSchema { database: String, schema: String },
+    #[error("default schema `{schema}` for database `{database}` is excluded by catalog scope")]
+    DefaultSchemaExcluded { database: String, schema: String },
+}
+
+impl CatalogScope {
+    pub fn for_profile(kind: DatabaseKind, database: &str, default_schema: Option<&str>) -> Self {
+        let schemas = match (kind, default_schema) {
+            (DatabaseKind::MySql, _) | (_, None) => CatalogSelection::All,
+            (_, Some(schema)) => CatalogSelection::Selected(vec![schema.to_owned()]),
+        };
+
+        Self {
+            databases: CatalogSelection::Selected(vec![DatabaseScope {
+                name: database.to_owned(),
+                schemas,
+            }]),
+        }
+    }
+
+    pub fn validate(
+        &self,
+        database: &str,
+        default_schema: Option<&str>,
+    ) -> Result<(), CatalogScopeValidationError> {
+        if let CatalogSelection::Selected(databases) = &self.databases {
+            if databases.is_empty() {
+                return Err(CatalogScopeValidationError::EmptyDatabaseSelection);
+            }
+
+            let mut database_names = HashSet::new();
+            for database_scope in databases {
+                if database_scope.name.is_empty() {
+                    return Err(CatalogScopeValidationError::EmptyDatabaseName);
+                }
+                if !database_names.insert(database_scope.name.as_str()) {
+                    return Err(CatalogScopeValidationError::DuplicateDatabase(
+                        database_scope.name.clone(),
+                    ));
+                }
+
+                if let CatalogSelection::Selected(schemas) = &database_scope.schemas {
+                    if schemas.is_empty() {
+                        return Err(CatalogScopeValidationError::EmptySchemaSelection {
+                            database: database_scope.name.clone(),
+                        });
+                    }
+
+                    let mut schema_names = HashSet::new();
+                    for schema in schemas {
+                        if schema.is_empty() {
+                            return Err(CatalogScopeValidationError::EmptySchemaName {
+                                database: database_scope.name.clone(),
+                            });
+                        }
+                        if !schema_names.insert(schema.as_str()) {
+                            return Err(CatalogScopeValidationError::DuplicateSchema {
+                                database: database_scope.name.clone(),
+                                schema: schema.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(schema) = default_schema
+            && !self.allows_schema(database, schema)
+        {
+            return Err(CatalogScopeValidationError::DefaultSchemaExcluded {
+                database: database.to_owned(),
+                schema: schema.to_owned(),
+            });
+        }
+
+        Ok(())
+    }
+
+    pub fn allows_database(&self, database: &str) -> bool {
+        match &self.databases {
+            CatalogSelection::All => true,
+            CatalogSelection::Selected(databases) => databases
+                .iter()
+                .any(|database_scope| database_scope.name == database),
+        }
+    }
+
+    pub fn allows_schema(&self, database: &str, schema: &str) -> bool {
+        match &self.databases {
+            CatalogSelection::All => true,
+            CatalogSelection::Selected(databases) => databases
+                .iter()
+                .find(|database_scope| database_scope.name == database)
+                .is_some_and(|database_scope| match &database_scope.schemas {
+                    CatalogSelection::All => true,
+                    CatalogSelection::Selected(schemas) => {
+                        schemas.iter().any(|selected| selected == schema)
+                    }
+                }),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -36,6 +170,7 @@ pub enum Environment {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConnectionProfile {
     pub id: Uuid,
     pub name: String,
@@ -53,10 +188,7 @@ pub struct ConnectionProfile {
     pub read_only: bool,
     #[serde(default)]
     pub environment: Environment,
-    #[serde(default)]
-    pub include_databases: Vec<String>,
-    #[serde(default)]
-    pub include_schemas: Vec<String>,
+    pub catalog_scope: CatalogScope,
 }
 
 #[derive(Debug)]
@@ -150,6 +282,11 @@ fn import_server_url(
         DatabaseKind::Sqlite => unreachable!("server URL cannot be SQLite"),
     };
     let derived_name = database.as_deref().unwrap_or(&host);
+    let catalog_scope = CatalogScope::for_profile(
+        kind,
+        database.as_deref().unwrap_or_default(),
+        default_schema.as_deref(),
+    );
 
     Ok(ImportedProfile {
         profile: ConnectionProfile {
@@ -166,8 +303,7 @@ fn import_server_url(
             secret_ref: None,
             read_only: false,
             environment: Environment::Development,
-            include_databases: Vec::new(),
-            include_schemas: Vec::new(),
+            catalog_scope,
         },
         transient_password: password,
     })
@@ -224,6 +360,11 @@ fn sqlite_profile(
         path.as_ref()
             .map(|value| value.to_string_lossy().into_owned())
     };
+    let catalog_scope = CatalogScope::for_profile(
+        DatabaseKind::Sqlite,
+        database.as_deref().unwrap_or(":memory:"),
+        Some("main"),
+    );
 
     ImportedProfile {
         profile: ConnectionProfile {
@@ -240,8 +381,7 @@ fn sqlite_profile(
             secret_ref: None,
             read_only,
             environment: Environment::Development,
-            include_databases: Vec::new(),
-            include_schemas: Vec::new(),
+            catalog_scope,
         },
         transient_password: None,
     }
@@ -272,7 +412,7 @@ fn parse_ssl_mode(value: &str, fallback: SslMode) -> SslMode {
 
 #[cfg(test)]
 mod tests {
-    use super::{DatabaseKind, SslMode, import_connection_url};
+    use super::{CatalogScope, DatabaseKind, SslMode, import_connection_url};
 
     #[test]
     fn imports_postgres_jdbc_url_and_current_schema() {
@@ -288,6 +428,10 @@ mod tests {
         assert_eq!(imported.profile.port, Some(30345));
         assert_eq!(imported.profile.database.as_deref(), Some("moss"));
         assert_eq!(imported.profile.default_schema.as_deref(), Some("tools"));
+        assert_eq!(
+            imported.profile.catalog_scope,
+            CatalogScope::for_profile(DatabaseKind::Postgres, "moss", Some("tools"))
+        );
     }
 
     #[test]
@@ -320,6 +464,10 @@ mod tests {
         assert_eq!(imported.profile.port, Some(3307));
         assert_eq!(imported.profile.database.as_deref(), Some("catalog"));
         assert_eq!(imported.profile.ssl_mode, SslMode::Require);
+        assert_eq!(
+            imported.profile.catalog_scope,
+            CatalogScope::for_profile(DatabaseKind::MySql, "catalog", None)
+        );
     }
 
     #[test]
@@ -338,6 +486,14 @@ mod tests {
         let file = import_connection_url("file:/tmp/file.db", None).unwrap();
         let memory = import_connection_url(":memory:", None).unwrap();
 
+        assert_eq!(
+            absolute.profile.catalog_scope,
+            CatalogScope::for_profile(DatabaseKind::Sqlite, "/tmp/lazydb.db", Some("main"))
+        );
+        assert_eq!(
+            memory.profile.catalog_scope,
+            CatalogScope::for_profile(DatabaseKind::Sqlite, ":memory:", Some("main"))
+        );
         assert_eq!(
             absolute.profile.sqlite_path.unwrap().to_string_lossy(),
             "/tmp/lazydb.db"

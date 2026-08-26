@@ -1,0 +1,594 @@
+use lazydb::{
+    db::catalog::{
+        CatalogCompleteness, CatalogCount, CatalogCursor, CatalogEntry, CatalogId, CatalogKind,
+        CatalogMetadata, ColumnMetadata, ObjectGroup, OptionalMetadata, QualifiedName,
+    },
+    model::explorer::{
+        CatalogGroupState, CatalogTree, CatalogTreeError, ExplorerConnectionStatus,
+        ExplorerLoadState, ExplorerNodeId, ExplorerOwnerId, ExplorerTreeState, StatusRowKind,
+    },
+};
+use uuid::Uuid;
+
+#[test]
+fn profile_order_controls_roots_independently_of_map_order() {
+    let first = profile_id(1);
+    let second = profile_id(2);
+    let mut explorer = ExplorerTreeState::default();
+
+    explorer.add_profile(second);
+    explorer.add_profile(first);
+    explorer.profile_order = vec![first, second];
+
+    assert_eq!(
+        visible_ids(&explorer),
+        vec![
+            ExplorerNodeId::Profile(first),
+            ExplorerNodeId::Profile(second),
+        ]
+    );
+}
+
+#[test]
+fn catalog_tree_validates_profiles_parents_and_duplicate_ids() {
+    let profile = profile_id(1);
+    let other_profile = profile_id(2);
+    let fixture = fixture(profile);
+    let mut tree = CatalogTree::new(profile);
+
+    tree.insert(fixture.database.clone()).unwrap();
+    assert!(matches!(
+        tree.insert(fixture.database.clone()),
+        Err(CatalogTreeError::DuplicateId { .. })
+    ));
+    assert!(matches!(
+        tree.insert(database_entry(other_profile, "other")),
+        Err(CatalogTreeError::ProfileMismatch { .. })
+    ));
+    assert!(matches!(
+        tree.remove_subtree(&id(other_profile, CatalogKind::Database, "other")),
+        Err(CatalogTreeError::ProfileMismatch { .. })
+    ));
+    assert!(matches!(tree.insert(fixture.schema.clone()), Ok(())));
+
+    let missing_database = id(profile, CatalogKind::Database, "missing");
+    let orphan = schema_entry(profile, &missing_database, "orphan");
+    assert!(matches!(
+        tree.insert(orphan),
+        Err(CatalogTreeError::MissingParent { .. })
+    ));
+
+    assert_eq!(tree.roots(), std::slice::from_ref(&fixture.database.id));
+    assert_eq!(
+        tree.children(&fixture.database.id),
+        std::slice::from_ref(&fixture.schema.id)
+    );
+    assert_eq!(tree.parent(&fixture.schema.id), Some(&fixture.database.id));
+    assert!(matches!(
+        tree.set_group_state(&fixture.database.id, ObjectGroup::Tables, complete_group(1),),
+        Err(CatalogTreeError::InvalidGroupParent { .. })
+    ));
+}
+
+#[test]
+fn page_replacement_and_subtree_removal_keep_indexes_consistent() {
+    let profile = profile_id(1);
+    let fixture = fixture(profile);
+    let replacement = relation_entry(profile, &fixture.schema.id, CatalogKind::Table, "accounts");
+    let mut tree = fixture.tree();
+
+    tree.replace_page(
+        &ExplorerOwnerId::Group {
+            parent: fixture.schema.id.clone(),
+            group: ObjectGroup::Tables,
+        },
+        vec![replacement.clone()],
+    )
+    .unwrap();
+
+    assert!(tree.get(&fixture.table.id).is_none());
+    assert!(tree.get(&fixture.column.id).is_none());
+    assert!(tree.get(&fixture.view.id).is_some());
+    assert_eq!(
+        tree.group_children(&fixture.schema.id, ObjectGroup::Tables),
+        std::slice::from_ref(&replacement.id)
+    );
+    assert_eq!(
+        tree.group_children(&fixture.schema.id, ObjectGroup::Views),
+        std::slice::from_ref(&fixture.view.id)
+    );
+
+    let removed = tree.remove_subtree(&fixture.schema.id).unwrap();
+    assert!(removed.contains(&fixture.schema.id));
+    assert!(removed.contains(&replacement.id));
+    assert!(removed.contains(&fixture.view.id));
+    assert!(tree.children(&fixture.database.id).is_empty());
+    assert!(
+        tree.group_state(&fixture.schema.id, ObjectGroup::Tables)
+            .is_none()
+    );
+}
+
+#[test]
+fn refresh_preserves_stable_selection_and_expansion() {
+    let profile = profile_id(1);
+    let fixture = fixture(profile);
+    let mut explorer = explorer_with_fixture(&fixture);
+    let selected = ExplorerNodeId::Catalog(fixture.column.id.clone());
+    let expanded = expanded_path(&fixture);
+
+    explorer.expanded.extend(expanded.clone());
+    assert!(explorer.select(selected.clone()));
+    explorer
+        .replace_page(
+            ExplorerOwnerId::Catalog(fixture.table.id.clone()),
+            vec![fixture.column.clone()],
+        )
+        .unwrap();
+
+    assert_eq!(explorer.selected, Some(selected));
+    for id in expanded {
+        assert!(explorer.expanded.contains(&id));
+    }
+}
+
+#[test]
+fn removed_selection_falls_back_through_existing_catalog_ancestors() {
+    let profile = profile_id(1);
+    let fixture = fixture(profile);
+    let mut explorer = explorer_with_fixture(&fixture);
+    explorer.expanded.extend(expanded_path(&fixture));
+    assert!(explorer.select(ExplorerNodeId::Catalog(fixture.column.id.clone())));
+
+    explorer.remove_subtree(&fixture.column.id).unwrap();
+    assert_eq!(
+        explorer.selected,
+        Some(ExplorerNodeId::Catalog(fixture.table.id.clone()))
+    );
+
+    explorer.remove_subtree(&fixture.table.id).unwrap();
+    assert_eq!(
+        explorer.selected,
+        Some(ExplorerNodeId::Catalog(fixture.schema.id.clone()))
+    );
+
+    explorer.remove_subtree(&fixture.database.id).unwrap();
+    assert_eq!(explorer.selected, Some(ExplorerNodeId::Profile(profile)));
+}
+
+#[test]
+fn refresh_falls_from_disappearing_empty_row_to_its_group_owner() {
+    let profile = profile_id(1);
+    let fixture = fixture(profile);
+    let owner = ExplorerOwnerId::Group {
+        parent: fixture.schema.id.clone(),
+        group: ObjectGroup::Tables,
+    };
+    let group = owner.node_id();
+    let mut explorer = explorer_with_fixture(&fixture);
+    explorer.replace_page(owner.clone(), Vec::new()).unwrap();
+    explorer
+        .profiles
+        .get_mut(&profile)
+        .unwrap()
+        .load_states
+        .insert(
+            owner.clone(),
+            ExplorerLoadState::Loaded { next_cursor: None },
+        );
+    assert!(explorer.select(ExplorerNodeId::Empty {
+        owner: owner.clone(),
+    }));
+
+    explorer
+        .replace_page(
+            owner,
+            vec![relation_entry(
+                profile,
+                &fixture.schema.id,
+                CatalogKind::Table,
+                "accounts",
+            )],
+        )
+        .unwrap();
+
+    assert_eq!(explorer.selected, Some(group));
+}
+
+#[test]
+fn directional_expand_collapse_and_parent_are_distinct() {
+    let profile = profile_id(1);
+    let fixture = fixture(profile);
+    let mut explorer = explorer_with_fixture(&fixture);
+    let schema = ExplorerNodeId::Catalog(fixture.schema.id.clone());
+
+    assert!(explorer.select(schema.clone()));
+    assert!(explorer.expand());
+    assert!(explorer.expanded.contains(&schema));
+    assert!(explorer.move_to_parent());
+    assert_eq!(
+        explorer.selected,
+        Some(ExplorerNodeId::Catalog(fixture.database.id.clone()))
+    );
+    assert!(explorer.expanded.contains(&schema));
+
+    assert!(explorer.select(schema.clone()));
+    assert!(explorer.collapse());
+    assert_eq!(explorer.selected, Some(schema.clone()));
+    assert!(!explorer.expanded.contains(&schema));
+    assert!(!explorer.collapse());
+    assert!(explorer.move_to_parent());
+}
+
+#[test]
+fn projection_inserts_groups_and_skips_collapsed_catalog_subtrees() {
+    let profile = profile_id(1);
+    let fixture = fixture(profile);
+    let mut explorer = explorer_with_fixture(&fixture);
+    let profile_node = ExplorerNodeId::Profile(profile);
+    let database_node = ExplorerNodeId::Catalog(fixture.database.id.clone());
+    let schema_node = ExplorerNodeId::Catalog(fixture.schema.id.clone());
+    let table_group = ExplorerNodeId::Group {
+        parent: fixture.schema.id.clone(),
+        group: ObjectGroup::Tables,
+    };
+    let table_node = ExplorerNodeId::Catalog(fixture.table.id.clone());
+
+    explorer.expanded.extend([
+        profile_node,
+        database_node,
+        schema_node.clone(),
+        table_group.clone(),
+    ]);
+    let (rows, visits) = explorer.visible_with_visit_count();
+    let ids: Vec<_> = rows.into_iter().map(|row| row.id).collect();
+    assert!(ids.contains(&table_group));
+    assert!(ids.contains(&table_node));
+    assert!(!ids.contains(&ExplorerNodeId::Catalog(fixture.column.id.clone())));
+    assert_eq!(visits, 3);
+
+    explorer.expanded.insert(table_node);
+    let (rows, visits) = explorer.visible_with_visit_count();
+    assert!(
+        rows.iter()
+            .any(|row| row.id == ExplorerNodeId::Catalog(fixture.column.id.clone()))
+    );
+    assert_eq!(visits, 4);
+
+    explorer.expanded.remove(&schema_node);
+    let (rows, visits) = explorer.visible_with_visit_count();
+    assert!(!rows.iter().any(|row| row.id == table_group));
+    assert_eq!(visits, 2);
+}
+
+#[test]
+fn synthetic_child_rows_have_deterministic_non_recursive_ids() {
+    let profile = profile_id(1);
+    let owner = ExplorerOwnerId::Profile(profile);
+    let mut explorer = ExplorerTreeState::default();
+    explorer.add_profile(profile);
+    explorer.expanded.insert(ExplorerNodeId::Profile(profile));
+
+    let profile_state = explorer.profiles.get_mut(&profile).unwrap();
+    profile_state
+        .load_states
+        .insert(owner.clone(), ExplorerLoadState::Loading { request_id: 1 });
+    let loading = ExplorerNodeId::Status {
+        owner: owner.clone(),
+        kind: StatusRowKind::Loading,
+    };
+    assert!(visible_ids(&explorer).contains(&loading));
+
+    explorer
+        .profiles
+        .get_mut(&profile)
+        .unwrap()
+        .load_states
+        .insert(owner.clone(), ExplorerLoadState::Loading { request_id: 99 });
+    assert!(visible_ids(&explorer).contains(&loading));
+
+    explorer
+        .profiles
+        .get_mut(&profile)
+        .unwrap()
+        .load_states
+        .insert(owner.clone(), ExplorerLoadState::Failed { request_id: 100 });
+    assert!(visible_ids(&explorer).contains(&ExplorerNodeId::Status {
+        owner: owner.clone(),
+        kind: StatusRowKind::Retry,
+    }));
+
+    explorer
+        .profiles
+        .get_mut(&profile)
+        .unwrap()
+        .load_states
+        .insert(
+            owner.clone(),
+            ExplorerLoadState::Loaded { next_cursor: None },
+        );
+    assert!(visible_ids(&explorer).contains(&ExplorerNodeId::Empty {
+        owner: owner.clone(),
+    }));
+
+    let cursor = CatalogCursor::new("page-2");
+    explorer
+        .profiles
+        .get_mut(&profile)
+        .unwrap()
+        .load_states
+        .insert(
+            owner.clone(),
+            ExplorerLoadState::Loaded {
+                next_cursor: Some(cursor.clone()),
+            },
+        );
+    assert!(visible_ids(&explorer).contains(&ExplorerNodeId::LoadMore {
+        parent: owner,
+        cursor,
+    }));
+}
+
+#[test]
+fn viewport_scroll_keeps_selection_visible() {
+    let profiles: Vec<_> = (1..=8).map(profile_id).collect();
+    let mut explorer = ExplorerTreeState::default();
+    for profile in &profiles {
+        explorer.add_profile(*profile);
+    }
+
+    explorer.move_selection(7, 3);
+    assert_eq!(
+        explorer.selected,
+        Some(ExplorerNodeId::Profile(profiles[7]))
+    );
+    assert_eq!(explorer.selected_visible_index(), Some(7));
+    assert_eq!(explorer.scroll, 5);
+
+    explorer.move_selection(-6, 3);
+    assert_eq!(
+        explorer.selected,
+        Some(ExplorerNodeId::Profile(profiles[1]))
+    );
+    assert_eq!(explorer.scroll, 1);
+}
+
+#[test]
+fn compatibility_movement_updates_normalized_scroll() {
+    let profiles: Vec<_> = (1..=20).map(profile_id).collect();
+    let mut explorer = ExplorerTreeState::default();
+    for profile in profiles {
+        explorer.add_profile(profile);
+    }
+    let mut state = lazydb::model::workspace::ExplorerState {
+        normalized: explorer,
+        ..Default::default()
+    };
+    state.move_selection(19);
+    assert_eq!(state.normalized.selected_visible_index(), Some(19));
+    assert!(state.normalized.scroll > 0);
+    let selected = state.normalized.selected_visible_index().unwrap();
+    assert!(selected >= state.normalized.scroll);
+    assert!(selected < state.normalized.scroll + 8);
+}
+
+#[test]
+fn rebuilding_projection_preserves_user_collapse_state() {
+    let profile = profile_id(1);
+    let fixture = fixture(profile);
+    let mut state = lazydb::model::workspace::ExplorerState {
+        normalized: explorer_with_fixture(&fixture),
+        ..Default::default()
+    };
+    state.rebuild_projection(profile);
+    state.normalized.expanded.clear();
+    state.normalized.selected = Some(ExplorerNodeId::Profile(profile));
+    state.rebuild_projection(profile);
+    assert!(
+        !state
+            .normalized
+            .expanded
+            .contains(&ExplorerNodeId::Profile(profile))
+    );
+    assert!(
+        !state
+            .normalized
+            .expanded
+            .contains(&ExplorerNodeId::Catalog(fixture.database.id))
+    );
+}
+
+#[test]
+fn profile_state_tracks_status_generations_requests_loads_and_errors() {
+    let profile = profile_id(1);
+    let mut explorer = ExplorerTreeState::default();
+    explorer.add_profile(profile);
+    let state = explorer.profiles.get_mut(&profile).unwrap();
+
+    assert_eq!(state.status, ExplorerConnectionStatus::Offline);
+    assert_eq!(state.catalog_epoch, 0);
+    assert_eq!(state.next_request_id, 1);
+    assert!(state.load_states.is_empty());
+    assert_eq!(state.last_error, None);
+    assert!(!state.expand_after_connect);
+    assert_eq!(state.allocate_request_id(), Some(1));
+    assert_eq!(state.allocate_request_id(), Some(2));
+    assert_eq!(state.advance_catalog_epoch(), Some(1));
+}
+
+#[test]
+fn relation_lookup_uses_catalog_identity_not_path_offsets() {
+    let profile = profile_id(1);
+    let fixture = fixture(profile);
+    let tree = fixture.tree();
+
+    assert_eq!(
+        tree.owning_relation_id(&fixture.table.id),
+        Some(&fixture.table.id)
+    );
+    assert_eq!(
+        tree.owning_relation_id(&fixture.column.id),
+        Some(&fixture.table.id)
+    );
+    assert_eq!(
+        tree.owning_relation(&fixture.column.id),
+        Some(&fixture.table)
+    );
+    assert_eq!(
+        tree.owning_relation_id(&fixture.schema.id),
+        None,
+        "schemas are not relations"
+    );
+}
+
+#[derive(Clone)]
+struct Fixture {
+    profile: Uuid,
+    database: CatalogEntry,
+    schema: CatalogEntry,
+    table: CatalogEntry,
+    view: CatalogEntry,
+    column: CatalogEntry,
+}
+
+impl Fixture {
+    fn tree(&self) -> CatalogTree {
+        let mut tree = CatalogTree::new(self.profile);
+        tree.insert_subtree(vec![
+            self.database.clone(),
+            self.schema.clone(),
+            self.table.clone(),
+            self.view.clone(),
+            self.column.clone(),
+        ])
+        .unwrap();
+        tree.set_group_state(&self.schema.id, ObjectGroup::Tables, complete_group(1))
+            .unwrap();
+        tree.set_group_state(&self.schema.id, ObjectGroup::Views, complete_group(1))
+            .unwrap();
+        tree
+    }
+}
+
+fn fixture(profile: Uuid) -> Fixture {
+    let database = database_entry(profile, "app");
+    let schema = schema_entry(profile, &database.id, "public");
+    let table = relation_entry(profile, &schema.id, CatalogKind::Table, "users");
+    let view = relation_entry(profile, &schema.id, CatalogKind::View, "active_users");
+    let column = CatalogEntry::relation_child(
+        id(profile, CatalogKind::Column, "users.id"),
+        table.id.clone(),
+        qualified("id"),
+        "column",
+        OptionalMetadata::Unsupported,
+        CatalogMetadata::Column(ColumnMetadata::new(1, "bigint", false)),
+    )
+    .unwrap();
+    Fixture {
+        profile,
+        database,
+        schema,
+        table,
+        view,
+        column,
+    }
+}
+
+fn explorer_with_fixture(fixture: &Fixture) -> ExplorerTreeState {
+    let mut explorer = ExplorerTreeState::default();
+    explorer.add_profile(fixture.profile);
+    explorer.profiles.get_mut(&fixture.profile).unwrap().catalog = fixture.tree();
+    explorer
+}
+
+fn expanded_path(fixture: &Fixture) -> Vec<ExplorerNodeId> {
+    vec![
+        ExplorerNodeId::Profile(fixture.profile),
+        ExplorerNodeId::Catalog(fixture.database.id.clone()),
+        ExplorerNodeId::Catalog(fixture.schema.id.clone()),
+        ExplorerNodeId::Group {
+            parent: fixture.schema.id.clone(),
+            group: ObjectGroup::Tables,
+        },
+        ExplorerNodeId::Catalog(fixture.table.id.clone()),
+    ]
+}
+
+fn database_entry(profile: Uuid, name: &str) -> CatalogEntry {
+    CatalogEntry::database(
+        id(profile, CatalogKind::Database, name),
+        QualifiedName {
+            database: Some(name.to_owned()),
+            schema: None,
+            object: name.to_owned(),
+        },
+        "database",
+        OptionalMetadata::Supported(None),
+        true,
+    )
+    .unwrap()
+}
+
+fn schema_entry(profile: Uuid, database: &CatalogId, name: &str) -> CatalogEntry {
+    CatalogEntry::schema(
+        id(profile, CatalogKind::Schema, name),
+        database.clone(),
+        QualifiedName {
+            database: Some("app".to_owned()),
+            schema: Some(name.to_owned()),
+            object: name.to_owned(),
+        },
+        "schema",
+        OptionalMetadata::Supported(None),
+        true,
+    )
+    .unwrap()
+}
+
+fn relation_entry(
+    profile: Uuid,
+    schema: &CatalogId,
+    kind: CatalogKind,
+    name: &str,
+) -> CatalogEntry {
+    CatalogEntry::relation(
+        id(profile, kind, name),
+        schema.clone(),
+        qualified(name),
+        match kind {
+            CatalogKind::Table => "table",
+            CatalogKind::View => "view",
+            _ => "relation",
+        },
+        OptionalMetadata::Supported(None),
+        true,
+    )
+    .unwrap()
+}
+
+fn complete_group(count: u64) -> CatalogGroupState {
+    CatalogGroupState {
+        count: CatalogCount::Exact(count),
+        completeness: CatalogCompleteness::Complete,
+    }
+}
+
+fn qualified(object: &str) -> QualifiedName {
+    QualifiedName {
+        database: Some("app".to_owned()),
+        schema: Some("public".to_owned()),
+        object: object.to_owned(),
+    }
+}
+
+fn id(profile: Uuid, kind: CatalogKind, native_id: &str) -> CatalogId {
+    CatalogId::new(profile, kind, [native_id])
+}
+
+fn profile_id(value: u128) -> Uuid {
+    Uuid::from_u128(value)
+}
+
+fn visible_ids(explorer: &ExplorerTreeState) -> Vec<ExplorerNodeId> {
+    explorer.visible().into_iter().map(|row| row.id).collect()
+}

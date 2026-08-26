@@ -1,17 +1,30 @@
+use std::collections::HashSet;
+
 use uuid::Uuid;
 
 use crate::{
     action::{Action, Command},
     cli::ConfirmationPolicy,
+    db::{
+        ErrorCategory,
+        catalog::{
+            CatalogPage, CatalogRequest, CatalogRequestKey, CatalogTarget, MAX_CATALOG_PAGE_SIZE,
+        },
+    },
     editor::{EditorEffect, EditorError, EditorWorkspace},
     model::{
         editor::{EditorMode, EditorRenderSnapshot, EditorViewport},
+        explorer::{
+            CatalogGroupState, ExplorerConnectionStatus, ExplorerLoadState, ExplorerNodeId,
+            ExplorerOwnerId, ProfileProvenance, owner_for_target,
+        },
         profile_manager::{
-            ProfileField, ProfileManagerPage, ProfileManagerState, ProfileOperation,
+            ProfileCatalogDiscovery, ProfileField, ProfileManagerPage, ProfileManagerState,
+            ProfileOperation,
         },
         tab::{
             CompletionPopup, ConsoleTab, ExecutionResult, LastExecution, OutputEntry, OutputKind,
-            ResultView,
+            ResultView, WorkspaceTab,
         },
         transaction::{
             self, DeferredIntent, DeferredIntentQueue, DeferredTransactionPrompt, TransactionEvent,
@@ -30,7 +43,7 @@ pub struct App {
     pub profiles: Vec<ConnectionProfile>,
     pub connection: ConnectionState,
     pub explorer: ExplorerState,
-    pub tabs: Vec<ConsoleTab>,
+    pub tabs: Vec<WorkspaceTab>,
     pub active_tab: usize,
     pub focus: Focus,
     pub overlay: Option<Overlay>,
@@ -45,24 +58,69 @@ pub struct App {
     resolving_deferred: Option<DeferredTransactionPrompt>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CatalogRequestIntent {
+    Automatic,
+    Continuation,
+    Explicit,
+    Refresh,
+}
+
 impl App {
     pub fn new(profiles: Vec<ConnectionProfile>) -> Self {
-        Self::with_confirmation_policy(profiles, ConfirmationPolicy::RiskyOnly)
+        let persisted = profiles.iter().map(|profile| profile.id).collect();
+        Self::with_profiles(profiles, persisted, ConfirmationPolicy::RiskyOnly)
+    }
+
+    pub fn with_startup_profiles(
+        profiles: Vec<ConnectionProfile>,
+        persisted: HashSet<Uuid>,
+    ) -> Self {
+        Self::with_profiles(profiles, persisted, ConfirmationPolicy::RiskyOnly)
     }
 
     pub fn with_confirmation_policy(
         profiles: Vec<ConnectionProfile>,
         confirmation_policy: ConfirmationPolicy,
     ) -> Self {
+        let persisted = profiles.iter().map(|profile| profile.id).collect();
+        Self::with_profiles(profiles, persisted, confirmation_policy)
+    }
+
+    pub fn with_startup_profiles_and_confirmation_policy(
+        profiles: Vec<ConnectionProfile>,
+        persisted: HashSet<Uuid>,
+        confirmation_policy: ConfirmationPolicy,
+    ) -> Self {
+        Self::with_profiles(profiles, persisted, confirmation_policy)
+    }
+
+    fn with_profiles(
+        profiles: Vec<ConnectionProfile>,
+        persisted: HashSet<Uuid>,
+        confirmation_policy: ConfirmationPolicy,
+    ) -> Self {
         let tab = ConsoleTab::new("console");
         let tab_id = tab.id;
         let mut editor = EditorWorkspace::new();
         editor.open_console(tab_id, "");
+        let mut explorer = ExplorerState::default();
+        for profile in &profiles {
+            add_explorer_profile(
+                &mut explorer,
+                profile,
+                if persisted.contains(&profile.id) {
+                    ProfileProvenance::Saved
+                } else {
+                    ProfileProvenance::Session
+                },
+            );
+        }
         Self {
             profiles,
             connection: ConnectionState::default(),
-            explorer: ExplorerState::default(),
-            tabs: vec![tab],
+            explorer,
+            tabs: vec![WorkspaceTab::Sql(tab)],
             active_tab: 0,
             focus: Focus::Editor,
             overlay: None,
@@ -83,15 +141,39 @@ impl App {
     }
 
     pub fn active_console(&self) -> &ConsoleTab {
-        &self.tabs[self.active_tab]
+        self.tabs[self.active_tab]
+            .as_console()
+            .expect("active tab is not a SQL console")
     }
 
     pub fn active_console_mut(&mut self) -> &mut ConsoleTab {
-        &mut self.tabs[self.active_tab]
+        self.tabs
+            .get_mut(self.active_tab)
+            .and_then(WorkspaceTab::as_console_mut)
+            .expect("active tab is not a SQL console")
+    }
+
+    pub fn active_console_opt(&self) -> Option<&ConsoleTab> {
+        self.tabs
+            .get(self.active_tab)
+            .and_then(WorkspaceTab::as_console)
+    }
+
+    pub fn active_console_opt_mut(&mut self) -> Option<&mut ConsoleTab> {
+        self.tabs
+            .get_mut(self.active_tab)
+            .and_then(WorkspaceTab::as_console_mut)
+    }
+
+    fn normalize_focus(&mut self) {
+        if self.active_console_opt().is_none() && self.focus == Focus::Editor {
+            self.focus = Focus::Results;
+        }
     }
 
     pub fn active_editor_text(&self) -> Result<String, EditorError> {
-        self.editor_text(self.active_console().id)
+        self.active_console_opt()
+            .map_or_else(|| Ok(String::new()), |tab| self.editor_text(tab.id))
     }
 
     pub fn editor_text(&self, tab_id: Uuid) -> Result<String, EditorError> {
@@ -99,30 +181,33 @@ impl App {
     }
 
     pub fn active_editor_revision(&self) -> u64 {
-        self.editor
-            .revision(self.active_console().id)
+        self.active_console_opt()
+            .and_then(|tab| self.editor.revision(tab.id).ok())
             .unwrap_or_default()
     }
 
     pub fn active_editor_mode(&self) -> EditorMode {
-        self.editor
-            .mode(self.active_console().id)
+        self.active_console_opt()
+            .and_then(|tab| self.editor.mode(tab.id).ok())
             .unwrap_or(EditorMode::Normal)
     }
 
     pub fn active_editor_viewport(&self) -> Result<EditorViewport, EditorError> {
-        self.editor.viewport(self.active_console().id)
+        self.active_console_opt().map_or_else(
+            || Err(EditorError::MissingSession(Uuid::nil())),
+            |tab| self.editor.viewport(tab.id),
+        )
     }
 
     pub fn active_editor_render_snapshot(
         &self,
         viewport: EditorViewport,
     ) -> Result<EditorRenderSnapshot, EditorError> {
-        self.editor.render_snapshot_with_dialect(
-            self.active_console().id,
-            viewport,
-            self.sql_dialect(),
-        )
+        let Some(tab) = self.active_console_opt() else {
+            return Err(EditorError::MissingSession(Uuid::nil()));
+        };
+        self.editor
+            .render_snapshot_with_dialect(tab.id, viewport, self.sql_dialect())
     }
 
     pub fn active_profile(&self) -> Option<&ConnectionProfile> {
@@ -133,13 +218,44 @@ impl App {
     }
 
     pub fn update(&mut self, action: Action) -> Vec<Command> {
+        if self.active_console_opt().is_none()
+            && matches!(
+                action,
+                Action::EditorKey(_)
+                    | Action::EditorPaste(_)
+                    | Action::EditorViewportChanged(_)
+                    | Action::EditorScroll { .. }
+                    | Action::ReplaceEditor(_)
+                    | Action::CompletionDue(_)
+                    | Action::RunActiveSql
+                    | Action::RunAllSql
+                    | Action::CancelActiveQuery
+                    | Action::ConfirmManualCancellation
+                    | Action::SetTransactionMode(_)
+                    | Action::CommitTransaction
+                    | Action::RollbackTransaction
+                    | Action::ClearTransactionOutcome
+                    | Action::GridMove { .. }
+                    | Action::GridSelect { .. }
+                    | Action::CompletionExplicit
+                    | Action::CompletionNext
+                    | Action::CompletionPrevious
+                    | Action::CompletionAccept
+                    | Action::CompletionDismiss
+                    | Action::ToggleResultView
+                    | Action::ConfirmClearTransactionOutcome
+                    | Action::CancelClearTransactionOutcome
+            )
+        {
+            return Vec::new();
+        }
         match action {
             Action::NewConsole => {
                 let name = format!("console_{}", self.next_console_number);
                 self.next_console_number += 1;
                 let tab = ConsoleTab::new(name);
                 let id = tab.id;
-                self.tabs.push(tab);
+                self.tabs.push(WorkspaceTab::Sql(tab));
                 self.editor.open_console(id, "");
                 self.active_tab = self.tabs.len() - 1;
                 self.focus = Focus::Editor;
@@ -147,13 +263,31 @@ impl App {
             }
             Action::CloseActiveTab => {
                 if self.tabs.len() > 1 {
-                    let id = self.active_console().id;
-                    if self.transaction_needs_exit(id) {
+                    let was_console = self.tabs[self.active_tab].as_console().is_some();
+                    let id = self.tabs[self.active_tab].id();
+                    if self.active_console_opt().is_some() && self.transaction_needs_exit(id) {
                         return self.defer_intent(DeferredIntent::CloseConsole, [id]);
                     }
+                    let is_final_console = was_console
+                        && self
+                            .tabs
+                            .iter()
+                            .filter(|tab| tab.as_console().is_some())
+                            .count()
+                            == 1;
                     self.tabs.remove(self.active_tab);
-                    self.editor.close_console(id);
+                    if was_console {
+                        self.editor.close_console(id);
+                    }
+                    if is_final_console {
+                        let tab = ConsoleTab::new(format!("console_{}", self.next_console_number));
+                        self.next_console_number += 1;
+                        let id = tab.id;
+                        self.tabs.push(WorkspaceTab::Sql(tab));
+                        self.editor.open_console(id, "");
+                    }
                     self.active_tab = self.active_tab.saturating_sub(1);
+                    self.normalize_focus();
                     vec![Command::PersistWorkspace]
                 } else {
                     Vec::new()
@@ -173,6 +307,7 @@ impl App {
             Action::ActivateTab(index) => {
                 if index < self.tabs.len() {
                     self.active_tab = index;
+                    self.normalize_focus();
                 }
                 Vec::new()
             }
@@ -242,9 +377,7 @@ impl App {
                     return Vec::new();
                 }
                 let mut manager = ProfileManagerState::default();
-                if self.profiles.is_empty() {
-                    manager.start_new(DatabaseKind::Postgres);
-                }
+                manager.start_new(DatabaseKind::Postgres);
                 self.profile_manager = Some(manager);
                 self.overlay = Some(Overlay::ProfileManager);
                 Vec::new()
@@ -253,46 +386,59 @@ impl App {
                 self.close_profile_manager();
                 Vec::new()
             }
-            Action::ProfileMove(delta) => {
-                let profile_count = self.profiles.len();
-                if let Some(manager) = self.idle_profile_manager_mut(ProfileManagerPage::List) {
-                    manager.move_selection(delta, profile_count);
-                    manager.message = None;
-                }
-                Vec::new()
-            }
             Action::ProfileStartNew => {
-                if let Some(manager) = self.idle_profile_manager_mut(ProfileManagerPage::List) {
-                    manager.start_new(DatabaseKind::Postgres);
+                if self
+                    .profile_manager
+                    .as_ref()
+                    .is_some_and(|manager| manager.operation.is_some())
+                {
+                    self.status_message("Profile operation already in progress");
+                    return Vec::new();
                 }
+                let mut manager = ProfileManagerState::default();
+                manager.start_new(DatabaseKind::Postgres);
+                self.profile_manager = Some(manager);
+                self.overlay = Some(Overlay::ProfileManager);
                 Vec::new()
             }
-            Action::ProfileStartEdit => {
-                let profile = self.selected_profile().cloned();
-                if let (Some(profile), Some(manager)) = (
-                    profile,
-                    self.idle_profile_manager_mut(ProfileManagerPage::List),
-                ) {
+            Action::ProfileStartEdit { profile_id } => {
+                if self
+                    .profile_manager
+                    .as_ref()
+                    .is_some_and(|manager| manager.operation.is_some())
+                {
+                    self.status_message("Profile operation already in progress");
+                    return Vec::new();
+                }
+                if let Some(profile) = self
+                    .profiles
+                    .iter()
+                    .find(|profile| profile.id == profile_id)
+                    .cloned()
+                {
+                    let mut manager = ProfileManagerState::default();
                     let has_stored_credential = profile.secret_ref.is_some();
                     manager.start_edit(&profile, has_stored_credential);
+                    self.profile_manager = Some(manager);
+                    self.overlay = Some(Overlay::ProfileManager);
                 }
                 Vec::new()
             }
-            Action::ProfileRequestDelete => {
-                self.request_profile_delete();
+            Action::ProfileRequestDelete { profile_id } => {
+                self.request_profile_delete(profile_id);
                 Vec::new()
             }
             Action::ProfileConfirmDelete => self.confirm_profile_delete(),
             Action::ProfileCancelDelete => {
-                if let Some(manager) =
-                    self.idle_profile_manager_mut(ProfileManagerPage::ConfirmDelete)
+                if self
+                    .idle_profile_manager_mut(ProfileManagerPage::ConfirmDelete)
+                    .is_some()
                 {
-                    manager.page = ProfileManagerPage::List;
-                    manager.message = None;
+                    self.profile_manager = None;
+                    self.overlay = None;
                 }
                 Vec::new()
             }
-            Action::ProfileConnectSelected => self.connect_selected_profile(),
             Action::ProfileFieldNext => {
                 if let Some(manager) = self.editable_profile_manager_mut() {
                     manager.move_field(1);
@@ -380,17 +526,75 @@ impl App {
                 }
                 Vec::new()
             }
+            Action::ProfileOpenScope => {
+                if let Some(manager) = self.editable_profile_manager_mut() {
+                    manager.open_scope_picker();
+                }
+                Vec::new()
+            }
+            Action::ProfileToggleScopeRow(id) => {
+                if let Some(manager) = self
+                    .profile_manager
+                    .as_mut()
+                    .filter(|manager| manager.page == ProfileManagerPage::Scope)
+                {
+                    manager.toggle_scope_row(&id);
+                }
+                Vec::new()
+            }
+            Action::ProfileScopeMove(delta) => {
+                if let Some(manager) = self
+                    .profile_manager
+                    .as_mut()
+                    .filter(|manager| manager.page == ProfileManagerPage::Scope)
+                {
+                    manager.move_scope_selection(delta);
+                }
+                Vec::new()
+            }
+            Action::ProfileScopeBack => {
+                if let Some(manager) = self
+                    .profile_manager
+                    .as_mut()
+                    .filter(|manager| manager.page == ProfileManagerPage::Scope)
+                {
+                    manager.close_scope_picker();
+                }
+                Vec::new()
+            }
             Action::ProfileTest => self.test_profile_draft(),
             Action::ProfileSave { connect } => self.save_profile_draft(connect),
-            Action::ProfileTestSucceeded { request_id, server } => {
+            Action::ProfileTestSucceeded {
+                request_id,
+                fingerprint,
+                server,
+                capabilities,
+                discovery,
+            } => {
                 if let Some(manager) =
                     self.matching_profile_operation(request_id, &[ProfileOperation::Testing])
                 {
                     manager.operation = None;
-                    manager.message = Some(format!(
-                        "Connection succeeded: {} ({})",
-                        server.version, server.database
-                    ));
+                    let warning = discovery.as_ref().err().cloned();
+                    let version = server.version.clone();
+                    let database = server.database.clone();
+                    let applied = manager.draft.as_mut().is_some_and(|draft| {
+                        draft.apply_catalog_discovery(ProfileCatalogDiscovery {
+                            fingerprint,
+                            server,
+                            capabilities,
+                            discovery,
+                        })
+                    });
+                    manager.message = Some(if !applied {
+                        "Connection test result ignored because the draft changed".into()
+                    } else if let Some(warning) = warning {
+                        format!(
+                            "Connection succeeded: {version} ({database}); catalog discovery warning: {warning}"
+                        )
+                    } else {
+                        format!("Connection succeeded: {version} ({database})")
+                    });
                 }
                 Vec::new()
             }
@@ -410,8 +614,9 @@ impl App {
                 request_id,
                 profile,
                 warning,
+                change,
                 connect,
-            } => self.profile_saved(request_id, profile, warning, connect),
+            } => self.profile_saved(request_id, profile, warning, change, connect),
             Action::ProfileSaveFailed {
                 request_id,
                 message,
@@ -471,6 +676,11 @@ impl App {
                     ConnectionStatus::Failed
                 };
                 self.connection.error = Some(message.clone());
+                if let Some(state) = self.explorer.normalized.profiles.get_mut(&profile_id) {
+                    state.status = ExplorerConnectionStatus::Failed;
+                    state.last_error = Some(message.clone());
+                    state.expand_after_connect = false;
+                }
                 if let Some(manager) = self.profile_manager.as_mut()
                     && manager
                         .operation
@@ -506,7 +716,8 @@ impl App {
                     self.connection.generation = 0;
                     self.connection.server = None;
                     self.connection.error = None;
-                    self.explorer = ExplorerState::default();
+                    self.clear_active_catalog(connection.profile_id);
+                    self.select_nearest_profile(connection.profile_id);
                 }
                 self.connection.status = if self.connection.pending_profile_id.is_some() {
                     ConnectionStatus::Connecting
@@ -671,7 +882,11 @@ impl App {
                 if focus != ManualCancelFocus::CancelQueryAndRollback {
                     return Vec::new();
                 }
-                let current = self.tabs.iter().find(|tab| tab.id == intent.console_id);
+                let current = self
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.id() == intent.console_id)
+                    .and_then(WorkspaceTab::as_console);
                 if self.connection.active_identity() != Some(intent.connection)
                     || current.is_none_or(|tab| {
                         tab.generation != intent.query_generation
@@ -685,7 +900,8 @@ impl App {
                 let tab = self
                     .tabs
                     .iter_mut()
-                    .find(|tab| tab.id == intent.console_id)
+                    .find(|tab| tab.id() == intent.console_id)
+                    .and_then(WorkspaceTab::as_console_mut)
                     .unwrap();
                 tab.generation = tab.generation.saturating_add(1);
                 tab.query_status = QueryStatus::Cancelled;
@@ -713,17 +929,21 @@ impl App {
             Action::CommitTransaction => self.transaction_control(true),
             Action::RollbackTransaction => self.transaction_control(false),
             Action::RefreshCatalog => {
-                let Some(connection) = self.database_command_identity() else {
-                    return Vec::new();
-                };
-                vec![Command::LoadCatalog {
-                    profile_id: connection.profile_id,
-                    generation: connection.generation,
-                }]
+                let target = self
+                    .selected_catalog_target()
+                    .unwrap_or(CatalogTarget::Databases);
+                self.start_catalog_request(target, None, CatalogRequestIntent::Refresh)
+            }
+            Action::ExplorerLoadTarget(target) => {
+                self.start_catalog_request(target, None, CatalogRequestIntent::Explicit)
             }
             Action::PreviewSelected => self.preview_selected(),
             Action::DdlSelected => self.ddl_selected(),
+            Action::RequestProfileConnect { profile_id } => self.request_connection(profile_id),
             Action::RequestConnect(profile_id) => self.request_connection(profile_id),
+            Action::RequestProfileDisconnect { profile_id } => {
+                self.request_profile_disconnect(profile_id)
+            }
             Action::ClearTransactionOutcome => self.request_clear_outcome(),
             Action::ConnectionSucceeded {
                 profile_id,
@@ -739,6 +959,7 @@ impl App {
                     return Vec::new();
                 }
                 let pending_matches = self.pending_connection_matches(profile_id, generation);
+                let old_profile_id = self.connection.profile_id;
                 self.connection_terminal_generation = generation;
                 self.connection.profile_id = Some(profile_id);
                 self.connection.generation = generation;
@@ -756,7 +977,33 @@ impl App {
                 self.connection.server = Some(server);
                 self.connection.error = None;
                 self.explorer.connection_changed();
+                if let Some(old_profile_id) = old_profile_id.filter(|id| *id != profile_id) {
+                    self.clear_profile_catalog(old_profile_id, ExplorerConnectionStatus::Offline);
+                }
+                let Some(state) = self.explorer.normalized.profiles.get_mut(&profile_id) else {
+                    return Vec::new();
+                };
+                state.status = ExplorerConnectionStatus::Online;
+                state.last_error = None;
+                let expand_after_connect = state.expand_after_connect;
+                state.expand_after_connect = false;
+                state.catalog = crate::model::explorer::CatalogTree::new(profile_id);
+                state.load_states.clear();
+                state.pending_requests.clear();
+                state.previous_load_states.clear();
+                state.load_errors.clear();
+                self.explorer.active_profile = Some(profile_id);
+                self.explorer.normalized.selected =
+                    Some(crate::model::explorer::ExplorerNodeId::Profile(profile_id));
+                if state.advance_catalog_epoch().is_none() {
+                    state.last_error = Some("catalog epoch exhausted".to_owned());
+                    return Vec::new();
+                }
+                state.status = ExplorerConnectionStatus::Syncing;
                 for tab in &mut self.tabs {
+                    let Some(tab) = tab.as_console_mut() else {
+                        continue;
+                    };
                     if tab.transaction_state == TransactionState::OutcomeUnknown
                         && let Ok(next) = transaction::transition(
                             tab_snapshot(tab),
@@ -777,10 +1024,18 @@ impl App {
                     manager.operation = None;
                     manager.message = Some("Connected".to_owned());
                 }
-                vec![Command::LoadCatalog {
-                    profile_id,
-                    generation,
-                }]
+                let commands = self.start_catalog_request(
+                    CatalogTarget::Databases,
+                    None,
+                    CatalogRequestIntent::Automatic,
+                );
+                if expand_after_connect {
+                    self.explorer
+                        .normalized
+                        .expanded
+                        .insert(crate::model::explorer::ExplorerNodeId::Profile(profile_id));
+                }
+                commands
             }
             Action::ConnectionFailed {
                 profile_id,
@@ -798,6 +1053,11 @@ impl App {
                         ConnectionStatus::Failed
                     };
                     self.connection.error = Some(message.clone());
+                    if let Some(state) = self.explorer.normalized.profiles.get_mut(&profile_id) {
+                        state.status = ExplorerConnectionStatus::Failed;
+                        state.last_error = Some(message.clone());
+                        state.expand_after_connect = false;
+                    }
                     if let Some(manager) = self.profile_manager.as_mut()
                         && manager.operation == Some(ProfileOperation::Connecting)
                     {
@@ -807,24 +1067,74 @@ impl App {
                 }
                 Vec::new()
             }
-            Action::CatalogLoaded {
-                profile_id,
-                generation,
-                nodes,
+            Action::ConnectionInvalidated {
+                connection,
+                message,
             } => {
-                if self.active_connection_matches(profile_id, generation) {
-                    self.explorer.set_nodes(nodes);
+                if self.connection.active_identity() != Some(connection) {
+                    return Vec::new();
+                }
+                self.connection_terminal_generation = self
+                    .connection_terminal_generation
+                    .max(connection.generation);
+                let pending_profile_id = self.connection.pending_profile_id;
+                self.connection.profile_id = None;
+                self.connection.generation = 0;
+                self.connection.server = None;
+                self.connection.error = Some(message.clone());
+                self.connection.status = if pending_profile_id.is_some() {
+                    self.connection.pending_profile_id = None;
+                    self.connection.pending_generation = None;
+                    ConnectionStatus::Failed
+                } else {
+                    ConnectionStatus::Failed
+                };
+                self.clear_active_catalog(connection.profile_id);
+                if let Some(state) = self
+                    .explorer
+                    .normalized
+                    .profiles
+                    .get_mut(&connection.profile_id)
+                {
+                    state.status = ExplorerConnectionStatus::Failed;
+                    state.last_error = Some(message.clone());
+                    state.expand_after_connect = false;
+                }
+                if let Some(pending_profile_id) = pending_profile_id
+                    && let Some(state) = self
+                        .explorer
+                        .normalized
+                        .profiles
+                        .get_mut(&pending_profile_id)
+                {
+                    state.status = ExplorerConnectionStatus::Failed;
+                    state.last_error = Some(message.clone());
+                    state.expand_after_connect = false;
+                }
+                self.select_nearest_profile(connection.profile_id);
+                for tab in &mut self.tabs {
+                    let Some(tab) = tab.as_console_mut() else {
+                        continue;
+                    };
+                    if tab.transaction_state != TransactionState::Idle {
+                        tab.transaction_state = TransactionState::OutcomeUnknown;
+                        tab.transaction_generation = tab.transaction_generation.saturating_add(1);
+                        tab.query_status = QueryStatus::Failed;
+                        tab.output.push(OutputEntry {
+                            kind: OutputKind::Error,
+                            message: message.clone(),
+                        });
+                    }
                 }
                 Vec::new()
             }
-            Action::CatalogFailed {
-                profile_id,
-                generation,
+            Action::CatalogPageLoaded(page) => self.accept_catalog_page(page),
+            Action::CatalogPageFailed {
+                key,
+                category,
                 message,
             } => {
-                if self.active_connection_matches(profile_id, generation) {
-                    self.connection.error = Some(message);
-                }
+                self.fail_catalog_page(&key, category, message);
                 Vec::new()
             }
             Action::QueryFinished {
@@ -833,7 +1143,12 @@ impl App {
                 connection,
                 outcome,
             } => {
-                let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+                let Some(tab) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|tab| tab.id() == tab_id)
+                    .and_then(WorkspaceTab::as_console_mut)
+                else {
                     return Vec::new();
                 };
                 if tab.generation != generation
@@ -863,7 +1178,12 @@ impl App {
                 connection,
                 message,
             } => {
-                let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+                let Some(tab) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|tab| tab.id() == tab_id)
+                    .and_then(WorkspaceTab::as_console_mut)
+                else {
                     return Vec::new();
                 };
                 if tab.generation != generation
@@ -897,7 +1217,12 @@ impl App {
                     connection,
                     TransactionState::Starting,
                 ) {
-                    let tab = self.tabs.iter_mut().find(|tab| tab.id == tab_id).unwrap();
+                    let tab = self
+                        .tabs
+                        .iter_mut()
+                        .find(|tab| tab.id() == tab_id)
+                        .and_then(WorkspaceTab::as_console_mut)
+                        .unwrap();
                     if let Ok(next) =
                         transaction::transition(tab_snapshot(tab), TransactionEvent::Started)
                     {
@@ -920,7 +1245,12 @@ impl App {
                     connection,
                     TransactionState::Starting,
                 ) {
-                    let tab = self.tabs.iter_mut().find(|tab| tab.id == tab_id).unwrap();
+                    let tab = self
+                        .tabs
+                        .iter_mut()
+                        .find(|tab| tab.id() == tab_id)
+                        .and_then(WorkspaceTab::as_console_mut)
+                        .unwrap();
                     if let Ok(next) =
                         transaction::transition(tab_snapshot(tab), TransactionEvent::StartFailed)
                     {
@@ -969,7 +1299,12 @@ impl App {
                     let postgres = self
                         .active_profile()
                         .is_some_and(|profile| profile.kind == DatabaseKind::Postgres);
-                    let tab = self.tabs.iter_mut().find(|tab| tab.id == tab_id).unwrap();
+                    let tab = self
+                        .tabs
+                        .iter_mut()
+                        .find(|tab| tab.id() == tab_id)
+                        .and_then(WorkspaceTab::as_console_mut)
+                        .unwrap();
                     tab.query_status = QueryStatus::Failed;
                     tab.output.push(OutputEntry {
                         kind: OutputKind::Error,
@@ -984,7 +1319,11 @@ impl App {
                         apply_transaction_snapshot(tab, next);
                     }
                 } else if self.connection.active_identity() == Some(connection)
-                    && let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id)
+                    && let Some(tab) = self
+                        .tabs
+                        .iter_mut()
+                        .find(|tab| tab.id() == tab_id)
+                        .and_then(WorkspaceTab::as_console_mut)
                     && tab.transaction_generation == transaction_generation
                     && tab.query_status == QueryStatus::Cancelled
                 {
@@ -1029,7 +1368,12 @@ impl App {
                     connection,
                     TransactionState::Active,
                 ) {
-                    let tab = self.tabs.iter_mut().find(|tab| tab.id == tab_id).unwrap();
+                    let tab = self
+                        .tabs
+                        .iter_mut()
+                        .find(|tab| tab.id() == tab_id)
+                        .and_then(WorkspaceTab::as_console_mut)
+                        .unwrap();
                     if let Ok(next) = transaction::transition(
                         tab_snapshot(tab),
                         TransactionEvent::ImplicitlyEnded,
@@ -1057,7 +1401,12 @@ impl App {
                     connection,
                     TransactionState::Committing,
                 ) {
-                    let tab = self.tabs.iter_mut().find(|tab| tab.id == tab_id).unwrap();
+                    let tab = self
+                        .tabs
+                        .iter_mut()
+                        .find(|tab| tab.id() == tab_id)
+                        .and_then(WorkspaceTab::as_console_mut)
+                        .unwrap();
                     if let Ok(next) =
                         transaction::transition(tab_snapshot(tab), TransactionEvent::Committed)
                     {
@@ -1083,7 +1432,12 @@ impl App {
                     connection,
                     TransactionState::Committing,
                 ) {
-                    let tab = self.tabs.iter_mut().find(|tab| tab.id == tab_id).unwrap();
+                    let tab = self
+                        .tabs
+                        .iter_mut()
+                        .find(|tab| tab.id() == tab_id)
+                        .and_then(WorkspaceTab::as_console_mut)
+                        .unwrap();
                     let event = if unknown {
                         TransactionEvent::OutcomeUnknown
                     } else {
@@ -1113,7 +1467,12 @@ impl App {
                     connection,
                     TransactionState::RollingBack,
                 ) {
-                    let tab = self.tabs.iter_mut().find(|tab| tab.id == tab_id).unwrap();
+                    let tab = self
+                        .tabs
+                        .iter_mut()
+                        .find(|tab| tab.id() == tab_id)
+                        .and_then(WorkspaceTab::as_console_mut)
+                        .unwrap();
                     if let Ok(next) =
                         transaction::transition(tab_snapshot(tab), TransactionEvent::RolledBack)
                     {
@@ -1139,7 +1498,12 @@ impl App {
                     connection,
                     TransactionState::RollingBack,
                 ) {
-                    let tab = self.tabs.iter_mut().find(|tab| tab.id == tab_id).unwrap();
+                    let tab = self
+                        .tabs
+                        .iter_mut()
+                        .find(|tab| tab.id() == tab_id)
+                        .and_then(WorkspaceTab::as_console_mut)
+                        .unwrap();
                     let event = if unknown {
                         TransactionEvent::OutcomeUnknown
                     } else {
@@ -1159,13 +1523,21 @@ impl App {
             Action::PreviewFinished {
                 tab_id,
                 generation,
+                connection,
                 sql,
                 outcome,
             } => {
-                let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+                let Some(tab) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|tab| tab.id() == tab_id)
+                    .and_then(WorkspaceTab::as_console_mut)
+                else {
                     return Vec::new();
                 };
-                if tab.generation != generation {
+                if tab.generation != generation
+                    || self.connection.active_identity() != Some(connection)
+                {
                     return Vec::new();
                 }
                 let _ = self.editor.set_text(tab_id, &sql);
@@ -1184,12 +1556,20 @@ impl App {
             Action::DdlLoaded {
                 tab_id,
                 generation,
+                connection,
                 ddl,
             } => {
-                let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+                let Some(tab) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|tab| tab.id() == tab_id)
+                    .and_then(WorkspaceTab::as_console_mut)
+                else {
                     return Vec::new();
                 };
-                if tab.generation != generation {
+                if tab.generation != generation
+                    || self.connection.active_identity() != Some(connection)
+                {
                     return Vec::new();
                 }
                 let _ = self.editor.set_text(tab_id, &ddl);
@@ -1206,10 +1586,9 @@ impl App {
                 self.explorer.move_selection(delta);
                 Vec::new()
             }
-            Action::ExplorerSelect(index) => {
-                if index < self.explorer.visible().len() {
-                    self.explorer.selected = index;
-                }
+            Action::ExplorerSelect(id) => {
+                self.explorer.select_id(id);
+                self.focus = Focus::Explorer;
                 Vec::new()
             }
             Action::GridMove { rows, columns } => {
@@ -1236,10 +1615,11 @@ impl App {
                 tab.selected_column = column.min(column_count.saturating_sub(1));
                 Vec::new()
             }
-            Action::ExplorerToggle => {
-                self.explorer.toggle_selected();
-                Vec::new()
-            }
+            Action::ExplorerToggle => self.toggle_explorer_selected(),
+            Action::ExplorerExpand => self.expand_explorer_selected(),
+            Action::ExplorerCollapse => self.collapse_explorer_selected(),
+            Action::ExplorerPrimary => self.primary_explorer_selected(),
+            Action::ExplorerRefresh => self.refresh_explorer_selected(),
             Action::ToggleResultView => {
                 let tab = self.active_console_mut();
                 tab.result_view = match tab.result_view {
@@ -1252,8 +1632,8 @@ impl App {
                 let ids = self
                     .tabs
                     .iter()
-                    .filter(|tab| self.transaction_needs_exit(tab.id))
-                    .map(|tab| tab.id)
+                    .filter(|tab| self.transaction_needs_exit(tab.id()))
+                    .map(|tab| tab.id())
                     .collect::<Vec<_>>();
                 if ids.is_empty() {
                     self.should_quit = true;
@@ -1266,17 +1646,10 @@ impl App {
     }
 
     fn close_profile_manager(&mut self) {
-        let Some(manager) = self.profile_manager.as_mut() else {
+        let Some(manager) = self.profile_manager.as_ref() else {
             return;
         };
         if manager.operation.is_some() {
-            return;
-        }
-        if manager.page != ProfileManagerPage::List && !self.profiles.is_empty() {
-            manager.page = ProfileManagerPage::List;
-            manager.draft = None;
-            manager.selected_field = ProfileField::Kind;
-            manager.message = None;
             return;
         }
         self.profile_manager = None;
@@ -1288,7 +1661,8 @@ impl App {
     fn transaction_needs_exit(&self, console_id: Uuid) -> bool {
         self.tabs
             .iter()
-            .find(|tab| tab.id == console_id)
+            .find(|tab| tab.id() == console_id)
+            .and_then(WorkspaceTab::as_console)
             .is_some_and(|tab| tab.transaction_state != TransactionState::Idle)
     }
 
@@ -1297,7 +1671,12 @@ impl App {
         I: IntoIterator<Item = Uuid>,
     {
         for console_id in console_ids {
-            let Some(tab) = self.tabs.iter().find(|tab| tab.id == console_id) else {
+            let Some(tab) = self
+                .tabs
+                .iter()
+                .find(|tab| tab.id() == console_id)
+                .and_then(WorkspaceTab::as_console)
+            else {
                 continue;
             };
             self.deferred.push(DeferredTransactionPrompt {
@@ -1327,7 +1706,12 @@ impl App {
         let Some(Overlay::TransactionExitConfirm { prompt, .. }) = self.overlay.take() else {
             return Vec::new();
         };
-        let Some(tab) = self.tabs.iter().find(|tab| tab.id == prompt.console_id) else {
+        let Some(tab) = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id() == prompt.console_id)
+            .and_then(WorkspaceTab::as_console)
+        else {
             self.show_next_deferred();
             return self.replay_deferred(prompt.intent);
         };
@@ -1366,7 +1750,8 @@ impl App {
         let tab = self
             .tabs
             .iter_mut()
-            .find(|tab| tab.id == prompt.console_id)
+            .find(|tab| tab.id() == prompt.console_id)
+            .and_then(WorkspaceTab::as_console_mut)
             .unwrap();
         let event = if commit {
             TransactionEvent::Commit
@@ -1427,7 +1812,7 @@ impl App {
             DeferredIntent::CloseConsole => {
                 if self.tabs.len() > 1 {
                     let id = self.active_console().id;
-                    if let Some(index) = self.tabs.iter().position(|tab| tab.id == id) {
+                    if let Some(index) = self.tabs.iter().position(|tab| tab.id() == id) {
                         self.tabs.remove(index);
                         self.editor.close_console(id);
                         self.active_tab = self.active_tab.min(self.tabs.len().saturating_sub(1));
@@ -1488,7 +1873,8 @@ impl App {
             && self
                 .tabs
                 .iter()
-                .find(|tab| tab.id == console_id)
+                .find(|tab| tab.id() == console_id)
+                .and_then(WorkspaceTab::as_console)
                 .is_some_and(|tab| {
                     tab.transaction_generation == transaction_generation
                         && tab.transaction_state == TransactionState::OutcomeUnknown
@@ -1500,7 +1886,8 @@ impl App {
         let tab = self
             .tabs
             .iter_mut()
-            .find(|tab| tab.id == console_id)
+            .find(|tab| tab.id() == console_id)
+            .and_then(WorkspaceTab::as_console_mut)
             .unwrap();
         if let Ok(next) = transaction::transition(tab_snapshot(tab), TransactionEvent::ClearOutcome)
         {
@@ -1526,29 +1913,29 @@ impl App {
         self.idle_profile_manager_mut(ProfileManagerPage::Form)
     }
 
-    fn selected_profile(&self) -> Option<&ConnectionProfile> {
-        let selected = self.profile_manager.as_ref()?.selected;
-        self.profiles.get(selected)
-    }
-
-    fn request_profile_delete(&mut self) {
-        let Some(profile_id) = self.selected_profile().map(|profile| profile.id) else {
+    fn request_profile_delete(&mut self, profile_id: Uuid) {
+        if !self.profiles.iter().any(|profile| profile.id == profile_id) {
             return;
-        };
+        }
         let blocked = self.connection.profile_id == Some(profile_id) && self.has_running_query();
-        let Some(manager) = self.idle_profile_manager_mut(ProfileManagerPage::List) else {
-            return;
+        let mut manager = ProfileManagerState {
+            page: ProfileManagerPage::ConfirmDelete,
+            delete_profile_id: Some(profile_id),
+            ..ProfileManagerState::default()
         };
         if blocked {
             manager.message = Some("Cancel the running query before deleting this profile".into());
-        } else {
-            manager.page = ProfileManagerPage::ConfirmDelete;
-            manager.message = None;
         }
+        self.profile_manager = Some(manager);
+        self.overlay = Some(Overlay::ProfileManager);
     }
 
     fn confirm_profile_delete(&mut self) -> Vec<Command> {
-        let Some(profile_id) = self.selected_profile().map(|profile| profile.id) else {
+        let Some(profile_id) = self
+            .profile_manager
+            .as_ref()
+            .and_then(|manager| manager.delete_profile_id)
+        else {
             return Vec::new();
         };
         let blocked = self.connection.profile_id == Some(profile_id) && self.has_running_query();
@@ -1558,14 +1945,13 @@ impl App {
         let deferred_console_ids = self
             .tabs
             .iter()
-            .filter(|tab| self.transaction_needs_exit(tab.id))
-            .map(|tab| tab.id)
+            .filter(|tab| self.transaction_needs_exit(tab.id()))
+            .map(|tab| tab.id())
             .collect::<Vec<_>>();
         let Some(manager) = self.idle_profile_manager_mut(ProfileManagerPage::ConfirmDelete) else {
             return Vec::new();
         };
         if blocked {
-            manager.page = ProfileManagerPage::List;
             manager.message = Some("Cancel the running query before deleting this profile".into());
             return Vec::new();
         }
@@ -1587,58 +1973,6 @@ impl App {
         }]
     }
 
-    fn connect_selected_profile(&mut self) -> Vec<Command> {
-        let Some(profile_id) = self.selected_profile().map(|profile| profile.id) else {
-            return Vec::new();
-        };
-        if self.connection.profile_id == Some(profile_id)
-            && self.connection.status == ConnectionStatus::Connected
-            && self.connection.pending_profile_id.is_none()
-        {
-            if let Some(manager) = self.idle_profile_manager_mut(ProfileManagerPage::List) {
-                manager.message = Some("Profile is already connected".into());
-            }
-            return Vec::new();
-        }
-        if self.connection.profile_id != Some(profile_id) && self.has_running_query() {
-            if let Some(manager) = self.idle_profile_manager_mut(ProfileManagerPage::List) {
-                manager.message = Some("Cancel the running query before switching profiles".into());
-            }
-            return Vec::new();
-        }
-        if self.connection.profile_id != Some(profile_id) {
-            let ids = self
-                .tabs
-                .iter()
-                .filter(|tab| self.transaction_needs_exit(tab.id))
-                .map(|tab| tab.id)
-                .collect::<Vec<_>>();
-            if !ids.is_empty() {
-                return self.defer_intent(
-                    DeferredIntent::SwitchConnection {
-                        profile_id,
-                        generation: 0,
-                    },
-                    ids,
-                );
-            }
-        }
-        if self
-            .idle_profile_manager_mut(ProfileManagerPage::List)
-            .is_none()
-        {
-            return Vec::new();
-        }
-        let commands = self.request_connection(profile_id);
-        if !commands.is_empty()
-            && let Some(manager) = self.profile_manager.as_mut()
-        {
-            manager.operation = Some(ProfileOperation::Connecting);
-            manager.message = Some("Connecting...".into());
-        }
-        commands
-    }
-
     fn test_profile_draft(&mut self) -> Vec<Command> {
         let profiles = &self.profiles;
         let Some(manager) = self.profile_manager.as_mut().filter(|manager| {
@@ -1658,6 +1992,9 @@ impl App {
             }
         };
         let request_id = next_profile_request(manager);
+        if let Some(draft) = manager.draft.as_mut() {
+            draft.begin_catalog_discovery(submission.discovery_fingerprint);
+        }
         manager.operation = Some(ProfileOperation::Testing);
         manager.message = Some("Testing connection...".into());
         vec![Command::TestProfile {
@@ -1719,6 +2056,7 @@ impl App {
         request_id: u64,
         profile: ConnectionProfile,
         warning: Option<String>,
+        change: crate::model::profile_manager::ProfileChange,
         connect: bool,
     ) -> Vec<Command> {
         let expected = if connect {
@@ -1731,6 +2069,18 @@ impl App {
         }
 
         let profile_id = profile.id;
+        let scope_changed = change.catalog_scope_changed;
+        add_explorer_profile(&mut self.explorer, &profile, ProfileProvenance::Saved);
+        if scope_changed && let Some(state) = self.explorer.normalized.profiles.get_mut(&profile_id)
+        {
+            if state.advance_catalog_epoch().is_none() {
+                state.last_error = Some("catalog epoch exhausted".to_owned());
+                return Vec::new();
+            }
+            state.load_states.clear();
+            state.pending_requests.clear();
+            state.load_errors.clear();
+        }
         if let Some(existing) = self
             .profiles
             .iter_mut()
@@ -1740,20 +2090,39 @@ impl App {
         } else {
             self.profiles.push(profile);
         }
-        let selected = self
-            .profiles
-            .iter()
-            .position(|profile| profile.id == profile_id)
-            .unwrap_or(0);
         if let Some(manager) = self.profile_manager.as_mut() {
-            manager.page = ProfileManagerPage::List;
-            manager.selected = selected;
             manager.draft = None;
             manager.selected_field = ProfileField::Kind;
             manager.operation = None;
             manager.message = warning.or_else(|| Some("Profile saved".into()));
         }
-
+        if !connect
+            && !change.connection_settings_changed
+            && !change.credentials_changed
+            && scope_changed
+            && self.connection.profile_id == Some(profile_id)
+        {
+            self.explorer.completion_index = Default::default();
+            self.active_console_mut().completion = None;
+            self.profile_manager = None;
+            self.overlay = None;
+            return self.start_catalog_request(
+                CatalogTarget::Databases,
+                None,
+                CatalogRequestIntent::Refresh,
+            );
+        }
+        if !connect
+            && !change.connection_settings_changed
+            && !change.credentials_changed
+            && !scope_changed
+            && change.display_only_changed
+            && self.connection.profile_id == Some(profile_id)
+        {
+            self.profile_manager = None;
+            self.overlay = None;
+            return Vec::new();
+        }
         if !connect {
             if self.connection.profile_id == Some(profile_id) && self.has_running_query() {
                 if let Some(manager) = self.profile_manager.as_mut() {
@@ -1762,7 +2131,10 @@ impl App {
                 }
                 return Vec::new();
             }
-            return self.retire_profile_connections(profile_id, None);
+            let commands = self.retire_profile_connections(profile_id, None);
+            self.profile_manager = None;
+            self.overlay = None;
+            return commands;
         }
         if self.has_running_query() {
             if let Some(manager) = self.profile_manager.as_mut() {
@@ -1789,14 +2161,10 @@ impl App {
         if !self.profile_operation_matches(request_id, &[ProfileOperation::Deleting]) {
             return Vec::new();
         }
+        self.explorer.normalized.remove_profile(profile_id);
         self.profiles.retain(|profile| profile.id != profile_id);
-        if let Some(manager) = self.profile_manager.as_mut() {
-            manager.page = ProfileManagerPage::List;
-            manager.selected = manager.selected.min(self.profiles.len().saturating_sub(1));
-            manager.draft = None;
-            manager.operation = None;
-            manager.message = Some("Profile deleted".into());
-        }
+        self.profile_manager = None;
+        self.overlay = None;
         self.retire_profile_connections(profile_id, active_connection)
     }
 
@@ -1842,6 +2210,19 @@ impl App {
         self.connection.pending_generation = Some(generation);
         self.connection.status = ConnectionStatus::Connecting;
         self.connection.error = None;
+        if let Some(active_profile_id) = self.connection.profile_id.filter(|id| *id != profile_id)
+            && let Some(state) = self
+                .explorer
+                .normalized
+                .profiles
+                .get_mut(&active_profile_id)
+        {
+            state.status = ExplorerConnectionStatus::Online;
+        }
+        if let Some(state) = self.explorer.normalized.profiles.get_mut(&profile_id) {
+            state.status = ExplorerConnectionStatus::Linking;
+            state.last_error = None;
+        }
         vec![Command::Connect {
             profile_id,
             generation,
@@ -1867,7 +2248,8 @@ impl App {
             self.connection.profile_id = None;
             self.connection.generation = 0;
             self.connection.server = None;
-            self.explorer = ExplorerState::default();
+            self.clear_active_catalog(profile_id);
+            self.select_nearest_profile(profile_id);
         }
         if let Some(connection) = pending {
             identities.push(connection);
@@ -1922,18 +2304,18 @@ impl App {
                 .draft
                 .as_ref()
                 .is_some_and(|draft| Some(draft.profile_id()) == self.connection.profile_id),
-            Some(ProfileOperation::Deleting) => self
-                .profiles
-                .get(manager.selected)
-                .is_some_and(|profile| Some(profile.id) == self.connection.profile_id),
+            Some(ProfileOperation::Deleting) => {
+                manager.delete_profile_id == self.connection.profile_id
+            }
             _ => false,
         }
     }
 
     fn has_running_query(&self) -> bool {
-        self.tabs
-            .iter()
-            .any(|tab| tab.query_status == QueryStatus::Running)
+        self.tabs.iter().any(|tab| {
+            tab.as_console()
+                .is_some_and(|tab| tab.query_status == QueryStatus::Running)
+        })
     }
 
     fn apply_editor_effects(&mut self) -> Vec<Command> {
@@ -1989,8 +2371,9 @@ impl App {
     }
 
     fn completion_key(&self) -> Option<CompletionScheduleKey> {
+        let tab = self.active_console_opt()?;
         Some(CompletionScheduleKey {
-            console_id: self.active_console().id,
+            console_id: tab.id,
             document_revision: self.active_editor_revision(),
             connection: self.connection.active_identity()?,
             catalog_generation: self.explorer.catalog_generation,
@@ -2016,16 +2399,20 @@ impl App {
             &self.explorer.completion_index,
             None,
         );
-        self.active_console_mut().completion =
-            (!candidates.is_empty()).then_some(CompletionPopup {
-                candidates,
-                selected: 0,
-            });
+        let Some(tab) = self.active_console_opt_mut() else {
+            return Vec::new();
+        };
+        tab.completion = (!candidates.is_empty()).then_some(CompletionPopup {
+            candidates,
+            selected: 0,
+        });
         Vec::new()
     }
 
     fn accept_completion(&mut self) -> Vec<Command> {
-        let id = self.active_console().id;
+        let Some(id) = self.active_console_opt().map(|tab| tab.id) else {
+            return Vec::new();
+        };
         let Some(popup) = self.active_console_mut().completion.take() else {
             return Vec::new();
         };
@@ -2048,7 +2435,9 @@ impl App {
     }
 
     fn format_current(&mut self) {
-        let id = self.active_console().id;
+        let Some(id) = self.active_console_opt().map(|tab| tab.id) else {
+            return;
+        };
         let dialect = self.sql_dialect();
         let scope = match self.editor.current_scope(id, dialect) {
             Ok(Some(scope)) => scope,
@@ -2091,7 +2480,9 @@ impl App {
     }
 
     fn set_transaction_mode(&mut self, mode: TransactionMode) -> Vec<Command> {
-        let tab = self.active_console_mut();
+        let Some(tab) = self.active_console_opt_mut() else {
+            return Vec::new();
+        };
         let event = match mode {
             TransactionMode::Manual => TransactionEvent::EnterManual,
             TransactionMode::Auto => TransactionEvent::SetAuto,
@@ -2317,7 +2708,12 @@ impl App {
     }
 
     fn validate_draft(&self, draft: &sql::ExecutionDraft) -> Result<(), String> {
-        let Some(tab) = self.tabs.iter().find(|tab| tab.id == draft.console_id) else {
+        let Some(tab) = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id() == draft.console_id)
+            .and_then(WorkspaceTab::as_console)
+        else {
             return Err("Console no longer exists".to_owned());
         };
         if tab.generation != draft.query_generation {
@@ -2346,8 +2742,11 @@ impl App {
             self.status_message(&message);
             return Vec::new();
         }
-        let tab = self.tabs.iter_mut().find(|tab| tab.id == draft.console_id);
-        let Some(tab) = tab else {
+        let tab = self
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.id() == draft.console_id);
+        let Some(tab) = tab.and_then(WorkspaceTab::as_console_mut) else {
             return Vec::new();
         };
         if draft.transaction_mode == TransactionMode::Manual {
@@ -2401,7 +2800,12 @@ impl App {
     }
 
     fn retain_execution(&mut self, draft: sql::ExecutionDraft, result: ExecutionResult) {
-        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == draft.console_id) {
+        if let Some(tab) = self
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.id() == draft.console_id)
+            .and_then(WorkspaceTab::as_console_mut)
+        {
             tab.last_execution = Some(LastExecution { draft, result });
         }
     }
@@ -2414,38 +2818,631 @@ impl App {
         self.connection.error = Some(message.to_owned());
     }
 
+    fn start_catalog_request(
+        &mut self,
+        target: CatalogTarget,
+        cursor: Option<crate::db::catalog::CatalogCursor>,
+        intent: CatalogRequestIntent,
+    ) -> Vec<Command> {
+        let Some(connection) = self.database_command_identity() else {
+            return Vec::new();
+        };
+        if target
+            .profile_id()
+            .is_some_and(|profile_id| profile_id != connection.profile_id)
+        {
+            return Vec::new();
+        }
+        let Some(scope) = self
+            .profiles
+            .iter()
+            .find(|profile| profile.id == connection.profile_id)
+            .map(|profile| profile.catalog_scope.clone())
+        else {
+            return Vec::new();
+        };
+        let owner = owner_for_target(connection.profile_id, &target);
+        let Some(state) = self
+            .explorer
+            .normalized
+            .profiles
+            .get_mut(&connection.profile_id)
+        else {
+            return Vec::new();
+        };
+        if state.pending_requests.contains_key(&owner) && intent != CatalogRequestIntent::Refresh {
+            return Vec::new();
+        }
+        let current = state
+            .load_states
+            .get(&owner)
+            .cloned()
+            .unwrap_or(ExplorerLoadState::NotLoaded);
+        if intent == CatalogRequestIntent::Automatic
+            && !matches!(current, ExplorerLoadState::NotLoaded)
+        {
+            return Vec::new();
+        }
+        if intent == CatalogRequestIntent::Continuation {
+            let expected_cursor = match &current {
+                ExplorerLoadState::Loaded { next_cursor } => next_cursor.as_ref(),
+                _ => None,
+            };
+            if expected_cursor != cursor.as_ref() {
+                return Vec::new();
+            }
+        }
+        if intent == CatalogRequestIntent::Explicit
+            && matches!(current, ExplorerLoadState::Loaded { next_cursor: None })
+            && cursor.is_none()
+        {
+            return Vec::new();
+        }
+        let Some(request_id) = state.allocate_request_id() else {
+            state.last_error = Some("catalog request ID exhausted".to_owned());
+            return Vec::new();
+        };
+        let request = CatalogRequest {
+            key: CatalogRequestKey {
+                connection,
+                catalog_epoch: state.catalog_epoch,
+                request_id,
+                target,
+                cursor,
+            },
+            scope,
+            page_size: 100.min(MAX_CATALOG_PAGE_SIZE),
+        };
+        if let Err(error) = request.validate() {
+            state.last_error = Some(error.to_string());
+            return Vec::new();
+        }
+        state
+            .previous_load_states
+            .entry(owner.clone())
+            .or_insert(current);
+        state
+            .load_states
+            .insert(owner.clone(), ExplorerLoadState::Loading { request_id });
+        state.pending_requests.insert(owner, request.clone());
+        vec![Command::LoadCatalogPage(request)]
+    }
+
+    fn accept_catalog_page(&mut self, page: CatalogPage) -> Vec<Command> {
+        let profile_id = page.key.connection.profile_id;
+        if self.connection.active_identity() != Some(page.key.connection) {
+            return Vec::new();
+        }
+        let owner = owner_for_target(profile_id, &page.key.target);
+        let pending = self
+            .explorer
+            .normalized
+            .profiles
+            .get(&profile_id)
+            .and_then(|state| state.pending_requests.get(&owner))
+            .cloned();
+        let Some(request) = pending.filter(|request| request.key == page.key) else {
+            return Vec::new();
+        };
+        if let Err(error) = page.validate_for(&request) {
+            self.fail_catalog_page(
+                &request.key,
+                ErrorCategory::Internal,
+                format!("invalid catalog page: {error}"),
+            );
+            return Vec::new();
+        }
+
+        let mut next_explorer = self.explorer.normalized.clone();
+        let apply_result: Result<Vec<crate::db::catalog::CatalogId>, String> =
+            match &request.key.target {
+                CatalogTarget::Groups { schema } => {
+                    let states = page
+                        .group_summaries
+                        .iter()
+                        .map(|summary| {
+                            (
+                                summary.group,
+                                CatalogGroupState {
+                                    count: summary.object_count,
+                                    completeness: page.completeness,
+                                },
+                            )
+                        })
+                        .collect();
+                    let catalog = &mut next_explorer.profiles.get_mut(&profile_id).unwrap().catalog;
+                    if request.key.cursor.is_some() {
+                        catalog.append_group_states(schema, states)
+                    } else {
+                        catalog.replace_group_states(schema, states)
+                    }
+                    .map(|()| Vec::new())
+                    .map_err(|error| error.to_string())
+                }
+                _ if request.key.cursor.is_some() => next_explorer
+                    .profiles
+                    .get_mut(&profile_id)
+                    .unwrap()
+                    .catalog
+                    .append_page(&owner, page.entries.clone())
+                    .map(|()| Vec::new())
+                    .map_err(|error| error.to_string()),
+                _ => next_explorer
+                    .replace_page(owner.clone(), page.entries.clone())
+                    .map_err(|error| error.to_string()),
+            };
+        let removed = match apply_result {
+            Ok(removed) => removed,
+            Err(error) => {
+                self.fail_catalog_page(
+                    &request.key,
+                    ErrorCategory::Internal,
+                    format!("invalid catalog tree mutation: {error}"),
+                );
+                return Vec::new();
+            }
+        };
+
+        let state = next_explorer.profiles.get_mut(&profile_id).unwrap();
+        if !removed.is_empty() {
+            let references_removed = |candidate: &ExplorerOwnerId| {
+                candidate != &owner
+                    && match candidate {
+                        ExplorerOwnerId::Profile(_) => false,
+                        ExplorerOwnerId::Catalog(id) => removed.contains(id),
+                        ExplorerOwnerId::Group { parent, .. } => removed.contains(parent),
+                    }
+            };
+            state
+                .load_states
+                .retain(|candidate, _| !references_removed(candidate));
+            state
+                .pending_requests
+                .retain(|candidate, _| !references_removed(candidate));
+            state
+                .previous_load_states
+                .retain(|candidate, _| !references_removed(candidate));
+            state
+                .load_errors
+                .retain(|candidate, _| !references_removed(candidate));
+        }
+        state.pending_requests.remove(&owner);
+        state.previous_load_states.remove(&owner);
+        state.load_errors.remove(&owner);
+        state.load_states.insert(
+            owner,
+            ExplorerLoadState::Loaded {
+                next_cursor: page.next_cursor.clone(),
+            },
+        );
+        if state.pending_requests.is_empty() {
+            state.status = ExplorerConnectionStatus::Online;
+        }
+        self.explorer.normalized = next_explorer;
+        self.explorer.completion_index.replace(
+            &self.explorer.normalized.profiles[&profile_id]
+                .catalog
+                .entries()
+                .values()
+                .cloned()
+                .collect::<Vec<_>>(),
+        );
+        self.explorer.catalog_generation = self.explorer.catalog_generation.saturating_add(1);
+        self.explorer.rebuild_projection(profile_id);
+
+        let mut commands = Vec::new();
+        if let Some(cursor) = page.next_cursor {
+            commands.extend(self.start_catalog_request(
+                request.key.target.clone(),
+                Some(cursor),
+                CatalogRequestIntent::Continuation,
+            ));
+        }
+        match request.key.target {
+            CatalogTarget::Databases => {
+                for entry in page.entries {
+                    commands.extend(self.start_catalog_request(
+                        CatalogTarget::schemas(entry.id).unwrap(),
+                        None,
+                        CatalogRequestIntent::Automatic,
+                    ));
+                }
+            }
+            CatalogTarget::Schemas { .. } => {
+                for entry in page.entries {
+                    commands.extend(self.start_catalog_request(
+                        CatalogTarget::groups(entry.id).unwrap(),
+                        None,
+                        CatalogRequestIntent::Automatic,
+                    ));
+                }
+            }
+            CatalogTarget::Groups { schema } => {
+                for summary in page
+                    .group_summaries
+                    .into_iter()
+                    .filter(|summary| completion_group(summary.group))
+                {
+                    commands.extend(self.start_catalog_request(
+                        CatalogTarget::objects(schema.clone(), summary.group).unwrap(),
+                        None,
+                        CatalogRequestIntent::Automatic,
+                    ));
+                }
+            }
+            CatalogTarget::Objects { .. } | CatalogTarget::RelationChildren { .. } => {}
+        }
+        commands
+    }
+
+    fn fail_catalog_page(
+        &mut self,
+        key: &CatalogRequestKey,
+        category: ErrorCategory,
+        message: String,
+    ) {
+        if self.connection.active_identity() != Some(key.connection) {
+            return;
+        }
+        let owner = owner_for_target(key.connection.profile_id, &key.target);
+        let Some(state) = self
+            .explorer
+            .normalized
+            .profiles
+            .get_mut(&key.connection.profile_id)
+        else {
+            return;
+        };
+        if state
+            .pending_requests
+            .get(&owner)
+            .is_none_or(|request| request.key != *key)
+        {
+            return;
+        }
+        let previous = state
+            .previous_load_states
+            .remove(&owner)
+            .unwrap_or(ExplorerLoadState::NotLoaded);
+        let has_snapshot = !matches!(
+            previous,
+            ExplorerLoadState::NotLoaded
+                | ExplorerLoadState::Loading { .. }
+                | ExplorerLoadState::Failed { .. }
+                | ExplorerLoadState::PermissionDenied { .. }
+        );
+        let next_cursor = match previous {
+            ExplorerLoadState::Loaded { next_cursor }
+            | ExplorerLoadState::Stale { next_cursor } => next_cursor,
+            _ => None,
+        };
+        let has_data = match &owner {
+            ExplorerOwnerId::Profile(_) => !state.catalog.roots().is_empty(),
+            ExplorerOwnerId::Catalog(id) => {
+                !state.catalog.children(id).is_empty() || !state.catalog.groups(id).is_empty()
+            }
+            ExplorerOwnerId::Group { parent, group } => {
+                !state.catalog.group_children(parent, *group).is_empty()
+            }
+        };
+        let load_state = if has_snapshot || has_data {
+            ExplorerLoadState::Stale { next_cursor }
+        } else if category == ErrorCategory::Permission {
+            ExplorerLoadState::PermissionDenied {
+                request_id: key.request_id,
+            }
+        } else {
+            ExplorerLoadState::Failed {
+                request_id: key.request_id,
+            }
+        };
+        state.pending_requests.remove(&owner);
+        state.load_errors.insert(owner.clone(), message);
+        state.load_states.insert(owner, load_state);
+        if state.pending_requests.is_empty() {
+            state.status = ExplorerConnectionStatus::Online;
+        }
+        self.explorer.rebuild_projection(key.connection.profile_id);
+    }
+
+    fn selected_catalog_target(&self) -> Option<CatalogTarget> {
+        self.target_for_node(self.explorer.selected_id()?)
+    }
+
+    fn target_for_node(
+        &self,
+        node: &crate::model::explorer::ExplorerNodeId,
+    ) -> Option<CatalogTarget> {
+        use crate::model::explorer::ExplorerNodeId;
+        match node {
+            ExplorerNodeId::Profile(_) => Some(CatalogTarget::Databases),
+            ExplorerNodeId::Catalog(id) => match id.kind {
+                crate::db::catalog::CatalogKind::Database => {
+                    CatalogTarget::schemas(id.clone()).ok()
+                }
+                crate::db::catalog::CatalogKind::Schema => CatalogTarget::groups(id.clone()).ok(),
+                kind if kind.is_relation() => CatalogTarget::relation_children(id.clone()).ok(),
+                _ => None,
+            },
+            ExplorerNodeId::Group { parent, group } => {
+                CatalogTarget::objects(parent.clone(), *group).ok()
+            }
+            ExplorerNodeId::Status { owner, .. }
+            | ExplorerNodeId::Empty { owner }
+            | ExplorerNodeId::LoadMore { parent: owner, .. } => self.target_for_owner(owner),
+            ExplorerNodeId::EmptyProfiles => None,
+        }
+    }
+
+    fn target_for_owner(&self, owner: &ExplorerOwnerId) -> Option<CatalogTarget> {
+        match owner {
+            ExplorerOwnerId::Profile(_) => Some(CatalogTarget::Databases),
+            ExplorerOwnerId::Catalog(id) => match id.kind {
+                crate::db::catalog::CatalogKind::Database => {
+                    CatalogTarget::schemas(id.clone()).ok()
+                }
+                crate::db::catalog::CatalogKind::Schema => CatalogTarget::groups(id.clone()).ok(),
+                kind if kind.is_relation() => CatalogTarget::relation_children(id.clone()).ok(),
+                _ => None,
+            },
+            ExplorerOwnerId::Group { parent, group } => {
+                CatalogTarget::objects(parent.clone(), *group).ok()
+            }
+        }
+    }
+
+    fn toggle_explorer_selected(&mut self) -> Vec<Command> {
+        use crate::model::explorer::{ExplorerNodeId, StatusRowKind};
+        let Some(selected) = self.explorer.selected_id().cloned() else {
+            return Vec::new();
+        };
+        match &selected {
+            ExplorerNodeId::LoadMore { parent, cursor } => self
+                .target_for_owner(parent)
+                .map_or_else(Vec::new, |target| {
+                    self.start_catalog_request(
+                        target,
+                        Some(cursor.clone()),
+                        CatalogRequestIntent::Continuation,
+                    )
+                }),
+            ExplorerNodeId::Status {
+                owner,
+                kind: StatusRowKind::Retry | StatusRowKind::PermissionDenied | StatusRowKind::Stale,
+            } => self
+                .target_for_owner(owner)
+                .map_or_else(Vec::new, |target| {
+                    self.start_catalog_request(target, None, CatalogRequestIntent::Explicit)
+                }),
+            ExplorerNodeId::Catalog(_) | ExplorerNodeId::Group { .. } => {
+                let expanded = self.explorer.normalized.expanded.contains(&selected);
+                self.explorer.toggle_selected();
+                if expanded {
+                    return Vec::new();
+                }
+                self.target_for_node(&selected)
+                    .map_or_else(Vec::new, |target| {
+                        if self.target_needs_load(&target) {
+                            self.start_catalog_request(target, None, CatalogRequestIntent::Explicit)
+                        } else {
+                            Vec::new()
+                        }
+                    })
+            }
+            ExplorerNodeId::Profile(profile_id) => {
+                let Some(status) = self
+                    .explorer
+                    .normalized
+                    .profiles
+                    .get(profile_id)
+                    .map(|profile| profile.status)
+                else {
+                    return Vec::new();
+                };
+                match status {
+                    ExplorerConnectionStatus::Offline | ExplorerConnectionStatus::Failed => {
+                        self.explorer
+                            .normalized
+                            .expanded
+                            .remove(&ExplorerNodeId::Profile(*profile_id));
+                        self.request_connection(*profile_id)
+                    }
+                    ExplorerConnectionStatus::Linking => Vec::new(),
+                    ExplorerConnectionStatus::Online | ExplorerConnectionStatus::Syncing => {
+                        self.explorer.toggle_selected();
+                        Vec::new()
+                    }
+                }
+            }
+            ExplorerNodeId::EmptyProfiles => self.update(Action::ProfileStartNew),
+            ExplorerNodeId::Status { .. } | ExplorerNodeId::Empty { .. } => Vec::new(),
+        }
+    }
+
+    fn expand_explorer_selected(&mut self) -> Vec<Command> {
+        let Some(selected) = self.explorer.selected_id().cloned() else {
+            return Vec::new();
+        };
+        if let ExplorerNodeId::Profile(profile_id) = selected {
+            let status = self
+                .explorer
+                .normalized
+                .profiles
+                .get(&profile_id)
+                .map(|profile| profile.status);
+            if matches!(
+                status,
+                Some(ExplorerConnectionStatus::Offline | ExplorerConnectionStatus::Failed)
+            ) {
+                if let Some(profile) = self.explorer.normalized.profiles.get_mut(&profile_id) {
+                    profile.expand_after_connect = true;
+                }
+                return self.request_connection(profile_id);
+            }
+        }
+        let expanded = self.explorer.normalized.expanded.contains(&selected);
+        if expanded || !self.explorer.normalized.expand() {
+            return Vec::new();
+        }
+        self.target_for_node(&selected)
+            .map_or_else(Vec::new, |target| {
+                if self.target_needs_load(&target) {
+                    self.start_catalog_request(target, None, CatalogRequestIntent::Explicit)
+                } else {
+                    Vec::new()
+                }
+            })
+    }
+
+    fn collapse_explorer_selected(&mut self) -> Vec<Command> {
+        if self.explorer.normalized.collapse() {
+            Vec::new()
+        } else {
+            self.explorer.normalized.move_to_parent();
+            Vec::new()
+        }
+    }
+
+    fn refresh_explorer_selected(&mut self) -> Vec<Command> {
+        self.selected_catalog_target()
+            .map_or_else(Vec::new, |target| {
+                self.start_catalog_request(target, None, CatalogRequestIntent::Refresh)
+            })
+    }
+
+    fn primary_explorer_selected(&mut self) -> Vec<Command> {
+        let Some(selected) = self.explorer.selected_id().cloned() else {
+            return Vec::new();
+        };
+        if let ExplorerNodeId::Catalog(id) = &selected
+            && let Some(entry) = self
+                .explorer
+                .normalized
+                .profiles
+                .get(&id.profile_id())
+                .and_then(|profile| profile.catalog.get(id))
+            && (entry.kind.is_relation() || entry.owning_relation_id().is_some())
+        {
+            return self.preview_selected();
+        }
+        self.toggle_explorer_selected()
+    }
+
+    fn target_needs_load(&self, target: &CatalogTarget) -> bool {
+        let Some(profile_id) = self.connection.profile_id else {
+            return false;
+        };
+        let owner = owner_for_target(profile_id, target);
+        self.explorer
+            .normalized
+            .profiles
+            .get(&profile_id)
+            .and_then(|state| state.load_states.get(&owner))
+            .is_none_or(|state| {
+                matches!(
+                    state,
+                    ExplorerLoadState::NotLoaded
+                        | ExplorerLoadState::Stale { .. }
+                        | ExplorerLoadState::Failed { .. }
+                        | ExplorerLoadState::PermissionDenied { .. }
+                )
+            })
+    }
+
+    fn clear_active_catalog(&mut self, profile_id: Uuid) {
+        self.explorer.connection_changed();
+        self.clear_profile_catalog(profile_id, ExplorerConnectionStatus::Offline);
+    }
+
+    fn clear_profile_catalog(&mut self, profile_id: Uuid, status: ExplorerConnectionStatus) {
+        self.explorer
+            .normalized
+            .expanded
+            .retain(|node| node.profile_id() != Some(profile_id));
+        if let Some(state) = self.explorer.normalized.profiles.get_mut(&profile_id) {
+            state.status = status;
+            state.catalog = crate::model::explorer::CatalogTree::new(profile_id);
+            state.load_states.clear();
+            state.pending_requests.clear();
+            state.previous_load_states.clear();
+            state.load_errors.clear();
+        }
+    }
+
+    fn select_nearest_profile(&mut self, removed_profile_id: Uuid) {
+        if self
+            .explorer
+            .normalized
+            .selected
+            .as_ref()
+            .is_some_and(|node| node.profile_id() != Some(removed_profile_id))
+        {
+            return;
+        }
+        let order = &self.explorer.normalized.profile_order;
+        let next = order
+            .iter()
+            .position(|profile_id| *profile_id == removed_profile_id)
+            .and_then(|index| {
+                order
+                    .get(index + 1)
+                    .or_else(|| index.checked_sub(1).and_then(|i| order.get(i)))
+            })
+            .copied();
+        self.explorer.normalized.selected = next
+            .map(crate::model::explorer::ExplorerNodeId::Profile)
+            .or(Some(crate::model::explorer::ExplorerNodeId::EmptyProfiles));
+    }
+
+    fn request_profile_disconnect(&mut self, profile_id: Uuid) -> Vec<Command> {
+        let Some(connection) = self
+            .connection
+            .active_identity()
+            .filter(|connection| connection.profile_id == profile_id)
+        else {
+            return Vec::new();
+        };
+        if self.has_running_query() {
+            return Vec::new();
+        }
+        if self.transaction_needs_exit(self.active_console().id) {
+            return self.defer_intent(
+                DeferredIntent::Disconnect { connection },
+                self.tabs
+                    .iter()
+                    .filter(|tab| self.transaction_needs_exit(tab.id()))
+                    .map(|tab| tab.id())
+                    .collect::<Vec<_>>(),
+            );
+        }
+        vec![Command::Disconnect { connection }]
+    }
+
     fn preview_selected(&mut self) -> Vec<Command> {
         let Some(connection) = self.database_command_identity() else {
             return Vec::new();
         };
-        let Some(node) = self.explorer.selected_node().cloned() else {
+        let Some(entry) = self.explorer.selected_entry().cloned() else {
             return Vec::new();
         };
-        if !matches!(
-            node.kind,
-            crate::db::catalog::CatalogKind::Table | crate::db::catalog::CatalogKind::View
-        ) {
-            self.explorer.toggle_selected();
+        if !entry.kind.is_relation() {
             return Vec::new();
         }
-        let Some(schema) = node
-            .id
-            .native_path
-            .get(node.id.native_path.len().saturating_sub(2))
-            .cloned()
-        else {
+        let Some(_database) = entry.qualified_name.database.as_ref() else {
             return Vec::new();
         };
-        let mut tab = ConsoleTab::new(format!("{} data", node.name));
+        let Some(schema) = entry.qualified_name.schema.clone() else {
+            return Vec::new();
+        };
+        let name = entry.qualified_name.object;
+        let mut tab = ConsoleTab::new(format!("{name} data"));
         tab.generation = 1;
         tab.query_status = QueryStatus::Running;
         let tab_id = tab.id;
         let generation = tab.generation;
-        self.tabs.push(tab);
-        self.editor.open_console(
-            tab_id,
-            &format!("-- Loading preview for {schema}.{}", node.name),
-        );
+        self.tabs.push(WorkspaceTab::Sql(tab));
+        self.editor
+            .open_console(tab_id, &format!("-- Loading preview for {schema}.{name}"));
         let _ = self.editor.set_mode(tab_id, EditorMode::Normal);
         self.active_tab = self.tabs.len() - 1;
         self.focus = Focus::Results;
@@ -2454,7 +3451,7 @@ impl App {
             tab_id,
             generation,
             schema,
-            name: node.name,
+            name,
         }]
     }
 
@@ -2462,32 +3459,32 @@ impl App {
         let Some(connection) = self.database_command_identity() else {
             return Vec::new();
         };
-        let Some(node) = self.explorer.selected_node().cloned() else {
+        let Some(entry) = self.explorer.selected_entry().cloned() else {
             return Vec::new();
         };
         if !matches!(
-            node.kind,
+            entry.kind,
             crate::db::catalog::CatalogKind::Table
                 | crate::db::catalog::CatalogKind::View
+                | crate::db::catalog::CatalogKind::MaterializedView
                 | crate::db::catalog::CatalogKind::Index
                 | crate::db::catalog::CatalogKind::Trigger
         ) {
             return Vec::new();
         }
-        let Some(schema) = node
-            .id
-            .native_path
-            .get(node.id.native_path.len().saturating_sub(2))
-            .cloned()
-        else {
+        let Some(_database) = entry.qualified_name.database.as_ref() else {
             return Vec::new();
         };
-        let mut tab = ConsoleTab::new(format!("{} DDL", node.name));
+        let Some(schema) = entry.qualified_name.schema.clone() else {
+            return Vec::new();
+        };
+        let name = entry.qualified_name.object;
+        let mut tab = ConsoleTab::new(format!("{name} DDL"));
         tab.generation = 1;
         tab.query_status = QueryStatus::Running;
         let tab_id = tab.id;
         let generation = tab.generation;
-        self.tabs.push(tab);
+        self.tabs.push(WorkspaceTab::Sql(tab));
         self.editor.open_console(tab_id, "");
         self.active_tab = self.tabs.len() - 1;
         self.focus = Focus::Editor;
@@ -2495,14 +3492,10 @@ impl App {
             connection,
             tab_id,
             generation,
-            kind: node.kind,
+            kind: entry.kind,
             schema,
-            name: node.name,
+            name,
         }]
-    }
-
-    fn active_connection_matches(&self, profile_id: Uuid, generation: u64) -> bool {
-        self.connection.profile_id == Some(profile_id) && self.connection.generation == generation
     }
 
     fn manual_matches(
@@ -2517,7 +3510,8 @@ impl App {
             && self
                 .tabs
                 .iter()
-                .find(|tab| tab.id == tab_id)
+                .find(|tab| tab.id() == tab_id)
+                .and_then(WorkspaceTab::as_console)
                 .is_some_and(|tab| {
                     tab.generation == query_generation
                         && tab.transaction_generation == transaction_generation
@@ -2532,7 +3526,12 @@ impl App {
         outcome: crate::db::query::QueryOutcome,
         _manual: bool,
     ) {
-        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+        let Some(tab) = self
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.id() == tab_id)
+            .and_then(WorkspaceTab::as_console_mut)
+        else {
             return;
         };
         let rows = outcome.stats.row_count;
@@ -2555,6 +3554,45 @@ impl App {
         self.connection.pending_profile_id == Some(profile_id)
             && self.connection.pending_generation == Some(generation)
     }
+}
+
+fn completion_group(group: crate::db::catalog::ObjectGroup) -> bool {
+    matches!(
+        group,
+        crate::db::catalog::ObjectGroup::Tables
+            | crate::db::catalog::ObjectGroup::Views
+            | crate::db::catalog::ObjectGroup::MaterializedViews
+            | crate::db::catalog::ObjectGroup::Functions
+            | crate::db::catalog::ObjectGroup::Procedures
+    )
+}
+
+fn add_explorer_profile(
+    explorer: &mut ExplorerState,
+    profile: &ConnectionProfile,
+    provenance: ProfileProvenance,
+) {
+    let endpoint = match profile.kind {
+        DatabaseKind::Sqlite => profile
+            .sqlite_path
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned())
+            .or_else(|| profile.database.clone())
+            .unwrap_or_default(),
+        DatabaseKind::Postgres | DatabaseKind::MySql => {
+            let host = profile.host.as_deref().unwrap_or_default();
+            profile
+                .port
+                .map_or_else(|| host.to_owned(), |port| format!("{host}:{port}"))
+        }
+    };
+    explorer.normalized.add_profile_with_metadata(
+        profile.id,
+        profile.name.clone(),
+        profile.kind,
+        endpoint,
+        provenance,
+    );
 }
 
 fn tab_snapshot(tab: &ConsoleTab) -> transaction::TransactionSnapshot {
@@ -2609,7 +3647,8 @@ mod tests {
     use crate::{
         action::{Action, Command},
         db::query::{QueryOutcome, QueryStats, ResultSet},
-        model::workspace::{ConnectionStatus, Focus, Overlay, QueryStatus},
+        model::explorer::ExplorerConnectionStatus,
+        model::workspace::{ConnectionIdentity, ConnectionStatus, Focus, Overlay, QueryStatus},
         profile::import_connection_url,
     };
     use uuid::Uuid;
@@ -2633,7 +3672,7 @@ mod tests {
         assert_eq!(
             app.tabs
                 .iter()
-                .map(|tab| tab.name.as_str())
+                .map(crate::model::tab::WorkspaceTab::title)
                 .collect::<Vec<_>>(),
             ["console", "console_2", "console_3"]
         );
@@ -2739,7 +3778,7 @@ mod tests {
             .profile;
         let profile_id = profile.id;
         let mut app = App::new(vec![profile]);
-        let commands = app.update(Action::RequestConnect(profile_id));
+        let commands = app.update(Action::RequestProfileConnect { profile_id });
         let generation = match commands[0] {
             Command::Connect { generation, .. } => generation,
             ref command => panic!("unexpected command: {command:?}"),
@@ -2751,5 +3790,136 @@ mod tests {
             message: "late".into(),
         });
         assert!(app.connection.error.is_none());
+    }
+
+    #[test]
+    fn invalidated_active_connection_fails_and_blocks_manual_transactions() {
+        let first = import_connection_url("sqlite::memory:", Some("first"))
+            .unwrap()
+            .profile;
+        let mut app = App::new(vec![first.clone()]);
+        app.connection.profile_id = Some(first.id);
+        app.connection.generation = 1;
+        app.connection.status = ConnectionStatus::Connected;
+        app.connection.server = Some(crate::db::ServerInfo {
+            kind: crate::profile::DatabaseKind::Sqlite,
+            version: "test".into(),
+            database: "memory".into(),
+        });
+        app.explorer
+            .nodes
+            .push(crate::db::catalog::CatalogNode::new(
+                crate::db::catalog::CatalogId::new(
+                    first.id,
+                    crate::db::catalog::CatalogKind::Table,
+                    ["example"],
+                ),
+                None,
+                "example",
+                "table",
+                None,
+                false,
+            ));
+        app.active_console_mut().transaction_generation = 3;
+        app.active_console_mut().transaction_state =
+            crate::model::transaction::TransactionState::Active;
+
+        app.update(Action::ConnectionInvalidated {
+            connection: ConnectionIdentity {
+                profile_id: first.id,
+                generation: 1,
+            },
+            message: "Reconnect before running more queries".into(),
+        });
+
+        assert_eq!(app.connection.active_identity(), None);
+        assert_eq!(app.connection.status, ConnectionStatus::Failed);
+        assert!(app.connection.server.is_none());
+        assert_eq!(
+            app.connection.error.as_deref(),
+            Some("Reconnect before running more queries")
+        );
+        assert_eq!(
+            app.active_console().transaction_state,
+            crate::model::transaction::TransactionState::OutcomeUnknown
+        );
+        assert!(app.explorer.nodes.is_empty());
+    }
+
+    #[test]
+    fn invalidated_active_connection_cancels_pending_switch() {
+        let first = import_connection_url("sqlite::memory:", Some("first"))
+            .unwrap()
+            .profile;
+        let second = import_connection_url("sqlite::memory:", Some("second"))
+            .unwrap()
+            .profile;
+        let mut app = App::new(vec![first.clone(), second.clone()]);
+        app.connection.profile_id = Some(first.id);
+        app.connection.generation = 4;
+        app.connection.pending_profile_id = Some(second.id);
+        app.connection.pending_generation = Some(5);
+        app.connection.status = ConnectionStatus::Connecting;
+
+        app.update(Action::ConnectionInvalidated {
+            connection: ConnectionIdentity {
+                profile_id: first.id,
+                generation: 4,
+            },
+            message: "Reconnect before running more queries".into(),
+        });
+
+        assert_eq!(app.connection.active_identity(), None);
+        assert_eq!(app.connection.pending_profile_id, None);
+        assert_eq!(app.connection.pending_generation, None);
+        assert_eq!(app.connection.status, ConnectionStatus::Failed);
+        assert_eq!(
+            app.connection.error.as_deref(),
+            Some("Reconnect before running more queries")
+        );
+        assert_eq!(
+            app.explorer.normalized.profiles[&first.id].status,
+            ExplorerConnectionStatus::Failed
+        );
+        assert_eq!(
+            app.explorer.normalized.profiles[&second.id].status,
+            ExplorerConnectionStatus::Failed
+        );
+    }
+
+    #[test]
+    fn stale_connection_invalidation_does_not_affect_newer_generation() {
+        let profile = import_connection_url("sqlite::memory:", Some("demo"))
+            .unwrap()
+            .profile;
+        let mut app = App::new(vec![profile.clone()]);
+        app.connection.profile_id = Some(profile.id);
+        app.connection.generation = 8;
+        app.connection.status = ConnectionStatus::Connected;
+        app.active_console_mut().transaction_generation = 2;
+        app.active_console_mut().transaction_state =
+            crate::model::transaction::TransactionState::Active;
+
+        app.update(Action::ConnectionInvalidated {
+            connection: ConnectionIdentity {
+                profile_id: profile.id,
+                generation: 7,
+            },
+            message: "stale quarantine".into(),
+        });
+
+        assert_eq!(
+            app.connection.active_identity(),
+            Some(ConnectionIdentity {
+                profile_id: profile.id,
+                generation: 8,
+            })
+        );
+        assert_eq!(app.connection.status, ConnectionStatus::Connected);
+        assert!(app.connection.error.is_none());
+        assert_eq!(
+            app.active_console().transaction_state,
+            crate::model::transaction::TransactionState::Active
+        );
     }
 }

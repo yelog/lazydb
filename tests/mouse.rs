@@ -1,16 +1,17 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use lazydb::{
     action::{Action, Command},
     app::App,
     db::{
-        catalog::{CatalogId, CatalogKind, CatalogNode},
+        catalog::{CatalogEntry, CatalogId, CatalogKind, OptionalMetadata, QualifiedName},
         query::{ColumnMeta, QueryOutcome, QueryStats, ResultSet},
         value::CellValue,
     },
     input::mouse::map_mouse,
     model::{
+        explorer::ExplorerNodeId,
         profile_manager::ProfileField,
         workspace::{Focus, Overlay},
     },
@@ -28,14 +29,28 @@ fn maps_tabs_tree_rows_and_result_cells_from_rendered_hit_regions() {
     app.connection.profile_id = Some(connection_id);
     app.connection.generation = 1;
     app.connection.status = lazydb::model::workspace::ConnectionStatus::Connected;
-    app.explorer.set_nodes(vec![CatalogNode::new(
+    let database = CatalogEntry::database(
         CatalogId::new(connection_id, CatalogKind::Database, ["demo"]),
-        None,
-        "demo",
+        QualifiedName {
+            database: Some("demo".into()),
+            schema: None,
+            object: "demo".into(),
+        },
         "database",
-        None,
+        OptionalMetadata::Supported(None),
         true,
-    )]);
+    )
+    .unwrap();
+    app.explorer.normalized.add_profile(connection_id);
+    app.explorer
+        .normalized
+        .profiles
+        .get_mut(&connection_id)
+        .unwrap()
+        .catalog
+        .insert(database)
+        .unwrap();
+    app.explorer.rebuild_projection(connection_id);
     let tab_id = app.active_console().id;
     let generation = app.active_console().generation;
     app.update(Action::QueryFinished {
@@ -67,13 +82,26 @@ fn maps_tabs_tree_rows_and_result_cells_from_rendered_hit_regions() {
         &ui_state,
         &app,
         &HitTarget::HeaderProfile,
-        Action::OpenProfileManager,
+        Action::ExplorerSelect(ExplorerNodeId::Profile(connection_id)),
     );
+    let row_id = lazydb::model::explorer::ExplorerNodeId::Catalog(CatalogId::new(
+        connection_id,
+        CatalogKind::Database,
+        ["demo"],
+    ));
     assert_click_maps(
         &ui_state,
         &app,
-        &HitTarget::ExplorerRow(0),
-        Action::ExplorerSelect(0),
+        &HitTarget::ExplorerRow(row_id.clone()),
+        Action::ExplorerSelect(row_id.clone()),
+    );
+    let action = click_action(&ui_state, &app, &HitTarget::ExplorerRow(row_id));
+    app.update(action);
+    assert_eq!(
+        app.explorer.selected_id(),
+        Some(&lazydb::model::explorer::ExplorerNodeId::Catalog(
+            CatalogId::new(connection_id, CatalogKind::Database, ["demo"]),
+        ))
     );
     assert_click_maps(
         &ui_state,
@@ -89,7 +117,93 @@ fn maps_tabs_tree_rows_and_result_cells_from_rendered_hit_regions() {
 }
 
 #[test]
-fn maps_profile_rows_fields_toggles_buttons_and_scroll() {
+fn secondary_click_on_profile_root_edits_that_stable_id() {
+    let profile = import_connection_url(":memory:", Some("root"))
+        .unwrap()
+        .profile;
+    let profile_id = profile.id;
+    let app = App::new(vec![profile]);
+    let mut ui = UiState::new(true);
+    ui.hit_regions.push(HitRegion {
+        area: Rect::new(1, 1, 20, 1),
+        target: HitTarget::ExplorerRow(ExplorerNodeId::Profile(profile_id)),
+    });
+
+    assert_eq!(
+        map_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Right), 1, 1),
+            &ui,
+            &app
+        ),
+        Some(Action::ProfileStartEdit { profile_id })
+    );
+}
+
+#[test]
+fn double_click_same_explorer_node_uses_primary_action_without_sleeping() {
+    let id = ExplorerNodeId::Profile(Uuid::new_v4());
+    let ui = UiState::new(true);
+    let first = Instant::now();
+    assert!(!ui.track_explorer_click(&id, first));
+    assert!(ui.track_explorer_click(&id, first + Duration::from_millis(499)));
+    assert!(!ui.track_explorer_click(&id, first + Duration::from_millis(1000)));
+    assert!(!ui.track_explorer_click(
+        &ExplorerNodeId::EmptyProfiles,
+        first + Duration::from_millis(1001)
+    ));
+}
+
+#[test]
+fn non_explorer_mouse_down_clears_explorer_double_click_tracker() {
+    let id = ExplorerNodeId::Profile(Uuid::new_v4());
+    let mut ui = UiState::new(true);
+    ui.hit_regions.extend([
+        HitRegion {
+            area: Rect::new(1, 1, 10, 1),
+            target: HitTarget::ExplorerRow(id.clone()),
+        },
+        HitRegion {
+            area: Rect::new(1, 2, 10, 1),
+            target: HitTarget::Tab(0),
+        },
+    ]);
+    let app = App::new(Vec::new());
+    assert_eq!(
+        map_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 1, 1),
+            &ui,
+            &app
+        ),
+        Some(Action::ExplorerSelect(id))
+    );
+    assert_eq!(
+        map_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 1, 2),
+            &ui,
+            &app
+        ),
+        Some(Action::ActivateTab(0))
+    );
+    assert_eq!(
+        map_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 1, 1),
+            &ui,
+            &app
+        ),
+        Some(Action::ExplorerSelect(ExplorerNodeId::Profile(
+            ui.hit_regions
+                .first()
+                .and_then(|region| match &region.target {
+                    HitTarget::ExplorerRow(ExplorerNodeId::Profile(id)) => Some(*id),
+                    _ => None,
+                })
+                .unwrap(),
+        )))
+    );
+}
+
+#[test]
+fn maps_profile_fields_toggles_and_buttons() {
     let profiles = ["first", "second", "third"]
         .into_iter()
         .map(|name| {
@@ -100,13 +214,10 @@ fn maps_profile_rows_fields_toggles_buttons_and_scroll() {
         .collect();
     let mut app = App::new(profiles);
     app.update(Action::OpenProfileManager);
-    app.profile_manager.as_mut().unwrap().selected = 1;
     let mut ui = UiState::new(true);
     let targets = [
-        HitTarget::ProfileRow(0),
         HitTarget::ProfileField(ProfileField::Name),
         HitTarget::ProfileToggle(ProfileField::ReadOnly),
-        HitTarget::ProfileButton(ProfileButton::New),
         HitTarget::ProfileButton(ProfileButton::Save),
         HitTarget::ProfileButton(ProfileButton::ConfirmDelete),
     ];
@@ -124,12 +235,6 @@ fn maps_profile_rows_fields_toggles_buttons_and_scroll() {
     assert_click_maps(
         &ui,
         &app,
-        &HitTarget::ProfileRow(0),
-        Action::ProfileMove(-1),
-    );
-    assert_click_maps(
-        &ui,
-        &app,
         &HitTarget::ProfileField(ProfileField::Name),
         Action::ProfileFocusField(ProfileField::Name),
     );
@@ -138,12 +243,6 @@ fn maps_profile_rows_fields_toggles_buttons_and_scroll() {
         &app,
         &HitTarget::ProfileToggle(ProfileField::ReadOnly),
         Action::ProfileToggleField(ProfileField::ReadOnly),
-    );
-    assert_click_maps(
-        &ui,
-        &app,
-        &HitTarget::ProfileButton(ProfileButton::New),
-        Action::ProfileStartNew,
     );
     assert_click_maps(
         &ui,
@@ -158,35 +257,6 @@ fn maps_profile_rows_fields_toggles_buttons_and_scroll() {
         Action::ProfileConfirmDelete,
     );
 
-    let list_region = ui
-        .hit_regions
-        .iter()
-        .find(|region| region.target == HitTarget::ProfileRow(0))
-        .unwrap();
-    assert_eq!(
-        map_mouse(
-            mouse(
-                MouseEventKind::ScrollDown,
-                list_region.area.x,
-                list_region.area.y,
-            ),
-            &ui,
-            &app,
-        ),
-        Some(Action::ProfileMove(3))
-    );
-    assert_eq!(
-        map_mouse(
-            mouse(
-                MouseEventKind::ScrollUp,
-                list_region.area.x,
-                list_region.area.y,
-            ),
-            &ui,
-            &app,
-        ),
-        Some(Action::ProfileMove(-3))
-    );
     assert_eq!(
         map_mouse(
             mouse(MouseEventKind::Down(MouseButton::Left), 2, 9),
@@ -300,6 +370,25 @@ fn assert_click_maps(ui: &UiState, app: &App, target: &HitTarget, expected: Acti
         region.area.y,
     );
     assert_eq!(map_mouse(event, ui, app), Some(expected));
+}
+
+fn click_action(ui: &UiState, app: &App, target: &HitTarget) -> Action {
+    ui.clear_click_tracker();
+    let region = ui
+        .hit_regions
+        .iter()
+        .find(|region| &region.target == target)
+        .unwrap();
+    map_mouse(
+        mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            region.area.x,
+            region.area.y,
+        ),
+        ui,
+        app,
+    )
+    .unwrap()
 }
 
 fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {

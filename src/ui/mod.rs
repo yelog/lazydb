@@ -14,6 +14,10 @@ use ratatui::{
         Wrap,
     },
 };
+use std::{
+    cell::RefCell,
+    time::{Duration, Instant},
+};
 
 use crate::{
     app::App,
@@ -35,11 +39,6 @@ use self::{
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProfileButton {
-    New,
-    Edit,
-    Delete,
-    Connect,
-    Close,
     Test,
     Save,
     SaveAndConnect,
@@ -52,14 +51,14 @@ pub enum ProfileButton {
 pub enum HitTarget {
     Focus(Focus),
     Tab(usize),
-    ExplorerRow(usize),
+    ExplorerRow(crate::model::explorer::ExplorerNodeId),
     ResultCell { row: usize, column: usize },
     Help,
     ToggleResultView,
     HeaderProfile,
-    ProfileRow(usize),
     ProfileField(ProfileField),
     ProfileToggle(ProfileField),
+    ProfileScopeRow(String),
     ProfileButton(ProfileButton),
 }
 
@@ -76,6 +75,7 @@ pub struct UiState {
     pub editor_viewport: Option<EditorViewport>,
     pub completion_popup: Option<Rect>,
     last_focus: Option<Focus>,
+    pub click_tracker: RefCell<Option<(crate::model::explorer::ExplorerNodeId, Instant)>>,
 }
 
 impl Default for UiState {
@@ -92,6 +92,7 @@ impl UiState {
             editor_viewport: None,
             completion_popup: None,
             last_focus: None,
+            click_tracker: RefCell::new(None),
         }
     }
 
@@ -101,6 +102,37 @@ impl UiState {
             .rev()
             .find(|region| contains(region.area, column, row))
             .map(|region| &region.target)
+    }
+
+    pub fn track_explorer_click(
+        &self,
+        id: &crate::model::explorer::ExplorerNodeId,
+        now: Instant,
+    ) -> bool {
+        let double = self
+            .click_tracker
+            .borrow()
+            .as_ref()
+            .is_some_and(|(previous, timestamp)| {
+                previous == id && now.duration_since(*timestamp) <= Duration::from_millis(500)
+            });
+        if !double
+            && self
+                .click_tracker
+                .borrow()
+                .as_ref()
+                .is_some_and(|(_, timestamp)| {
+                    now.duration_since(*timestamp) > Duration::from_millis(500)
+                })
+        {
+            self.clear_click_tracker();
+        }
+        *self.click_tracker.borrow_mut() = Some((id.clone(), now));
+        double
+    }
+
+    pub fn clear_click_tracker(&self) {
+        *self.click_tracker.borrow_mut() = None;
     }
 }
 
@@ -125,6 +157,10 @@ pub fn render_with_state(frame: &mut Frame<'_>, app: &App, state: &mut UiState) 
 
     render_header(frame, layout.header, app, theme, state);
     render_tabs(frame, layout.tabs, app, theme, state);
+    if app.active_console_opt().is_none() {
+        render_relation_placeholder(frame, layout.body, app, theme);
+        return;
+    }
     if let Some(area) = layout.explorer {
         state.hit_regions.push(HitRegion {
             area,
@@ -171,6 +207,21 @@ pub fn render_with_state(frame: &mut Frame<'_>, app: &App, state: &mut UiState) 
     state.effects.render(frame, layout.body);
 }
 
+fn render_relation_placeholder(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
+    let title = app
+        .tabs
+        .get(app.active_tab)
+        .map(|tab| tab.title())
+        .unwrap_or("relation");
+    frame.render_widget(
+        Paragraph::new(format!("Relation tab: {title}\n\nRelation loading and data views are reserved for a later task."))
+            .block(panel_block(" RELATION ", true, theme))
+            .style(Style::new().fg(theme.text).bg(theme.surface))
+            .wrap(Wrap { trim: true }),
+        area,
+    );
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CompletionAnchor {
     viewport: Rect,
@@ -184,7 +235,10 @@ fn render_completion_popup(
     state: &mut UiState,
     anchor: Option<CompletionAnchor>,
 ) {
-    let Some(popup) = &app.active_console().completion else {
+    let Some(popup) = app
+        .active_console_opt()
+        .and_then(|tab| tab.completion.as_ref())
+    else {
         return;
     };
     let Some(anchor) = anchor else {
@@ -283,33 +337,37 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, sta
         ConnectionStatus::Connected => ("ONLINE", theme.accent),
         ConnectionStatus::Failed => ("FAILED", theme.error),
     };
-    let query = match app.active_console().query_status {
-        QueryStatus::Idle => ("IDLE", theme.muted),
-        QueryStatus::Running => ("RUNNING", theme.action),
-        QueryStatus::Cancelled => ("CANCELLED", theme.warning),
-        QueryStatus::Failed => ("ERROR", theme.error),
+    let query = match app.active_console_opt().map(|tab| tab.query_status) {
+        None => ("N/A", theme.muted),
+        Some(QueryStatus::Idle) => ("IDLE", theme.muted),
+        Some(QueryStatus::Running) => ("RUNNING", theme.action),
+        Some(QueryStatus::Cancelled) => ("CANCELLED", theme.warning),
+        Some(QueryStatus::Failed) => ("ERROR", theme.error),
     };
-    let transaction = match (
-        app.active_console().transaction_mode,
-        app.active_console().transaction_state,
-    ) {
-        (crate::model::transaction::TransactionMode::Auto, _) => "TX AUTO",
-        (
+    let transaction = match app
+        .active_console_opt()
+        .map(|tab| (tab.transaction_mode, tab.transaction_state))
+    {
+        None => "TX N/A",
+        Some((crate::model::transaction::TransactionMode::Auto, _)) => "TX AUTO",
+        Some((
             crate::model::transaction::TransactionMode::Manual,
             crate::model::transaction::TransactionState::Idle,
-        ) => "TX MANUAL:IDLE",
-        (
+        )) => "TX MANUAL:IDLE",
+        Some((
             crate::model::transaction::TransactionMode::Manual,
             crate::model::transaction::TransactionState::Starting,
-        ) => "TX MANUAL:STARTING",
-        (
+        )) => "TX MANUAL:STARTING",
+        Some((
             crate::model::transaction::TransactionMode::Manual,
             crate::model::transaction::TransactionState::Active,
-        ) => "TX MANUAL:ACTIVE",
-        (_, crate::model::transaction::TransactionState::Aborted) => "TX ABORTED",
-        (_, crate::model::transaction::TransactionState::Committing) => "TX COMMITTING",
-        (_, crate::model::transaction::TransactionState::RollingBack) => "TX ROLLING BACK",
-        (_, crate::model::transaction::TransactionState::OutcomeUnknown) => "TX OUTCOME UNKNOWN",
+        )) => "TX MANUAL:ACTIVE",
+        Some((_, crate::model::transaction::TransactionState::Aborted)) => "TX ABORTED",
+        Some((_, crate::model::transaction::TransactionState::Committing)) => "TX COMMITTING",
+        Some((_, crate::model::transaction::TransactionState::RollingBack)) => "TX ROLLING BACK",
+        Some((_, crate::model::transaction::TransactionState::OutcomeUnknown)) => {
+            "TX OUTCOME UNKNOWN"
+        }
     };
     let lines = vec![
         Line::from(vec![
@@ -376,8 +434,8 @@ fn render_tabs(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, state
     )];
     let mut x = area.x + 11;
     for (index, tab) in app.tabs.iter().enumerate() {
-        let label = format!(" {:02} {} ", index + 1, tab.name);
-        let width = label.chars().count().min(u16::MAX as usize) as u16;
+        let label = format!(" {:02} {} ", index + 1, tab.title());
+        let width = label.cell_width();
         let active = index == app.active_tab;
         spans.push(Span::styled(
             label,
@@ -427,53 +485,82 @@ fn render_explorer(
                 .wrap(Wrap { trim: true }),
             inner,
         );
+        if app.explorer.selected_id()
+            == Some(&crate::model::explorer::ExplorerNodeId::EmptyProfiles)
+        {
+            state.hit_regions.push(HitRegion {
+                area: Rect::new(inner.x, inner.y, inner.width, 1),
+                target: HitTarget::ExplorerRow(
+                    crate::model::explorer::ExplorerNodeId::EmptyProfiles,
+                ),
+            });
+        }
         return;
     }
 
     let displayed = visible
         .iter()
         .enumerate()
-        .skip(app.explorer.scroll)
+        .skip(app.explorer.normalized.scroll)
         .take(inner.height as usize)
         .collect::<Vec<_>>();
-    for (row, (visible_index, _)) in displayed.iter().enumerate() {
+    for (row, (_, visible)) in displayed.iter().enumerate() {
         state.hit_regions.push(HitRegion {
             area: Rect::new(inner.x, inner.y.saturating_add(row as u16), inner.width, 1),
-            target: HitTarget::ExplorerRow(*visible_index),
+            target: HitTarget::ExplorerRow(visible.id.clone()),
         });
     }
     let items = displayed
         .into_iter()
-        .map(|(visible_index, visible)| {
-            let node = &app.explorer.nodes[visible.node_index];
-            let expanded = app.explorer.expanded.contains(&node.id);
-            let marker = if node.expandable {
+        .map(|(_, visible)| {
+            let expanded = app.explorer.normalized.expanded.contains(&visible.id);
+            let marker = if visible.expandable {
                 if expanded { "▾" } else { "▸" }
             } else {
                 " "
             };
-            let icon = catalog_icon(node.kind);
-            let text = format!(
+            let icon = visible.kind.map_or("·", catalog_icon);
+            let detail = visible
+                .detail
+                .as_deref()
+                .map(sanitize_terminal_text)
+                .unwrap_or_default();
+            let label = sanitize_terminal_text(&visible.label);
+            let prefix = format!(
                 "{}{} {} {}",
                 "  ".repeat(visible.depth),
                 marker,
                 icon,
-                node.name
+                label
             );
-            let selected = visible_index == app.explorer.selected;
-            ListItem::new(Line::from(Span::styled(
-                text,
-                if selected {
-                    Style::new()
-                        .fg(theme.accent)
-                        .bg(theme.selection)
-                        .add_modifier(Modifier::BOLD)
+            let selected = app.explorer.selected_id() == Some(&visible.id);
+            let style = if selected {
+                Style::new()
+                    .fg(theme.accent)
+                    .bg(theme.selection)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::new()
+                    .fg(visible
+                        .kind
+                        .map_or(theme.muted, |kind| kind_color(kind, theme)))
+                    .bg(theme.surface)
+            };
+            let available = inner.width as usize;
+            let text = if usize::from(prefix.cell_width()) >= available {
+                prefix
+            } else {
+                let remaining = available.saturating_sub(usize::from(prefix.cell_width()) + 2);
+                if remaining == 0 || detail.is_empty() {
+                    prefix
                 } else {
-                    Style::new()
-                        .fg(kind_color(node.kind, theme))
-                        .bg(theme.surface)
-                },
-            )))
+                    format!(
+                        "{prefix}  {}",
+                        detail.chars().take(remaining).collect::<String>()
+                    )
+                }
+            };
+            ListItem::new(Line::from(Span::styled(text, style)))
         })
         .collect::<Vec<_>>();
     frame.render_widget(
@@ -942,13 +1029,19 @@ fn render_overlay(
             use crate::model::transaction::TransactionExitChoice;
             let popup = centered(area, 78, 12);
             frame.render_widget(Clear, popup);
-            let tab = app.tabs.iter().find(|tab| tab.id == prompt.console_id);
+            let tab = app.tabs.iter().find(|tab| tab.id() == prompt.console_id);
             let state = tab
+                .and_then(|tab| tab.as_console())
                 .map(|tab| format!("{:?}", tab.transaction_state))
                 .unwrap_or_else(|| "gone".into());
-            let running = tab.is_some_and(|tab| tab.query_status == QueryStatus::Running);
+            let running = tab.is_some_and(|tab| {
+                tab.as_console()
+                    .is_some_and(|tab| tab.query_status == QueryStatus::Running)
+            });
             let commit_disabled = tab.is_some_and(|tab| {
-                tab.transaction_state == crate::model::transaction::TransactionState::Aborted
+                tab.as_console().is_some_and(|tab| {
+                    tab.transaction_state == crate::model::transaction::TransactionState::Aborted
+                })
             });
             let buttons = if running {
                 "Query running: wait or Ctrl-C to cancel"
@@ -972,7 +1065,7 @@ fn render_overlay(
                 Line::from(Span::styled(" TRANSACTION EXIT ", theme.title(true))),
                 Line::raw(format!(
                     "console: {}   state: {state}",
-                    tab.map(|tab| tab.name.as_str()).unwrap_or("unknown")
+                    tab.map(|tab| tab.title()).unwrap_or("unknown")
                 )),
                 Line::raw(buttons),
                 Line::raw(
@@ -1208,7 +1301,7 @@ fn catalog_icon(kind: CatalogKind) -> &'static str {
         CatalogKind::Database => "◆",
         CatalogKind::Schema => "◇",
         CatalogKind::Table => "▦",
-        CatalogKind::View => "◈",
+        CatalogKind::View | CatalogKind::MaterializedView => "◈",
         CatalogKind::Column => "·",
         CatalogKind::Index => "⌘",
         CatalogKind::PrimaryKey => "◆",
@@ -1225,7 +1318,7 @@ fn catalog_icon(kind: CatalogKind) -> &'static str {
 fn kind_color(kind: CatalogKind, theme: Theme) -> Color {
     match kind {
         CatalogKind::Database | CatalogKind::Schema => theme.action,
-        CatalogKind::Table | CatalogKind::View => theme.text,
+        CatalogKind::Table | CatalogKind::View | CatalogKind::MaterializedView => theme.text,
         CatalogKind::PrimaryKey | CatalogKind::UniqueConstraint => theme.warning,
         CatalogKind::ForeignKey | CatalogKind::Trigger => theme.accent,
         _ => theme.muted,

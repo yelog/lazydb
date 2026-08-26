@@ -2,13 +2,19 @@ use crossterm::event::KeyEvent;
 use uuid::Uuid;
 
 use crate::db::{
-    ServerInfo,
-    catalog::{CatalogKind, CatalogNode},
+    ErrorCategory, ServerInfo,
+    catalog::{
+        CatalogCapabilities, CatalogDiscovery, CatalogKind, CatalogPage, CatalogRequest,
+        CatalogRequestKey, CatalogTarget,
+    },
     query::QueryOutcome,
 };
 use crate::{
     model::{
-        profile_manager::{ProfileField, ProfileInput, ProfileSubmission},
+        explorer::ExplorerNodeId,
+        profile_manager::{
+            DiscoveryFingerprint, ProfileChange, ProfileField, ProfileInput, ProfileSubmission,
+        },
         workspace::{ConnectionIdentity, Focus},
     },
     profile::ConnectionProfile,
@@ -33,13 +39,15 @@ pub enum Action {
     SubstituteQuit,
     OpenProfileManager,
     CloseProfileManager,
-    ProfileMove(isize),
     ProfileStartNew,
-    ProfileStartEdit,
-    ProfileRequestDelete,
+    ProfileStartEdit {
+        profile_id: Uuid,
+    },
+    ProfileRequestDelete {
+        profile_id: Uuid,
+    },
     ProfileConfirmDelete,
     ProfileCancelDelete,
-    ProfileConnectSelected,
     ProfileFieldNext,
     ProfileFieldPrevious,
     ProfileFocusField(ProfileField),
@@ -54,13 +62,20 @@ pub enum Action {
     ProfileCycle(i8),
     ProfileToggle,
     ProfileToggleField(ProfileField),
+    ProfileOpenScope,
+    ProfileToggleScopeRow(String),
+    ProfileScopeMove(isize),
+    ProfileScopeBack,
     ProfileTest,
     ProfileSave {
         connect: bool,
     },
     ProfileTestSucceeded {
         request_id: u64,
+        fingerprint: DiscoveryFingerprint,
         server: ServerInfo,
+        capabilities: CatalogCapabilities,
+        discovery: Result<CatalogDiscovery, String>,
     },
     ProfileTestFailed {
         request_id: u64,
@@ -70,6 +85,7 @@ pub enum Action {
         request_id: u64,
         profile: ConnectionProfile,
         warning: Option<String>,
+        change: ProfileChange,
         connect: bool,
     },
     ProfileSaveFailed {
@@ -126,9 +142,16 @@ pub enum Action {
     RollbackTransaction,
     ClearTransactionOutcome,
     RefreshCatalog,
+    ExplorerLoadTarget(CatalogTarget),
     PreviewSelected,
     DdlSelected,
+    RequestProfileConnect {
+        profile_id: Uuid,
+    },
     RequestConnect(Uuid),
+    RequestProfileDisconnect {
+        profile_id: Uuid,
+    },
     ConnectionSucceeded {
         profile_id: Uuid,
         generation: u64,
@@ -139,14 +162,14 @@ pub enum Action {
         generation: u64,
         message: String,
     },
-    CatalogLoaded {
-        profile_id: Uuid,
-        generation: u64,
-        nodes: Vec<CatalogNode>,
+    ConnectionInvalidated {
+        connection: ConnectionIdentity,
+        message: String,
     },
-    CatalogFailed {
-        profile_id: Uuid,
-        generation: u64,
+    CatalogPageLoaded(CatalogPage),
+    CatalogPageFailed {
+        key: CatalogRequestKey,
+        category: ErrorCategory,
         message: String,
     },
     QueryFinished {
@@ -225,17 +248,23 @@ pub enum Action {
     PreviewFinished {
         tab_id: Uuid,
         generation: u64,
+        connection: ConnectionIdentity,
         sql: String,
         outcome: QueryOutcome,
     },
     DdlLoaded {
         tab_id: Uuid,
         generation: u64,
+        connection: ConnectionIdentity,
         ddl: String,
     },
     ExplorerMove(isize),
-    ExplorerSelect(usize),
+    ExplorerSelect(ExplorerNodeId),
     ExplorerToggle,
+    ExplorerExpand,
+    ExplorerCollapse,
+    ExplorerPrimary,
+    ExplorerRefresh,
     GridMove {
         rows: isize,
         columns: isize,
@@ -270,10 +299,7 @@ pub enum Command {
         profile_id: Uuid,
         generation: u64,
     },
-    LoadCatalog {
-        profile_id: Uuid,
-        generation: u64,
-    },
+    LoadCatalogPage(CatalogRequest),
     RunQuery {
         connection: ConnectionIdentity,
         tab_id: Uuid,

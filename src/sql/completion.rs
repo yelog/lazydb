@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use uuid::Uuid;
 
-use crate::db::catalog::{CatalogId, CatalogKind, CatalogNode};
+use crate::db::catalog::{CatalogEntry, CatalogId, CatalogKind, CatalogMetadata};
 
 use super::{SqlDialect, TextRange};
 
@@ -45,34 +45,54 @@ pub struct CompletionCandidate {
 pub struct CompletionIndex {
     by_name: BTreeMap<String, Vec<usize>>,
     children: HashMap<CatalogId, Vec<usize>>,
-    nodes: Vec<CatalogNode>,
+    entries: Vec<CatalogEntry>,
 }
 
 impl CompletionIndex {
-    pub fn new(nodes: &[CatalogNode]) -> Self {
-        let mut index = Self {
-            nodes: nodes.to_vec(),
-            ..Self::default()
-        };
-        for (position, node) in nodes.iter().enumerate() {
-            index
-                .by_name
-                .entry(fold(&node.name))
+    pub fn new(entries: &[CatalogEntry]) -> Self {
+        let mut index = Self::default();
+        index.replace(entries);
+        index
+    }
+
+    pub fn replace(&mut self, entries: &[CatalogEntry]) {
+        self.entries = entries
+            .iter()
+            .filter(|entry| completion_kind(entry.kind).is_some())
+            .cloned()
+            .collect();
+        self.rebuild();
+    }
+
+    pub fn append(&mut self, entries: &[CatalogEntry]) {
+        self.entries.extend(
+            entries
+                .iter()
+                .filter(|entry| completion_kind(entry.kind).is_some())
+                .cloned(),
+        );
+        self.rebuild();
+    }
+
+    pub fn entries(&self) -> &[CatalogEntry] {
+        &self.entries
+    }
+
+    fn rebuild(&mut self) {
+        self.by_name.clear();
+        self.children.clear();
+        for (position, entry) in self.entries.iter().enumerate() {
+            self.by_name
+                .entry(fold(&entry.qualified_name.object))
                 .or_default()
                 .push(position);
-            if let Some(parent) = &node.parent_id {
-                index
-                    .children
+            if let Some(parent) = &entry.parent_id {
+                self.children
                     .entry(parent.clone())
                     .or_default()
                     .push(position);
             }
         }
-        index
-    }
-
-    pub fn nodes(&self) -> &[CatalogNode] {
-        &self.nodes
     }
 }
 
@@ -96,21 +116,24 @@ pub fn complete(
     let context = context_at(text, replace.start, dialect);
     let parent = qualifier.as_deref().and_then(|name| {
         index
-            .nodes
+            .entries
             .iter()
-            .find(|node| {
+            .find(|entry| {
                 matches!(
-                    node.kind,
-                    CatalogKind::Schema | CatalogKind::Table | CatalogKind::View
-                ) && node.name.eq_ignore_ascii_case(name)
+                    entry.kind,
+                    CatalogKind::Schema
+                        | CatalogKind::Table
+                        | CatalogKind::View
+                        | CatalogKind::MaterializedView
+                ) && entry.qualified_name.object.eq_ignore_ascii_case(name)
             })
-            .map(|node| node.id.clone())
+            .map(|entry| entry.id.clone())
     });
     let mut candidates = Vec::new();
     let folded_prefix = fold(&prefix);
     for node_index in candidate_indices(index, parent.as_ref(), &folded_prefix) {
-        let node = &index.nodes[node_index];
-        let Some(kind) = completion_kind(node.kind) else {
+        let entry = &index.entries[node_index];
+        let Some(kind) = completion_kind(entry.kind) else {
             continue;
         };
         if dialect == SqlDialect::Sqlite
@@ -118,7 +141,8 @@ pub fn complete(
         {
             continue;
         }
-        if !node.name.to_lowercase().starts_with(&folded_prefix) {
+        let name = &entry.qualified_name.object;
+        if !name.to_lowercase().starts_with(&folded_prefix) {
             continue;
         }
         if context == Context::Relation
@@ -147,20 +171,21 @@ pub fn complete(
             _ => 2,
         };
         let schema_score = u8::from(default_schema.is_some_and(|schema| {
-            node.id
+            entry
+                .id
                 .native_path
                 .iter()
                 .any(|part| part.eq_ignore_ascii_case(schema))
         }));
         candidates.push(CompletionCandidate {
-            label: display_text(&node.name),
-            insert_text: quote_identifier(&node.name, dialect),
+            label: display_text(name),
+            insert_text: quote_identifier(name, dialect),
             kind,
-            detail: node.detail.as_deref().map(display_text),
+            detail: completion_detail(entry).map(|detail| display_text(&detail)),
             replace,
             score: CompletionScore {
                 context: context_score,
-                prefix: u8::from(node.name.starts_with(&prefix)),
+                prefix: u8::from(name.starts_with(&prefix)),
                 schema: schema_score,
             },
         });
@@ -197,6 +222,13 @@ pub fn complete(
     candidates
 }
 
+fn completion_detail(entry: &CatalogEntry) -> Option<String> {
+    match &entry.metadata {
+        CatalogMetadata::Column(column) => Some(column.native_type.clone()),
+        CatalogMetadata::None | CatalogMetadata::Index(_) | CatalogMetadata::Constraint(_) => None,
+    }
+}
+
 fn candidate_indices(
     index: &CompletionIndex,
     parent: Option<&CatalogId>,
@@ -216,7 +248,7 @@ fn completion_kind(kind: CatalogKind) -> Option<CompletionKind> {
     Some(match kind {
         CatalogKind::Schema => CompletionKind::Schema,
         CatalogKind::Table => CompletionKind::Table,
-        CatalogKind::View => CompletionKind::View,
+        CatalogKind::View | CatalogKind::MaterializedView => CompletionKind::View,
         CatalogKind::Column => CompletionKind::Column,
         CatalogKind::Function => CompletionKind::Function,
         CatalogKind::Procedure => CompletionKind::Procedure,

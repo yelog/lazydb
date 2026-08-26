@@ -1,13 +1,22 @@
 use std::fs;
 
 use lazydb::{
-    persistence::profiles::ProfileStore,
-    profile::{Environment, import_connection_url},
+    persistence::profiles::{PersistenceError, ProfileStore},
+    profile::{
+        CatalogScope, CatalogSelection, ConnectionProfile, DatabaseScope, Environment,
+        import_connection_url,
+    },
 };
 use tempfile::TempDir;
 
+#[derive(serde::Serialize)]
+struct ProfileFileFixture<'a> {
+    version: u16,
+    profiles: &'a [ConnectionProfile],
+}
+
 #[test]
-fn round_trips_profiles_without_passwords() {
+fn version_two_profiles_round_trip_hierarchical_scope() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("connections.toml");
     let store = ProfileStore::new(path.clone());
@@ -19,6 +28,18 @@ fn round_trips_profiles_without_passwords() {
     .profile;
     first.secret_ref = Some("keyring:profile-id".into());
     first.environment = Environment::Production;
+    first.catalog_scope = CatalogScope {
+        databases: CatalogSelection::Selected(vec![
+            DatabaseScope {
+                name: "app".into(),
+                schemas: CatalogSelection::Selected(vec!["public".into(), "audit".into()]),
+            },
+            DatabaseScope {
+                name: "analytics".into(),
+                schemas: CatalogSelection::All,
+            },
+        ]),
+    };
     let second = import_connection_url("sqlite:///tmp/demo.db", Some("demo"))
         .unwrap()
         .profile;
@@ -28,8 +49,49 @@ fn round_trips_profiles_without_passwords() {
 
     assert_eq!(loaded, vec![first, second]);
     let serialized = fs::read_to_string(path).unwrap();
+    assert!(serialized.contains("version = 2"));
+    assert!(serialized.contains("catalog_scope"));
+    assert!(!serialized.contains("include_databases"));
+    assert!(!serialized.contains("include_schemas"));
     assert!(serialized.contains("keyring:profile-id"));
     assert!(!serialized.contains("alice-password-42"));
+}
+
+#[test]
+fn version_one_is_rejected_before_profile_shape_decoding() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("connections.toml");
+    fs::write(
+        &path,
+        r#"version = 1
+
+[[profiles]]
+id = "5f43b849-2a01-4e4a-a388-3fbc89af7ae2"
+name = "legacy"
+kind = "postgres"
+host = "localhost"
+port = 5432
+user = "alice"
+database = "app"
+default_schema = "public"
+ssl_mode = "prefer"
+read_only = false
+environment = "development"
+include_databases = ["app"]
+include_schemas = ["public"]
+"#,
+    )
+    .unwrap();
+
+    let error = ProfileStore::new(path).load().unwrap_err();
+
+    assert!(matches!(
+        error,
+        PersistenceError::UnsupportedVersion {
+            found: 1,
+            expected: 2
+        }
+    ));
 }
 
 #[test]
@@ -78,15 +140,19 @@ fn rejects_duplicate_profile_uuids_on_save_and_load() {
     assert!(store.save(&[profile.clone(), profile.clone()]).is_err());
     assert!(!path.exists());
 
-    let profile_toml = toml::to_string(&profile).unwrap();
+    let duplicates = [profile.clone(), profile.clone()];
     fs::write(
         &path,
-        format!(
-            "version = 1\n\n[[profiles]]\n{}\n[[profiles]]\n{}",
-            profile_toml, profile_toml
-        ),
+        toml::to_string(&ProfileFileFixture {
+            version: 2,
+            profiles: &duplicates,
+        })
+        .unwrap(),
     )
     .unwrap();
 
-    assert!(store.load().is_err());
+    assert!(matches!(
+        store.load(),
+        Err(PersistenceError::DuplicateProfileId(duplicate)) if duplicate == profile.id
+    ));
 }

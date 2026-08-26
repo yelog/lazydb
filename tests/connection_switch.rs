@@ -8,13 +8,19 @@ use async_trait::async_trait;
 use lazydb::{
     action::{Action, Command},
     app::App,
-    db::{DatabaseConnection, ServerInfo, catalog::CatalogKind},
-    model::workspace::{ConnectionIdentity, ConnectionStatus, QueryStatus},
+    db::{
+        DatabaseConnection, ServerInfo,
+        catalog::{CatalogKind, CatalogRequest, CatalogRequestKey, CatalogTarget},
+    },
+    model::{
+        explorer::{ExplorerConnectionStatus, ExplorerNodeId},
+        workspace::{ConnectionIdentity, ConnectionStatus, QueryStatus},
+    },
     persistence::{
         profiles::ProfileStore,
         secrets::{SecretStore, SecretStoreError, keyring_ref},
     },
-    profile::{ConnectionProfile, DatabaseKind, import_connection_url},
+    profile::{CatalogSelection, ConnectionProfile, DatabaseKind, import_connection_url},
     runtime::Runtime,
 };
 use secrecy::SecretString;
@@ -139,10 +145,25 @@ async fn connect(
         } if connected_id == profile_id
     ));
     dispatch(app, runtime, connected);
-    let catalog = next_action(receiver).await;
-    assert!(matches!(catalog, Action::CatalogLoaded { .. }));
-    dispatch(app, runtime, catalog);
+    drain_catalog(app, runtime, receiver).await;
     app.connection.active_identity().unwrap()
+}
+
+async fn drain_catalog(
+    app: &mut App,
+    runtime: &mut Runtime,
+    receiver: &mut mpsc::UnboundedReceiver<Action>,
+) {
+    loop {
+        let Ok(Some(action)) = timeout(Duration::from_millis(100), receiver.recv()).await else {
+            break;
+        };
+        assert!(matches!(
+            action,
+            Action::CatalogPageLoaded(_) | Action::CatalogPageFailed { .. }
+        ));
+        dispatch(app, runtime, action);
+    }
 }
 
 async fn run_marker_query(
@@ -216,6 +237,129 @@ fn pending_switch_keeps_active_identity_and_rejects_new_queries() {
     assert_eq!(app.connection.status, ConnectionStatus::Connected);
     assert!(app.connection.pending_profile_id.is_none());
     assert_eq!(app.connection.server, active_server);
+}
+
+#[test]
+fn profile_root_safe_switch_keeps_old_online_while_target_links_then_fails_locally() {
+    let first = memory_profile("first");
+    let second = memory_profile("second");
+    let first_id = first.id;
+    let second_id = second.id;
+    let mut app = App::new(vec![first, second]);
+    let first_generation = match app
+        .update(Action::RequestProfileConnect {
+            profile_id: first_id,
+        })
+        .as_slice()
+    {
+        [Command::Connect { generation, .. }] => *generation,
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+    app.update(Action::ConnectionSucceeded {
+        profile_id: first_id,
+        generation: first_generation,
+        server: server("first"),
+    });
+
+    let second_generation = match app
+        .update(Action::RequestProfileConnect {
+            profile_id: second_id,
+        })
+        .as_slice()
+    {
+        [Command::Connect { generation, .. }] => *generation,
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+    assert_eq!(
+        app.explorer.normalized.profiles[&first_id].status,
+        ExplorerConnectionStatus::Online
+    );
+    assert_eq!(
+        app.explorer.normalized.profiles[&second_id].status,
+        ExplorerConnectionStatus::Linking
+    );
+
+    app.update(Action::ConnectionFailed {
+        profile_id: second_id,
+        generation: second_generation,
+        message: "unreachable".into(),
+    });
+    assert_eq!(
+        app.explorer.normalized.profiles[&first_id].status,
+        ExplorerConnectionStatus::Online
+    );
+    assert_eq!(
+        app.explorer.normalized.profiles[&second_id].status,
+        ExplorerConnectionStatus::Failed
+    );
+    assert_eq!(
+        app.explorer.normalized.profiles[&second_id]
+            .last_error
+            .as_deref(),
+        Some("unreachable")
+    );
+}
+
+#[test]
+fn profile_root_successful_switch_clears_old_catalog_and_syncs_target() {
+    let first = memory_profile("first");
+    let second = memory_profile("second");
+    let first_id = first.id;
+    let second_id = second.id;
+    let mut app = App::new(vec![first, second]);
+    let first_generation = match app
+        .update(Action::RequestProfileConnect {
+            profile_id: first_id,
+        })
+        .as_slice()
+    {
+        [Command::Connect { generation, .. }] => *generation,
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+    app.update(Action::ConnectionSucceeded {
+        profile_id: first_id,
+        generation: first_generation,
+        server: server("first"),
+    });
+    app.explorer
+        .normalized
+        .expanded
+        .insert(ExplorerNodeId::Profile(first_id));
+
+    let second_generation = match app
+        .update(Action::RequestProfileConnect {
+            profile_id: second_id,
+        })
+        .as_slice()
+    {
+        [Command::Connect { generation, .. }] => *generation,
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+    app.update(Action::ConnectionSucceeded {
+        profile_id: second_id,
+        generation: second_generation,
+        server: server("second"),
+    });
+
+    assert_eq!(
+        app.explorer.normalized.profiles[&first_id].status,
+        ExplorerConnectionStatus::Offline
+    );
+    assert!(
+        app.explorer.normalized.profiles[&first_id]
+            .catalog
+            .is_empty()
+    );
+    assert!(
+        !app.explorer
+            .normalized
+            .expanded
+            .contains(&ExplorerNodeId::Profile(first_id))
+    );
+    assert_eq!(
+        app.explorer.normalized.profiles[&second_id].status,
+        ExplorerConnectionStatus::Syncing
+    );
 }
 
 #[test]
@@ -377,8 +521,7 @@ async fn successful_switch_installs_the_new_database_and_rejects_stale_commands(
         } if connected_id == second_id
     ));
     dispatch(&mut app, &mut runtime, connected);
-    let catalog = next_action(&mut receiver).await;
-    dispatch(&mut app, &mut runtime, catalog);
+    drain_catalog(&mut app, &mut runtime, &mut receiver).await;
     assert_eq!(app.connection.profile_id, Some(second_id));
     assert!(app.connection.pending_profile_id.is_none());
     assert_eq!(
@@ -419,15 +562,11 @@ async fn successful_switch_installs_the_new_database_and_rejects_stale_commands(
         next_action(&mut receiver).await,
         Action::QueryFailed { .. }
     ));
-    runtime.dispatch(Command::LoadCatalog {
-        profile_id: first_identity.profile_id,
-        generation: first_identity.generation,
-    });
-    assert!(
-        timeout(Duration::from_millis(100), receiver.recv())
-            .await
-            .is_err()
-    );
+    runtime.dispatch(Command::LoadCatalogPage(catalog_request(first_identity)));
+    assert!(matches!(
+        next_action(&mut receiver).await,
+        Action::CatalogPageFailed { key, .. } if key.connection == first_identity
+    ));
     runtime.shutdown().await;
 }
 
@@ -460,16 +599,7 @@ async fn late_disconnect_cannot_close_a_new_generation_of_the_same_profile() {
         } if connected_id == profile_id && generation == new_generation
     ));
     dispatch(&mut app, &mut runtime, connected);
-    let catalog = next_action(&mut receiver).await;
-    assert!(matches!(
-        catalog,
-        Action::CatalogLoaded {
-            profile_id: loaded_id,
-            generation,
-            ..
-        } if loaded_id == profile_id && generation == new_generation
-    ));
-    dispatch(&mut app, &mut runtime, catalog);
+    drain_catalog(&mut app, &mut runtime, &mut receiver).await;
 
     assert_eq!(
         app.connection.active_identity(),
@@ -499,6 +629,22 @@ async fn late_disconnect_cannot_close_a_new_generation_of_the_same_profile() {
         "current"
     );
     runtime.shutdown().await;
+}
+
+fn catalog_request(connection: ConnectionIdentity) -> CatalogRequest {
+    CatalogRequest {
+        key: CatalogRequestKey {
+            connection,
+            catalog_epoch: 1,
+            request_id: 1,
+            target: CatalogTarget::Databases,
+            cursor: None,
+        },
+        scope: lazydb::profile::CatalogScope {
+            databases: CatalogSelection::All,
+        },
+        page_size: 100,
+    }
 }
 
 #[tokio::test]

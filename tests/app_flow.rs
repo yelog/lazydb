@@ -58,11 +58,7 @@ async fn connects_loads_catalog_and_executes_through_runtime() {
     dispatch(&mut app, &mut runtime, action);
     assert_eq!(app.connection.status, ConnectionStatus::Connected);
 
-    let action = timeout(Duration::from_secs(3), receiver.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    dispatch(&mut app, &mut runtime, action);
+    drain_catalog(&mut app, &mut runtime, &mut receiver).await;
 
     dispatch(
         &mut app,
@@ -101,20 +97,18 @@ async fn connects_loads_catalog_and_executes_through_runtime() {
     );
 
     dispatch(&mut app, &mut runtime, Action::RefreshCatalog);
-    let action = timeout(Duration::from_secs(3), receiver.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    dispatch(&mut app, &mut runtime, action);
+    drain_catalog(&mut app, &mut runtime, &mut receiver).await;
     assert!(app.explorer.nodes.iter().any(|node| node.name == "users"));
 
-    let users_visible_index = app
-        .explorer
-        .visible()
+    let users = app.explorer.normalized.profiles[&profile_id]
+        .catalog
+        .entries()
         .iter()
-        .position(|visible| app.explorer.nodes[visible.node_index].name == "users")
+        .find(|(_, entry)| entry.qualified_name.object == "users")
+        .map(|(id, _)| id.clone())
         .unwrap();
-    app.explorer.selected = users_visible_index;
+    app.explorer.normalized.selected =
+        Some(lazydb::model::explorer::ExplorerNodeId::Catalog(users));
     dispatch(&mut app, &mut runtime, Action::PreviewSelected);
     let action = timeout(Duration::from_secs(3), receiver.recv())
         .await
@@ -154,6 +148,23 @@ async fn connects_loads_catalog_and_executes_through_runtime() {
 fn dispatch(app: &mut App, runtime: &mut Runtime, action: Action) {
     for command in app.update(action) {
         runtime.dispatch(command);
+    }
+}
+
+async fn drain_catalog(
+    app: &mut App,
+    runtime: &mut Runtime,
+    receiver: &mut mpsc::UnboundedReceiver<Action>,
+) {
+    loop {
+        let Ok(Some(action)) = timeout(Duration::from_millis(100), receiver.recv()).await else {
+            break;
+        };
+        assert!(matches!(
+            action,
+            Action::CatalogPageLoaded(_) | Action::CatalogPageFailed { .. }
+        ));
+        dispatch(app, runtime, action);
     }
 }
 

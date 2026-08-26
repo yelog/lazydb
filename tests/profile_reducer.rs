@@ -1,18 +1,81 @@
 use lazydb::{
     action::{Action, Command},
     app::App,
-    db::ServerInfo,
+    db::{
+        ServerInfo,
+        catalog::{
+            CatalogCapabilities, CatalogDiscovery, ColumnMetadataCapabilities, DiscoveredDatabase,
+            NamespaceModel, ObjectGroup,
+        },
+    },
     model::{
-        profile_manager::{ProfileField, ProfileManagerPage, ProfileOperation},
+        explorer::{ExplorerConnectionStatus, ExplorerNodeId},
+        profile_manager::{
+            CatalogDiscoveryState, DiscoveryFingerprint, ProfileDraft, ProfileField,
+            ProfileManagerPage, ProfileOperation,
+        },
         workspace::{ConnectionIdentity, ConnectionStatus, Overlay, QueryStatus},
     },
-    profile::{ConnectionProfile, DatabaseKind, import_connection_url},
+    profile::{
+        CatalogScope, CatalogSelection, ConnectionProfile, DatabaseKind, DatabaseScope,
+        import_connection_url,
+    },
 };
 
 fn sqlite_profile(name: &str) -> ConnectionProfile {
     import_connection_url(":memory:", Some(name))
         .unwrap()
         .profile
+}
+
+#[test]
+fn profile_root_actions_target_exact_uuid_and_activation_never_disconnects() {
+    let first = sqlite_profile("first");
+    let second = sqlite_profile("second");
+    let first_id = first.id;
+    let second_id = second.id;
+    let mut app = App::new(vec![first, second]);
+
+    app.update(Action::ProfileStartEdit {
+        profile_id: second_id,
+    });
+    assert_eq!(
+        app.profile_manager
+            .as_ref()
+            .unwrap()
+            .draft
+            .as_ref()
+            .unwrap()
+            .profile_id(),
+        second_id
+    );
+    app.update(Action::CloseProfileManager);
+
+    app.explorer.normalized.selected = Some(ExplorerNodeId::Profile(first_id));
+    assert!(matches!(
+        app.update(Action::ExplorerToggle).as_slice(),
+        [Command::Connect { profile_id, .. }] if *profile_id == first_id
+    ));
+    app.explorer
+        .normalized
+        .profiles
+        .get_mut(&first_id)
+        .unwrap()
+        .status = ExplorerConnectionStatus::Online;
+    assert!(app.update(Action::ExplorerToggle).is_empty());
+    assert!(
+        app.explorer
+            .normalized
+            .expanded
+            .contains(&ExplorerNodeId::Profile(first_id))
+    );
+    assert!(app.update(Action::ExplorerToggle).is_empty());
+    assert!(
+        !app.explorer
+            .normalized
+            .expanded
+            .contains(&ExplorerNodeId::Profile(first_id))
+    );
 }
 
 fn valid_new_profile(app: &mut App, name: &str) {
@@ -30,14 +93,62 @@ fn server() -> ServerInfo {
     }
 }
 
+fn capabilities() -> CatalogCapabilities {
+    CatalogCapabilities {
+        namespace_model: NamespaceModel::DatabaseAndSchema,
+        top_level_groups: vec![
+            ObjectGroup::Tables,
+            ObjectGroup::Views,
+            ObjectGroup::Functions,
+            ObjectGroup::Procedures,
+        ],
+        column_metadata: ColumnMetadataCapabilities::default(),
+        supports_lazy_children: false,
+    }
+}
+
+fn discovery(database: &str, schemas: &[&str]) -> CatalogDiscovery {
+    CatalogDiscovery {
+        databases: vec![DiscoveredDatabase {
+            name: database.into(),
+            schemas: schemas.iter().map(|schema| (*schema).into()).collect(),
+        }],
+    }
+}
+
+fn profile_test_succeeded(
+    request_id: u64,
+    fingerprint: DiscoveryFingerprint,
+    discovery: Result<CatalogDiscovery, String>,
+) -> Action {
+    Action::ProfileTestSucceeded {
+        request_id,
+        fingerprint,
+        server: server(),
+        capabilities: capabilities(),
+        discovery,
+    }
+}
+
 #[test]
-fn opening_manager_uses_the_list_or_a_new_form() {
+fn opening_manager_always_uses_a_new_form() {
     let mut populated = App::new(vec![sqlite_profile("primary")]);
     assert!(populated.update(Action::OpenProfileManager).is_empty());
     assert_eq!(populated.overlay, Some(Overlay::ProfileManager));
     assert_eq!(
         populated.profile_manager.as_ref().unwrap().page,
-        ProfileManagerPage::List
+        ProfileManagerPage::Form
+    );
+    assert_eq!(
+        populated
+            .profile_manager
+            .as_ref()
+            .unwrap()
+            .draft
+            .as_ref()
+            .unwrap()
+            .kind,
+        DatabaseKind::Postgres
     );
 
     let mut empty = App::new(Vec::new());
@@ -48,16 +159,30 @@ fn opening_manager_uses_the_list_or_a_new_form() {
 }
 
 #[test]
-fn list_navigation_new_edit_cancel_and_delete_confirmation_are_pure() {
+fn profile_test_form_open_and_edit_are_pure() {
+    let profile = sqlite_profile("primary");
+    let profile_id = profile.id;
+    let mut app = App::new(vec![profile]);
+
+    assert!(
+        app.update(Action::ProfileStartEdit { profile_id })
+            .is_empty()
+    );
+    assert_eq!(
+        app.profile_manager.as_ref().unwrap().page,
+        ProfileManagerPage::Form
+    );
+}
+
+#[test]
+fn uuid_targeted_new_edit_cancel_and_delete_confirmation_are_pure() {
     let first = sqlite_profile("first");
     let second = sqlite_profile("second");
     let second_id = second.id;
     let mut app = App::new(vec![first, second]);
-    app.update(Action::OpenProfileManager);
-
-    app.update(Action::ProfileMove(1));
-    assert_eq!(app.profile_manager.as_ref().unwrap().selected, 1);
-    app.update(Action::ProfileStartEdit);
+    app.update(Action::ProfileStartEdit {
+        profile_id: second_id,
+    });
     assert_eq!(
         app.profile_manager
             .as_ref()
@@ -70,10 +195,7 @@ fn list_navigation_new_edit_cancel_and_delete_confirmation_are_pure() {
     );
 
     app.update(Action::CloseProfileManager);
-    assert_eq!(
-        app.profile_manager.as_ref().unwrap().page,
-        ProfileManagerPage::List
-    );
+    assert!(app.profile_manager.is_none());
     app.update(Action::ProfileStartNew);
     assert_eq!(
         app.profile_manager.as_ref().unwrap().page,
@@ -81,18 +203,14 @@ fn list_navigation_new_edit_cancel_and_delete_confirmation_are_pure() {
     );
     app.update(Action::CloseProfileManager);
 
-    app.update(Action::ProfileRequestDelete);
+    app.update(Action::ProfileRequestDelete {
+        profile_id: second_id,
+    });
     assert_eq!(
         app.profile_manager.as_ref().unwrap().page,
         ProfileManagerPage::ConfirmDelete
     );
     app.update(Action::ProfileCancelDelete);
-    assert_eq!(
-        app.profile_manager.as_ref().unwrap().page,
-        ProfileManagerPage::List
-    );
-
-    app.update(Action::CloseProfileManager);
     assert!(app.profile_manager.is_none());
     assert!(app.overlay.is_none());
 }
@@ -119,7 +237,7 @@ fn form_navigation_skips_fields_hidden_by_driver_and_mode() {
     app.update(Action::ProfileFieldNext);
     assert_eq!(
         app.profile_manager.as_ref().unwrap().selected_field,
-        ProfileField::ReadOnly
+        ProfileField::VisibleObjects
     );
     app.update(Action::ProfileFieldPrevious);
     assert_eq!(
@@ -203,8 +321,13 @@ fn test_rejects_invalid_drafts_and_tracks_matching_results() {
 
     valid_new_profile(&mut app, "primary");
     let commands = app.update(Action::ProfileTest);
-    let request_id = match commands.as_slice() {
-        [Command::TestProfile { request_id, .. }] => *request_id,
+    let (request_id, fingerprint) = match commands.as_slice() {
+        [
+            Command::TestProfile {
+                request_id,
+                submission,
+            },
+        ] => (*request_id, submission.discovery_fingerprint),
         commands => panic!("unexpected commands: {commands:?}"),
     };
     assert_eq!(
@@ -227,13 +350,228 @@ fn test_rejects_invalid_drafts_and_tracks_matching_results() {
         Some(ProfileOperation::Testing)
     );
 
-    app.update(Action::ProfileTestSucceeded {
+    app.update(profile_test_succeeded(
         request_id,
-        server: server(),
-    });
+        fingerprint,
+        Ok(discovery("lazydb", &["public"])),
+    ));
     let manager = app.profile_manager.as_ref().unwrap();
     assert_eq!(manager.operation, None);
     assert!(manager.message.as_deref().unwrap().contains("16.4"));
+    assert!(matches!(
+        manager.draft.as_ref().unwrap().catalog_discovery,
+        CatalogDiscoveryState::Fresh(_)
+    ));
+}
+
+#[test]
+fn profile_test_discovery_failure_is_success_with_a_warning_and_preserves_scope() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::OpenProfileManager);
+    valid_new_profile(&mut app, "primary");
+    let scope = CatalogScope {
+        databases: CatalogSelection::Selected(vec![DatabaseScope {
+            name: "lazydb".into(),
+            schemas: CatalogSelection::Selected(vec!["public".into(), "audit".into()]),
+        }]),
+    };
+    app.profile_manager
+        .as_mut()
+        .unwrap()
+        .draft
+        .as_mut()
+        .unwrap()
+        .catalog_scope = scope.clone();
+    let (request_id, fingerprint) = match app.update(Action::ProfileTest).as_slice() {
+        [
+            Command::TestProfile {
+                request_id,
+                submission,
+            },
+        ] => (*request_id, submission.discovery_fingerprint),
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+
+    app.update(profile_test_succeeded(
+        request_id,
+        fingerprint,
+        Err("catalog permission denied".into()),
+    ));
+
+    let manager = app.profile_manager.as_ref().unwrap();
+    assert_eq!(manager.operation, None);
+    let message = manager.message.as_deref().unwrap();
+    assert!(message.contains("Connection succeeded"));
+    assert!(message.contains("catalog permission denied"));
+    let draft = manager.draft.as_ref().unwrap();
+    assert_eq!(draft.catalog_scope, scope);
+    let CatalogDiscoveryState::Fresh(snapshot) = &draft.catalog_discovery else {
+        panic!("probe success must retain the discovery warning")
+    };
+    assert_eq!(snapshot.fingerprint, fingerprint);
+    assert!(matches!(
+        &snapshot.discovery,
+        Err(warning) if warning == "catalog permission denied"
+    ));
+}
+
+#[test]
+fn profile_test_stale_generation_cannot_replace_newer_discovery() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::OpenProfileManager);
+    valid_new_profile(&mut app, "primary");
+    let (first_request, first_fingerprint) = match app.update(Action::ProfileTest).as_slice() {
+        [
+            Command::TestProfile {
+                request_id,
+                submission,
+            },
+        ] => (*request_id, submission.discovery_fingerprint),
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+    app.update(profile_test_succeeded(
+        first_request,
+        first_fingerprint,
+        Ok(discovery("first", &["public"])),
+    ));
+
+    let (second_request, second_fingerprint) = match app.update(Action::ProfileTest).as_slice() {
+        [
+            Command::TestProfile {
+                request_id,
+                submission,
+            },
+        ] => (*request_id, submission.discovery_fingerprint),
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+    let before_stale = app
+        .profile_manager
+        .as_ref()
+        .unwrap()
+        .draft
+        .as_ref()
+        .unwrap()
+        .catalog_discovery
+        .clone();
+    app.update(profile_test_succeeded(
+        first_request,
+        first_fingerprint,
+        Ok(discovery("stale", &["ignored"])),
+    ));
+    let manager = app.profile_manager.as_ref().unwrap();
+    assert_eq!(manager.operation, Some(ProfileOperation::Testing));
+    assert_eq!(
+        manager.draft.as_ref().unwrap().catalog_discovery,
+        before_stale
+    );
+
+    app.update(profile_test_succeeded(
+        second_request,
+        second_fingerprint,
+        Ok(discovery("current", &["public"])),
+    ));
+    let current = app
+        .profile_manager
+        .as_ref()
+        .unwrap()
+        .draft
+        .as_ref()
+        .unwrap()
+        .catalog_discovery
+        .clone();
+    app.update(profile_test_succeeded(
+        first_request,
+        first_fingerprint,
+        Ok(discovery("late", &["ignored"])),
+    ));
+    assert_eq!(
+        app.profile_manager
+            .as_ref()
+            .unwrap()
+            .draft
+            .as_ref()
+            .unwrap()
+            .catalog_discovery,
+        current
+    );
+}
+
+#[test]
+fn profile_test_connection_edits_mark_discovery_stale_and_preserve_scope() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::OpenProfileManager);
+    valid_new_profile(&mut app, "primary");
+    let scope = CatalogScope {
+        databases: CatalogSelection::Selected(vec![DatabaseScope {
+            name: "lazydb".into(),
+            schemas: CatalogSelection::Selected(vec!["public".into(), "audit".into()]),
+        }]),
+    };
+    app.profile_manager
+        .as_mut()
+        .unwrap()
+        .draft
+        .as_mut()
+        .unwrap()
+        .catalog_scope = scope.clone();
+    let (request_id, fingerprint) = match app.update(Action::ProfileTest).as_slice() {
+        [
+            Command::TestProfile {
+                request_id,
+                submission,
+            },
+        ] => (*request_id, submission.discovery_fingerprint),
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+    app.update(profile_test_succeeded(
+        request_id,
+        fingerprint,
+        Ok(discovery("lazydb", &["public", "audit"])),
+    ));
+
+    app.update(Action::ProfileFocusField(ProfileField::Host));
+    app.update(Action::ProfileInsert('2'.into()));
+
+    let draft = app
+        .profile_manager
+        .as_ref()
+        .unwrap()
+        .draft
+        .as_ref()
+        .unwrap();
+    assert!(matches!(
+        draft.catalog_discovery,
+        CatalogDiscoveryState::Stale(_)
+    ));
+    assert!(draft.discovery_fingerprint.is_none());
+    assert_eq!(draft.catalog_scope, scope);
+}
+
+#[test]
+fn profile_test_fingerprint_never_depends_on_password_contents() {
+    let mut first = ProfileDraft::new(DatabaseKind::Postgres);
+    first.name.set("primary");
+    first.database.set("lazydb");
+    first.set_password("first-password");
+    let first_fingerprint = first.validate(&[]).unwrap().discovery_fingerprint;
+
+    let mut same_revision = ProfileDraft::new(DatabaseKind::Postgres);
+    same_revision.name.set("other-name");
+    same_revision.database.set("lazydb");
+    same_revision.set_password("different-password");
+    assert_eq!(
+        same_revision.validate(&[]).unwrap().discovery_fingerprint,
+        first_fingerprint
+    );
+
+    first.set_password("replacement-password");
+    assert_ne!(
+        first.validate(&[]).unwrap().discovery_fingerprint,
+        first_fingerprint
+    );
+    let debug = format!("{first:?}");
+    assert!(!debug.contains("first-password"));
+    assert!(!debug.contains("replacement-password"));
 }
 
 #[test]
@@ -268,11 +606,12 @@ fn save_and_save_and_connect_emit_distinct_commands() {
 fn save_success_upserts_without_reordering_profiles() {
     let first = sqlite_profile("first");
     let second = sqlite_profile("second");
+    let second_id = second.id;
     let expected_ids = [first.id, second.id];
     let mut app = App::new(vec![first, second]);
-    app.update(Action::OpenProfileManager);
-    app.update(Action::ProfileMove(1));
-    app.update(Action::ProfileStartEdit);
+    app.update(Action::ProfileStartEdit {
+        profile_id: second_id,
+    });
     app.profile_manager
         .as_mut()
         .unwrap()
@@ -303,6 +642,12 @@ fn save_success_upserts_without_reordering_profiles() {
         request_id,
         profile: saved,
         warning: None,
+        change: lazydb::model::profile_manager::ProfileChange {
+            connection_settings_changed: false,
+            catalog_scope_changed: false,
+            display_only_changed: false,
+            credentials_changed: false,
+        },
         connect: false,
     });
 
@@ -314,10 +659,7 @@ fn save_success_upserts_without_reordering_profiles() {
         expected_ids
     );
     assert_eq!(app.profiles[1].name, "renamed");
-    assert_eq!(
-        app.profile_manager.as_ref().unwrap().page,
-        ProfileManagerPage::List
-    );
+    assert!(app.profile_manager.is_none());
 }
 
 #[test]
@@ -326,9 +668,9 @@ fn delete_success_removes_the_profile_and_clamps_selection() {
     let second = sqlite_profile("second");
     let second_id = second.id;
     let mut app = App::new(vec![first, second]);
-    app.update(Action::OpenProfileManager);
-    app.update(Action::ProfileMove(1));
-    app.update(Action::ProfileRequestDelete);
+    app.update(Action::ProfileRequestDelete {
+        profile_id: second_id,
+    });
     let request_id = match app.update(Action::ProfileConfirmDelete).as_slice() {
         [
             Command::DeleteProfile {
@@ -348,11 +690,7 @@ fn delete_success_removes_the_profile_and_clamps_selection() {
         active_connection: None,
     });
     assert_eq!(app.profiles.len(), 1);
-    assert_eq!(app.profile_manager.as_ref().unwrap().selected, 0);
-    assert_eq!(
-        app.profile_manager.as_ref().unwrap().page,
-        ProfileManagerPage::List
-    );
+    assert!(app.profile_manager.is_none());
 }
 
 #[test]
@@ -363,8 +701,7 @@ fn deleting_or_saving_a_pending_profile_clears_its_connection_state() {
     deleting.connection.pending_profile_id = Some(profile_id);
     deleting.connection.pending_generation = Some(1);
     deleting.connection.status = ConnectionStatus::Connecting;
-    deleting.update(Action::OpenProfileManager);
-    deleting.update(Action::ProfileRequestDelete);
+    deleting.update(Action::ProfileRequestDelete { profile_id });
     let request_id = match deleting.update(Action::ProfileConfirmDelete).as_slice() {
         [Command::DeleteProfile { request_id, .. }] => *request_id,
         commands => panic!("unexpected commands: {commands:?}"),
@@ -387,8 +724,7 @@ fn deleting_or_saving_a_pending_profile_clears_its_connection_state() {
     saving.connection.pending_profile_id = Some(profile_id);
     saving.connection.pending_generation = Some(1);
     saving.connection.status = ConnectionStatus::Connecting;
-    saving.update(Action::OpenProfileManager);
-    saving.update(Action::ProfileStartEdit);
+    saving.update(Action::ProfileStartEdit { profile_id });
     let request_id = match saving
         .update(Action::ProfileSave { connect: false })
         .as_slice()
@@ -412,6 +748,7 @@ fn deleting_or_saving_a_pending_profile_clears_its_connection_state() {
                 request_id,
                 profile: saved,
                 warning: None,
+                change: lazydb::model::profile_manager::ProfileChange { connection_settings_changed: false, catalog_scope_changed: false, display_only_changed: false, credentials_changed: false },
                 connect: false,
             })
             .as_slice(),
@@ -442,8 +779,7 @@ fn saving_an_active_profile_retires_the_old_connection() {
     app.connection.profile_id = Some(profile_id);
     app.connection.generation = connection.generation;
     app.connection.status = ConnectionStatus::Connected;
-    app.update(Action::OpenProfileManager);
-    app.update(Action::ProfileStartEdit);
+    app.update(Action::ProfileStartEdit { profile_id });
     let request_id = match app
         .update(Action::ProfileSave { connect: false })
         .as_slice()
@@ -468,6 +804,12 @@ fn saving_an_active_profile_retires_the_old_connection() {
         request_id,
         profile: saved,
         warning: None,
+        change: lazydb::model::profile_manager::ProfileChange {
+            connection_settings_changed: true,
+            catalog_scope_changed: false,
+            display_only_changed: false,
+            credentials_changed: false,
+        },
         connect: false,
     });
     assert!(matches!(
@@ -480,6 +822,70 @@ fn saving_an_active_profile_retires_the_old_connection() {
 }
 
 #[test]
+fn active_scope_only_save_keeps_connection_clears_completion_and_reloads_catalog() {
+    let mut profile = sqlite_profile("active");
+    let profile_id = profile.id;
+    profile.catalog_scope =
+        CatalogScope::for_profile(DatabaseKind::Sqlite, ":memory:", Some("main"));
+    let mut app = App::new(vec![profile.clone()]);
+    app.connection.profile_id = Some(profile_id);
+    app.connection.generation = 3;
+    app.connection.status = ConnectionStatus::Connected;
+    app.active_console_mut().completion = Some(Default::default());
+    app.update(Action::ProfileStartEdit { profile_id });
+    let request_id = match app
+        .update(Action::ProfileSave { connect: false })
+        .as_slice()
+    {
+        [Command::SaveProfile { request_id, .. }] => *request_id,
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+    let mut saved = app
+        .profile_manager
+        .as_ref()
+        .unwrap()
+        .draft
+        .as_ref()
+        .unwrap()
+        .validate(&app.profiles)
+        .unwrap()
+        .profile;
+    saved.catalog_scope = CatalogScope::for_profile(DatabaseKind::Sqlite, ":memory:", None);
+    let old_epoch = app
+        .explorer
+        .normalized
+        .profiles
+        .get(&profile_id)
+        .unwrap()
+        .catalog_epoch;
+    let commands = app.update(Action::ProfileSaved {
+        request_id,
+        profile: saved,
+        warning: None,
+        change: lazydb::model::profile_manager::ProfileChange {
+            connection_settings_changed: false,
+            catalog_scope_changed: true,
+            display_only_changed: false,
+            credentials_changed: false,
+        },
+        connect: false,
+    });
+    assert!(matches!(commands.as_slice(), [Command::LoadCatalogPage(_)]));
+    assert_eq!(app.connection.profile_id, Some(profile_id));
+    assert_eq!(app.connection.status, ConnectionStatus::Connected);
+    assert!(app.active_console().completion.is_none());
+    assert!(
+        app.explorer
+            .normalized
+            .profiles
+            .get(&profile_id)
+            .unwrap()
+            .catalog_epoch
+            > old_epoch
+    );
+}
+
+#[test]
 fn query_started_while_save_is_in_flight_preserves_the_active_connection() {
     let profile = sqlite_profile("active");
     let profile_id = profile.id;
@@ -487,8 +893,7 @@ fn query_started_while_save_is_in_flight_preserves_the_active_connection() {
     app.connection.profile_id = Some(profile_id);
     app.connection.generation = 3;
     app.connection.status = ConnectionStatus::Connected;
-    app.update(Action::OpenProfileManager);
-    app.update(Action::ProfileStartEdit);
+    app.update(Action::ProfileStartEdit { profile_id });
     let request_id = match app
         .update(Action::ProfileSave { connect: false })
         .as_slice()
@@ -513,6 +918,12 @@ fn query_started_while_save_is_in_flight_preserves_the_active_connection() {
             request_id,
             profile: saved,
             warning: None,
+            change: lazydb::model::profile_manager::ProfileChange {
+                connection_settings_changed: true,
+                catalog_scope_changed: false,
+                display_only_changed: false,
+                credentials_changed: false,
+            },
             connect: false,
         })
         .is_empty()
@@ -542,8 +953,7 @@ fn deleting_an_active_profile_retires_it_before_disconnect_completes() {
     app.connection.profile_id = Some(profile_id);
     app.connection.generation = connection.generation;
     app.connection.status = ConnectionStatus::Connected;
-    app.update(Action::OpenProfileManager);
-    app.update(Action::ProfileRequestDelete);
+    app.update(Action::ProfileRequestDelete { profile_id });
     let request_id = match app.update(Action::ProfileConfirmDelete).as_slice() {
         [Command::DeleteProfile { request_id, .. }] => *request_id,
         commands => panic!("unexpected commands: {commands:?}"),
@@ -571,32 +981,30 @@ fn running_queries_block_switching_active_profile_saves_and_deletion() {
     let active = sqlite_profile("active");
     let other = sqlite_profile("other");
     let active_id = active.id;
+    let other_id = other.id;
     let mut app = App::new(vec![active, other]);
     app.connection.profile_id = Some(active_id);
     app.connection.status = ConnectionStatus::Connected;
     app.active_console_mut().query_status = QueryStatus::Running;
-    app.update(Action::OpenProfileManager);
-
-    app.update(Action::ProfileMove(1));
-    assert!(app.update(Action::ProfileConnectSelected).is_empty());
     assert!(
-        app.profile_manager
-            .as_ref()
-            .unwrap()
-            .message
-            .as_deref()
-            .unwrap()
-            .contains("running")
+        app.update(Action::RequestProfileConnect {
+            profile_id: other_id,
+        })
+        .is_empty()
     );
 
-    app.update(Action::ProfileMove(-1));
-    app.update(Action::ProfileRequestDelete);
+    app.update(Action::ProfileRequestDelete {
+        profile_id: active_id,
+    });
     assert_eq!(
         app.profile_manager.as_ref().unwrap().page,
-        ProfileManagerPage::List
+        ProfileManagerPage::ConfirmDelete
     );
+    assert!(app.profile_manager.as_ref().unwrap().message.is_some());
 
-    app.update(Action::ProfileStartEdit);
+    app.update(Action::ProfileStartEdit {
+        profile_id: active_id,
+    });
     assert!(
         app.update(Action::ProfileSave { connect: false })
             .is_empty()
@@ -649,9 +1057,14 @@ fn credentials_required_does_not_replace_an_in_flight_profile_operation() {
     app.connection.pending_generation = Some(4);
     app.connection.status = ConnectionStatus::Connecting;
     app.update(Action::OpenProfileManager);
-    app.update(Action::ProfileStartEdit);
-    let request_id = match app.update(Action::ProfileTest).as_slice() {
-        [Command::TestProfile { request_id, .. }] => *request_id,
+    app.update(Action::ProfileStartEdit { profile_id });
+    let (request_id, fingerprint) = match app.update(Action::ProfileTest).as_slice() {
+        [
+            Command::TestProfile {
+                request_id,
+                submission,
+            },
+        ] => (*request_id, submission.discovery_fingerprint),
         commands => panic!("unexpected commands: {commands:?}"),
     };
 
@@ -664,9 +1077,81 @@ fn credentials_required_does_not_replace_an_in_flight_profile_operation() {
     assert_eq!(manager.operation, Some(ProfileOperation::Testing));
     assert_eq!(manager.request_generation, request_id);
 
-    app.update(Action::ProfileTestSucceeded {
+    app.update(profile_test_succeeded(
         request_id,
-        server: server(),
-    });
+        fingerprint,
+        Ok(discovery("lazydb", &["public"])),
+    ));
     assert_eq!(app.profile_manager.as_ref().unwrap().operation, None);
+}
+
+#[test]
+fn starting_another_profile_form_during_operation_preserves_request_generation() {
+    let first = sqlite_profile("first");
+    let second = sqlite_profile("second");
+    let first_id = first.id;
+    let second_id = second.id;
+    let mut app = App::new(vec![first, second]);
+    app.update(Action::ProfileStartEdit {
+        profile_id: first_id,
+    });
+    let request_id = match app.update(Action::ProfileTest).as_slice() {
+        [Command::TestProfile { request_id, .. }] => *request_id,
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+
+    app.update(Action::ProfileStartEdit {
+        profile_id: second_id,
+    });
+    let manager = app.profile_manager.as_ref().unwrap();
+    assert_eq!(manager.request_generation, request_id);
+    assert_eq!(manager.operation, Some(ProfileOperation::Testing));
+    app.update(Action::ProfileTestFailed {
+        request_id,
+        message: "late".into(),
+    });
+    assert_eq!(
+        app.profile_manager.as_ref().unwrap().message.as_deref(),
+        Some("late")
+    );
+}
+
+#[test]
+fn invalidating_active_connection_cancels_pending_switch() {
+    let first = sqlite_profile("first");
+    let second = sqlite_profile("second");
+    let first_id = first.id;
+    let second_id = second.id;
+    let mut app = App::new(vec![first, second]);
+    app.connection.profile_id = Some(first_id);
+    app.connection.generation = 1;
+    app.connection.status = ConnectionStatus::Connected;
+    app.update(Action::RequestProfileConnect {
+        profile_id: second_id,
+    });
+
+    app.update(Action::ConnectionInvalidated {
+        connection: ConnectionIdentity {
+            profile_id: first_id,
+            generation: 1,
+        },
+        message: "connection lost".into(),
+    });
+
+    assert!(app.connection.pending_profile_id.is_none());
+    assert_eq!(app.connection.status, ConnectionStatus::Failed);
+    assert_eq!(
+        app.explorer.normalized.profiles[&first_id].status,
+        ExplorerConnectionStatus::Failed
+    );
+    assert_eq!(
+        app.explorer.normalized.profiles[&second_id].status,
+        ExplorerConnectionStatus::Failed
+    );
+    assert_eq!(
+        app.explorer.normalized.profiles[&second_id]
+            .last_error
+            .as_deref(),
+        Some("connection lost")
+    );
 }

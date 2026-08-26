@@ -1,9 +1,24 @@
-use std::{fmt, path::PathBuf};
+use std::{
+    collections::HashSet,
+    collections::hash_map::DefaultHasher,
+    fmt,
+    hash::{Hash, Hasher},
+    path::PathBuf,
+};
 
 use secrecy::{ExposeSecret, SecretString, zeroize::Zeroizing};
 use uuid::Uuid;
 
-use crate::profile::{ConnectionProfile, DatabaseKind, Environment, SslMode};
+use crate::{
+    db::{
+        ServerInfo,
+        catalog::{CatalogCapabilities, CatalogDiscovery},
+    },
+    profile::{
+        CatalogScope, CatalogScopeValidationError, CatalogSelection, ConnectionProfile,
+        DatabaseKind, DatabaseScope, Environment, SslMode,
+    },
+};
 
 use super::text_input::TextInput;
 
@@ -50,8 +65,8 @@ impl From<&str> for ProfileInput {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProfileManagerPage {
-    List,
     Form,
+    Scope,
     ConfirmDelete,
 }
 
@@ -65,6 +80,7 @@ pub enum ProfileField {
     Password,
     Database,
     Schema,
+    VisibleObjects,
     SslMode,
     Environment,
     ReadOnly,
@@ -105,10 +121,67 @@ impl fmt::Debug for CredentialUpdate {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct DiscoveryFingerprint(u64);
+
+impl DiscoveryFingerprint {
+    pub fn for_profile(
+        profile: &ConnectionProfile,
+        credential_present: bool,
+        credential_revision: u64,
+    ) -> Self {
+        let mut hasher = DefaultHasher::new();
+        (profile.kind as u8).hash(&mut hasher);
+        profile.host.hash(&mut hasher);
+        profile.port.hash(&mut hasher);
+        profile.user.hash(&mut hasher);
+        profile.database.hash(&mut hasher);
+        (profile.ssl_mode as u8).hash(&mut hasher);
+        profile.sqlite_path.hash(&mut hasher);
+        (profile.kind == DatabaseKind::Sqlite
+            && profile.sqlite_path.is_none()
+            && profile.database.as_deref() == Some(":memory:"))
+        .hash(&mut hasher);
+        credential_present.hash(&mut hasher);
+        credential_revision.hash(&mut hasher);
+        Self(hasher.finish())
+    }
+}
+
 #[derive(Clone)]
 pub struct ProfileSubmission {
     pub profile: ConnectionProfile,
     pub credential: CredentialUpdate,
+    pub discovery_fingerprint: DiscoveryFingerprint,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProfileChange {
+    pub connection_settings_changed: bool,
+    pub catalog_scope_changed: bool,
+    pub display_only_changed: bool,
+    pub credentials_changed: bool,
+}
+
+impl ProfileSubmission {
+    pub fn new(
+        profile: ConnectionProfile,
+        credential: CredentialUpdate,
+        credential_revision: u64,
+    ) -> Self {
+        let credential_present = match &credential {
+            CredentialUpdate::Preserve => profile.secret_ref.is_some(),
+            CredentialUpdate::Session(_) | CredentialUpdate::Remember(_) => true,
+            CredentialUpdate::Forget => false,
+        };
+        let discovery_fingerprint =
+            DiscoveryFingerprint::for_profile(&profile, credential_present, credential_revision);
+        Self {
+            profile,
+            credential,
+            discovery_fingerprint,
+        }
+    }
 }
 
 impl fmt::Debug for ProfileSubmission {
@@ -117,6 +190,7 @@ impl fmt::Debug for ProfileSubmission {
             .debug_struct("ProfileSubmission")
             .field("profile", &self.profile)
             .field("credential", &self.credential)
+            .field("discovery_fingerprint", &self.discovery_fingerprint)
             .finish()
     }
 }
@@ -144,6 +218,51 @@ impl fmt::Display for ProfileValidationError {
 
 impl std::error::Error for ProfileValidationError {}
 
+#[derive(Clone, Eq, PartialEq)]
+pub struct ProfileCatalogDiscovery {
+    pub fingerprint: DiscoveryFingerprint,
+    pub server: ServerInfo,
+    pub capabilities: CatalogCapabilities,
+    pub discovery: Result<CatalogDiscovery, String>,
+}
+
+impl fmt::Debug for ProfileCatalogDiscovery {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProfileCatalogDiscovery")
+            .field("fingerprint", &self.fingerprint)
+            .field("server_kind", &self.server.kind)
+            .field("capabilities", &self.capabilities)
+            .field(
+                "discovery",
+                &if self.discovery.is_ok() {
+                    "available"
+                } else {
+                    "warning"
+                },
+            )
+            .finish()
+    }
+}
+
+#[derive(Clone, Default, Eq, PartialEq)]
+pub enum CatalogDiscoveryState {
+    #[default]
+    NotRequested,
+    Fresh(ProfileCatalogDiscovery),
+    Stale(ProfileCatalogDiscovery),
+}
+
+impl fmt::Debug for CatalogDiscoveryState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotRequested => formatter.write_str("NotRequested"),
+            Self::Fresh(snapshot) => formatter.debug_tuple("Fresh").field(snapshot).finish(),
+            Self::Stale(snapshot) => formatter.debug_tuple("Stale").field(snapshot).finish(),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct ProfileDraft {
     profile_id: Uuid,
@@ -164,8 +283,20 @@ pub struct ProfileDraft {
     pub sqlite_path: TextInput,
     pub original_secret_ref: Option<String>,
     pub has_stored_credential: bool,
-    include_databases: Vec<String>,
-    include_schemas: Vec<String>,
+    pub catalog_scope: CatalogScope,
+    pub catalog_discovery: CatalogDiscoveryState,
+    pub discovery_fingerprint: Option<DiscoveryFingerprint>,
+    credential_revision: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScopeRow {
+    pub id: String,
+    pub name: String,
+    pub selected: bool,
+    pub read_only: bool,
+    pub unavailable: bool,
+    pub database: bool,
 }
 
 impl ProfileDraft {
@@ -195,8 +326,10 @@ impl ProfileDraft {
             sqlite_path: TextInput::default(),
             original_secret_ref: None,
             has_stored_credential: false,
-            include_databases: Vec::new(),
-            include_schemas: Vec::new(),
+            catalog_scope: CatalogScope::for_profile(kind, "", Some(schema)),
+            catalog_discovery: CatalogDiscoveryState::NotRequested,
+            discovery_fingerprint: None,
+            credential_revision: 0,
         }
     }
 
@@ -239,8 +372,10 @@ impl ProfileDraft {
             sqlite_path: TextInput::from(sqlite_path),
             original_secret_ref: profile.secret_ref.clone(),
             has_stored_credential,
-            include_databases: profile.include_databases.clone(),
-            include_schemas: profile.include_schemas.clone(),
+            catalog_scope: profile.catalog_scope.clone(),
+            catalog_discovery: CatalogDiscoveryState::NotRequested,
+            discovery_fingerprint: None,
+            credential_revision: 0,
         }
     }
 
@@ -256,6 +391,7 @@ impl ProfileDraft {
         let password = password.into();
         self.password_cursor = password.chars().count();
         self.password = SecretString::from(password);
+        self.credential_changed();
     }
 
     pub fn password_len(&self) -> usize {
@@ -272,6 +408,7 @@ impl ProfileDraft {
         } else if let Some(input) = self.text_input_mut(field) {
             input.insert(character);
         }
+        self.connection_field_changed(field);
     }
 
     pub fn paste(&mut self, field: ProfileField, text: &str) {
@@ -284,6 +421,7 @@ impl ProfileDraft {
         } else if let Some(input) = self.text_input_mut(field) {
             input.paste(text);
         }
+        self.connection_field_changed(field);
     }
 
     pub fn backspace(&mut self, field: ProfileField) {
@@ -300,6 +438,7 @@ impl ProfileDraft {
         } else if let Some(input) = self.text_input_mut(field) {
             input.backspace();
         }
+        self.connection_field_changed(field);
     }
 
     pub fn delete(&mut self, field: ProfileField) {
@@ -315,6 +454,63 @@ impl ProfileDraft {
         } else if let Some(input) = self.text_input_mut(field) {
             input.delete();
         }
+        self.connection_field_changed(field);
+    }
+
+    pub fn begin_catalog_discovery(&mut self, fingerprint: DiscoveryFingerprint) {
+        self.discovery_fingerprint = Some(fingerprint);
+    }
+
+    pub fn visible_objects_summary(&self) -> String {
+        match &self.catalog_scope.databases {
+            CatalogSelection::All => "all databases".to_owned(),
+            CatalogSelection::Selected(items) => format!(
+                "{} database{}",
+                items.len(),
+                if items.len() == 1 { "" } else { "s" }
+            ),
+        }
+    }
+
+    pub fn invalidate_discovery_for_test(&mut self) {
+        self.invalidate_catalog_discovery();
+    }
+
+    pub fn apply_catalog_discovery(&mut self, snapshot: ProfileCatalogDiscovery) -> bool {
+        if self.discovery_fingerprint != Some(snapshot.fingerprint) {
+            return false;
+        }
+        self.catalog_discovery = CatalogDiscoveryState::Fresh(snapshot);
+        true
+    }
+
+    fn invalidate_catalog_discovery(&mut self) {
+        let current = std::mem::take(&mut self.catalog_discovery);
+        self.catalog_discovery = match current {
+            CatalogDiscoveryState::Fresh(snapshot) => CatalogDiscoveryState::Stale(snapshot),
+            other => other,
+        };
+        self.discovery_fingerprint = None;
+    }
+
+    fn connection_field_changed(&mut self, field: ProfileField) {
+        if field == ProfileField::Password {
+            self.credential_changed();
+        } else if matches!(
+            field,
+            ProfileField::Host
+                | ProfileField::Port
+                | ProfileField::User
+                | ProfileField::Database
+                | ProfileField::SqlitePath
+        ) {
+            self.invalidate_catalog_discovery();
+        }
+    }
+
+    fn credential_changed(&mut self) {
+        self.credential_revision = self.credential_revision.saturating_add(1);
+        self.invalidate_catalog_discovery();
     }
 
     pub fn move_left(&mut self, field: ProfileField) {
@@ -436,9 +632,26 @@ impl ProfileDraft {
         } else {
             None
         };
+        let catalog_scope = if self.catalog_scope_is_pending_default() {
+            CatalogScope::for_profile(
+                self.kind,
+                database.as_deref().unwrap_or_default(),
+                default_schema.as_deref(),
+            )
+        } else {
+            self.catalog_scope.clone()
+        };
+        catalog_scope
+            .validate(
+                database.as_deref().unwrap_or_default(),
+                default_schema.as_deref(),
+            )
+            .map_err(|error| {
+                ProfileValidationError::new(catalog_scope_error_field(&error), error.to_string())
+            })?;
 
-        Ok(ProfileSubmission {
-            profile: ConnectionProfile {
+        Ok(ProfileSubmission::new(
+            ConnectionProfile {
                 id: self.profile_id,
                 name,
                 kind: self.kind,
@@ -452,11 +665,11 @@ impl ProfileDraft {
                 secret_ref,
                 read_only: self.read_only,
                 environment: self.environment,
-                include_databases: self.include_databases.clone(),
-                include_schemas: self.include_schemas.clone(),
+                catalog_scope,
             },
             credential,
-        })
+            self.credential_revision,
+        ))
     }
 
     fn credential_update(&self) -> CredentialUpdate {
@@ -483,6 +696,14 @@ impl ProfileDraft {
         }
     }
 
+    fn catalog_scope_is_pending_default(&self) -> bool {
+        matches!(
+            &self.catalog_scope.databases,
+            CatalogSelection::Selected(databases)
+                if matches!(databases.as_slice(), [DatabaseScope { name, .. }] if name.is_empty())
+        )
+    }
+
     fn text_input_mut(&mut self, field: ProfileField) -> Option<&mut TextInput> {
         match field {
             ProfileField::Name => Some(&mut self.name),
@@ -501,6 +722,7 @@ impl ProfileDraft {
             return;
         }
 
+        self.invalidate_catalog_discovery();
         let previous = self.kind;
         self.kind = kind;
         match kind {
@@ -562,8 +784,10 @@ impl fmt::Debug for ProfileDraft {
             .field("sqlite_path", &self.sqlite_path)
             .field("original_secret_ref", &self.original_secret_ref)
             .field("has_stored_credential", &self.has_stored_credential)
-            .field("include_databases", &self.include_databases)
-            .field("include_schemas", &self.include_schemas)
+            .field("catalog_scope", &self.catalog_scope)
+            .field("catalog_discovery", &self.catalog_discovery)
+            .field("discovery_fingerprint", &self.discovery_fingerprint)
+            .field("credential_revision", &self.credential_revision)
             .finish()
     }
 }
@@ -571,26 +795,36 @@ impl fmt::Debug for ProfileDraft {
 #[derive(Clone, Debug)]
 pub struct ProfileManagerState {
     pub page: ProfileManagerPage,
-    pub selected: usize,
     pub draft: Option<ProfileDraft>,
+    pub delete_profile_id: Option<Uuid>,
     pub selected_field: ProfileField,
     pub operation: Option<ProfileOperation>,
     pub message: Option<String>,
     pub request_generation: u64,
     pub opened_automatically: bool,
+    pub scope_selected_row: Option<String>,
+    pub scope_expanded_databases: HashSet<String>,
+    pub scope_viewport: usize,
+    pub scope_warning: Option<String>,
 }
+
+const SCOPE_VIEWPORT_CAPACITY: usize = 29;
 
 impl ProfileManagerState {
     pub fn new(opened_automatically: bool) -> Self {
         Self {
-            page: ProfileManagerPage::List,
-            selected: 0,
+            page: ProfileManagerPage::Form,
             draft: None,
+            delete_profile_id: None,
             selected_field: ProfileField::Kind,
             operation: None,
             message: None,
             request_generation: 0,
             opened_automatically,
+            scope_selected_row: None,
+            scope_expanded_databases: HashSet::new(),
+            scope_viewport: 0,
+            scope_warning: None,
         }
     }
 
@@ -600,6 +834,7 @@ impl ProfileManagerState {
         self.selected_field = ProfileField::Kind;
         self.operation = None;
         self.message = None;
+        self.scope_warning = None;
     }
 
     pub fn start_edit(&mut self, profile: &ConnectionProfile, has_stored_credential: bool) {
@@ -608,16 +843,220 @@ impl ProfileManagerState {
         self.selected_field = ProfileField::Kind;
         self.operation = None;
         self.message = None;
+        self.scope_warning = None;
+    }
+
+    pub fn open_scope_picker(&mut self) {
+        if let Some(draft) = self.draft.as_mut() {
+            if matches!(&draft.catalog_scope.databases, CatalogSelection::Selected(items) if items.len() == 1 && items[0].name.is_empty())
+            {
+                draft.catalog_scope = CatalogScope::for_profile(
+                    draft.kind,
+                    draft.database.value(),
+                    optional(&draft.schema).as_deref(),
+                );
+            }
+            self.page = ProfileManagerPage::Scope;
+            self.scope_selected_row = self
+                .scope_rows_for_render()
+                .first()
+                .map(|row| row.id.clone());
+            self.scope_viewport = 0;
+            self.scope_warning = self.scope_unavailable_warning();
+        }
+    }
+
+    pub fn close_scope_picker(&mut self) {
+        self.page = ProfileManagerPage::Form;
+        self.selected_field = ProfileField::VisibleObjects;
+    }
+
+    pub fn move_scope_selection(&mut self, delta: isize) {
+        let rows = self.scope_rows_for_render();
+        if rows.is_empty() {
+            self.scope_selected_row = None;
+            self.scope_viewport = 0;
+            return;
+        }
+        let current = self
+            .scope_selected_row
+            .as_ref()
+            .and_then(|id| rows.iter().position(|row| &row.id == id))
+            .unwrap_or(0);
+        let next = (current as isize + delta).clamp(0, rows.len() as isize - 1) as usize;
+        self.scope_selected_row = Some(rows[next].id.clone());
+        if next < self.scope_viewport {
+            self.scope_viewport = next;
+        } else if next >= self.scope_viewport + SCOPE_VIEWPORT_CAPACITY {
+            self.scope_viewport = next + 1 - SCOPE_VIEWPORT_CAPACITY;
+        }
+    }
+
+    pub fn set_scope_viewport_for_test(&mut self, viewport: usize) {
+        self.scope_viewport = viewport;
+    }
+
+    pub fn scope_warning(&self) -> Option<&str> {
+        self.scope_warning.as_deref()
+    }
+
+    pub fn scope_row(&self, id: &str) -> Option<ScopeRow> {
+        self.scope_rows_for_render()
+            .into_iter()
+            .find(|row| row.id == id)
+    }
+
+    pub fn toggle_scope_row(&mut self, id: &str) -> bool {
+        let Some(row) = self.scope_row(id) else {
+            return false;
+        };
+        if row.read_only {
+            return false;
+        }
+        let Some(draft) = self.draft.as_mut() else {
+            return false;
+        };
+        let changed = toggle_scope(&mut draft.catalog_scope, draft.kind, &row);
+        if changed {
+            self.scope_warning = self.scope_unavailable_warning();
+        }
+        changed
+    }
+
+    pub fn scope_rows_for_render(&self) -> Vec<ScopeRow> {
+        let Some(draft) = self.draft.as_ref() else {
+            return Vec::new();
+        };
+        let mut rows = Vec::new();
+        let selected = match &draft.catalog_scope.databases {
+            CatalogSelection::All => None,
+            CatalogSelection::Selected(items) => Some(items),
+        };
+        let discovery = match &draft.catalog_discovery {
+            CatalogDiscoveryState::Fresh(snapshot) | CatalogDiscoveryState::Stale(snapshot) => {
+                Some(snapshot.discovery.as_ref())
+            }
+            CatalogDiscoveryState::NotRequested => None,
+        };
+        let discovered = discovery.and_then(Result::ok);
+        let names =
+            selected
+                .into_iter()
+                .flat_map(|items| items.iter().map(|item| item.name.as_str()))
+                .chain(discovered.into_iter().flat_map(|discovery| {
+                    discovery.databases.iter().map(|item| item.name.as_str())
+                }))
+                .collect::<HashSet<_>>();
+        for database in names {
+            let selected_db = database_selected(&draft.catalog_scope, database);
+            rows.push(ScopeRow {
+                id: format!("database:{database}"),
+                name: database.to_owned(),
+                selected: selected_db,
+                read_only: false,
+                unavailable: discovery.is_none_or(|result| {
+                    result.as_ref().map_or(true, |items| {
+                        !items.databases.iter().any(|item| item.name == database)
+                    })
+                }),
+                database: true,
+            });
+            if self.scope_expanded_databases.contains(database)
+                || self.scope_selected_row.as_deref() == Some(&format!("database:{database}"))
+            {
+                let schemas = discovered
+                    .and_then(|d| {
+                        d.databases
+                            .iter()
+                            .find(|item| item.name == database)
+                            .map(|item| item.schemas.clone())
+                    })
+                    .unwrap_or_default();
+                let selected_schemas = selected_schema(&draft.catalog_scope, database);
+                if draft.kind == DatabaseKind::MySql {
+                    rows.push(ScopeRow {
+                        id: format!("database:{database}:schema:{database}"),
+                        name: database.to_owned(),
+                        selected: true,
+                        read_only: true,
+                        unavailable: discovery.is_none_or(|result| {
+                            result.as_ref().map_or(true, |items| {
+                                !items.databases.iter().any(|item| item.name == database)
+                            })
+                        }),
+                        database: false,
+                    });
+                } else {
+                    let all_id = format!("database:{database}:schema:all");
+                    rows.push(ScopeRow {
+                        id: all_id,
+                        name: "All schemas".into(),
+                        selected: matches!(selected_schemas, Some(CatalogSelection::All)),
+                        read_only: false,
+                        unavailable: false,
+                        database: false,
+                    });
+                }
+                let custom_schemas =
+                    selected_schemas.map_or_else(Vec::new, |selection| match selection {
+                        CatalogSelection::Selected(items) => items.clone(),
+                        CatalogSelection::All => Vec::new(),
+                    });
+                let schema_names = schemas
+                    .into_iter()
+                    .chain(custom_schemas)
+                    .collect::<HashSet<_>>();
+                for schema in schema_names {
+                    let selected_schema = selected_schemas.is_some_and(|selection| matches!(selection, CatalogSelection::Selected(items) if items.contains(&schema)));
+                    rows.push(ScopeRow {
+                        id: format!("database:{database}:schema:{schema}"),
+                        name: schema.clone(),
+                        selected: selected_schema || draft.kind == DatabaseKind::MySql,
+                        read_only: draft.kind == DatabaseKind::MySql,
+                        unavailable: discovery.is_none_or(|result| {
+                            result.as_ref().map_or(true, |items| {
+                                !items
+                                    .databases
+                                    .iter()
+                                    .find(|item| item.name == database)
+                                    .is_some_and(|item| {
+                                        item.schemas.iter().any(|name| name == &schema)
+                                    })
+                            })
+                        }),
+                        database: false,
+                    });
+                }
+            }
+        }
+        rows.sort_by(|a, b| a.id.cmp(&b.id));
+        rows
+    }
+
+    fn scope_unavailable_warning(&self) -> Option<String> {
+        let draft = self.draft.as_ref()?;
+        match &draft.catalog_discovery {
+            CatalogDiscoveryState::Stale(snapshot) => {
+                snapshot.discovery.as_ref().err().map_or_else(
+                    || Some("Discovery is stale; saved selections were preserved".into()),
+                    |error| Some(format!("Catalog discovery warning: {error}")),
+                )
+            }
+            CatalogDiscoveryState::NotRequested => {
+                Some("Discovery unavailable; saved selections are shown".into())
+            }
+            CatalogDiscoveryState::Fresh(snapshot) => snapshot
+                .discovery
+                .as_ref()
+                .err()
+                .map(|error| format!("Catalog discovery warning: {error}")),
+        }
     }
 
     pub fn visible_fields(&self) -> &'static [ProfileField] {
         self.draft
             .as_ref()
             .map_or(&[], ProfileDraft::visible_fields)
-    }
-
-    pub fn move_selection(&mut self, delta: isize, profile_count: usize) {
-        self.selected = move_bounded(self.selected, delta, profile_count);
     }
 
     pub fn move_field(&mut self, delta: isize) {
@@ -726,6 +1165,7 @@ impl ProfileManagerState {
                     ],
                     delta,
                 );
+                draft.invalidate_catalog_discovery();
             }
             ProfileField::Environment => {
                 draft.environment = cycle_value(
@@ -752,8 +1192,12 @@ impl ProfileManagerState {
             ProfileField::ReadOnly => draft.read_only = !draft.read_only,
             ProfileField::RememberPassword => {
                 draft.remember_password = !draft.remember_password;
+                draft.credential_changed();
             }
-            ProfileField::SqliteMemory => draft.sqlite_memory = !draft.sqlite_memory,
+            ProfileField::SqliteMemory => {
+                draft.sqlite_memory = !draft.sqlite_memory;
+                draft.invalidate_catalog_discovery();
+            }
             _ => return,
         }
         self.message = None;
@@ -784,6 +1228,18 @@ fn optional(input: &TextInput) -> Option<String> {
     (!value.is_empty()).then(|| value.to_owned())
 }
 
+fn catalog_scope_error_field(error: &CatalogScopeValidationError) -> ProfileField {
+    match error {
+        CatalogScopeValidationError::EmptyDatabaseSelection
+        | CatalogScopeValidationError::EmptyDatabaseName
+        | CatalogScopeValidationError::DuplicateDatabase(_) => ProfileField::Database,
+        CatalogScopeValidationError::EmptySchemaSelection { .. }
+        | CatalogScopeValidationError::EmptySchemaName { .. }
+        | CatalogScopeValidationError::DuplicateSchema { .. }
+        | CatalogScopeValidationError::DefaultSchemaExcluded { .. } => ProfileField::Schema,
+    }
+}
+
 fn character_byte_index(value: &str, character_index: usize) -> usize {
     value
         .char_indices()
@@ -800,14 +1256,96 @@ fn cycle_value<T: Copy + PartialEq>(current: T, values: &[T], delta: i8) -> T {
     values[next]
 }
 
-fn move_bounded(current: usize, delta: isize, count: usize) -> usize {
-    if count == 0 {
-        0
-    } else {
-        current
-            .saturating_add_signed(delta)
-            .min(count.saturating_sub(1))
+fn database_selected(scope: &CatalogScope, name: &str) -> bool {
+    matches!(&scope.databases, CatalogSelection::All)
+        || matches!(&scope.databases, CatalogSelection::Selected(items) if items.iter().any(|item| item.name == name))
+}
+
+fn selected_schema<'a>(
+    scope: &'a CatalogScope,
+    database: &str,
+) -> Option<&'a CatalogSelection<String>> {
+    match &scope.databases {
+        CatalogSelection::All => None,
+        CatalogSelection::Selected(items) => items
+            .iter()
+            .find(|item| item.name == database)
+            .map(|item| &item.schemas),
     }
+}
+
+fn toggle_scope(scope: &mut CatalogScope, kind: DatabaseKind, row: &ScopeRow) -> bool {
+    let Some((database, schema)) = row
+        .id
+        .strip_prefix("database:")
+        .and_then(|value| value.split_once(":schema:"))
+    else {
+        let Some(database) = row.id.strip_prefix("database:") else {
+            return false;
+        };
+        if database.is_empty() {
+            return false;
+        }
+        match &mut scope.databases {
+            CatalogSelection::All => {
+                scope.databases = CatalogSelection::Selected(vec![DatabaseScope {
+                    name: database.to_owned(),
+                    schemas: if kind == DatabaseKind::MySql {
+                        CatalogSelection::All
+                    } else {
+                        CatalogSelection::Selected(vec!["public".to_owned()])
+                    },
+                }]);
+            }
+            CatalogSelection::Selected(items) => {
+                if let Some(index) = items.iter().position(|item| item.name == database) {
+                    if items.len() == 1 {
+                        scope.databases = CatalogSelection::All;
+                    } else {
+                        items.remove(index);
+                    }
+                } else {
+                    items.push(DatabaseScope {
+                        name: database.to_owned(),
+                        schemas: CatalogSelection::All,
+                    });
+                }
+            }
+        }
+        return true;
+    };
+    let Some(databases) = (match &mut scope.databases {
+        CatalogSelection::Selected(items) => Some(items),
+        CatalogSelection::All => return false,
+    }) else {
+        return false;
+    };
+    let Some(database_scope) = databases.iter_mut().find(|item| item.name == database) else {
+        return false;
+    };
+    if kind == DatabaseKind::MySql {
+        return false;
+    }
+    match schema {
+        "all" => database_scope.schemas = CatalogSelection::All,
+        schema => match &mut database_scope.schemas {
+            CatalogSelection::All => {
+                database_scope.schemas = CatalogSelection::Selected(vec![schema.to_owned()])
+            }
+            CatalogSelection::Selected(items) => {
+                if let Some(index) = items.iter().position(|item| item == schema) {
+                    if items.len() == 1 {
+                        database_scope.schemas = CatalogSelection::All;
+                    } else {
+                        items.remove(index);
+                    }
+                } else {
+                    items.push(schema.to_owned());
+                }
+            }
+        },
+    }
+    true
 }
 
 const SERVER_FIELDS: [ProfileField; 16] = [
@@ -818,7 +1356,7 @@ const SERVER_FIELDS: [ProfileField; 16] = [
     ProfileField::User,
     ProfileField::Password,
     ProfileField::Database,
-    ProfileField::Schema,
+    ProfileField::VisibleObjects,
     ProfileField::SslMode,
     ProfileField::Environment,
     ProfileField::ReadOnly,
@@ -829,11 +1367,12 @@ const SERVER_FIELDS: [ProfileField; 16] = [
     ProfileField::Cancel,
 ];
 
-const SQLITE_FILE_FIELDS: [ProfileField; 9] = [
+const SQLITE_FILE_FIELDS: [ProfileField; 10] = [
     ProfileField::Kind,
     ProfileField::Name,
     ProfileField::SqliteMemory,
     ProfileField::SqlitePath,
+    ProfileField::VisibleObjects,
     ProfileField::ReadOnly,
     ProfileField::Test,
     ProfileField::Save,
@@ -841,10 +1380,11 @@ const SQLITE_FILE_FIELDS: [ProfileField; 9] = [
     ProfileField::Cancel,
 ];
 
-const SQLITE_MEMORY_FIELDS: [ProfileField; 8] = [
+const SQLITE_MEMORY_FIELDS: [ProfileField; 9] = [
     ProfileField::Kind,
     ProfileField::Name,
     ProfileField::SqliteMemory,
+    ProfileField::VisibleObjects,
     ProfileField::ReadOnly,
     ProfileField::Test,
     ProfileField::Save,

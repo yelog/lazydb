@@ -7,10 +7,15 @@ use lazydb::{
     cli::ConfirmationPolicy,
     db::{
         ServerInfo,
+        catalog::{
+            CatalogCount, CatalogCursor, CatalogEntry, CatalogId, CatalogKind, ObjectGroup,
+            OptionalMetadata, QualifiedName,
+        },
         query::{ColumnMeta, QueryOutcome, QueryStats, ResultSet},
         value::CellValue,
     },
     model::{
+        explorer::{CatalogGroupState, ExplorerLoadState, ExplorerNodeId, ExplorerOwnerId},
         profile_manager::{ProfileField, ProfileManagerPage, ProfileOperation},
         tab::CompletionPopup,
         workspace::{ConnectionStatus, Focus},
@@ -92,6 +97,207 @@ fn render_with_state(app: &App, width: u16, height: u16) -> (String, UiState) {
         output.push('\n');
     }
     (output, state)
+}
+
+#[test]
+fn active_profile_explorer_renders_normalized_group_permission_and_load_more_rows() {
+    let profile = import_connection_url(":memory:", Some("catalog-ui"))
+        .unwrap()
+        .profile;
+    let mut app = App::new(vec![profile.clone()]);
+    app.connection.profile_id = Some(profile.id);
+    app.connection.generation = 1;
+    app.connection.status = ConnectionStatus::Connected;
+    let database = CatalogEntry::database(
+        CatalogId::new(profile.id, CatalogKind::Database, ["app"]),
+        QualifiedName {
+            database: Some("app".into()),
+            schema: None,
+            object: "app".into(),
+        },
+        "database",
+        OptionalMetadata::Supported(None),
+        true,
+    )
+    .unwrap();
+    let schema = CatalogEntry::schema(
+        CatalogId::new(profile.id, CatalogKind::Schema, ["app", "public"]),
+        database.id.clone(),
+        QualifiedName {
+            database: Some("app".into()),
+            schema: Some("public".into()),
+            object: "public".into(),
+        },
+        "schema",
+        OptionalMetadata::Supported(None),
+        true,
+    )
+    .unwrap();
+    let owner = ExplorerOwnerId::Group {
+        parent: schema.id.clone(),
+        group: ObjectGroup::Tables,
+    };
+    let state = app
+        .explorer
+        .normalized
+        .profiles
+        .get_mut(&profile.id)
+        .unwrap();
+    state
+        .catalog
+        .insert_subtree(vec![database.clone(), schema.clone()])
+        .unwrap();
+    state
+        .catalog
+        .set_group_state(
+            &schema.id,
+            ObjectGroup::Tables,
+            CatalogGroupState {
+                count: CatalogCount::Exact(2),
+                completeness: lazydb::db::catalog::CatalogCompleteness::Partial,
+            },
+        )
+        .unwrap();
+    state.load_states.insert(
+        owner.clone(),
+        ExplorerLoadState::PermissionDenied { request_id: 4 },
+    );
+    state
+        .load_errors
+        .insert(owner.clone(), "permission denied".into());
+    app.explorer.normalized.expanded.extend([
+        ExplorerNodeId::Catalog(database.id),
+        ExplorerNodeId::Catalog(schema.id.clone()),
+        ExplorerNodeId::Group {
+            parent: schema.id.clone(),
+            group: ObjectGroup::Tables,
+        },
+    ]);
+    app.explorer.rebuild_projection(profile.id);
+    let permission = render(&app, 120, 36);
+    assert!(permission.contains("Tables"));
+    assert!(permission.contains("Permission"), "{permission}");
+
+    app.explorer
+        .normalized
+        .profiles
+        .get_mut(&profile.id)
+        .unwrap()
+        .load_states
+        .insert(
+            owner,
+            ExplorerLoadState::Loaded {
+                next_cursor: Some(CatalogCursor::from_keyset("users", "users").unwrap()),
+            },
+        );
+    app.explorer.rebuild_projection(profile.id);
+    let load_more = render(&app, 120, 36);
+    assert!(load_more.contains("Load more..."));
+}
+
+#[test]
+fn explorer_width_is_adaptive_and_clamped_in_split_layouts() {
+    let app = fixture();
+    for (width, expected) in [(120, 40), (180, 56), (300, 56)] {
+        let (_, state) = render_with_state(&app, width, 36);
+        let explorer = state
+            .hit_regions
+            .iter()
+            .find(|region| region.target == HitTarget::Focus(Focus::Explorer))
+            .unwrap();
+        assert_eq!(explorer.area.width, expected);
+    }
+}
+
+#[test]
+fn explorer_hostile_metadata_is_sanitized_and_name_type_stay_first() {
+    let profile = import_connection_url("sqlite::memory:", Some("safe\x1b[31m-name"))
+        .unwrap()
+        .profile;
+    let mut app = App::new(vec![profile.clone()]);
+    app.focus = Focus::Explorer;
+    app.connection.profile_id = Some(profile.id);
+    app.connection.status = ConnectionStatus::Connected;
+    let database = CatalogEntry::database(
+        CatalogId::new(profile.id, CatalogKind::Database, ["db\x1b[31m"]),
+        QualifiedName {
+            database: Some("db\x1b[31m".into()),
+            schema: None,
+            object: "db\x1b[31m".into(),
+        },
+        "db\x1b[31m",
+        OptionalMetadata::Supported(Some("comment\x1b[2J".into())),
+        true,
+    )
+    .unwrap();
+    app.explorer
+        .normalized
+        .profiles
+        .get_mut(&profile.id)
+        .unwrap()
+        .catalog
+        .insert(database)
+        .unwrap();
+    app.explorer
+        .normalized
+        .expanded
+        .insert(ExplorerNodeId::Profile(profile.id));
+    app.explorer.rebuild_projection(profile.id);
+    for (width, height) in [(80, 24), (120, 36), (180, 50)] {
+        let output = render(&app, width, height);
+        assert!(!output.contains('\x1b'));
+        assert!(output.contains("safe<ESC>[31m-name"));
+        assert!(output.contains("db<ESC>[31m"));
+    }
+}
+
+#[test]
+fn explorer_metadata_keeps_name_type_before_flags_and_comments() {
+    let profile = import_connection_url(":memory:", Some("metadata-order"))
+        .unwrap()
+        .profile;
+    let mut app = App::new(vec![profile.clone()]);
+    let database = CatalogEntry::database(
+        CatalogId::new(profile.id, CatalogKind::Database, ["db"]),
+        QualifiedName {
+            database: Some("db".into()),
+            schema: None,
+            object: "db".into(),
+        },
+        "DATABASE",
+        OptionalMetadata::Supported(Some("database comment".into())),
+        true,
+    )
+    .unwrap();
+    app.explorer
+        .normalized
+        .profiles
+        .get_mut(&profile.id)
+        .unwrap()
+        .catalog
+        .insert(database)
+        .unwrap();
+    app.explorer
+        .normalized
+        .expanded
+        .insert(ExplorerNodeId::Profile(profile.id));
+    app.explorer.rebuild_projection(profile.id);
+    let row = app.explorer.visible().into_iter().find(
+        |row| matches!(row.id, ExplorerNodeId::Catalog(ref id) if id.kind == CatalogKind::Database),
+    );
+    let row = row.unwrap();
+    assert_eq!(row.label, "db  DATABASE");
+    assert_eq!(row.detail.as_deref(), Some("database comment"));
+}
+
+#[test]
+fn explorer_local_status_rows_render_at_supported_sizes() {
+    let mut app = App::new(Vec::new());
+    app.focus = Focus::Explorer;
+    for (width, height) in [(80, 24), (120, 36), (180, 50)] {
+        let output = render(&app, width, height);
+        assert!(output.contains("No profiles"), "{width}x{height}: {output}");
+    }
 }
 
 #[test]
@@ -233,7 +439,7 @@ fn tiny_terminal_gets_an_actionable_message() {
 }
 
 #[test]
-fn profile_list_shows_connection_metadata_and_semantic_hit_regions() {
+fn explorer_roots_show_connection_metadata_and_semantic_hit_regions() {
     let mut primary = import_connection_url(
         "postgres://alice@db.example.com:5432/app",
         Some("production"),
@@ -248,31 +454,19 @@ fn profile_list_shows_connection_metadata_and_semantic_hit_regions() {
             .profile;
     let primary_id = primary.id;
     let mut app = App::new(vec![primary, replica]);
+    app.focus = Focus::Explorer;
     app.connection.profile_id = Some(primary_id);
     app.connection.status = ConnectionStatus::Connected;
-    app.update(Action::OpenProfileManager);
-
     let (output, state) = render_with_state(&app, 120, 36);
-    assert!(output.contains("CONNECTIONS"));
+    assert!(output.contains("EXPLORER"));
     assert!(output.contains("production"));
-    assert!(output.contains("POSTGRES"));
-    assert!(output.contains("db.example.com:5432/app"));
-    assert!(output.contains("PRODUCTION"));
-    assert!(output.contains("READ ONLY"));
-    assert!(output.contains("ACTIVE"));
+    assert!(output.contains("SAVED"));
+    assert!(output.contains("production"));
     assert!(output.contains("reports"));
-    assert!(
-        state
-            .hit_regions
-            .iter()
-            .any(|region| { region.target == HitTarget::ProfileRow(0) })
-    );
-    assert!(
-        state
-            .hit_regions
-            .iter()
-            .any(|region| { region.target == HitTarget::ProfileButton(ProfileButton::New) })
-    );
+    assert!(state.hit_regions.iter().any(|region| matches!(
+        region.target,
+        HitTarget::ExplorerRow(ExplorerNodeId::Profile(_))
+    )));
 }
 
 #[test]
@@ -295,7 +489,7 @@ fn server_profile_form_shows_all_fields_and_never_reveals_passwords() {
         "USER",
         "PASSWORD",
         "DATABASE",
-        "SCHEMA",
+        "VISIBLE OBJECTS",
         "SSL MODE",
         "ENVIRONMENT",
         "READ ONLY",
@@ -329,7 +523,9 @@ fn stored_password_is_described_without_rendering_a_secret() {
     profile.secret_ref = Some(keyring_ref(profile.id));
     let mut app = App::new(vec![profile]);
     app.update(Action::OpenProfileManager);
-    app.update(Action::ProfileStartEdit);
+    app.update(Action::ProfileStartEdit {
+        profile_id: app.profiles[0].id,
+    });
 
     let output = render(&app, 120, 36);
     assert!(output.contains("Stored in system keyring"));
@@ -383,7 +579,9 @@ fn profile_manager_renders_confirmation_busy_errors_and_warnings() {
         .profile;
     let mut deleting = App::new(vec![profile]);
     deleting.update(Action::OpenProfileManager);
-    deleting.update(Action::ProfileRequestDelete);
+    deleting.update(Action::ProfileRequestDelete {
+        profile_id: deleting.profiles[0].id,
+    });
     let confirmation = render(&deleting, 100, 30);
     assert!(confirmation.contains("DELETE CONNECTION"));
     assert!(confirmation.contains("throwaway"));
@@ -420,12 +618,10 @@ fn profile_manager_renders_confirmation_busy_errors_and_warnings() {
     connecting.update(Action::OpenProfileManager);
     connecting.profile_manager.as_mut().unwrap().operation = Some(ProfileOperation::Connecting);
     let (_, connecting_state) = render_with_state(&connecting, 100, 30);
-    assert!(
-        !connecting_state
-            .hit_regions
-            .iter()
-            .any(|region| matches!(region.target, HitTarget::ProfileRow(_)))
-    );
+    assert!(!connecting_state.hit_regions.iter().any(|region| matches!(
+        region.target,
+        HitTarget::ProfileField(_) | HitTarget::ProfileButton(_)
+    )));
 
     let mut invalid = App::new(Vec::new());
     invalid.update(Action::OpenProfileManager);
@@ -456,13 +652,12 @@ fn tiny_terminal_wins_over_profile_overlay() {
 #[test]
 fn disconnected_explorer_points_to_the_profile_manager() {
     let output = render(&App::new(Vec::new()), 120, 36);
-    assert!(output.contains("Press Space c"));
-    assert!(output.contains("create"));
-    assert!(output.contains("profile"));
+    assert!(output.contains("No profiles"));
+    assert!(output.contains("NEW"));
 }
 
 #[test]
-fn narrow_profile_list_scrolls_to_keep_the_selection_visible() {
+fn explorer_root_projection_keeps_ordered_roots_visible() {
     let profiles = (0..7)
         .map(|index| {
             import_connection_url(":memory:", Some(&format!("profile-{index:02}")))
@@ -471,23 +666,19 @@ fn narrow_profile_list_scrolls_to_keep_the_selection_visible() {
         })
         .collect();
     let mut app = App::new(profiles);
-    app.update(Action::OpenProfileManager);
-    app.update(Action::ProfileMove(isize::MAX));
-
-    let (output, state) = render_with_state(&app, 56, 16);
-    assert!(output.contains("profile-06"));
-    assert!(!output.contains("profile-00"));
-    assert!(
-        state
-            .hit_regions
-            .iter()
-            .any(|region| { region.target == HitTarget::ProfileRow(6) })
-    );
+    app.focus = Focus::Explorer;
+    let (output, state) = render_with_state(&app, 120, 36);
+    assert!(output.contains("profile-00"));
+    assert!(state.hit_regions.iter().any(|region| matches!(
+        region.target,
+        HitTarget::ExplorerRow(ExplorerNodeId::Profile(_))
+    )));
 }
 
 #[test]
 fn minimum_supported_form_scrolls_to_the_selected_field() {
     let mut app = App::new(Vec::new());
+    app.focus = Focus::Explorer;
     app.update(Action::OpenProfileManager);
     app.update(Action::ProfileFocusField(ProfileField::RememberPassword));
 
@@ -541,7 +732,9 @@ fn profile_modal_hides_the_workspace_cursor_unless_editing_text() {
         .unwrap();
     assert!(!terminal.backend().cursor_visible());
 
-    list.update(Action::ProfileStartEdit);
+    list.update(Action::ProfileStartEdit {
+        profile_id: list.profiles[0].id,
+    });
     list.update(Action::ProfileFocusField(ProfileField::Name));
     terminal
         .draw(|frame| ui::render_with_state(frame, &list, &mut state))
@@ -551,33 +744,12 @@ fn profile_modal_hides_the_workspace_cursor_unless_editing_text() {
 
 #[test]
 fn empty_profile_list_only_exposes_actionable_buttons() {
-    let mut app = App::new(Vec::new());
-    app.update(Action::OpenProfileManager);
-    let manager = app.profile_manager.as_mut().unwrap();
-    manager.page = ProfileManagerPage::List;
-    manager.draft = None;
-
-    let (_, state) = render_with_state(&app, 80, 24);
-    assert!(
-        state
-            .hit_regions
-            .iter()
-            .any(|region| { region.target == HitTarget::ProfileButton(ProfileButton::New) })
-    );
-    assert!(
-        state
-            .hit_regions
-            .iter()
-            .any(|region| { region.target == HitTarget::ProfileButton(ProfileButton::Close) })
-    );
-    assert!(!state.hit_regions.iter().any(|region| {
-        matches!(
-            region.target,
-            HitTarget::ProfileButton(
-                ProfileButton::Edit | ProfileButton::Connect | ProfileButton::Delete
-            )
-        )
-    }));
+    let app = App::new(Vec::new());
+    let (_, state) = render_with_state(&app, 120, 36);
+    assert!(state.hit_regions.iter().any(|region| matches!(
+        region.target,
+        HitTarget::ExplorerRow(ExplorerNodeId::EmptyProfiles)
+    )));
 }
 
 #[test]
