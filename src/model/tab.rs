@@ -39,7 +39,7 @@ impl WorkspaceTab {
     pub fn title(&self) -> &str {
         match self {
             Self::Sql(tab) => &tab.name,
-            Self::Relation(tab) => &tab.title,
+            Self::Relation(tab) => tab.title(),
         }
     }
 

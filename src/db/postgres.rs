@@ -1,9 +1,13 @@
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 use futures_util::TryStreamExt;
 use secrecy::{ExposeSecret, SecretString};
 use sqlx::{
-    AssertSqlSafe, Column, Connection, Either, PgPool, Row, TypeInfo, ValueRef,
+    AssertSqlSafe, Column, Connection, Either, Executor, PgPool, Row, SqlSafeStr, Statement,
+    TypeInfo, ValueRef,
     pool::PoolConnection,
     postgres::{PgConnectOptions, PgConnection, PgPoolOptions, PgRow, PgSslMode, Postgres},
 };
@@ -11,7 +15,8 @@ use sqlx_core::transaction::TransactionManager;
 use uuid::Uuid;
 
 use crate::{
-    profile::{CatalogSelection, ConnectionProfile, DatabaseKind, SslMode},
+    identity::ConnectionIdentity,
+    profile::{CatalogScope, CatalogSelection, ConnectionProfile, DatabaseKind, SslMode},
     security::sanitize_terminal_text,
 };
 
@@ -21,11 +26,12 @@ use super::{
     catalog::{
         CatalogCapabilities, CatalogCount, CatalogCursor, CatalogDiscovery, CatalogEntry,
         CatalogGroupSummary, CatalogId, CatalogKind, CatalogMetadata, CatalogPage, CatalogRequest,
-        CatalogTarget, CatalogValidationError, ColumnMetadata, ColumnMetadataCapabilities,
-        ConstraintMembership, ConstraintMetadata, DiscoveredDatabase, IndexMetadata,
-        NamespaceModel, ObjectGroup, OptionalMetadata, QualifiedName, finalize_keyset_page,
+        CatalogRequestKey, CatalogTarget, CatalogValidationError, ColumnMetadata,
+        ColumnMetadataCapabilities, ConstraintMembership, ConstraintMetadata, Ddl, DdlProvenance,
+        DiscoveredDatabase, IndexMetadata, NamespaceModel, ObjectGroup, OptionalMetadata,
+        QualifiedName, RelationStructure, finalize_keyset_page,
     },
-    query::{ColumnMeta, QueryOutcome, QueryOutcomeAccumulator},
+    query::{ColumnMeta, QueryOutcome, QueryOutcomeAccumulator, RELATION_PREVIEW_LIMIT, ResultSet},
     value::CellValue,
 };
 
@@ -79,6 +85,7 @@ ORDER BY schemaname, tablename, indexname
 pub struct PostgresAdapter {
     pool: PgPool,
     connection_id: Uuid,
+    catalog_scope: CatalogScope,
 }
 
 struct PgIndexInfo {
@@ -207,6 +214,7 @@ impl PostgresAdapter {
         Ok(Self {
             pool,
             connection_id: profile.id,
+            catalog_scope: profile.catalog_scope.clone(),
         })
     }
 
@@ -675,7 +683,7 @@ impl PostgresAdapter {
         request: &CatalogRequest,
         relation: &CatalogId,
     ) -> Result<CatalogPage, DatabaseError> {
-        let (database, schema, _, relation_oid) = self
+        let (database, schema, _, relation_oid, _) = self
             .verify_relation(connection, relation, &request.key.target)
             .await?;
         let indexes = self.load_pg_indexes(connection, relation_oid).await?;
@@ -888,9 +896,12 @@ impl PostgresAdapter {
         connection: &mut PgConnection,
         relation: &CatalogId,
         target: &CatalogTarget,
-    ) -> Result<(String, String, String, i64), DatabaseError> {
+    ) -> Result<(String, String, String, i64, &'static str), DatabaseError> {
+        if relation.profile_id() != self.connection_id || !relation.kind.is_relation() {
+            return Err(catalog_target_not_found(target));
+        }
         let (database, schema, name, oid) = match relation.native_path.as_slice() {
-            [database, schema, name, oid, ..] => (
+            [database, schema, name, oid] => (
                 database.as_str(),
                 schema.as_str(),
                 name.as_str(),
@@ -915,16 +926,136 @@ impl PostgresAdapter {
         .fetch_optional(&mut *connection)
         .await
         .map_err(sql_error)?;
-        let expected = match native_kind.as_deref() {
-            Some("r" | "p") => CatalogKind::Table,
-            Some("v") => CatalogKind::View,
-            Some("m") => CatalogKind::MaterializedView,
+        let (expected, verified_native_kind) = match native_kind.as_deref() {
+            Some("r" | "p") => (CatalogKind::Table, "table"),
+            Some("v") => (CatalogKind::View, "view"),
+            Some("m") => (CatalogKind::MaterializedView, "materialized_view"),
             _ => return Err(catalog_target_not_found(target)),
         };
         if relation.kind != expected {
             return Err(catalog_target_not_found(target));
         }
-        Ok((current, schema.to_owned(), name.to_owned(), oid))
+        Ok((
+            current,
+            schema.to_owned(),
+            name.to_owned(),
+            oid,
+            verified_native_kind,
+        ))
+    }
+
+    pub async fn preview_relation(
+        &self,
+        relation: &CatalogId,
+    ) -> Result<crate::db::RelationPreview, DatabaseError> {
+        let mut connection = self.pool.acquire().await.map_err(sql_error)?;
+        let target = CatalogTarget::RelationChildren {
+            relation: relation.clone(),
+        };
+        let (_, schema, name, _, _) = self
+            .verify_relation(&mut connection, relation, &target)
+            .await?;
+        let database: String = sqlx::query_scalar("SELECT current_database()")
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(sql_error)?;
+        if !self.catalog_scope.allows_schema(&database, &schema) {
+            return Err(catalog_target_not_found(&target));
+        }
+        let sql = format!(
+            "SELECT * FROM {}.{} LIMIT {}",
+            quote_identifier(&schema),
+            quote_identifier(&name),
+            RELATION_PREVIEW_LIMIT
+        );
+        let started = Instant::now();
+        let statement = connection
+            .prepare(AssertSqlSafe(sql.clone()).into_sql_str())
+            .await
+            .map_err(sql_error)?;
+        let columns = statement
+            .columns()
+            .iter()
+            .map(|column| ColumnMeta {
+                name: column.name().to_owned(),
+                type_name: column.type_info().name().to_owned(),
+            })
+            .collect();
+        let rows = statement
+            .query()
+            .fetch_all(&mut *connection)
+            .await
+            .map_err(sql_error)?;
+        let result_set = ResultSet {
+            columns,
+            rows: rows.iter().map(decode_row).collect(),
+            affected_rows: 0,
+        };
+        Ok(crate::db::RelationPreview {
+            sql,
+            result: QueryOutcome::from_result_set(result_set, started.elapsed(), Duration::ZERO),
+        })
+    }
+
+    pub async fn relation_structure(
+        &self,
+        relation: &CatalogId,
+    ) -> Result<RelationStructure, DatabaseError> {
+        let mut connection = self.pool.acquire().await.map_err(sql_error)?;
+        let target = CatalogTarget::RelationChildren {
+            relation: relation.clone(),
+        };
+        let (database, schema, name, _, native_kind) = self
+            .verify_relation(&mut connection, relation, &target)
+            .await?;
+        if !self.catalog_scope.allows_schema(&database, &schema) {
+            return Err(catalog_target_not_found(&target));
+        }
+        let relation_entry = CatalogEntry::relation(
+            relation.clone(),
+            CatalogId::new(
+                self.connection_id,
+                CatalogKind::Schema,
+                [database.clone(), schema.clone()],
+            ),
+            qualified_object(&database, &schema, &name),
+            native_kind,
+            OptionalMetadata::Unsupported,
+            true,
+        )
+        .map_err(catalog_invariant)?;
+        drop(connection);
+        let request = CatalogRequest {
+            key: CatalogRequestKey {
+                connection: ConnectionIdentity {
+                    profile_id: self.connection_id,
+                    generation: 0,
+                },
+                catalog_epoch: 0,
+                request_id: 0,
+                target,
+                cursor: None,
+            },
+            scope: self.catalog_scope.clone(),
+            page_size: RELATION_PREVIEW_LIMIT,
+        };
+        let children = self.load_catalog_page(&request).await?;
+        let ddl = self.object_ddl(relation.kind, &schema, &name).await?;
+        let provenance = if relation.kind == CatalogKind::MaterializedView {
+            DdlProvenance::AdapterGenerated
+        } else if ddl.is_some() {
+            DdlProvenance::NativeCatalog
+        } else {
+            DdlProvenance::AdapterGenerated
+        };
+        Ok(RelationStructure {
+            relation: relation_entry,
+            children,
+            ddl: Ddl {
+                sql: ddl,
+                provenance,
+            },
+        })
     }
 
     async fn load_pg_indexes(

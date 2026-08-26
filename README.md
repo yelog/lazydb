@@ -11,7 +11,8 @@ integration.
 
 ## What Works
 
-- PostgreSQL, MySQL, and SQLite connection and server probing.
+- PostgreSQL, MySQL, and SQLite connection and server probing. PostgreSQL 12+
+  and Oracle MySQL 8.0.13+ are required for their catalog implementations.
 - PostgreSQL/MySQL/SQLite URL import plus JDBC PostgreSQL/MySQL import.
 - SQLite tables, views, columns, indexes, foreign keys, triggers, and DDL.
 - PostgreSQL/MySQL databases, schemas, tables, views, columns, indexes, and
@@ -29,7 +30,9 @@ integration.
   switching PostgreSQL, MySQL, and SQLite connections.
 - Optional remembered passwords in the native system keyring, with explicit
   session-only fallback when the keyring is unavailable.
-- Object tree refresh, table preview with a 500-row limit, and DDL in a new tab.
+- UUID-owned Explorer roots for saved and session-only profiles, lazy catalog
+  loading, object tree refresh, relation Data/Structure tabs, table/view preview
+  with an adapter-owned 500-row limit, and DDL in a new tab.
 - Responsive 80-column focus mode, standard split layout, truecolor theme,
   contextual help, bounded TachyonFX transitions, and mouse hit regions.
 - A thin `lazydb.nvim` floating-terminal plugin with one process per Neovim tab.
@@ -86,10 +89,20 @@ other local processes. `LAZYDB_PASSWORD` is read only at startup and is bound to
 the selected persisted profile (or the ad-hoc `--url` connection). It is never
 written to disk or reused for another profile.
 
-On first launch with no saved profiles, LazyDB opens a new Profile Manager form.
+On first launch with no saved profiles, LazyDB opens a new Profile Manager form
+and the Explorer shows a `No profiles` row. This row starts a new draft; it is
+not a profile-list popup. The Explorer has one UUID-targeted root per saved
+profile and per current-process session profile. Roots show `SAVED` or `SESSION`
+and `OFFLINE`, `LINKING`, `ONLINE`, `SYNCING`, or `FAILED`; catalog loading,
+stale data, permission failures, and retries are shown below the owning root.
+
 Press `Space c` from any normal-mode workspace to open the manager later. Use
-`Test Connection` to validate a draft without persistence, `Save` to persist
-metadata, and `Save & Connect` to persist and activate it. `Remember Password`
+`Test Connection` to validate a draft without persistence or changing the active
+connection. A successful test also discovers databases and schemas for the
+hierarchical scope picker. The picker supports `All` or `Selected` databases
+and schema selection. MySQL mirrors each database as its schema, so its schema
+rows are informational and not independently selectable. `Save` persists
+metadata, and `Save & Connect` persists and activates it. `Remember Password`
 stores only in the native macOS Keychain or Linux Secret Service; if that store
 is unavailable, LazyDB reports a session-only downgrade. Passwords in URLs are
 not supported as a safe credential mechanism.
@@ -158,6 +171,11 @@ Terminal-Normal mode.
   read-only session settings are defense in depth, not a replacement for a
   least-privilege database account.
 - Unknown database values degrade to an inert preview instead of panicking.
+
+## Database Capabilities
+
+See [database capabilities](docs/database-capabilities.md) for the driver
+catalog matrix, lazy paging contract, relation snapshots, and version gates.
 
 ## License
 

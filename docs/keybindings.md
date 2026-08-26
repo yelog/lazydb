@@ -34,6 +34,18 @@ Editor Normal mode but contextual help outside the editor.
 | `Space` | Toggle checkboxes and SQLite memory mode |
 | `Esc` | Close, cancel, or leave the manager |
 
+The manager edits one draft at a time; it does not open a profile-list popup.
+The Explorer is the profile navigation surface. Its roots are keyed by profile
+UUID and show `SAVED` or `SESSION` plus `OFFLINE`, `LINKING`, `ONLINE`, `SYNCING`,
+or `FAILED`. With no roots, select `No profiles` to start a new draft. Root
+refresh/connect/retry actions apply only to the selected UUID. Catalog status
+rows include loading, stale/retry, and permission-denied/retry states.
+
+`Test Connection` is non-persistent and leaves the active connection alone. On
+success it discovers databases and schemas used by the hierarchical scope
+picker. The picker supports `All` and `Selected`; MySQL displays a read-only
+database-as-schema mirror rather than independently selectable schemas.
+
 ## Explorer
 
 | Key | Action |
@@ -44,6 +56,13 @@ Editor Normal mode but contextual help outside the editor.
 | `r` | Reload catalog |
 | `p` | Open a 500-row table/view preview |
 | `D` | Open available object DDL in a new SQL tab |
+
+Expanding a database loads schemas, expanding a schema loads object groups, and
+expanding a group loads objects. Catalog pages are lazy and may show `Load
+more...`; `r` refreshes the selected UUID-owned target. A refresh can retain the
+previous page as stale data until the replacement arrives. Late pages whose
+connection identity, catalog epoch, request id, target, or cursor no longer
+matches are ignored.
 
 ## SQL Editor
 
@@ -92,6 +111,14 @@ MANUAL query rolls back the complete transaction; MySQL DDL may implicitly commi
 | --- | --- |
 | `h/j/k/l`, arrows | Move selected cell |
 | `o` | Switch Data/Output |
+
+Selecting a relation or one of its supported descendants opens a relation tab.
+Relation tabs have `DATA` and `STRUCTURE` pages. Data uses an adapter-generated,
+read-only preview with a hard `LIMIT 500`; the adapter owns the SQL and the
+limit. Zero-row results still retain and render column metadata. `r` retries a
+failed relation request and `Ctrl-C` cancels an in-flight relation request.
+Relation snapshots identify whether they are `LIVE`, `OFFLINE SNAPSHOT`,
+`PROFILE DELETED SNAPSHOT`, or `OUT OF SCOPE SNAPSHOT`.
 
 ## Mouse
 

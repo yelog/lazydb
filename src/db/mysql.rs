@@ -1,9 +1,13 @@
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 use futures_util::TryStreamExt;
 use secrecy::{ExposeSecret, SecretString};
 use sqlx::{
-    AssertSqlSafe, Column, Connection, Either, Executor, MySqlPool, Row, TypeInfo, ValueRef,
+    AssertSqlSafe, Column, Connection, Either, Executor, MySqlPool, Row, SqlSafeStr, Statement,
+    TypeInfo, ValueRef,
     mysql::{
         MySql, MySqlConnectOptions, MySqlConnection, MySqlPoolOptions, MySqlRow, MySqlSslMode,
     },
@@ -12,19 +16,23 @@ use sqlx::{
 use sqlx_core::transaction::TransactionManager;
 use uuid::Uuid;
 
-use crate::profile::{CatalogScope, CatalogSelection, ConnectionProfile, DatabaseKind, SslMode};
+use crate::{
+    identity::ConnectionIdentity,
+    profile::{CatalogScope, CatalogSelection, ConnectionProfile, DatabaseKind, SslMode},
+};
 
 use super::transaction::{TransactionBackend, TransactionError};
 use super::{
     DatabaseError, ErrorCategory, ServerInfo,
     catalog::{
         CatalogCapabilities, CatalogCount, CatalogDiscovery, CatalogEntry, CatalogGroupSummary,
-        CatalogId, CatalogKind, CatalogMetadata, CatalogPage, CatalogRequest, CatalogTarget,
-        CatalogValidationError, ColumnMetadata, ColumnMetadataCapabilities, ConstraintMembership,
-        ConstraintMetadata, DiscoveredDatabase, IndexMetadata, NamespaceModel, ObjectGroup,
-        OptionalMetadata, QualifiedName, finalize_keyset_page,
+        CatalogId, CatalogKind, CatalogMetadata, CatalogPage, CatalogRequest, CatalogRequestKey,
+        CatalogTarget, CatalogValidationError, ColumnMetadata, ColumnMetadataCapabilities,
+        ConstraintMembership, ConstraintMetadata, Ddl, DdlProvenance, DiscoveredDatabase,
+        IndexMetadata, NamespaceModel, ObjectGroup, OptionalMetadata, QualifiedName,
+        RelationStructure, finalize_keyset_page,
     },
-    query::{ColumnMeta, QueryOutcome, QueryOutcomeAccumulator},
+    query::{ColumnMeta, QueryOutcome, QueryOutcomeAccumulator, RELATION_PREVIEW_LIMIT, ResultSet},
     sanitize_terminal_text,
     value::CellValue,
 };
@@ -72,6 +80,7 @@ ORDER BY BINARY schema_name
 pub struct MySqlAdapter {
     pool: MySqlPool,
     connection_id: Uuid,
+    catalog_scope: CatalogScope,
 }
 
 impl MySqlAdapter {
@@ -164,6 +173,7 @@ impl MySqlAdapter {
         Ok(Self {
             pool,
             connection_id: profile.id,
+            catalog_scope: profile.catalog_scope.clone(),
         })
     }
 
@@ -695,7 +705,7 @@ impl MySqlAdapter {
         relation: &CatalogId,
         lower_case_table_names: i64,
     ) -> Result<CatalogPage, DatabaseError> {
-        let (database, relation_name) = self
+        let (database, relation_name, _) = self
             .verify_relation(
                 connection,
                 relation,
@@ -973,7 +983,10 @@ impl MySqlAdapter {
         relation: &CatalogId,
         target: &CatalogTarget,
         lower_case_table_names: i64,
-    ) -> Result<(String, String), DatabaseError> {
+    ) -> Result<(String, String, &'static str), DatabaseError> {
+        if relation.profile_id() != self.connection_id || !relation.kind.is_relation() {
+            return Err(catalog_target_not_found(target));
+        }
         let (database, schema, name) =
             relation_path(relation).ok_or_else(|| catalog_target_not_found(target))?;
         if database != schema {
@@ -997,15 +1010,131 @@ impl MySqlAdapter {
             return Err(catalog_target_not_found(target));
         }
         let native_kind: String = row.try_get("table_type").map_err(decode_error)?;
-        let expected_kind = if native_kind == "VIEW" {
-            CatalogKind::View
+        let (expected_kind, verified_native_kind) = if native_kind == "VIEW" {
+            (CatalogKind::View, "VIEW")
         } else {
-            CatalogKind::Table
+            (CatalogKind::Table, "BASE TABLE")
         };
         if relation.kind != expected_kind {
             return Err(catalog_target_not_found(target));
         }
-        Ok((database.to_owned(), actual_name))
+        Ok((database.to_owned(), actual_name, verified_native_kind))
+    }
+
+    pub async fn preview_relation(
+        &self,
+        relation: &CatalogId,
+    ) -> Result<crate::db::RelationPreview, DatabaseError> {
+        let mut connection = self.pool.acquire().await.map_err(sql_error)?;
+        let target = CatalogTarget::RelationChildren {
+            relation: relation.clone(),
+        };
+        let lower_case: i64 = sqlx::query_scalar("SELECT @@lower_case_table_names")
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(sql_error)?;
+        let (database, name, _) = self
+            .verify_relation(&mut connection, relation, &target, lower_case)
+            .await?;
+        if !self.catalog_scope.allows_schema(&database, &database) {
+            return Err(catalog_target_not_found(&target));
+        }
+        let sql = format!(
+            "SELECT * FROM {}.{} LIMIT {}",
+            quote_identifier(&database),
+            quote_identifier(&name),
+            RELATION_PREVIEW_LIMIT
+        );
+        let started = Instant::now();
+        let statement = connection
+            .prepare(AssertSqlSafe(sql.clone()).into_sql_str())
+            .await
+            .map_err(sql_error)?;
+        let columns = statement
+            .columns()
+            .iter()
+            .map(|column| ColumnMeta {
+                name: column.name().to_owned(),
+                type_name: column.type_info().name().to_owned(),
+            })
+            .collect();
+        let rows = statement
+            .query()
+            .fetch_all(&mut *connection)
+            .await
+            .map_err(sql_error)?;
+        let result_set = ResultSet {
+            columns,
+            rows: rows.iter().map(decode_row).collect(),
+            affected_rows: 0,
+        };
+        Ok(crate::db::RelationPreview {
+            sql,
+            result: QueryOutcome::from_result_set(result_set, started.elapsed(), Duration::ZERO),
+        })
+    }
+
+    pub async fn relation_structure(
+        &self,
+        relation: &CatalogId,
+    ) -> Result<RelationStructure, DatabaseError> {
+        let mut connection = self.pool.acquire().await.map_err(sql_error)?;
+        let target = CatalogTarget::RelationChildren {
+            relation: relation.clone(),
+        };
+        let lower_case: i64 = sqlx::query_scalar("SELECT @@lower_case_table_names")
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(sql_error)?;
+        let (database, name, native_kind) = self
+            .verify_relation(&mut connection, relation, &target, lower_case)
+            .await?;
+        if !self.catalog_scope.allows_schema(&database, &database) {
+            return Err(catalog_target_not_found(&target));
+        }
+        let relation_entry = CatalogEntry::relation(
+            relation.clone(),
+            CatalogId::new(
+                self.connection_id,
+                CatalogKind::Schema,
+                [database.clone(), database.clone()],
+            ),
+            qualified_object(&database, &name),
+            native_kind,
+            OptionalMetadata::Unsupported,
+            true,
+        )
+        .map_err(catalog_invariant)?;
+        drop(connection);
+        let request = CatalogRequest {
+            key: CatalogRequestKey {
+                connection: ConnectionIdentity {
+                    profile_id: self.connection_id,
+                    generation: 0,
+                },
+                catalog_epoch: 0,
+                request_id: 0,
+                target,
+                cursor: None,
+            },
+            scope: self.catalog_scope.clone(),
+            page_size: RELATION_PREVIEW_LIMIT,
+        };
+        let children = self.load_catalog_page(&request).await?;
+        let ddl = self.object_ddl(relation.kind, &database, &name).await?;
+        let provenance = if ddl.is_some() {
+            DdlProvenance::NativeCatalog
+        } else {
+            DdlProvenance::AdapterGenerated
+        };
+        Ok(RelationStructure {
+            relation: relation_entry,
+            children,
+            ddl: Ddl {
+                sql: ddl,
+                provenance,
+            },
+        })
     }
 
     async fn load_index_metadata(

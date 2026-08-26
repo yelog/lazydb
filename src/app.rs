@@ -22,6 +22,10 @@ use crate::{
             ProfileCatalogDiscovery, ProfileField, ProfileManagerPage, ProfileManagerState,
             ProfileOperation,
         },
+        relation::{
+            RelationDescriptor, RelationKey, RelationLoad, RelationRequest, RelationRequestKind,
+            RelationSnapshot, RelationTab, RelationView,
+        },
         tab::{
             CompletionPopup, ConsoleTab, ExecutionResult, LastExecution, OutputEntry, OutputKind,
             ResultView, WorkspaceTab,
@@ -38,6 +42,32 @@ use crate::{
     profile::{ConnectionProfile, DatabaseKind},
     sql::{self, CompletionScheduleKey, ScopeSource, SqlDialect},
 };
+
+fn pending_relation_request<T>(load: &RelationLoad<T>) -> Option<RelationRequest> {
+    match load {
+        RelationLoad::Loading { request, .. } => Some(request.clone()),
+        _ => None,
+    }
+}
+
+fn cancel_relation_load<T: Clone>(load: &RelationLoad<T>) -> RelationLoad<T> {
+    match load {
+        RelationLoad::Loading { previous, .. } => RelationLoad::Cancelled {
+            previous: previous.clone(),
+        },
+        other => other.clone(),
+    }
+}
+
+fn cancel_pending_relation<T: Clone>(load: &mut RelationLoad<T>) -> Option<RelationRequest> {
+    let pending = pending_relation_request(load);
+    if let RelationLoad::Loading { previous, .. } = load {
+        *load = RelationLoad::Cancelled {
+            previous: previous.clone(),
+        };
+    }
+    pending
+}
 
 pub struct App {
     pub profiles: Vec<ConnectionProfile>,
@@ -67,6 +97,13 @@ enum CatalogRequestIntent {
 }
 
 impl App {
+    fn is_active_relation_tab(&self) -> bool {
+        matches!(
+            self.tabs.get(self.active_tab),
+            Some(WorkspaceTab::Relation(_))
+        )
+    }
+
     pub fn new(profiles: Vec<ConnectionProfile>) -> Self {
         let persisted = profiles.iter().map(|profile| profile.id).collect();
         Self::with_profiles(profiles, persisted, ConfirmationPolicy::RiskyOnly)
@@ -219,6 +256,8 @@ impl App {
 
     pub fn update(&mut self, action: Action) -> Vec<Command> {
         if self.active_console_opt().is_none()
+            && !(self.is_active_relation_tab()
+                && matches!(action, Action::GridMove { .. } | Action::GridSelect { .. }))
             && matches!(
                 action,
                 Action::EditorKey(_)
@@ -275,6 +314,22 @@ impl App {
                             .filter(|tab| tab.as_console().is_some())
                             .count()
                             == 1;
+                    let cancel = match self.tabs.get_mut(self.active_tab) {
+                        Some(WorkspaceTab::Relation(tab)) => {
+                            let requests = [
+                                pending_relation_request(&tab.data),
+                                pending_relation_request(&tab.structure),
+                            ];
+                            tab.data = cancel_relation_load(&tab.data);
+                            tab.structure = cancel_relation_load(&tab.structure);
+                            requests
+                                .into_iter()
+                                .flatten()
+                                .map(Command::CancelRelationRequest)
+                                .collect()
+                        }
+                        _ => Vec::new(),
+                    };
                     self.tabs.remove(self.active_tab);
                     if was_console {
                         self.editor.close_console(id);
@@ -288,13 +343,16 @@ impl App {
                     }
                     self.active_tab = self.active_tab.saturating_sub(1);
                     self.normalize_focus();
-                    vec![Command::PersistWorkspace]
+                    let mut commands = cancel;
+                    commands.push(Command::PersistWorkspace);
+                    commands
                 } else {
                     Vec::new()
                 }
             }
             Action::NextTab => {
                 self.active_tab = (self.active_tab + 1) % self.tabs.len();
+                self.normalize_focus();
                 Vec::new()
             }
             Action::PreviousTab => {
@@ -302,6 +360,7 @@ impl App {
                     .active_tab
                     .checked_sub(1)
                     .unwrap_or(self.tabs.len() - 1);
+                self.normalize_focus();
                 Vec::new()
             }
             Action::ActivateTab(index) => {
@@ -312,11 +371,25 @@ impl App {
                 Vec::new()
             }
             Action::FocusNext => {
-                self.focus = self.focus.next();
+                self.focus = if self.is_active_relation_tab() {
+                    match self.focus {
+                        Focus::Explorer => Focus::Results,
+                        _ => Focus::Explorer,
+                    }
+                } else {
+                    self.focus.next()
+                };
                 Vec::new()
             }
             Action::FocusPrevious => {
-                self.focus = self.focus.previous();
+                self.focus = if self.is_active_relation_tab() {
+                    match self.focus {
+                        Focus::Explorer => Focus::Results,
+                        _ => Focus::Explorer,
+                    }
+                } else {
+                    self.focus.previous()
+                };
                 Vec::new()
             }
             Action::Focus(focus) => {
@@ -729,33 +802,43 @@ impl App {
                 Vec::new()
             }
             Action::EditorKey(key) => {
-                let id = self.active_console().id;
-                self.active_console_mut().completion = None;
+                let Some(id) = self.active_console_opt().map(|tab| tab.id) else {
+                    return Vec::new();
+                };
+                self.active_console_opt_mut().unwrap().completion = None;
                 if self.editor.key(id, key).is_err() {
                     return Vec::new();
                 }
                 self.apply_editor_effects()
             }
             Action::EditorPaste(text) => {
-                let id = self.active_console().id;
-                self.active_console_mut().completion = None;
+                let Some(id) = self.active_console_opt().map(|tab| tab.id) else {
+                    return Vec::new();
+                };
+                self.active_console_opt_mut().unwrap().completion = None;
                 if self.editor.paste(id, &text).is_err() {
                     return Vec::new();
                 }
                 self.apply_editor_effects()
             }
             Action::EditorViewportChanged(viewport) => {
-                let id = self.active_console().id;
+                let Some(id) = self.active_console_opt().map(|tab| tab.id) else {
+                    return Vec::new();
+                };
                 let _ = self.editor.set_viewport(id, viewport);
                 Vec::new()
             }
             Action::EditorScroll { rows, columns } => {
-                let id = self.active_console().id;
+                let Some(id) = self.active_console_opt().map(|tab| tab.id) else {
+                    return Vec::new();
+                };
                 let _ = self.editor.scroll(id, rows, columns);
                 Vec::new()
             }
             Action::ReplaceEditor(text) => {
-                let id = self.active_console().id;
+                let Some(id) = self.active_console_opt().map(|tab| tab.id) else {
+                    return Vec::new();
+                };
                 let _ = self.editor.set_text(id, &text);
                 vec![Command::PersistWorkspace]
             }
@@ -937,8 +1020,53 @@ impl App {
             Action::ExplorerLoadTarget(target) => {
                 self.start_catalog_request(target, None, CatalogRequestIntent::Explicit)
             }
-            Action::PreviewSelected => self.preview_selected(),
+            Action::ExplorerOpenSelected => {
+                let opens_relation = matches!(
+                    self.explorer.selected_id(),
+                    Some(ExplorerNodeId::Catalog(id))
+                        if self
+                            .explorer
+                            .normalized
+                            .profiles
+                            .get(&id.profile_id())
+                            .and_then(|profile| profile.catalog.owning_relation_id(id))
+                            .is_some()
+                );
+                if opens_relation {
+                    self.open_selected_relation(RelationView::Data)
+                } else {
+                    self.primary_explorer_selected()
+                }
+            }
+            Action::OpenSelectedRelation { view } => self.open_selected_relation(view),
+            Action::SetRelationView(view) => {
+                if let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab) {
+                    tab.view = view;
+                }
+                self.load_active_relation(false)
+            }
+            Action::RefreshActiveRelation => self.load_active_relation(true),
+            Action::CancelActiveRelationRequest => {
+                let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab) else {
+                    return Vec::new();
+                };
+                let request = match tab.view {
+                    RelationView::Data => cancel_pending_relation(&mut tab.data),
+                    RelationView::Structure => cancel_pending_relation(&mut tab.structure),
+                };
+                request
+                    .map(Command::CancelRelationRequest)
+                    .into_iter()
+                    .collect()
+            }
+            Action::PreviewSelected => self.open_selected_relation(RelationView::Data),
             Action::DdlSelected => self.ddl_selected(),
+            Action::RelationSucceeded { request, snapshot } => {
+                self.accept_relation(request, Ok(*snapshot))
+            }
+            Action::RelationFailed { request, message } => {
+                self.accept_relation(request, Err(message))
+            }
             Action::RequestProfileConnect { profile_id } => self.request_connection(profile_id),
             Action::RequestConnect(profile_id) => self.request_connection(profile_id),
             Action::RequestProfileDisconnect { profile_id } => {
@@ -976,6 +1104,11 @@ impl App {
                 };
                 self.connection.server = Some(server);
                 self.connection.error = None;
+                let relation_cancellations =
+                    self.cancel_relation_requests_for_connection(Some(ConnectionIdentity {
+                        profile_id,
+                        generation,
+                    }));
                 self.explorer.connection_changed();
                 if let Some(old_profile_id) = old_profile_id.filter(|id| *id != profile_id) {
                     self.clear_profile_catalog(old_profile_id, ExplorerConnectionStatus::Offline);
@@ -1024,7 +1157,7 @@ impl App {
                     manager.operation = None;
                     manager.message = Some("Connected".to_owned());
                 }
-                let commands = self.start_catalog_request(
+                let commands_for_catalog = self.start_catalog_request(
                     CatalogTarget::Databases,
                     None,
                     CatalogRequestIntent::Automatic,
@@ -1035,6 +1168,8 @@ impl App {
                         .expanded
                         .insert(crate::model::explorer::ExplorerNodeId::Profile(profile_id));
                 }
+                let mut commands = relation_cancellations;
+                commands.extend(commands_for_catalog);
                 commands
             }
             Action::ConnectionFailed {
@@ -1520,68 +1655,6 @@ impl App {
                 }
                 Vec::new()
             }
-            Action::PreviewFinished {
-                tab_id,
-                generation,
-                connection,
-                sql,
-                outcome,
-            } => {
-                let Some(tab) = self
-                    .tabs
-                    .iter_mut()
-                    .find(|tab| tab.id() == tab_id)
-                    .and_then(WorkspaceTab::as_console_mut)
-                else {
-                    return Vec::new();
-                };
-                if tab.generation != generation
-                    || self.connection.active_identity() != Some(connection)
-                {
-                    return Vec::new();
-                }
-                let _ = self.editor.set_text(tab_id, &sql);
-                let _ = self.editor.set_mode(tab_id, EditorMode::Normal);
-                let rows = outcome.stats.row_count;
-                let total_ms = outcome.stats.total().as_millis();
-                tab.outcome = Some(outcome);
-                tab.query_status = QueryStatus::Idle;
-                tab.output.push(OutputEntry {
-                    kind: OutputKind::Success,
-                    message: format!("{rows} row(s) previewed in {total_ms} ms"),
-                });
-                tab.result_view = ResultView::Data;
-                Vec::new()
-            }
-            Action::DdlLoaded {
-                tab_id,
-                generation,
-                connection,
-                ddl,
-            } => {
-                let Some(tab) = self
-                    .tabs
-                    .iter_mut()
-                    .find(|tab| tab.id() == tab_id)
-                    .and_then(WorkspaceTab::as_console_mut)
-                else {
-                    return Vec::new();
-                };
-                if tab.generation != generation
-                    || self.connection.active_identity() != Some(connection)
-                {
-                    return Vec::new();
-                }
-                let _ = self.editor.set_text(tab_id, &ddl);
-                let _ = self.editor.set_mode(tab_id, EditorMode::Normal);
-                tab.query_status = QueryStatus::Idle;
-                tab.output.push(OutputEntry {
-                    kind: OutputKind::Success,
-                    message: "Object DDL loaded".to_owned(),
-                });
-                self.focus = Focus::Editor;
-                Vec::new()
-            }
             Action::ExplorerMove(delta) => {
                 self.explorer.move_selection(delta);
                 Vec::new()
@@ -1592,27 +1665,48 @@ impl App {
                 Vec::new()
             }
             Action::GridMove { rows, columns } => {
-                let tab = self.active_console_mut();
-                let (row_count, column_count) = tab
-                    .outcome
-                    .as_ref()
-                    .and_then(|outcome| outcome.result_sets.last())
-                    .map(|result| (result.rows.len(), result.columns.len()))
-                    .unwrap_or((0, 0));
-                tab.selected_row = move_bounded(tab.selected_row, rows, row_count);
-                tab.selected_column = move_bounded(tab.selected_column, columns, column_count);
+                if self.is_active_relation_tab() {
+                    let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab)
+                    else {
+                        return Vec::new();
+                    };
+                    let (row_count, column_count) = relation_grid_dimensions(&tab.data);
+                    tab.grid.selected_row = move_bounded(tab.grid.selected_row, rows, row_count);
+                    tab.grid.selected_column =
+                        move_bounded(tab.grid.selected_column, columns, column_count);
+                } else {
+                    let tab = self.active_console_mut();
+                    let (row_count, column_count) = tab
+                        .outcome
+                        .as_ref()
+                        .and_then(|outcome| outcome.result_sets.last())
+                        .map(|result| (result.rows.len(), result.columns.len()))
+                        .unwrap_or((0, 0));
+                    tab.selected_row = move_bounded(tab.selected_row, rows, row_count);
+                    tab.selected_column = move_bounded(tab.selected_column, columns, column_count);
+                }
                 Vec::new()
             }
             Action::GridSelect { row, column } => {
-                let tab = self.active_console_mut();
-                let (row_count, column_count) = tab
-                    .outcome
-                    .as_ref()
-                    .and_then(|outcome| outcome.result_sets.last())
-                    .map(|result| (result.rows.len(), result.columns.len()))
-                    .unwrap_or((0, 0));
-                tab.selected_row = row.min(row_count.saturating_sub(1));
-                tab.selected_column = column.min(column_count.saturating_sub(1));
+                if self.is_active_relation_tab() {
+                    let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab)
+                    else {
+                        return Vec::new();
+                    };
+                    let (row_count, column_count) = relation_grid_dimensions(&tab.data);
+                    tab.grid.selected_row = row.min(row_count.saturating_sub(1));
+                    tab.grid.selected_column = column.min(column_count.saturating_sub(1));
+                } else {
+                    let tab = self.active_console_mut();
+                    let (row_count, column_count) = tab
+                        .outcome
+                        .as_ref()
+                        .and_then(|outcome| outcome.result_sets.last())
+                        .map(|result| (result.rows.len(), result.columns.len()))
+                        .unwrap_or((0, 0));
+                    tab.selected_row = row.min(row_count.saturating_sub(1));
+                    tab.selected_column = column.min(column_count.saturating_sub(1));
+                }
                 Vec::new()
             }
             Action::ExplorerToggle => self.toggle_explorer_selected(),
@@ -2070,6 +2164,11 @@ impl App {
 
         let profile_id = profile.id;
         let scope_changed = change.catalog_scope_changed;
+        let mut commands = if scope_changed {
+            self.cancel_relation_requests_for_profile(profile_id)
+        } else {
+            Vec::new()
+        };
         add_explorer_profile(&mut self.explorer, &profile, ProfileProvenance::Saved);
         if scope_changed && let Some(state) = self.explorer.normalized.profiles.get_mut(&profile_id)
         {
@@ -2106,11 +2205,12 @@ impl App {
             self.active_console_mut().completion = None;
             self.profile_manager = None;
             self.overlay = None;
-            return self.start_catalog_request(
+            commands.extend(self.start_catalog_request(
                 CatalogTarget::Databases,
                 None,
                 CatalogRequestIntent::Refresh,
-            );
+            ));
+            return commands;
         }
         if !connect
             && !change.connection_settings_changed
@@ -2131,7 +2231,7 @@ impl App {
                 }
                 return Vec::new();
             }
-            let commands = self.retire_profile_connections(profile_id, None);
+            commands.extend(self.retire_profile_connections(profile_id, None));
             self.profile_manager = None;
             self.overlay = None;
             return commands;
@@ -2143,7 +2243,7 @@ impl App {
             }
             return Vec::new();
         }
-        let commands = self.request_connection(profile_id);
+        commands.extend(self.request_connection(profile_id));
         if !commands.is_empty()
             && let Some(manager) = self.profile_manager.as_mut()
         {
@@ -2210,6 +2310,10 @@ impl App {
         self.connection.pending_generation = Some(generation);
         self.connection.status = ConnectionStatus::Connecting;
         self.connection.error = None;
+        let mut commands = self.cancel_relation_requests_for_connection(Some(ConnectionIdentity {
+            profile_id,
+            generation,
+        }));
         if let Some(active_profile_id) = self.connection.profile_id.filter(|id| *id != profile_id)
             && let Some(state) = self
                 .explorer
@@ -2223,10 +2327,54 @@ impl App {
             state.status = ExplorerConnectionStatus::Linking;
             state.last_error = None;
         }
-        vec![Command::Connect {
+        commands.push(Command::Connect {
             profile_id,
             generation,
-        }]
+        });
+        commands
+    }
+
+    fn cancel_relation_requests_for_connection(
+        &mut self,
+        next_connection: Option<ConnectionIdentity>,
+    ) -> Vec<Command> {
+        let mut commands = Vec::new();
+        for tab in &mut self.tabs {
+            let WorkspaceTab::Relation(tab) = tab else {
+                continue;
+            };
+            for pending in [
+                cancel_pending_relation(&mut tab.data),
+                cancel_pending_relation(&mut tab.structure),
+            ] {
+                if let Some(request) = pending
+                    && next_connection.is_none_or(|connection| request.connection != connection)
+                {
+                    commands.push(Command::CancelRelationRequest(request));
+                }
+            }
+        }
+        commands
+    }
+
+    fn cancel_relation_requests_for_profile(&mut self, profile_id: Uuid) -> Vec<Command> {
+        let mut commands = Vec::new();
+        for tab in &mut self.tabs {
+            let WorkspaceTab::Relation(tab) = tab else {
+                continue;
+            };
+            for pending in [
+                cancel_pending_relation(&mut tab.data),
+                cancel_pending_relation(&mut tab.structure),
+            ] {
+                if let Some(request) = pending
+                    && request.connection.profile_id == profile_id
+                {
+                    commands.push(Command::CancelRelationRequest(request));
+                }
+            }
+        }
+        commands
     }
 
     fn retire_profile_connections(
@@ -2234,6 +2382,7 @@ impl App {
         profile_id: Uuid,
         runtime_active: Option<ConnectionIdentity>,
     ) -> Vec<Command> {
+        let mut commands = self.cancel_relation_requests_for_profile(profile_id);
         let active = self
             .connection
             .active_identity()
@@ -2278,10 +2427,13 @@ impl App {
                 ConnectionStatus::Disconnected
             };
         }
-        identities
-            .into_iter()
-            .map(|connection| Command::Disconnect { connection })
-            .collect()
+        commands.extend(
+            identities
+                .into_iter()
+                .map(|connection| Command::Disconnect { connection })
+                .collect::<Vec<_>>(),
+        );
+        commands
     }
 
     fn database_command_identity(&self) -> Option<ConnectionIdentity> {
@@ -2313,8 +2465,11 @@ impl App {
 
     fn has_running_query(&self) -> bool {
         self.tabs.iter().any(|tab| {
-            tab.as_console()
-                .is_some_and(|tab| tab.query_status == QueryStatus::Running)
+            tab.as_console().is_some_and(|tab| tab.query_status == QueryStatus::Running)
+                || matches!(tab, WorkspaceTab::Relation(relation) if match relation.view {
+                    RelationView::Data => matches!(relation.data, RelationLoad::Loading { .. }),
+                    RelationView::Structure => matches!(relation.structure, RelationLoad::Loading { .. }),
+                })
         })
     }
 
@@ -3019,14 +3174,24 @@ impl App {
             state.status = ExplorerConnectionStatus::Online;
         }
         self.explorer.normalized = next_explorer;
-        self.explorer.completion_index.replace(
-            &self.explorer.normalized.profiles[&profile_id]
-                .catalog
-                .entries()
-                .values()
-                .cloned()
-                .collect::<Vec<_>>(),
-        );
+        let scope = self
+            .profiles
+            .iter()
+            .find(|profile| profile.id == profile_id)
+            .map(|profile| &profile.catalog_scope);
+        if let Some(scope) = scope {
+            self.explorer.completion_index.replace_scoped(
+                &self.explorer.normalized.profiles[&profile_id]
+                    .catalog
+                    .entries()
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                scope,
+            );
+        } else {
+            self.explorer.completion_index = Default::default();
+        }
         self.explorer.catalog_generation = self.explorer.catalog_generation.saturating_add(1);
         self.explorer.rebuild_projection(profile_id);
 
@@ -3323,7 +3488,7 @@ impl App {
                 .and_then(|profile| profile.catalog.get(id))
             && (entry.kind.is_relation() || entry.owning_relation_id().is_some())
         {
-            return self.preview_selected();
+            return self.open_selected_relation(RelationView::Data);
         }
         self.toggle_explorer_selected()
     }
@@ -3402,100 +3567,302 @@ impl App {
         else {
             return Vec::new();
         };
-        if self.has_running_query() {
+        if self.tabs.iter().any(|tab| {
+            tab.as_console()
+                .is_some_and(|tab| tab.query_status == QueryStatus::Running)
+        }) {
             return Vec::new();
         }
-        if self.transaction_needs_exit(self.active_console().id) {
-            return self.defer_intent(
-                DeferredIntent::Disconnect { connection },
-                self.tabs
-                    .iter()
-                    .filter(|tab| self.transaction_needs_exit(tab.id()))
-                    .map(|tab| tab.id())
-                    .collect::<Vec<_>>(),
+        let mut commands = self.cancel_relation_requests_for_connection(None);
+        if self
+            .active_console_opt()
+            .is_some_and(|tab| self.transaction_needs_exit(tab.id))
+        {
+            commands.extend(
+                self.defer_intent(
+                    DeferredIntent::Disconnect { connection },
+                    self.tabs
+                        .iter()
+                        .filter(|tab| self.transaction_needs_exit(tab.id()))
+                        .map(|tab| tab.id())
+                        .collect::<Vec<_>>(),
+                ),
             );
+            return commands;
         }
-        vec![Command::Disconnect { connection }]
+        commands.push(Command::Disconnect { connection });
+        commands
     }
 
-    fn preview_selected(&mut self) -> Vec<Command> {
-        let Some(connection) = self.database_command_identity() else {
+    fn open_selected_relation(&mut self, view: RelationView) -> Vec<Command> {
+        let Some(ExplorerNodeId::Catalog(selected_id)) = self.explorer.selected_id().cloned()
+        else {
             return Vec::new();
         };
-        let Some(entry) = self.explorer.selected_entry().cloned() else {
+        let Some(profile) = self
+            .explorer
+            .normalized
+            .profiles
+            .get(&selected_id.profile_id())
+        else {
             return Vec::new();
         };
-        if !entry.kind.is_relation() {
+        let Some(entry) = profile.catalog.get(&selected_id) else {
+            return Vec::new();
+        };
+        let Some(relation_id) = profile.catalog.owning_relation_id(&selected_id).cloned() else {
+            return Vec::new();
+        };
+        let Some(relation) = profile.catalog.get(&relation_id) else {
+            return Vec::new();
+        };
+        if !relation.kind.is_relation()
+            || relation.id.profile_id() != selected_id.profile_id()
+            || entry.id.profile_id() != selected_id.profile_id()
+        {
             return Vec::new();
         }
-        let Some(_database) = entry.qualified_name.database.as_ref() else {
-            return Vec::new();
+        let key = RelationKey {
+            profile_id: relation.id.profile_id(),
+            object_id: relation.id.clone(),
         };
-        let Some(schema) = entry.qualified_name.schema.clone() else {
-            return Vec::new();
+        if let Some(index) = self.tabs.iter().position(|tab| {
+            matches!(
+                tab,
+                WorkspaceTab::Relation(existing)
+                    if existing.descriptor.key == key
+            )
+        }) {
+            self.active_tab = index;
+            if let WorkspaceTab::Relation(tab) = &mut self.tabs[index] {
+                tab.view = view;
+            }
+            self.focus = Focus::Results;
+            self.active_tab = index;
+            return self.load_active_relation(false);
+        }
+        let title = relation.qualified_name.object.clone();
+        let descriptor = RelationDescriptor {
+            key,
+            qualified_name: relation.qualified_name.clone(),
+            kind: relation.kind,
+            title,
         };
-        let name = entry.qualified_name.object;
-        let mut tab = ConsoleTab::new(format!("{name} data"));
-        tab.generation = 1;
-        tab.query_status = QueryStatus::Running;
-        let tab_id = tab.id;
-        let generation = tab.generation;
-        self.tabs.push(WorkspaceTab::Sql(tab));
-        self.editor
-            .open_console(tab_id, &format!("-- Loading preview for {schema}.{name}"));
-        let _ = self.editor.set_mode(tab_id, EditorMode::Normal);
+        self.tabs
+            .push(WorkspaceTab::Relation(RelationTab::with_descriptor(
+                descriptor, view,
+            )));
         self.active_tab = self.tabs.len() - 1;
         self.focus = Focus::Results;
-        vec![Command::PreviewTable {
-            connection,
-            tab_id,
-            generation,
-            schema,
-            name,
-        }]
+        self.load_active_relation(true)
     }
 
     fn ddl_selected(&mut self) -> Vec<Command> {
+        self.open_selected_relation(RelationView::Structure)
+    }
+
+    fn load_active_relation(&mut self, refresh: bool) -> Vec<Command> {
         let Some(connection) = self.database_command_identity() else {
             return Vec::new();
         };
-        let Some(entry) = self.explorer.selected_entry().cloned() else {
+        let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab) else {
             return Vec::new();
         };
-        if !matches!(
-            entry.kind,
-            crate::db::catalog::CatalogKind::Table
-                | crate::db::catalog::CatalogKind::View
-                | crate::db::catalog::CatalogKind::MaterializedView
-                | crate::db::catalog::CatalogKind::Index
-                | crate::db::catalog::CatalogKind::Trigger
-        ) {
+        if tab.descriptor.key.profile_id != connection.profile_id {
             return Vec::new();
         }
-        let Some(_database) = entry.qualified_name.database.as_ref() else {
+        let Some(profile) = self
+            .profiles
+            .iter()
+            .find(|profile| profile.id == connection.profile_id)
+        else {
             return Vec::new();
         };
-        let Some(schema) = entry.qualified_name.schema.clone() else {
+        if !relation_is_in_scope(tab, &profile.catalog_scope) {
             return Vec::new();
+        }
+        let kind = match tab.view {
+            RelationView::Data => RelationRequestKind::Preview,
+            RelationView::Structure => RelationRequestKind::Structure,
         };
-        let name = entry.qualified_name.object;
-        let mut tab = ConsoleTab::new(format!("{name} DDL"));
-        tab.generation = 1;
-        tab.query_status = QueryStatus::Running;
-        let tab_id = tab.id;
-        let generation = tab.generation;
-        self.tabs.push(WorkspaceTab::Sql(tab));
-        self.editor.open_console(tab_id, "");
-        self.active_tab = self.tabs.len() - 1;
-        self.focus = Focus::Editor;
-        vec![Command::LoadDdl {
+        let should_load = match tab.view {
+            RelationView::Data => {
+                refresh
+                    || matches!(
+                        tab.data,
+                        RelationLoad::Empty
+                            | RelationLoad::Failed { .. }
+                            | RelationLoad::Cancelled { .. }
+                    )
+            }
+            RelationView::Structure => {
+                refresh
+                    || matches!(
+                        tab.structure,
+                        RelationLoad::Empty
+                            | RelationLoad::Failed { .. }
+                            | RelationLoad::Cancelled { .. }
+                    )
+            }
+        };
+        if !should_load {
+            return Vec::new();
+        }
+        let previous_request = match tab.view {
+            RelationView::Data => pending_relation_request(&tab.data),
+            RelationView::Structure => pending_relation_request(&tab.structure),
+        };
+        let request = RelationRequest {
+            tab_id: tab.id,
+            tab_generation: tab.generation,
+            request_id: tab.next_request_id,
             connection,
-            tab_id,
-            generation,
-            kind: entry.kind,
-            schema,
-            name,
-        }]
+            relation: tab.descriptor.key.clone(),
+            kind,
+            scope: profile.catalog_scope.clone(),
+        };
+        tab.next_request_id = tab.next_request_id.saturating_add(1);
+        match kind {
+            RelationRequestKind::Preview => {
+                let previous = match std::mem::replace(&mut tab.data, RelationLoad::Empty) {
+                    RelationLoad::Ready(snapshot) => Some(snapshot),
+                    RelationLoad::Loading { previous, .. }
+                    | RelationLoad::Failed { previous, .. }
+                    | RelationLoad::Cancelled { previous } => previous,
+                    RelationLoad::Empty => None,
+                };
+                tab.data = RelationLoad::Loading {
+                    request: request.clone(),
+                    previous,
+                };
+                previous_request
+                    .map(Command::CancelRelationRequest)
+                    .into_iter()
+                    .chain([Command::LoadRelationPreview(request)])
+                    .collect()
+            }
+            RelationRequestKind::Structure => {
+                let previous = match std::mem::replace(&mut tab.structure, RelationLoad::Empty) {
+                    RelationLoad::Ready(snapshot) => Some(snapshot),
+                    RelationLoad::Loading { previous, .. }
+                    | RelationLoad::Failed { previous, .. }
+                    | RelationLoad::Cancelled { previous } => previous,
+                    RelationLoad::Empty => None,
+                };
+                tab.structure = RelationLoad::Loading {
+                    request: request.clone(),
+                    previous,
+                };
+                previous_request
+                    .map(Command::CancelRelationRequest)
+                    .into_iter()
+                    .chain([Command::LoadRelationStructure(request)])
+                    .collect()
+            }
+        }
+    }
+
+    fn accept_relation(
+        &mut self,
+        request: RelationRequest,
+        result: Result<RelationSnapshot, String>,
+    ) -> Vec<Command> {
+        let Some(tab_index) = self.tabs.iter().position(|tab| {
+            match tab {
+                WorkspaceTab::Relation(tab) if tab.id == request.tab_id => Some(tab),
+                _ => None,
+            }
+            .is_some()
+        }) else {
+            return Vec::new();
+        };
+        let current = match &self.tabs[tab_index] {
+            WorkspaceTab::Relation(tab) => tab,
+            _ => return Vec::new(),
+        };
+        if !self.relation_result_is_current(&request, current) {
+            return Vec::new();
+        }
+        let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(tab_index) else {
+            return Vec::new();
+        };
+        match (request.kind, result) {
+            (RelationRequestKind::Preview, Ok(RelationSnapshot::Preview(snapshot))) => {
+                if matches!(&tab.data, RelationLoad::Loading { request: pending, .. } if pending == &request)
+                {
+                    tab.data = RelationLoad::Ready(crate::model::relation::OwnedSnapshot {
+                        value: snapshot,
+                        attribution: crate::model::relation::SnapshotAttribution {
+                            connection: request.connection,
+                            profile_id: request.connection.profile_id,
+                            scope: request.scope.clone(),
+                        },
+                    });
+                }
+            }
+            (RelationRequestKind::Structure, Ok(RelationSnapshot::Structure(snapshot))) => {
+                if matches!(&tab.structure, RelationLoad::Loading { request: pending, .. } if pending == &request)
+                {
+                    tab.structure = RelationLoad::Ready(crate::model::relation::OwnedSnapshot {
+                        value: *snapshot,
+                        attribution: crate::model::relation::SnapshotAttribution {
+                            connection: request.connection,
+                            profile_id: request.connection.profile_id,
+                            scope: request.scope.clone(),
+                        },
+                    });
+                }
+            }
+            (RelationRequestKind::Preview, Err(message)) => {
+                if let RelationLoad::Loading {
+                    previous,
+                    request: pending,
+                } = &tab.data
+                    && pending == &request
+                {
+                    tab.data = RelationLoad::Failed {
+                        message,
+                        previous: previous.clone(),
+                    };
+                }
+            }
+            (RelationRequestKind::Structure, Err(message)) => {
+                if let RelationLoad::Loading {
+                    previous,
+                    request: pending,
+                } = &tab.structure
+                    && pending == &request
+                {
+                    tab.structure = RelationLoad::Failed {
+                        message,
+                        previous: previous.clone(),
+                    };
+                }
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    fn relation_result_is_current(&self, request: &RelationRequest, tab: &RelationTab) -> bool {
+        self.connection.active_identity() == Some(request.connection)
+            && tab.id == request.tab_id
+            && tab.generation == request.tab_generation
+            && tab.descriptor.key == request.relation
+            && match request.kind {
+                RelationRequestKind::Preview => {
+                    matches!(&tab.data, RelationLoad::Loading { request: pending, .. } if pending == request)
+                }
+                RelationRequestKind::Structure => matches!(
+                    &tab.structure,
+                    RelationLoad::Loading { request: pending, .. } if pending == request
+                ),
+            }
+            && self
+                .profiles
+                .iter()
+                .find(|profile| profile.id == request.connection.profile_id)
+                .is_some_and(|profile| relation_is_in_scope(tab, &profile.catalog_scope))
     }
 
     fn manual_matches(
@@ -3554,6 +3921,17 @@ impl App {
         self.connection.pending_profile_id == Some(profile_id)
             && self.connection.pending_generation == Some(generation)
     }
+}
+
+fn relation_is_in_scope(tab: &RelationTab, scope: &crate::profile::CatalogScope) -> bool {
+    let name = &tab.descriptor.qualified_name;
+    name.database.as_deref().is_none_or(|database| {
+        scope.allows_database(database)
+            && name
+                .schema
+                .as_deref()
+                .is_none_or(|schema| scope.allows_schema(database, schema))
+    })
 }
 
 fn completion_group(group: crate::db::catalog::ObjectGroup) -> bool {
@@ -3638,6 +4016,19 @@ fn move_bounded(current: usize, delta: isize, count: usize) -> usize {
             .saturating_add_signed(delta)
             .min(count.saturating_sub(1))
     }
+}
+
+fn relation_grid_dimensions(load: &RelationLoad<crate::db::RelationPreview>) -> (usize, usize) {
+    let snapshot = match load {
+        RelationLoad::Ready(snapshot) => Some(snapshot),
+        RelationLoad::Loading { previous, .. }
+        | RelationLoad::Failed { previous, .. }
+        | RelationLoad::Cancelled { previous } => previous.as_ref(),
+        RelationLoad::Empty => None,
+    };
+    snapshot
+        .and_then(|snapshot| snapshot.value.result.result_sets.last())
+        .map_or((0, 0), |result| (result.rows.len(), result.columns.len()))
 }
 
 #[cfg(test)]

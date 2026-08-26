@@ -1,6 +1,7 @@
 pub mod effects;
 pub mod layout;
 pub mod profiles;
+pub mod relation;
 pub mod theme;
 
 use ratatui::{
@@ -25,7 +26,7 @@ use crate::{
     model::{
         editor::{EditorHighlightKind, EditorMode, EditorViewport},
         profile_manager::ProfileField,
-        tab::{OutputKind, ResultView},
+        tab::{OutputKind, ResultView, WorkspaceTab},
         workspace::{ConnectionStatus, Focus, Overlay, QueryStatus},
     },
     security::sanitize_terminal_text,
@@ -55,6 +56,9 @@ pub enum HitTarget {
     ResultCell { row: usize, column: usize },
     Help,
     ToggleResultView,
+    RelationView(crate::model::relation::RelationView),
+    RelationRetry,
+    RelationCancel,
     HeaderProfile,
     ProfileField(ProfileField),
     ProfileToggle(ProfileField),
@@ -145,7 +149,11 @@ pub fn render_with_state(frame: &mut Frame<'_>, app: &App, state: &mut UiState) 
     let theme = Theme::default();
     let area = frame.area();
     frame.render_widget(Block::new().style(theme.base()), area);
-    let layout = AppLayout::calculate(area, app.focus);
+    let is_relation = matches!(
+        app.tabs.get(app.active_tab),
+        Some(WorkspaceTab::Relation(_))
+    );
+    let layout = AppLayout::calculate(area, app.focus, is_relation);
     state.hit_regions.clear();
     state.editor_viewport = None;
     state.completion_popup = None;
@@ -157,8 +165,22 @@ pub fn render_with_state(frame: &mut Frame<'_>, app: &App, state: &mut UiState) 
 
     render_header(frame, layout.header, app, theme, state);
     render_tabs(frame, layout.tabs, app, theme, state);
-    if app.active_console_opt().is_none() {
-        render_relation_placeholder(frame, layout.body, app, theme);
+    if is_relation {
+        if let Some(area) = layout.explorer {
+            state.hit_regions.push(HitRegion {
+                area,
+                target: HitTarget::Focus(Focus::Explorer),
+            });
+            render_explorer(frame, area, app, theme, state);
+        }
+        if let Some(area) = layout.relation {
+            relation::render(frame, area, app, theme, state);
+        }
+        render_footer(frame, layout.footer, app, theme);
+        state.hit_regions.push(HitRegion {
+            area: layout.footer,
+            target: HitTarget::Help,
+        });
         return;
     }
     if let Some(area) = layout.explorer {
@@ -207,20 +229,8 @@ pub fn render_with_state(frame: &mut Frame<'_>, app: &App, state: &mut UiState) 
     state.effects.render(frame, layout.body);
 }
 
-fn render_relation_placeholder(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
-    let title = app
-        .tabs
-        .get(app.active_tab)
-        .map(|tab| tab.title())
-        .unwrap_or("relation");
-    frame.render_widget(
-        Paragraph::new(format!("Relation tab: {title}\n\nRelation loading and data views are reserved for a later task."))
-            .block(panel_block(" RELATION ", true, theme))
-            .style(Style::new().fg(theme.text).bg(theme.surface))
-            .wrap(Wrap { trim: true }),
-        area,
-    );
-}
+// Relation pages are rendered by `ui::relation`; keeping them out of the SQL path
+// prevents accidental editor access when a relation tab is active.
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CompletionAnchor {
@@ -434,7 +444,11 @@ fn render_tabs(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, state
     )];
     let mut x = area.x + 11;
     for (index, tab) in app.tabs.iter().enumerate() {
-        let label = format!(" {:02} {} ", index + 1, tab.title());
+        let title = sanitize_terminal_text(tab.title())
+            .chars()
+            .take(48)
+            .collect::<String>();
+        let label = format!(" {:02} {} ", index + 1, title);
         let width = label.cell_width();
         let active = index == app.active_tab;
         spans.push(Span::styled(
@@ -719,7 +733,9 @@ fn render_editor(
 }
 
 fn render_result_tabs(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
-    let active = app.active_console().result_view;
+    let active = app
+        .active_console_opt()
+        .map_or(ResultView::Data, |tab| tab.result_view);
     let data_style = if active == ResultView::Data {
         Style::new()
             .fg(theme.background)
@@ -736,16 +752,19 @@ fn render_result_tabs(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme
     } else {
         Style::new().fg(theme.muted).bg(theme.surface)
     };
-    let stats = app.active_console().outcome.as_ref().map_or_else(
-        || "no result".to_owned(),
-        |outcome| {
-            format!(
-                "{} rows  ·  {} ms",
-                outcome.stats.row_count,
-                outcome.stats.total().as_millis()
-            )
-        },
-    );
+    let stats = app
+        .active_console_opt()
+        .and_then(|tab| tab.outcome.as_ref())
+        .map_or_else(
+            || "no result".to_owned(),
+            |outcome| {
+                format!(
+                    "{} rows  ·  {} ms",
+                    outcome.stats.row_count,
+                    outcome.stats.total().as_millis()
+                )
+            },
+        );
     let line = Line::from(vec![
         Span::styled(" DATA ", data_style),
         Span::raw(" "),
@@ -759,7 +778,10 @@ fn render_result_tabs(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme
 }
 
 fn render_results(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, state: &mut UiState) {
-    match app.active_console().result_view {
+    match app
+        .active_console_opt()
+        .map_or(ResultView::Data, |tab| tab.result_view)
+    {
         ResultView::Output | ResultView::Plan => render_output(frame, area, app, theme),
         ResultView::Data => render_data(frame, area, app, theme, state),
     }
@@ -768,9 +790,8 @@ fn render_results(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, st
 fn render_data(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, state: &mut UiState) {
     let block = panel_block(" RESULT SET ", app.focus == Focus::Results, theme);
     let Some(result) = app
-        .active_console()
-        .outcome
-        .as_ref()
+        .active_console_opt()
+        .and_then(|tab| tab.outcome.as_ref())
         .and_then(|outcome| outcome.result_sets.last())
     else {
         frame.render_widget(
@@ -782,14 +803,26 @@ fn render_data(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, state
         );
         return;
     };
-    render_result_table(frame, area, result, app, theme, block, state);
+    render_result_table(
+        frame,
+        area,
+        result,
+        app.active_console_opt()
+            .map_or(Default::default(), |tab| crate::model::tab::GridState {
+                selected_row: tab.selected_row,
+                selected_column: tab.selected_column,
+            }),
+        theme,
+        block,
+        state,
+    );
 }
 
-fn render_result_table(
+pub(crate) fn render_result_table(
     frame: &mut Frame<'_>,
     area: Rect,
     result: &ResultSet,
-    app: &App,
+    grid: crate::model::tab::GridState,
     theme: Theme,
     block: Block<'_>,
     state: &mut UiState,
@@ -844,8 +877,13 @@ fn render_result_table(
         }
     }
     let header = Row::new(result.columns.iter().map(|column| {
-        Cell::from(column.name.clone())
-            .style(Style::new().fg(theme.accent).add_modifier(Modifier::BOLD))
+        Cell::from(
+            sanitize_terminal_text(&column.name)
+                .chars()
+                .take(80)
+                .collect::<String>(),
+        )
+        .style(Style::new().fg(theme.accent).add_modifier(Modifier::BOLD))
     }))
     .height(1)
     .bottom_margin(1);
@@ -874,10 +912,8 @@ fn render_result_table(
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("▌");
-    let mut state = TableState::new().with_selected_cell(Some((
-        app.active_console().selected_row,
-        app.active_console().selected_column,
-    )));
+    let mut state =
+        TableState::new().with_selected_cell(Some((grid.selected_row, grid.selected_column)));
     frame.render_stateful_widget(table, area, &mut state);
 }
 
@@ -885,7 +921,9 @@ fn render_output(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
     let block = panel_block(" OUTPUT LOG ", app.focus == Focus::Results, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let entries = &app.active_console().output;
+    let entries = app
+        .active_console_opt()
+        .map_or(&[][..], |tab| tab.output.as_slice());
     if entries.is_empty() {
         frame.render_widget(
             Paragraph::new("No execution output")

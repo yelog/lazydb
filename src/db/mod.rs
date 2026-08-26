@@ -17,8 +17,8 @@ use crate::{
 
 use self::{
     catalog::{
-        CatalogCapabilities, CatalogDiscovery, CatalogKind, CatalogPage, CatalogRequest,
-        CatalogTarget, CatalogValidationError,
+        CatalogCapabilities, CatalogDiscovery, CatalogId, CatalogKind, CatalogPage, CatalogRequest,
+        CatalogTarget, CatalogValidationError, RelationStructure,
     },
     mysql::MySqlAdapter,
     postgres::PostgresAdapter,
@@ -31,6 +31,14 @@ pub struct ServerInfo {
     pub kind: DatabaseKind,
     pub version: String,
     pub database: String,
+}
+
+pub use query::RELATION_PREVIEW_LIMIT;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RelationPreview {
+    pub sql: String,
+    pub result: QueryOutcome,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -201,6 +209,28 @@ impl DatabaseConnection {
             Self::Postgres(adapter) => adapter.execute_pool(sql).await,
             Self::MySql(adapter) => adapter.execute_pool(sql).await,
             Self::Sqlite(adapter) => adapter.execute_pool(sql).await,
+        }
+    }
+
+    pub async fn preview_relation(
+        &self,
+        relation: &CatalogId,
+    ) -> Result<RelationPreview, DatabaseError> {
+        match self {
+            Self::Postgres(adapter) => adapter.preview_relation(relation).await,
+            Self::MySql(adapter) => adapter.preview_relation(relation).await,
+            Self::Sqlite(adapter) => adapter.preview_relation(relation).await,
+        }
+    }
+
+    pub async fn relation_structure(
+        &self,
+        relation: &CatalogId,
+    ) -> Result<RelationStructure, DatabaseError> {
+        match self {
+            Self::Postgres(adapter) => adapter.relation_structure(relation).await,
+            Self::MySql(adapter) => adapter.relation_structure(relation).await,
+            Self::Sqlite(adapter) => adapter.relation_structure(relation).await,
         }
     }
 

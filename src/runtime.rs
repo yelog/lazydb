@@ -89,6 +89,8 @@ pub struct Runtime {
     connection: Arc<Mutex<Option<ActiveConnection>>>,
     connection_attempts: Arc<StdMutex<ConnectionAttemptTracker>>,
     query_tasks: HashMap<(Uuid, u64), JoinHandle<()>>,
+    relation_tasks: HashMap<crate::model::relation::RelationRequest, JoinHandle<()>>,
+    known_relations: Arc<StdMutex<HashSet<(ConnectionIdentity, crate::db::catalog::CatalogId)>>>,
     background_tasks: Vec<JoinHandle<()>>,
     profile_tasks: Vec<JoinHandle<()>>,
     completion_tasks: HashMap<Uuid, JoinHandle<()>>,
@@ -139,6 +141,8 @@ impl Runtime {
             connection: Arc::new(Mutex::new(None)),
             connection_attempts: Arc::new(StdMutex::new(ConnectionAttemptTracker::default())),
             query_tasks: HashMap::new(),
+            relation_tasks: HashMap::new(),
+            known_relations: Arc::new(StdMutex::new(HashSet::new())),
             background_tasks: Vec::new(),
             profile_tasks: Vec::new(),
             completion_tasks: HashMap::new(),
@@ -148,6 +152,7 @@ impl Runtime {
 
     pub fn dispatch(&mut self, command: Command) {
         self.query_tasks.retain(|_, task| !task.is_finished());
+        self.relation_tasks.retain(|_, task| !task.is_finished());
         self.background_tasks.retain(|task| !task.is_finished());
         self.profile_tasks.retain(|task| !task.is_finished());
         match command {
@@ -170,6 +175,14 @@ impl Runtime {
                 generation,
             } => self.connect(profile_id, generation),
             Command::LoadCatalogPage(request) => self.load_catalog_page(request),
+            Command::LoadRelationPreview(request) | Command::LoadRelationStructure(request) => {
+                self.load_relation(request)
+            }
+            Command::CancelRelationRequest(request) => {
+                if let Some(task) = self.relation_tasks.remove(&request) {
+                    task.abort();
+                }
+            }
             Command::RunQuery {
                 connection,
                 tab_id,
@@ -207,21 +220,6 @@ impl Runtime {
                 query_generation,
                 transaction_generation,
             } => self.manual_rollback(connection, tab_id, query_generation, transaction_generation),
-            Command::PreviewTable {
-                connection,
-                tab_id,
-                generation,
-                schema,
-                name,
-            } => self.preview_table(connection, tab_id, generation, schema, name),
-            Command::LoadDdl {
-                connection,
-                tab_id,
-                generation,
-                kind,
-                schema,
-                name,
-            } => self.load_ddl(connection, tab_id, generation, kind, schema, name),
             Command::CancelQuery { tab_id, generation } => {
                 if let Some(task) = self.query_tasks.remove(&(tab_id, generation)) {
                     task.abort();
@@ -378,6 +376,7 @@ impl Runtime {
 
     fn disconnect(&mut self, expected: ConnectionIdentity) {
         let connection = Arc::clone(&self.connection);
+        let known_relations = Arc::clone(&self.known_relations);
         let mutation = Arc::clone(&self.profile_mutation);
         let attempts = Arc::clone(&self.connection_attempts);
         let sender = self.event_sender.clone();
@@ -401,6 +400,9 @@ impl Runtime {
                 }
             };
             if let Some(active) = active {
+                if let Ok(mut known) = known_relations.lock() {
+                    known.clear();
+                }
                 active.database.close().await;
             }
             let _ = sender.send(Action::DisconnectCompleted {
@@ -416,6 +418,7 @@ impl Runtime {
         let sender = self.event_sender.clone();
         let connection = Arc::clone(&self.connection);
         let attempts = Arc::clone(&self.connection_attempts);
+        let known_relations = Arc::clone(&self.known_relations);
         let expected = ConnectionIdentity {
             profile_id,
             generation,
@@ -480,6 +483,9 @@ impl Runtime {
                             {
                                 None
                             } else {
+                                if let Ok(mut known) = known_relations.lock() {
+                                    known.clear();
+                                }
                                 Some(active.replace(ActiveConnection {
                                     profile_id,
                                     generation,
@@ -540,6 +546,7 @@ impl Runtime {
     fn load_catalog_page(&mut self, request: crate::db::catalog::CatalogRequest) {
         let sender = self.event_sender.clone();
         let connection = Arc::clone(&self.connection);
+        let known_relations = Arc::clone(&self.known_relations);
         self.background_tasks.push(tokio::spawn(async move {
             let key = request.key.clone();
             let database = {
@@ -569,6 +576,21 @@ impl Runtime {
                             message: format!("adapter returned invalid catalog page: {error}"),
                         });
                     } else {
+                        let active =
+                            active_database(Arc::clone(&connection), request.key.connection)
+                                .await
+                                .is_some();
+                        if !active {
+                            return;
+                        }
+                        if let Ok(mut known) = known_relations.lock() {
+                            known.extend(
+                                page.entries
+                                    .iter()
+                                    .filter(|entry| entry.kind.is_relation())
+                                    .map(|entry| (request.key.connection, entry.id.clone())),
+                            );
+                        }
                         let _ = sender.send(Action::CatalogPageLoaded(page));
                     }
                 }
@@ -581,6 +603,82 @@ impl Runtime {
                 }
             }
         }));
+    }
+
+    fn load_relation(&mut self, request: crate::model::relation::RelationRequest) {
+        if request.relation.profile_id != request.connection.profile_id
+            || !request.relation.object_id.kind.is_relation()
+        {
+            let _ = self.event_sender.send(Action::RelationFailed {
+                request,
+                message: "relation request is not owned by the active profile".to_owned(),
+            });
+            return;
+        }
+        let active = self.connection.try_lock().ok().and_then(|guard| {
+            guard.as_ref().map(|active| ConnectionIdentity {
+                profile_id: active.profile_id,
+                generation: active.generation,
+            })
+        }) == Some(request.connection);
+        if !active {
+            let _ = self.event_sender.send(Action::RelationFailed {
+                request,
+                message: "No active database connection".to_owned(),
+            });
+            return;
+        }
+        if !self.known_relations.lock().is_ok_and(|known| {
+            known.contains(&(request.connection, request.relation.object_id.clone()))
+        }) {
+            let _ = self.event_sender.send(Action::RelationFailed {
+                request,
+                message: "relation is not present in the active catalog snapshot".to_owned(),
+            });
+            return;
+        }
+        if self.relation_tasks.contains_key(&request) {
+            return;
+        }
+        let sender = self.event_sender.clone();
+        let connection = Arc::clone(&self.connection);
+        let task_request = request.clone();
+        let task = tokio::spawn(async move {
+            let Some(database) = active_database(connection, task_request.connection).await else {
+                let _ = sender.send(Action::RelationFailed {
+                    request: task_request,
+                    message: "No active database connection".to_owned(),
+                });
+                return;
+            };
+            let result = match task_request.kind {
+                crate::model::relation::RelationRequestKind::Preview => database
+                    .preview_relation(&task_request.relation.object_id)
+                    .await
+                    .map(crate::model::relation::RelationSnapshot::Preview),
+                crate::model::relation::RelationRequestKind::Structure => database
+                    .relation_structure(&task_request.relation.object_id)
+                    .await
+                    .map(|snapshot| {
+                        crate::model::relation::RelationSnapshot::Structure(Box::new(snapshot))
+                    }),
+            };
+            match result {
+                Ok(snapshot) => {
+                    let _ = sender.send(Action::RelationSucceeded {
+                        request: task_request,
+                        snapshot: Box::new(snapshot),
+                    });
+                }
+                Err(error) => {
+                    let _ = sender.send(Action::RelationFailed {
+                        request: task_request,
+                        message: error.to_string(),
+                    });
+                }
+            }
+        });
+        self.relation_tasks.insert(request, task);
     }
 
     fn run_query(
@@ -957,106 +1055,11 @@ impl Runtime {
         reap_finished_manual_worker(&mut self.manual_transactions, tab_id);
     }
 
-    fn preview_table(
-        &mut self,
-        expected: ConnectionIdentity,
-        tab_id: Uuid,
-        generation: u64,
-        schema: String,
-        name: String,
-    ) {
-        let sender = self.event_sender.clone();
-        let connection = Arc::clone(&self.connection);
-        let task = tokio::spawn(async move {
-            let Some(database) = active_database(connection, expected).await else {
-                let _ = sender.send(Action::QueryFailed {
-                    tab_id,
-                    generation,
-                    connection: expected,
-                    message: "No active database connection".to_owned(),
-                });
-                return;
-            };
-            let sql = format!(
-                "SELECT * FROM {}.{} LIMIT 500",
-                database.quote_identifier(&schema),
-                database.quote_identifier(&name)
-            );
-            match database.execute(&sql).await {
-                Ok(outcome) => {
-                    let _ = sender.send(Action::PreviewFinished {
-                        tab_id,
-                        generation,
-                        connection: expected,
-                        sql,
-                        outcome,
-                    });
-                }
-                Err(error) => {
-                    let _ = sender.send(Action::QueryFailed {
-                        tab_id,
-                        generation,
-                        connection: expected,
-                        message: error.to_string(),
-                    });
-                }
-            }
-        });
-        self.query_tasks.insert((tab_id, generation), task);
-    }
-
-    fn load_ddl(
-        &mut self,
-        expected: ConnectionIdentity,
-        tab_id: Uuid,
-        generation: u64,
-        kind: crate::db::catalog::CatalogKind,
-        schema: String,
-        name: String,
-    ) {
-        let sender = self.event_sender.clone();
-        let connection = Arc::clone(&self.connection);
-        let task = tokio::spawn(async move {
-            let Some(database) = active_database(connection, expected).await else {
-                let _ = sender.send(Action::QueryFailed {
-                    tab_id,
-                    generation,
-                    connection: expected,
-                    message: "No active database connection".to_owned(),
-                });
-                return;
-            };
-            match database.object_ddl(kind, &schema, &name).await {
-                Ok(Some(ddl)) => {
-                    let _ = sender.send(Action::DdlLoaded {
-                        tab_id,
-                        generation,
-                        connection: expected,
-                        ddl,
-                    });
-                }
-                Ok(None) => {
-                    let _ = sender.send(Action::QueryFailed {
-                        tab_id,
-                        generation,
-                        connection: expected,
-                        message: "DDL is not available for this object type".to_owned(),
-                    });
-                }
-                Err(error) => {
-                    let _ = sender.send(Action::QueryFailed {
-                        tab_id,
-                        generation,
-                        connection: expected,
-                        message: error.to_string(),
-                    });
-                }
-            }
-        });
-        self.query_tasks.insert((tab_id, generation), task);
-    }
-
     pub async fn shutdown(mut self) {
+        for (_, task) in self.relation_tasks.drain() {
+            task.abort();
+            let _ = task.await;
+        }
         for (_, task) in self.query_tasks.drain() {
             task.abort();
             let _ = task.await;

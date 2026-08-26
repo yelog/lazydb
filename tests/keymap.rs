@@ -132,7 +132,7 @@ fn maps_selected_profile_root_actions_by_stable_id() {
     );
     assert_eq!(
         keymap.map(key(KeyCode::Enter), &app),
-        Some(Action::ExplorerPrimary)
+        Some(Action::ExplorerOpenSelected)
     );
 }
 
@@ -271,11 +271,15 @@ fn maps_explorer_and_result_actions_by_context() {
     );
     assert_eq!(
         keymap.map(key(KeyCode::Char('p')), &app),
-        Some(Action::PreviewSelected)
+        Some(Action::OpenSelectedRelation {
+            view: lazydb::model::relation::RelationView::Data,
+        })
     );
     assert_eq!(
         keymap.map(key(KeyCode::Char('D')), &app),
-        Some(Action::DdlSelected)
+        Some(Action::OpenSelectedRelation {
+            view: lazydb::model::relation::RelationView::Structure,
+        })
     );
     assert_eq!(
         keymap.map(key(KeyCode::Char('r')), &app),
@@ -293,6 +297,54 @@ fn maps_explorer_and_result_actions_by_context() {
     assert_eq!(
         keymap.map(key(KeyCode::Char('o')), &app),
         Some(Action::ToggleResultView)
+    );
+
+    app.tabs.push(lazydb::model::tab::WorkspaceTab::Relation(
+        lazydb::model::relation::RelationTab::new("users"),
+    ));
+    app.active_tab = 1;
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('o')), &app),
+        Some(Action::SetRelationView(
+            lazydb::model::relation::RelationView::Structure
+        ))
+    );
+    app.update(Action::SetRelationView(
+        lazydb::model::relation::RelationView::Structure,
+    ));
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('o')), &app),
+        Some(Action::SetRelationView(
+            lazydb::model::relation::RelationView::Data
+        ))
+    );
+}
+
+#[test]
+fn relation_keys_control_only_the_active_relation_view() {
+    let mut app = App::new(Vec::new());
+    app.tabs.push(lazydb::model::tab::WorkspaceTab::Relation(
+        lazydb::model::relation::RelationTab::new("users"),
+    ));
+    app.active_tab = 1;
+    app.focus = Focus::Results;
+    let mut keymap = Keymap::default();
+
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('p')), &app),
+        Some(Action::SetRelationView(
+            lazydb::model::relation::RelationView::Data
+        ))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('D')), &app),
+        Some(Action::SetRelationView(
+            lazydb::model::relation::RelationView::Structure
+        ))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('r')), &app),
+        Some(Action::RefreshActiveRelation)
     );
 }
 

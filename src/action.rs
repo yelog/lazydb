@@ -4,8 +4,8 @@ use uuid::Uuid;
 use crate::db::{
     ErrorCategory, ServerInfo,
     catalog::{
-        CatalogCapabilities, CatalogDiscovery, CatalogKind, CatalogPage, CatalogRequest,
-        CatalogRequestKey, CatalogTarget,
+        CatalogCapabilities, CatalogDiscovery, CatalogPage, CatalogRequest, CatalogRequestKey,
+        CatalogTarget,
     },
     query::QueryOutcome,
 };
@@ -143,8 +143,23 @@ pub enum Action {
     ClearTransactionOutcome,
     RefreshCatalog,
     ExplorerLoadTarget(CatalogTarget),
+    ExplorerOpenSelected,
+    OpenSelectedRelation {
+        view: crate::model::relation::RelationView,
+    },
+    SetRelationView(crate::model::relation::RelationView),
+    RefreshActiveRelation,
+    CancelActiveRelationRequest,
     PreviewSelected,
     DdlSelected,
+    RelationSucceeded {
+        request: crate::model::relation::RelationRequest,
+        snapshot: Box<crate::model::relation::RelationSnapshot>,
+    },
+    RelationFailed {
+        request: crate::model::relation::RelationRequest,
+        message: String,
+    },
     RequestProfileConnect {
         profile_id: Uuid,
     },
@@ -245,19 +260,6 @@ pub enum Action {
         message: String,
         unknown: bool,
     },
-    PreviewFinished {
-        tab_id: Uuid,
-        generation: u64,
-        connection: ConnectionIdentity,
-        sql: String,
-        outcome: QueryOutcome,
-    },
-    DdlLoaded {
-        tab_id: Uuid,
-        generation: u64,
-        connection: ConnectionIdentity,
-        ddl: String,
-    },
     ExplorerMove(isize),
     ExplorerSelect(ExplorerNodeId),
     ExplorerToggle,
@@ -300,6 +302,9 @@ pub enum Command {
         generation: u64,
     },
     LoadCatalogPage(CatalogRequest),
+    LoadRelationPreview(crate::model::relation::RelationRequest),
+    LoadRelationStructure(crate::model::relation::RelationRequest),
+    CancelRelationRequest(crate::model::relation::RelationRequest),
     RunQuery {
         connection: ConnectionIdentity,
         tab_id: Uuid,
@@ -330,21 +335,6 @@ pub enum Command {
         tab_id: Uuid,
         query_generation: u64,
         transaction_generation: u64,
-    },
-    PreviewTable {
-        connection: ConnectionIdentity,
-        tab_id: Uuid,
-        generation: u64,
-        schema: String,
-        name: String,
-    },
-    LoadDdl {
-        connection: ConnectionIdentity,
-        tab_id: Uuid,
-        generation: u64,
-        kind: CatalogKind,
-        schema: String,
-        name: String,
     },
     CancelQuery {
         tab_id: Uuid,

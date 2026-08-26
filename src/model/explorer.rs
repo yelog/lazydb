@@ -239,11 +239,47 @@ impl CatalogTree {
     }
 
     pub fn owning_relation_id(&self, id: &CatalogId) -> Option<&CatalogId> {
-        let relation_id = self.entries.get(id)?.owning_relation_id()?;
-        self.entries
-            .get(relation_id)
-            .filter(|entry| entry.kind.is_relation())?;
-        Some(relation_id)
+        let entry = self.entries.get(id)?;
+        if entry.id.profile_id() != self.profile_id {
+            return None;
+        }
+        if entry.kind.is_relation() {
+            return Some(&entry.id);
+        }
+        if !entry.kind.is_relation_child() {
+            return None;
+        }
+        let declared_relation = entry.owning_relation_id().cloned();
+        let mut current = id;
+        let mut visited = HashSet::new();
+        loop {
+            if !visited.insert(current.clone()) {
+                return None;
+            }
+            let current_entry = self.entries.get(current)?;
+            if current_entry.kind.is_relation() {
+                return (current_entry.id.profile_id() == self.profile_id
+                    && declared_relation
+                        .as_ref()
+                        .is_none_or(|id| id == &current_entry.id))
+                .then_some(&current_entry.id);
+            }
+            if current_entry.kind == CatalogKind::Schema {
+                let relation_id = declared_relation.as_ref()?;
+                let relation = self.entries.get(relation_id)?;
+                return (relation.kind.is_relation()
+                    && relation.id.profile_id() == self.profile_id)
+                    .then_some(&relation.id);
+            }
+            if !current_entry.kind.is_relation_child() {
+                return None;
+            }
+            let parent = current_entry.parent_id.as_ref()?;
+            if parent.profile_id() != self.profile_id {
+                return None;
+            }
+            current = parent;
+        }
     }
 
     pub fn owning_relation(&self, id: &CatalogId) -> Option<&CatalogEntry> {

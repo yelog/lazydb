@@ -647,7 +647,7 @@ fn normalized_group_retry_permission_and_load_more_rows_select_and_load_precise_
 }
 
 #[test]
-fn preview_and_ddl_use_qualified_names_for_oid_suffixed_native_identity() {
+fn preview_uses_selected_relation_identity_without_opening_relation_tabs() {
     let (mut app, profile) = connected_app();
     let database = install_database(&mut app, &profile);
     let schema = install_schema(&mut app, &profile, &database);
@@ -677,19 +677,12 @@ fn preview_and_ddl_use_qualified_names_for_oid_suffixed_native_identity() {
     )));
     app.explorer.normalized.selected = Some(ExplorerNodeId::Catalog(relation.id));
 
-    let preview = app.update(Action::PreviewSelected);
+    let commands = app.update(Action::PreviewSelected);
     assert!(matches!(
-        preview.as_slice(),
-        [Command::PreviewTable { schema, name, .. }]
-            if schema == "public" && name == "logical_view"
+        commands.as_slice(),
+        [Command::LoadRelationPreview(request)] if request.relation.object_id.native_path == ["app", "public", "logical_view", "42", "native-suffix"]
     ));
-    app.active_tab = 0;
-    let ddl = app.update(Action::DdlSelected);
-    assert!(matches!(
-        ddl.as_slice(),
-        [Command::LoadDdl { schema, name, kind: CatalogKind::MaterializedView, .. }]
-            if schema == "public" && name == "logical_view"
-    ));
+    assert_eq!(app.tabs.len(), 2);
 }
 
 fn connected_app() -> (App, ConnectionProfile) {

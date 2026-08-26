@@ -4,11 +4,13 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 use futures_util::TryStreamExt;
 use sqlx::{
-    AssertSqlSafe, Column, Connection, Either, Row, Sqlite, SqlitePool, TypeInfo, ValueRef,
+    AssertSqlSafe, Column, Connection, Either, Executor, Row, SqlSafeStr, Sqlite, SqlitePool,
+    Statement, TypeInfo, ValueRef,
     pool::PoolConnection,
     sqlite::{SqliteConnectOptions, SqliteConnection, SqlitePoolOptions, SqliteRow},
 };
@@ -16,7 +18,8 @@ use sqlx_core::transaction::TransactionManager;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
 
-use crate::profile::{ConnectionProfile, DatabaseKind};
+use crate::identity::ConnectionIdentity;
+use crate::profile::{CatalogScope, ConnectionProfile, DatabaseKind};
 use crate::security::sanitize_terminal_text;
 
 use super::transaction::{TransactionBackend, TransactionError};
@@ -25,11 +28,12 @@ use super::{
     catalog::{
         CatalogCapabilities, CatalogCount, CatalogCursor, CatalogDiscovery, CatalogEntry,
         CatalogGroupSummary, CatalogId, CatalogKind, CatalogMetadata, CatalogPage, CatalogRequest,
-        CatalogTarget, CatalogValidationError, ColumnMetadata, ColumnMetadataCapabilities,
-        ConstraintMembership, ConstraintMetadata, DiscoveredDatabase, IndexMetadata,
-        NamespaceModel, ObjectGroup, OptionalMetadata, QualifiedName, finalize_keyset_page,
+        CatalogRequestKey, CatalogTarget, CatalogValidationError, ColumnMetadata,
+        ColumnMetadataCapabilities, ConstraintMembership, ConstraintMetadata, Ddl, DdlProvenance,
+        DiscoveredDatabase, IndexMetadata, NamespaceModel, ObjectGroup, OptionalMetadata,
+        QualifiedName, RelationStructure, finalize_keyset_page,
     },
-    query::{ColumnMeta, QueryOutcome, QueryOutcomeAccumulator},
+    query::{ColumnMeta, QueryOutcome, QueryOutcomeAccumulator, RELATION_PREVIEW_LIMIT, ResultSet},
     value::CellValue,
 };
 
@@ -39,6 +43,7 @@ pub struct SqliteAdapter {
     operation_gate: Arc<Semaphore>,
     connection_id: Uuid,
     database: String,
+    catalog_scope: CatalogScope,
     #[cfg(test)]
     page_snapshot_hook: Arc<std::sync::Mutex<Option<PageSnapshotHook>>>,
 }
@@ -170,6 +175,7 @@ impl SqliteAdapter {
                 .database
                 .clone()
                 .unwrap_or_else(|| ":memory:".to_owned()),
+            catalog_scope: profile.catalog_scope.clone(),
             #[cfg(test)]
             page_snapshot_hook: Arc::new(std::sync::Mutex::new(None)),
         })
@@ -207,6 +213,125 @@ impl SqliteAdapter {
 
     pub async fn execute(&self, sql: &str) -> Result<QueryOutcome, DatabaseError> {
         self.execute_pool(sql).await
+    }
+
+    pub async fn preview_relation(
+        &self,
+        relation: &CatalogId,
+    ) -> Result<crate::db::RelationPreview, DatabaseError> {
+        let _permit = self.acquire_operation().await?;
+        let target = CatalogTarget::RelationChildren {
+            relation: relation.clone(),
+        };
+        let mut connection = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|e| DatabaseError::from_sqlx(e, ErrorCategory::Network))?;
+        let (schema, name, _) = self
+            .verified_relation_id(&mut connection, relation, &target)
+            .await?;
+        if !self.catalog_scope.allows_schema(&self.database, &schema) {
+            return Err(catalog_target_not_found(&target));
+        }
+        let sql = format!(
+            "SELECT * FROM {}.{} LIMIT {}",
+            self.quote_identifier(&schema),
+            self.quote_identifier(&name),
+            RELATION_PREVIEW_LIMIT
+        );
+        let started = Instant::now();
+        let statement = connection
+            .prepare(AssertSqlSafe(sql.clone()).into_sql_str())
+            .await
+            .map_err(|e| DatabaseError::from_sqlx(e, ErrorCategory::Sql))?;
+        let columns = statement
+            .columns()
+            .iter()
+            .map(|column| ColumnMeta {
+                name: column.name().to_owned(),
+                type_name: column.type_info().name().to_owned(),
+            })
+            .collect();
+        let rows = statement
+            .query()
+            .fetch_all(&mut *connection)
+            .await
+            .map_err(|e| DatabaseError::from_sqlx(e, ErrorCategory::Sql))?;
+        let result_set = ResultSet {
+            columns,
+            rows: rows.iter().map(decode_row).collect(),
+            affected_rows: 0,
+        };
+        let execution = started.elapsed();
+        Ok(crate::db::RelationPreview {
+            sql,
+            result: QueryOutcome::from_result_set(result_set, execution, Duration::ZERO),
+        })
+    }
+
+    pub async fn relation_structure(
+        &self,
+        relation: &CatalogId,
+    ) -> Result<RelationStructure, DatabaseError> {
+        let target = CatalogTarget::RelationChildren {
+            relation: relation.clone(),
+        };
+        let (schema, name, native_kind) = {
+            let _permit = self.acquire_operation().await?;
+            let mut connection = self
+                .pool
+                .acquire()
+                .await
+                .map_err(|e| DatabaseError::from_sqlx(e, ErrorCategory::Network))?;
+            self.verified_relation_id(&mut connection, relation, &target)
+                .await?
+        };
+        if !self.catalog_scope.allows_schema(&self.database, &schema) {
+            return Err(catalog_target_not_found(&target));
+        }
+        let relation_entry = CatalogEntry::relation(
+            relation.clone(),
+            CatalogId::new(
+                self.connection_id,
+                CatalogKind::Schema,
+                [self.database.clone(), schema.clone()],
+            ),
+            child_qualified_name(&self.database, &schema, &name),
+            native_kind,
+            OptionalMetadata::Unsupported,
+            true,
+        )
+        .map_err(catalog_invariant)?;
+        let request = CatalogRequest {
+            key: CatalogRequestKey {
+                connection: ConnectionIdentity {
+                    profile_id: self.connection_id,
+                    generation: 0,
+                },
+                catalog_epoch: 0,
+                request_id: 0,
+                target,
+                cursor: None,
+            },
+            scope: self.catalog_scope.clone(),
+            page_size: RELATION_PREVIEW_LIMIT,
+        };
+        let children = self.load_catalog_page(&request).await?;
+        let ddl = self.object_ddl(relation.kind, &schema, &name).await?;
+        let provenance = if ddl.is_some() {
+            DdlProvenance::NativeCatalog
+        } else {
+            DdlProvenance::AdapterGenerated
+        };
+        Ok(RelationStructure {
+            relation: relation_entry,
+            children,
+            ddl: Ddl {
+                sql: ddl,
+                provenance,
+            },
+        })
     }
 
     pub(crate) async fn execute_pool(&self, sql: &str) -> Result<QueryOutcome, DatabaseError> {
@@ -622,7 +747,7 @@ impl SqliteAdapter {
         request: &CatalogRequest,
         relation: &CatalogId,
     ) -> Result<CatalogPage, DatabaseError> {
-        let (schema, relation_name) = self
+        let (schema, relation_name, _) = self
             .verified_relation_id(connection, relation, &request.key.target)
             .await?;
         let indexes = if relation.kind == CatalogKind::Table {
@@ -1081,7 +1206,10 @@ impl SqliteAdapter {
         connection: &mut SqliteConnection,
         relation: &CatalogId,
         target: &CatalogTarget,
-    ) -> Result<(String, String), DatabaseError> {
+    ) -> Result<(String, String, &'static str), DatabaseError> {
+        if relation.profile_id() != self.connection_id || !relation.kind.is_relation() {
+            return Err(catalog_target_not_found(target));
+        }
         if relation.kind == CatalogKind::MaterializedView {
             return Err(DatabaseError::unsupported_catalog_target(
                 DatabaseKind::Sqlite,
@@ -1089,9 +1217,7 @@ impl SqliteAdapter {
             ));
         }
         let (schema, relation_name) = match relation.native_path.as_slice() {
-            [database, schema, relation, ..]
-                if database == &self.database && !relation.is_empty() =>
-            {
+            [database, schema, relation] if database == &self.database && !relation.is_empty() => {
                 (schema.as_str(), relation.as_str())
             }
             _ => return Err(catalog_target_not_found(target)),
@@ -1111,15 +1237,15 @@ impl SqliteAdapter {
             .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Sql))?
             .map(|row| row.try_get::<String, _>("type").map_err(decode_error))
             .transpose()?;
-        let expected_kind = match native_type.as_deref() {
-            Some("table") => CatalogKind::Table,
-            Some("view") => CatalogKind::View,
+        let (expected_kind, native_kind) = match native_type.as_deref() {
+            Some("table") => (CatalogKind::Table, "table"),
+            Some("view") => (CatalogKind::View, "view"),
             _ => return Err(catalog_target_not_found(target)),
         };
         if relation.kind != expected_kind {
             return Err(catalog_target_not_found(target));
         }
-        Ok((schema, relation_name.to_owned()))
+        Ok((schema, relation_name.to_owned(), native_kind))
     }
 
     pub async fn object_ddl(

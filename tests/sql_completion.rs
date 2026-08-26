@@ -3,6 +3,7 @@ use lazydb::{
         CatalogEntry, CatalogId, CatalogKind, CatalogMetadata, ColumnMetadata, OptionalMetadata,
         QualifiedName,
     },
+    profile::{CatalogScope, CatalogSelection, DatabaseScope},
     sql::{CompletionIndex, CompletionKind, SqlDialect, complete, quote_identifier},
 };
 use uuid::Uuid;
@@ -169,6 +170,54 @@ fn index_retains_only_completion_relevant_entries() {
             | CatalogKind::Function
             | CatalogKind::Procedure
     )));
+}
+
+#[test]
+fn scoped_index_deduplicates_replaces_removed_entries_and_rejects_out_of_scope_entries() {
+    let entries = fixture();
+    let profile = entries[0].id.profile_id();
+    let scope = CatalogScope {
+        databases: CatalogSelection::Selected(vec![DatabaseScope {
+            name: "app".into(),
+            schemas: CatalogSelection::Selected(vec!["public".into()]),
+        }]),
+    };
+    let mut index = CompletionIndex::default();
+    index.replace_scoped(&entries, &scope);
+    index.append_scoped(&[entries[2].clone(), entries[3].clone()], &scope);
+
+    assert_eq!(
+        index
+            .entries()
+            .iter()
+            .filter(|entry| entry.id == entries[2].id)
+            .count(),
+        1
+    );
+    assert!(index.entries().iter().all(|entry| {
+        entry.qualified_name.database.as_deref() == Some("app")
+            && entry.qualified_name.schema.as_deref() == Some("public")
+    }));
+
+    let other_database = CatalogEntry::relation(
+        CatalogId::new(profile, CatalogKind::Table, ["other", "public", "orders"]),
+        CatalogId::new(profile, CatalogKind::Schema, ["other", "public"]),
+        qualified("other", Some("public"), "orders"),
+        "table",
+        OptionalMetadata::Supported(None),
+        false,
+    )
+    .unwrap();
+    index.append_scoped(&[other_database], &scope);
+    assert!(
+        !index
+            .entries()
+            .iter()
+            .any(|entry| entry.qualified_name.database.as_deref() == Some("other"))
+    );
+
+    index.replace_scoped(&[entries[0].clone()], &scope);
+    assert_eq!(index.entries().len(), 0);
 }
 
 fn qualified(database: &str, schema: Option<&str>, object: &str) -> QualifiedName {

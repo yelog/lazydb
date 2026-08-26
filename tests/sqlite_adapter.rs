@@ -20,6 +20,149 @@ use uuid::Uuid;
 
 const ATTACHED_ALIAS: &str = "ArchiveCase";
 
+#[tokio::test]
+async fn relation_preview_preserves_metadata_limits_quotes_and_rejects_forged_ids() {
+    let imported = import_connection_url("sqlite://:memory:", Some("relation-preview")).unwrap();
+    let profile_id = imported.profile.id;
+    let database = DatabaseConnection::connect(&imported.profile, None)
+        .await
+        .unwrap();
+    database
+        .execute(
+            r#"
+            CREATE TABLE "odd""table" ("odd""column" INTEGER, "payload" TEXT);
+            CREATE TABLE empty (id INTEGER, note TEXT);
+            CREATE TABLE many (id INTEGER);
+            CREATE VIEW "odd""view" AS SELECT "odd""column", "payload" FROM "odd""table";
+            WITH RECURSIVE numbers(value) AS (
+                SELECT 1 UNION ALL SELECT value + 1 FROM numbers WHERE value < 501
+            ) INSERT INTO many SELECT value FROM numbers;
+            "#,
+        )
+        .await
+        .unwrap_or_else(|_| panic!("SQLite test setup must support the requested DDL"));
+
+    let empty = CatalogId::new(
+        profile_id,
+        CatalogKind::Table,
+        [":memory:", "main", "empty"],
+    );
+    let preview = database.preview_relation(&empty).await.unwrap();
+    assert!(preview.sql.contains("LIMIT 500"));
+    assert_eq!(preview.result.stats.row_count, 0);
+    assert_eq!(
+        preview.result.result_sets[0]
+            .columns
+            .iter()
+            .map(|column| (column.name.as_str(), column.type_name.as_str()))
+            .collect::<Vec<_>>(),
+        [("id", "INTEGER"), ("note", "TEXT")]
+    );
+
+    let many = CatalogId::new(profile_id, CatalogKind::Table, [":memory:", "main", "many"]);
+    let many_preview = database.preview_relation(&many).await.unwrap();
+    assert_eq!(many_preview.result.stats.row_count, 500);
+    assert_eq!(many_preview.result.result_sets[0].rows.len(), 500);
+
+    let hostile = CatalogId::new(
+        profile_id,
+        CatalogKind::Table,
+        [":memory:", "main", "odd\"table"],
+    );
+    let hostile_preview = database.preview_relation(&hostile).await.unwrap();
+    assert!(hostile_preview.sql.contains("\"odd\"\"table\""));
+    assert!(hostile_preview.sql.contains("LIMIT 500"));
+
+    let view = CatalogId::new(
+        profile_id,
+        CatalogKind::View,
+        [":memory:", "main", "odd\"view"],
+    );
+    let view_preview = database.preview_relation(&view).await.unwrap();
+    assert_eq!(view_preview.result.stats.row_count, 0);
+
+    for id in [
+        CatalogId::new(
+            Uuid::new_v4(),
+            CatalogKind::Table,
+            [":memory:", "main", "empty"],
+        ),
+        CatalogId::new(
+            profile_id,
+            CatalogKind::Column,
+            [":memory:", "main", "empty", "id"],
+        ),
+        CatalogId::new(
+            profile_id,
+            CatalogKind::Table,
+            [":memory:", "main", "missing"],
+        ),
+    ] {
+        let error = database.preview_relation(&id).await.unwrap_err();
+        assert_eq!(error.category, ErrorCategory::Configuration);
+    }
+    database.close().await;
+}
+
+#[tokio::test]
+async fn relation_structure_preserves_typed_children_and_ddl_provenance() {
+    let imported = import_connection_url("sqlite://:memory:", Some("relation-structure")).unwrap();
+    let profile_id = imported.profile.id;
+    let database = DatabaseConnection::connect(&imported.profile, None)
+        .await
+        .unwrap();
+    database
+        .execute("CREATE TABLE records (id INTEGER PRIMARY KEY, label TEXT NOT NULL DEFAULT 'x');")
+        .await
+        .unwrap();
+    let relation = CatalogId::new(
+        profile_id,
+        CatalogKind::Table,
+        [":memory:", "main", "records"],
+    );
+    let structure = database.relation_structure(&relation).await.unwrap();
+    assert_eq!(structure.relation.id, relation);
+    assert!(structure.children.entries.iter().any(|entry| {
+        entry.kind == CatalogKind::Column && matches!(entry.metadata, CatalogMetadata::Column(_))
+    }));
+    assert!(
+        structure
+            .ddl
+            .sql
+            .as_deref()
+            .unwrap()
+            .contains("CREATE TABLE records")
+    );
+    assert_eq!(
+        structure.ddl.provenance,
+        lazydb::db::catalog::DdlProvenance::NativeCatalog
+    );
+    assert_eq!(structure.relation.native_kind, "table");
+    database.close().await;
+}
+
+#[tokio::test]
+async fn relation_structure_rejects_excluded_scope_before_loading_children_or_ddl() {
+    let imported = import_connection_url("sqlite://:memory:", Some("relation-scope")).unwrap();
+    let profile_id = imported.profile.id;
+    let mut profile = imported.profile;
+    profile.catalog_scope = selected_scope(":memory:", &["other"]);
+    let database = DatabaseConnection::connect(&profile, None).await.unwrap();
+    database
+        .execute("CREATE TABLE records (id INTEGER);")
+        .await
+        .unwrap();
+
+    let relation = CatalogId::new(
+        profile_id,
+        CatalogKind::Table,
+        [":memory:", "main", "records"],
+    );
+    let error = database.relation_structure(&relation).await.unwrap_err();
+    assert_eq!(error.category, ErrorCategory::Configuration);
+    database.close().await;
+}
+
 struct CatalogFixture {
     _temp: TempDir,
     database: DatabaseConnection,

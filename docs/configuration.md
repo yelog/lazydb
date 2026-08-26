@@ -12,13 +12,19 @@ migration; M0 treats it as the connection-profile file.
 ## Startup Selection
 
 If the profile file is empty, LazyDB opens a new Profile Manager form instead of
-creating an implicit connection. `--profile NAME` selects a saved profile by
-name. `--url URL` creates an ad-hoc profile for the current process and takes
-precedence over `--profile`; it is never persisted.
+creating an implicit connection. The Explorer contains a `No profiles` row
+(`EmptyProfiles`) whose primary action starts that form. There is no profile-list
+popup. `--profile NAME` selects a saved profile by name at startup. `--url URL`
+creates an ad-hoc session profile for the current process and takes precedence
+over `--profile`; it is never persisted.
 
-`Space c` opens the manager while LazyDB is running. `Test Connection` does not
-save metadata or change the active connection. `Save` persists the profile, and
-`Save & Connect` persists it and activates the new pool.
+`Space c` opens the manager while LazyDB is running. The Explorer keeps roots by
+profile UUID and labels them `SAVED` or `SESSION`, with `OFFLINE`, `LINKING`,
+`ONLINE`, `SYNCING`, or `FAILED` status. Refresh, expand, retry, and relation
+actions target the selected UUID. `Test Connection` does not save metadata or
+change the active connection; it probes and discovers databases/schemas for the
+draft's scope picker. `Save` persists the profile, and `Save & Connect` persists
+it and activates the new pool.
 
 ## Ad-hoc Connections
 
@@ -42,7 +48,7 @@ URL passwords because process arguments can be inspected by other local users.
 Profiles are versioned TOML and contain no password field:
 
 ```toml
-version = 1
+version = 2
 
 [[profiles]]
 id = "1c73c7c0-f944-4adc-a73a-1265fe1260a9"
@@ -57,8 +63,7 @@ ssl_mode = "require"
 secret_ref = "keyring:dev.lazydb.lazydb/1c73c7c0-f944-4adc-a73a-1265fe1260a9"
 read_only = false
 environment = "development"
-include_databases = []
-include_schemas = []
+catalog_scope = { databases = { mode = "selected", items = [{ name = "app", schemas = { mode = "selected", items = ["public"] } }] } }
 ```
 
 `secret_ref` points to the native keyring service `dev.lazydb.lazydb` and account
@@ -68,9 +73,15 @@ native store is unavailable, LazyDB falls back to a session-only password and
 shows a warning. Delete removes the entry; manually edited or orphaned files
 may require manual keyring cleanup.
 
-An empty `include_databases` or `include_schemas` means all visible objects. TLS
-mode maps to native driver modes. `verify-full`/`verify-identity` is recommended
-for remote production connections.
+The current profile serializer stores scope under `catalog_scope`, with
+`databases` and `schemas` represented as `All` or `Selected` lists. PostgreSQL
+and SQLite expose database then schema rows. MySQL treats each selected database
+as its own schema and mirrors that name in the picker; the mirrored schema
+cannot be toggled separately. If discovery is stale or unavailable, saved
+selections remain visible with a warning.
+
+TLS mode maps to native driver modes. `verify-full`/`verify-identity` is
+recommended for remote production connections.
 
 ## Read-only
 

@@ -20,11 +20,12 @@ pub struct AppLayout {
     pub editor: Option<Rect>,
     pub result_tabs: Option<Rect>,
     pub results: Option<Rect>,
+    pub relation: Option<Rect>,
     pub footer: Rect,
 }
 
 impl AppLayout {
-    pub fn calculate(area: Rect, focus: Focus) -> Self {
+    pub fn calculate(area: Rect, focus: Focus, is_relation: bool) -> Self {
         if area.width < 56 || area.height < 16 {
             return Self {
                 mode: LayoutMode::TooSmall,
@@ -35,6 +36,7 @@ impl AppLayout {
                 editor: None,
                 result_tabs: None,
                 results: None,
+                relation: None,
                 footer: Rect::default(),
             };
         }
@@ -64,6 +66,7 @@ impl AppLayout {
                     editor: None,
                     result_tabs: None,
                     results: None,
+                    relation: None,
                     footer,
                 },
                 Focus::Editor => Self {
@@ -75,9 +78,24 @@ impl AppLayout {
                     editor: Some(body),
                     result_tabs: None,
                     results: None,
+                    relation: is_relation.then_some(body),
                     footer,
                 },
                 Focus::Results => {
+                    if is_relation {
+                        return Self {
+                            mode: LayoutMode::Focus,
+                            header,
+                            tabs,
+                            body,
+                            explorer: None,
+                            editor: None,
+                            result_tabs: None,
+                            results: None,
+                            relation: Some(body),
+                            footer,
+                        };
+                    }
                     let result = split_results(body);
                     Self {
                         mode: LayoutMode::Focus,
@@ -88,6 +106,7 @@ impl AppLayout {
                         editor: None,
                         result_tabs: Some(result.0),
                         results: Some(result.1),
+                        relation: None,
                         footer,
                     }
                 }
@@ -121,6 +140,7 @@ impl AppLayout {
             editor: Some(main[0]),
             result_tabs: Some(main[1]),
             results: Some(main[2]),
+            relation: is_relation.then_some(horizontal[1]),
             footer,
         }
     }

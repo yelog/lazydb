@@ -14,6 +14,7 @@ use lazydb::{
     },
     model::{
         explorer::{ExplorerConnectionStatus, ExplorerNodeId},
+        relation::{RelationKey, RelationRequest, RelationRequestKind},
         workspace::{ConnectionIdentity, ConnectionStatus, QueryStatus},
     },
     persistence::{
@@ -539,28 +540,34 @@ async fn successful_switch_installs_the_new_database_and_rejects_stale_commands(
         next_action(&mut receiver).await,
         Action::QueryFailed { .. }
     ));
-    runtime.dispatch(Command::PreviewTable {
-        connection: first_identity,
+    let relation_request = RelationRequest {
         tab_id: Uuid::new_v4(),
-        generation: 1,
-        schema: "main".into(),
-        name: "marker".into(),
-    });
+        tab_generation: 0,
+        request_id: 1,
+        connection: first_identity,
+        relation: RelationKey {
+            profile_id: first_id,
+            object_id: lazydb::db::catalog::CatalogId::new(
+                first_id,
+                CatalogKind::Table,
+                ["first", "main", "marker"],
+            ),
+        },
+        kind: RelationRequestKind::Preview,
+        scope: first.catalog_scope.clone(),
+    };
+    runtime.dispatch(Command::LoadRelationPreview(relation_request.clone()));
     assert!(matches!(
         next_action(&mut receiver).await,
-        Action::QueryFailed { .. }
+        Action::RelationFailed { .. }
     ));
-    runtime.dispatch(Command::LoadDdl {
-        connection: first_identity,
-        tab_id: Uuid::new_v4(),
-        generation: 1,
-        kind: CatalogKind::Table,
-        schema: "main".into(),
-        name: "marker".into(),
-    });
+    runtime.dispatch(Command::LoadRelationStructure(RelationRequest {
+        kind: RelationRequestKind::Structure,
+        ..relation_request
+    }));
     assert!(matches!(
         next_action(&mut receiver).await,
-        Action::QueryFailed { .. }
+        Action::RelationFailed { .. }
     ));
     runtime.dispatch(Command::LoadCatalogPage(catalog_request(first_identity)));
     assert!(matches!(

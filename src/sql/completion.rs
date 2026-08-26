@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use uuid::Uuid;
 
 use crate::db::catalog::{CatalogEntry, CatalogId, CatalogKind, CatalogMetadata};
+use crate::profile::CatalogScope;
 
 use super::{SqlDialect, TextRange};
 
@@ -56,21 +57,25 @@ impl CompletionIndex {
     }
 
     pub fn replace(&mut self, entries: &[CatalogEntry]) {
-        self.entries = entries
-            .iter()
-            .filter(|entry| completion_kind(entry.kind).is_some())
-            .cloned()
-            .collect();
+        self.entries = accepted_entries(entries, None);
         self.rebuild();
     }
 
     pub fn append(&mut self, entries: &[CatalogEntry]) {
-        self.entries.extend(
-            entries
-                .iter()
-                .filter(|entry| completion_kind(entry.kind).is_some())
-                .cloned(),
-        );
+        self.entries.extend(accepted_entries(entries, None));
+        self.deduplicate();
+        self.rebuild();
+    }
+
+    pub fn replace_scoped(&mut self, entries: &[CatalogEntry], scope: &CatalogScope) {
+        self.entries = accepted_entries(entries, Some(scope));
+        self.rebuild();
+    }
+
+    pub fn append_scoped(&mut self, entries: &[CatalogEntry], scope: &CatalogScope) {
+        self.entries.retain(|entry| entry_in_scope(entry, scope));
+        self.entries.extend(accepted_entries(entries, Some(scope)));
+        self.deduplicate();
         self.rebuild();
     }
 
@@ -93,6 +98,33 @@ impl CompletionIndex {
                     .push(position);
             }
         }
+    }
+
+    fn deduplicate(&mut self) {
+        let mut seen = std::collections::HashSet::with_capacity(self.entries.len());
+        self.entries.retain(|entry| seen.insert(entry.id.clone()));
+    }
+}
+
+fn accepted_entries(entries: &[CatalogEntry], scope: Option<&CatalogScope>) -> Vec<CatalogEntry> {
+    let mut seen = std::collections::HashSet::with_capacity(entries.len());
+    entries
+        .iter()
+        .filter(|entry| completion_kind(entry.kind).is_some())
+        .filter(|entry| scope.is_none_or(|scope| entry_in_scope(entry, scope)))
+        .filter(|entry| seen.insert(entry.id.clone()))
+        .cloned()
+        .collect()
+}
+
+fn entry_in_scope(entry: &CatalogEntry, scope: &CatalogScope) -> bool {
+    match (
+        entry.qualified_name.database.as_deref(),
+        entry.qualified_name.schema.as_deref(),
+    ) {
+        (Some(database), Some(schema)) => scope.allows_schema(database, schema),
+        (Some(database), None) => scope.allows_database(database),
+        (None, _) => false,
     }
 }
 

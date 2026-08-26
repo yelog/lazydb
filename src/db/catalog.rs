@@ -369,6 +369,26 @@ pub struct CatalogEntry {
     pub relation_id: Option<CatalogId>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DdlProvenance {
+    NativeCatalog,
+    AdapterGenerated,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Ddl {
+    pub sql: Option<String>,
+    pub provenance: DdlProvenance,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RelationStructure {
+    pub relation: CatalogEntry,
+    pub children: CatalogPage,
+    pub ddl: Ddl,
+}
+
 #[derive(Default)]
 struct CatalogEntryShape {
     parent_id: Option<CatalogId>,

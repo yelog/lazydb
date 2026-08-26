@@ -141,7 +141,12 @@ impl Keymap {
                     None
                 }
                 KeyCode::Char('c') => {
-                    if app.active_console_opt().is_some_and(|tab| {
+                    if matches!(
+                        app.tabs.get(app.active_tab),
+                        Some(crate::model::tab::WorkspaceTab::Relation(_))
+                    ) {
+                        Some(Action::CancelActiveRelationRequest)
+                    } else if app.active_console_opt().is_some_and(|tab| {
                         tab.query_status == crate::model::workspace::QueryStatus::Running
                     }) {
                         Some(Action::CancelActiveQuery)
@@ -203,10 +208,20 @@ impl Keymap {
             _ => {}
         }
 
+        let relation_tab = matches!(
+            app.tabs.get(app.active_tab),
+            Some(crate::model::tab::WorkspaceTab::Relation(_))
+        );
+        if relation_tab && matches!(event.code, KeyCode::Char('o' | 'p' | 'D' | 'r')) {
+            return map_relation(event.code, app);
+        }
+        if relation_tab && app.focus == Focus::Results {
+            return map_relation(event.code, app);
+        }
         match app.focus {
             Focus::Explorer => map_explorer(event.code, app),
             Focus::Editor => None,
-            Focus::Results => map_results(event.code),
+            Focus::Results => map_results(event.code, app),
         }
     }
 
@@ -434,17 +449,21 @@ fn map_explorer(code: KeyCode, app: &App) -> Option<Action> {
         KeyCode::Char('k') | KeyCode::Up => Some(Action::ExplorerMove(-1)),
         KeyCode::Char('l') | KeyCode::Right => Some(Action::ExplorerExpand),
         KeyCode::Char('h') | KeyCode::Left => Some(Action::ExplorerCollapse),
-        KeyCode::Enter => Some(Action::ExplorerPrimary),
+        KeyCode::Enter | KeyCode::Char('o') => Some(Action::ExplorerOpenSelected),
         KeyCode::Char('r') => Some(Action::ExplorerRefresh),
-        KeyCode::Char('p') => Some(Action::PreviewSelected),
-        KeyCode::Char('D') => Some(Action::DdlSelected),
+        KeyCode::Char('p') => Some(Action::OpenSelectedRelation {
+            view: crate::model::relation::RelationView::Data,
+        }),
+        KeyCode::Char('D') => Some(Action::OpenSelectedRelation {
+            view: crate::model::relation::RelationView::Structure,
+        }),
         KeyCode::Home => Some(Action::ExplorerMove(isize::MIN)),
         KeyCode::End => Some(Action::ExplorerMove(isize::MAX)),
         _ => None,
     }
 }
 
-fn map_results(code: KeyCode) -> Option<Action> {
+fn map_results(code: KeyCode, app: &App) -> Option<Action> {
     match code {
         KeyCode::Char('h') | KeyCode::Left => Some(Action::GridMove {
             rows: 0,
@@ -462,7 +481,33 @@ fn map_results(code: KeyCode) -> Option<Action> {
             rows: 0,
             columns: 1,
         }),
-        KeyCode::Char('o') => Some(Action::ToggleResultView),
+        KeyCode::Char('o') => match app.tabs.get(app.active_tab) {
+            Some(crate::model::tab::WorkspaceTab::Relation(tab)) => {
+                Some(Action::SetRelationView(match tab.view {
+                    crate::model::relation::RelationView::Data => {
+                        crate::model::relation::RelationView::Structure
+                    }
+                    crate::model::relation::RelationView::Structure => {
+                        crate::model::relation::RelationView::Data
+                    }
+                }))
+            }
+            _ => Some(Action::ToggleResultView),
+        },
         _ => None,
+    }
+}
+
+fn map_relation(code: KeyCode, app: &App) -> Option<Action> {
+    match code {
+        KeyCode::Char('o') => map_results(code, app),
+        KeyCode::Char('p') => Some(Action::SetRelationView(
+            crate::model::relation::RelationView::Data,
+        )),
+        KeyCode::Char('D') => Some(Action::SetRelationView(
+            crate::model::relation::RelationView::Structure,
+        )),
+        KeyCode::Char('r') => Some(Action::RefreshActiveRelation),
+        _ => map_results(code, app),
     }
 }

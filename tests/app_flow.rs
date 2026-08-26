@@ -39,6 +39,7 @@ async fn connects_loads_catalog_and_executes_through_runtime() {
     let profile = imported.profile;
     let profile_id = profile.id;
     let mut app = App::new(vec![profile.clone()]);
+    let tab_id = app.active_console().id;
     let (events, mut receiver) = mpsc::unbounded_channel();
     let mut runtime = Runtime::new(
         vec![profile],
@@ -87,6 +88,7 @@ async fn connects_loads_catalog_and_executes_through_runtime() {
         .unwrap();
     dispatch(&mut app, &mut runtime, action);
 
+    let original_sql = app.active_editor_text().unwrap();
     let outcome = app.active_console().outcome.as_ref().unwrap();
     assert_eq!(outcome.stats.row_count, 1);
     assert_eq!(
@@ -115,33 +117,36 @@ async fn connects_loads_catalog_and_executes_through_runtime() {
         .unwrap()
         .unwrap();
     dispatch(&mut app, &mut runtime, action);
-    assert_eq!(app.active_console().name, "users data");
-    assert!(app.active_editor_text().unwrap().contains("LIMIT 500"));
-    assert_eq!(
-        app.active_console()
-            .outcome
-            .as_ref()
-            .unwrap()
-            .stats
-            .row_count,
-        1
-    );
+    assert!(matches!(
+        app.tabs[app.active_tab],
+        lazydb::model::tab::WorkspaceTab::Relation(lazydb::model::relation::RelationTab {
+            data: lazydb::model::relation::RelationLoad::Ready(_),
+            ..
+        })
+    ));
 
-    dispatch(&mut app, &mut runtime, Action::DdlSelected);
+    dispatch(
+        &mut app,
+        &mut runtime,
+        Action::SetRelationView(lazydb::model::relation::RelationView::Structure),
+    );
     let action = timeout(Duration::from_secs(3), receiver.recv())
         .await
         .unwrap()
         .unwrap();
     dispatch(&mut app, &mut runtime, action);
-    assert_eq!(app.active_console().name, "users DDL");
-    assert!(
-        app.active_editor_text()
-            .unwrap()
-            .contains("CREATE TABLE users")
-    );
+    assert!(matches!(
+        app.tabs[app.active_tab],
+        lazydb::model::tab::WorkspaceTab::Relation(lazydb::model::relation::RelationTab {
+            structure: lazydb::model::relation::RelationLoad::Ready(_),
+            ..
+        })
+    ));
+    assert_eq!(app.tabs.len(), 2);
+    assert_eq!(app.editor_text(tab_id).unwrap(), original_sql);
 
     app.update(Action::NewConsole);
-    assert_eq!(app.tabs.len(), 4);
+    assert_eq!(app.tabs.len(), 3);
     runtime.shutdown().await;
 }
 

@@ -43,6 +43,9 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                 HitTarget::ResultCell { row, column } => Some(Action::GridSelect { row, column }),
                 HitTarget::Help => Some(Action::ShowHelp),
                 HitTarget::ToggleResultView => Some(Action::ToggleResultView),
+                HitTarget::RelationView(view) => Some(Action::SetRelationView(view)),
+                HitTarget::RelationRetry => Some(Action::RefreshActiveRelation),
+                HitTarget::RelationCancel => Some(Action::CancelActiveRelationRequest),
                 HitTarget::HeaderProfile => app.connection.profile_id.map_or(
                     Some(Action::Focus(Focus::Explorer)),
                     |profile_id| {
@@ -119,7 +122,11 @@ fn focus_at(ui: &UiState, column: u16, row: u16) -> Option<Focus> {
     match ui.target_at(column, row)? {
         HitTarget::Focus(focus) => Some(*focus),
         HitTarget::ExplorerRow(_) => Some(Focus::Explorer),
-        HitTarget::ResultCell { .. } | HitTarget::ToggleResultView => Some(Focus::Results),
+        HitTarget::ResultCell { .. }
+        | HitTarget::ToggleResultView
+        | HitTarget::RelationView(_)
+        | HitTarget::RelationRetry => Some(Focus::Results),
+        HitTarget::RelationCancel => Some(Focus::Results),
         HitTarget::Tab(_)
         | HitTarget::Help
         | HitTarget::HeaderProfile

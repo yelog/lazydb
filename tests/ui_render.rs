@@ -17,7 +17,9 @@ use lazydb::{
     model::{
         explorer::{CatalogGroupState, ExplorerLoadState, ExplorerNodeId, ExplorerOwnerId},
         profile_manager::{ProfileField, ProfileManagerPage, ProfileOperation},
+        relation::RelationTab,
         tab::CompletionPopup,
+        tab::WorkspaceTab,
         workspace::{ConnectionStatus, Focus},
     },
     persistence::secrets::keyring_ref,
@@ -248,6 +250,94 @@ fn explorer_hostile_metadata_is_sanitized_and_name_type_stay_first() {
         assert!(!output.contains('\x1b'));
         assert!(output.contains("safe<ESC>[31m-name"));
         assert!(output.contains("db<ESC>[31m"));
+    }
+}
+
+#[test]
+fn relation_hostile_title_is_sanitized_in_placeholder() {
+    let mut app = App::new(Vec::new());
+    let raw_title = "users\x1b[31m\x07";
+    app.tabs
+        .push(WorkspaceTab::Relation(RelationTab::new(raw_title)));
+    app.active_tab = 1;
+    app.focus = Focus::Results;
+    assert_eq!(app.tabs[1].title(), raw_title);
+
+    let output = render(&app, 80, 24);
+
+    assert!(!output.contains('\x1b'));
+    assert!(output.contains("users<ESC>[31m<0x07>"));
+}
+
+#[test]
+fn relation_title_is_bounded_in_workspace_tab_bar() {
+    let mut app = App::new(Vec::new());
+    app.tabs
+        .push(WorkspaceTab::Relation(RelationTab::new(format!(
+            "{}END",
+            "x".repeat(200)
+        ))));
+    app.active_tab = 1;
+    let output = render(&app, 120, 36);
+    assert!(!output.contains(&"x".repeat(200)));
+    assert!(output.contains(&"x".repeat(48)));
+}
+
+#[test]
+fn relation_loading_with_previous_snapshot_keeps_data_visible_and_exposes_cancel() {
+    let mut app = fixture();
+    let mut relation = RelationTab::new("users");
+    relation.data = lazydb::model::relation::RelationLoad::Loading {
+        request: lazydb::model::relation::RelationRequest {
+            tab_id: relation.id,
+            tab_generation: relation.generation,
+            request_id: 1,
+            connection: lazydb::identity::ConnectionIdentity {
+                profile_id: uuid::Uuid::nil(),
+                generation: 0,
+            },
+            relation: relation.descriptor.key.clone(),
+            kind: lazydb::model::relation::RelationRequestKind::Preview,
+            scope: lazydb::profile::CatalogScope::for_profile(DatabaseKind::Sqlite, "db", None),
+        },
+        previous: Some(lazydb::model::relation::OwnedSnapshot::new(
+            lazydb::db::RelationPreview {
+                sql: "SELECT previous".into(),
+                result: app.active_console().outcome.clone().unwrap(),
+            },
+            lazydb::identity::ConnectionIdentity {
+                profile_id: uuid::Uuid::nil(),
+                generation: 0,
+            },
+            lazydb::profile::CatalogScope::for_profile(DatabaseKind::Sqlite, "db", None),
+        )),
+    };
+    app.tabs.push(WorkspaceTab::Relation(relation));
+    app.active_tab = 1;
+    let output = render(&app, 120, 36);
+    assert!(output.contains("RELATION DATA"), "{output}");
+    assert!(output.contains("Refreshing"), "{output}");
+}
+
+#[test]
+fn relation_page_renders_data_structure_selectors_and_relation_layout() {
+    let mut app = App::new(Vec::new());
+    app.tabs
+        .push(WorkspaceTab::Relation(RelationTab::new("users")));
+    app.active_tab = 1;
+    app.focus = Focus::Results;
+
+    for (width, height) in [(80, 24), (120, 36), (180, 50)] {
+        let (output, state) = render_with_state(&app, width, height);
+        assert!(output.contains("DATA"), "{width}x{height}: {output}");
+        assert!(output.contains("STRUCTURE"), "{width}x{height}: {output}");
+        if width >= 100 {
+            assert!(output.contains("EXPLORER"), "{width}x{height}: {output}");
+        }
+        assert!(state.hit_regions.iter().any(|region| region.target
+            == HitTarget::RelationView(lazydb::model::relation::RelationView::Data)));
+        assert!(state.hit_regions.iter().any(|region| region.target
+            == HitTarget::RelationView(lazydb::model::relation::RelationView::Structure)));
     }
 }
 

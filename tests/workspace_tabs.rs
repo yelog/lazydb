@@ -44,6 +44,24 @@ fn mixed_tabs_cycle_and_activate_without_sql_assumptions() {
 }
 
 #[test]
+fn cycling_relation_tabs_normalizes_editor_focus() {
+    let mut app = App::new(Vec::new());
+    app.tabs
+        .push(WorkspaceTab::Relation(RelationTab::new("users")));
+    app.focus = Focus::Editor;
+
+    app.update(Action::NextTab);
+
+    assert_eq!(app.active_tab, 1);
+    assert_eq!(app.focus, Focus::Results);
+
+    app.focus = Focus::Editor;
+    app.update(Action::PreviousTab);
+    assert_eq!(app.active_tab, 0);
+    assert_eq!(app.focus, Focus::Editor);
+}
+
+#[test]
 fn closing_relation_tab_bypasses_transaction_exit() {
     let mut app = App::new(Vec::new());
     app.tabs

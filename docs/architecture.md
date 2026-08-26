@@ -31,6 +31,14 @@ connection generation prevents a late connection result from replacing a newer
 connection. Each console has its own generation so a cancelled or old query
 cannot overwrite a newer run.
 
+The Explorer is a normalized, UUID-keyed tree. Its top-level roots are ordered
+saved or session profiles, and each root carries provenance and connection
+status. `EmptyProfiles` is a real empty-state node, not a popup; its action
+starts a new profile draft. Catalog requests identify connection, catalog epoch,
+request id, target, cursor, and scope. Pages are loaded lazily, validated before
+mutation, and stale or mismatched results are discarded. A failed refresh
+preserves the previous tree as stale where possible.
+
 The editor is an App-owned `EditorWorkspace` keyed by console UUID. Modalkit
 types stay behind that boundary; actions and UI consume LazyDB-owned editor
 snapshots, effects, selections, and UTF-8 byte ranges. SQL scope, risk,
@@ -47,11 +55,35 @@ blocking tasks; references use `keyring:dev.lazydb.lazydb/<profile-uuid>`.
 `App` applies profile state only after matching runtime completion actions, so a
 failed save or switch can compensate without exposing a password.
 
+The Profile Manager owns one draft form. `Test Connection` uses a temporary
+connection, probes it, and performs read-only database/schema discovery for the
+hierarchical scope picker without persistence or active-connection mutation.
+Scope is `All` or `Selected`; MySQL's database-is-schema namespace is represented
+as a mirrored, non-toggleable schema row. Discovery is fingerprinted by the
+connection fields and credential revision; edits make a previous discovery
+stale and late test results are ignored.
+
 ## Database Boundary
 
 `DatabaseConnection` dispatches to concrete `PostgresAdapter`, `MySqlAdapter`, or
 `SqliteAdapter`. This is intentionally not SQLx `AnyPool`: native catalog, type,
 SSL, DDL, cancellation, and transaction behavior must remain visible.
+
+Catalog requests use bounded keyset pages (maximum page size 500), with separate
+targets for databases, schemas, groups, objects, and relation children. The
+PostgreSQL adapter requires server version 12 or newer; the Oracle MySQL catalog
+adapter requires 8.0.13 or newer and rejects MariaDB for this contract. SQLite
+supports metadata from native schema tables and loads each page inside a
+transaction that is rolled back afterward. SQLite deliberately uses a single
+physical pool connection, and catalog operations do not write database state.
+
+Relation tabs are workspace tabs distinct from SQL consoles. Their Data and
+Structure loads retain owned snapshots attributed to connection identity,
+profile UUID, and catalog scope. Data previews are adapter-owned `SELECT * ...
+LIMIT 500` requests and keep column metadata when there are zero rows. Relation
+responses must match tab UUID, tab generation, request id, relation key, scope,
+and active connection. Snapshot provenance is Live, OfflineSnapshot,
+ProfileDeletedSnapshot, or OutOfScopeSnapshot.
 
 Dynamic user SQL consumes SQLx `raw_sql().fetch_many()` so statement result
 markers are retained. Each adapter decodes its concrete row type into owned
@@ -71,6 +103,11 @@ unchanged when sent to the database. Completion labels/details and prompt text
 are sanitized only for display; their raw insertion/request values remain
 separate.
 
+Workspace tabs are heterogeneous: SQL consoles and relation tabs share identity,
+titles, and tab navigation but not behavior. Activating a relation tab moves
+focus to Results; SQL-only editor, transaction, execution, and completion
+actions are no-ops there. Relation focus cycles between Explorer and Results.
+
 ## Transaction Boundary
 
 AUTO queries use the active pool and are tagged with `ConnectionIdentity`.
@@ -81,6 +118,14 @@ An armed guard detaches and backend-closes uncertain sessions. PostgreSQL and
 MySQL use database-native cancellation metadata; SQLite uses a progress handler
 and awaited connection close. Commit/rollback acknowledgement loss is represented
 as `OutcomeUnknown` and is never retried automatically.
+
+Completion is an in-memory index populated from accepted catalog entries and
+updated as lazy pages arrive. It filters to the active catalog scope,
+deduplicates stable IDs, and replaces entries when the connection/catalog is
+reset. Scheduled completion work carries console UUID, document revision,
+connection identity, and catalog generation as one stale-check key. Typing,
+switching connections, or refreshing the catalog therefore invalidates old
+results; completion performs no database I/O while typing.
 
 ## Neovim Boundary
 

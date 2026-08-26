@@ -15,18 +15,18 @@ pub enum DatabaseKind {
     Sqlite,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct CatalogScope {
     pub databases: CatalogSelection<DatabaseScope>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct DatabaseScope {
     pub name: String,
     pub schemas: CatalogSelection<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(tag = "mode", content = "items", rename_all = "snake_case")]
 pub enum CatalogSelection<T> {
     All,

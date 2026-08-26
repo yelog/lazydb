@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use super::value::CellValue;
 
+pub const RELATION_PREVIEW_LIMIT: usize = 500;
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ColumnMeta {
     pub name: String,
@@ -42,6 +44,20 @@ impl QueryStats {
 pub struct QueryOutcome {
     pub result_sets: Vec<ResultSet>,
     pub stats: QueryStats,
+}
+
+impl QueryOutcome {
+    pub(crate) fn from_result_set(
+        result_set: ResultSet,
+        execution: Duration,
+        fetch: Duration,
+    ) -> Self {
+        let row_count = result_set.rows.len();
+        Self {
+            result_sets: vec![result_set],
+            stats: QueryStats::new(execution, fetch, row_count),
+        }
+    }
 }
 
 /// Collects SQLx stream events without knowing which database produced them.

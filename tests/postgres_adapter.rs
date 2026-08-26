@@ -146,6 +146,72 @@ async fn connects_and_decodes_common_postgres_values_when_configured() {
     database.close().await;
 }
 
+#[tokio::test]
+async fn materialized_view_structure_reports_truthful_ddl_and_native_kind_when_configured() {
+    let Ok(url) = std::env::var("LAZYDB_TEST_POSTGRES_URL") else {
+        return;
+    };
+    let imported = import_connection_url(&url, Some("postgres-materialized-view")).unwrap();
+    let profile_id = imported.profile.id;
+    let database =
+        DatabaseConnection::connect(&imported.profile, imported.transient_password.as_ref())
+            .await
+            .unwrap();
+    let database_name = database.probe().await.unwrap().database;
+    let schema = format!("lazydb_mv_{}", Uuid::new_v4().simple());
+    let name = "materialized_view";
+    let qualified_schema = postgres::quote_identifier(&schema);
+    database
+        .execute(&format!(
+            "CREATE SCHEMA {qualified_schema}; CREATE TABLE {qualified_schema}.source (id integer); CREATE MATERIALIZED VIEW {qualified_schema}.{name} AS SELECT id FROM {qualified_schema}.source;"
+        ))
+        .await
+        .unwrap();
+    let oid = match database
+        .execute(&format!(
+            "SELECT oid::bigint FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = '{schema}' AND c.relname = '{name}'"
+        ))
+        .await
+        .unwrap()
+        .result_sets
+        .last()
+        .unwrap()
+        .rows[0][0]
+        .clone()
+    {
+        CellValue::Integer(oid) => oid,
+        value => panic!("unexpected materialized view oid: {value:?}"),
+    };
+    let relation = CatalogId::new(
+        profile_id,
+        CatalogKind::MaterializedView,
+        [
+            database_name.clone(),
+            schema.clone(),
+            name.to_owned(),
+            oid.to_string(),
+        ],
+    );
+    let mut profile = imported.profile;
+    profile.catalog_scope = selected_scope(&database_name, &[&schema]);
+    database.close().await;
+    let database = DatabaseConnection::connect(&profile, imported.transient_password.as_ref())
+        .await
+        .unwrap();
+    let structure = database.relation_structure(&relation).await.unwrap();
+    assert_eq!(structure.relation.native_kind, "materialized_view");
+    assert_eq!(
+        structure.ddl.provenance,
+        lazydb::db::catalog::DdlProvenance::AdapterGenerated
+    );
+    assert!(structure.ddl.sql.is_none());
+    database
+        .execute(&format!("DROP MATERIALIZED VIEW {qualified_schema}.{name}; DROP SCHEMA {qualified_schema} CASCADE;"))
+        .await
+        .unwrap();
+    database.close().await;
+}
+
 fn selected_scope(database: &str, schemas: &[&str]) -> CatalogScope {
     CatalogScope {
         databases: CatalogSelection::Selected(vec![DatabaseScope {

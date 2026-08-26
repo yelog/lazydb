@@ -1,0 +1,214 @@
+use uuid::Uuid;
+
+use super::tab::GridState;
+use crate::db::{
+    RelationPreview,
+    catalog::{CatalogId, CatalogKind, QualifiedName, RelationStructure},
+};
+use crate::identity::ConnectionIdentity;
+use crate::profile::CatalogScope;
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct RelationKey {
+    pub profile_id: Uuid,
+    pub object_id: CatalogId,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RelationView {
+    #[default]
+    Data,
+    Structure,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum RelationRequestKind {
+    Preview,
+    Structure,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct RelationRequest {
+    pub tab_id: Uuid,
+    pub tab_generation: u64,
+    pub request_id: u64,
+    pub connection: ConnectionIdentity,
+    pub relation: RelationKey,
+    pub kind: RelationRequestKind,
+    pub scope: CatalogScope,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RelationSnapshotProvenance {
+    Live,
+    OfflineSnapshot,
+    ProfileDeletedSnapshot,
+    OutOfScopeSnapshot,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SnapshotAttribution {
+    pub connection: ConnectionIdentity,
+    pub profile_id: Uuid,
+    pub scope: CatalogScope,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct OwnedSnapshot<T> {
+    pub value: T,
+    pub attribution: SnapshotAttribution,
+}
+
+impl<T> OwnedSnapshot<T> {
+    pub fn new(value: T, connection: ConnectionIdentity, scope: CatalogScope) -> Self {
+        Self {
+            value,
+            attribution: SnapshotAttribution {
+                connection,
+                profile_id: connection.profile_id,
+                scope,
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum RelationLoad<T> {
+    Empty,
+    Loading {
+        request: RelationRequest,
+        previous: Option<OwnedSnapshot<T>>,
+    },
+    Ready(OwnedSnapshot<T>),
+    Failed {
+        message: String,
+        previous: Option<OwnedSnapshot<T>>,
+    },
+    Cancelled {
+        previous: Option<OwnedSnapshot<T>>,
+    },
+}
+
+pub type RelationPreviewLoad = RelationLoad<RelationPreview>;
+pub type RelationStructureLoad = RelationLoad<RelationStructure>;
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum RelationSnapshot {
+    Preview(RelationPreview),
+    Structure(Box<RelationStructure>),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RelationDescriptor {
+    pub key: RelationKey,
+    pub qualified_name: QualifiedName,
+    pub kind: CatalogKind,
+    pub title: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RelationTab {
+    pub id: Uuid,
+    pub generation: u64,
+    pub next_request_id: u64,
+    pub descriptor: RelationDescriptor,
+    pub view: RelationView,
+    pub data: RelationPreviewLoad,
+    pub structure: RelationStructureLoad,
+    pub grid: GridState,
+}
+
+impl RelationTab {
+    pub fn provenance(
+        &self,
+        view: RelationView,
+        active: Option<ConnectionIdentity>,
+        profile: Option<&crate::profile::ConnectionProfile>,
+    ) -> Option<RelationSnapshotProvenance> {
+        let snapshot_connection = match view {
+            RelationView::Data => relation_snapshot(&self.data)?.attribution.connection,
+            RelationView::Structure => relation_snapshot(&self.structure)?.attribution.connection,
+        };
+        let Some(profile) = profile else {
+            return Some(RelationSnapshotProvenance::ProfileDeletedSnapshot);
+        };
+        let in_scope = self
+            .descriptor
+            .qualified_name
+            .database
+            .as_deref()
+            .is_none_or(|database| profile.catalog_scope.allows_database(database))
+            && self
+                .descriptor
+                .qualified_name
+                .schema
+                .as_deref()
+                .is_none_or(|schema| {
+                    self.descriptor
+                        .qualified_name
+                        .database
+                        .as_deref()
+                        .is_none_or(|database| {
+                            profile.catalog_scope.allows_schema(database, schema)
+                        })
+                });
+        if !in_scope {
+            Some(RelationSnapshotProvenance::OutOfScopeSnapshot)
+        } else if active == Some(snapshot_connection) {
+            Some(RelationSnapshotProvenance::Live)
+        } else {
+            Some(RelationSnapshotProvenance::OfflineSnapshot)
+        }
+    }
+}
+
+fn relation_snapshot<T>(load: &RelationLoad<T>) -> Option<&OwnedSnapshot<T>> {
+    match load {
+        RelationLoad::Ready(snapshot) => Some(snapshot),
+        RelationLoad::Loading { previous, .. }
+        | RelationLoad::Failed { previous, .. }
+        | RelationLoad::Cancelled { previous } => previous.as_ref(),
+        RelationLoad::Empty => None,
+    }
+}
+
+impl RelationTab {
+    pub fn new(title: impl Into<String>) -> Self {
+        let title = title.into();
+        let profile_id = Uuid::nil();
+        let object_id = CatalogId::new(profile_id, CatalogKind::Table, [title.clone()]);
+        Self::with_descriptor(
+            RelationDescriptor {
+                key: RelationKey {
+                    profile_id,
+                    object_id,
+                },
+                qualified_name: QualifiedName {
+                    database: None,
+                    schema: None,
+                    object: title.clone(),
+                },
+                kind: CatalogKind::Table,
+                title,
+            },
+            RelationView::Data,
+        )
+    }
+
+    pub fn with_descriptor(descriptor: RelationDescriptor, view: RelationView) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            generation: 0,
+            next_request_id: 1,
+            descriptor,
+            view,
+            data: RelationLoad::Empty,
+            structure: RelationLoad::Empty,
+            grid: GridState::default(),
+        }
+    }
+
+    pub fn title(&self) -> &str {
+        &self.descriptor.title
+    }
+}

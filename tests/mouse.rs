@@ -117,6 +117,70 @@ fn maps_tabs_tree_rows_and_result_cells_from_rendered_hit_regions() {
 }
 
 #[test]
+fn relation_view_and_retry_hit_targets_emit_semantic_actions() {
+    let mut app = App::new(Vec::new());
+    app.tabs.push(lazydb::model::tab::WorkspaceTab::Relation(
+        lazydb::model::relation::RelationTab::new("users"),
+    ));
+    app.active_tab = 1;
+    let mut ui = UiState::new(true);
+    ui.hit_regions.extend([
+        HitRegion {
+            area: Rect::new(1, 1, 6, 1),
+            target: HitTarget::RelationView(lazydb::model::relation::RelationView::Data),
+        },
+        HitRegion {
+            area: Rect::new(1, 2, 12, 1),
+            target: HitTarget::RelationRetry,
+        },
+    ]);
+
+    assert_eq!(
+        map_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 1, 1),
+            &ui,
+            &app
+        ),
+        Some(Action::SetRelationView(
+            lazydb::model::relation::RelationView::Data
+        ))
+    );
+    assert_eq!(
+        map_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 1, 2),
+            &ui,
+            &app
+        ),
+        Some(Action::RefreshActiveRelation)
+    );
+}
+
+#[test]
+fn relation_result_cell_mouse_action_updates_relation_grid() {
+    let mut app = App::new(Vec::new());
+    app.tabs.push(lazydb::model::tab::WorkspaceTab::Relation(
+        lazydb::model::relation::RelationTab::new("users"),
+    ));
+    app.active_tab = 1;
+    let mut ui = UiState::new(true);
+    ui.hit_regions.push(HitRegion {
+        area: Rect::new(2, 2, 8, 1),
+        target: HitTarget::ResultCell { row: 2, column: 3 },
+    });
+    let action = map_mouse(
+        mouse(MouseEventKind::Down(MouseButton::Left), 2, 2),
+        &ui,
+        &app,
+    );
+    assert_eq!(action, Some(Action::GridSelect { row: 2, column: 3 }));
+    app.update(action.unwrap());
+    let lazydb::model::tab::WorkspaceTab::Relation(tab) = &app.tabs[1] else {
+        panic!()
+    };
+    assert_eq!((tab.grid.selected_row, tab.grid.selected_column), (0, 0));
+}
+
+#[test]
 fn secondary_click_on_profile_root_edits_that_stable_id() {
     let profile = import_connection_url(":memory:", Some("root"))
         .unwrap()
