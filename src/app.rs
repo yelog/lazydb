@@ -436,6 +436,10 @@ impl App {
             Id::EditorUndo => vec![editor_key(KeyCode::Char('u'))],
             Id::EditorRedo => vec![editor_control_key(KeyCode::Char('r'))],
             Id::EditorRun => vec![Action::RunActiveSql],
+            Id::EditorFormat => vec![
+                editor_key(KeyCode::Char(' ')),
+                editor_key(KeyCode::Char('f')),
+            ],
             Id::ToggleTransaction => vec![
                 editor_key(KeyCode::Char(' ')),
                 editor_key(KeyCode::Char('t')),
