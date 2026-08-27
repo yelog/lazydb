@@ -101,7 +101,7 @@ enum CatalogRequestIntent {
 }
 
 impl App {
-    fn is_active_relation_tab(&self) -> bool {
+    pub(crate) fn is_active_relation_tab(&self) -> bool {
         matches!(
             self.tabs.get(self.active_tab),
             Some(WorkspaceTab::Relation(_))
@@ -459,6 +459,13 @@ impl App {
                     .checked_sub(1)
                     .unwrap_or(self.tabs.len() - 1);
                 self.normalize_focus();
+                Vec::new()
+            }
+            Action::GotoSqlConsole => {
+                if let Some(index) = self.tabs.iter().position(|tab| tab.as_console().is_some()) {
+                    self.active_tab = index;
+                    self.focus = Focus::Editor;
+                }
                 Vec::new()
             }
             Action::ActivateTab(index) => {
@@ -2937,6 +2944,7 @@ impl App {
                 EditorEffect::RunCurrent => Action::RunActiveSql,
                 EditorEffect::RunAll => Action::RunAllSql,
                 EditorEffect::NewConsole => Action::NewConsole,
+                EditorEffect::GotoSqlConsole => Action::GotoSqlConsole,
                 EditorEffect::CloseConsole => Action::CloseActiveTab,
                 EditorEffect::FocusPane(focus) => Action::Focus(focus),
                 EditorEffect::NextTab => Action::NextTab,
@@ -4608,6 +4616,8 @@ mod tests {
         action::{Action, Command},
         db::query::{QueryOutcome, QueryStats, ResultSet},
         model::explorer::ExplorerConnectionStatus,
+        model::relation::RelationTab,
+        model::tab::WorkspaceTab,
         model::workspace::{ConnectionIdentity, ConnectionStatus, Focus, Overlay, QueryStatus},
         profile::import_connection_url,
     };
@@ -4660,6 +4670,21 @@ mod tests {
 
         assert_eq!(app.tabs.len(), 1);
         assert_eq!(app.active_console().name, "console");
+    }
+
+    #[test]
+    fn goto_sql_console_activates_the_first_available_sql_tab() {
+        let mut app = App::new(Vec::new());
+        app.update(Action::NewConsole);
+        app.tabs
+            .push(WorkspaceTab::Relation(RelationTab::new("users")));
+        app.active_tab = 2;
+        app.focus = Focus::Results;
+
+        app.update(Action::GotoSqlConsole);
+
+        assert_eq!(app.active_tab, 0);
+        assert_eq!(app.focus, Focus::Editor);
     }
 
     #[test]

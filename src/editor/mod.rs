@@ -43,6 +43,7 @@ pub(crate) enum EditorEffect {
     RunAll,
     FormatCurrent,
     NewConsole,
+    GotoSqlConsole,
     CloseConsole,
     FocusPane(Focus),
     NextTab,
@@ -1075,6 +1076,7 @@ impl EditorWorkspace {
                 (PendingBinding::Leader, 'R') => self.effects.push(EditorEffect::RunAll),
                 (PendingBinding::Leader, 'f') => self.effects.push(EditorEffect::FormatCurrent),
                 (PendingBinding::Leader, 'n') => self.effects.push(EditorEffect::NewConsole),
+                (PendingBinding::Leader, 's') => self.effects.push(EditorEffect::GotoSqlConsole),
                 (PendingBinding::Leader, '?') => self.effects.push(EditorEffect::ShowHelp),
                 (PendingBinding::Leader, 't') => {
                     session.pending_binding = Some(PendingBinding::LeaderTransaction)

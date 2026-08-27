@@ -65,6 +65,24 @@ fn maps_global_sequences_and_function_keys() {
 }
 
 #[test]
+fn maps_tab_sequences_from_editor_normal_mode() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::EditorKey(key(KeyCode::Esc)));
+    let mut keymap = Keymap::default();
+
+    assert_eq!(keymap.map(key(KeyCode::Char('[')), &app), None);
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('t')), &app),
+        Some(Action::PreviousTab)
+    );
+    assert_eq!(keymap.map(key(KeyCode::Char(']')), &app), None);
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('t')), &app),
+        Some(Action::NextTab)
+    );
+}
+
+#[test]
 fn space_n_opens_console_from_explorer_on_relation_tab() {
     let mut app = App::new(Vec::new());
     app.tabs.push(lazydb::model::tab::WorkspaceTab::Relation(
@@ -79,6 +97,27 @@ fn space_n_opens_console_from_explorer_on_relation_tab() {
         keymap.map(key(KeyCode::Char('n')), &app),
         Some(Action::NewConsole)
     );
+}
+
+#[test]
+fn space_s_returns_to_the_first_sql_console_from_explorer() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::NewConsole);
+    app.tabs.push(lazydb::model::tab::WorkspaceTab::Relation(
+        lazydb::model::relation::RelationTab::new("users"),
+    ));
+    app.active_tab = 2;
+    app.focus = Focus::Explorer;
+    let mut keymap = Keymap::default();
+
+    assert_eq!(keymap.map(key(KeyCode::Char(' ')), &app), None);
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('s')), &app),
+        Some(Action::GotoSqlConsole)
+    );
+    app.update(Action::GotoSqlConsole);
+    assert_eq!(app.active_tab, 0);
+    assert_eq!(app.focus, Focus::Editor);
 }
 
 #[test]

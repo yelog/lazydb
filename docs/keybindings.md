@@ -14,8 +14,9 @@ Editor Normal mode but contextual help outside the editor.
 | `Ctrl-w j` | Focus Results |
 | `Ctrl-w k`, `Ctrl-w l` | Focus Editor |
 | `Tab`, `Shift-Tab` | Next/previous panel outside Insert mode |
-| `[t`, `]t` | Previous/next LazyDB tab |
+| `[` then `t`, `]` then `t` | Previous/next LazyDB tab |
 | `Space n` | New SQL console |
+| `Space s` | Go to the first available SQL console and focus its editor |
 | `Ctrl-c` | Cancel active query; otherwise leave Insert mode |
 | `Q` | Quit LazyDB in Normal mode |
 | `Space c` | Focus the connection Explorer |

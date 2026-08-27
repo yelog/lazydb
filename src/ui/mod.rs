@@ -180,7 +180,9 @@ pub fn render_with_state(frame: &mut Frame<'_>, app: &App, state: &mut UiState) 
     }
 
     render_header(frame, layout.header, app, theme, state);
-    render_tabs(frame, layout.tabs, app, theme, state);
+    if let Some(area) = layout.tabs {
+        render_tabs(frame, area, app, theme, state);
+    }
     if is_relation {
         if let Some(area) = layout.explorer {
             state.hit_regions.push(HitRegion {
@@ -425,11 +427,8 @@ fn header_text(value: &str) -> String {
 }
 
 fn render_tabs(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, state: &mut UiState) {
-    let mut spans = vec![Span::styled(
-        " WORKSPACE ",
-        Style::new().fg(theme.muted).bg(theme.background),
-    )];
-    let mut x = area.x + 11;
+    let mut spans = Vec::new();
+    let mut x = area.x;
     for (index, tab) in app.tabs.iter().enumerate() {
         let title = sanitize_terminal_text(tab.title())
             .chars()
@@ -1044,7 +1043,10 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
     };
     let hints = match app.focus {
         Focus::Explorer => "j/k move   o toggle   Enter open   r refresh",
-        Focus::Editor => "Esc normal   i/a/o insert   F5 run   Ctrl+w pane   [t/]t tabs",
+        Focus::Editor => "Esc normal   i/a/o insert   F5 run   [ then t / ] then t tabs",
+        Focus::Results if app.is_active_relation_tab() => {
+            "h/j/k/l cells   Space s SQL console   Ctrl+w pane"
+        }
         Focus::Results => "h/j/k/l cells   Tab data/output   Ctrl+w pane",
     };
     let line = Line::from(vec![
@@ -1360,8 +1362,9 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, focus: Focus, app: &App, theme
         key_line("? / F1", "open contextual keymap", theme),
         key_line("Esc", "close overlay / return to Normal", theme),
         key_line("Ctrl-w h/j/k/l", "move between panels", theme),
-        key_line("[t / ]t", "previous / next tab", theme),
+        key_line("[ then t / ] then t", "previous / next tab", theme),
         key_line("Space n", "new SQL console", theme),
+        key_line("Space s", "go to first SQL console", theme),
         Line::raw(""),
     ];
     let relation_data = matches!(

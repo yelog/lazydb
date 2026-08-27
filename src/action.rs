@@ -27,6 +27,7 @@ pub enum Action {
     CloseActiveTab,
     NextTab,
     PreviousTab,
+    GotoSqlConsole,
     ActivateTab(usize),
     FocusNext,
     FocusPrevious,

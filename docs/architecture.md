@@ -123,9 +123,11 @@ are sanitized only for display; their raw insertion/request values remain
 separate.
 
 Workspace tabs are heterogeneous: SQL consoles and relation tabs share identity,
-titles, and tab navigation but not behavior. Activating a relation tab moves
-focus to Results; SQL-only editor, transaction, execution, and completion
-actions are no-ops there. Relation focus cycles between Explorer and Results.
+titles, and tab navigation but not behavior. Their tab bar is rendered above the
+main content column; Explorer is outside that visual scope. Activating a relation
+tab moves focus to Results; SQL-only editor, transaction, execution, and
+completion actions are no-ops there. Relation focus cycles between Explorer and
+Results.
 
 ## Transaction Boundary
 

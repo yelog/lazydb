@@ -168,6 +168,20 @@ impl Keymap {
             return Some(action);
         }
 
+        if app.focus == Focus::Editor && app.active_editor_mode() == EditorMode::Normal {
+            match event.code {
+                KeyCode::Char('[') => {
+                    self.set_pending(Pending::Previous, app);
+                    return None;
+                }
+                KeyCode::Char(']') => {
+                    self.set_pending(Pending::Next, app);
+                    return None;
+                }
+                _ => {}
+            }
+        }
+
         if event.modifiers.contains(KeyModifiers::CONTROL) {
             return match event.code {
                 KeyCode::Char('w') if app.focus == Focus::Editor => Some(Action::EditorKey(event)),
@@ -292,6 +306,7 @@ fn map_pending(pending: Pending, event: KeyEvent) -> Option<Action> {
     match (pending, event.code) {
         (Pending::Leader, KeyCode::Char('c')) => Some(Action::Focus(Focus::Explorer)),
         (Pending::Leader, KeyCode::Char('n')) => Some(Action::NewConsole),
+        (Pending::Leader, KeyCode::Char('s')) => Some(Action::GotoSqlConsole),
         (Pending::Leader, KeyCode::Char('r')) => Some(Action::RunActiveSql),
         (Pending::Leader, KeyCode::Char('R')) => Some(Action::RunAllSql),
         (Pending::Leader, KeyCode::Char('d')) => Some(Action::OpenTargetSelector),
