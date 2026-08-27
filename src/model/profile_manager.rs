@@ -14,10 +14,11 @@ use crate::{
         ServerInfo,
         catalog::{CatalogCapabilities, CatalogDiscovery},
     },
+    persistence::secrets::SecretStoreAvailability,
     profile::{
         CatalogScope, CatalogScopeValidationError, CatalogSelection, ConnectionProfile,
-        ConnectionUrlFormat, CredentialPolicy, DatabaseKind, DatabaseScope, Environment, SslMode,
-        format_connection_url, parse_connection_url,
+        ConnectionUrlFormat, CredentialPolicy, DatabaseKind, DatabaseScope, Environment,
+        PasswordStorageChoice, SslMode, format_connection_url, parse_connection_url,
     },
 };
 
@@ -87,7 +88,7 @@ pub enum ProfileField {
     SslMode,
     Environment,
     ReadOnly,
-    RememberPassword,
+    PasswordStorage,
     SqliteMemory,
     SqlitePath,
     Test,
@@ -122,6 +123,8 @@ pub enum CredentialUpdate {
     Preserve,
     Session(SecretString),
     Remember(SecretString),
+    LocalEncrypted(SecretString),
+    System(SecretString),
     Forget,
 }
 
@@ -131,6 +134,8 @@ impl fmt::Debug for CredentialUpdate {
             Self::Preserve => formatter.write_str("Preserve"),
             Self::Session(_) => formatter.write_str("Session([REDACTED])"),
             Self::Remember(_) => formatter.write_str("Remember([REDACTED])"),
+            Self::LocalEncrypted(_) => formatter.write_str("LocalEncrypted([REDACTED])"),
+            Self::System(_) => formatter.write_str("System([REDACTED])"),
             Self::Forget => formatter.write_str("Forget"),
         }
     }
@@ -188,7 +193,10 @@ impl ProfileSubmission {
             CredentialUpdate::Preserve => {
                 !matches!(profile.credential_policy, CredentialPolicy::None)
             }
-            CredentialUpdate::Session(_) | CredentialUpdate::Remember(_) => true,
+            CredentialUpdate::Session(_)
+            | CredentialUpdate::Remember(_)
+            | CredentialUpdate::LocalEncrypted(_)
+            | CredentialUpdate::System(_) => true,
             CredentialUpdate::Forget => false,
         };
         let discovery_fingerprint =
@@ -300,7 +308,7 @@ pub struct ProfileDraft {
     pub ssl_mode: SslMode,
     pub environment: Environment,
     pub read_only: bool,
-    pub remember_password: bool,
+    pub password_storage: PasswordStorageChoice,
     pub sqlite_memory: bool,
     pub sqlite_path: TextInput,
     pub original_credential_policy: CredentialPolicy,
@@ -310,6 +318,7 @@ pub struct ProfileDraft {
     pub catalog_discovery: CatalogDiscoveryState,
     pub discovery_fingerprint: Option<DiscoveryFingerprint>,
     credential_revision: u64,
+    pub system_credential_availability: SecretStoreAvailability,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -356,7 +365,7 @@ impl ProfileDraft {
             ssl_mode,
             environment: Environment::Development,
             read_only: false,
-            remember_password: kind != DatabaseKind::Sqlite,
+            password_storage: PasswordStorageChoice::LocalEncrypted,
             sqlite_memory: false,
             sqlite_path: TextInput::default(),
             original_credential_policy: CredentialPolicy::None,
@@ -366,6 +375,7 @@ impl ProfileDraft {
             catalog_discovery: CatalogDiscoveryState::NotRequested,
             discovery_fingerprint: None,
             credential_revision: 0,
+            system_credential_availability: SecretStoreAvailability::Unavailable,
         };
         draft.refresh_url();
         draft
@@ -419,10 +429,12 @@ impl ProfileDraft {
             ssl_mode: profile.ssl_mode,
             environment: profile.environment,
             read_only: profile.read_only,
-            remember_password: matches!(
-                profile.credential_policy,
-                CredentialPolicy::Prompt | CredentialPolicy::Keyring(_)
-            ),
+            password_storage: match &profile.credential_policy {
+                CredentialPolicy::System(_) | CredentialPolicy::Keyring(_) => {
+                    PasswordStorageChoice::System
+                }
+                _ => PasswordStorageChoice::LocalEncrypted,
+            },
             sqlite_memory,
             sqlite_path: TextInput::from(sqlite_path),
             original_credential_policy: profile.credential_policy.clone(),
@@ -436,6 +448,7 @@ impl ProfileDraft {
             catalog_discovery: CatalogDiscoveryState::NotRequested,
             discovery_fingerprint: None,
             credential_revision: 0,
+            system_credential_availability: SecretStoreAvailability::Unavailable,
         };
         draft.refresh_url();
         draft
@@ -737,6 +750,22 @@ impl ProfileDraft {
         }
     }
 
+    pub fn password_storage_choices(&self) -> &'static [PasswordStorageChoice] {
+        if self.kind == DatabaseKind::Sqlite {
+            &[]
+        } else if matches!(
+            self.system_credential_availability,
+            SecretStoreAvailability::Available | SecretStoreAvailability::Locked
+        ) || matches!(
+            self.original_credential_policy,
+            CredentialPolicy::System(_) | CredentialPolicy::Keyring(_)
+        ) {
+            &PASSWORD_STORAGE_CHOICES
+        } else {
+            &PASSWORD_STORAGE_LOCAL_ONLY
+        }
+    }
+
     pub fn validate(
         &self,
         profiles: &[ConnectionProfile],
@@ -827,6 +856,8 @@ impl ProfileDraft {
             CredentialUpdate::Session(_) | CredentialUpdate::Remember(_) => {
                 CredentialPolicy::Prompt
             }
+            CredentialUpdate::LocalEncrypted(_) => CredentialPolicy::Prompt,
+            CredentialUpdate::System(_) => CredentialPolicy::Prompt,
             CredentialUpdate::Forget => CredentialPolicy::None,
         };
         let catalog_scope = match self.catalog_scope_mode {
@@ -879,22 +910,15 @@ impl ProfileDraft {
         }
 
         if !self.password.expose_secret().is_empty() {
-            return if self.remember_password {
-                CredentialUpdate::Remember(self.password.clone())
-            } else {
-                CredentialUpdate::Session(self.password.clone())
+            return match self.password_storage {
+                PasswordStorageChoice::LocalEncrypted => {
+                    CredentialUpdate::LocalEncrypted(self.password.clone())
+                }
+                PasswordStorageChoice::System => CredentialUpdate::System(self.password.clone()),
             };
         }
 
-        if matches!(
-            self.original_credential_policy,
-            CredentialPolicy::Keyring(_)
-        ) && !self.remember_password
-        {
-            CredentialUpdate::Forget
-        } else {
-            CredentialUpdate::Preserve
-        }
+        CredentialUpdate::Preserve
     }
 
     fn sync_derived_catalog_scope(&mut self) {
@@ -1077,7 +1101,7 @@ impl fmt::Debug for ProfileDraft {
             .field("ssl_mode", &self.ssl_mode)
             .field("environment", &self.environment)
             .field("read_only", &self.read_only)
-            .field("remember_password", &self.remember_password)
+            .field("password_storage", &self.password_storage)
             .field("sqlite_memory", &self.sqlite_memory)
             .field("sqlite_path", &self.sqlite_path)
             .field(
@@ -1109,6 +1133,7 @@ pub struct ProfileManagerState {
     pub scope_viewport: usize,
     pub scope_warning: Option<String>,
     pub scope_discovery_request: Option<(u64, DiscoveryFingerprint)>,
+    pub system_credential_availability: SecretStoreAvailability,
 }
 
 const SCOPE_VIEWPORT_CAPACITY: usize = 29;
@@ -1129,6 +1154,7 @@ impl ProfileManagerState {
             scope_viewport: 0,
             scope_warning: None,
             scope_discovery_request: None,
+            system_credential_availability: SecretStoreAvailability::Unavailable,
         }
     }
 
@@ -1442,6 +1468,19 @@ impl ProfileManagerState {
             .map_or(&[], ProfileDraft::visible_fields)
     }
 
+    pub fn set_system_credential_availability(&mut self, availability: SecretStoreAvailability) {
+        self.system_credential_availability = availability;
+        if let Some(draft) = self.draft.as_mut() {
+            draft.system_credential_availability = availability;
+        }
+    }
+
+    pub fn password_storage_choices(&self) -> &'static [PasswordStorageChoice] {
+        self.draft
+            .as_ref()
+            .map_or(&[], ProfileDraft::password_storage_choices)
+    }
+
     pub fn move_field(&mut self, delta: isize) {
         if self.selected_field == ProfileField::Url
             && let Err(error) = self.commit_url()
@@ -1536,6 +1575,7 @@ impl ProfileManagerState {
 
     pub fn cycle(&mut self, delta: i8) {
         let field = self.selected_field;
+        let password_choices = self.password_storage_choices();
         let Some(draft) = self.draft.as_mut() else {
             return;
         };
@@ -1575,6 +1615,11 @@ impl ProfileManagerState {
                     delta,
                 );
             }
+            ProfileField::PasswordStorage => {
+                draft.password_storage =
+                    cycle_value(draft.password_storage, password_choices, delta);
+                draft.credential_changed();
+            }
             _ => return,
         }
         self.message = None;
@@ -1590,13 +1635,14 @@ impl ProfileManagerState {
 
     pub fn toggle(&mut self) {
         let field = self.selected_field;
+        let password_choices = self.password_storage_choices();
         let Some(draft) = self.draft.as_mut() else {
             return;
         };
         match field {
             ProfileField::ReadOnly => draft.read_only = !draft.read_only,
-            ProfileField::RememberPassword => {
-                draft.remember_password = !draft.remember_password;
+            ProfileField::PasswordStorage => {
+                draft.password_storage = cycle_value(draft.password_storage, password_choices, 1);
                 draft.credential_changed();
             }
             ProfileField::SqliteMemory => {
@@ -1932,7 +1978,7 @@ const POSTGRES_FIELDS: [ProfileField; 19] = [
     ProfileField::SslMode,
     ProfileField::Environment,
     ProfileField::ReadOnly,
-    ProfileField::RememberPassword,
+    ProfileField::PasswordStorage,
     ProfileField::Test,
     ProfileField::Save,
     ProfileField::SaveAndConnect,
@@ -1953,7 +1999,7 @@ const MYSQL_FIELDS: [ProfileField; 18] = [
     ProfileField::SslMode,
     ProfileField::Environment,
     ProfileField::ReadOnly,
-    ProfileField::RememberPassword,
+    ProfileField::PasswordStorage,
     ProfileField::Test,
     ProfileField::Save,
     ProfileField::SaveAndConnect,
@@ -1988,3 +2034,10 @@ const SQLITE_MEMORY_FIELDS: [ProfileField; 11] = [
     ProfileField::SaveAndConnect,
     ProfileField::Cancel,
 ];
+
+const PASSWORD_STORAGE_CHOICES: [PasswordStorageChoice; 2] = [
+    PasswordStorageChoice::LocalEncrypted,
+    PasswordStorageChoice::System,
+];
+const PASSWORD_STORAGE_LOCAL_ONLY: [PasswordStorageChoice; 1] =
+    [PasswordStorageChoice::LocalEncrypted];

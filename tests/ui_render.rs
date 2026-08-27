@@ -718,7 +718,7 @@ fn server_profile_form_shows_all_fields_and_never_reveals_passwords() {
         "SSL MODE",
         "ENVIRONMENT",
         "READ ONLY",
-        "REMEMBER PASSWORD",
+        "PASSWORD STORAGE",
         "TEST",
         "SAVE",
         "SAVE & CONNECT",
@@ -856,7 +856,7 @@ fn stored_password_is_described_without_rendering_a_secret() {
     });
 
     let output = render(&app, 120, 36);
-    assert!(output.contains("Stored in system keyring"));
+    assert!(output.contains("Stored in system credential store"));
     assert!(!output.contains("keyring:dev.lazydb"));
 }
 
@@ -1056,14 +1056,16 @@ fn minimum_supported_form_scrolls_to_the_selected_field() {
     let mut app = App::new(Vec::new());
     app.focus = Focus::Explorer;
     app.update(Action::OpenProfileManager);
-    app.update(Action::ProfileFocusField(ProfileField::RememberPassword));
+    app.update(Action::ProfileFocusField(ProfileField::PasswordStorage));
 
     let (output, state) = render_with_state(&app, 56, 16);
-    assert!(output.contains("REMEMBER PASSWORD"));
+    assert!(output.contains("PASSWORD STORAGE"));
     assert!(output.contains("Esc cancel"));
-    assert!(state.hit_regions.iter().any(|region| {
-        region.target == HitTarget::ProfileToggle(ProfileField::RememberPassword)
-    }));
+    assert!(
+        state.hit_regions.iter().any(|region| {
+            region.target == HitTarget::ProfileField(ProfileField::PasswordStorage)
+        })
+    );
 }
 
 #[test]

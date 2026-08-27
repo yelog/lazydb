@@ -21,6 +21,60 @@ pub enum SecretStoreError {
     InvalidReference,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SecretStoreAvailability {
+    Available,
+    Locked,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SecretStoreDiagnostic {
+    pub provider: &'static str,
+    pub status: &'static str,
+    pub detail: &'static str,
+}
+
+pub fn secret_store_diagnostic() -> SecretStoreDiagnostic {
+    let provider = if cfg!(target_os = "macos") {
+        "macos-login-keychain"
+    } else if cfg!(target_os = "linux") {
+        "freedesktop-secret-service"
+    } else {
+        "none"
+    };
+    let (status, detail) = match if provider == "none" {
+        None
+    } else {
+        Some(Entry::store_status())
+    } {
+        None => ("unavailable", "native credential store is unavailable"),
+        Some(Ok(())) => ("available", "native credential store is available"),
+        Some(Err(KeyringError::NoStorageAccess(_))) => {
+            ("locked", "native credential store is locked")
+        }
+        Some(Err(KeyringError::NoDefaultStore)) => {
+            ("unavailable", "native credential store is unavailable")
+        }
+        Some(Err(_)) => ("error", "native credential store probe failed"),
+    };
+    SecretStoreDiagnostic {
+        provider,
+        status,
+        detail,
+    }
+}
+
+impl SecretStoreAvailability {
+    pub const fn from_result(result: Result<(), SecretStoreError>) -> Self {
+        match result {
+            Ok(()) => Self::Available,
+            Err(SecretStoreError::Locked) => Self::Locked,
+            Err(_) => Self::Unavailable,
+        }
+    }
+}
+
 #[async_trait]
 pub trait SecretStore: Send + Sync {
     async fn available(&self) -> Result<(), SecretStoreError>;

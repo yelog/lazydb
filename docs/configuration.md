@@ -65,12 +65,30 @@ read-only settings. Changing those settings regenerates a password-free URL.
 Passwords parsed from URLs are moved into the secret-backed Password field and
 are never retained in the displayed URL.
 
+## Password Storage
+
+New PostgreSQL and MySQL connections save entered passwords by default using
+`LOCAL ENCRYPTED`. The password is authenticated-encrypted in
+`connections.toml`; the separate device-local `credential.key` file contains
+the encryption key. This default works in desktop and headless Linux sessions,
+but copying only `connections.toml` does not copy the password. The local mode
+protects against accidental disclosure, not a process running as the same OS
+user with access to the complete LazyDB configuration directory.
+
+When supported by the current session, the Profile Manager also offers
+`MACOS LOGIN KEYCHAIN` or `SECRET SERVICE`. A locked provider remains visible as
+`LOCKED`; a missing provider or session bus is not shown for new connections. If
+writing a selected System provider fails, LazyDB falls back to Local Encrypted
+storage and reports the actual storage mode. It does not keep a hidden local copy
+for a successfully stored System credential.
+
 ## Persisted Profile Shape
 
-Profiles are versioned TOML and contain no password field:
+Profiles are versioned TOML. Local encrypted profiles contain authenticated
+ciphertext rather than a plaintext password:
 
 ```toml
-version = 3
+version = 4
 
 [[profiles]]
 id = "1c73c7c0-f944-4adc-a73a-1265fe1260a9"
@@ -83,22 +101,23 @@ user = "app_user"
 database = "app"
 default_schema = "public"
 ssl_mode = "require"
-credential_policy = { policy = "keyring", reference = "keyring:dev.lazydb.lazydb/1c73c7c0-f944-4adc-a73a-1265fe1260a9" }
+credential_policy = { policy = "local_encrypted", value = { version = 1, nonce = "...", ciphertext = "..." } }
 read_only = false
 environment = "development"
 catalog_scope = { databases = { mode = "selected", items = [{ name = "app", schemas = { mode = "selected", items = ["public"] } }] } }
 ```
 
-Credential policy is explicit: `none` permits a passwordless connection,
-`prompt` requires a current-process password, and `keyring` references the
-native service `dev.lazydb.lazydb` with the profile UUID as account. The password
-is never stored in TOML. New PostgreSQL and MySQL forms enable `Remember
-Password` by default and write the keyring entry; disable it to keep a password
-for the current session only. If the native store is unavailable, LazyDB
-persists `prompt`, keeps the password only for the current session, and shows a
-warning. A later restart opens the profile form for a password instead of trying
-an empty password. Delete removes a keyring entry; externally edited or orphaned
-files may require manual cleanup.
+Credential storage is explicit: `none` permits a passwordless connection,
+`prompt` requires a current-process password, `local_encrypted` stores an
+authenticated ciphertext in this file, and `system` references the native
+credential service using the profile UUID as account. Local encryption uses a
+random device-local key stored separately as `credential.key`. New PostgreSQL
+and MySQL connections default to `LOCAL ENCRYPTED`, so saved passwords survive
+restart on desktop and headless systems. `SYSTEM` is offered only when macOS
+Login Keychain or Linux Secret Service is detected; a locked provider is shown
+as `LOCKED`. If a System write fails, LazyDB saves using Local Encrypted storage
+and reports the actual fallback. Copying only this file does not copy the local
+encryption key.
 
 The current profile serializer stores scope under `catalog_scope`, with
 `databases` and `schemas` represented as `All` or `Selected` lists. PostgreSQL

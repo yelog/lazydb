@@ -54,12 +54,15 @@ failure preserves both the old console target and old active pool.
 
 ## Profile and Credential Boundary
 
-`ProfileStore` atomically persists versioned connection metadata in TOML without
-passwords or raw URLs. Profiles use an explicit credential policy: passwordless,
-prompt for a process-local secret, or native keyring. `Runtime` owns profile
-CRUD, native keyring operations, session-only secrets, and connection identity
-validation. Native keyring calls run in blocking tasks; references use
-`keyring:dev.lazydb.lazydb/<profile-uuid>`.
+`ProfileStore` atomically persists versioned connection metadata and authenticated
+local credential ciphertext in TOML. Profiles
+use an explicit credential policy: passwordless, process-local prompt, authenticated
+local encryption with a separate device key, or a native system credential
+provider. `Runtime` owns profile CRUD, local cipher operations, native credential
+operations, session-only secrets, and connection identity validation. Native and
+local credential calls run in blocking tasks. Native references use
+`keyring:dev.lazydb.lazydb/<profile-uuid>`; provider availability is runtime state
+and is never persisted.
 `App` applies profile state only after matching runtime completion actions, so a
 failed save or switch can compensate without exposing a password.
 

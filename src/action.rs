@@ -18,6 +18,7 @@ use crate::{
         },
         workspace::{ConnectionIdentity, Focus},
     },
+    persistence::secrets::SecretStoreAvailability,
     profile::{ConnectionProfile, DatabaseKind},
 };
 
@@ -40,6 +41,7 @@ pub enum Action {
     SubstituteLast,
     SubstituteQuit,
     OpenProfileManager,
+    SystemCredentialAvailability(SecretStoreAvailability),
     CloseProfileManager,
     ProfileStartNew,
     ProfileStartEdit {
@@ -399,6 +401,7 @@ pub enum Command {
         transaction_generation: u64,
     },
     PersistWorkspace(crate::persistence::workspace::WorkspaceSnapshot),
+    CheckSecretStoreAvailability,
     ScheduleCompletion(crate::sql::CompletionScheduleKey),
     Quit,
 }

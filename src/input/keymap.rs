@@ -491,15 +491,15 @@ fn is_text_field(field: ProfileField) -> bool {
 fn is_cycle_field(field: ProfileField) -> bool {
     matches!(
         field,
-        ProfileField::UrlFormat | ProfileField::SslMode | ProfileField::Environment
+        ProfileField::UrlFormat
+            | ProfileField::SslMode
+            | ProfileField::Environment
+            | ProfileField::PasswordStorage
     )
 }
 
 fn is_toggle_field(field: ProfileField) -> bool {
-    matches!(
-        field,
-        ProfileField::ReadOnly | ProfileField::RememberPassword | ProfileField::SqliteMemory
-    )
+    matches!(field, ProfileField::ReadOnly | ProfileField::SqliteMemory)
 }
 
 fn map_explorer(code: KeyCode, app: &App) -> Option<Action> {

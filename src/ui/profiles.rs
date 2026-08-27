@@ -16,7 +16,7 @@ use crate::{
         },
         text_input::TextInput,
     },
-    profile::{ConnectionUrlFormat, DatabaseKind, Environment, SslMode},
+    profile::{ConnectionUrlFormat, DatabaseKind, Environment, PasswordStorageChoice, SslMode},
     security::sanitize_terminal_text,
 };
 
@@ -601,7 +601,12 @@ fn field_value(draft: &ProfileDraft, field: ProfileField) -> String {
             if draft.password_len() > 0 {
                 "•".repeat(draft.password_len())
             } else if draft.has_stored_credential {
-                "Stored in system keyring".to_owned()
+                match draft.password_storage {
+                    PasswordStorageChoice::LocalEncrypted => {
+                        "Stored locally (encrypted)".to_owned()
+                    }
+                    PasswordStorageChoice::System => "Stored in system credential store".to_owned(),
+                }
             } else {
                 "Not set".to_owned()
             }
@@ -612,7 +617,7 @@ fn field_value(draft: &ProfileDraft, field: ProfileField) -> String {
         ProfileField::SslMode => ssl_name(draft.ssl_mode).to_owned(),
         ProfileField::Environment => environment_name(draft.environment).to_owned(),
         ProfileField::ReadOnly => toggle_value(draft.read_only),
-        ProfileField::RememberPassword => toggle_value(draft.remember_password),
+        ProfileField::PasswordStorage => password_storage_name(draft.password_storage).to_owned(),
         ProfileField::SqliteMemory => toggle_value(draft.sqlite_memory),
         ProfileField::SqlitePath => safe_line(draft.sqlite_path.value()),
         ProfileField::Test
@@ -638,7 +643,7 @@ fn field_label(field: ProfileField) -> &'static str {
         ProfileField::SslMode => "SSL MODE",
         ProfileField::Environment => "ENVIRONMENT",
         ProfileField::ReadOnly => "READ ONLY",
-        ProfileField::RememberPassword => "REMEMBER PASSWORD",
+        ProfileField::PasswordStorage => "PASSWORD STORAGE",
         ProfileField::SqliteMemory => "MEMORY DATABASE",
         ProfileField::SqlitePath => "PATH",
         ProfileField::Test => "TEST",
@@ -659,10 +664,7 @@ fn is_button_field(field: ProfileField) -> bool {
 }
 
 fn is_toggle_field(field: ProfileField) -> bool {
-    matches!(
-        field,
-        ProfileField::ReadOnly | ProfileField::RememberPassword | ProfileField::SqliteMemory
-    )
+    matches!(field, ProfileField::ReadOnly | ProfileField::SqliteMemory)
 }
 
 fn toggle_value(enabled: bool) -> String {
@@ -670,6 +672,19 @@ fn toggle_value(enabled: bool) -> String {
         "[x] ON".to_owned()
     } else {
         "[ ] OFF".to_owned()
+    }
+}
+
+fn password_storage_name(storage: PasswordStorageChoice) -> &'static str {
+    match storage {
+        PasswordStorageChoice::LocalEncrypted => "LOCAL ENCRYPTED",
+        PasswordStorageChoice::System => {
+            if cfg!(target_os = "macos") {
+                "macOS LOGIN KEYCHAIN"
+            } else {
+                "SECRET SERVICE"
+            }
+        }
     }
 }
 

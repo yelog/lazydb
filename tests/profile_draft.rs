@@ -208,7 +208,10 @@ fn new_postgres_uses_server_defaults() {
     assert_eq!(draft.schema.value(), "public");
     assert_eq!(draft.ssl_mode, SslMode::Prefer);
     assert!(!draft.sqlite_memory);
-    assert!(draft.remember_password);
+    assert_eq!(
+        draft.password_storage,
+        lazydb::profile::PasswordStorageChoice::LocalEncrypted
+    );
 }
 
 #[test]
@@ -216,13 +219,20 @@ fn new_mysql_and_sqlite_use_driver_defaults() {
     let mysql = ProfileDraft::new(DatabaseKind::MySql);
     assert_eq!(mysql.host.value(), "localhost");
     assert_eq!(mysql.port.value(), "3306");
-    assert!(mysql.remember_password);
+    assert_eq!(
+        mysql.password_storage,
+        lazydb::profile::PasswordStorageChoice::LocalEncrypted
+    );
 
     let sqlite = ProfileDraft::new(DatabaseKind::Sqlite);
     assert!(!sqlite.sqlite_memory);
     assert!(sqlite.sqlite_path.value().is_empty());
     assert_eq!(sqlite.ssl_mode, SslMode::Disable);
-    assert!(!sqlite.remember_password);
+    assert!(
+        !sqlite
+            .visible_fields()
+            .contains(&ProfileField::PasswordStorage)
+    );
 }
 
 #[test]
@@ -472,9 +482,9 @@ fn visible_objects_can_exclude_the_connection_default_schema() {
 }
 
 #[test]
-fn credential_intent_preserves_forgets_or_replaces_stored_passwords() {
+fn credential_intent_preserves_or_replaces_stored_passwords() {
     let mut profile = saved_postgres_profile();
-    profile.credential_policy = CredentialPolicy::Keyring(format!("keyring:test/{}", profile.id));
+    profile.credential_policy = CredentialPolicy::System(format!("keyring:test/{}", profile.id));
 
     let draft = ProfileDraft::edit(&profile, true);
     assert!(matches!(
@@ -482,35 +492,14 @@ fn credential_intent_preserves_forgets_or_replaces_stored_passwords() {
         CredentialUpdate::Preserve
     ));
 
-    let mut forget = draft.clone();
-    forget.remember_password = false;
-    let submission = forget.validate(&[profile.clone()]).unwrap();
-    assert!(matches!(submission.credential, CredentialUpdate::Forget));
-    assert_eq!(submission.profile.credential_policy, CredentialPolicy::None);
-
-    let mut session = draft.clone();
-    session.remember_password = false;
-    session.set_password("session-password");
-    let submission = session.validate(&[profile.clone()]).unwrap();
-    match submission.credential {
-        CredentialUpdate::Session(secret) => {
-            assert_eq!(secret.expose_secret(), "session-password");
-        }
-        other => panic!("expected session credential, got {other:?}"),
-    }
-    assert_eq!(
-        submission.profile.credential_policy,
-        CredentialPolicy::Prompt
-    );
-
     let mut remember = draft;
     remember.set_password("remembered-password");
     let submission = remember.validate(&[profile]).unwrap();
     match submission.credential {
-        CredentialUpdate::Remember(secret) => {
+        CredentialUpdate::System(secret) => {
             assert_eq!(secret.expose_secret(), "remembered-password");
         }
-        other => panic!("expected remembered credential, got {other:?}"),
+        other => panic!("expected system credential, got {other:?}"),
     }
     assert_eq!(
         submission.profile.credential_policy,
@@ -519,37 +508,36 @@ fn credential_intent_preserves_forgets_or_replaces_stored_passwords() {
 }
 
 #[test]
-fn new_password_uses_session_or_remember_intent() {
+fn new_password_uses_selected_storage() {
     let mut draft = valid_postgres_draft();
     draft.set_password("temporary");
 
     assert!(matches!(
         draft.validate(&[]).unwrap().credential,
-        CredentialUpdate::Remember(_)
-    ));
-
-    draft.remember_password = false;
-    assert!(matches!(
-        draft.validate(&[]).unwrap().credential,
-        CredentialUpdate::Session(_)
+        CredentialUpdate::LocalEncrypted(_)
     ));
 }
 
 #[test]
-fn editing_prompt_profile_defaults_to_remembering_replacement_password() {
+fn editing_prompt_profile_defaults_to_local_replacement_storage() {
     let mut prompt = saved_postgres_profile();
     prompt.credential_policy = CredentialPolicy::Prompt;
-    assert!(ProfileDraft::edit(&prompt, false).remember_password);
+    assert_eq!(
+        ProfileDraft::edit(&prompt, false).password_storage,
+        lazydb::profile::PasswordStorageChoice::LocalEncrypted
+    );
 
     let passwordless = saved_postgres_profile();
-    assert!(!ProfileDraft::edit(&passwordless, false).remember_password);
+    assert_eq!(
+        ProfileDraft::edit(&passwordless, false).password_storage,
+        lazydb::profile::PasswordStorageChoice::LocalEncrypted
+    );
 }
 
 #[test]
 fn debug_output_redacts_passwords() {
     let mut draft = valid_postgres_draft();
     draft.set_password("never-print-this-password");
-    draft.remember_password = true;
     let submission = draft.validate(&[]).unwrap();
 
     assert!(!format!("{draft:?}").contains("never-print-this-password"));
@@ -662,7 +650,7 @@ fn visible_fields_follow_the_selected_driver_and_sqlite_mode() {
             ProfileField::SslMode,
             ProfileField::Environment,
             ProfileField::ReadOnly,
-            ProfileField::RememberPassword,
+            ProfileField::PasswordStorage,
             ProfileField::Test,
             ProfileField::Save,
             ProfileField::SaveAndConnect,

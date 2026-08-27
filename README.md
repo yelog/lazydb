@@ -28,8 +28,8 @@ integration.
   generation-safe asynchronous updates.
 - Runtime profile manager for creating, testing, saving, editing, deleting, and
   switching PostgreSQL, MySQL, and SQLite connections.
-- Optional remembered passwords in the native system keyring, with explicit
-  session-only fallback when the keyring is unavailable.
+- Password storage with Local Encrypted as the cross-platform default, plus
+  detected macOS Login Keychain or Linux Secret Service support.
 - UUID-owned Explorer roots for saved and session-only profiles, lazy catalog
   loading, object tree refresh, relation Data/Structure tabs, table/view preview
   with an adapter-owned 500-row limit, and DDL in a new tab.
@@ -37,6 +37,9 @@ integration.
   contextual help, bounded TachyonFX transitions, and mouse hit regions.
 - A thin `lazydb.nvim` floating-terminal plugin with one process per Neovim tab.
 - Stable machine-readable `version`, `capabilities`, and `doctor` commands.
+- SQL completion includes database/schema/relation paths, relation-aware columns,
+  native column types, and catalog icons; the statement under the cursor is
+  underlined when it is the current execution scope.
 
 ## Deliberately Deferred
 
@@ -110,9 +113,13 @@ Explorer to that database and schema. The URL field accepts native and JDBC
 forms, fills the structured fields, and is regenerated when those fields change.
 Any URL password is moved into the secret-backed Password field and removed from
 the displayed URL. `Save` persists metadata, and `Save & Connect` persists and
-activates it. `Remember Password` stores only in the native macOS Keychain or
-Linux Secret Service; if that store is unavailable, LazyDB reports a
-session-only downgrade.
+  activates it. `Password Storage` defaults to `LOCAL ENCRYPTED`, which stores
+  authenticated ciphertext in the profile file and a separate device-local key.
+  When a supported native store is detected, the Profile Manager also offers
+  `MACOS LOGIN KEYCHAIN` or `SECRET SERVICE`; unavailable providers are hidden
+  for new connections. If a selected System store cannot
+  save the password, LazyDB falls back to Local Encrypted storage and reports
+  the actual storage mode.
 
 ## CLI Contract
 

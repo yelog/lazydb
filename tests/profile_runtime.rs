@@ -311,6 +311,115 @@ async fn remember_writes_keyring_reference_but_never_password_text() {
 }
 
 #[tokio::test]
+async fn local_encrypted_password_is_persisted_and_resolved_after_restart() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("connections.toml");
+    let profile = postgres_profile("local-encrypted");
+    let profile_id = profile.id;
+    let password = "local-encrypted-password";
+    let fake = Arc::new(FakeSecretStore::default());
+    let (mut first_runtime, mut first_receiver) = runtime(
+        Vec::new(),
+        HashSet::new(),
+        ProfileStore::new(path.clone()),
+        Arc::clone(&fake),
+    );
+
+    first_runtime.dispatch(Command::SaveProfile {
+        request_id: 31,
+        submission: submission(
+            profile,
+            CredentialUpdate::LocalEncrypted(SecretString::from(password.to_owned())),
+        ),
+        connect: false,
+    });
+    let saved = match next_action(&mut first_receiver).await {
+        Action::ProfileSaved {
+            request_id: 31,
+            profile,
+            warning,
+            ..
+        } => {
+            assert!(warning.is_none());
+            profile
+        }
+        action => panic!("unexpected action: {action:?}"),
+    };
+    assert!(matches!(
+        saved.credential_policy,
+        CredentialPolicy::LocalEncrypted(_)
+    ));
+    let contents = fs::read_to_string(&path).unwrap();
+    assert!(!contents.contains(password));
+    first_runtime.shutdown().await;
+
+    let (mut second_runtime, mut second_receiver) = runtime(
+        ProfileStore::new(path).load().unwrap(),
+        HashSet::from([profile_id]),
+        ProfileStore::new(temp.path().join("connections.toml")),
+        fake,
+    );
+    second_runtime.dispatch(Command::Connect {
+        profile_id,
+        generation: 1,
+        target: ExecutionTarget {
+            profile_id,
+            database: "outside-scope".to_owned(),
+            schema: None,
+        },
+    });
+    assert!(matches!(
+        next_action(&mut second_receiver).await,
+        Action::ConnectionFailed {
+            profile_id: failed,
+            generation,
+            message,
+        } if failed == profile_id && generation == 1 && message == "Execution target is invalid for this profile"
+    ));
+    second_runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn unavailable_system_store_falls_back_to_local_encryption() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("connections.toml");
+    let profile = postgres_profile("system-fallback");
+    let fake = Arc::new(FakeSecretStore::default());
+    fake.set_available_error(SecretStoreError::Unavailable);
+    let (mut runtime, mut receiver) = runtime(
+        Vec::new(),
+        HashSet::new(),
+        ProfileStore::new(path.clone()),
+        fake,
+    );
+
+    runtime.dispatch(Command::SaveProfile {
+        request_id: 32,
+        submission: submission(
+            profile,
+            CredentialUpdate::System(SecretString::from("fallback-password".to_owned())),
+        ),
+        connect: false,
+    });
+    match next_action(&mut receiver).await {
+        Action::ProfileSaved {
+            request_id: 32,
+            profile,
+            warning,
+            ..
+        } => {
+            assert!(matches!(
+                profile.credential_policy,
+                CredentialPolicy::LocalEncrypted(_)
+            ));
+            assert!(warning.unwrap().contains("local encryption"));
+        }
+        action => panic!("unexpected action: {action:?}"),
+    }
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
 async fn remembered_password_is_resolved_after_runtime_reconstruction() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("connections.toml");

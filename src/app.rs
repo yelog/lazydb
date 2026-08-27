@@ -81,6 +81,7 @@ pub struct App {
     pub focus: Focus,
     pub overlay: Option<Overlay>,
     pub profile_manager: Option<ProfileManagerState>,
+    pub system_credential_availability: crate::persistence::secrets::SecretStoreAvailability,
     pub should_quit: bool,
     next_console_number: usize,
     connection_request_generation: u64,
@@ -167,6 +168,8 @@ impl App {
             focus: Focus::Editor,
             overlay: None,
             profile_manager: None,
+            system_credential_availability:
+                crate::persistence::secrets::SecretStoreAvailability::Unavailable,
             should_quit: false,
             next_console_number: 2,
             connection_request_generation: 0,
@@ -556,8 +559,16 @@ impl App {
                 }
                 let mut manager = ProfileManagerState::default();
                 manager.start_new(DatabaseKind::Postgres);
+                manager.set_system_credential_availability(self.system_credential_availability);
                 self.profile_manager = Some(manager);
                 self.overlay = Some(Overlay::ProfileManager);
+                Vec::new()
+            }
+            Action::SystemCredentialAvailability(availability) => {
+                self.system_credential_availability = availability;
+                if let Some(manager) = self.profile_manager.as_mut() {
+                    manager.set_system_credential_availability(availability);
+                }
                 Vec::new()
             }
             Action::CloseProfileManager => {
@@ -575,6 +586,7 @@ impl App {
                 }
                 let mut manager = ProfileManagerState::default();
                 manager.start_new(DatabaseKind::Postgres);
+                manager.set_system_credential_availability(self.system_credential_availability);
                 self.profile_manager = Some(manager);
                 self.overlay = Some(Overlay::ProfileManager);
                 Vec::new()
@@ -596,8 +608,9 @@ impl App {
                 {
                     let mut manager = ProfileManagerState::default();
                     let has_stored_credential =
-                        profile.credential_policy.keyring_reference().is_some();
+                        profile.credential_policy.has_persisted_credential();
                     manager.start_edit(&profile, has_stored_credential);
+                    manager.set_system_credential_availability(self.system_credential_availability);
                     self.profile_manager = Some(manager);
                     self.overlay = Some(Overlay::ProfileManager);
                 }
@@ -912,9 +925,10 @@ impl App {
                     manager.message = Some(message);
                     return Vec::new();
                 }
-                let has_stored_credential = profile.credential_policy.keyring_reference().is_some();
+                let has_stored_credential = profile.credential_policy.has_persisted_credential();
                 let mut manager = ProfileManagerState::default();
                 manager.start_edit(&profile, has_stored_credential);
+                manager.set_system_credential_availability(self.system_credential_availability);
                 manager.selected_field = ProfileField::Password;
                 manager.message = Some(message);
                 self.profile_manager = Some(manager);

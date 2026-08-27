@@ -26,10 +26,12 @@ use crate::{
         workspace::{ConnectionIdentity, QueryStatus},
     },
     persistence::{
+        local_credentials::LocalCredentialStore,
         paths::AppPaths,
         profiles::ProfileStore,
         secrets::{
-            NativeSecretStore, SecretStore, SecretStoreError, keyring_ref, profile_id_from_ref,
+            NativeSecretStore, SecretStore, SecretStoreAvailability, SecretStoreError, keyring_ref,
+            profile_id_from_ref,
         },
         workspace::WorkspaceStore,
     },
@@ -94,6 +96,7 @@ pub struct Runtime {
     workspace_store: Option<WorkspaceStore>,
     workspace_mutation: Arc<Mutex<()>>,
     secret_store: Arc<dyn SecretStore>,
+    local_credential_store: LocalCredentialStore,
     profile_mutation: Arc<Mutex<()>>,
     event_sender: mpsc::UnboundedSender<Action>,
     connection: Arc<Mutex<Option<ActiveConnection>>>,
@@ -117,6 +120,7 @@ impl Runtime {
         secret_store: Arc<dyn SecretStore>,
         event_sender: mpsc::UnboundedSender<Action>,
     ) -> Self {
+        let local_credential_store = local_credential_store_for(&profile_store);
         let mut order = Vec::with_capacity(profiles.len());
         let mut profiles_by_id = HashMap::with_capacity(profiles.len());
         for profile in profiles {
@@ -148,6 +152,7 @@ impl Runtime {
             workspace_store: None,
             workspace_mutation: Arc::new(Mutex::new(())),
             secret_store,
+            local_credential_store,
             profile_mutation: Arc::new(Mutex::new(())),
             event_sender,
             connection: Arc::new(Mutex::new(None)),
@@ -172,6 +177,7 @@ impl Runtime {
         self.background_tasks.retain(|task| !task.is_finished());
         self.profile_tasks.retain(|task| !task.is_finished());
         match command {
+            Command::CheckSecretStoreAvailability => self.check_secret_store_availability(),
             Command::TestProfile {
                 request_id,
                 submission,
@@ -295,6 +301,7 @@ impl Runtime {
     fn test_profile(&mut self, request_id: u64, submission: ProfileSubmission) {
         let registry = Arc::clone(&self.registry);
         let secret_store = Arc::clone(&self.secret_store);
+        let local_credential_store = self.local_credential_store.clone();
         let sender = self.event_sender.clone();
         self.background_tasks.push(tokio::spawn(async move {
             let ProfileSubmission {
@@ -302,19 +309,24 @@ impl Runtime {
                 credential,
                 discovery_fingerprint,
             } = submission;
-            let password =
-                match resolve_submission_password(&registry, &secret_store, &profile, credential)
-                    .await
-                {
-                    Ok(password) => password,
-                    Err(message) => {
-                        let _ = sender.send(Action::ProfileTestFailed {
-                            request_id,
-                            message,
-                        });
-                        return;
-                    }
-                };
+            let password = match resolve_submission_password(
+                &registry,
+                &secret_store,
+                &local_credential_store,
+                &profile,
+                credential,
+            )
+            .await
+            {
+                Ok(password) => password,
+                Err(message) => {
+                    let _ = sender.send(Action::ProfileTestFailed {
+                        request_id,
+                        message,
+                    });
+                    return;
+                }
+            };
             match DatabaseConnection::connect(&profile, password.as_ref()).await {
                 Ok(database) => match database.probe().await {
                     Ok(server) => {
@@ -350,9 +362,19 @@ impl Runtime {
         }));
     }
 
+    fn check_secret_store_availability(&mut self) {
+        let secret_store = Arc::clone(&self.secret_store);
+        let sender = self.event_sender.clone();
+        self.background_tasks.push(tokio::spawn(async move {
+            let availability = SecretStoreAvailability::from_result(secret_store.available().await);
+            let _ = sender.send(Action::SystemCredentialAvailability(availability));
+        }));
+    }
+
     fn discover_profile_catalog(&mut self, request_id: u64, submission: ProfileSubmission) {
         let registry = Arc::clone(&self.registry);
         let secret_store = Arc::clone(&self.secret_store);
+        let local_credential_store = self.local_credential_store.clone();
         let sender = self.event_sender.clone();
         self.background_tasks.push(tokio::spawn(async move {
             let ProfileSubmission {
@@ -360,20 +382,25 @@ impl Runtime {
                 credential,
                 discovery_fingerprint,
             } = submission;
-            let password =
-                match resolve_submission_password(&registry, &secret_store, &profile, credential)
-                    .await
-                {
-                    Ok(password) => password,
-                    Err(message) => {
-                        let _ = sender.send(Action::ProfileCatalogDiscoveryFailed {
-                            request_id,
-                            fingerprint: discovery_fingerprint,
-                            message,
-                        });
-                        return;
-                    }
-                };
+            let password = match resolve_submission_password(
+                &registry,
+                &secret_store,
+                &local_credential_store,
+                &profile,
+                credential,
+            )
+            .await
+            {
+                Ok(password) => password,
+                Err(message) => {
+                    let _ = sender.send(Action::ProfileCatalogDiscoveryFailed {
+                        request_id,
+                        fingerprint: discovery_fingerprint,
+                        message,
+                    });
+                    return;
+                }
+            };
             match discover_profile_catalog(&profile, password.as_ref()).await {
                 Ok((server, capabilities, discovery)) => {
                     let _ = sender.send(Action::ProfileCatalogDiscoverySucceeded {
@@ -400,10 +427,18 @@ impl Runtime {
         let mutation = Arc::clone(&self.profile_mutation);
         let profile_store = self.profile_store.clone();
         let secret_store = Arc::clone(&self.secret_store);
+        let local_credential_store = self.local_credential_store.clone();
         let sender = self.event_sender.clone();
         self.profile_tasks.push(tokio::spawn(async move {
             let _mutation_guard = mutation.lock().await;
-            match save_profile_transaction(registry, profile_store, secret_store, submission).await
+            match save_profile_transaction(
+                registry,
+                profile_store,
+                secret_store,
+                local_credential_store,
+                submission,
+            )
+            .await
             {
                 Ok(saved) => {
                     let _ = sender.send(Action::ProfileSaved {
@@ -500,6 +535,7 @@ impl Runtime {
         let registry = Arc::clone(&self.registry);
         let mutation = Arc::clone(&self.profile_mutation);
         let secret_store = Arc::clone(&self.secret_store);
+        let local_credential_store = self.local_credential_store.clone();
         let sender = self.event_sender.clone();
         let connection = Arc::clone(&self.connection);
         let attempts = Arc::clone(&self.connection_attempts);
@@ -536,7 +572,13 @@ impl Runtime {
                 });
                 return;
             };
-            let password = match resolve_profile_password(&registry, &secret_store, &profile).await
+            let password = match resolve_profile_password(
+                &registry,
+                &secret_store,
+                &local_credential_store,
+                &profile,
+            )
+            .await
             {
                 Ok(password) => password,
                 Err(message) => {
@@ -1250,6 +1292,7 @@ async fn save_profile_transaction(
     registry: Arc<Mutex<ProfileRegistry>>,
     profile_store: ProfileStore,
     secret_store: Arc<dyn SecretStore>,
+    local_credential_store: LocalCredentialStore,
     submission: ProfileSubmission,
 ) -> Result<SavedProfile, String> {
     let snapshot = registry.lock().await.clone();
@@ -1265,7 +1308,10 @@ async fn save_profile_transaction(
     let mut warning = None;
     let credentials_changed = match &credential {
         CredentialUpdate::Preserve => false,
-        CredentialUpdate::Session(_) | CredentialUpdate::Remember(_) => true,
+        CredentialUpdate::Session(_)
+        | CredentialUpdate::Remember(_)
+        | CredentialUpdate::LocalEncrypted(_)
+        | CredentialUpdate::System(_) => true,
         CredentialUpdate::Forget => old_profile
             .as_ref()
             .is_some_and(|old| !matches!(old.credential_policy, CredentialPolicy::None)),
@@ -1298,6 +1344,31 @@ async fn save_profile_transaction(
             profile.credential_policy = CredentialPolicy::Prompt;
             next.session_secrets.insert(profile_id, password);
         }
+        CredentialUpdate::LocalEncrypted(password) => {
+            let encrypted = local_credential_store
+                .encrypt(profile_id, &password)
+                .map_err(|error| {
+                    sanitize_terminal_text(&format!(
+                        "Unable to encrypt the local password: {error}"
+                    ))
+                })?;
+            if let Some(old_profile) = old_profile.as_ref()
+                && old_profile.credential_policy.keyring_reference().is_some()
+            {
+                validate_secret_reference(old_profile)?;
+                let previous = read_secret(&secret_store, profile_id)
+                    .await
+                    .map_err(|error| secret_error("Unable to read the previous password", error))?;
+                delete_secret(&secret_store, profile_id)
+                    .await
+                    .map_err(|error| {
+                        secret_error("Unable to forget the previous password", error)
+                    })?;
+                previous_secret = Some(previous);
+            }
+            profile.credential_policy = CredentialPolicy::LocalEncrypted(encrypted);
+            next.session_secrets.insert(profile_id, password);
+        }
         CredentialUpdate::Remember(password) => {
             if let Some(old_profile) = old_profile.as_ref()
                 && old_profile.credential_policy.keyring_reference().is_some()
@@ -1307,7 +1378,7 @@ async fn save_profile_transaction(
             match remember_secret(&secret_store, profile_id, &password).await? {
                 RememberResult::Stored { previous } => {
                     previous_secret = Some(previous);
-                    profile.credential_policy = CredentialPolicy::Keyring(keyring_ref(profile_id));
+                    profile.credential_policy = CredentialPolicy::System(keyring_ref(profile_id));
                 }
                 RememberResult::SessionOnly => {
                     profile.credential_policy = CredentialPolicy::Prompt;
@@ -1321,6 +1392,35 @@ async fn save_profile_transaction(
                             "Native password store is unavailable; the password is available for this session only"
                             .to_owned()
                         },
+                    );
+                }
+            }
+            next.session_secrets.insert(profile_id, password);
+        }
+        CredentialUpdate::System(password) => {
+            if let Some(old_profile) = old_profile.as_ref()
+                && old_profile.credential_policy.keyring_reference().is_some()
+            {
+                validate_secret_reference(old_profile)?;
+            }
+            match remember_secret(&secret_store, profile_id, &password).await? {
+                RememberResult::Stored { previous } => {
+                    previous_secret = Some(previous);
+                    profile.credential_policy = CredentialPolicy::System(keyring_ref(profile_id));
+                }
+                RememberResult::SessionOnly => {
+                    profile.credential_policy = CredentialPolicy::LocalEncrypted(
+                        local_credential_store
+                            .encrypt(profile_id, &password)
+                            .map_err(|error| {
+                                sanitize_terminal_text(&format!(
+                                    "Unable to encrypt the local password after native store failure: {error}"
+                                ))
+                            })?,
+                    );
+                    warning = Some(
+                        "Native password store is unavailable; the password was saved using local encryption"
+                            .to_owned(),
                     );
                 }
             }
@@ -1494,6 +1594,7 @@ async fn remember_secret(
 async fn resolve_submission_password(
     registry: &Arc<Mutex<ProfileRegistry>>,
     secret_store: &Arc<dyn SecretStore>,
+    local_credential_store: &LocalCredentialStore,
     profile: &ConnectionProfile,
     credential: CredentialUpdate,
 ) -> Result<Option<SecretString>, String> {
@@ -1501,9 +1602,12 @@ async fn resolve_submission_password(
         CredentialUpdate::Session(password) | CredentialUpdate::Remember(password) => {
             Ok(Some(password))
         }
+        CredentialUpdate::LocalEncrypted(password) | CredentialUpdate::System(password) => {
+            Ok(Some(password))
+        }
         CredentialUpdate::Forget => Ok(None),
         CredentialUpdate::Preserve => {
-            resolve_profile_password(registry, secret_store, profile).await
+            resolve_profile_password(registry, secret_store, local_credential_store, profile).await
         }
     }
 }
@@ -1615,6 +1719,7 @@ async fn discover_profile_catalog(
 async fn resolve_profile_password(
     registry: &Arc<Mutex<ProfileRegistry>>,
     secret_store: &Arc<dyn SecretStore>,
+    local_credential_store: &LocalCredentialStore,
     profile: &ConnectionProfile,
 ) -> Result<Option<SecretString>, String> {
     let (session_password, startup_password) = {
@@ -1634,10 +1739,32 @@ async fn resolve_profile_password(
     match &profile.credential_policy {
         CredentialPolicy::None => Ok(None),
         CredentialPolicy::Prompt => Err("Enter a password to continue".to_owned()),
-        CredentialPolicy::Keyring(_) => {
+        CredentialPolicy::LocalEncrypted(credential) => {
+            let password = local_credential_store
+                .decrypt(profile.id, credential)
+                .map_err(|error| {
+                    sanitize_terminal_text(&format!(
+                        "Unable to decrypt the local password: {error}"
+                    ))
+                })?;
+            registry
+                .lock()
+                .await
+                .session_secrets
+                .insert(profile.id, password.clone());
+            Ok(Some(password))
+        }
+        CredentialPolicy::System(_) | CredentialPolicy::Keyring(_) => {
             validate_secret_reference(profile)?;
             match read_secret(secret_store, profile.id).await {
-                Ok(Some(password)) => Ok(Some(password)),
+                Ok(Some(password)) => {
+                    registry
+                        .lock()
+                        .await
+                        .session_secrets
+                        .insert(profile.id, password.clone());
+                    Ok(Some(password))
+                }
                 Ok(None) => {
                     Err("Stored password is missing; enter a password to continue".to_owned())
                 }
@@ -1725,6 +1852,15 @@ fn secret_store_unavailable(error: SecretStoreError) -> bool {
 
 fn secret_error(context: &str, error: SecretStoreError) -> String {
     sanitize_terminal_text(&format!("{context}: {error}"))
+}
+
+fn local_credential_store_for(profile_store: &ProfileStore) -> LocalCredentialStore {
+    let key_path = profile_store
+        .path()
+        .parent()
+        .map(|parent| parent.join("credential.key"))
+        .unwrap_or_else(|| std::path::PathBuf::from("credential.key"));
+    LocalCredentialStore::new(key_path, "lazydb")
 }
 
 async fn profile_revision_is_current(
@@ -1857,6 +1993,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
 
     let result: Result<()> = async {
         apply_startup_action_with_runtime(&mut app, &mut runtime, startup.selected);
+        runtime.dispatch(Command::CheckSecretStoreAvailability);
         terminal
             .draw(|frame| ui::render_with_state_using_icons(frame, &app, &mut ui_state, icons))?;
         sync_editor_viewport(&mut app, &mut runtime, &ui_state);

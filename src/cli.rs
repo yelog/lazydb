@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 
+use crate::persistence::secrets::secret_store_diagnostic;
 use crate::ui::icons::IconMode;
 
 pub const CLI_API_VERSION: u16 = 1;
@@ -109,7 +110,15 @@ pub struct DoctorReport<'a> {
     pub version: &'a str,
     pub cli_api: u16,
     pub profile: Option<&'a str>,
-    pub checks: [DoctorCheck<'a>; 2],
+    pub checks: [DoctorCheck<'a>; 3],
+    pub credential_store: CredentialStoreReport,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CredentialStoreReport {
+    pub provider: &'static str,
+    pub status: &'static str,
+    pub detail: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -148,11 +157,17 @@ pub fn doctor_report(profile: Option<&str>) -> DoctorReport<'_> {
         .map(|value| value.to_ascii_lowercase().contains("utf-8") || value.contains("utf8"))
         .unwrap_or(true);
 
+    let secret_store = secret_store_diagnostic();
     DoctorReport {
         ok: locale_is_utf8,
         version: env!("CARGO_PKG_VERSION"),
         cli_api: CLI_API_VERSION,
         profile,
+        credential_store: CredentialStoreReport {
+            provider: secret_store.provider,
+            status: secret_store.status,
+            detail: secret_store.detail,
+        },
         checks: [
             DoctorCheck {
                 name: "locale",
@@ -167,6 +182,11 @@ pub fn doctor_report(profile: Option<&str>) -> DoctorReport<'_> {
                 name: "drivers",
                 status: "ok",
                 detail: "postgres,mysql,sqlite",
+            },
+            DoctorCheck {
+                name: "credential_store",
+                status: secret_store.status,
+                detail: secret_store.detail,
             },
         ],
     }
@@ -193,8 +213,11 @@ pub fn render_command(command: &Command) -> Result<String, serde_json::Error> {
             let report = doctor_report(profile.as_deref());
             let status = if report.ok { "ok" } else { "warning" };
             Ok(format!(
-                "LazyDB doctor: {status}\nlocale: {}\ndrivers: postgres, mysql, sqlite",
-                report.checks[0].status
+                "LazyDB doctor: {status}\nlocale: {}\ndrivers: postgres, mysql, sqlite\ncredential_store: {} {} ({})",
+                report.checks[0].status,
+                report.credential_store.provider,
+                report.credential_store.status,
+                report.credential_store.detail,
             ))
         }
     }

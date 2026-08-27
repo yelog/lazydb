@@ -7,6 +7,8 @@ use thiserror::Error;
 use url::Url;
 use uuid::Uuid;
 
+use crate::persistence::local_credentials::EncryptedCredential;
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DatabaseKind {
@@ -205,19 +207,44 @@ pub enum Environment {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "policy", content = "reference", rename_all = "lowercase")]
+#[serde(tag = "policy", content = "reference", rename_all = "snake_case")]
 pub enum CredentialPolicy {
     #[default]
     None,
     Prompt,
+    LocalEncrypted(EncryptedCredential),
+    System(String),
+    /// Legacy v3 spelling. Profile loading normalizes this to `System`.
     Keyring(String),
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PasswordStorageChoice {
+    #[default]
+    LocalEncrypted,
+    System,
+}
+
 impl CredentialPolicy {
+    pub const fn has_persisted_credential(&self) -> bool {
+        matches!(
+            self,
+            Self::LocalEncrypted(_) | Self::System(_) | Self::Keyring(_)
+        )
+    }
+
+    pub const fn storage_choice(&self) -> Option<PasswordStorageChoice> {
+        match self {
+            Self::LocalEncrypted(_) => Some(PasswordStorageChoice::LocalEncrypted),
+            Self::System(_) | Self::Keyring(_) => Some(PasswordStorageChoice::System),
+            Self::None | Self::Prompt => None,
+        }
+    }
+
     pub fn keyring_reference(&self) -> Option<&str> {
         match self {
-            Self::Keyring(reference) => Some(reference),
-            Self::None | Self::Prompt => None,
+            Self::System(reference) | Self::Keyring(reference) => Some(reference),
+            Self::None | Self::Prompt | Self::LocalEncrypted(_) => None,
         }
     }
 }

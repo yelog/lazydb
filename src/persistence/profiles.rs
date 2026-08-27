@@ -14,7 +14,7 @@ use crate::profile::{
     Environment, SslMode,
 };
 
-const PROFILE_FILE_VERSION: u16 = 3;
+const PROFILE_FILE_VERSION: u16 = 4;
 
 #[derive(Clone, Debug)]
 pub struct ProfileStore {
@@ -126,6 +126,11 @@ impl ProfileStore {
                 .into_iter()
                 .map(ConnectionProfile::from)
                 .collect(),
+            3 => toml::from_str::<ProfileFile>(&contents)?
+                .profiles
+                .into_iter()
+                .map(normalize_v3_profile)
+                .collect(),
             found => {
                 return Err(PersistenceError::UnsupportedVersion {
                     found,
@@ -134,6 +139,9 @@ impl ProfileStore {
             }
         };
         for profile in &mut profiles {
+            if let CredentialPolicy::Keyring(reference) = &profile.credential_policy {
+                profile.credential_policy = CredentialPolicy::System(reference.clone());
+            }
             if !profile.url_format.is_compatible(profile.kind) {
                 profile.url_format = ConnectionUrlFormat::default_for(profile.kind);
             }
@@ -175,6 +183,13 @@ impl ProfileStore {
         }
         result
     }
+}
+
+fn normalize_v3_profile(mut profile: ConnectionProfile) -> ConnectionProfile {
+    if let CredentialPolicy::Keyring(reference) = profile.credential_policy {
+        profile.credential_policy = CredentialPolicy::System(reference);
+    }
+    profile
 }
 
 fn validate_profile_ids(profiles: &[ConnectionProfile]) -> Result<(), PersistenceError> {

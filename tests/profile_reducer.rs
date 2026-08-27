@@ -16,6 +16,7 @@ use lazydb::{
         },
         workspace::{ConnectionIdentity, ConnectionStatus, Overlay, QueryStatus},
     },
+    persistence::secrets::SecretStoreAvailability,
     profile::{
         CatalogScope, CatalogSelection, ConnectionProfile, DatabaseKind, DatabaseScope,
         import_connection_url,
@@ -363,8 +364,11 @@ fn cycle_and_toggle_actions_only_change_supported_fields() {
     app.update(Action::ProfileFocusField(ProfileField::Environment));
     app.update(Action::ProfileCycle(1));
     app.update(Action::ProfileToggleField(ProfileField::ReadOnly));
-    app.update(Action::ProfileFocusField(ProfileField::RememberPassword));
-    app.update(Action::ProfileToggle);
+    app.update(Action::ProfileFocusField(ProfileField::PasswordStorage));
+    app.update(Action::SystemCredentialAvailability(
+        SecretStoreAvailability::Available,
+    ));
+    app.update(Action::ProfileCycle(1));
 
     let draft = app
         .profile_manager
@@ -376,17 +380,53 @@ fn cycle_and_toggle_actions_only_change_supported_fields() {
     assert_eq!(draft.kind, DatabaseKind::MySql);
     assert_eq!(draft.environment, lazydb::profile::Environment::Staging);
     assert!(draft.read_only);
-    assert!(!draft.remember_password);
+    assert_eq!(
+        draft.password_storage,
+        lazydb::profile::PasswordStorageChoice::System
+    );
 
-    app.update(Action::ProfileToggle);
-    assert!(
+    app.update(Action::ProfileCycle(-1));
+    assert_eq!(
         app.profile_manager
             .as_ref()
             .unwrap()
             .draft
             .as_ref()
             .unwrap()
-            .remember_password
+            .password_storage,
+        lazydb::profile::PasswordStorageChoice::LocalEncrypted
+    );
+}
+
+#[test]
+fn unavailable_system_store_hides_option_but_available_store_shows_it() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::OpenProfileManager);
+    app.update(Action::ProfileFocusField(ProfileField::PasswordStorage));
+    assert_eq!(
+        app.profile_manager
+            .as_ref()
+            .unwrap()
+            .draft
+            .as_ref()
+            .unwrap()
+            .password_storage_choices(),
+        &[lazydb::profile::PasswordStorageChoice::LocalEncrypted]
+    );
+
+    app.update(Action::SystemCredentialAvailability(
+        SecretStoreAvailability::Available,
+    ));
+    assert_eq!(
+        app.profile_manager
+            .as_ref()
+            .unwrap()
+            .draft
+            .as_ref()
+            .unwrap()
+            .password_storage_choices()
+            .len(),
+        2
     );
 }
 

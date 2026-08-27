@@ -16,7 +16,7 @@ struct ProfileFileFixture<'a> {
 }
 
 #[test]
-fn version_two_profiles_migrate_credential_policy_and_save_as_version_three() {
+fn version_two_profiles_migrate_credential_policy_and_save_as_version_four() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("connections.toml");
     let store = ProfileStore::new(path.clone());
@@ -71,17 +71,17 @@ fn version_two_profiles_migrate_credential_policy_and_save_as_version_three() {
 
     assert_eq!(
         loaded[0].credential_policy,
-        CredentialPolicy::Keyring("keyring:profile-id".into())
+        CredentialPolicy::System("keyring:profile-id".into())
     );
     assert_eq!(loaded[1].credential_policy, CredentialPolicy::None);
-    first.credential_policy = CredentialPolicy::Keyring("keyring:profile-id".into());
+    first.credential_policy = CredentialPolicy::System("keyring:profile-id".into());
     first.url_format = ConnectionUrlFormat::PostgreSql;
     assert_eq!(loaded, vec![first, second]);
 
     store.save(&loaded).unwrap();
     let serialized = fs::read_to_string(path).unwrap();
-    assert!(serialized.contains("version = 3"));
-    assert!(serialized.contains("policy = \"keyring\""));
+    assert!(serialized.contains("version = 4"));
+    assert!(serialized.contains("policy = \"system\""));
     assert!(!serialized.contains("secret_ref"));
     assert!(serialized.contains("catalog_scope"));
     assert!(!serialized.contains("include_databases"));
@@ -124,9 +124,57 @@ include_schemas = ["public"]
         error,
         PersistenceError::UnsupportedVersion {
             found: 1,
-            expected: 3
+            expected: 4
         }
     ));
+}
+
+#[test]
+fn version_three_keyring_profiles_migrate_to_system_without_secret_access() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("connections.toml");
+    let store = ProfileStore::new(path.clone());
+    let mut profile = import_connection_url("postgres://db.example.com/app", Some("app"))
+        .unwrap()
+        .profile;
+    profile.credential_policy = CredentialPolicy::Keyring("keyring:app".into());
+    fs::write(
+        &path,
+        toml::to_string(&ProfileFileFixture {
+            version: 3,
+            profiles: &[profile],
+        })
+        .unwrap(),
+    )
+    .unwrap();
+
+    let loaded = store.load().unwrap();
+    assert_eq!(
+        loaded[0].credential_policy,
+        CredentialPolicy::System("keyring:app".into())
+    );
+}
+
+#[test]
+fn credential_storage_variants_serialize_without_plaintext() {
+    let mut profile = import_connection_url("postgres://db.example.com/app", Some("app"))
+        .unwrap()
+        .profile;
+    profile.credential_policy = CredentialPolicy::LocalEncrypted(
+        lazydb::persistence::local_credentials::EncryptedCredential {
+            version: 1,
+            nonce: "nonce".into(),
+            ciphertext: "ciphertext".into(),
+        },
+    );
+    let serialized = toml::to_string(&profile).unwrap();
+    assert!(serialized.contains("policy = \"local_encrypted\""));
+    assert!(serialized.contains("ciphertext = \"ciphertext\""));
+
+    profile.credential_policy = CredentialPolicy::System("keyring:app".into());
+    let serialized = toml::to_string(&profile).unwrap();
+    assert!(serialized.contains("policy = \"system\""));
+    assert!(serialized.contains("keyring:app"));
 }
 
 #[test]
@@ -179,7 +227,7 @@ fn rejects_duplicate_profile_uuids_on_save_and_load() {
     fs::write(
         &path,
         toml::to_string(&ProfileFileFixture {
-            version: 3,
+            version: 4,
             profiles: &duplicates,
         })
         .unwrap(),
