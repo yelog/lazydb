@@ -717,12 +717,8 @@ impl App {
                 }
                 Vec::new()
             }
-            Action::ProfileOpenScope => {
-                if let Some(manager) = self.editable_profile_manager_mut() {
-                    manager.open_scope_picker();
-                }
-                Vec::new()
-            }
+            Action::ProfileOpenScope => self.open_profile_scope(false),
+            Action::ProfileRefreshScope => self.open_profile_scope(true),
             Action::ProfileToggleScopeRow(id) => {
                 if let Some(manager) = self
                     .profile_manager
@@ -798,6 +794,40 @@ impl App {
                 {
                     manager.operation = None;
                     manager.message = Some(message);
+                }
+                Vec::new()
+            }
+            Action::ProfileCatalogDiscoverySucceeded {
+                request_id,
+                fingerprint,
+                server,
+                capabilities,
+                discovery,
+            } => {
+                if let Some(manager) = self.profile_manager.as_mut()
+                    && manager.matches_scope_discovery(request_id, fingerprint)
+                {
+                    if let Some(draft) = manager.draft.as_mut() {
+                        draft.apply_catalog_discovery(ProfileCatalogDiscovery {
+                            fingerprint,
+                            server,
+                            capabilities,
+                            discovery: Ok(discovery),
+                        });
+                    }
+                    manager.finish_scope_discovery();
+                }
+                Vec::new()
+            }
+            Action::ProfileCatalogDiscoveryFailed {
+                request_id,
+                fingerprint,
+                message,
+            } => {
+                if let Some(manager) = self.profile_manager.as_mut()
+                    && manager.matches_scope_discovery(request_id, fingerprint)
+                {
+                    manager.fail_scope_discovery(message);
                 }
                 Vec::new()
             }
@@ -2427,6 +2457,51 @@ impl App {
         manager.operation = Some(ProfileOperation::Testing);
         manager.message = Some("Testing connection...".into());
         vec![Command::TestProfile {
+            request_id,
+            submission,
+        }]
+    }
+
+    fn open_profile_scope(&mut self, force: bool) -> Vec<Command> {
+        let profiles = &self.profiles;
+        let Some(manager) = self.profile_manager.as_mut() else {
+            return Vec::new();
+        };
+        if manager.page == ProfileManagerPage::Form {
+            if manager.commit_url().is_err() {
+                return Vec::new();
+            }
+            manager.open_scope_picker();
+        } else if manager.page != ProfileManagerPage::Scope {
+            return Vec::new();
+        }
+        if manager.scope_discovery_loading() {
+            return Vec::new();
+        }
+        let Some(draft) = manager.draft.as_ref() else {
+            return Vec::new();
+        };
+        let submission = match draft.validate(profiles) {
+            Ok(submission) => submission,
+            Err(error) => {
+                manager.close_scope_picker();
+                manager.selected_field = error.field;
+                manager.message = Some(error.message);
+                return Vec::new();
+            }
+        };
+        if !force
+            && matches!(
+                &draft.catalog_discovery,
+                crate::model::profile_manager::CatalogDiscoveryState::Fresh(snapshot)
+                    if snapshot.fingerprint == submission.discovery_fingerprint
+            )
+        {
+            return Vec::new();
+        }
+        let request_id = next_profile_request(manager);
+        manager.begin_scope_discovery(request_id, submission.discovery_fingerprint);
+        vec![Command::DiscoverProfileCatalog {
             request_id,
             submission,
         }]

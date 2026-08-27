@@ -792,6 +792,7 @@ fn discovered_and_saved_schema_rows_are_deduplicated() {
                 name: "db".into(),
                 schemas: vec!["public".into()],
             }],
+            warnings: Vec::new(),
         }),
     });
     state.open_scope_picker();

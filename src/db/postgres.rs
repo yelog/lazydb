@@ -249,7 +249,20 @@ impl PostgresAdapter {
                 name: database,
                 schemas,
             }],
+            warnings: Vec::new(),
         })
+    }
+
+    pub async fn discoverable_databases(&self) -> Result<Vec<String>, DatabaseError> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT datname FROM pg_database \
+             WHERE datallowconn AND NOT datistemplate \
+               AND has_database_privilege(datname, 'CONNECT') \
+             ORDER BY datname COLLATE \"C\"",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Sql))
     }
 
     pub async fn execute(&self, sql: &str) -> Result<QueryOutcome, DatabaseError> {

@@ -11,7 +11,11 @@ use crate::{
     action::{Action, Command},
     app::App,
     cli::{Cli, MouseMode},
-    db::{DatabaseConnection, transaction::TransactionRequest},
+    db::{
+        DatabaseConnection,
+        catalog::{CatalogDiscovery, DiscoveredDatabase},
+        transaction::TransactionRequest,
+    },
     input::{
         keymap::{Keymap, map_paste},
         mouse::map_mouse,
@@ -172,6 +176,10 @@ impl Runtime {
                 request_id,
                 submission,
             } => self.test_profile(request_id, submission),
+            Command::DiscoverProfileCatalog {
+                request_id,
+                submission,
+            } => self.discover_profile_catalog(request_id, submission),
             Command::SaveProfile {
                 request_id,
                 submission,
@@ -336,6 +344,51 @@ impl Runtime {
                     let _ = sender.send(Action::ProfileTestFailed {
                         request_id,
                         message: sanitize_terminal_text(&error.to_string()),
+                    });
+                }
+            }
+        }));
+    }
+
+    fn discover_profile_catalog(&mut self, request_id: u64, submission: ProfileSubmission) {
+        let registry = Arc::clone(&self.registry);
+        let secret_store = Arc::clone(&self.secret_store);
+        let sender = self.event_sender.clone();
+        self.background_tasks.push(tokio::spawn(async move {
+            let ProfileSubmission {
+                profile,
+                credential,
+                discovery_fingerprint,
+            } = submission;
+            let password =
+                match resolve_submission_password(&registry, &secret_store, &profile, credential)
+                    .await
+                {
+                    Ok(password) => password,
+                    Err(message) => {
+                        let _ = sender.send(Action::ProfileCatalogDiscoveryFailed {
+                            request_id,
+                            fingerprint: discovery_fingerprint,
+                            message,
+                        });
+                        return;
+                    }
+                };
+            match discover_profile_catalog(&profile, password.as_ref()).await {
+                Ok((server, capabilities, discovery)) => {
+                    let _ = sender.send(Action::ProfileCatalogDiscoverySucceeded {
+                        request_id,
+                        fingerprint: discovery_fingerprint,
+                        server,
+                        capabilities,
+                        discovery,
+                    });
+                }
+                Err(message) => {
+                    let _ = sender.send(Action::ProfileCatalogDiscoveryFailed {
+                        request_id,
+                        fingerprint: discovery_fingerprint,
+                        message,
                     });
                 }
             }
@@ -1453,6 +1506,110 @@ async fn resolve_submission_password(
             resolve_profile_password(registry, secret_store, profile).await
         }
     }
+}
+
+async fn discover_profile_catalog(
+    profile: &ConnectionProfile,
+    password: Option<&SecretString>,
+) -> Result<
+    (
+        crate::db::ServerInfo,
+        crate::db::catalog::CatalogCapabilities,
+        CatalogDiscovery,
+    ),
+    String,
+> {
+    let connection = DatabaseConnection::connect(profile, password)
+        .await
+        .map_err(|error| sanitize_terminal_text(&error.to_string()))?;
+    let server = match connection.probe().await {
+        Ok(server) => server,
+        Err(error) => {
+            connection.close().await;
+            return Err(sanitize_terminal_text(&error.to_string()));
+        }
+    };
+    let capabilities = connection.catalog_capabilities();
+    let postgres_databases = match connection.discoverable_postgres_databases().await {
+        Ok(databases) => databases,
+        Err(error) => {
+            connection.close().await;
+            return Err(sanitize_terminal_text(&error.to_string()));
+        }
+    };
+    let discovery = if let Some(databases) = postgres_databases {
+        connection.close().await;
+        let profile = profile.clone();
+        let password = password.cloned();
+        let results = futures_util::stream::iter(databases.into_iter().map(|database| {
+            let mut database_profile = profile.clone();
+            let password = password.clone();
+            async move {
+                database_profile.database = Some(database.clone());
+                let operation = async {
+                    let connection =
+                        DatabaseConnection::connect(&database_profile, password.as_ref()).await?;
+                    let result = connection.discover_catalog_scope().await;
+                    connection.close().await;
+                    result
+                };
+                let result = timeout(Duration::from_secs(15), operation).await;
+                (database, result)
+            }
+        }))
+        .buffer_unordered(4)
+        .collect::<Vec<_>>()
+        .await;
+        let mut discovered = Vec::new();
+        let mut warnings = Vec::new();
+        for (database, result) in results {
+            match result {
+                Ok(Ok(scope)) => {
+                    let schemas = scope
+                        .databases
+                        .into_iter()
+                        .find(|item| item.name == database)
+                        .map(|item| item.schemas)
+                        .unwrap_or_default();
+                    discovered.push(DiscoveredDatabase {
+                        name: database,
+                        schemas,
+                    });
+                    warnings.extend(scope.warnings);
+                }
+                Ok(Err(error)) => {
+                    warnings.push(format!(
+                        "{database}: {}",
+                        sanitize_terminal_text(&error.to_string())
+                    ));
+                    discovered.push(DiscoveredDatabase {
+                        name: database,
+                        schemas: Vec::new(),
+                    });
+                }
+                Err(_) => {
+                    warnings.push(format!("{database}: discovery timed out after 15 seconds"));
+                    discovered.push(DiscoveredDatabase {
+                        name: database,
+                        schemas: Vec::new(),
+                    });
+                }
+            }
+        }
+        discovered.sort_by(|left, right| left.name.cmp(&right.name));
+        CatalogDiscovery {
+            databases: discovered,
+            warnings,
+        }
+    } else {
+        let result = connection
+            .discover_catalog_scope()
+            .await
+            .map_err(|error| sanitize_terminal_text(&error.to_string()));
+        connection.close().await;
+        result?
+    };
+    Ok((server, capabilities, discovery))
 }
 
 async fn resolve_profile_password(

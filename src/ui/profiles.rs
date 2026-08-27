@@ -287,7 +287,7 @@ fn render_scope(
     render_hint(
         frame,
         Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
-        "Space toggle   Enter back   Esc back",
+        "Space toggle   r refresh   Enter back   Esc back",
         theme,
     );
 }

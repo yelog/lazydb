@@ -740,6 +740,32 @@ fn server_profile_form_shows_all_fields_and_never_reveals_passwords() {
 }
 
 #[test]
+fn visible_objects_scope_shows_discovery_loading_and_refresh_hint() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::OpenProfileManager);
+    {
+        let draft = app
+            .profile_manager
+            .as_mut()
+            .unwrap()
+            .draft
+            .as_mut()
+            .unwrap();
+        draft.name.set("primary");
+        draft.database.set("warehouse");
+    }
+    assert!(matches!(
+        app.update(Action::ProfileOpenScope).as_slice(),
+        [lazydb::action::Command::DiscoverProfileCatalog { .. }]
+    ));
+
+    let output = render(&app, 120, 36);
+    assert!(output.contains("Discovering databases and schemas..."));
+    assert!(output.contains("r refresh"));
+    assert!(output.contains("warehouse"));
+}
+
+#[test]
 fn pending_url_redacts_an_embedded_password_before_commit() {
     let mut app = App::new(Vec::new());
     app.update(Action::OpenProfileManager);

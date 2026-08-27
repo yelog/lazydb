@@ -373,6 +373,7 @@ fn map_profile_manager(event: KeyEvent, app: &App) -> Option<Action> {
         ProfileManagerPage::Form => map_profile_form(event, manager.selected_field),
         ProfileManagerPage::Scope => match event.code {
             KeyCode::Esc | KeyCode::Enter => Some(Action::ProfileScopeBack),
+            KeyCode::Char('r') => Some(Action::ProfileRefreshScope),
             KeyCode::Up | KeyCode::Char('k') => Some(Action::ProfileScopeMove(-1)),
             KeyCode::Down | KeyCode::Char('j') => Some(Action::ProfileScopeMove(1)),
             KeyCode::Char(' ') => manager

@@ -124,6 +124,17 @@ fn space_s_returns_to_the_first_sql_console_from_explorer() {
 fn maps_scope_picker_navigation_and_toggle() {
     let mut app = App::new(Vec::new());
     app.update(Action::OpenProfileManager);
+    {
+        let draft = app
+            .profile_manager
+            .as_mut()
+            .unwrap()
+            .draft
+            .as_mut()
+            .unwrap();
+        draft.name.set("scope");
+        draft.database.set("lazydb");
+    }
     app.update(Action::ProfileOpenScope);
     let mut keymap = Keymap::default();
     assert_eq!(
@@ -144,7 +155,11 @@ fn maps_scope_picker_navigation_and_toggle() {
     );
     assert_eq!(
         keymap.map(key(KeyCode::Char(' ')), &app),
-        Some(Action::ProfileToggleScopeRow("database:".into()))
+        Some(Action::ProfileToggleScopeRow("database:lazydb".into()))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('r')), &app),
+        Some(Action::ProfileRefreshScope)
     );
 }
 

@@ -204,7 +204,10 @@ impl MySqlAdapter {
             })
             .collect();
 
-        Ok(CatalogDiscovery { databases })
+        Ok(CatalogDiscovery {
+            databases,
+            warnings: Vec::new(),
+        })
     }
 
     pub async fn execute(&self, sql: &str) -> Result<QueryOutcome, DatabaseError> {

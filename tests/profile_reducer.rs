@@ -113,7 +113,77 @@ fn discovery(database: &str, schemas: &[&str]) -> CatalogDiscovery {
             name: database.into(),
             schemas: schemas.iter().map(|schema| (*schema).into()).collect(),
         }],
+        warnings: Vec::new(),
     }
+}
+
+#[test]
+fn opening_visible_objects_starts_discovery_and_preserves_saved_scope() {
+    let profile = sqlite_profile("scope");
+    let saved_scope = profile.catalog_scope.clone();
+    let mut app = App::new(vec![profile.clone()]);
+    app.update(Action::ProfileStartEdit {
+        profile_id: profile.id,
+    });
+
+    let commands = app.update(Action::ProfileOpenScope);
+    let [
+        Command::DiscoverProfileCatalog {
+            request_id,
+            submission,
+        },
+    ] = commands.as_slice()
+    else {
+        panic!("unexpected commands: {commands:?}")
+    };
+    let manager = app.profile_manager.as_ref().unwrap();
+    assert_eq!(manager.page, ProfileManagerPage::Scope);
+    assert!(manager.scope_discovery_loading());
+    assert_eq!(manager.draft.as_ref().unwrap().catalog_scope, saved_scope);
+    assert_eq!(
+        manager.scope_discovery_request,
+        Some((*request_id, submission.discovery_fingerprint))
+    );
+}
+
+#[test]
+fn scope_discovery_response_preserves_scope_and_refresh_starts_new_request() {
+    let profile = sqlite_profile("scope");
+    let saved_scope = profile.catalog_scope.clone();
+    let mut app = App::new(vec![profile.clone()]);
+    app.update(Action::ProfileStartEdit {
+        profile_id: profile.id,
+    });
+    let (request_id, fingerprint) = match app.update(Action::ProfileOpenScope).as_slice() {
+        [
+            Command::DiscoverProfileCatalog {
+                request_id,
+                submission,
+            },
+        ] => (*request_id, submission.discovery_fingerprint),
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+
+    app.update(Action::ProfileCatalogDiscoverySucceeded {
+        request_id,
+        fingerprint,
+        server: ServerInfo {
+            kind: DatabaseKind::Sqlite,
+            version: "3.50".into(),
+            database: ":memory:".into(),
+        },
+        capabilities: capabilities(),
+        discovery: discovery(":memory:", &["main", "temp"]),
+    });
+    let manager = app.profile_manager.as_ref().unwrap();
+    assert!(!manager.scope_discovery_loading());
+    assert_eq!(manager.draft.as_ref().unwrap().catalog_scope, saved_scope);
+    assert!(manager.scope_row("database::memory::schema:temp").is_some());
+
+    assert!(matches!(
+        app.update(Action::ProfileRefreshScope).as_slice(),
+        [Command::DiscoverProfileCatalog { request_id: next, .. }] if *next > request_id
+    ));
 }
 
 fn profile_test_succeeded(

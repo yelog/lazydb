@@ -208,6 +208,7 @@ impl SqliteAdapter {
                 name: self.database.clone(),
                 schemas: aliases,
             }],
+            warnings: Vec::new(),
         })
     }
 

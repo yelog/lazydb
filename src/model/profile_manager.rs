@@ -1101,6 +1101,7 @@ pub struct ProfileManagerState {
     pub scope_expanded_databases: HashSet<String>,
     pub scope_viewport: usize,
     pub scope_warning: Option<String>,
+    pub scope_discovery_request: Option<(u64, DiscoveryFingerprint)>,
 }
 
 const SCOPE_VIEWPORT_CAPACITY: usize = 29;
@@ -1120,6 +1121,7 @@ impl ProfileManagerState {
             scope_expanded_databases: HashSet::new(),
             scope_viewport: 0,
             scope_warning: None,
+            scope_discovery_request: None,
         }
     }
 
@@ -1130,6 +1132,7 @@ impl ProfileManagerState {
         self.operation = None;
         self.message = None;
         self.scope_warning = None;
+        self.scope_discovery_request = None;
     }
 
     pub fn start_edit(&mut self, profile: &ConnectionProfile, has_stored_credential: bool) {
@@ -1139,6 +1142,7 @@ impl ProfileManagerState {
         self.operation = None;
         self.message = None;
         self.scope_warning = None;
+        self.scope_discovery_request = None;
     }
 
     pub fn open_scope_picker(&mut self) {
@@ -1152,6 +1156,38 @@ impl ProfileManagerState {
             self.scope_viewport = 0;
             self.scope_warning = self.scope_unavailable_warning();
         }
+    }
+
+    pub fn begin_scope_discovery(&mut self, request_id: u64, fingerprint: DiscoveryFingerprint) {
+        if let Some(draft) = self.draft.as_mut() {
+            draft.begin_catalog_discovery(fingerprint);
+        }
+        self.scope_discovery_request = Some((request_id, fingerprint));
+        self.scope_warning = Some("Discovering databases and schemas...".into());
+    }
+
+    pub fn matches_scope_discovery(
+        &self,
+        request_id: u64,
+        fingerprint: DiscoveryFingerprint,
+    ) -> bool {
+        self.scope_discovery_request == Some((request_id, fingerprint))
+    }
+
+    pub fn finish_scope_discovery(&mut self) {
+        self.scope_discovery_request = None;
+        self.scope_warning = self.scope_unavailable_warning();
+    }
+
+    pub fn fail_scope_discovery(&mut self, message: String) {
+        self.scope_discovery_request = None;
+        self.scope_warning = Some(format!(
+            "Catalog discovery failed: {message}; saved selections are shown"
+        ));
+    }
+
+    pub const fn scope_discovery_loading(&self) -> bool {
+        self.scope_discovery_request.is_some()
     }
 
     pub fn close_scope_picker(&mut self) {
@@ -1338,7 +1374,17 @@ impl ProfileManagerState {
                 .discovery
                 .as_ref()
                 .err()
-                .map(|error| format!("Catalog discovery warning: {error}")),
+                .map(|error| format!("Catalog discovery warning: {error}"))
+                .or_else(|| {
+                    snapshot.discovery.as_ref().ok().and_then(|discovery| {
+                        (!discovery.warnings.is_empty()).then(|| {
+                            format!(
+                                "Catalog discovery warning: {}",
+                                discovery.warnings.join("; ")
+                            )
+                        })
+                    })
+                }),
         }
     }
 

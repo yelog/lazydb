@@ -67,6 +67,7 @@ pub enum Action {
     ProfileToggle,
     ProfileToggleField(ProfileField),
     ProfileOpenScope,
+    ProfileRefreshScope,
     ProfileToggleScopeRow(String),
     ProfileScopeMove(isize),
     ProfileScopeBack,
@@ -83,6 +84,18 @@ pub enum Action {
     },
     ProfileTestFailed {
         request_id: u64,
+        message: String,
+    },
+    ProfileCatalogDiscoverySucceeded {
+        request_id: u64,
+        fingerprint: DiscoveryFingerprint,
+        server: ServerInfo,
+        capabilities: CatalogCapabilities,
+        discovery: CatalogDiscovery,
+    },
+    ProfileCatalogDiscoveryFailed {
+        request_id: u64,
+        fingerprint: DiscoveryFingerprint,
         message: String,
     },
     ProfileSaved {
@@ -313,6 +326,10 @@ pub enum Action {
 #[derive(Clone, Debug)]
 pub enum Command {
     TestProfile {
+        request_id: u64,
+        submission: ProfileSubmission,
+    },
+    DiscoverProfileCatalog {
         request_id: u64,
         submission: ProfileSubmission,
     },

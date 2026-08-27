@@ -205,6 +205,15 @@ impl DatabaseConnection {
         }
     }
 
+    pub async fn discoverable_postgres_databases(
+        &self,
+    ) -> Result<Option<Vec<String>>, DatabaseError> {
+        match self {
+            Self::Postgres(adapter) => adapter.discoverable_databases().await.map(Some),
+            Self::MySql(_) | Self::Sqlite(_) => Ok(None),
+        }
+    }
+
     pub async fn load_catalog_page(
         &self,
         request: &CatalogRequest,

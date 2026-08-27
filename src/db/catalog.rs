@@ -182,6 +182,8 @@ pub struct DiscoveredDatabase {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CatalogDiscovery {
     pub databases: Vec<DiscoveredDatabase>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
