@@ -763,7 +763,6 @@ fn server_profile_form_shows_all_fields_and_never_reveals_passwords() {
     let (output, state) = render_with_state(&app, 120, 36);
     for label in [
         "DRIVER",
-        "URL FORMAT",
         "URL",
         "NAME",
         "HOST",
@@ -784,6 +783,9 @@ fn server_profile_form_shows_all_fields_and_never_reveals_passwords() {
     ] {
         assert!(output.contains(label), "missing {label}");
     }
+    assert!(!output.contains("URL FORMAT"));
+    assert!(output.contains("EXAMPLES"));
+    assert!(output.contains("postgres://user:password@host:5432/database"));
     assert!(!output.contains("super-secret"));
     assert!(output.contains("••••••••••••"));
     assert!(
@@ -795,6 +797,43 @@ fn server_profile_form_shows_all_fields_and_never_reveals_passwords() {
     assert!(state.hit_regions.iter().any(|region| {
         region.target == HitTarget::ProfileButton(ProfileButton::SaveAndConnect)
     }));
+    assert!(
+        !state
+            .hit_regions
+            .iter()
+            .any(|region| { region.target == HitTarget::ProfileField(ProfileField::UrlFormat) })
+    );
+}
+
+#[test]
+fn profile_url_examples_follow_the_selected_driver() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::OpenProfileManager);
+    let cases = [
+        (
+            0,
+            "postgres://user:password@host:5432/database",
+            "mysql://user:password@host:3306/database",
+        ),
+        (
+            1,
+            "mysql://user:password@host:3306/database",
+            "sqlite:///path/to/database.db",
+        ),
+        (
+            2,
+            "sqlite:///path/to/database.db",
+            "postgres://user:password@host:5432/database",
+        ),
+    ];
+    for (cycle, expected, absent) in cases {
+        if cycle != 0 {
+            app.update(Action::ProfileCycle(1));
+        }
+        let output = render(&app, 120, 36);
+        assert!(output.contains(expected), "missing {expected}: {output}");
+        assert!(!output.contains(absent), "unexpected {absent}: {output}");
+    }
 }
 
 #[test]
@@ -958,6 +997,8 @@ fn profile_form_remains_actionable_in_compact_layout() {
     assert!(output.contains("SQLITE"), "{output}");
     assert!(output.contains("HOST"));
     assert!(output.contains("PASSWORD"));
+    assert!(output.contains("URL"));
+    assert!(output.contains("postgres://user:password@host:5432/database"));
     assert!(output.contains("SAVE & CONNECT"));
     assert!(output.contains("Esc cancel"));
 }

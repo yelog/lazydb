@@ -609,7 +609,8 @@ fn structured_edits_refresh_url_and_invalid_port_keeps_last_valid_url() {
 fn url_format_cycles_only_compatible_values_and_driver_resets_default() {
     let mut state = ProfileManagerState::new(false);
     state.start_new(DatabaseKind::Postgres);
-    state.focus_field(ProfileField::UrlFormat);
+    // URL format remains internal state even though it is no longer navigable.
+    state.selected_field = ProfileField::UrlFormat;
     state.cycle(1);
     assert_eq!(
         state.draft.as_ref().unwrap().url_format,
@@ -637,8 +638,6 @@ fn visible_fields_follow_the_selected_driver_and_sqlite_mode() {
         postgres.visible_fields(),
         &[
             ProfileField::Kind,
-            ProfileField::UrlFormat,
-            ProfileField::Url,
             ProfileField::Name,
             ProfileField::Host,
             ProfileField::Port,
@@ -651,6 +650,7 @@ fn visible_fields_follow_the_selected_driver_and_sqlite_mode() {
             ProfileField::Environment,
             ProfileField::ReadOnly,
             ProfileField::PasswordStorage,
+            ProfileField::Url,
             ProfileField::Test,
             ProfileField::Save,
             ProfileField::SaveAndConnect,
@@ -666,6 +666,23 @@ fn visible_fields_follow_the_selected_driver_and_sqlite_mode() {
     sqlite.sqlite_memory = true;
     assert!(!sqlite.visible_fields().contains(&ProfileField::SqlitePath));
     assert!(!sqlite.visible_fields().contains(&ProfileField::Password));
+}
+
+#[test]
+fn visible_field_navigation_reaches_url_before_actions_without_url_format() {
+    let mut state = ProfileManagerState::new(false);
+    state.start_new(DatabaseKind::Postgres);
+    let fields = state.visible_fields();
+    assert!(!fields.contains(&ProfileField::UrlFormat));
+    assert_eq!(fields[fields.len() - 5], ProfileField::Url);
+
+    state.selected_field = ProfileField::PasswordStorage;
+    state.move_field(1);
+    assert_eq!(state.selected_field, ProfileField::Url);
+    state.move_field(1);
+    assert_eq!(state.selected_field, ProfileField::Test);
+    state.move_field(-1);
+    assert_eq!(state.selected_field, ProfileField::Url);
 }
 
 #[test]

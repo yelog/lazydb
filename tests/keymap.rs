@@ -772,11 +772,7 @@ fn profile_form_maps_navigation_editing_and_commands() {
     assert_eq!(keymap.map(key(KeyCode::Enter), &app), None);
     assert_eq!(keymap.map(key(KeyCode::Char(' ')), &app), None);
 
-    for field in [
-        ProfileField::UrlFormat,
-        ProfileField::SslMode,
-        ProfileField::Environment,
-    ] {
+    for field in [ProfileField::SslMode, ProfileField::Environment] {
         app.profile_manager.as_mut().unwrap().selected_field = field;
         for (code, expected) in [
             (KeyCode::Left, Action::ProfileCycle(-1)),
