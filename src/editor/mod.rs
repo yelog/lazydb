@@ -397,6 +397,16 @@ impl EditorWorkspace {
         viewport: EditorViewport,
         dialect: SqlDialect,
     ) -> Result<EditorRenderSnapshot, EditorError> {
+        self.render_snapshot_with_dialect_and_statement(id, viewport, dialect, None)
+    }
+
+    pub(crate) fn render_snapshot_with_dialect_and_statement(
+        &self,
+        id: Uuid,
+        viewport: EditorViewport,
+        dialect: SqlDialect,
+        statement: Option<sql::TextRange>,
+    ) -> Result<EditorRenderSnapshot, EditorError> {
         let session = self
             .sessions
             .get(&id)
@@ -459,6 +469,8 @@ impl EditorWorkspace {
                             byte,
                             start,
                             EditorHighlightKind::Plain,
+                            statement,
+                            line_start,
                         ));
                     }
                     if end > start {
@@ -467,6 +479,8 @@ impl EditorWorkspace {
                             start,
                             end,
                             map_highlight(highlight.kind),
+                            statement,
+                            line_start,
                         ));
                     }
                     byte = byte.max(end);
@@ -477,6 +491,8 @@ impl EditorWorkspace {
                         byte,
                         source.len(),
                         EditorHighlightKind::Plain,
+                        statement,
+                        line_start,
                     ));
                 }
                 EditorRenderLine {
@@ -487,6 +503,9 @@ impl EditorWorkspace {
                             source_start: 0,
                             source_end: source.len(),
                             kind: EditorHighlightKind::Plain,
+                            current_statement: statement.is_some_and(|range| {
+                                range.start < line_end && range.end > line_start
+                            }),
                         }]
                     } else {
                         spans
@@ -1525,6 +1544,8 @@ fn render_span(
     start: usize,
     end: usize,
     kind: EditorHighlightKind,
+    statement: Option<sql::TextRange>,
+    line_start: usize,
 ) -> EditorRenderSpan {
     let text = source.get(start..end).unwrap_or_default();
     EditorRenderSpan {
@@ -1532,6 +1553,8 @@ fn render_span(
         source_start: start,
         source_end: end,
         kind,
+        current_statement: statement
+            .is_some_and(|range| range.start < line_start + end && range.end > line_start + start),
     }
 }
 

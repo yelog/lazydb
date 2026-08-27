@@ -82,6 +82,30 @@ fn fixture() -> App {
     app
 }
 
+#[test]
+fn sql_editor_underlines_only_the_statement_at_the_cursor() {
+    let mut app = fixture();
+    app.update(Action::ReplaceEditor("SELECT 1;\nSELECT 2;".into()));
+    let snapshot = app
+        .active_editor_render_snapshot(lazydb::model::editor::EditorViewport {
+            width: 120,
+            height: 10,
+        })
+        .unwrap();
+    assert!(
+        snapshot.lines[0]
+            .spans
+            .iter()
+            .any(|span| span.current_statement)
+    );
+    assert!(
+        snapshot.lines[1]
+            .spans
+            .iter()
+            .all(|span| !span.current_statement)
+    );
+}
+
 fn render(app: &App, width: u16, height: u16) -> String {
     render_with_state(app, width, height).0
 }

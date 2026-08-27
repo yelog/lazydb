@@ -218,7 +218,7 @@ pub fn render_with_state_using_icons(
         }
         if let Some(area) = layout.editor {
             let completion_anchor = render_editor(frame, area, app, theme, state);
-            render_completion_popup(frame, app, theme, state, completion_anchor);
+            render_completion_popup(frame, app, theme, state, completion_anchor, icons);
             state.hit_regions.push(HitRegion {
                 area,
                 target: HitTarget::Focus(Focus::Editor),
@@ -271,6 +271,7 @@ fn render_completion_popup(
     theme: Theme,
     state: &mut UiState,
     anchor: Option<CompletionAnchor>,
+    icons: icons::IconSet,
 ) {
     let Some(popup) = app
         .active_console_opt()
@@ -290,10 +291,15 @@ fn render_completion_popup(
         .iter()
         .map(|candidate| {
             let detail = candidate.detail.as_deref().unwrap_or("");
-            format!("{}  {}", candidate.label, detail)
-                .as_str()
-                .cell_width()
-                .saturating_add(1)
+            format!(
+                "{} {}  {}",
+                icons.completion(candidate.kind),
+                candidate.label,
+                detail
+            )
+            .as_str()
+            .cell_width()
+            .saturating_add(1)
         })
         .max()
         .unwrap_or(4)
@@ -309,12 +315,27 @@ fn render_completion_popup(
         .enumerate()
         .map(|(index, candidate)| {
             let detail = candidate.detail.as_deref().unwrap_or("");
-            let text = sanitize_terminal_text(&format!("{}  {}", candidate.label, detail));
-            ListItem::new(text).style(if index == popup.selected {
+            let row_style = if index == popup.selected {
                 Style::new().fg(theme.background).bg(theme.accent)
             } else {
                 Style::new().fg(theme.text).bg(theme.surface_raised)
-            })
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("{} ", icons.completion(candidate.kind)), row_style),
+                Span::styled(candidate.label.clone(), row_style),
+                Span::styled(
+                    if detail.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  {detail}")
+                    },
+                    row_style.fg(if index == popup.selected {
+                        theme.background
+                    } else {
+                        theme.muted
+                    }),
+                ),
+            ]))
         })
         .collect::<Vec<_>>();
     frame.render_widget(Clear, area);
@@ -750,11 +771,18 @@ fn render_editor(
                 };
                 Span::styled(
                     span.text.clone(),
-                    Style::new().fg(foreground).bg(if selected {
-                        theme.selection
-                    } else {
-                        theme.surface
-                    }),
+                    Style::new()
+                        .fg(foreground)
+                        .bg(if selected {
+                            theme.selection
+                        } else {
+                            theme.surface
+                        })
+                        .add_modifier(if span.current_statement {
+                            Modifier::UNDERLINED
+                        } else {
+                            Modifier::empty()
+                        }),
                 )
             })
             .collect::<Vec<_>>();

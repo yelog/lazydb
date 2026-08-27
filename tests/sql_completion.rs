@@ -86,6 +86,110 @@ fn completion_is_contextual_and_quotes_raw_names() {
 }
 
 #[test]
+fn completion_includes_databases_and_qualified_children() {
+    let index = CompletionIndex::new(&fixture());
+
+    let databases = complete("select * from ", 14, SqlDialect::Postgres, &index, None);
+    assert!(databases.iter().any(|candidate| {
+        candidate.kind == CompletionKind::Database && candidate.label == "app"
+    }));
+
+    let schema_text = "select * from app.";
+    let schemas = complete(
+        schema_text,
+        schema_text.len(),
+        SqlDialect::Postgres,
+        &index,
+        None,
+    );
+    assert!(schemas.iter().any(|candidate| {
+        candidate.kind == CompletionKind::Schema && candidate.label == "public"
+    }));
+
+    let table_text = "select * from app.public.";
+    let tables = complete(
+        table_text,
+        table_text.len(),
+        SqlDialect::Postgres,
+        &index,
+        None,
+    );
+    assert!(tables.iter().any(|candidate| {
+        candidate.kind == CompletionKind::Table && candidate.label == "users"
+    }));
+}
+
+#[test]
+fn alias_column_completion_uses_relation_columns_and_native_type() {
+    let index = CompletionIndex::new(&fixture());
+    let candidates = complete(
+        "select u. from users u",
+        9,
+        SqlDialect::Postgres,
+        &index,
+        None,
+    );
+    let column = candidates
+        .iter()
+        .find(|candidate| candidate.kind == CompletionKind::Column)
+        .expect("alias should resolve to table columns");
+    assert_eq!(column.label, "odd name");
+    assert_eq!(column.detail.as_deref(), Some("text<ESC>[31m"));
+}
+
+#[test]
+fn unqualified_columns_are_limited_to_relations_in_current_statement() {
+    let mut entries = fixture();
+    let connection = entries[0].id.profile_id();
+    let other_schema = CatalogId::new(connection, CatalogKind::Schema, ["app", "public"]);
+    let other_table = CatalogId::new(connection, CatalogKind::Table, ["app", "public", "roles"]);
+    entries.push(
+        CatalogEntry::relation(
+            other_table.clone(),
+            other_schema,
+            qualified("app", Some("public"), "roles"),
+            "table",
+            OptionalMetadata::Supported(None),
+            true,
+        )
+        .unwrap(),
+    );
+    entries.push(
+        CatalogEntry::relation_child(
+            CatalogId::new(
+                connection,
+                CatalogKind::Column,
+                ["app", "public", "roles", "user_id"],
+            ),
+            other_table,
+            qualified("app", Some("public"), "user_id"),
+            "column",
+            OptionalMetadata::Unsupported,
+            CatalogMetadata::Column(ColumnMetadata::new(1, "bigint", false)),
+        )
+        .unwrap(),
+    );
+    let index = CompletionIndex::new(&entries);
+    let candidates = complete(
+        "select odd from users u",
+        10,
+        SqlDialect::Postgres,
+        &index,
+        None,
+    );
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate.label == "odd name")
+    );
+    assert!(
+        !candidates
+            .iter()
+            .any(|candidate| candidate.label == "user_id")
+    );
+}
+
+#[test]
 fn hostile_display_text_does_not_change_insertion() {
     let mut nodes = fixture();
     let hostile_profile = Uuid::new_v4();
@@ -165,7 +269,8 @@ fn index_retains_only_completion_relevant_entries() {
     let index = CompletionIndex::new(&entries);
     assert!(index.entries().iter().all(|entry| matches!(
         entry.kind,
-        CatalogKind::Schema
+        CatalogKind::Database
+            | CatalogKind::Schema
             | CatalogKind::Table
             | CatalogKind::View
             | CatalogKind::MaterializedView
@@ -198,8 +303,9 @@ fn scoped_index_deduplicates_replaces_removed_entries_and_rejects_out_of_scope_e
         1
     );
     assert!(index.entries().iter().all(|entry| {
-        entry.qualified_name.database.as_deref() == Some("app")
-            && entry.qualified_name.schema.as_deref() == Some("public")
+        entry.kind == CatalogKind::Database
+            || (entry.qualified_name.database.as_deref() == Some("app")
+                && entry.qualified_name.schema.as_deref() == Some("public"))
     }));
 
     let other_database = CatalogEntry::relation(
@@ -220,7 +326,8 @@ fn scoped_index_deduplicates_replaces_removed_entries_and_rejects_out_of_scope_e
     );
 
     index.replace_scoped(&[entries[0].clone()], &scope);
-    assert_eq!(index.entries().len(), 0);
+    assert_eq!(index.entries().len(), 1);
+    assert_eq!(index.entries()[0].kind, CatalogKind::Database);
 }
 
 #[test]
