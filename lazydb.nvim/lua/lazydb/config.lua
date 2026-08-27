@@ -8,6 +8,7 @@ local defaults = {
   read_only = false,
   mouse = nil,
   color = nil,
+  icons = nil,
   window = {
     width = 0.85,
     height = 0.80,
@@ -47,6 +48,10 @@ local function validate(options)
   end
   if options.color ~= nil and not vim.tbl_contains({ "auto", "always", "never" }, options.color) then
     error("lazydb.nvim: color must be 'auto', 'always', or 'never'", 3)
+  end
+  if options.icons ~= nil
+      and not vim.tbl_contains({ "nerd-font", "unicode", "ascii" }, options.icons) then
+    error("lazydb.nvim: icons must be 'nerd-font', 'unicode', or 'ascii'", 3)
   end
   if options.window ~= nil and type(options.window) ~= "table" then
     error("lazydb.nvim: window must be a table", 3)
@@ -88,6 +93,9 @@ function M.argv()
   end
   if values.color then
     vim.list_extend(argv, { "--color", values.color })
+  end
+  if values.icons then
+    vim.list_extend(argv, { "--icons", values.icons })
   end
 
   return argv

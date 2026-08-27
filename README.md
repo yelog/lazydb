@@ -57,6 +57,9 @@ Requirements:
 - Rust 1.94 or newer.
 - macOS or Linux.
 - A UTF-8 terminal. Truecolor is recommended.
+- Nerd Fonts 3.x (or a compatible Symbols Nerd Font fallback) is recommended
+  for branded database and catalog icons. Unicode and ASCII fallbacks are
+  available when Nerd Font glyphs are not installed.
 
 ```bash
 cargo build --release
@@ -116,12 +119,18 @@ session-only downgrade.
 ```text
 lazydb [--config PATH] [--profile NAME] [--read-only]
        [--mouse auto|on|off] [--color auto|always|never]
+       [--icons nerd-font|unicode|ascii]
        [--confirm-execution risky|always]
 
 lazydb version --json
 lazydb capabilities --json
 lazydb doctor --json [--profile NAME]
 ```
+
+`--icons` applies to the current process only. `nerd-font` is the default and
+uses recognizable database brand glyphs; `unicode` uses standard Unicode
+symbols; `ascii` is the safest choice for minimal or remote terminals. If
+Nerd Font icons appear as boxes or misalign, select a fallback mode.
 
 `--url` creates an ad-hoc connection and never writes a profile. `--profile`
 selects a saved profile by name; if both are supplied, `--url` wins.

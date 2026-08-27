@@ -25,7 +25,10 @@ use lazydb::{
     persistence::secrets::keyring_ref,
     profile::{DatabaseKind, Environment, import_connection_url},
     sql::{CompletionCandidate, CompletionKind, CompletionScore, TextRange},
-    ui::{self, HitTarget, ProfileButton, UiState},
+    ui::{
+        self, HitTarget, ProfileButton, UiState,
+        icons::{IconMode, IconSet},
+    },
 };
 use ratatui::{Terminal, backend::TestBackend};
 
@@ -84,11 +87,15 @@ fn render(app: &App, width: u16, height: u16) -> String {
 }
 
 fn render_with_state(app: &App, width: u16, height: u16) -> (String, UiState) {
+    render_with_icons(app, width, height, IconSet::default())
+}
+
+fn render_with_icons(app: &App, width: u16, height: u16, icons: IconSet) -> (String, UiState) {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).unwrap();
     let mut state = UiState::new(true);
     terminal
-        .draw(|frame| ui::render_with_state(frame, app, &mut state))
+        .draw(|frame| ui::render_with_state_using_icons(frame, app, &mut state, icons))
         .unwrap();
     let buffer = terminal.backend().buffer();
     let mut output = String::new();
@@ -99,6 +106,20 @@ fn render_with_state(app: &App, width: u16, height: u16) -> (String, UiState) {
         output.push('\n');
     }
     (output, state)
+}
+
+#[test]
+fn explorer_uses_selected_icon_mode() {
+    let app = fixture();
+
+    let nerd = render_with_icons(&app, 120, 36, IconSet::new(IconMode::NerdFont)).0;
+    assert!(nerd.contains(nerd_font_symbols::dev::DEV_SQLITE), "{nerd}");
+
+    let unicode = render_with_icons(&app, 120, 36, IconSet::new(IconMode::Unicode)).0;
+    assert!(unicode.contains("SQ "), "{unicode}");
+
+    let ascii = render_with_icons(&app, 120, 36, IconSet::new(IconMode::Ascii)).0;
+    assert!(ascii.contains("SQ "), "{ascii}");
 }
 
 #[test]

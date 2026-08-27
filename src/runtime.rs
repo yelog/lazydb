@@ -1691,6 +1691,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
     runtime.set_workspace_store(workspace_store);
     let mut terminal = TerminalSession::enter(cli.mouse != MouseMode::Off)
         .context("failed to initialize terminal")?;
+    let icons = crate::ui::icons::IconSet::new(cli.icons);
     let mut terminal_events = EventStream::new();
     let mut keymap = Keymap::default();
     let mut ui_state = UiState::default();
@@ -1699,7 +1700,8 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
 
     let result: Result<()> = async {
         apply_startup_action_with_runtime(&mut app, &mut runtime, startup.selected);
-        terminal.draw(|frame| ui::render_with_state(frame, &app, &mut ui_state))?;
+        terminal
+            .draw(|frame| ui::render_with_state_using_icons(frame, &app, &mut ui_state, icons))?;
         sync_editor_viewport(&mut app, &mut runtime, &ui_state);
 
         while !app.should_quit {
@@ -1751,7 +1753,9 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
             }
 
             if redraw && !app.should_quit {
-                terminal.draw(|frame| ui::render_with_state(frame, &app, &mut ui_state))?;
+                terminal.draw(|frame| {
+                    ui::render_with_state_using_icons(frame, &app, &mut ui_state, icons)
+                })?;
                 sync_editor_viewport(&mut app, &mut runtime, &ui_state);
             }
         }

@@ -1,4 +1,5 @@
 pub mod effects;
+pub mod icons;
 pub mod layout;
 pub mod profiles;
 pub mod relation;
@@ -30,7 +31,6 @@ use crate::{
         tab::{OutputKind, ResultView, WorkspaceTab},
         workspace::{ConnectionStatus, Focus, Overlay, QueryStatus},
     },
-    profile::DatabaseKind,
     security::sanitize_terminal_text,
 };
 
@@ -162,6 +162,15 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
 }
 
 pub fn render_with_state(frame: &mut Frame<'_>, app: &App, state: &mut UiState) {
+    render_with_state_using_icons(frame, app, state, icons::IconSet::default());
+}
+
+pub fn render_with_state_using_icons(
+    frame: &mut Frame<'_>,
+    app: &App,
+    state: &mut UiState,
+    icons: icons::IconSet,
+) {
     let theme = Theme::default();
     let area = frame.area();
     frame.render_widget(Block::new().style(theme.base()), area);
@@ -189,7 +198,7 @@ pub fn render_with_state(frame: &mut Frame<'_>, app: &App, state: &mut UiState) 
                 area,
                 target: HitTarget::Focus(Focus::Explorer),
             });
-            render_explorer(frame, area, app, theme, state);
+            render_explorer(frame, area, app, theme, state, icons);
         }
         if let Some(area) = layout.relation {
             relation::render(frame, area, app, theme, state);
@@ -205,7 +214,7 @@ pub fn render_with_state(frame: &mut Frame<'_>, app: &App, state: &mut UiState) 
                 area,
                 target: HitTarget::Focus(Focus::Explorer),
             });
-            render_explorer(frame, area, app, theme, state);
+            render_explorer(frame, area, app, theme, state, icons);
         }
         if let Some(area) = layout.editor {
             let completion_anchor = render_editor(frame, area, app, theme, state);
@@ -466,6 +475,7 @@ fn render_explorer(
     app: &App,
     theme: Theme,
     state: &mut UiState,
+    icons: icons::IconSet,
 ) {
     let block = panel_block(" EXPLORER ", app.focus == Focus::Explorer, theme);
     let inner = block.inner(area);
@@ -519,7 +529,7 @@ fn render_explorer(
             } else {
                 " "
             };
-            let icon = visible.kind.map_or("·", catalog_icon);
+            let icon = visible.kind.map_or("·", |kind| icons.catalog(kind));
             let label = sanitize_terminal_text(&visible.label);
             let selected = app.explorer.selected_id() == Some(&visible.id);
             let label_style = if selected {
@@ -534,7 +544,7 @@ fn render_explorer(
             let mut spans = vec![Span::styled(base, label_style)];
             if let Some(kind) = visible.profile_kind {
                 spans.push(Span::styled(
-                    format!("{} ", database_icon(kind)),
+                    format!("{} ", icons.database(kind)),
                     Style::new().fg(theme.action).bg(if selected {
                         theme.selection
                     } else {
@@ -1492,33 +1502,6 @@ fn key_line<'a>(key: &'a str, description: &'a str, theme: Theme) -> Line<'a> {
         ),
         Span::styled(description, Style::new().fg(theme.text)),
     ])
-}
-
-fn catalog_icon(kind: CatalogKind) -> &'static str {
-    match kind {
-        CatalogKind::Database => "◆",
-        CatalogKind::Schema => "◇",
-        CatalogKind::Table => "▦",
-        CatalogKind::View | CatalogKind::MaterializedView => "◈",
-        CatalogKind::Column => "·",
-        CatalogKind::Index => "⌘",
-        CatalogKind::PrimaryKey => "◆",
-        CatalogKind::UniqueConstraint => "◇",
-        CatalogKind::ForeignKey => "↗",
-        CatalogKind::CheckConstraint => "✓",
-        CatalogKind::Function | CatalogKind::Procedure => "ƒ",
-        CatalogKind::Trigger => "⚡",
-        CatalogKind::Sequence => "#",
-        CatalogKind::Type => "τ",
-    }
-}
-
-fn database_icon(kind: DatabaseKind) -> &'static str {
-    match kind {
-        DatabaseKind::Postgres => "󰘦",
-        DatabaseKind::MySql => "󰆼",
-        DatabaseKind::Sqlite => "󰘚",
-    }
 }
 
 fn connection_status_spans(

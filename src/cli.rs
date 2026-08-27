@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 
+use crate::ui::icons::IconMode;
+
 pub const CLI_API_VERSION: u16 = 1;
 
 #[derive(Debug, Parser)]
@@ -30,6 +32,9 @@ pub struct Cli {
 
     #[arg(long, global = true, value_enum, default_value_t = ColorMode::Auto)]
     pub color: ColorMode,
+
+    #[arg(long, global = true, value_enum, default_value_t = IconMode::NerdFont)]
+    pub icons: IconMode,
 
     #[arg(long, global = true, value_enum, default_value_t = ConfirmationPolicy::RiskyOnly)]
     pub confirm_execution: ConfirmationPolicy,
@@ -200,6 +205,7 @@ mod tests {
     use clap::Parser;
 
     use super::{CLI_API_VERSION, Cli, Command, capabilities, render_command};
+    use crate::ui::icons::IconMode;
 
     #[test]
     fn parses_direct_connection_url() {
@@ -208,6 +214,33 @@ mod tests {
 
         assert_eq!(cli.url.as_deref(), Some("sqlite://demo.db"));
         assert!(cli.read_only);
+    }
+
+    #[test]
+    fn parses_icon_modes() {
+        assert_eq!(
+            Cli::try_parse_from(["lazydb"]).unwrap().icons,
+            IconMode::NerdFont
+        );
+        assert_eq!(
+            Cli::try_parse_from(["lazydb", "--icons", "unicode"])
+                .unwrap()
+                .icons,
+            IconMode::Unicode
+        );
+        assert_eq!(
+            Cli::try_parse_from(["lazydb", "--icons", "ascii"])
+                .unwrap()
+                .icons,
+            IconMode::Ascii
+        );
+        assert_eq!(
+            Cli::try_parse_from(["lazydb", "--icons", "nerd-font"])
+                .unwrap()
+                .icons,
+            IconMode::NerdFont
+        );
+        assert!(Cli::try_parse_from(["lazydb", "--icons", "emoji"]).is_err());
     }
 
     #[test]

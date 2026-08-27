@@ -9,6 +9,21 @@ Use `lazydb --config /path/to/connections.toml` to override the profile file for
 the current run. This option will point to a broader app configuration in a later
 migration; M0 treats it as the connection-profile file.
 
+## Icon Mode
+
+`--icons` selects the icon set for the current process:
+
+```text
+lazydb --icons nerd-font   # default; branded database and object glyphs
+lazydb --icons unicode     # standard Unicode fallback
+lazydb --icons ascii       # maximum compatibility
+```
+
+Nerd Fonts 3.x or a compatible Symbols Nerd Font fallback is recommended for
+the branded PostgreSQL, MySQL, and SQLite glyphs. LazyDB does not detect or
+install fonts, and the option is not stored in `connections.toml`. When using
+SSH, glyph rendering depends on the font configured by the local terminal.
+
 ## Startup Selection
 
 If the profile file is empty, LazyDB opens a new Profile Manager form instead of

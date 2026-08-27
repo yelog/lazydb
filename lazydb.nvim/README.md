@@ -23,6 +23,7 @@ require("lazydb").setup({
   read_only = false,
   mouse = nil, -- "auto", "on", or "off"
   color = nil, -- "auto", "always", or "never"
+  icons = nil, -- "nerd-font", "unicode", or "ascii"
   window = {
     width = 0.85,
     height = 0.80,

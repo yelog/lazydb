@@ -125,6 +125,7 @@ test("merges configuration and builds a stable argv list", function()
     read_only = true,
     mouse = "off",
     color = "always",
+    icons = "unicode",
     window = { border = "single" },
   })
 
@@ -142,8 +143,17 @@ test("merges configuration and builds a stable argv list", function()
     "off",
     "--color",
     "always",
+    "--icons",
+    "unicode",
   })
   eq(config.cwd(), "/tmp/work tree")
+end)
+
+test("rejects unsupported icon modes", function()
+  local lazydb = fresh_plugin()
+  local ok, err = pcall(lazydb.setup, { icons = "emoji" })
+  truthy(not ok, "unsupported icon mode was accepted")
+  truthy(err:find("nerd%-font") ~= nil, "error did not list valid icon modes")
 end)
 
 test("starts with argv and hides without stopping", function()
