@@ -4,6 +4,7 @@ use nerd_font_symbols::{dev, md};
 use crate::{
     db::catalog::{CatalogKind, ObjectGroup},
     profile::DatabaseKind,
+    sql::CompletionKind,
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
@@ -126,6 +127,23 @@ impl IconSet {
                     "[d]"
                 }
             }
+        }
+    }
+
+    pub const fn completion(self, kind: CompletionKind) -> &'static str {
+        match kind {
+            CompletionKind::Keyword => match self.mode {
+                IconMode::NerdFont => md::MD_CODE_BRACES,
+                IconMode::Unicode => "·",
+                IconMode::Ascii => "KW",
+            },
+            CompletionKind::Database => self.catalog(CatalogKind::Database),
+            CompletionKind::Schema => self.catalog(CatalogKind::Schema),
+            CompletionKind::Table => self.catalog(CatalogKind::Table),
+            CompletionKind::View => self.catalog(CatalogKind::View),
+            CompletionKind::Column => self.catalog(CatalogKind::Column),
+            CompletionKind::Function => self.catalog(CatalogKind::Function),
+            CompletionKind::Procedure => self.catalog(CatalogKind::Procedure),
         }
     }
 }

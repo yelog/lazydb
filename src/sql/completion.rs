@@ -4,6 +4,7 @@ use uuid::Uuid;
 use crate::db::catalog::{CatalogEntry, CatalogId, CatalogKind, CatalogMetadata};
 use crate::profile::CatalogScope;
 
+use super::scope::scan_statements;
 use super::{SqlDialect, TextRange};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -17,6 +18,7 @@ pub struct CompletionScheduleKey {
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum CompletionKind {
     Keyword,
+    Database,
     Schema,
     Table,
     View,
@@ -144,30 +146,26 @@ pub fn complete(
     default_schema: Option<&str>,
 ) -> Vec<CompletionCandidate> {
     let cursor = cursor.min(text.len());
-    let (replace, prefix, qualifier) = identifier_at(text, cursor, dialect);
+    let (replace, prefix, qualifiers) = identifier_at(text, cursor, dialect);
     let context = context_at(text, replace.start, dialect);
-    let parent = qualifier.as_deref().and_then(|name| {
-        index
-            .entries
-            .iter()
-            .find(|entry| {
-                matches!(
-                    entry.kind,
-                    CatalogKind::Schema
-                        | CatalogKind::Table
-                        | CatalogKind::View
-                        | CatalogKind::MaterializedView
-                ) && entry.qualified_name.object.eq_ignore_ascii_case(name)
-            })
-            .map(|entry| entry.id.clone())
-    });
+    let statement = current_statement_text(text, replace.start, dialect);
+    let bindings = relation_bindings(statement, dialect);
     let mut candidates = Vec::new();
     let folded_prefix = fold(&prefix);
-    for node_index in candidate_indices(index, parent.as_ref(), &folded_prefix) {
+    let candidate_indexes =
+        qualified_candidate_indices(index, &qualifiers, &folded_prefix, &bindings);
+    for node_index in candidate_indexes {
         let entry = &index.entries[node_index];
         let Some(kind) = completion_kind(entry.kind) else {
             continue;
         };
+        if kind == CompletionKind::Column
+            && qualifiers.is_empty()
+            && !bindings.is_empty()
+            && !entry_belongs_to_binding(entry, index, &bindings)
+        {
+            continue;
+        }
         if dialect == SqlDialect::Sqlite
             && matches!(kind, CompletionKind::Function | CompletionKind::Procedure)
         {
@@ -178,7 +176,13 @@ pub fn complete(
             continue;
         }
         if context == Context::Relation
-            && !matches!(kind, CompletionKind::Table | CompletionKind::View)
+            && !matches!(
+                kind,
+                CompletionKind::Database
+                    | CompletionKind::Schema
+                    | CompletionKind::Table
+                    | CompletionKind::View
+            )
         {
             continue;
         }
@@ -222,7 +226,7 @@ pub fn complete(
             },
         });
     }
-    if qualifier.is_none() {
+    if qualifiers.is_empty() {
         for keyword in keywords(dialect) {
             if keyword.to_lowercase().starts_with(&folded_prefix) {
                 candidates.push(CompletionCandidate {
@@ -254,6 +258,20 @@ pub fn complete(
     candidates
 }
 
+pub fn relation_ids_for_completion(
+    text: &str,
+    cursor: usize,
+    dialect: SqlDialect,
+    index: &CompletionIndex,
+) -> Vec<CatalogId> {
+    let cursor = cursor.min(text.len());
+    let statement = current_statement_text(text, cursor, dialect);
+    relation_bindings(statement, dialect)
+        .into_iter()
+        .flat_map(|(relation, _)| relation_parents(index, &relation))
+        .collect()
+}
+
 fn completion_detail(entry: &CatalogEntry) -> Option<String> {
     match &entry.metadata {
         CatalogMetadata::Column(column) => Some(column.native_type.clone()),
@@ -269,7 +287,20 @@ pub fn should_offer_completion(text: &str, cursor: usize) -> bool {
     else {
         return false;
     };
-    *previous == b'.' || previous.is_ascii_alphanumeric() || *previous == b'_' || *previous >= 0x80
+    if *previous == b'.'
+        || previous.is_ascii_alphanumeric()
+        || *previous == b'_'
+        || *previous >= 0x80
+    {
+        return true;
+    }
+    if previous.is_ascii_whitespace() {
+        let before = text[..cursor].trim_end().to_ascii_lowercase();
+        return ["from", "join", "update", "into", "select", "where"]
+            .iter()
+            .any(|keyword| before.ends_with(keyword));
+    }
+    false
 }
 
 fn candidate_indices(
@@ -289,6 +320,7 @@ fn candidate_indices(
 
 fn completion_kind(kind: CatalogKind) -> Option<CompletionKind> {
     Some(match kind {
+        CatalogKind::Database => CompletionKind::Database,
         CatalogKind::Schema => CompletionKind::Schema,
         CatalogKind::Table => CompletionKind::Table,
         CatalogKind::View | CatalogKind::MaterializedView => CompletionKind::View,
@@ -301,9 +333,6 @@ fn completion_kind(kind: CatalogKind) -> Option<CompletionKind> {
 
 fn context_at(text: &str, start: usize, dialect: SqlDialect) -> Context {
     let before = text[..start].to_ascii_lowercase();
-    if before.ends_with('.') {
-        return Context::Qualifier;
-    }
     let word = before.split_whitespace().last().unwrap_or_default();
     let relation = [" from ", " join ", " update ", " into "]
         .iter()
@@ -315,6 +344,9 @@ fn context_at(text: &str, start: usize, dialect: SqlDialect) -> Context {
         .max();
     if matches!(word, "from" | "join" | "update" | "into") || relation > clause {
         return Context::Relation;
+    }
+    if before.ends_with('.') {
+        return Context::Qualifier;
     }
     if before.ends_with("select ") || before.ends_with("select") {
         return Context::General;
@@ -331,26 +363,171 @@ fn identifier_at(
     text: &str,
     cursor: usize,
     dialect: SqlDialect,
-) -> (TextRange, String, Option<String>) {
+) -> (TextRange, String, Vec<String>) {
     let mut start = cursor;
     while start > 0 && is_identifier_byte(text.as_bytes()[start - 1], dialect) {
         start -= 1;
     }
     let prefix = text[start..cursor].to_owned();
-    let qualifier = (start > 0 && text.as_bytes()[start - 1] == b'.')
-        .then(|| {
-            let mut q = start - 1;
-            while q > 0 && is_identifier_byte(text.as_bytes()[q - 1], dialect) {
-                q -= 1;
-            }
-            text[q..start - 1].trim_matches(['"', '`']).to_owned()
-        })
-        .filter(|value| !value.is_empty());
+    let qualifiers = if start > 0 && text.as_bytes()[start - 1] == b'.' {
+        let mut q = start - 1;
+        while q > 0
+            && (is_identifier_byte(text.as_bytes()[q - 1], dialect)
+                || text.as_bytes()[q - 1] == b'.')
+        {
+            q -= 1;
+        }
+        text[q..start - 1]
+            .split('.')
+            .map(|value| value.trim_matches(['"', '`']).to_owned())
+            .filter(|value| !value.is_empty())
+            .collect()
+    } else {
+        Vec::new()
+    };
     (
         TextRange::new(start, cursor),
         prefix.trim_matches(['"', '`']).to_owned(),
-        qualifier,
+        qualifiers,
     )
+}
+
+fn qualified_candidate_indices(
+    index: &CompletionIndex,
+    qualifiers: &[String],
+    prefix: &str,
+    bindings: &[(String, Option<String>)],
+) -> Vec<usize> {
+    if qualifiers.is_empty() {
+        return candidate_indices(index, None, prefix);
+    }
+    let qualifier = &qualifiers[0];
+    let alias_parents = bindings
+        .iter()
+        .filter(|(_, alias)| {
+            alias
+                .as_deref()
+                .is_some_and(|alias| alias.eq_ignore_ascii_case(qualifier))
+        })
+        .flat_map(|(relation, _)| relation_parents(index, relation))
+        .collect::<Vec<_>>();
+    if !alias_parents.is_empty() {
+        return alias_parents
+            .into_iter()
+            .flat_map(|parent| index.children.get(&parent).into_iter().flatten().copied())
+            .collect();
+    }
+    let mut parents = index
+        .entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| {
+            entry
+                .qualified_name
+                .object
+                .eq_ignore_ascii_case(&qualifiers[0])
+                && (entry.kind == CatalogKind::Database
+                    || entry.kind == CatalogKind::Schema
+                    || entry.kind.is_relation())
+        })
+        .map(|(_, entry)| entry.id.clone())
+        .collect::<Vec<_>>();
+    for qualifier in &qualifiers[1..] {
+        parents = parents
+            .into_iter()
+            .flat_map(|parent| index.children.get(&parent).into_iter().flatten())
+            .filter_map(|position| {
+                let entry = &index.entries[*position];
+                entry
+                    .qualified_name
+                    .object
+                    .eq_ignore_ascii_case(qualifier)
+                    .then(|| entry.id.clone())
+            })
+            .collect();
+    }
+    parents
+        .into_iter()
+        .flat_map(|parent| index.children.get(&parent).into_iter().flatten().copied())
+        .collect()
+}
+
+fn relation_parents(index: &CompletionIndex, relation: &str) -> Vec<CatalogId> {
+    index
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry.qualified_name.object.eq_ignore_ascii_case(relation) && entry.kind.is_relation()
+        })
+        .map(|entry| entry.id.clone())
+        .collect()
+}
+
+fn entry_belongs_to_binding(
+    entry: &CatalogEntry,
+    index: &CompletionIndex,
+    bindings: &[(String, Option<String>)],
+) -> bool {
+    let Some(parent) = entry.parent_id.as_ref() else {
+        return false;
+    };
+    index.entries.iter().any(|candidate| {
+        candidate.id == *parent
+            && candidate.kind.is_relation()
+            && bindings.iter().any(|(relation, alias)| {
+                candidate
+                    .qualified_name
+                    .object
+                    .eq_ignore_ascii_case(relation)
+                    || alias.as_deref().is_some_and(|alias| {
+                        candidate.qualified_name.object.eq_ignore_ascii_case(alias)
+                    })
+            })
+    })
+}
+
+fn current_statement_text(text: &str, cursor: usize, dialect: SqlDialect) -> &str {
+    scan_statements(text, dialect)
+        .into_iter()
+        .find(|range| range.start <= cursor && cursor <= range.end)
+        .and_then(|range| text.get(range.start..range.end))
+        .unwrap_or(text)
+}
+
+fn relation_bindings(text: &str, dialect: SqlDialect) -> Vec<(String, Option<String>)> {
+    let words = text
+        .split(|character: char| !is_identifier_byte(character as u8, dialect) && character != '.')
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+    let mut bindings = Vec::new();
+    for (index, word) in words.iter().enumerate() {
+        if !matches!(
+            word.to_ascii_lowercase().as_str(),
+            "from" | "join" | "update" | "into"
+        ) {
+            continue;
+        }
+        let Some(relation) = words.get(index + 1) else {
+            continue;
+        };
+        let relation = relation
+            .trim_matches(['"', '`'])
+            .split('.')
+            .next_back()
+            .unwrap_or(relation)
+            .to_owned();
+        let alias = words
+            .get(index + 2)
+            .filter(|candidate| {
+                !matches!(
+                    candidate.to_ascii_lowercase().as_str(),
+                    "where" | "join" | "on" | "group" | "order" | "limit" | "having" | "returning"
+                )
+            })
+            .map(|alias| alias.trim_matches(['"', '`']).to_owned());
+        bindings.push((relation, alias));
+    }
+    bindings
 }
 
 fn is_identifier_byte(byte: u8, dialect: SqlDialect) -> bool {

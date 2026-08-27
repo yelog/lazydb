@@ -41,6 +41,7 @@ pub struct EditorRenderSpan {
     pub source_start: usize,
     pub source_end: usize,
     pub kind: EditorHighlightKind,
+    pub current_statement: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

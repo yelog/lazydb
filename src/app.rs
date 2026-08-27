@@ -98,6 +98,7 @@ enum CatalogRequestIntent {
     Continuation,
     Explicit,
     Refresh,
+    Completion,
 }
 
 impl App {
@@ -249,8 +250,25 @@ impl App {
         let Some(tab) = self.active_console_opt() else {
             return Err(EditorError::MissingSession(Uuid::nil()));
         };
-        self.editor
-            .render_snapshot_with_dialect(tab.id, viewport, self.sql_dialect())
+        let text = self.active_editor_text().unwrap_or_default();
+        let statement = self
+            .editor
+            .position(tab.id)
+            .ok()
+            .and_then(|position| {
+                let cursor = cursor_byte(&text, position.line, position.column);
+                sql::resolve_scope(&text, cursor, None, self.sql_dialect())
+            })
+            .map(|scope| match scope.source {
+                sql::ScopeSource::Contiguous(range) => range,
+                sql::ScopeSource::Block(_) => unreachable!(),
+            });
+        self.editor.render_snapshot_with_dialect_and_statement(
+            tab.id,
+            viewport,
+            self.sql_dialect(),
+            statement,
+        )
     }
 
     pub fn active_profile(&self) -> Option<&ConnectionProfile> {
@@ -2985,7 +3003,7 @@ impl App {
                         .active_editor_text()
                         .is_ok_and(|text| text.ends_with('.'))
                     {
-                        self.complete_now();
+                        commands.extend(self.complete_now());
                     } else if let Some(key) = self.completion_key() {
                         commands.push(Command::ScheduleCompletion(key));
                     }
@@ -3054,6 +3072,36 @@ impl App {
             .as_ref()
             .map(|snapshot| cursor_byte(&text, snapshot.cursor.line, snapshot.cursor.column))
             .unwrap_or(text.len());
+        let relation_ids = sql::relation_ids_for_completion(
+            &text,
+            cursor,
+            self.sql_dialect(),
+            &self.explorer.completion_index,
+        );
+        let mut commands = Vec::new();
+        for relation in relation_ids {
+            let owner = crate::model::explorer::ExplorerOwnerId::Catalog(relation.clone());
+            let loaded = self
+                .explorer
+                .normalized
+                .profiles
+                .get(&relation.profile_id())
+                .is_some_and(|profile| {
+                    matches!(
+                        profile.load_states.get(&owner),
+                        Some(crate::model::explorer::ExplorerLoadState::Loaded {
+                            next_cursor: None
+                        })
+                    )
+                });
+            if !loaded {
+                commands.extend(self.start_catalog_request(
+                    CatalogTarget::relation_children(relation).unwrap(),
+                    None,
+                    CatalogRequestIntent::Completion,
+                ));
+            }
+        }
         let default_schema = self
             .active_console_opt()
             .and_then(|tab| tab.execution_target.as_ref())
@@ -3076,7 +3124,7 @@ impl App {
             candidates,
             selected: 0,
         });
-        Vec::new()
+        commands
     }
 
     fn accept_completion(&mut self) -> Vec<Command> {
@@ -3750,7 +3798,7 @@ impl App {
                 CatalogRequestIntent::Continuation,
             ));
         }
-        match request.key.target {
+        match &request.key.target {
             CatalogTarget::Databases => {
                 for entry in page.entries {
                     commands.extend(self.start_catalog_request(
@@ -3783,6 +3831,11 @@ impl App {
                 }
             }
             CatalogTarget::Objects { .. } | CatalogTarget::RelationChildren { .. } => {}
+        }
+        if matches!(&request.key.target, CatalogTarget::RelationChildren { .. })
+            && self.active_console_opt().is_some()
+        {
+            commands.extend(self.complete_now());
         }
         commands
     }
