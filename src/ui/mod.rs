@@ -529,7 +529,12 @@ fn render_explorer(
             } else {
                 " "
             };
-            let icon = visible.kind.map_or("·", |kind| icons.catalog(kind));
+            let icon = match &visible.id {
+                crate::model::explorer::ExplorerNodeId::Group { group, .. } => {
+                    icons.group(*group, expanded)
+                }
+                _ => visible.kind.map_or("·", |kind| icons.catalog(kind)),
+            };
             let label = sanitize_terminal_text(&visible.label);
             let selected = app.explorer.selected_id() == Some(&visible.id);
             let label_style = if selected {
@@ -594,17 +599,13 @@ fn render_explorer(
             {
                 spans.push(Span::styled(
                     format!("  {}", sanitize_terminal_text(metadata)),
-                    Style::new().fg(theme.text).bg(if selected {
-                        theme.selection
-                    } else {
-                        theme.surface
-                    }),
+                    secondary_style,
                 ));
             }
             if let Some(comment) = visible.comment.as_deref().filter(|value| !value.is_empty()) {
                 spans.push(Span::styled(
                     format!("  {}", sanitize_terminal_text(comment)),
-                    secondary_style,
+                    secondary_style.add_modifier(Modifier::DIM),
                 ));
             }
             ListItem::new(Line::from(spans))

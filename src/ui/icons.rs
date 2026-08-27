@@ -1,7 +1,10 @@
 use clap::ValueEnum;
 use nerd_font_symbols::{dev, md};
 
-use crate::{db::catalog::CatalogKind, profile::DatabaseKind};
+use crate::{
+    db::catalog::{CatalogKind, ObjectGroup},
+    profile::DatabaseKind,
+};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 pub enum IconMode {
@@ -99,6 +102,32 @@ impl IconSet {
             },
         }
     }
+
+    pub const fn group(self, _group: ObjectGroup, expanded: bool) -> &'static str {
+        match self.mode {
+            IconMode::NerdFont => {
+                if expanded {
+                    md::MD_FOLDER_OPEN
+                } else {
+                    md::MD_FOLDER
+                }
+            }
+            IconMode::Unicode => {
+                if expanded {
+                    "▾"
+                } else {
+                    "▸"
+                }
+            }
+            IconMode::Ascii => {
+                if expanded {
+                    "[D]"
+                } else {
+                    "[d]"
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -175,5 +204,7 @@ mod tests {
         assert_eq!(icons.catalog(CatalogKind::Column), md::MD_TABLE_COLUMN);
         assert_eq!(icons.catalog(CatalogKind::PrimaryKey), md::MD_KEY);
         assert_eq!(icons.catalog(CatalogKind::Function), md::MD_FUNCTION);
+        assert_eq!(icons.group(ObjectGroup::Tables, false), md::MD_FOLDER);
+        assert_eq!(icons.group(ObjectGroup::Tables, true), md::MD_FOLDER_OPEN);
     }
 }
