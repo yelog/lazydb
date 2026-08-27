@@ -8,7 +8,11 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lazydb::{
     action::Action,
     app::App,
-    model::{tab::CompletionPopup, workspace::ConnectionStatus},
+    model::{
+        tab::CompletionPopup,
+        transaction::{TransactionMode, TransactionState},
+        workspace::{ConnectionStatus, Overlay},
+    },
     persistence::{profiles::ProfileStore, secrets::NativeSecretStore},
     profile::import_connection_url,
     runtime::Runtime,
@@ -76,6 +80,40 @@ fn normal_mode_motions_do_not_insert_literal_keys_through_app() {
         app.active_editor_mode(),
         lazydb::model::editor::EditorMode::Normal
     );
+}
+
+#[test]
+fn space_tt_toggles_transaction_mode_through_app_pipeline() {
+    let mut app = App::new(Vec::new());
+    editor_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+
+    for expected in [TransactionMode::Manual, TransactionMode::Auto] {
+        for code in [KeyCode::Char(' '), KeyCode::Char('t'), KeyCode::Char('t')] {
+            editor_key(&mut app, code, KeyModifiers::NONE);
+        }
+        assert_eq!(app.active_console().transaction_mode, expected);
+    }
+}
+
+#[test]
+fn space_tt_requires_exit_confirmation_for_active_manual_transaction() {
+    let mut app = App::new(Vec::new());
+    app.active_console_mut().transaction_mode = TransactionMode::Manual;
+    app.active_console_mut().transaction_state = TransactionState::Active;
+    editor_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+
+    for code in [KeyCode::Char(' '), KeyCode::Char('t'), KeyCode::Char('t')] {
+        editor_key(&mut app, code, KeyModifiers::NONE);
+    }
+
+    assert_eq!(
+        app.active_console().transaction_mode,
+        TransactionMode::Manual
+    );
+    assert!(matches!(
+        app.overlay,
+        Some(Overlay::TransactionExitConfirm { .. })
+    ));
 }
 
 #[test]

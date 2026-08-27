@@ -3298,12 +3298,17 @@ impl App {
                 }
                 EditorEffect::Message(_)
                 | EditorEffect::BackwardSearch
-                | EditorEffect::ToggleTransaction
                 | EditorEffect::ClearTransactionOutcome
                 | EditorEffect::SetConnectionTarget(_)
                 | EditorEffect::SetDatabaseTarget(_)
                 | EditorEffect::SetSchemaTarget(_) => continue,
                 EditorEffect::OpenTargetSelector => Action::OpenTargetSelector,
+                EditorEffect::ToggleTransaction => {
+                    Action::SetTransactionMode(match self.active_console().transaction_mode {
+                        TransactionMode::Auto => TransactionMode::Manual,
+                        TransactionMode::Manual => TransactionMode::Auto,
+                    })
+                }
                 EditorEffect::SetTransactionModeRequested { manual } => {
                     Action::SetTransactionMode(if manual {
                         TransactionMode::Manual
