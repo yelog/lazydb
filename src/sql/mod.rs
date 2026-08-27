@@ -18,8 +18,9 @@ mod transaction;
 
 pub use analysis::{AnalysisKey, LineIndex};
 pub use completion::{
-    CompletionCandidate, CompletionIndex, CompletionKind, CompletionScheduleKey, CompletionScore,
-    complete, quote_identifier, relation_ids_for_completion, should_offer_completion,
+    CompletionCandidate, CompletionContext, CompletionIndex, CompletionKind, CompletionScheduleKey,
+    CompletionScore, complete, quote_identifier, relation_ids_for_completion,
+    should_offer_completion,
 };
 pub use derived_result::{DerivedQueryError, build_derived_query, derived_query_capable};
 pub use dialect::SqlDialect;

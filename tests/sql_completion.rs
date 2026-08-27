@@ -7,7 +7,9 @@ use lazydb::{
     },
     model::workspace::ConnectionStatus,
     profile::{CatalogScope, CatalogSelection, DatabaseKind, DatabaseScope, import_connection_url},
-    sql::{CompletionIndex, CompletionKind, SqlDialect, complete, quote_identifier},
+    sql::{
+        CompletionContext, CompletionIndex, CompletionKind, SqlDialect, complete, quote_identifier,
+    },
 };
 use uuid::Uuid;
 
@@ -67,14 +69,14 @@ fn completion_is_contextual_and_quotes_raw_names() {
         16,
         SqlDialect::Postgres,
         &index,
-        Some("public"),
+        CompletionContext {
+            database: Some("app"),
+            schema: Some("public"),
+        },
     );
-    assert!(
-        candidates
-            .iter()
-            .any(|candidate| candidate.kind == CompletionKind::Table
-                && candidate.insert_text == "\"users\"")
-    );
+    assert!(candidates.iter().any(
+        |candidate| candidate.kind == CompletionKind::Table && candidate.insert_text == "users"
+    ));
     assert_eq!(
         quote_identifier("odd\" name", SqlDialect::Postgres),
         "\"odd\"\" name\""
@@ -89,7 +91,13 @@ fn completion_is_contextual_and_quotes_raw_names() {
 fn completion_includes_databases_and_qualified_children() {
     let index = CompletionIndex::new(&fixture());
 
-    let databases = complete("select * from ", 14, SqlDialect::Postgres, &index, None);
+    let databases = complete(
+        "select * from ",
+        14,
+        SqlDialect::Postgres,
+        &index,
+        CompletionContext::default(),
+    );
     assert!(databases.iter().any(|candidate| {
         candidate.kind == CompletionKind::Database && candidate.label == "app"
     }));
@@ -100,7 +108,7 @@ fn completion_includes_databases_and_qualified_children() {
         schema_text.len(),
         SqlDialect::Postgres,
         &index,
-        None,
+        CompletionContext::default(),
     );
     assert!(schemas.iter().any(|candidate| {
         candidate.kind == CompletionKind::Schema && candidate.label == "public"
@@ -112,10 +120,10 @@ fn completion_includes_databases_and_qualified_children() {
         table_text.len(),
         SqlDialect::Postgres,
         &index,
-        None,
+        CompletionContext::default(),
     );
     assert!(tables.iter().any(|candidate| {
-        candidate.kind == CompletionKind::Table && candidate.label == "users"
+        candidate.kind == CompletionKind::Table && candidate.label == "app.public.users"
     }));
 }
 
@@ -127,7 +135,7 @@ fn alias_column_completion_uses_relation_columns_and_native_type() {
         9,
         SqlDialect::Postgres,
         &index,
-        None,
+        CompletionContext::default(),
     );
     let column = candidates
         .iter()
@@ -175,7 +183,7 @@ fn unqualified_columns_are_limited_to_relations_in_current_statement() {
         10,
         SqlDialect::Postgres,
         &index,
-        None,
+        CompletionContext::default(),
     );
     assert!(
         candidates
@@ -210,7 +218,13 @@ fn hostile_display_text_does_not_change_insertion() {
         .unwrap(),
     );
     let index = CompletionIndex::new(&nodes);
-    let candidates = complete("from ", 5, SqlDialect::Postgres, &index, None);
+    let candidates = complete(
+        "from ",
+        5,
+        SqlDialect::Postgres,
+        &index,
+        CompletionContext::default(),
+    );
     let candidate = candidates
         .iter()
         .find(|candidate| candidate.insert_text.contains("2J"))
@@ -239,7 +253,13 @@ fn general_sql_keywords_rank_before_matching_catalog_names() {
     let index = CompletionIndex::new(&nodes);
 
     for (prefix, keyword) in [("s", "SELECT"), ("d", "DELETE"), ("f", "FROM")] {
-        let candidates = complete(prefix, prefix.len(), SqlDialect::Postgres, &index, None);
+        let candidates = complete(
+            prefix,
+            prefix.len(),
+            SqlDialect::Postgres,
+            &index,
+            CompletionContext::default(),
+        );
         assert_eq!(
             candidates.first().map(|candidate| candidate.label.as_str()),
             Some(keyword)
@@ -361,6 +381,10 @@ fn app_completion_prefers_the_active_console_target_schema() {
         .schema = Some("public".into());
     app.explorer.completion_index = CompletionIndex::new(&entries);
     app.update(Action::ReplaceEditor("select * from or".into()));
+    app.update(Action::EditorKey(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('i'),
+        crossterm::event::KeyModifiers::NONE,
+    )));
 
     app.update(Action::CompletionExplicit);
 
@@ -368,10 +392,96 @@ fn app_completion_prefers_the_active_console_target_schema() {
     let scores = popup
         .candidates
         .iter()
-        .filter(|candidate| candidate.label == "orders")
+        .filter(|candidate| candidate.label == "app.public.orders")
         .map(|candidate| candidate.score.schema)
         .collect::<Vec<_>>();
     assert_eq!(scores, [1]);
+}
+
+#[test]
+fn relation_completion_uses_shortest_target_relative_reference() {
+    let connection = Uuid::new_v4();
+    let database = CatalogId::new(connection, CatalogKind::Database, ["app"]);
+    let public = CatalogId::new(connection, CatalogKind::Schema, ["app", "public"]);
+    let mut entries = vec![
+        CatalogEntry::database(
+            database.clone(),
+            qualified("app", None, "app"),
+            "database",
+            OptionalMetadata::Supported(None),
+            false,
+        )
+        .unwrap(),
+        CatalogEntry::schema(
+            public.clone(),
+            database,
+            qualified("app", Some("public"), "public"),
+            "schema",
+            OptionalMetadata::Supported(None),
+            false,
+        )
+        .unwrap(),
+    ];
+    entries.extend(
+        [
+            ("app", "public", "users"),
+            ("app", "audit", "users"),
+            ("analytics", "bi", "users"),
+        ]
+        .into_iter()
+        .map(|(database, schema, object)| {
+            CatalogEntry::relation(
+                CatalogId::new(connection, CatalogKind::Table, [database, schema, object]),
+                CatalogId::new(connection, CatalogKind::Schema, [database, schema]),
+                qualified(database, Some(schema), object),
+                "table",
+                OptionalMetadata::Supported(None),
+                false,
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>(),
+    );
+    let index = CompletionIndex::new(&entries);
+    let context = CompletionContext {
+        database: Some("app"),
+        schema: Some("public"),
+    };
+    let candidates = complete(
+        "select * from us",
+        16,
+        SqlDialect::Postgres,
+        &index,
+        context,
+    );
+    let by_label = |label: &str| {
+        candidates
+            .iter()
+            .find(|candidate| candidate.label == label)
+            .unwrap()
+    };
+    assert_eq!(by_label("app.public.users").insert_text, "users");
+    assert_eq!(by_label("app.audit.users").insert_text, "audit.users");
+    assert_eq!(
+        by_label("analytics.bi.users").insert_text,
+        "analytics.bi.users"
+    );
+
+    let qualified_text = "select * from app.public.us";
+    let qualified_candidates = complete(
+        qualified_text,
+        qualified_text.len(),
+        SqlDialect::Postgres,
+        &index,
+        context,
+    );
+    assert_eq!(
+        qualified_candidates
+            .iter()
+            .map(|candidate| candidate.label.as_str())
+            .collect::<Vec<_>>(),
+        ["app.public.users"]
+    );
 }
 
 fn qualified(database: &str, schema: Option<&str>, object: &str) -> QualifiedName {
