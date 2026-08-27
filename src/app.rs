@@ -518,6 +518,7 @@ impl App {
                         | Action::GridStartColumnResize { .. }
                         | Action::GridSetColumnWidth { .. }
                         | Action::GridEndColumnResize
+                        | Action::GridSetColumnOffset { .. }
                         | Action::FocusDataQueryInput(_)
                         | Action::DataQueryInsert(_)
                         | Action::DataQueryBackspace
@@ -564,6 +565,7 @@ impl App {
                     | Action::GridStartColumnResize { .. }
                     | Action::GridSetColumnWidth { .. }
                     | Action::GridEndColumnResize
+                    | Action::GridSetColumnOffset { .. }
                     | Action::CompletionExplicit
                     | Action::CompletionNext
                     | Action::CompletionPrevious
@@ -1650,6 +1652,10 @@ impl App {
                 Vec::new()
             }
             Action::GridEndColumnResize => Vec::new(),
+            Action::GridSetColumnOffset { offset } => {
+                self.set_grid_column_offset(offset);
+                Vec::new()
+            }
             Action::PreviewSelected => self.open_selected_relation(RelationView::Data),
             Action::DdlSelected => self.ddl_selected(),
             Action::RelationSucceeded { request, snapshot } => {
@@ -4801,6 +4807,15 @@ impl App {
         self.with_active_grid(|grid, (row_count, column_count)| {
             grid.selected_row = row.min(row_count.saturating_sub(1));
             grid.selected_column = column.min(column_count.saturating_sub(1));
+            grid.clamp(row_count, column_count);
+        });
+    }
+
+    fn set_grid_column_offset(&mut self, offset: usize) {
+        self.with_active_grid(|grid, (row_count, column_count)| {
+            let offset = offset.min(column_count.saturating_sub(1));
+            grid.column_offset = offset;
+            grid.selected_column = offset;
             grid.clamp(row_count, column_count);
         });
     }

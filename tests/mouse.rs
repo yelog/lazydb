@@ -466,6 +466,76 @@ fn header_profile_hit_region_uses_terminal_display_width() {
     }
 }
 
+#[test]
+fn horizontal_scrollbar_track_click_sets_page_offset() {
+    let app = App::new(Vec::new());
+    let mut ui = UiState::new();
+    ui.hit_regions.push(HitRegion {
+        area: Rect::new(20, 10, 8, 1),
+        target: HitTarget::GridScrollbarPage { offset: 6 },
+    });
+
+    assert_eq!(
+        map_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 22, 10),
+            &ui,
+            &app,
+        ),
+        Some(Action::GridSetColumnOffset { offset: 6 })
+    );
+}
+
+#[test]
+fn horizontal_scrollbar_thumb_drag_maps_to_column_offsets() {
+    let app = App::new(Vec::new());
+    let mut ui = UiState::new();
+    ui.hit_regions.push(HitRegion {
+        area: Rect::new(12, 10, 4, 1),
+        target: HitTarget::GridScrollbarThumb {
+            track_x: 10,
+            track_width: 20,
+            thumb_x: 12,
+            thumb_width: 4,
+            offset: 2,
+            max_offset: 16,
+        },
+    });
+
+    assert_eq!(
+        map_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 13, 10),
+            &ui,
+            &app,
+        ),
+        Some(Action::GridSetColumnOffset { offset: 2 })
+    );
+    assert_eq!(
+        map_mouse(
+            mouse(MouseEventKind::Drag(MouseButton::Left), 29, 10),
+            &ui,
+            &app,
+        ),
+        Some(Action::GridSetColumnOffset { offset: 16 })
+    );
+    assert_eq!(
+        map_mouse(
+            mouse(MouseEventKind::Drag(MouseButton::Left), 10, 10),
+            &ui,
+            &app,
+        ),
+        Some(Action::GridSetColumnOffset { offset: 0 })
+    );
+    assert_eq!(
+        map_mouse(
+            mouse(MouseEventKind::Up(MouseButton::Left), 10, 10),
+            &ui,
+            &app,
+        ),
+        Some(Action::GridEndColumnResize)
+    );
+    assert!(ui.grid_scrollbar_drag.borrow().is_none());
+}
+
 fn assert_click_maps(ui: &UiState, app: &App, target: &HitTarget, expected: Action) {
     let region = ui
         .hit_regions

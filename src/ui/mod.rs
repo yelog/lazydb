@@ -52,14 +52,31 @@ pub enum HitTarget {
     Focus(Focus),
     Tab(usize),
     ExplorerRow(crate::model::explorer::ExplorerNodeId),
-    ResultCell { row: usize, column: usize },
+    ResultCell {
+        row: usize,
+        column: usize,
+    },
     Help,
     ToggleResultView,
     RelationView(crate::model::relation::RelationView),
     RelationRetry,
     RelationCancel,
     DataQueryInput(crate::model::data_query::DataQueryInput),
-    RelationColumnResize { column: usize, width: u16 },
+    RelationColumnResize {
+        column: usize,
+        width: u16,
+    },
+    GridScrollbarThumb {
+        track_x: u16,
+        track_width: u16,
+        thumb_x: u16,
+        thumb_width: u16,
+        offset: usize,
+        max_offset: usize,
+    },
+    GridScrollbarPage {
+        offset: usize,
+    },
     HeaderProfile,
     ProfileField(ProfileField),
     ProfileDriver(crate::profile::DatabaseKind),
@@ -89,6 +106,16 @@ pub struct UiState {
     pub cursor_style: Option<CursorStyle>,
     pub click_tracker: RefCell<Option<(crate::model::explorer::ExplorerNodeId, Instant)>>,
     pub relation_resize: RefCell<Option<(usize, u16, u16)>>,
+    pub grid_scrollbar_drag: RefCell<Option<GridScrollbarDrag>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GridScrollbarDrag {
+    pub track_x: u16,
+    pub track_width: u16,
+    pub thumb_width: u16,
+    pub pointer_offset: u16,
+    pub max_offset: usize,
 }
 
 impl Default for UiState {
@@ -106,6 +133,7 @@ impl UiState {
             cursor_style: None,
             click_tracker: RefCell::new(None),
             relation_resize: RefCell::new(None),
+            grid_scrollbar_drag: RefCell::new(None),
         }
     }
 

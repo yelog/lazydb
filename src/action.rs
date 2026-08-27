@@ -226,6 +226,9 @@ pub enum Action {
         width: u16,
     },
     GridEndColumnResize,
+    GridSetColumnOffset {
+        offset: usize,
+    },
     PreviewSelected,
     DdlSelected,
     RelationSucceeded {

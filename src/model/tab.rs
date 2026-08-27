@@ -22,6 +22,7 @@ pub enum TabKind {
 pub struct DataGridState {
     pub selected_row: usize,
     pub selected_column: usize,
+    pub column_offset: usize,
     pub column_widths: Vec<Option<u16>>,
 }
 
@@ -171,6 +172,7 @@ impl DataGridState {
     pub fn clamp(&mut self, row_count: usize, column_count: usize) {
         self.selected_row = self.selected_row.min(row_count.saturating_sub(1));
         self.selected_column = self.selected_column.min(column_count.saturating_sub(1));
+        self.column_offset = self.column_offset.min(column_count.saturating_sub(1));
         self.column_widths.truncate(column_count);
     }
 }
@@ -184,6 +186,7 @@ mod tests {
         let mut state = DataGridState {
             selected_row: 9,
             selected_column: 8,
+            column_offset: 7,
             column_widths: vec![Some(10), Some(11), Some(12), Some(13)],
         };
 
@@ -191,6 +194,7 @@ mod tests {
 
         assert_eq!(state.selected_row, 1);
         assert_eq!(state.selected_column, 2);
+        assert_eq!(state.column_offset, 2);
         assert_eq!(state.column_widths, vec![Some(10), Some(11), Some(12)]);
     }
 
@@ -199,6 +203,7 @@ mod tests {
         let mut state = DataGridState {
             selected_row: 3,
             selected_column: 4,
+            column_offset: 2,
             column_widths: vec![Some(10)],
         };
 
@@ -206,6 +211,7 @@ mod tests {
 
         assert_eq!(state.selected_row, 0);
         assert_eq!(state.selected_column, 0);
+        assert_eq!(state.column_offset, 0);
         assert!(state.column_widths.is_empty());
     }
 }

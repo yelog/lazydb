@@ -13,7 +13,22 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
         MouseEventKind::Drag(MouseButton::Left) => {
             if app.overlay.is_some() {
                 ui.relation_resize.borrow_mut().take();
+                ui.grid_scrollbar_drag.borrow_mut().take();
                 return None;
+            }
+            if let Some(drag) = *ui.grid_scrollbar_drag.borrow() {
+                let travel = drag.track_width.saturating_sub(drag.thumb_width);
+                let pointer = event
+                    .column
+                    .saturating_sub(drag.track_x)
+                    .saturating_sub(drag.pointer_offset)
+                    .min(travel);
+                let offset = if travel == 0 {
+                    0
+                } else {
+                    (pointer as usize * drag.max_offset + travel as usize / 2) / travel as usize
+                };
+                return Some(Action::GridSetColumnOffset { offset });
             }
             let (column, start_width, start_x) = (*ui.relation_resize.borrow())?;
             Some(Action::GridSetColumnWidth {
@@ -23,10 +38,12 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
         }
         MouseEventKind::Up(MouseButton::Left) => {
             ui.relation_resize.borrow_mut().take();
+            ui.grid_scrollbar_drag.borrow_mut().take();
             Some(Action::GridEndColumnResize)
         }
         MouseEventKind::Down(MouseButton::Left) => {
             ui.relation_resize.borrow_mut().take();
+            ui.grid_scrollbar_drag.borrow_mut().take();
             let Some(target) = ui.target_at(event.column, event.row).cloned() else {
                 ui.clear_click_tracker();
                 return None;
@@ -67,6 +84,26 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                 HitTarget::RelationColumnResize { column, width } => {
                     *ui.relation_resize.borrow_mut() = Some((column, width, event.column));
                     Some(Action::GridStartColumnResize { column, width })
+                }
+                HitTarget::GridScrollbarThumb {
+                    track_x,
+                    track_width,
+                    thumb_x,
+                    thumb_width,
+                    offset,
+                    max_offset,
+                } => {
+                    *ui.grid_scrollbar_drag.borrow_mut() = Some(crate::ui::GridScrollbarDrag {
+                        track_x,
+                        track_width,
+                        thumb_width,
+                        pointer_offset: event.column.saturating_sub(thumb_x),
+                        max_offset,
+                    });
+                    Some(Action::GridSetColumnOffset { offset })
+                }
+                HitTarget::GridScrollbarPage { offset } => {
+                    Some(Action::GridSetColumnOffset { offset })
                 }
                 HitTarget::HeaderProfile => app.connection.profile_id.map_or(
                     Some(Action::Focus(Focus::Explorer)),
@@ -150,7 +187,9 @@ fn focus_at(ui: &UiState, column: u16, row: u16) -> Option<Focus> {
         | HitTarget::RelationView(_)
         | HitTarget::RelationRetry
         | HitTarget::DataQueryInput(_)
-        | HitTarget::RelationColumnResize { .. } => Some(Focus::Results),
+        | HitTarget::RelationColumnResize { .. }
+        | HitTarget::GridScrollbarThumb { .. }
+        | HitTarget::GridScrollbarPage { .. } => Some(Focus::Results),
         HitTarget::RelationCancel => Some(Focus::Results),
         HitTarget::Tab(_)
         | HitTarget::Help

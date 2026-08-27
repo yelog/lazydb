@@ -2,7 +2,8 @@ use ratatui::{
     Frame,
     layout::{Constraint, Rect},
     style::{Modifier, Style},
-    widgets::{Block, Cell, Row, Table, TableState},
+    text::{Line, Span},
+    widgets::{Block, Cell, Paragraph, Row, Table, TableState},
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -49,21 +50,9 @@ pub(crate) fn render(
         })
         .collect::<Vec<_>>();
     let available = area.width.saturating_sub(4).max(1);
-    let first = visible_column_start(&widths, grid.selected_column, available);
-    let visible = widths
-        .iter()
-        .enumerate()
-        .skip(first)
-        .scan(0u16, |used, (index, width)| {
-            let next = used.saturating_add(*width).saturating_add(1);
-            if *used == 0 || next <= available {
-                *used = next;
-                Some(index)
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>();
+    let overflow = total_width(&widths) > available;
+    let first = viewport_start(&widths, grid.column_offset, grid.selected_column, available);
+    let visible = visible_columns(&widths, first, available);
     let constraints = visible
         .iter()
         .map(|index| Constraint::Length(widths[*index]))
@@ -73,7 +62,7 @@ pub(crate) fn render(
     for (row_index, _) in result
         .rows
         .iter()
-        .take(area.height.saturating_sub(4) as usize)
+        .take(area.height.saturating_sub(if overflow { 5 } else { 4 }) as usize)
         .enumerate()
     {
         let mut x = area.x.saturating_add(2);
@@ -150,6 +139,18 @@ pub(crate) fn render(
     let mut table_state =
         TableState::new().with_selected_cell(Some((grid.selected_row, selected_column)));
     frame.render_stateful_widget(table, area, &mut table_state);
+    if overflow {
+        render_scrollbar(
+            frame,
+            area,
+            first,
+            &visible,
+            widths.len(),
+            last_page_start(&widths, available),
+            theme,
+            state,
+        );
+    }
 }
 
 fn automatic_widths(result: &ResultSet) -> Vec<u16> {
@@ -172,18 +173,175 @@ fn automatic_widths(result: &ResultSet) -> Vec<u16> {
         .collect()
 }
 
-fn visible_column_start(widths: &[u16], selected: usize, available: u16) -> usize {
+fn total_width(widths: &[u16]) -> u16 {
+    widths
+        .iter()
+        .enumerate()
+        .fold(0u16, |total, (index, width)| {
+            total
+                .saturating_add(u16::from(index > 0))
+                .saturating_add(*width)
+        })
+}
+
+fn visible_columns(widths: &[u16], first: usize, available: u16) -> Vec<usize> {
+    widths
+        .iter()
+        .enumerate()
+        .skip(first.min(widths.len()))
+        .scan(0u16, |used, (index, width)| {
+            let spacing = u16::from(index > first);
+            let next = used.saturating_add(spacing).saturating_add(*width);
+            if *used == 0 || next <= available {
+                *used = next;
+                Some(index)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn viewport_start(widths: &[u16], offset: usize, selected: usize, available: u16) -> usize {
     if widths.is_empty() {
         return 0;
     }
-    let mut start = selected.min(widths.len() - 1);
-    loop {
-        let total = widths[start..].iter().fold(0u16, |sum, width| {
-            sum.saturating_add(*width).saturating_add(1)
-        });
-        if total <= available || start + 1 >= widths.len() {
-            return start;
-        }
+    let selected = selected.min(widths.len() - 1);
+    let mut start = offset.min(last_page_start(widths, available));
+    if selected < start {
+        return selected;
+    }
+    while !visible_columns(widths, start, available).contains(&selected) && start + 1 < widths.len()
+    {
         start += 1;
+    }
+    start
+}
+
+fn last_page_start(widths: &[u16], available: u16) -> usize {
+    let mut used = 0u16;
+    for index in (0..widths.len()).rev() {
+        let spacing = u16::from(used > 0);
+        let next = used.saturating_add(spacing).saturating_add(widths[index]);
+        if used != 0 && next > available {
+            return index + 1;
+        }
+        used = next;
+    }
+    0
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_scrollbar(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    first: usize,
+    visible: &[usize],
+    column_count: usize,
+    max_offset: usize,
+    theme: Theme,
+    state: &mut UiState,
+) {
+    let track = Rect::new(
+        area.x.saturating_add(2),
+        area.bottom().saturating_sub(2),
+        area.width.saturating_sub(4),
+        1,
+    );
+    if track.width < 3 || column_count == 0 {
+        return;
+    }
+    let rail_width = track.width.saturating_sub(2);
+    let thumb_width = ((rail_width as usize * visible.len().max(1)) / column_count)
+        .clamp(1, rail_width as usize) as u16;
+    let travel = rail_width.saturating_sub(thumb_width);
+    let thumb_offset = if max_offset == 0 {
+        0
+    } else {
+        ((travel as usize * first) / max_offset) as u16
+    };
+    let thumb_x = track.x.saturating_add(1).saturating_add(thumb_offset);
+    let before = thumb_x.saturating_sub(track.x.saturating_add(1));
+    let after = rail_width
+        .saturating_sub(before)
+        .saturating_sub(thumb_width);
+    let line = Line::from(vec![
+        Span::styled("‹", Style::new().fg(theme.muted)),
+        Span::styled("─".repeat(before as usize), Style::new().fg(theme.muted)),
+        Span::styled(
+            "━".repeat(thumb_width as usize),
+            Style::new().fg(theme.accent),
+        ),
+        Span::styled("─".repeat(after as usize), Style::new().fg(theme.muted)),
+        Span::styled("›", Style::new().fg(theme.muted)),
+    ]);
+    frame.render_widget(
+        Paragraph::new(line).style(Style::new().bg(theme.surface)),
+        track,
+    );
+
+    let page = visible.len().max(1) as isize;
+    state.hit_regions.push(HitRegion {
+        area: Rect::new(track.x, track.y, thumb_x.saturating_sub(track.x), 1),
+        target: HitTarget::GridScrollbarPage {
+            offset: first.saturating_sub(page as usize),
+        },
+    });
+    state.hit_regions.push(HitRegion {
+        area: Rect::new(thumb_x, track.y, thumb_width, 1),
+        target: HitTarget::GridScrollbarThumb {
+            track_x: track.x.saturating_add(1),
+            track_width: rail_width,
+            thumb_x,
+            thumb_width,
+            offset: first,
+            max_offset,
+        },
+    });
+    let after_x = thumb_x.saturating_add(thumb_width);
+    state.hit_regions.push(HitRegion {
+        area: Rect::new(after_x, track.y, track.right().saturating_sub(after_x), 1),
+        target: HitTarget::GridScrollbarPage {
+            offset: first.saturating_add(page as usize).min(max_offset),
+        },
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{total_width, viewport_start, visible_columns};
+
+    #[test]
+    fn narrow_grid_starts_with_first_columns() {
+        let widths = vec![6; 10];
+        let start = viewport_start(&widths, 0, 0, 20);
+        assert_eq!(start, 0);
+        assert_eq!(visible_columns(&widths, start, 20), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn viewport_follows_selection_across_right_edge() {
+        let widths = vec![6; 10];
+        assert_eq!(viewport_start(&widths, 0, 3, 20), 1);
+    }
+
+    #[test]
+    fn viewport_follows_selection_across_left_edge() {
+        let widths = vec![6; 10];
+        assert_eq!(viewport_start(&widths, 4, 2, 20), 2);
+    }
+
+    #[test]
+    fn explicit_last_offset_reaches_last_column() {
+        let widths = vec![6; 10];
+        let start = viewport_start(&widths, 9, 9, 20);
+        assert_eq!(visible_columns(&widths, start, 20), vec![7, 8, 9]);
+    }
+
+    #[test]
+    fn exact_fit_does_not_add_trailing_spacing() {
+        let widths = vec![6, 6];
+        assert_eq!(total_width(&widths), 13);
+        assert_eq!(visible_columns(&widths, 0, 13), vec![0, 1]);
     }
 }
