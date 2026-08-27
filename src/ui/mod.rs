@@ -735,10 +735,14 @@ fn render_editor(
     let block = base_block
         .title_top(Line::raw(format!(" SQL EDITOR  {mode} ")).left_aligned())
         .title_top(Line::raw(format!(" {target}  {transaction} ")).right_aligned());
-    state.cursor_style = Some(match snapshot.mode {
-        EditorMode::Insert => CursorStyle::Bar,
-        EditorMode::Replace => CursorStyle::Underline,
-        _ => CursorStyle::Block,
+    state.cursor_style = Some(if snapshot.prompt.is_some() {
+        CursorStyle::Bar
+    } else {
+        match snapshot.mode {
+            EditorMode::Insert => CursorStyle::Bar,
+            EditorMode::Replace => CursorStyle::Underline,
+            _ => CursorStyle::Block,
+        }
     });
     frame.render_widget(block, area);
     for (row, line) in snapshot.lines.iter().take(viewport.height).enumerate() {

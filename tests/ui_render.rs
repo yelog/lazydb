@@ -550,6 +550,40 @@ fn cursor_style_follows_editor_mode() {
         insert_state.cursor_style,
         Some(lazydb::ui::CursorStyle::Bar)
     );
+
+    app.update(Action::EditorKey(KeyEvent::new(
+        KeyCode::Esc,
+        KeyModifiers::NONE,
+    )));
+    let (_, returned_normal_state) = render_with_state(&app, 120, 36);
+    assert_eq!(
+        returned_normal_state.cursor_style,
+        Some(lazydb::ui::CursorStyle::Block)
+    );
+}
+
+#[test]
+fn editor_prompt_uses_bar_cursor() {
+    let mut app = fixture();
+    app.update(Action::EditorKey(KeyEvent::new(
+        KeyCode::Char(':'),
+        KeyModifiers::NONE,
+    )));
+
+    let (_, state) = render_with_state(&app, 120, 36);
+    assert_eq!(state.cursor_style, Some(lazydb::ui::CursorStyle::Bar));
+}
+
+#[test]
+fn replace_mode_uses_underline_cursor() {
+    let mut app = fixture();
+    app.update(Action::EditorKey(KeyEvent::new(
+        KeyCode::Char('R'),
+        KeyModifiers::NONE,
+    )));
+
+    let (_, state) = render_with_state(&app, 120, 36);
+    assert_eq!(state.cursor_style, Some(lazydb::ui::CursorStyle::Underline));
 }
 
 #[test]

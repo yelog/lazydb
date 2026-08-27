@@ -1996,6 +1996,9 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
         runtime.dispatch(Command::CheckSecretStoreAvailability);
         terminal
             .draw(|frame| ui::render_with_state_using_icons(frame, &app, &mut ui_state, icons))?;
+        if let Some(style) = ui_state.cursor_style {
+            terminal.set_cursor_style(style)?;
+        }
         sync_editor_viewport(&mut app, &mut runtime, &ui_state);
 
         while !app.should_quit {
@@ -2050,6 +2053,9 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                 terminal.draw(|frame| {
                     ui::render_with_state_using_icons(frame, &app, &mut ui_state, icons)
                 })?;
+                if let Some(style) = ui_state.cursor_style {
+                    terminal.set_cursor_style(style)?;
+                }
                 sync_editor_viewport(&mut app, &mut runtime, &ui_state);
             }
         }
