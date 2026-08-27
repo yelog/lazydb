@@ -12,6 +12,8 @@ use sqlx::{
     AssertSqlSafe, Column, Connection, Either, Executor, Row, SqlSafeStr, Sqlite, SqlitePool,
     Statement, TypeInfo, ValueRef,
     pool::PoolConnection,
+    query::Query,
+    sqlite::SqliteArguments,
     sqlite::{SqliteConnectOptions, SqliteConnection, SqlitePoolOptions, SqliteRow},
 };
 use sqlx_core::transaction::TransactionManager;
@@ -33,6 +35,7 @@ use super::{
         DiscoveredDatabase, IndexMetadata, NamespaceModel, ObjectGroup, OptionalMetadata,
         QualifiedName, RelationStructure, finalize_keyset_page,
     },
+    mutation::{InputValue, MutationResult, RelationMutation, RelationMutationRequest},
     query::{ColumnMeta, QueryOutcome, QueryOutcomeAccumulator, RELATION_PREVIEW_LIMIT, ResultSet},
     value::CellValue,
 };
@@ -1498,6 +1501,226 @@ impl TransactionBackend for SqliteTransactionBackend {
         self.cancelled.store(false, Ordering::Relaxed);
         result
     }
+    async fn relation_mutation(
+        &mut self,
+        request: RelationMutationRequest,
+    ) -> Result<MutationResult, TransactionError> {
+        let [_, schema, relation] = request.relation.native_path.as_slice() else {
+            return Err(TransactionError(
+                "SQLite relation has no canonical database, schema, and table path".into(),
+            ));
+        };
+        let columns = &request.metadata.columns;
+        let quoted_table = format!(
+            "{}.{}",
+            self.adapter.quote_identifier(schema),
+            self.adapter.quote_identifier(relation)
+        );
+        match request.operation {
+            RelationMutation::DeleteRows(rows) => {
+                if rows.is_empty() {
+                    return Ok(MutationResult::Deleted { rows: 0 });
+                }
+                let mut deleted = 0;
+                for mutation in rows {
+                    if mutation.row.columns.len() != mutation.row.values.len()
+                        || mutation.original.len() != columns.len()
+                    {
+                        return Err(TransactionError(
+                            "SQLite delete mutation is malformed".into(),
+                        ));
+                    }
+                    let mut sql = format!("DELETE FROM {quoted_table} WHERE ");
+                    let mut predicates = Vec::new();
+                    for index in &mutation.row.columns {
+                        if *index >= columns.len() {
+                            return Err(TransactionError(
+                                "SQLite row locator column is out of range".into(),
+                            ));
+                        }
+                        predicates.push(format!(
+                            "(({} = ?) OR ({} IS NULL AND ? IS NULL))",
+                            self.adapter.quote_identifier(&columns[*index].0),
+                            self.adapter.quote_identifier(&columns[*index].0)
+                        ));
+                    }
+                    for (index, _) in columns.iter().enumerate() {
+                        let name = self.adapter.quote_identifier(&columns[index].0);
+                        predicates
+                            .push(format!("(({name} = ?) OR ({name} IS NULL AND ? IS NULL))"));
+                    }
+                    sql.push_str(&predicates.join(" AND "));
+                    let mut query = sqlx::query(AssertSqlSafe(sql));
+                    for value in &mutation.row.values {
+                        query = bind_cell(query, value)?;
+                        query = bind_cell(query, value)?;
+                    }
+                    for value in &mutation.original {
+                        query = bind_cell(query, value)?;
+                        query = bind_cell(query, value)?;
+                    }
+                    if query
+                        .execute(&mut *self.connection)
+                        .await
+                        .map_err(|e| TransactionError(e.to_string()))?
+                        .rows_affected()
+                        != 1
+                    {
+                        return Err(TransactionError("SQLite relation mutation conflict".into()));
+                    }
+                    deleted += 1;
+                }
+                return Ok(MutationResult::Deleted { rows: deleted });
+            }
+            RelationMutation::InsertRow(insert) => {
+                if insert.columns.len() != insert.values.len()
+                    || insert.columns.iter().any(|i| *i >= columns.len())
+                {
+                    return Err(TransactionError(
+                        "SQLite insert mutation is malformed".into(),
+                    ));
+                }
+                // SQLite does not accept DEFAULT in a VALUES term. Omit a
+                // DEFAULT request so SQLite evaluates the column default.
+                let supplied = insert
+                    .columns
+                    .iter()
+                    .zip(&insert.values)
+                    .filter(|(_, value)| !matches!(value, InputValue::Default))
+                    .collect::<Vec<_>>();
+                let names = supplied
+                    .iter()
+                    .map(|(i, _)| self.adapter.quote_identifier(&columns[**i].0))
+                    .collect::<Vec<_>>();
+                let expressions = supplied.iter().map(|_| "?").collect::<Vec<_>>();
+                let sql = if names.is_empty() {
+                    format!("INSERT INTO {quoted_table} DEFAULT VALUES RETURNING *")
+                } else {
+                    format!(
+                        "INSERT INTO {quoted_table} ({}) VALUES ({}) RETURNING *",
+                        names.join(", "),
+                        expressions.join(", ")
+                    )
+                };
+                let mut query = sqlx::query(AssertSqlSafe(sql));
+                for (_, value) in supplied {
+                    match value {
+                        InputValue::Default => unreachable!(),
+                        InputValue::Null => query = query.bind(Option::<String>::None),
+                        InputValue::Value(value) => query = query.bind(value),
+                    }
+                }
+                let row = query
+                    .fetch_one(&mut *self.connection)
+                    .await
+                    .map_err(|e| TransactionError(e.to_string()))?;
+                return Ok(MutationResult::Inserted {
+                    row: decode_row(&row),
+                });
+            }
+            RelationMutation::UpdateCell(update) => {
+                let Some((column_name, _, _)) = columns.get(update.column) else {
+                    return Err(TransactionError(
+                        "SQLite update column is out of range".into(),
+                    ));
+                };
+                if update.row.columns.len() != update.row.values.len() {
+                    return Err(TransactionError("SQLite row locator is malformed".into()));
+                }
+                let primary_key_columns = request
+                    .metadata
+                    .primary_key
+                    .iter()
+                    .map(|name| {
+                        columns
+                            .iter()
+                            .position(|(column, _, _)| column == name)
+                            .ok_or_else(|| {
+                                TransactionError("SQLite primary key column is missing".into())
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                if primary_key_columns != update.row.columns {
+                    return Err(TransactionError(
+                        "SQLite row locator must contain the primary key columns in order".into(),
+                    ));
+                }
+                if update
+                    .row
+                    .columns
+                    .iter()
+                    .any(|index| *index >= columns.len())
+                {
+                    return Err(TransactionError(
+                        "SQLite row locator column is out of range".into(),
+                    ));
+                }
+
+                let quoted_column = self.adapter.quote_identifier(column_name);
+                let set_sql = match update.value {
+                    InputValue::Default => format!("{quoted_column} = DEFAULT"),
+                    InputValue::Null | InputValue::Value(_) => format!("{quoted_column} = ?"),
+                };
+                let mut statement = format!("UPDATE {quoted_table} SET {set_sql} WHERE ");
+                for (position, column_index) in update.row.columns.iter().enumerate() {
+                    if position > 0 {
+                        statement.push_str(" AND ");
+                    }
+                    let name = self.adapter.quote_identifier(&columns[*column_index].0);
+                    statement
+                        .push_str(&format!("(({name} = ?) OR ({name} IS NULL AND ? IS NULL))"));
+                }
+                if !update.row.columns.is_empty() {
+                    statement.push_str(" AND ");
+                }
+                statement.push_str(&format!(
+                    "(({quoted_column} = ?) OR ({quoted_column} IS NULL AND ? IS NULL))"
+                ));
+
+                let mut query = sqlx::query(AssertSqlSafe(statement));
+                match &update.value {
+                    InputValue::Default => {}
+                    InputValue::Null => query = query.bind(Option::<String>::None),
+                    InputValue::Value(value) => query = query.bind(value),
+                }
+                for value in &update.row.values {
+                    query = bind_cell(query, value)?;
+                    query = bind_cell(query, value)?;
+                }
+                query = bind_cell(query, &update.original)?;
+                query = bind_cell(query, &update.original)?;
+                let affected = query
+                    .execute(&mut *self.connection)
+                    .await
+                    .map_err(|error| TransactionError(error.to_string()))?
+                    .rows_affected();
+                if affected != 1 {
+                    return Err(TransactionError("SQLite relation mutation conflict".into()));
+                }
+
+                let mut select = format!("SELECT * FROM {quoted_table} WHERE ");
+                for (position, column_index) in update.row.columns.iter().enumerate() {
+                    if position > 0 {
+                        select.push_str(" AND ");
+                    }
+                    let name = self.adapter.quote_identifier(&columns[*column_index].0);
+                    select.push_str(&format!("(({name} = ?) OR ({name} IS NULL AND ? IS NULL))"));
+                }
+                let mut select_query = sqlx::query(AssertSqlSafe(select));
+                for value in &update.row.values {
+                    select_query = bind_cell(select_query, value)?;
+                    select_query = bind_cell(select_query, value)?;
+                }
+                let row = select_query
+                    .fetch_one(&mut *self.connection)
+                    .await
+                    .map_err(|error| TransactionError(error.to_string()))?;
+                Ok(MutationResult::Updated {
+                    row: decode_row(&row),
+                })
+            }
+        }
+    }
     async fn commit(&mut self) -> Result<(), TransactionError> {
         <Sqlite as sqlx::Database>::TransactionManager::commit(&mut self.connection)
             .await
@@ -1585,6 +1808,28 @@ fn decode_error(error: sqlx::Error) -> DatabaseError {
     DatabaseError::from_sqlx(error, ErrorCategory::Internal)
 }
 
+fn bind_cell<'q>(
+    query: Query<'q, Sqlite, SqliteArguments>,
+    value: &CellValue,
+) -> Result<Query<'q, Sqlite, SqliteArguments>, TransactionError> {
+    Ok(match value {
+        CellValue::Null => query.bind(Option::<String>::None),
+        CellValue::Boolean(value) => query.bind(*value),
+        CellValue::Integer(value) => query.bind(*value),
+        CellValue::Unsigned(value) => query.bind(i64::try_from(*value).map_err(|_| {
+            TransactionError("SQLite cannot bind an unsigned value larger than i64".into())
+        })?),
+        CellValue::Float(value) => query.bind(*value),
+        CellValue::Text(value) => query.bind(value.clone()),
+        CellValue::Bytes(value) => query.bind(value.clone()),
+        CellValue::Unsupported { .. } => {
+            return Err(TransactionError(
+                "SQLite cannot bind an unsupported cell value".into(),
+            ));
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::{sync::Arc, time::Duration};
@@ -1600,15 +1845,292 @@ mod tests {
                 CatalogId, CatalogKind, CatalogRequest, CatalogRequestKey, CatalogTarget,
                 ObjectGroup,
             },
-            transaction::TransactionBackend,
+            mutation::{
+                DeleteRowMutation, InputValue, InsertRowMutation, MetadataFingerprint,
+                RelationMutation, RelationMutationRequest, RowLocator, UpdateCellMutation,
+            },
+            transaction::{TransactionBackend, TransactionError},
+            value::CellValue,
         },
         identity::ConnectionIdentity,
+        model::{execution_target::ExecutionTarget, relation::RelationKey},
         profile::{CatalogScope, DatabaseKind, import_connection_url},
     };
 
     async fn memory_adapter() -> SqliteAdapter {
         let imported = import_connection_url("sqlite://:memory:", Some("sqlite-internal")).unwrap();
         SqliteAdapter::connect(&imported.profile).await.unwrap()
+    }
+
+    fn update_request(value: InputValue, original: CellValue) -> RelationMutationRequest {
+        let connection_id = uuid::Uuid::nil();
+        RelationMutationRequest {
+            tab_id: uuid::Uuid::nil(),
+            tab_generation: 1,
+            edit_generation: 1,
+            row_id: crate::model::relation_edit::EditableRowId(1),
+            connection: ConnectionIdentity {
+                profile_id: connection_id,
+                generation: 1,
+            },
+            target: ExecutionTarget {
+                profile_id: connection_id,
+                database: ":memory:".into(),
+                schema: Some("main".into()),
+            },
+            relation: CatalogId::new(
+                connection_id,
+                CatalogKind::Table,
+                [":memory:", "main", "items"],
+            ),
+            relation_key: RelationKey {
+                profile_id: connection_id,
+                object_id: CatalogId::new(
+                    connection_id,
+                    CatalogKind::Table,
+                    [":memory:", "main", "items"],
+                ),
+            },
+            scope: CatalogScope::for_profile(DatabaseKind::Sqlite, ":memory:", Some("main")),
+            metadata: MetadataFingerprint {
+                relation: "items".into(),
+                columns: vec![
+                    ("id".into(), "INTEGER".into(), false),
+                    ("value".into(), "TEXT".into(), true),
+                ],
+                primary_key: vec!["id".into()],
+            },
+            operation: RelationMutation::UpdateCell(UpdateCellMutation {
+                row: RowLocator {
+                    columns: vec![0],
+                    values: vec![CellValue::Integer(1)],
+                },
+                column: 1,
+                original,
+                value,
+            }),
+        }
+    }
+
+    fn mutation_request(operation: RelationMutation) -> RelationMutationRequest {
+        let mut request = update_request(InputValue::Null, CellValue::Null);
+        request.operation = operation;
+        request
+    }
+
+    #[tokio::test]
+    async fn relation_mutation_updates_full_row_and_observes_transaction_outcome() {
+        let adapter = memory_adapter().await;
+        let mut backend = adapter.transaction_backend().await.unwrap();
+        backend.begin().await.unwrap();
+        backend
+            .execute("CREATE TABLE items (id INTEGER PRIMARY KEY, value TEXT)")
+            .await
+            .unwrap();
+        backend
+            .execute("INSERT INTO items VALUES (1, NULL)")
+            .await
+            .unwrap();
+        backend.commit().await.unwrap();
+        backend.begin().await.unwrap();
+
+        let result = backend
+            .relation_mutation(update_request(
+                InputValue::Value("updated".into()),
+                CellValue::Null,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            result,
+            super::MutationResult::Updated {
+                row: vec![CellValue::Integer(1), CellValue::Text("updated".into())]
+            }
+        );
+        backend.rollback().await.unwrap();
+        let count = backend.execute("SELECT count(*) FROM items").await.unwrap();
+        assert_eq!(count.result_sets[0].rows, vec![vec![CellValue::Integer(1)]]);
+        backend.begin().await.unwrap();
+        backend
+            .relation_mutation(update_request(
+                InputValue::Value("committed".into()),
+                CellValue::Null,
+            ))
+            .await
+            .unwrap();
+        backend.commit().await.unwrap();
+        let row = backend.execute("SELECT * FROM items").await.unwrap();
+        assert_eq!(
+            row.result_sets[0].rows,
+            vec![vec![
+                CellValue::Integer(1),
+                CellValue::Text("committed".into())
+            ]]
+        );
+        drop(backend);
+        adapter.close().await;
+    }
+
+    #[tokio::test]
+    async fn relation_mutation_conflicts_when_original_value_changed() {
+        let adapter = memory_adapter().await;
+        let mut backend = adapter.transaction_backend().await.unwrap();
+        backend.begin().await.unwrap();
+        backend
+            .execute("CREATE TABLE items (id INTEGER PRIMARY KEY, value TEXT)")
+            .await
+            .unwrap();
+        backend
+            .execute("INSERT INTO items VALUES (1, 'actual')")
+            .await
+            .unwrap();
+        let error = backend
+            .relation_mutation(update_request(
+                InputValue::Value("new".into()),
+                CellValue::Text("stale".into()),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error,
+            TransactionError("SQLite relation mutation conflict".into())
+        );
+        backend.commit().await.unwrap();
+        drop(backend);
+        adapter.close().await;
+    }
+
+    #[tokio::test]
+    async fn relation_mutation_deletes_multiple_rows_with_full_null_safe_snapshot() {
+        let adapter = memory_adapter().await;
+        adapter
+            .execute("CREATE TABLE items (id INTEGER PRIMARY KEY, value TEXT)")
+            .await
+            .unwrap();
+        adapter
+            .execute("INSERT INTO items VALUES (1, NULL), (2, 'two')")
+            .await
+            .unwrap();
+        let mut backend = adapter.transaction_backend().await.unwrap();
+        backend.begin().await.unwrap();
+        let request = mutation_request(RelationMutation::DeleteRows(vec![
+            DeleteRowMutation {
+                row: RowLocator {
+                    columns: vec![0],
+                    values: vec![CellValue::Integer(1)],
+                },
+                original: vec![CellValue::Integer(1), CellValue::Null],
+            },
+            DeleteRowMutation {
+                row: RowLocator {
+                    columns: vec![0],
+                    values: vec![CellValue::Integer(2)],
+                },
+                original: vec![CellValue::Integer(2), CellValue::Text("two".into())],
+            },
+        ]));
+        assert_eq!(
+            { backend.relation_mutation(request).await.unwrap() },
+            super::MutationResult::Deleted { rows: 2 }
+        );
+        backend.commit().await.unwrap();
+        assert!(
+            backend
+                .execute("SELECT * FROM items")
+                .await
+                .unwrap()
+                .result_sets[0]
+                .rows
+                .is_empty()
+        );
+        drop(backend);
+        adapter.close().await;
+    }
+
+    #[tokio::test]
+    async fn relation_mutation_delete_batch_conflict_is_atomic() {
+        let adapter = memory_adapter().await;
+        adapter
+            .execute("CREATE TABLE items (id INTEGER PRIMARY KEY, value TEXT)")
+            .await
+            .unwrap();
+        adapter
+            .execute("INSERT INTO items VALUES (1, 'one'), (2, 'two')")
+            .await
+            .unwrap();
+        let mut backend = adapter.transaction_backend().await.unwrap();
+        backend.begin().await.unwrap();
+        let request = mutation_request(RelationMutation::DeleteRows(vec![
+            DeleteRowMutation {
+                row: RowLocator {
+                    columns: vec![0],
+                    values: vec![CellValue::Integer(1)],
+                },
+                original: vec![CellValue::Integer(1), CellValue::Text("one".into())],
+            },
+            DeleteRowMutation {
+                row: RowLocator {
+                    columns: vec![0],
+                    values: vec![CellValue::Integer(2)],
+                },
+                original: vec![CellValue::Integer(2), CellValue::Text("stale".into())],
+            },
+        ]));
+        assert!(backend.relation_mutation(request).await.is_err());
+        backend.rollback().await.unwrap();
+        assert_eq!(
+            backend
+                .execute("SELECT count(*) FROM items")
+                .await
+                .unwrap()
+                .result_sets[0]
+                .rows,
+            vec![vec![CellValue::Integer(2)]]
+        );
+        drop(backend);
+        adapter.close().await;
+    }
+
+    #[tokio::test]
+    async fn relation_mutation_inserts_bound_null_default_and_generated_values() {
+        let adapter = memory_adapter().await;
+        adapter
+            .execute("CREATE TABLE items (id INTEGER PRIMARY KEY, value TEXT DEFAULT 'default', doubled INTEGER GENERATED ALWAYS AS (id * 2) STORED)")
+            .await
+            .unwrap();
+        let mut backend = adapter.transaction_backend().await.unwrap();
+        backend.begin().await.unwrap();
+        let request = mutation_request(RelationMutation::InsertRow(InsertRowMutation {
+            columns: vec![0, 1],
+            values: vec![InputValue::Value("7".into()), InputValue::Default],
+        }));
+        assert_eq!(
+            backend.relation_mutation(request).await.unwrap(),
+            super::MutationResult::Inserted {
+                row: vec![
+                    CellValue::Integer(7),
+                    CellValue::Text("default".into()),
+                    CellValue::Integer(14)
+                ]
+            }
+        );
+        let request = mutation_request(RelationMutation::InsertRow(InsertRowMutation {
+            columns: vec![0, 1],
+            values: vec![InputValue::Value("8".into()), InputValue::Null],
+        }));
+        assert_eq!(
+            backend.relation_mutation(request).await.unwrap(),
+            super::MutationResult::Inserted {
+                row: vec![
+                    CellValue::Integer(8),
+                    CellValue::Null,
+                    CellValue::Integer(16)
+                ]
+            }
+        );
+        backend.rollback().await.unwrap();
+        drop(backend);
+        adapter.close().await;
     }
 
     #[tokio::test]

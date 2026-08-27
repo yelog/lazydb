@@ -156,6 +156,26 @@ where
                         return WorkerDisposition::CancelledAndRolledBack;
                     }
                 }
+                TransactionRequest::RelationMutation {
+                    request,
+                    cancel,
+                    reply,
+                } => {
+                    let mutation = guard.backend_mut().relation_mutation(request);
+                    tokio::pin!(mutation);
+                    tokio::select! {
+                        result = &mut mutation => {
+                            let _ = reply.send(result);
+                        }
+                        cancellation = cancel => {
+                            if cancellation.is_ok() {
+                                let _ = reply.send(Err(TransactionError("cancelled".into())));
+                                return WorkerDisposition::Quarantine;
+                            }
+                            let _ = reply.send(mutation.await);
+                        }
+                    }
+                }
                 TransactionRequest::Commit { reply } => {
                     let result = guard.backend_mut().commit().await;
                     let safe = result.is_ok() && guard.backend_mut().depth() == 0;
@@ -166,6 +186,7 @@ where
                     if safe {
                         return WorkerDisposition::Committed;
                     }
+                    return WorkerDisposition::Quarantine;
                 }
                 TransactionRequest::Rollback { reply } => {
                     let result = guard.backend_mut().rollback().await;
@@ -177,6 +198,7 @@ where
                     if safe {
                         return WorkerDisposition::RolledBack;
                     }
+                    return WorkerDisposition::Quarantine;
                 }
                 TransactionRequest::Shutdown => {
                     let result = guard.backend_mut().rollback().await;
@@ -218,7 +240,18 @@ async fn execute_or_cancel<B: TransactionBackend>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::catalog::{CatalogId, CatalogKind};
+    use crate::db::mutation::{
+        InputValue, MetadataFingerprint, MutationResult, RelationMutation, RelationMutationRequest,
+        RowLocator, UpdateCellMutation,
+    };
     use crate::db::query::QueryOutcomeAccumulator;
+    use crate::db::value::CellValue;
+    use crate::{
+        identity::ConnectionIdentity,
+        model::{execution_target::ExecutionTarget, relation::RelationKey},
+        profile::{CatalogScope, DatabaseKind},
+    };
     use async_trait::async_trait;
     use futures_util::future::BoxFuture;
     use std::{
@@ -266,6 +299,15 @@ mod tests {
                 self.depth = 0;
                 Ok(())
             }
+        }
+        async fn relation_mutation(
+            &mut self,
+            _request: RelationMutationRequest,
+        ) -> Result<MutationResult, TransactionError> {
+            self.log.lock().unwrap().push("relation_mutation");
+            Ok(MutationResult::Updated {
+                row: vec![CellValue::Integer(1), CellValue::Text("new".into())],
+            })
         }
         async fn rollback(&mut self) -> Result<(), TransactionError> {
             self.log.lock().unwrap().push("rollback");
@@ -327,6 +369,76 @@ mod tests {
             .unwrap();
         assert!(result.await.unwrap().is_ok());
         assert_eq!(*log.lock().unwrap(), vec!["begin", "execute", "rollback"]);
+    }
+
+    #[tokio::test]
+    async fn relation_mutation_is_executed_before_commit_on_the_same_worker() {
+        let fake = Fake::default();
+        let log = fake.log.clone();
+        let worker = spawn_transaction_worker(fake);
+        let id = uuid::Uuid::nil();
+        let request = RelationMutationRequest {
+            tab_id: id,
+            tab_generation: 1,
+            edit_generation: 1,
+            row_id: crate::model::relation_edit::EditableRowId(1),
+            connection: ConnectionIdentity {
+                profile_id: id,
+                generation: 1,
+            },
+            target: ExecutionTarget {
+                profile_id: id,
+                database: "db".into(),
+                schema: Some("main".into()),
+            },
+            relation: CatalogId::new(id, CatalogKind::Table, ["db", "main", "items"]),
+            relation_key: RelationKey {
+                profile_id: id,
+                object_id: CatalogId::new(id, CatalogKind::Table, ["db", "main", "items"]),
+            },
+            scope: CatalogScope::for_profile(DatabaseKind::Sqlite, "db", Some("main")),
+            metadata: MetadataFingerprint {
+                relation: "items".into(),
+                columns: vec![
+                    ("id".into(), "INTEGER".into(), false),
+                    ("value".into(), "TEXT".into(), true),
+                ],
+                primary_key: vec!["id".into()],
+            },
+            operation: RelationMutation::UpdateCell(UpdateCellMutation {
+                row: RowLocator {
+                    columns: vec![0],
+                    values: vec![CellValue::Integer(1)],
+                },
+                column: 1,
+                original: CellValue::Text("old".into()),
+                value: InputValue::Value("new".into()),
+            }),
+        };
+        let (reply, result) = oneshot::channel();
+        let (_, cancel) = oneshot::channel();
+        worker
+            .requests
+            .send(TransactionRequest::RelationMutation {
+                request,
+                cancel,
+                reply,
+            })
+            .unwrap();
+        assert!(matches!(
+            result.await.unwrap(),
+            Ok(MutationResult::Updated { .. })
+        ));
+        let (reply, result) = oneshot::channel();
+        worker
+            .requests
+            .send(TransactionRequest::Commit { reply })
+            .unwrap();
+        assert!(result.await.unwrap().is_ok());
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec!["begin", "relation_mutation", "commit"]
+        );
     }
 
     #[tokio::test]

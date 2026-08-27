@@ -572,6 +572,15 @@ fn relation_keys_control_only_the_active_relation_view() {
     app.focus = Focus::Results;
     let mut keymap = Keymap::default();
 
+    // Relation Data reserves p for paste; the view shortcut remains available
+    // when the Structure view is active.
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('p')), &app),
+        Some(Action::RelationPaste)
+    );
+    app.update(Action::SetRelationView(
+        lazydb::model::relation::RelationView::Structure,
+    ));
     assert_eq!(
         keymap.map(key(KeyCode::Char('p')), &app),
         Some(Action::SetRelationView(

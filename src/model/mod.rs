@@ -4,6 +4,7 @@ pub mod execution_target;
 pub mod explorer;
 pub mod profile_manager;
 pub mod relation;
+pub mod relation_edit;
 pub mod tab;
 pub mod text_input;
 pub mod transaction;

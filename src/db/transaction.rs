@@ -1,15 +1,25 @@
 use async_trait::async_trait;
 use futures_util::future::BoxFuture;
 
-use super::{DatabaseError, query::QueryOutcome};
+use super::{
+    DatabaseError,
+    mutation::{MutationResult, RelationMutationRequest},
+    query::QueryOutcome,
+};
 
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum TransactionRequest {
     Execute {
         query_generation: u64,
         sql: String,
         cancel: tokio::sync::oneshot::Receiver<()>,
         reply: tokio::sync::oneshot::Sender<Result<QueryOutcome, TransactionError>>,
+    },
+    RelationMutation {
+        request: RelationMutationRequest,
+        cancel: tokio::sync::oneshot::Receiver<()>,
+        reply: tokio::sync::oneshot::Sender<Result<MutationResult, TransactionError>>,
     },
     Commit {
         reply: tokio::sync::oneshot::Sender<Result<(), TransactionError>>,
@@ -48,6 +58,14 @@ impl From<DatabaseError> for TransactionError {
 pub trait TransactionBackend: Send + 'static {
     async fn begin(&mut self) -> Result<(), TransactionError>;
     async fn execute(&mut self, sql: &str) -> Result<QueryOutcome, TransactionError>;
+    async fn relation_mutation(
+        &mut self,
+        _request: RelationMutationRequest,
+    ) -> Result<MutationResult, TransactionError> {
+        Err(TransactionError(
+            "relation mutations are not supported by this backend yet".into(),
+        ))
+    }
     async fn commit(&mut self) -> Result<(), TransactionError>;
     async fn rollback(&mut self) -> Result<(), TransactionError>;
     async fn cancel(&mut self) -> Result<(), TransactionError>;
