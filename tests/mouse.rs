@@ -72,7 +72,7 @@ fn maps_tabs_tree_rows_and_result_cells_from_rendered_hit_regions() {
 
     let backend = TestBackend::new(120, 36);
     let mut terminal = Terminal::new(backend).unwrap();
-    let mut ui_state = UiState::new(true);
+    let mut ui_state = UiState::new();
     terminal
         .draw(|frame| ui::render_with_state(frame, &app, &mut ui_state))
         .unwrap();
@@ -123,7 +123,7 @@ fn relation_view_and_retry_hit_targets_emit_semantic_actions() {
         lazydb::model::relation::RelationTab::new("users"),
     ));
     app.active_tab = 1;
-    let mut ui = UiState::new(true);
+    let mut ui = UiState::new();
     ui.hit_regions.extend([
         HitRegion {
             area: Rect::new(1, 1, 6, 1),
@@ -162,7 +162,7 @@ fn relation_result_cell_mouse_action_updates_relation_grid() {
         lazydb::model::relation::RelationTab::new("users"),
     ));
     app.active_tab = 1;
-    let mut ui = UiState::new(true);
+    let mut ui = UiState::new();
     ui.hit_regions.push(HitRegion {
         area: Rect::new(2, 2, 8, 1),
         target: HitTarget::ResultCell { row: 2, column: 3 },
@@ -187,7 +187,7 @@ fn secondary_click_on_profile_root_edits_that_stable_id() {
         .profile;
     let profile_id = profile.id;
     let app = App::new(vec![profile]);
-    let mut ui = UiState::new(true);
+    let mut ui = UiState::new();
     ui.hit_regions.push(HitRegion {
         area: Rect::new(1, 1, 20, 1),
         target: HitTarget::ExplorerRow(ExplorerNodeId::Profile(profile_id)),
@@ -206,7 +206,7 @@ fn secondary_click_on_profile_root_edits_that_stable_id() {
 #[test]
 fn double_click_same_explorer_node_uses_primary_action_without_sleeping() {
     let id = ExplorerNodeId::Profile(Uuid::new_v4());
-    let ui = UiState::new(true);
+    let ui = UiState::new();
     let first = Instant::now();
     assert!(!ui.track_explorer_click(&id, first));
     assert!(ui.track_explorer_click(&id, first + Duration::from_millis(499)));
@@ -220,7 +220,7 @@ fn double_click_same_explorer_node_uses_primary_action_without_sleeping() {
 #[test]
 fn non_explorer_mouse_down_clears_explorer_double_click_tracker() {
     let id = ExplorerNodeId::Profile(Uuid::new_v4());
-    let mut ui = UiState::new(true);
+    let mut ui = UiState::new();
     ui.hit_regions.extend([
         HitRegion {
             area: Rect::new(1, 1, 10, 1),
@@ -278,7 +278,7 @@ fn maps_profile_fields_toggles_and_buttons() {
         .collect();
     let mut app = App::new(profiles);
     app.update(Action::OpenProfileManager);
-    let mut ui = UiState::new(true);
+    let mut ui = UiState::new();
     let targets = [
         HitTarget::ProfileField(ProfileField::Name),
         HitTarget::ProfileDriver(DatabaseKind::MySql),
@@ -344,7 +344,7 @@ fn rendered_driver_options_select_exact_kinds_and_are_disabled_while_busy() {
     app.update(Action::OpenProfileManager);
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).unwrap();
-    let mut state = UiState::new(true);
+    let mut state = UiState::new();
     terminal
         .draw(|frame| ui::render_with_state(frame, &app, &mut state))
         .unwrap();
@@ -378,7 +378,7 @@ fn rendered_driver_options_select_exact_kinds_and_are_disabled_while_busy() {
 #[test]
 fn editor_mouse_scroll_is_a_viewport_action() {
     let app = App::new(Vec::new());
-    let mut state = UiState::new(true);
+    let mut state = UiState::new();
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
@@ -406,7 +406,7 @@ fn editor_mouse_scroll_is_a_viewport_action() {
 #[test]
 fn help_and_message_overlays_block_background_mouse_input() {
     let mut app = App::new(Vec::new());
-    let mut ui = UiState::new(true);
+    let mut ui = UiState::new();
     ui.hit_regions.extend([
         HitRegion {
             area: Rect::new(0, 0, 10, 1),
@@ -452,7 +452,7 @@ fn header_profile_hit_region_uses_terminal_display_width() {
         app.connection.profile_id = Some(profile_id);
         let backend = TestBackend::new(120, 36);
         let mut terminal = Terminal::new(backend).unwrap();
-        let mut ui_state = UiState::new(true);
+        let mut ui_state = UiState::new();
         terminal
             .draw(|frame| ui::render_with_state(frame, &app, &mut ui_state))
             .unwrap();

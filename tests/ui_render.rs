@@ -117,7 +117,7 @@ fn render_with_state(app: &App, width: u16, height: u16) -> (String, UiState) {
 fn render_with_icons(app: &App, width: u16, height: u16, icons: IconSet) -> (String, UiState) {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).unwrap();
-    let mut state = UiState::new(true);
+    let mut state = UiState::new();
     terminal
         .draw(|frame| ui::render_with_state_using_icons(frame, app, &mut state, icons))
         .unwrap();
@@ -968,7 +968,7 @@ fn driver_options_have_individual_targets_and_selected_style_survives_field_blur
 
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).unwrap();
-    let mut state = UiState::new(true);
+    let mut state = UiState::new();
     terminal
         .draw(|frame| ui::render_with_state(frame, &app, &mut state))
         .unwrap();
@@ -1162,7 +1162,7 @@ fn profile_modal_hides_the_workspace_cursor_unless_editing_text() {
     list.update(Action::OpenProfileManager);
     let backend = TestBackend::new(120, 36);
     let mut terminal = Terminal::new(backend).unwrap();
-    let mut state = UiState::new(true);
+    let mut state = UiState::new();
     terminal
         .draw(|frame| ui::render_with_state(frame, &list, &mut state))
         .unwrap();

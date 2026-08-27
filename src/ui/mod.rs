@@ -1,4 +1,3 @@
-pub mod effects;
 pub mod icons;
 pub mod layout;
 pub mod profiles;
@@ -35,7 +34,6 @@ use crate::{
 };
 
 use self::{
-    effects::UiEffects,
     layout::{AppLayout, LayoutMode},
     theme::Theme,
 };
@@ -87,30 +85,26 @@ pub enum CursorStyle {
 #[derive(Debug)]
 pub struct UiState {
     pub hit_regions: Vec<HitRegion>,
-    pub effects: UiEffects,
     pub editor_viewport: Option<EditorViewport>,
     pub completion_popup: Option<Rect>,
     pub cursor_style: Option<CursorStyle>,
-    last_focus: Option<Focus>,
     pub click_tracker: RefCell<Option<(crate::model::explorer::ExplorerNodeId, Instant)>>,
     pub relation_resize: RefCell<Option<(usize, u16, u16)>>,
 }
 
 impl Default for UiState {
     fn default() -> Self {
-        Self::new(false)
+        Self::new()
     }
 }
 
 impl UiState {
-    pub fn new(reduced_motion: bool) -> Self {
+    pub fn new() -> Self {
         Self {
             hit_regions: Vec::new(),
-            effects: UiEffects::new(reduced_motion),
             editor_viewport: None,
             completion_popup: None,
             cursor_style: None,
-            last_focus: None,
             click_tracker: RefCell::new(None),
             relation_resize: RefCell::new(None),
         }
@@ -157,7 +151,7 @@ impl UiState {
 }
 
 pub fn render(frame: &mut Frame<'_>, app: &App) {
-    let mut state = UiState::new(true);
+    let mut state = UiState::new();
     render_with_state(frame, app, &mut state);
 }
 
@@ -248,12 +242,6 @@ pub fn render_with_state_using_icons(
     if let Some(overlay) = &app.overlay {
         render_overlay(frame, area, overlay, app, state, theme);
     }
-
-    if state.last_focus.is_some() && state.last_focus != Some(app.focus) {
-        state.effects.focus_changed(theme.border);
-    }
-    state.last_focus = Some(app.focus);
-    state.effects.render(frame, layout.body);
 }
 
 // Relation pages are rendered by `ui::relation`; keeping them out of the SQL path

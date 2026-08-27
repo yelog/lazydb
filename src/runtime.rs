@@ -2041,11 +2041,10 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                     redraw = true;
                 }
                 _ = ticker.tick() => {
-                    redraw = ui_state.effects.is_active()
-                        || app.tabs.iter().any(|tab| {
-                            tab.as_console()
-                                .is_some_and(|tab| tab.query_status == QueryStatus::Running)
-                        });
+                    redraw = app.tabs.iter().any(|tab| {
+                        tab.as_console()
+                            .is_some_and(|tab| tab.query_status == QueryStatus::Running)
+                    });
                 }
             }
 
