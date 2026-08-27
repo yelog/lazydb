@@ -3286,6 +3286,10 @@ impl App {
         for effect in effects {
             let action = match effect {
                 EditorEffect::Changed { .. } => {
+                    if self.active_editor_mode() != EditorMode::Insert {
+                        self.active_console_mut().completion = None;
+                        continue;
+                    }
                     if self
                         .active_editor_text()
                         .is_ok_and(|text| text.ends_with('.'))
@@ -3343,6 +3347,9 @@ impl App {
     }
 
     fn completion_key(&self) -> Option<CompletionScheduleKey> {
+        if self.active_editor_mode() != EditorMode::Insert {
+            return None;
+        }
         let tab = self.active_console_opt()?;
         Some(CompletionScheduleKey {
             console_id: tab.id,
@@ -3353,6 +3360,10 @@ impl App {
     }
 
     fn complete_now(&mut self) -> Vec<Command> {
+        if self.active_editor_mode() != EditorMode::Insert {
+            self.active_console_mut().completion = None;
+            return Vec::new();
+        }
         let text = self.active_editor_text().unwrap_or_default();
         let snapshot = self
             .active_editor_render_snapshot(EditorViewport {
@@ -3420,6 +3431,10 @@ impl App {
     }
 
     fn accept_completion(&mut self) -> Vec<Command> {
+        if self.active_editor_mode() != EditorMode::Insert {
+            self.active_console_mut().completion = None;
+            return Vec::new();
+        }
         let Some(id) = self.active_console_opt().map(|tab| tab.id) else {
             return Vec::new();
         };
