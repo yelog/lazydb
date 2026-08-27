@@ -93,7 +93,10 @@ fn normal_mode_delete_line_does_not_reopen_completion() {
         editor_key(&mut app, code, KeyModifiers::NONE);
     }
 
-    assert_eq!(app.active_editor_mode(), lazydb::model::editor::EditorMode::Normal);
+    assert_eq!(
+        app.active_editor_mode(),
+        lazydb::model::editor::EditorMode::Normal
+    );
     assert!(app.active_console().completion.is_none());
 }
 

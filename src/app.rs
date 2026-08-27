@@ -3409,20 +3409,20 @@ impl App {
                 ));
             }
         }
-        let default_schema = self
+        let completion_context = self
             .active_console_opt()
             .and_then(|tab| tab.execution_target.as_ref())
-            .and_then(|target| target.schema.clone())
-            .or_else(|| {
-                self.active_profile()
-                    .and_then(|profile| profile.default_schema.clone())
-            });
+            .map(|target| sql::CompletionContext {
+                database: Some(target.database.as_str()),
+                schema: target.schema.as_deref(),
+            })
+            .unwrap_or_default();
         let candidates = sql::complete(
             &text,
             cursor,
             self.sql_dialect(),
             &self.explorer.completion_index,
-            default_schema.as_deref(),
+            completion_context,
         );
         let Some(tab) = self.active_console_opt_mut() else {
             return Vec::new();

@@ -154,13 +154,9 @@ impl Keymap {
                 _ => None,
             };
         }
-        if app
-            .active_console_opt()
-            .is_some_and(|tab| {
-                tab.completion.is_some()
-                    && app.active_editor_mode() == EditorMode::Insert
-            })
-        {
+        if app.active_console_opt().is_some_and(|tab| {
+            tab.completion.is_some() && app.active_editor_mode() == EditorMode::Insert
+        }) {
             let completion_action = match event.code {
                 KeyCode::Char('n') if event.modifiers.contains(KeyModifiers::CONTROL) => {
                     Some(Action::CompletionNext)
@@ -234,8 +230,9 @@ impl Keymap {
                     }
                 }
                 KeyCode::Char('h') if app.focus == Focus::Editor => Some(Action::EditorKey(event)),
-                KeyCode::Char(' ') if app.focus == Focus::Editor
-                    && app.active_editor_mode() == EditorMode::Insert =>
+                KeyCode::Char(' ')
+                    if app.focus == Focus::Editor
+                        && app.active_editor_mode() == EditorMode::Insert =>
                 {
                     Some(Action::CompletionExplicit)
                 }
