@@ -6,13 +6,21 @@ Editor Normal mode but contextual help outside the editor.
 
 ## Global
 
+When contextual help is open, its search field has focus. Printable text is
+searched case-insensitively, Up/Down selects a result, Enter executes it after
+closing the overlay, Esc closes the overlay, Backspace deletes the last query
+character, and Ctrl-U clears the query. The help list has one row per
+executable shortcut, so shortcuts with different actions are independently
+selectable.
+
 | Key | Action |
 | --- | --- |
 | `F1` | Contextual help |
 | `?` | Contextual help outside Insert mode |
 | `Ctrl-w h` | Focus Explorer |
 | `Ctrl-w j` | Focus Results |
-| `Ctrl-w k`, `Ctrl-w l` | Focus Editor |
+| `Ctrl-w k` | Focus Editor |
+| `Ctrl-w l` | Focus Editor |
 | `Tab`, `Shift-Tab` | Next/previous panel outside Insert mode |
 | `[` then `t`, `]` then `t` | Previous/next LazyDB tab |
 | `Space n` | New SQL console |

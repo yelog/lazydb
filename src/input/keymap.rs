@@ -33,6 +33,28 @@ impl Keymap {
         if matches!(event.kind, KeyEventKind::Release) {
             return None;
         }
+        if app
+            .overlay
+            .as_ref()
+            .is_some_and(|overlay| matches!(overlay, Overlay::Help(_)))
+        {
+            self.pending = None;
+            if event.modifiers == KeyModifiers::NONE {
+                return match event.code {
+                    KeyCode::Char(character) => Some(Action::HelpInsert(character)),
+                    KeyCode::Backspace => Some(Action::HelpBackspace),
+                    KeyCode::Up => Some(Action::HelpMove(-1)),
+                    KeyCode::Down => Some(Action::HelpMove(1)),
+                    KeyCode::Enter => app.help_selected_id().map(Action::ExecuteHelpShortcut),
+                    KeyCode::Esc => Some(Action::DismissOverlay),
+                    _ => None,
+                };
+            }
+            if event.modifiers == KeyModifiers::CONTROL && event.code == KeyCode::Char('u') {
+                return Some(Action::HelpClear);
+            }
+            return None;
+        }
         if app.overlay == Some(Overlay::ProfileManager) {
             self.pending = None;
             return map_profile_manager(event, app);
@@ -320,6 +342,13 @@ fn map_pending(pending: Pending, event: KeyEvent) -> Option<Action> {
 }
 
 pub fn map_paste(value: String, app: &App) -> Vec<Action> {
+    if app
+        .overlay
+        .as_ref()
+        .is_some_and(|overlay| matches!(overlay, Overlay::Help(_)))
+    {
+        return vec![Action::HelpPaste(value)];
+    }
     if app.overlay == Some(Overlay::ProfileManager) {
         let Some(manager) = app.profile_manager.as_ref().filter(|manager| {
             manager.page == ProfileManagerPage::Form && manager.operation.is_none()

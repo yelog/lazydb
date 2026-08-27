@@ -1,5 +1,6 @@
 use std::collections::{BTreeSet, HashSet};
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use uuid::Uuid;
 
 use crate::{
@@ -364,6 +365,140 @@ impl App {
         Command::PersistWorkspace(self.workspace_snapshot())
     }
 
+    fn execute_help_shortcut(&mut self, id: crate::help::HelpShortcutId) -> Vec<Command> {
+        let Some(selected) = self.help_selected_id() else {
+            return Vec::new();
+        };
+        if selected != id {
+            return Vec::new();
+        }
+        self.overlay = None;
+        use crate::help::HelpShortcutId as Id;
+        let editor_key = |code| Action::EditorKey(KeyEvent::new(code, KeyModifiers::NONE));
+        let editor_control_key =
+            |code| Action::EditorKey(KeyEvent::new(code, KeyModifiers::CONTROL));
+        let actions = match id {
+            Id::FocusExplorer => vec![Action::Focus(Focus::Explorer)],
+            Id::FocusResults => vec![Action::Focus(Focus::Results)],
+            Id::FocusEditorFromK | Id::FocusEditorFromL => vec![Action::Focus(Focus::Editor)],
+            Id::PreviousTab => vec![Action::PreviousTab],
+            Id::NextTab => vec![Action::NextTab],
+            Id::NewConsole => vec![Action::NewConsole],
+            Id::GotoSqlConsole => vec![Action::GotoSqlConsole],
+            Id::ExplorerMoveDown => vec![Action::ExplorerMove(1)],
+            Id::ExplorerMoveUp => vec![Action::ExplorerMove(-1)],
+            Id::ExplorerExpand => vec![Action::ExplorerExpand],
+            Id::ExplorerCollapse => vec![Action::ExplorerCollapse],
+            Id::ExplorerToggle => vec![Action::ExplorerToggle],
+            Id::ExplorerActivate => vec![Action::ExplorerOpenSelected],
+            Id::ExplorerNewProfile => vec![Action::ProfileStartNew],
+            Id::ExplorerEditProfile => self
+                .explorer
+                .normalized
+                .selected
+                .as_ref()
+                .and_then(|node| node.profile_id())
+                .map(|profile_id| vec![Action::ProfileStartEdit { profile_id }])
+                .unwrap_or_default(),
+            Id::ExplorerDeleteProfile => self
+                .explorer
+                .normalized
+                .selected
+                .as_ref()
+                .and_then(|node| node.profile_id())
+                .map(|profile_id| vec![Action::ProfileRequestDelete { profile_id }])
+                .unwrap_or_default(),
+            Id::ExplorerConnect => self
+                .explorer
+                .normalized
+                .selected
+                .as_ref()
+                .and_then(|node| node.profile_id())
+                .map(|profile_id| vec![Action::RequestProfileConnect { profile_id }])
+                .unwrap_or_default(),
+            Id::ExplorerDisconnect => self
+                .explorer
+                .normalized
+                .selected
+                .as_ref()
+                .and_then(|node| node.profile_id())
+                .map(|profile_id| vec![Action::RequestProfileDisconnect { profile_id }])
+                .unwrap_or_default(),
+            Id::ExplorerRefresh => vec![Action::ExplorerRefresh],
+            Id::ExplorerPreview => vec![Action::OpenSelectedRelation {
+                view: RelationView::Data,
+            }],
+            Id::ExplorerDdl => vec![Action::OpenSelectedRelation {
+                view: RelationView::Structure,
+            }],
+            Id::EditorInsert => vec![editor_key(KeyCode::Char('i'))],
+            Id::EditorNormal => vec![editor_key(KeyCode::Esc)],
+            Id::EditorUndo => vec![editor_key(KeyCode::Char('u'))],
+            Id::EditorRedo => vec![editor_control_key(KeyCode::Char('r'))],
+            Id::EditorRun => vec![Action::RunActiveSql],
+            Id::ToggleTransaction => vec![
+                editor_key(KeyCode::Char(' ')),
+                editor_key(KeyCode::Char('t')),
+                editor_key(KeyCode::Char('t')),
+            ],
+            Id::CommitTransaction => vec![
+                editor_key(KeyCode::Char(' ')),
+                editor_key(KeyCode::Char('t')),
+                editor_key(KeyCode::Char('c')),
+            ],
+            Id::RollbackTransaction => vec![
+                editor_key(KeyCode::Char(' ')),
+                editor_key(KeyCode::Char('t')),
+                editor_key(KeyCode::Char('r')),
+            ],
+            Id::OpenTargetSelector => vec![Action::OpenTargetSelector],
+            Id::ResultsMoveLeft => vec![Action::GridMove {
+                rows: 0,
+                columns: -1,
+            }],
+            Id::ResultsMoveDown => vec![Action::GridMove {
+                rows: 1,
+                columns: 0,
+            }],
+            Id::ResultsMoveUp => vec![Action::GridMove {
+                rows: -1,
+                columns: 0,
+            }],
+            Id::ResultsMoveRight => vec![Action::GridMove {
+                rows: 0,
+                columns: 1,
+            }],
+            Id::ResultsToggleView => vec![Action::ToggleResultView],
+            Id::RelationWhere => vec![Action::FocusRelationQueryInput(
+                crate::model::relation::RelationQueryInput::Where,
+            )],
+            Id::RelationOrderBy => vec![Action::FocusRelationQueryInput(
+                crate::model::relation::RelationQueryInput::OrderBy,
+            )],
+            Id::RelationApplyInputs => vec![Action::SubmitRelationQuery],
+            Id::RelationResizeLeft => vec![Action::ResizeRelationColumn(-1)],
+            Id::RelationResizeRight => vec![Action::ResizeRelationColumn(1)],
+            Id::RelationResetWidth => vec![Action::ResetRelationColumnWidth],
+            Id::RelationRefresh => vec![Action::RefreshActiveRelation],
+        };
+        actions
+            .into_iter()
+            .flat_map(|action| self.update(action))
+            .collect()
+    }
+
+    pub fn help_selected_id(&self) -> Option<crate::help::HelpShortcutId> {
+        let relation_data = matches!(
+            self.tabs.get(self.active_tab),
+            Some(WorkspaceTab::Relation(tab))
+                if tab.view == RelationView::Data
+        );
+        match &self.overlay {
+            Some(Overlay::Help(help)) => help.selected_id(relation_data),
+            _ => None,
+        }
+    }
+
     pub fn update(&mut self, action: Action) -> Vec<Command> {
         if self.active_console_opt().is_none()
             && !(self.is_active_relation_tab()
@@ -523,9 +658,48 @@ impl App {
                 Vec::new()
             }
             Action::ShowHelp => {
-                self.overlay = Some(Overlay::Help(self.focus));
+                self.overlay = Some(Overlay::Help(crate::help::HelpState::new(self.focus)));
                 Vec::new()
             }
+            Action::HelpInsert(character) => {
+                if let Some(Overlay::Help(help)) = self.overlay.as_mut() {
+                    help.insert(character);
+                }
+                Vec::new()
+            }
+            Action::HelpPaste(value) => {
+                if let Some(Overlay::Help(help)) = self.overlay.as_mut() {
+                    help.paste(&value);
+                }
+                Vec::new()
+            }
+            Action::HelpBackspace => {
+                if let Some(Overlay::Help(help)) = self.overlay.as_mut() {
+                    help.backspace();
+                }
+                Vec::new()
+            }
+            Action::HelpClear => {
+                if let Some(Overlay::Help(help)) = self.overlay.as_mut() {
+                    help.clear();
+                }
+                Vec::new()
+            }
+            Action::HelpMove(delta) => {
+                let relation_data = matches!(
+                    self.tabs.get(self.active_tab),
+                    Some(WorkspaceTab::Relation(tab))
+                        if tab.view == RelationView::Data
+                );
+                if let Some(Overlay::Help(help)) = self.overlay.as_mut() {
+                    let count =
+                        crate::help::filtered_shortcuts(help.context, relation_data, &help.query)
+                            .len();
+                    help.move_selection(delta, count);
+                }
+                Vec::new()
+            }
+            Action::ExecuteHelpShortcut(id) => self.execute_help_shortcut(id),
             Action::DismissOverlay => {
                 if matches!(self.overlay, Some(Overlay::ExecutionConfirm { .. })) {
                     if let Some(Overlay::ExecutionConfirm { draft, .. }) = self.overlay.take() {
@@ -4848,7 +5022,10 @@ mod tests {
         app.focus = Focus::Explorer;
 
         app.update(Action::ShowHelp);
-        assert_eq!(app.overlay, Some(Overlay::Help(Focus::Explorer)));
+        assert_eq!(
+            app.overlay,
+            Some(Overlay::Help(crate::help::HelpState::new(Focus::Explorer)))
+        );
         app.update(Action::DismissOverlay);
         assert_eq!(app.overlay, None);
     }

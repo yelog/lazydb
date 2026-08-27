@@ -3,6 +3,7 @@ pub mod app;
 pub mod cli;
 pub mod db;
 pub(crate) mod editor;
+pub mod help;
 pub mod identity;
 pub mod input;
 pub mod model;

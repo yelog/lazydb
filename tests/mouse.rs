@@ -419,7 +419,7 @@ fn help_and_message_overlays_block_background_mouse_input() {
     ]);
 
     for overlay in [
-        Overlay::Help(Focus::Editor),
+        Overlay::Help(lazydb::help::HelpState::new(Focus::Editor)),
         Overlay::Message {
             title: "Notice".into(),
             body: "Body".into(),
