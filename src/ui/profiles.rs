@@ -20,7 +20,7 @@ use crate::{
     security::sanitize_terminal_text,
 };
 
-use super::{HitRegion, HitTarget, ProfileButton, Theme, UiState};
+use super::{HitRegion, HitTarget, ProfileButton, Theme, UiState, icons::IconSet};
 
 pub fn render_profile_manager(
     frame: &mut Frame<'_>,
@@ -28,12 +28,13 @@ pub fn render_profile_manager(
     app: &App,
     state: &mut UiState,
     theme: Theme,
+    icons: IconSet,
 ) {
     let Some(manager) = app.profile_manager.as_ref() else {
         return;
     };
     match manager.page {
-        ProfileManagerPage::Form => render_form(frame, area, app, manager, state, theme),
+        ProfileManagerPage::Form => render_form(frame, area, app, manager, state, theme, icons),
         ProfileManagerPage::Scope => render_scope(frame, area, manager, state, theme),
         ProfileManagerPage::ConfirmDelete => {
             render_confirmation(frame, area, app, manager, state, theme);
@@ -48,6 +49,7 @@ fn render_form(
     manager: &ProfileManagerState,
     state: &mut UiState,
     theme: Theme,
+    icons: IconSet,
 ) {
     let Some(draft) = manager.draft.as_ref() else {
         return;
@@ -110,6 +112,7 @@ fn render_form(
             busy,
             state,
             theme,
+            icons,
         );
         if !busy && field != ProfileField::Kind {
             state.hit_regions.push(HitRegion {
@@ -325,6 +328,7 @@ fn render_field(
     busy: bool,
     state: &mut UiState,
     theme: Theme,
+    icons: IconSet,
 ) {
     let active = field == selected;
     let row_style = if active {
@@ -362,7 +366,7 @@ fn render_field(
         label_area,
     );
     if field == ProfileField::Kind {
-        render_driver_options(frame, value_area, draft.kind, busy, state, theme);
+        render_driver_options(frame, value_area, draft.kind, busy, state, theme, icons);
         return;
     }
     let value = field_value(draft, field);
@@ -385,10 +389,11 @@ fn render_driver_options(
     busy: bool,
     state: &mut UiState,
     theme: Theme,
+    icons: IconSet,
 ) {
     let mut x = area.x;
     for kind in DRIVER_ORDER {
-        let label = kind_name(kind);
+        let label = format!("{} {}", icons.database(kind), kind_name(kind));
         let width = label.cell_width();
         if width > area.right().saturating_sub(x) {
             break;

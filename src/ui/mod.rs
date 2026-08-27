@@ -240,7 +240,7 @@ pub fn render_with_state_using_icons(
     }
 
     if let Some(overlay) = &app.overlay {
-        render_overlay(frame, area, overlay, app, state, theme);
+        render_overlay(frame, area, overlay, app, state, theme, icons);
     }
 }
 
@@ -1123,10 +1123,13 @@ fn render_overlay(
     app: &App,
     state: &mut UiState,
     theme: Theme,
+    icons: icons::IconSet,
 ) {
     match overlay {
         Overlay::Help(focus) => render_help(frame, area, *focus, app, theme),
-        Overlay::ProfileManager => profiles::render_profile_manager(frame, area, app, state, theme),
+        Overlay::ProfileManager => {
+            profiles::render_profile_manager(frame, area, app, state, theme, icons)
+        }
         Overlay::Message { title, body } => render_message(frame, area, title, body, theme),
         Overlay::SubstituteConfirm { remaining } => {
             render_substitute_confirm(frame, area, *remaining, theme)

@@ -953,7 +953,9 @@ fn profile_form_remains_actionable_in_compact_layout() {
     let output = render(&app, 80, 24);
 
     assert!(output.contains("NEW CONNECTION"));
-    assert!(output.contains("POSTGRES MYSQL SQLITE"), "{output}");
+    assert!(output.contains("POSTGRES"), "{output}");
+    assert!(output.contains("MYSQL"), "{output}");
+    assert!(output.contains("SQLITE"), "{output}");
     assert!(output.contains("HOST"));
     assert!(output.contains("PASSWORD"));
     assert!(output.contains("SAVE & CONNECT"));
@@ -1001,6 +1003,28 @@ fn driver_options_have_individual_targets_and_selected_style_survives_field_blur
         buffer[(unselected.x, unselected.y)].bg,
         ui::theme::Theme::default().accent
     );
+}
+
+#[test]
+fn driver_options_use_database_icons_in_each_icon_mode() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::OpenProfileManager);
+    let kinds = [
+        DatabaseKind::Postgres,
+        DatabaseKind::MySql,
+        DatabaseKind::Sqlite,
+    ];
+
+    for mode in [IconMode::NerdFont, IconMode::Unicode, IconMode::Ascii] {
+        let (output, _) = render_with_icons(&app, 120, 36, IconSet::new(mode));
+        for (kind, name) in kinds.into_iter().zip(["POSTGRES", "MYSQL", "SQLITE"]) {
+            let label = format!("{} {name}", IconSet::new(mode).database(kind));
+            assert!(
+                output.contains(&label),
+                "missing {label:?} in {mode:?}: {output}"
+            );
+        }
+    }
 }
 
 #[test]
