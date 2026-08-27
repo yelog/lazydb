@@ -76,11 +76,13 @@ catalog_scope = { databases = { mode = "selected", items = [{ name = "app", sche
 Credential policy is explicit: `none` permits a passwordless connection,
 `prompt` requires a current-process password, and `keyring` references the
 native service `dev.lazydb.lazydb` with the profile UUID as account. The password
-is never stored in TOML. `Remember Password` writes the keyring entry; if the
-native store is unavailable, LazyDB persists `prompt`, keeps the password only
-for the current session, and shows a warning. A later restart opens the profile
-form for a password instead of trying an empty password. Delete removes a
-keyring entry; externally edited or orphaned files may require manual cleanup.
+is never stored in TOML. New PostgreSQL and MySQL forms enable `Remember
+Password` by default and write the keyring entry; disable it to keep a password
+for the current session only. If the native store is unavailable, LazyDB
+persists `prompt`, keeps the password only for the current session, and shows a
+warning. A later restart opens the profile form for a password instead of trying
+an empty password. Delete removes a keyring entry; externally edited or orphaned
+files may require manual cleanup.
 
 The current profile serializer stores scope under `catalog_scope`, with
 `databases` and `schemas` represented as `All` or `Selected` lists. PostgreSQL

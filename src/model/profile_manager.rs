@@ -349,7 +349,7 @@ impl ProfileDraft {
             ssl_mode,
             environment: Environment::Development,
             read_only: false,
-            remember_password: false,
+            remember_password: kind != DatabaseKind::Sqlite,
             sqlite_memory: false,
             sqlite_path: TextInput::default(),
             original_credential_policy: CredentialPolicy::None,
@@ -412,7 +412,10 @@ impl ProfileDraft {
             ssl_mode: profile.ssl_mode,
             environment: profile.environment,
             read_only: profile.read_only,
-            remember_password: matches!(profile.credential_policy, CredentialPolicy::Keyring(_)),
+            remember_password: matches!(
+                profile.credential_policy,
+                CredentialPolicy::Prompt | CredentialPolicy::Keyring(_)
+            ),
             sqlite_memory,
             sqlite_path: TextInput::from(sqlite_path),
             original_credential_policy: profile.credential_policy.clone(),

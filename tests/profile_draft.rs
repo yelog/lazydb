@@ -73,6 +73,7 @@ fn new_postgres_uses_server_defaults() {
     assert_eq!(draft.schema.value(), "public");
     assert_eq!(draft.ssl_mode, SslMode::Prefer);
     assert!(!draft.sqlite_memory);
+    assert!(draft.remember_password);
 }
 
 #[test]
@@ -80,11 +81,13 @@ fn new_mysql_and_sqlite_use_driver_defaults() {
     let mysql = ProfileDraft::new(DatabaseKind::MySql);
     assert_eq!(mysql.host.value(), "localhost");
     assert_eq!(mysql.port.value(), "3306");
+    assert!(mysql.remember_password);
 
     let sqlite = ProfileDraft::new(DatabaseKind::Sqlite);
     assert!(!sqlite.sqlite_memory);
     assert!(sqlite.sqlite_path.value().is_empty());
     assert_eq!(sqlite.ssl_mode, SslMode::Disable);
+    assert!(!sqlite.remember_password);
 }
 
 #[test]
@@ -386,14 +389,24 @@ fn new_password_uses_session_or_remember_intent() {
 
     assert!(matches!(
         draft.validate(&[]).unwrap().credential,
-        CredentialUpdate::Session(_)
-    ));
-
-    draft.remember_password = true;
-    assert!(matches!(
-        draft.validate(&[]).unwrap().credential,
         CredentialUpdate::Remember(_)
     ));
+
+    draft.remember_password = false;
+    assert!(matches!(
+        draft.validate(&[]).unwrap().credential,
+        CredentialUpdate::Session(_)
+    ));
+}
+
+#[test]
+fn editing_prompt_profile_defaults_to_remembering_replacement_password() {
+    let mut prompt = saved_postgres_profile();
+    prompt.credential_policy = CredentialPolicy::Prompt;
+    assert!(ProfileDraft::edit(&prompt, false).remember_password);
+
+    let passwordless = saved_postgres_profile();
+    assert!(!ProfileDraft::edit(&passwordless, false).remember_password);
 }
 
 #[test]

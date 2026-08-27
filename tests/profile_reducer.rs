@@ -306,7 +306,18 @@ fn cycle_and_toggle_actions_only_change_supported_fields() {
     assert_eq!(draft.kind, DatabaseKind::MySql);
     assert_eq!(draft.environment, lazydb::profile::Environment::Staging);
     assert!(draft.read_only);
-    assert!(draft.remember_password);
+    assert!(!draft.remember_password);
+
+    app.update(Action::ProfileToggle);
+    assert!(
+        app.profile_manager
+            .as_ref()
+            .unwrap()
+            .draft
+            .as_ref()
+            .unwrap()
+            .remember_password
+    );
 }
 
 #[test]

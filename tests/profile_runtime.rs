@@ -311,6 +311,73 @@ async fn remember_writes_keyring_reference_but_never_password_text() {
 }
 
 #[tokio::test]
+async fn remembered_password_is_resolved_after_runtime_reconstruction() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("connections.toml");
+    let profile = postgres_profile("remembered-after-restart");
+    let profile_id = profile.id;
+    let fake = Arc::new(FakeSecretStore::default());
+    let (mut first_runtime, mut first_receiver) = runtime(
+        Vec::new(),
+        HashSet::new(),
+        ProfileStore::new(path.clone()),
+        Arc::clone(&fake),
+    );
+
+    first_runtime.dispatch(Command::SaveProfile {
+        request_id: 30,
+        submission: submission(
+            profile,
+            CredentialUpdate::Remember(SecretString::from("remembered-password".to_owned())),
+        ),
+        connect: false,
+    });
+    assert!(matches!(
+        next_action(&mut first_receiver).await,
+        Action::ProfileSaved {
+            request_id: 30,
+            warning: None,
+            ..
+        }
+    ));
+    first_runtime.shutdown().await;
+
+    let stored_profiles = ProfileStore::new(path.clone()).load().unwrap();
+    assert_eq!(
+        stored_profiles[0].credential_policy.keyring_reference(),
+        Some(keyring_ref(profile_id).as_str())
+    );
+    let (mut second_runtime, mut second_receiver) = runtime(
+        stored_profiles,
+        HashSet::from([profile_id]),
+        ProfileStore::new(path),
+        Arc::clone(&fake),
+    );
+    let invalid_target = ExecutionTarget {
+        profile_id,
+        database: "outside-scope".to_owned(),
+        schema: None,
+    };
+
+    second_runtime.dispatch(Command::Connect {
+        profile_id,
+        generation: 1,
+        target: invalid_target,
+    });
+
+    assert!(matches!(
+        next_action(&mut second_receiver).await,
+        Action::ConnectionFailed {
+            profile_id: failed,
+            generation: 1,
+            message,
+        } if failed == profile_id && message == "Execution target is invalid for this profile"
+    ));
+    assert_eq!(fake.calls(), (1, 2, 1, 0));
+    second_runtime.shutdown().await;
+}
+
+#[tokio::test]
 async fn unavailable_keyring_downgrades_remember_to_session_only() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("connections.toml");
