@@ -39,3 +39,6 @@ tarpaulin-report.html
 .DS_Store
 ._*
 Thumbs.db
+
+# CodeGraph index
+/.codegraph/
