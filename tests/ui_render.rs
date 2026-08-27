@@ -533,6 +533,31 @@ fn completion_popup_is_anchored_below_the_editor_cursor() {
 }
 
 #[test]
+fn completion_popup_is_not_rendered_in_normal_mode() {
+    let mut app = fixture();
+    app.focus = Focus::Editor;
+    app.active_console_mut().completion = Some(CompletionPopup {
+        candidates: vec![CompletionCandidate {
+            label: "app.public.users".into(),
+            insert_text: "users".into(),
+            kind: CompletionKind::Table,
+            detail: None,
+            replace: TextRange::new(0, 0),
+            score: CompletionScore {
+                context: 3,
+                prefix: 1,
+                schema: 1,
+            },
+        }],
+        selected: 0,
+    });
+
+    let (_, state) = render_with_state(&app, 120, 36);
+
+    assert!(state.completion_popup.is_none());
+}
+
+#[test]
 fn cursor_style_follows_editor_mode() {
     let mut app = fixture();
     let (_, normal_state) = render_with_state(&app, 120, 36);
@@ -613,8 +638,8 @@ fn editor_title_owns_target_and_transaction_context() {
 fn editor_help_documents_target_context_controls() {
     let mut app = fixture();
     app.update(Action::ShowHelp);
-    let (output, _) = render_with_state(&app, 80, 24);
-    for text in ["Space d", "Space tt", "Space tc", "Space tr"] {
+    let (output, _) = render_with_state(&app, 80, 28);
+    for text in ["Space d", "Space f", "Space tt", "Space tc", "Space tr"] {
         assert!(output.contains(text), "missing {text}");
     }
     assert!(output.contains("Search"));
