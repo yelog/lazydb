@@ -356,10 +356,14 @@ impl MySqlAdapter {
         let scope_predicate = selected
             .as_ref()
             .map(|databases| {
-                format!(
-                    " AND BINARY schema_name IN ({})",
-                    placeholders(databases.len())
-                )
+                if databases.is_empty() {
+                    " AND FALSE".to_owned()
+                } else {
+                    format!(
+                        " AND BINARY schema_name IN ({})",
+                        placeholders(databases.len())
+                    )
+                }
             })
             .unwrap_or_default();
         let count_sql = format!(

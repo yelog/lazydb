@@ -766,6 +766,60 @@ fn visible_objects_scope_shows_discovery_loading_and_refresh_hint() {
 }
 
 #[test]
+fn visible_objects_scope_renders_partial_database_without_all_schemas_row() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::OpenProfileManager);
+    {
+        let draft = app
+            .profile_manager
+            .as_mut()
+            .unwrap()
+            .draft
+            .as_mut()
+            .unwrap();
+        draft.name.set("primary");
+        draft.database.set("warehouse");
+    }
+    let (request_id, fingerprint) = match app.update(Action::ProfileOpenScope).as_slice() {
+        [
+            lazydb::action::Command::DiscoverProfileCatalog {
+                request_id,
+                submission,
+            },
+        ] => (*request_id, submission.discovery_fingerprint),
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+    app.update(Action::ProfileCatalogDiscoverySucceeded {
+        request_id,
+        fingerprint,
+        server: ServerInfo {
+            kind: DatabaseKind::Postgres,
+            version: "16".into(),
+            database: "warehouse".into(),
+        },
+        capabilities: lazydb::db::catalog::CatalogCapabilities {
+            namespace_model: lazydb::db::catalog::NamespaceModel::DatabaseAndSchema,
+            top_level_groups: vec![],
+            column_metadata: Default::default(),
+            supports_lazy_children: false,
+        },
+        discovery: lazydb::db::catalog::CatalogDiscovery {
+            databases: vec![lazydb::db::catalog::DiscoveredDatabase {
+                name: "warehouse".into(),
+                schemas: vec!["analytics".into(), "public".into()],
+            }],
+            warnings: Vec::new(),
+        },
+    });
+
+    let output = render(&app, 120, 36);
+    assert!(output.contains("[-] warehouse"), "{output}");
+    assert!(output.contains("[x] public"), "{output}");
+    assert!(output.contains("[ ] analytics"), "{output}");
+    assert!(!output.contains("All schemas"), "{output}");
+}
+
+#[test]
 fn pending_url_redacts_an_embedded_password_before_commit() {
     let mut app = App::new(Vec::new());
     app.update(Action::OpenProfileManager);

@@ -2,7 +2,7 @@ use lazydb::{
     model::{
         profile_manager::{
             CatalogScopeMode, CredentialUpdate, ProfileDraft, ProfileField, ProfileManagerPage,
-            ProfileManagerState,
+            ProfileManagerState, ScopeSelectionState,
         },
         text_input::TextInput,
     },
@@ -22,6 +22,141 @@ fn valid_postgres_draft() -> ProfileDraft {
 
 fn saved_postgres_profile() -> ConnectionProfile {
     valid_postgres_draft().validate(&[]).unwrap().profile
+}
+
+fn discovered_postgres_scope(selected_schemas: &[&str]) -> ProfileManagerState {
+    let mut state = ProfileManagerState::new(false);
+    state.start_new(DatabaseKind::Postgres);
+    let draft = state.draft.as_mut().unwrap();
+    draft.name.set("primary");
+    draft.database.set("moss_biz");
+    draft.catalog_scope = CatalogScope {
+        databases: CatalogSelection::Selected(vec![DatabaseScope {
+            name: "moss_biz".into(),
+            schemas: CatalogSelection::Selected(
+                selected_schemas
+                    .iter()
+                    .map(|schema| (*schema).into())
+                    .collect(),
+            ),
+        }]),
+    };
+    draft.catalog_scope_mode = CatalogScopeMode::Explicit;
+    let profile = draft.validate(&[]).unwrap().profile;
+    let fingerprint =
+        lazydb::model::profile_manager::DiscoveryFingerprint::for_profile(&profile, false, 0);
+    draft.begin_catalog_discovery(fingerprint);
+    draft.apply_catalog_discovery(lazydb::model::profile_manager::ProfileCatalogDiscovery {
+        fingerprint,
+        server: lazydb::db::ServerInfo {
+            kind: DatabaseKind::Postgres,
+            version: "16".into(),
+            database: "moss_biz".into(),
+        },
+        capabilities: lazydb::db::catalog::CatalogCapabilities {
+            namespace_model: lazydb::db::catalog::NamespaceModel::DatabaseAndSchema,
+            top_level_groups: vec![],
+            column_metadata: Default::default(),
+            supports_lazy_children: false,
+        },
+        discovery: Ok(lazydb::db::catalog::CatalogDiscovery {
+            databases: vec![lazydb::db::catalog::DiscoveredDatabase {
+                name: "moss_biz".into(),
+                schemas: ["coa", "public", "tools"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+            }],
+            warnings: Vec::new(),
+        }),
+    });
+    state.open_scope_picker();
+    state
+}
+
+#[test]
+fn moving_from_database_keeps_schemas_visible_and_selectable() {
+    let mut state = discovered_postgres_scope(&["public"]);
+    assert_eq!(
+        state.scope_selected_row.as_deref(),
+        Some("database:moss_biz")
+    );
+    assert!(state.scope_row("database:moss_biz:schema:coa").is_some());
+
+    state.move_scope_selection(1);
+    assert_eq!(
+        state.scope_selected_row.as_deref(),
+        Some("database:moss_biz:schema:coa")
+    );
+    assert!(state.scope_row("database:moss_biz:schema:public").is_some());
+    assert!(state.scope_row("database:moss_biz:schema:all").is_none());
+}
+
+#[test]
+fn database_toggle_uses_tri_state_select_all_and_remove() {
+    let mut state = discovered_postgres_scope(&["public"]);
+    assert_eq!(
+        state.scope_row("database:moss_biz").unwrap().selection,
+        ScopeSelectionState::Partial
+    );
+
+    assert!(state.toggle_scope_row("database:moss_biz"));
+    assert_eq!(
+        state.scope_row("database:moss_biz").unwrap().selection,
+        ScopeSelectionState::Checked
+    );
+    let CatalogSelection::Selected(databases) =
+        &state.draft.as_ref().unwrap().catalog_scope.databases
+    else {
+        panic!("database toggle must keep explicit scope")
+    };
+    assert!(matches!(databases[0].schemas, CatalogSelection::All));
+
+    assert!(state.toggle_scope_row("database:moss_biz"));
+    assert_eq!(
+        state.scope_row("database:moss_biz").unwrap().selection,
+        ScopeSelectionState::Unchecked
+    );
+    assert!(matches!(
+        state.draft.as_ref().unwrap().catalog_scope.databases,
+        CatalogSelection::Selected(ref databases) if databases.is_empty()
+    ));
+}
+
+#[test]
+fn schema_toggle_expands_all_and_last_schema_removes_database() {
+    let mut state = discovered_postgres_scope(&["coa", "public", "tools"]);
+    state.draft.as_mut().unwrap().catalog_scope.databases =
+        CatalogSelection::Selected(vec![DatabaseScope {
+            name: "moss_biz".into(),
+            schemas: CatalogSelection::All,
+        }]);
+
+    assert!(state.toggle_scope_row("database:moss_biz:schema:tools"));
+    let CatalogSelection::Selected(databases) =
+        &state.draft.as_ref().unwrap().catalog_scope.databases
+    else {
+        panic!("schema exclusion must become explicit")
+    };
+    assert_eq!(
+        databases[0].schemas,
+        CatalogSelection::Selected(vec!["coa".into(), "public".into()])
+    );
+    assert_eq!(
+        state.scope_row("database:moss_biz").unwrap().selection,
+        ScopeSelectionState::Partial
+    );
+
+    state.draft.as_mut().unwrap().catalog_scope.databases =
+        CatalogSelection::Selected(vec![DatabaseScope {
+            name: "moss_biz".into(),
+            schemas: CatalogSelection::Selected(vec!["public".into()]),
+        }]);
+    assert!(state.toggle_scope_row("database:moss_biz:schema:public"));
+    assert!(matches!(
+        state.draft.as_ref().unwrap().catalog_scope.databases,
+        CatalogSelection::Selected(ref databases) if databases.is_empty()
+    ));
 }
 
 #[test]
@@ -319,7 +454,7 @@ fn changing_unrelated_fields_does_not_reset_a_custom_scope() {
 }
 
 #[test]
-fn excluding_the_default_schema_is_a_field_level_validation_error() {
+fn visible_objects_can_exclude_the_connection_default_schema() {
     let mut draft = valid_postgres_draft();
     draft.catalog_scope = CatalogScope {
         databases: CatalogSelection::Selected(vec![DatabaseScope {
@@ -329,10 +464,11 @@ fn excluding_the_default_schema_is_a_field_level_validation_error() {
     };
     draft.catalog_scope_mode = CatalogScopeMode::Explicit;
 
-    let error = draft.validate(&[]).unwrap_err();
+    let profile = draft.validate(&[]).unwrap().profile;
 
-    assert_eq!(error.field, ProfileField::Schema);
-    assert!(error.message.contains("default schema `public`"));
+    assert_eq!(profile.default_schema.as_deref(), Some("public"));
+    assert!(!profile.catalog_scope.allows_schema("lazydb", "public"));
+    assert!(profile.catalog_scope.allows_schema("lazydb", "private"));
 }
 
 #[test]
@@ -641,7 +777,10 @@ fn mysql_mirrored_schema_row_is_selected_and_read_only() {
     let row = state
         .scope_row("database:sales:schema:sales")
         .expect("mirror row");
-    assert!(row.selected);
+    assert_eq!(
+        row.selection,
+        lazydb::model::profile_manager::ScopeSelectionState::Checked
+    );
     assert!(row.read_only);
     assert!(!state.toggle_scope_row("database:sales:schema:sales"));
 }

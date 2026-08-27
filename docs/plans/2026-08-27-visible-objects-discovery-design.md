@@ -27,6 +27,12 @@ Add a discovery-specific pending request to `ProfileManagerState`; do not reuse 
 - Global failure keeps saved selections and shows the actual sanitized error.
 - Partial failure shows discovered objects and a concise warning count/detail.
 
+## Scope Selection Tree
+
+Scope rows use `Unchecked`, `Partial`, and `Checked` selection states. A database is partial when only some discovered or preserved schemas are selected. Selected databases remain expanded while focus moves through their schema rows; navigation never controls expansion implicitly.
+
+The synthetic `All schemas` row is removed. Toggling an unchecked or partial database selects all schemas using `CatalogSelection::All`; toggling a checked database removes it from the selected database list. Toggling one schema while the database is `All` expands the selection to all discovered schemas except that schema. Removing the last selected schema removes the database. Saved schemas absent from discovery remain visible and contribute to partial state.
+
 ## PostgreSQL Semantics
 
 The initial connection queries non-template, connectable databases visible to the current role. Schema discovery then connects to each database with a concurrency limit of four and runs the existing non-system-schema query. The configured database uses the existing connection where possible. Individual connection/query failures become warnings rather than failing the entire result.

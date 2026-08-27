@@ -316,10 +316,17 @@ pub struct ProfileDraft {
 pub struct ScopeRow {
     pub id: String,
     pub name: String,
-    pub selected: bool,
+    pub selection: ScopeSelectionState,
     pub read_only: bool,
     pub unavailable: bool,
     pub database: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScopeSelectionState {
+    Unchecked,
+    Partial,
+    Checked,
 }
 
 impl ProfileDraft {
@@ -1149,10 +1156,18 @@ impl ProfileManagerState {
         if let Some(draft) = self.draft.as_mut() {
             draft.sync_derived_catalog_scope();
             self.page = ProfileManagerPage::Scope;
+            self.scope_expanded_databases = selected_database_names(&draft.catalog_scope);
             self.scope_selected_row = self
                 .scope_rows_for_render()
                 .first()
                 .map(|row| row.id.clone());
+            if let Some(database) = self
+                .scope_selected_row
+                .as_deref()
+                .and_then(scope_database_id)
+            {
+                self.scope_expanded_databases.insert(database.to_owned());
+            }
             self.scope_viewport = 0;
             self.scope_warning = self.scope_unavailable_warning();
         }
@@ -1196,6 +1211,14 @@ impl ProfileManagerState {
     }
 
     pub fn move_scope_selection(&mut self, delta: isize) {
+        if let Some(database) = self
+            .scope_selected_row
+            .as_deref()
+            .filter(|id| !id.contains(":schema:"))
+            .and_then(scope_database_id)
+        {
+            self.scope_expanded_databases.insert(database.to_owned());
+        }
         let rows = self.scope_rows_for_render();
         if rows.is_empty() {
             self.scope_selected_row = None;
@@ -1237,15 +1260,38 @@ impl ProfileManagerState {
         if row.read_only {
             return false;
         }
+        let discovered = self.discovered_scope();
         let Some(draft) = self.draft.as_mut() else {
             return false;
         };
-        let changed = toggle_scope(&mut draft.catalog_scope, draft.kind, &row);
+        let changed = toggle_scope(
+            &mut draft.catalog_scope,
+            draft.kind,
+            &row,
+            discovered.as_ref(),
+        );
         if changed {
             draft.catalog_scope_mode = CatalogScopeMode::Explicit;
+            if row.database
+                && row.selection != ScopeSelectionState::Checked
+                && let Some(database) = scope_database_id(&row.id)
+            {
+                self.scope_expanded_databases.insert(database.to_owned());
+            }
             self.scope_warning = self.scope_unavailable_warning();
         }
         changed
+    }
+
+    fn discovered_scope(&self) -> Option<crate::db::catalog::CatalogDiscovery> {
+        self.draft
+            .as_ref()
+            .and_then(|draft| match &draft.catalog_discovery {
+                CatalogDiscoveryState::Fresh(snapshot) | CatalogDiscoveryState::Stale(snapshot) => {
+                    snapshot.discovery.as_ref().ok().cloned()
+                }
+                CatalogDiscoveryState::NotRequested => None,
+            })
     }
 
     pub fn scope_rows_for_render(&self) -> Vec<ScopeRow> {
@@ -1273,11 +1319,24 @@ impl ProfileManagerState {
                 }))
                 .collect::<HashSet<_>>();
         for database in names {
-            let selected_db = database_selected(&draft.catalog_scope, database);
+            let schemas = discovered
+                .and_then(|discovery| {
+                    discovery
+                        .databases
+                        .iter()
+                        .find(|item| item.name == database)
+                        .map(|item| item.schemas.clone())
+                })
+                .unwrap_or_default();
             rows.push(ScopeRow {
                 id: format!("database:{database}"),
                 name: database.to_owned(),
-                selected: selected_db,
+                selection: database_selection_state(
+                    &draft.catalog_scope,
+                    database,
+                    &schemas,
+                    discovered.is_some(),
+                ),
                 read_only: false,
                 unavailable: discovery.is_none_or(|result| {
                     result.as_ref().map_or(true, |items| {
@@ -1289,36 +1348,22 @@ impl ProfileManagerState {
             if self.scope_expanded_databases.contains(database)
                 || self.scope_selected_row.as_deref() == Some(&format!("database:{database}"))
             {
-                let schemas = discovered
-                    .and_then(|d| {
-                        d.databases
-                            .iter()
-                            .find(|item| item.name == database)
-                            .map(|item| item.schemas.clone())
-                    })
-                    .unwrap_or_default();
                 let selected_schemas = selected_schema(&draft.catalog_scope, database);
                 if draft.kind == DatabaseKind::MySql {
                     rows.push(ScopeRow {
                         id: format!("database:{database}:schema:{database}"),
                         name: database.to_owned(),
-                        selected: true,
+                        selection: if database_selected(&draft.catalog_scope, database) {
+                            ScopeSelectionState::Checked
+                        } else {
+                            ScopeSelectionState::Unchecked
+                        },
                         read_only: true,
                         unavailable: discovery.is_none_or(|result| {
                             result.as_ref().map_or(true, |items| {
                                 !items.databases.iter().any(|item| item.name == database)
                             })
                         }),
-                        database: false,
-                    });
-                } else {
-                    let all_id = format!("database:{database}:schema:all");
-                    rows.push(ScopeRow {
-                        id: all_id,
-                        name: "All schemas".into(),
-                        selected: matches!(selected_schemas, Some(CatalogSelection::All)),
-                        read_only: false,
-                        unavailable: false,
                         database: false,
                     });
                 }
@@ -1332,11 +1377,14 @@ impl ProfileManagerState {
                     .chain(custom_schemas)
                     .collect::<HashSet<_>>();
                 for schema in schema_names {
-                    let selected_schema = selected_schemas.is_some_and(|selection| matches!(selection, CatalogSelection::Selected(items) if items.contains(&schema)));
                     rows.push(ScopeRow {
                         id: format!("database:{database}:schema:{schema}"),
                         name: schema.clone(),
-                        selected: selected_schema || draft.kind == DatabaseKind::MySql,
+                        selection: if schema_selected(&draft.catalog_scope, database, &schema) {
+                            ScopeSelectionState::Checked
+                        } else {
+                            ScopeSelectionState::Unchecked
+                        },
                         read_only: draft.kind == DatabaseKind::MySql,
                         unavailable: discovery.is_none_or(|result| {
                             result.as_ref().map_or(true, |items| {
@@ -1634,6 +1682,59 @@ fn database_selected(scope: &CatalogScope, name: &str) -> bool {
         || matches!(&scope.databases, CatalogSelection::Selected(items) if items.iter().any(|item| item.name == name))
 }
 
+fn selected_database_names(scope: &CatalogScope) -> HashSet<String> {
+    match &scope.databases {
+        CatalogSelection::All => HashSet::new(),
+        CatalogSelection::Selected(items) => items.iter().map(|item| item.name.clone()).collect(),
+    }
+}
+
+fn scope_database_id(id: &str) -> Option<&str> {
+    id.strip_prefix("database:")
+        .and_then(|value| value.split(":schema:").next())
+        .filter(|database| !database.is_empty())
+}
+
+fn schema_selected(scope: &CatalogScope, database: &str, schema: &str) -> bool {
+    match selected_schema(scope, database) {
+        None => matches!(scope.databases, CatalogSelection::All),
+        Some(CatalogSelection::All) => true,
+        Some(CatalogSelection::Selected(items)) => items.iter().any(|item| item == schema),
+    }
+}
+
+fn database_selection_state(
+    scope: &CatalogScope,
+    database: &str,
+    discovered_schemas: &[String],
+    discovery_available: bool,
+) -> ScopeSelectionState {
+    if matches!(scope.databases, CatalogSelection::All) {
+        return ScopeSelectionState::Checked;
+    }
+    let Some(selection) = selected_schema(scope, database) else {
+        return ScopeSelectionState::Unchecked;
+    };
+    match selection {
+        CatalogSelection::All => ScopeSelectionState::Checked,
+        CatalogSelection::Selected(items) => {
+            if items.is_empty() {
+                ScopeSelectionState::Unchecked
+            } else if discovery_available
+                && !discovered_schemas.is_empty()
+                && items.len() == discovered_schemas.len()
+                && discovered_schemas
+                    .iter()
+                    .all(|schema| items.contains(schema))
+            {
+                ScopeSelectionState::Checked
+            } else {
+                ScopeSelectionState::Partial
+            }
+        }
+    }
+}
+
 fn selected_schema<'a>(
     scope: &'a CatalogScope,
     database: &str,
@@ -1647,7 +1748,13 @@ fn selected_schema<'a>(
     }
 }
 
-fn toggle_scope(scope: &mut CatalogScope, kind: DatabaseKind, row: &ScopeRow) -> bool {
+fn toggle_scope(
+    scope: &mut CatalogScope,
+    kind: DatabaseKind,
+    row: &ScopeRow,
+    discovered: Option<&crate::db::catalog::CatalogDiscovery>,
+) -> bool {
+    materialize_all_databases(scope, discovered);
     let Some((database, schema)) = row
         .id
         .strip_prefix("database:")
@@ -1659,66 +1766,124 @@ fn toggle_scope(scope: &mut CatalogScope, kind: DatabaseKind, row: &ScopeRow) ->
         if database.is_empty() {
             return false;
         }
-        match &mut scope.databases {
-            CatalogSelection::All => {
-                scope.databases = CatalogSelection::Selected(vec![DatabaseScope {
-                    name: database.to_owned(),
-                    schemas: if kind == DatabaseKind::MySql {
-                        CatalogSelection::All
-                    } else {
-                        CatalogSelection::Selected(vec!["public".to_owned()])
-                    },
-                }]);
-            }
-            CatalogSelection::Selected(items) => {
-                if let Some(index) = items.iter().position(|item| item.name == database) {
-                    if items.len() == 1 {
-                        scope.databases = CatalogSelection::All;
-                    } else {
-                        items.remove(index);
-                    }
-                } else {
-                    items.push(DatabaseScope {
-                        name: database.to_owned(),
-                        schemas: CatalogSelection::All,
-                    });
-                }
-            }
+        if row.selection == ScopeSelectionState::Checked {
+            remove_database(scope, database);
+        } else {
+            select_database(scope, database);
         }
         return true;
-    };
-    let Some(databases) = (match &mut scope.databases {
-        CatalogSelection::Selected(items) => Some(items),
-        CatalogSelection::All => return false,
-    }) else {
-        return false;
-    };
-    let Some(database_scope) = databases.iter_mut().find(|item| item.name == database) else {
-        return false;
     };
     if kind == DatabaseKind::MySql {
         return false;
     }
-    match schema {
-        "all" => database_scope.schemas = CatalogSelection::All,
-        schema => match &mut database_scope.schemas {
-            CatalogSelection::All => {
-                database_scope.schemas = CatalogSelection::Selected(vec![schema.to_owned()])
-            }
-            CatalogSelection::Selected(items) => {
-                if let Some(index) = items.iter().position(|item| item == schema) {
-                    if items.len() == 1 {
-                        database_scope.schemas = CatalogSelection::All;
-                    } else {
-                        items.remove(index);
-                    }
-                } else {
-                    items.push(schema.to_owned());
-                }
-            }
-        },
+    let discovered_schemas = discovered
+        .and_then(|discovery| {
+            discovery
+                .databases
+                .iter()
+                .find(|item| item.name == database)
+        })
+        .map(|item| item.schemas.as_slice())
+        .unwrap_or_default();
+    if schema_selected(scope, database, schema) {
+        let remaining = match selected_schema(scope, database) {
+            Some(CatalogSelection::All) | None => discovered_schemas
+                .iter()
+                .filter(|candidate| candidate.as_str() != schema)
+                .cloned()
+                .collect::<Vec<_>>(),
+            Some(CatalogSelection::Selected(items)) => items
+                .iter()
+                .filter(|candidate| candidate.as_str() != schema)
+                .cloned()
+                .collect::<Vec<_>>(),
+        };
+        if remaining.is_empty() {
+            remove_database(scope, database);
+        } else {
+            set_database_schemas(scope, database, CatalogSelection::Selected(remaining));
+        }
+    } else {
+        let mut selected = match selected_schema(scope, database) {
+            Some(CatalogSelection::Selected(items)) => items.clone(),
+            Some(CatalogSelection::All) | None => Vec::new(),
+        };
+        selected.push(schema.to_owned());
+        selected.sort();
+        selected.dedup();
+        set_database_schemas(scope, database, CatalogSelection::Selected(selected));
     }
     true
+}
+
+fn select_database(scope: &mut CatalogScope, database: &str) {
+    match &mut scope.databases {
+        CatalogSelection::All => {}
+        CatalogSelection::Selected(items) => {
+            if let Some(item) = items.iter_mut().find(|item| item.name == database) {
+                item.schemas = CatalogSelection::All;
+            } else {
+                items.push(DatabaseScope {
+                    name: database.to_owned(),
+                    schemas: CatalogSelection::All,
+                });
+                items.sort_by(|left, right| left.name.cmp(&right.name));
+            }
+        }
+    }
+}
+
+fn remove_database(scope: &mut CatalogScope, database: &str) {
+    match &mut scope.databases {
+        CatalogSelection::All => {
+            scope.databases = CatalogSelection::Selected(Vec::new());
+        }
+        CatalogSelection::Selected(items) => items.retain(|item| item.name != database),
+    }
+}
+
+fn set_database_schemas(
+    scope: &mut CatalogScope,
+    database: &str,
+    schemas: CatalogSelection<String>,
+) {
+    if matches!(scope.databases, CatalogSelection::All) {
+        scope.databases = CatalogSelection::Selected(Vec::new());
+    }
+    let CatalogSelection::Selected(items) = &mut scope.databases else {
+        return;
+    };
+    if let Some(item) = items.iter_mut().find(|item| item.name == database) {
+        item.schemas = schemas;
+    } else {
+        items.push(DatabaseScope {
+            name: database.to_owned(),
+            schemas,
+        });
+        items.sort_by(|left, right| left.name.cmp(&right.name));
+    }
+}
+
+fn materialize_all_databases(
+    scope: &mut CatalogScope,
+    discovered: Option<&crate::db::catalog::CatalogDiscovery>,
+) {
+    if !matches!(scope.databases, CatalogSelection::All) {
+        return;
+    }
+    let Some(discovered) = discovered else {
+        return;
+    };
+    scope.databases = CatalogSelection::Selected(
+        discovered
+            .databases
+            .iter()
+            .map(|database| DatabaseScope {
+                name: database.name.clone(),
+                schemas: CatalogSelection::All,
+            })
+            .collect(),
+    );
 }
 
 fn redact_url_password(value: &str) -> (String, Option<(usize, usize)>) {

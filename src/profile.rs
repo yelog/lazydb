@@ -118,10 +118,6 @@ impl CatalogScope {
         default_schema: Option<&str>,
     ) -> Result<(), CatalogScopeValidationError> {
         if let CatalogSelection::Selected(databases) = &self.databases {
-            if databases.is_empty() {
-                return Err(CatalogScopeValidationError::EmptyDatabaseSelection);
-            }
-
             let mut database_names = HashSet::new();
             for database_scope in databases {
                 if database_scope.name.is_empty() {
@@ -158,14 +154,7 @@ impl CatalogScope {
             }
         }
 
-        if let Some(schema) = default_schema
-            && !self.allows_schema(database, schema)
-        {
-            return Err(CatalogScopeValidationError::DefaultSchemaExcluded {
-                database: database.to_owned(),
-                schema: schema.to_owned(),
-            });
-        }
+        let _ = (database, default_schema);
 
         Ok(())
     }

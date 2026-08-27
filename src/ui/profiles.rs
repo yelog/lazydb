@@ -249,7 +249,11 @@ fn render_scope(
             .y
             .saturating_add(offset.saturating_sub(manager.scope_viewport) as u16);
         let active = manager.scope_selected_row.as_deref() == Some(row.id.as_str());
-        let marker = if row.selected { "[x]" } else { "[ ]" };
+        let marker = match row.selection {
+            crate::model::profile_manager::ScopeSelectionState::Unchecked => "[ ]",
+            crate::model::profile_manager::ScopeSelectionState::Partial => "[-]",
+            crate::model::profile_manager::ScopeSelectionState::Checked => "[x]",
+        };
         let prefix = if row.database { "" } else { "  " };
         let text = format!(
             "{prefix}{marker} {}{}",

@@ -74,3 +74,13 @@ cargo clippy --all-targets --all-features -- -D warnings
 ```
 
 Expected: all commands pass; manual PostgreSQL verification shows all connectable databases, per-database schemas, preserved saved selections, and actionable partial warnings.
+
+### Task 7: Add Stable Expansion And Tri-State Selection
+
+**Files:**
+- Modify: `src/model/profile_manager.rs:315-323,1198-1322,1632-1722`
+- Modify: `src/ui/profiles.rs:241-278`
+- Test: `tests/profile_draft.rs`
+- Test: `tests/ui_render.rs`
+
+Replace `ScopeRow.selected` with an explicit `ScopeSelectionState`. Persist expansion for selected databases, remove the `All schemas` row, compute database state from scope plus discovered schemas, and pass discovered schema context into toggles. Lock down navigation stability, partial rendering, database select-all/deselect-all, `All` exclusion conversion, last-schema removal, saved unavailable schemas, and MySQL mirroring with focused tests.

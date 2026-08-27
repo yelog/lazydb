@@ -113,7 +113,7 @@ fn exact_case_sensitive_names_round_trip_unchanged() {
 }
 
 #[test]
-fn validation_rejects_empty_selected_at_either_level() {
+fn validation_allows_no_databases_but_rejects_empty_schema_selection() {
     let empty_databases = CatalogScope {
         databases: CatalogSelection::Selected(Vec::new()),
     };
@@ -124,7 +124,8 @@ fn validation_rejects_empty_selected_at_either_level() {
         }]),
     };
 
-    assert!(empty_databases.validate("app", None).is_err());
+    assert!(empty_databases.validate("app", None).is_ok());
+    assert!(!empty_databases.allows_database("app"));
     assert!(empty_schemas.validate("app", None).is_err());
 }
 
@@ -186,7 +187,7 @@ fn validation_rejects_exact_duplicates_but_allows_case_variants() {
 }
 
 #[test]
-fn validation_rejects_an_excluded_default_schema() {
+fn validation_allows_visibility_to_exclude_the_default_schema() {
     let scope = CatalogScope {
         databases: CatalogSelection::Selected(vec![DatabaseScope {
             name: "app".to_owned(),
@@ -194,7 +195,7 @@ fn validation_rejects_an_excluded_default_schema() {
         }]),
     };
 
-    assert!(scope.validate("app", Some("public")).is_err());
+    assert!(scope.validate("app", Some("public")).is_ok());
     assert!(scope.validate("app", Some("private")).is_ok());
 }
 
