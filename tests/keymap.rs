@@ -388,6 +388,21 @@ fn printable_input_passes_through_an_open_completion_popup() {
 }
 
 #[test]
+fn normal_mode_does_not_route_keys_to_a_stale_completion_popup() {
+    let mut keymap = Keymap::default();
+    let mut app = App::new(Vec::new());
+    app.update(Action::EditorKey(key(KeyCode::Esc)));
+    app.active_console_mut().completion = Some(CompletionPopup::default());
+
+    assert_eq!(keymap.map(ctrl('n'), &app), None);
+    assert_eq!(keymap.map(ctrl('p'), &app), None);
+    assert_ne!(
+        keymap.map(key(KeyCode::Enter), &app),
+        Some(Action::CompletionAccept)
+    );
+}
+
+#[test]
 fn transaction_exit_keys_carry_their_explicit_choice() {
     let mut keymap = Keymap::default();
     let mut app = App::new(Vec::new());

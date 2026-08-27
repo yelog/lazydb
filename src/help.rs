@@ -29,6 +29,7 @@ pub enum HelpShortcutId {
     EditorUndo,
     EditorRedo,
     EditorRun,
+    EditorFormat,
     ToggleTransaction,
     CommitTransaction,
     RollbackTransaction,
@@ -261,6 +262,11 @@ pub fn shortcuts(context: Focus, relation_data: bool) -> Vec<HelpShortcut> {
                 description: "execute SQL buffer",
             },
             HelpShortcut {
+                id: HelpShortcutId::EditorFormat,
+                key: "Space f",
+                description: "format selected / current SQL",
+            },
+            HelpShortcut {
                 id: HelpShortcutId::ToggleTransaction,
                 key: "Space tt",
                 description: "toggle AUTO / MANUAL transaction",
@@ -411,5 +417,15 @@ mod tests {
         assert_eq!(state.selected, 0);
         state.backspace();
         assert_eq!(state.query, "ctrl edito");
+    }
+
+    #[test]
+    fn editor_help_includes_sql_formatting() {
+        let format = shortcuts(Focus::Editor, false)
+            .into_iter()
+            .find(|shortcut| shortcut.id == HelpShortcutId::EditorFormat)
+            .expect("format shortcut");
+        assert_eq!(format.key, "Space f");
+        assert!(format.description.contains("format"));
     }
 }

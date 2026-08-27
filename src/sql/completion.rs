@@ -15,6 +15,12 @@ pub struct CompletionScheduleKey {
     pub catalog_generation: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CompletionContext<'a> {
+    pub database: Option<&'a str>,
+    pub schema: Option<&'a str>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum CompletionKind {
     Keyword,
@@ -143,7 +149,7 @@ pub fn complete(
     cursor: usize,
     dialect: SqlDialect,
     index: &CompletionIndex,
-    default_schema: Option<&str>,
+    completion_context: CompletionContext<'_>,
 ) -> Vec<CompletionCandidate> {
     let cursor = cursor.min(text.len());
     let (replace, prefix, qualifiers) = identifier_at(text, cursor, dialect);
@@ -206,7 +212,7 @@ pub fn complete(
             (_, CompletionKind::Keyword) => 1,
             _ => 2,
         };
-        let schema_score = u8::from(default_schema.is_some_and(|schema| {
+        let schema_score = u8::from(completion_context.schema.is_some_and(|schema| {
             entry
                 .id
                 .native_path
@@ -214,8 +220,16 @@ pub fn complete(
                 .any(|part| part.eq_ignore_ascii_case(schema))
         }));
         candidates.push(CompletionCandidate {
-            label: display_text(name),
-            insert_text: quote_identifier(name, dialect),
+            label: if matches!(kind, CompletionKind::Table | CompletionKind::View) {
+                relation_label(entry)
+            } else {
+                display_text(name)
+            },
+            insert_text: if matches!(kind, CompletionKind::Table | CompletionKind::View) {
+                relation_insert_text(entry, completion_context, dialect, &qualifiers)
+            } else {
+                quote_identifier(name, dialect)
+            },
             kind,
             detail: completion_detail(entry).map(|detail| display_text(&detail)),
             replace,
@@ -276,6 +290,85 @@ fn completion_detail(entry: &CatalogEntry) -> Option<String> {
     match &entry.metadata {
         CatalogMetadata::Column(column) => Some(column.native_type.clone()),
         CatalogMetadata::None | CatalogMetadata::Index(_) | CatalogMetadata::Constraint(_) => None,
+    }
+}
+
+fn relation_label(entry: &CatalogEntry) -> String {
+    [
+        entry.qualified_name.database.as_deref(),
+        entry.qualified_name.schema.as_deref(),
+        Some(entry.qualified_name.object.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    .map(display_text)
+    .collect::<Vec<_>>()
+    .join(".")
+}
+
+fn relation_insert_text(
+    entry: &CatalogEntry,
+    context: CompletionContext<'_>,
+    dialect: SqlDialect,
+    qualifiers: &[String],
+) -> String {
+    let object = entry.qualified_name.object.as_str();
+    if !qualifiers.is_empty() {
+        return quote_identifier(object, dialect);
+    }
+    let database = entry.qualified_name.database.as_deref();
+    let schema = entry.qualified_name.schema.as_deref();
+    let parts = match dialect {
+        SqlDialect::MySql => {
+            if database.is_some_and(|value| context.database == Some(value)) {
+                vec![object]
+            } else {
+                vec![database.unwrap_or_default(), object]
+            }
+        }
+        SqlDialect::Sqlite => {
+            if schema.is_some_and(|value| context.schema == Some(value)) {
+                vec![object]
+            } else {
+                vec![schema.or(database).unwrap_or_default(), object]
+            }
+        }
+        _ => {
+            if database.is_some_and(|value| context.database == Some(value)) {
+                if schema.is_some_and(|value| context.schema == Some(value)) {
+                    vec![object]
+                } else {
+                    vec![schema.unwrap_or_default(), object]
+                }
+            } else {
+                vec![
+                    database.unwrap_or_default(),
+                    schema.unwrap_or_default(),
+                    object,
+                ]
+            }
+        }
+    };
+    parts
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .map(|part| quote_relation_component(part, dialect))
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+fn quote_relation_component(value: &str, dialect: SqlDialect) -> String {
+    if value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        && value
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_alphabetic() || character == '_')
+    {
+        value.to_owned()
+    } else {
+        quote_identifier(value, dialect)
     }
 }
 

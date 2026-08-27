@@ -260,6 +260,9 @@ fn render_completion_popup(
     anchor: Option<CompletionAnchor>,
     icons: icons::IconSet,
 ) {
+    if app.active_editor_mode() != crate::model::editor::EditorMode::Insert {
+        return;
+    }
     let Some(popup) = app
         .active_console_opt()
         .and_then(|tab| tab.completion.as_ref())

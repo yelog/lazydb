@@ -83,6 +83,24 @@ fn normal_mode_motions_do_not_insert_literal_keys_through_app() {
 }
 
 #[test]
+fn normal_mode_delete_line_does_not_reopen_completion() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::ReplaceEditor("select 1\nselect 2".into()));
+    app.active_console_mut().completion = Some(CompletionPopup::default());
+    editor_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+
+    for code in [KeyCode::Char('d'), KeyCode::Char('d')] {
+        editor_key(&mut app, code, KeyModifiers::NONE);
+    }
+
+    assert_eq!(
+        app.active_editor_mode(),
+        lazydb::model::editor::EditorMode::Normal
+    );
+    assert!(app.active_console().completion.is_none());
+}
+
+#[test]
 fn space_tt_toggles_transaction_mode_through_app_pipeline() {
     let mut app = App::new(Vec::new());
     editor_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);

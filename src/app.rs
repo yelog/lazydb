@@ -439,6 +439,10 @@ impl App {
             Id::EditorUndo => vec![editor_key(KeyCode::Char('u'))],
             Id::EditorRedo => vec![editor_control_key(KeyCode::Char('r'))],
             Id::EditorRun => vec![Action::RunActiveSql],
+            Id::EditorFormat => vec![
+                editor_key(KeyCode::Char(' ')),
+                editor_key(KeyCode::Char('f')),
+            ],
             Id::ToggleTransaction => vec![
                 editor_key(KeyCode::Char(' ')),
                 editor_key(KeyCode::Char('t')),
@@ -3295,6 +3299,10 @@ impl App {
         for effect in effects {
             let action = match effect {
                 EditorEffect::Changed { .. } => {
+                    if self.active_editor_mode() != EditorMode::Insert {
+                        self.active_console_mut().completion = None;
+                        continue;
+                    }
                     if self
                         .active_editor_text()
                         .is_ok_and(|text| text.ends_with('.'))
@@ -3352,6 +3360,9 @@ impl App {
     }
 
     fn completion_key(&self) -> Option<CompletionScheduleKey> {
+        if self.active_editor_mode() != EditorMode::Insert {
+            return None;
+        }
         let tab = self.active_console_opt()?;
         Some(CompletionScheduleKey {
             console_id: tab.id,
@@ -3362,6 +3373,10 @@ impl App {
     }
 
     fn complete_now(&mut self) -> Vec<Command> {
+        if self.active_editor_mode() != EditorMode::Insert {
+            self.active_console_mut().completion = None;
+            return Vec::new();
+        }
         let text = self.active_editor_text().unwrap_or_default();
         let snapshot = self
             .active_editor_render_snapshot(EditorViewport {
@@ -3403,20 +3418,20 @@ impl App {
                 ));
             }
         }
-        let default_schema = self
+        let completion_context = self
             .active_console_opt()
             .and_then(|tab| tab.execution_target.as_ref())
-            .and_then(|target| target.schema.clone())
-            .or_else(|| {
-                self.active_profile()
-                    .and_then(|profile| profile.default_schema.clone())
-            });
+            .map(|target| sql::CompletionContext {
+                database: Some(target.database.as_str()),
+                schema: target.schema.as_deref(),
+            })
+            .unwrap_or_default();
         let candidates = sql::complete(
             &text,
             cursor,
             self.sql_dialect(),
             &self.explorer.completion_index,
-            default_schema.as_deref(),
+            completion_context,
         );
         let Some(tab) = self.active_console_opt_mut() else {
             return Vec::new();
@@ -3429,6 +3444,10 @@ impl App {
     }
 
     fn accept_completion(&mut self) -> Vec<Command> {
+        if self.active_editor_mode() != EditorMode::Insert {
+            self.active_console_mut().completion = None;
+            return Vec::new();
+        }
         let Some(id) = self.active_console_opt().map(|tab| tab.id) else {
             return Vec::new();
         };
