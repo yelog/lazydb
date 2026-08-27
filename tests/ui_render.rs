@@ -392,8 +392,9 @@ fn explorer_metadata_keeps_name_type_before_flags_and_comments() {
         |row| matches!(row.id, ExplorerNodeId::Catalog(ref id) if id.kind == CatalogKind::Database),
     );
     let row = row.unwrap();
-    assert_eq!(row.label, "db  DATABASE");
-    assert_eq!(row.detail.as_deref(), Some("database comment"));
+    assert_eq!(row.label, "db");
+    assert_eq!(row.metadata, None);
+    assert_eq!(row.comment.as_deref(), Some("database comment"));
 }
 
 #[test]
@@ -618,7 +619,8 @@ fn help_overlay_is_contextual() {
     let output = render(&app, 120, 36);
 
     assert!(output.contains("KEYMAP // EXPLORER"));
-    assert!(output.contains("expand / open"));
+    assert!(output.contains("toggle expand / collapse"));
+    assert!(output.contains("open table preview / activate"));
     assert!(output.contains("Esc"));
 }
 
@@ -649,10 +651,17 @@ fn explorer_roots_show_connection_metadata_and_semantic_hit_regions() {
     app.focus = Focus::Explorer;
     app.connection.profile_id = Some(primary_id);
     app.connection.status = ConnectionStatus::Connected;
+    app.explorer
+        .normalized
+        .profiles
+        .get_mut(&primary_id)
+        .unwrap()
+        .status = lazydb::model::explorer::ExplorerConnectionStatus::Online;
     let (output, state) = render_with_state(&app, 120, 36);
     assert!(output.contains("EXPLORER"));
     assert!(output.contains("production"));
-    assert!(output.contains("SAVED"));
+    assert!(!output.contains("SAVED"));
+    assert!(output.contains("●"));
     assert!(output.contains("production"));
     assert!(output.contains("reports"));
     assert!(state.hit_regions.iter().any(|region| matches!(

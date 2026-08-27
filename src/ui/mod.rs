@@ -25,10 +25,12 @@ use crate::{
     db::{catalog::CatalogKind, query::ResultSet},
     model::{
         editor::{EditorHighlightKind, EditorMode, EditorViewport},
+        explorer::{ExplorerConnectionStatus, ProfileProvenance},
         profile_manager::ProfileField,
         tab::{OutputKind, ResultView, WorkspaceTab},
         workspace::{ConnectionStatus, Focus, Overlay, QueryStatus},
     },
+    profile::DatabaseKind,
     security::sanitize_terminal_text,
 };
 
@@ -519,47 +521,84 @@ fn render_explorer(
                 " "
             };
             let icon = visible.kind.map_or("·", catalog_icon);
-            let detail = visible
-                .detail
-                .as_deref()
-                .map(sanitize_terminal_text)
-                .unwrap_or_default();
             let label = sanitize_terminal_text(&visible.label);
-            let prefix = format!(
-                "{}{} {} {}",
-                "  ".repeat(visible.depth),
-                marker,
-                icon,
-                label
-            );
             let selected = app.explorer.selected_id() == Some(&visible.id);
-            let style = if selected {
+            let label_style = if selected {
                 Style::new()
                     .fg(theme.accent)
                     .bg(theme.selection)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::new()
-                    .fg(visible
-                        .kind
-                        .map_or(theme.muted, |kind| kind_color(kind, theme)))
-                    .bg(theme.surface)
+                Style::new().fg(theme.text).bg(theme.surface)
             };
-            let available = inner.width as usize;
-            let text = if usize::from(prefix.cell_width()) >= available {
-                prefix
+            let base = format!("{}{} ", "  ".repeat(visible.depth), marker);
+            let mut spans = vec![Span::styled(base, label_style)];
+            if let Some(kind) = visible.profile_kind {
+                spans.push(Span::styled(
+                    format!("{} ", database_icon(kind)),
+                    Style::new().fg(theme.action).bg(if selected {
+                        theme.selection
+                    } else {
+                        theme.surface
+                    }),
+                ));
             } else {
-                let remaining = available.saturating_sub(usize::from(prefix.cell_width()) + 2);
-                if remaining == 0 || detail.is_empty() {
-                    prefix
-                } else {
-                    format!(
-                        "{prefix}  {}",
-                        detail.chars().take(remaining).collect::<String>()
-                    )
-                }
-            };
-            ListItem::new(Line::from(Span::styled(text, style)))
+                spans.push(Span::styled(
+                    format!("{} ", icon),
+                    Style::new()
+                        .fg(visible
+                            .kind
+                            .map_or(theme.muted, |kind| kind_color(kind, theme)))
+                        .bg(if selected {
+                            theme.selection
+                        } else {
+                            theme.surface
+                        }),
+                ));
+            }
+            spans.push(Span::styled(label, label_style));
+            let secondary_style = Style::new().fg(theme.muted).bg(if selected {
+                theme.selection
+            } else {
+                theme.surface
+            });
+            if visible.provenance == Some(ProfileProvenance::Session) {
+                spans.push(Span::styled("  SESSION", secondary_style));
+            }
+            if let Some(status) = visible.connection_status {
+                spans.extend(connection_status_spans(status, theme, selected));
+            }
+            if let Some(endpoint) = visible
+                .endpoint
+                .as_deref()
+                .filter(|value| !value.is_empty())
+            {
+                spans.push(Span::styled(
+                    format!("  {}", sanitize_terminal_text(endpoint)),
+                    secondary_style,
+                ));
+            }
+            if let Some(metadata) = visible
+                .metadata
+                .as_deref()
+                .filter(|value| !value.is_empty())
+            {
+                spans.push(Span::styled(
+                    format!("  {}", sanitize_terminal_text(metadata)),
+                    Style::new().fg(theme.text).bg(if selected {
+                        theme.selection
+                    } else {
+                        theme.surface
+                    }),
+                ));
+            }
+            if let Some(comment) = visible.comment.as_deref().filter(|value| !value.is_empty()) {
+                spans.push(Span::styled(
+                    format!("  {}", sanitize_terminal_text(comment)),
+                    secondary_style,
+                ));
+            }
+            ListItem::new(Line::from(spans))
         })
         .collect::<Vec<_>>();
     frame.render_widget(
@@ -1004,7 +1043,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
         Focus::Results => ("DATA", theme.warning),
     };
     let hints = match app.focus {
-        Focus::Explorer => "j/k move   h/l collapse/expand   Enter open   r refresh",
+        Focus::Explorer => "j/k move   o toggle   Enter open   r refresh",
         Focus::Editor => "Esc normal   i/a/o insert   F5 run   Ctrl+w pane   [t/]t tabs",
         Focus::Results => "h/j/k/l cells   Tab data/output   Ctrl+w pane",
     };
@@ -1333,7 +1372,9 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, focus: Focus, app: &App, theme
     match focus {
         Focus::Explorer => lines.extend([
             key_line("j / k", "move selection", theme),
-            key_line("h / l / Enter", "collapse / expand / open", theme),
+            key_line("h / l", "collapse / expand", theme),
+            key_line("o", "toggle expand / collapse", theme),
+            key_line("Enter", "open table preview / activate", theme),
         ]),
         Focus::Editor => lines.extend([
             key_line("i / Esc", "Insert / Normal mode", theme),
@@ -1464,6 +1505,37 @@ fn catalog_icon(kind: CatalogKind) -> &'static str {
         CatalogKind::Sequence => "#",
         CatalogKind::Type => "τ",
     }
+}
+
+fn database_icon(kind: DatabaseKind) -> &'static str {
+    match kind {
+        DatabaseKind::Postgres => "󰘦",
+        DatabaseKind::MySql => "󰆼",
+        DatabaseKind::Sqlite => "󰘚",
+    }
+}
+
+fn connection_status_spans(
+    status: ExplorerConnectionStatus,
+    theme: Theme,
+    selected: bool,
+) -> Vec<Span<'static>> {
+    let background = if selected {
+        theme.selection
+    } else {
+        theme.surface
+    };
+    let (marker, text, color) = match status {
+        ExplorerConnectionStatus::Online => ("●", "", theme.accent),
+        ExplorerConnectionStatus::Offline => ("○", "", theme.muted),
+        ExplorerConnectionStatus::Linking => ("◐", " CONNECTING", theme.warning),
+        ExplorerConnectionStatus::Syncing => ("◐", " SYNCING", theme.action),
+        ExplorerConnectionStatus::Failed => ("●", " FAILED", theme.error),
+    };
+    vec![Span::styled(
+        format!("  {marker}{text}"),
+        Style::new().fg(color).bg(background),
+    )]
 }
 
 fn kind_color(kind: CatalogKind, theme: Theme) -> Color {

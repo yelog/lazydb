@@ -19,8 +19,9 @@ creates an ad-hoc session profile for the current process and takes precedence
 over `--profile`; it is never persisted.
 
 `Space c` opens the manager while LazyDB is running. The Explorer keeps roots by
-profile UUID and labels them `SAVED` or `SESSION`, with `OFFLINE`, `LINKING`,
-`ONLINE`, `SYNCING`, or `FAILED` status. Refresh, expand, retry, and relation
+profile UUID. Temporary roots are marked `SESSION`; saved roots have no
+provenance label. Connection status is shown with a compact marker, with text
+retained for connecting, syncing, and failed states. Refresh, expand, retry, and relation
 actions target the selected UUID. `Test Connection` does not save metadata or
 change the active connection; it probes and discovers databases/schemas for the
 draft's scope picker. `Save` persists the profile, and `Save & Connect` persists

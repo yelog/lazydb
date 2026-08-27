@@ -244,7 +244,10 @@ impl Keymap {
             app.tabs.get(app.active_tab),
             Some(crate::model::tab::WorkspaceTab::Relation(_))
         );
-        if relation_tab && matches!(event.code, KeyCode::Char('o' | 'p' | 'D' | 'r')) {
+        if relation_tab
+            && app.focus == Focus::Results
+            && matches!(event.code, KeyCode::Char('o' | 'p' | 'D' | 'r'))
+        {
             return map_relation(event.code, app);
         }
         if relation_tab && app.focus == Focus::Results {
@@ -509,7 +512,8 @@ fn map_explorer(code: KeyCode, app: &App) -> Option<Action> {
         KeyCode::Char('k') | KeyCode::Up => Some(Action::ExplorerMove(-1)),
         KeyCode::Char('l') | KeyCode::Right => Some(Action::ExplorerExpand),
         KeyCode::Char('h') | KeyCode::Left => Some(Action::ExplorerCollapse),
-        KeyCode::Enter | KeyCode::Char('o') => Some(Action::ExplorerOpenSelected),
+        KeyCode::Enter => Some(Action::ExplorerOpenSelected),
+        KeyCode::Char('o') => Some(Action::ExplorerToggle),
         KeyCode::Char('r') => Some(Action::ExplorerRefresh),
         KeyCode::Char('p') => Some(Action::OpenSelectedRelation {
             view: crate::model::relation::RelationView::Data,

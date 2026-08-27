@@ -38,8 +38,9 @@ Editor Normal mode but contextual help outside the editor.
 
 The manager edits one draft at a time; it does not open a profile-list popup.
 The Explorer is the profile navigation surface. Its roots are keyed by profile
-UUID and show `SAVED` or `SESSION` plus `OFFLINE`, `LINKING`, `ONLINE`, `SYNCING`,
-or `FAILED`. With no roots, select `No profiles` to start a new draft. Root
+UUID; temporary roots show `SESSION` while saved roots have no provenance label.
+Connection state is shown with a status marker, and process/error states may also
+show text. With no roots, select `No profiles` to start a new draft. Root
 refresh/connect/retry actions apply only to the selected UUID. Catalog status
 rows include loading, stale/retry, and permission-denied/retry states.
 
@@ -60,7 +61,9 @@ selected driver, and URL applies on Enter, field exit, Test, or Save.
 | --- | --- |
 | `j/k`, arrows | Move selection |
 | `Home/End` | First/last visible object |
-| `h/l`, left/right, `Enter` | Collapse or expand |
+| `h/l`, left/right | Collapse or expand |
+| `o` | Toggle expansion only |
+| `Enter` | Activate; open the owning table/view preview for relations and descendants |
 | `r` | Reload catalog |
 | `p` | Open a 500-row table/view preview |
 | `D` | Open available object DDL in a new SQL tab |

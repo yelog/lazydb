@@ -134,6 +134,16 @@ fn maps_selected_profile_root_actions_by_stable_id() {
         keymap.map(key(KeyCode::Enter), &app),
         Some(Action::ExplorerOpenSelected)
     );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('o')), &app),
+        Some(Action::ExplorerToggle)
+    );
+
+    app.focus = Focus::Explorer;
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('o')), &app),
+        Some(Action::ExplorerToggle)
+    );
 }
 
 #[test]
@@ -393,6 +403,13 @@ fn maps_explorer_and_result_actions_by_context() {
         lazydb::model::relation::RelationTab::new("users"),
     ));
     app.active_tab = 1;
+    app.focus = Focus::Explorer;
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('o')), &app),
+        Some(Action::ExplorerToggle)
+    );
+
+    app.focus = Focus::Results;
     assert_eq!(
         keymap.map(key(KeyCode::Char('o')), &app),
         Some(Action::SetRelationView(

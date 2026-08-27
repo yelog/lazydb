@@ -9,10 +9,13 @@ use crate::db::{
     catalog::{CatalogEntry, CatalogId, CatalogKind, CatalogNode, OptionalMetadata},
 };
 use crate::model::execution_target::ExecutionTarget;
-use crate::model::explorer::{ExplorerNodeId, ExplorerTreeState, StatusRowKind};
+use crate::model::explorer::{
+    ExplorerConnectionStatus, ExplorerNodeId, ExplorerTreeState, ProfileProvenance, StatusRowKind,
+};
 use crate::model::transaction::{
     CancellationIntent, DeferredTransactionPrompt, TransactionExitChoice,
 };
+use crate::profile::DatabaseKind;
 use crate::sql::CompletionIndex;
 use crate::sql::ExecutionDraft;
 
@@ -142,8 +145,13 @@ pub struct VisibleCatalogNode {
     pub id: ExplorerNodeId,
     pub depth: usize,
     pub label: String,
-    pub detail: Option<String>,
+    pub metadata: Option<String>,
+    pub comment: Option<String>,
     pub kind: Option<CatalogKind>,
+    pub profile_kind: Option<DatabaseKind>,
+    pub provenance: Option<ProfileProvenance>,
+    pub connection_status: Option<ExplorerConnectionStatus>,
+    pub endpoint: Option<String>,
     pub expandable: bool,
 }
 
@@ -218,59 +226,132 @@ impl ExplorerState {
                     .id
                     .profile_id()
                     .and_then(|profile_id| self.normalized.profiles.get(&profile_id));
-                let (label, detail, kind, expandable) = match &row.id {
+                let (
+                    label,
+                    metadata,
+                    comment,
+                    kind,
+                    profile_kind,
+                    provenance,
+                    connection_status,
+                    endpoint,
+                    expandable,
+                ) = match &row.id {
                     ExplorerNodeId::Catalog(id) => profile
                         .and_then(|profile| profile.catalog.get(id))
                         .map_or_else(
-                            || ("Missing object".to_owned(), None, None, false),
+                            || {
+                                (
+                                    "Missing object".to_owned(),
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    None,
+                                    false,
+                                )
+                            },
                             |entry| {
                                 (
                                     entry_label(entry),
-                                    entry_display_detail(entry),
+                                    entry_detail(entry),
+                                    entry_comment(entry),
                                     Some(entry.kind),
+                                    None,
+                                    None,
+                                    None,
+                                    None,
                                     entry.expandable,
                                 )
                             },
                         ),
                     ExplorerNodeId::Group { parent, group } => {
-                        let detail = profile
+                        let metadata = profile
                             .and_then(|profile| profile.catalog.group_state(parent, *group))
-                            .map(|state| format!("{:?}", state.count));
-                        (group_label(*group).to_owned(), detail, None, true)
+                            .and_then(|state| catalog_count_label(state.count));
+                        (
+                            group_label(*group).to_owned(),
+                            metadata,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            true,
+                        )
                     }
                     ExplorerNodeId::Status { owner, kind } => (
                         status_label(*kind).to_owned(),
                         profile.and_then(|profile| profile.load_errors.get(owner).cloned()),
                         None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
                         false,
                     ),
-                    ExplorerNodeId::LoadMore { .. } => {
-                        ("Load more...".to_owned(), None, None, false)
-                    }
-                    ExplorerNodeId::Empty { .. } => ("No objects".to_owned(), None, None, false),
+                    ExplorerNodeId::LoadMore { .. } => (
+                        "Load more...".to_owned(),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        false,
+                    ),
+                    ExplorerNodeId::Empty { .. } => (
+                        "No objects".to_owned(),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        false,
+                    ),
                     ExplorerNodeId::Profile(_profile_id) => profile.map_or_else(
-                        || ("Missing profile".to_owned(), None, None, false),
+                        || {
+                            (
+                                "Missing profile".to_owned(),
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                false,
+                            )
+                        },
                         |profile| {
                             (
                                 profile.display_name.clone(),
-                                Some(format!(
-                                    "{} {}  {}",
-                                    match profile.provenance {
-                                        crate::model::explorer::ProfileProvenance::Saved => "SAVED",
-                                        crate::model::explorer::ProfileProvenance::Session =>
-                                            "SESSION",
-                                    },
-                                    explorer_status_label(profile.status),
-                                    profile.endpoint,
-                                )),
                                 None,
+                                None,
+                                None,
+                                Some(profile.kind),
+                                Some(profile.provenance),
+                                Some(profile.status),
+                                Some(profile.endpoint.clone()),
                                 true,
                             )
                         },
                     ),
                     ExplorerNodeId::EmptyProfiles => (
                         "No profiles".to_owned(),
+                        None,
                         Some("NEW".to_owned()),
+                        None,
+                        None,
+                        None,
+                        None,
                         None,
                         false,
                     ),
@@ -279,8 +360,13 @@ impl ExplorerState {
                     id: row.id,
                     depth: row.depth,
                     label,
-                    detail,
+                    metadata,
+                    comment,
                     kind,
+                    profile_kind,
+                    provenance,
+                    connection_status,
+                    endpoint,
                     expandable,
                 }
             })
@@ -411,16 +497,6 @@ fn status_label(kind: StatusRowKind) -> &'static str {
     }
 }
 
-fn explorer_status_label(status: crate::model::explorer::ExplorerConnectionStatus) -> &'static str {
-    match status {
-        crate::model::explorer::ExplorerConnectionStatus::Offline => "OFFLINE",
-        crate::model::explorer::ExplorerConnectionStatus::Linking => "LINKING",
-        crate::model::explorer::ExplorerConnectionStatus::Online => "ONLINE",
-        crate::model::explorer::ExplorerConnectionStatus::Syncing => "SYNCING",
-        crate::model::explorer::ExplorerConnectionStatus::Failed => "FAILED",
-    }
-}
-
 fn entry_detail(entry: &CatalogEntry) -> Option<String> {
     use crate::db::catalog::{CatalogMetadata, ConstraintMetadata};
     match &entry.metadata {
@@ -460,19 +536,20 @@ fn entry_detail(entry: &CatalogEntry) -> Option<String> {
 }
 
 fn entry_label(entry: &CatalogEntry) -> String {
-    format!("{}  {}", entry.qualified_name.object, entry.native_kind)
+    entry.qualified_name.object.clone()
 }
 
-fn entry_display_detail(entry: &CatalogEntry) -> Option<String> {
-    let metadata = entry_detail(entry);
-    let comment = match &entry.comment {
+fn entry_comment(entry: &CatalogEntry) -> Option<String> {
+    match &entry.comment {
         OptionalMetadata::Supported(comment) => comment.clone(),
         OptionalMetadata::Unsupported => None,
-    };
-    match (metadata, comment) {
-        (Some(metadata), Some(comment)) => Some(format!("{metadata}  {comment}")),
-        (Some(metadata), None) => Some(metadata),
-        (None, Some(comment)) => Some(comment),
-        (None, None) => None,
+    }
+}
+
+fn catalog_count_label(count: crate::db::catalog::CatalogCount) -> Option<String> {
+    match count {
+        crate::db::catalog::CatalogCount::Exact(value) => Some(value.to_string()),
+        crate::db::catalog::CatalogCount::AtLeast(value) => Some(format!("{value}+")),
+        crate::db::catalog::CatalogCount::Unknown => None,
     }
 }
