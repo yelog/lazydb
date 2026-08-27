@@ -21,6 +21,8 @@ enum Pending {
     Window,
     Previous,
     Next,
+    RelationDelete,
+    RelationYank,
 }
 
 #[derive(Debug, Default)]
@@ -189,6 +191,25 @@ impl Keymap {
             return Some(action);
         }
 
+        if is_relation_data_focus(app) {
+            if event.modifiers.is_empty() && relation_grid_is_browse(app) {
+                match event.code {
+                    KeyCode::Char('d') => {
+                        self.set_pending(Pending::RelationDelete, app);
+                        return None;
+                    }
+                    KeyCode::Char('y') => {
+                        self.set_pending(Pending::RelationYank, app);
+                        return None;
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(action) = map_relation_data(event, app) {
+                return Some(action);
+            }
+        }
+
         if let Some(action) = map_data_query(event, app) {
             return Some(action);
         }
@@ -343,6 +364,8 @@ fn map_pending(pending: Pending, event: KeyEvent) -> Option<Action> {
         (Pending::Window, KeyCode::Char('k' | 'l')) => Some(Action::Focus(Focus::Editor)),
         (Pending::Previous, KeyCode::Char('t')) => Some(Action::PreviousTab),
         (Pending::Next, KeyCode::Char('t')) => Some(Action::NextTab),
+        (Pending::RelationDelete, KeyCode::Char('d')) => Some(Action::RelationDeleteCurrent),
+        (Pending::RelationYank, KeyCode::Char('y')) => Some(Action::RelationYank),
         _ => None,
     }
 }
@@ -369,10 +392,99 @@ pub fn map_paste(value: String, app: &App) -> Vec<Action> {
     if app.overlay.is_some() {
         return Vec::new();
     }
+    if is_relation_data_focus(app) {
+        return vec![Action::RelationPaste];
+    }
     if app.focus != Focus::Editor || app.active_editor_mode() != EditorMode::Insert {
         return Vec::new();
     }
     vec![Action::EditorPaste(value)]
+}
+
+fn is_relation_data_focus(app: &App) -> bool {
+    app.focus == Focus::Results
+        && matches!(
+            app.tabs.get(app.active_tab),
+            Some(crate::model::tab::WorkspaceTab::Relation(tab))
+                if tab.view == crate::model::relation::RelationView::Data && tab.query.focus.is_none()
+        )
+}
+
+fn relation_grid_is_browse(app: &App) -> bool {
+    use crate::model::relation_edit::RelationGridMode;
+
+    app.tabs
+        .get(app.active_tab)
+        .and_then(|tab| match tab {
+            crate::model::tab::WorkspaceTab::Relation(tab) => tab.edit.as_ref(),
+            _ => None,
+        })
+        .is_none_or(|edit| matches!(edit.mode, RelationGridMode::Browse))
+}
+
+fn map_relation_data(event: KeyEvent, app: &App) -> Option<Action> {
+    use crate::model::relation_edit::RelationGridMode;
+
+    let mode = app.tabs.get(app.active_tab).and_then(|tab| match tab {
+        crate::model::tab::WorkspaceTab::Relation(tab) => tab.edit.as_ref().map(|edit| &edit.mode),
+        _ => None,
+    });
+    if let Some(RelationGridMode::EditCell(_)) = mode {
+        if !event.modifiers.is_empty() {
+            return None;
+        }
+        return match event.code {
+            KeyCode::Enter => Some(Action::RelationEditConfirm),
+            KeyCode::Esc => Some(Action::RelationEditCancel),
+            KeyCode::Backspace => Some(Action::RelationEditBackspace),
+            KeyCode::Delete => Some(Action::RelationEditDelete),
+            KeyCode::Left => Some(Action::RelationEditMoveLeft),
+            KeyCode::Right => Some(Action::RelationEditMoveRight),
+            KeyCode::Home => Some(Action::RelationEditMoveHome),
+            KeyCode::End => Some(Action::RelationEditMoveEnd),
+            KeyCode::Char(character) => Some(Action::RelationEditInsert(character)),
+            _ => None,
+        };
+    }
+
+    if !event.modifiers.is_empty() {
+        return match (event.modifiers, event.code) {
+            (KeyModifiers::CONTROL, KeyCode::Char('s')) => Some(Action::RelationCommit),
+            (KeyModifiers::CONTROL, KeyCode::Char('x')) => Some(Action::RelationRollback),
+            (KeyModifiers::CONTROL, KeyCode::Char('r')) => Some(Action::RelationRedo),
+            _ => None,
+        };
+    }
+
+    match mode {
+        Some(RelationGridMode::VisualLine { .. }) => match event.code {
+            KeyCode::Char('j') | KeyCode::Down => Some(Action::GridMove {
+                rows: 1,
+                columns: 0,
+            }),
+            KeyCode::Char('k') | KeyCode::Up => Some(Action::GridMove {
+                rows: -1,
+                columns: 0,
+            }),
+            KeyCode::Char('d') => Some(Action::RelationDeleteSelected),
+            KeyCode::Char('y') => Some(Action::RelationYankSelected),
+            KeyCode::Char('V') => Some(Action::RelationEditCancel),
+            _ => None,
+        },
+        _ => match event.code {
+            KeyCode::Char('i') => Some(Action::RelationEditCell),
+            KeyCode::Char('V') => Some(Action::RelationVisualLine),
+            KeyCode::Char('d') => {
+                // Keep d available for the dd sequence instead of deleting immediately.
+                None
+            }
+            KeyCode::Char('y') => None,
+            KeyCode::Char('p') => Some(Action::RelationPaste),
+            KeyCode::Char('a') => Some(Action::RelationInsertRow),
+            KeyCode::Char('u') => Some(Action::RelationUndo),
+            _ => None,
+        },
+    }
 }
 
 fn map_profile_manager(event: KeyEvent, app: &App) -> Option<Action> {
@@ -698,4 +810,157 @@ fn map_data_query(event: KeyEvent, app: &App) -> Option<Action> {
         };
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Keymap;
+    use crate::{
+        action::Action,
+        app::App,
+        model::{
+            relation::RelationTab,
+            relation_edit::{RelationEditSession, RelationGridMode},
+            tab::WorkspaceTab,
+            workspace::Focus,
+        },
+    };
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn relation_app(mode: RelationGridMode) -> App {
+        let mut app = App::new(Vec::new());
+        let mut tab = RelationTab::new("users");
+        let mut edit = RelationEditSession::from_rows(vec![vec![]; 3]);
+        edit.mode = mode;
+        tab.edit = Some(edit);
+        app.tabs.push(WorkspaceTab::Relation(tab));
+        app.active_tab = 1;
+        app.focus = Focus::Results;
+        app
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn relation_data_maps_cell_edit_lifecycle_and_text() {
+        let app = relation_app(RelationGridMode::Browse);
+        let mut keymap = Keymap::default();
+
+        assert_eq!(
+            keymap.map(key(KeyCode::Char('i')), &app),
+            Some(Action::RelationEditCell)
+        );
+        assert_eq!(
+            keymap.map(
+                key(KeyCode::Char('x')),
+                &relation_app(RelationGridMode::EditCell(
+                    crate::model::relation_edit::CellEditorState {
+                        row: 0,
+                        column: 0,
+                        input: Default::default(),
+                    },
+                ))
+            ),
+            Some(Action::RelationEditInsert('x'))
+        );
+        assert_eq!(
+            keymap.map(
+                key(KeyCode::Esc),
+                &relation_app(RelationGridMode::EditCell(
+                    crate::model::relation_edit::CellEditorState {
+                        row: 0,
+                        column: 0,
+                        input: Default::default(),
+                    },
+                )),
+            ),
+            Some(Action::RelationEditCancel)
+        );
+    }
+
+    #[test]
+    fn relation_data_dd_and_yy_are_pending_sequences() {
+        let app = relation_app(RelationGridMode::Browse);
+        let mut keymap = Keymap::default();
+
+        assert_eq!(keymap.map(key(KeyCode::Char('d')), &app), None);
+        assert_eq!(
+            keymap.map(key(KeyCode::Char('d')), &app),
+            Some(Action::RelationDeleteCurrent)
+        );
+        assert_eq!(keymap.map(key(KeyCode::Char('y')), &app), None);
+        assert_eq!(
+            keymap.map(key(KeyCode::Char('y')), &app),
+            Some(Action::RelationYank)
+        );
+    }
+
+    #[test]
+    fn relation_data_visual_and_transaction_bindings_are_scoped() {
+        let app = relation_app(RelationGridMode::Browse);
+        let mut keymap = Keymap::default();
+
+        assert_eq!(
+            keymap.map(key(KeyCode::Char('V')), &app),
+            Some(Action::RelationVisualLine)
+        );
+        assert_eq!(
+            keymap.map(key(KeyCode::Char('p')), &app),
+            Some(Action::RelationPaste)
+        );
+        assert_eq!(
+            keymap.map(key(KeyCode::Char('a')), &app),
+            Some(Action::RelationInsertRow)
+        );
+        assert_eq!(
+            keymap.map(
+                KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+                &app,
+            ),
+            Some(Action::RelationCommit)
+        );
+        assert_eq!(
+            keymap.map(
+                KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL),
+                &app,
+            ),
+            Some(Action::RelationRollback)
+        );
+    }
+
+    #[test]
+    fn existing_relation_view_keys_keep_their_meaning() {
+        let mut app = App::new(Vec::new());
+        app.tabs
+            .push(WorkspaceTab::Relation(RelationTab::new("users")));
+        app.active_tab = 1;
+        app.focus = Focus::Results;
+        let mut keymap = Keymap::default();
+
+        assert_eq!(
+            keymap.map(key(KeyCode::Char('p')), &app),
+            Some(Action::RelationPaste)
+        );
+        app.update(Action::SetRelationView(
+            crate::model::relation::RelationView::Structure,
+        ));
+        assert_eq!(
+            keymap.map(key(KeyCode::Char('p')), &app),
+            Some(Action::SetRelationView(
+                crate::model::relation::RelationView::Data
+            ))
+        );
+        assert_eq!(
+            keymap.map(key(KeyCode::Char('o')), &app),
+            Some(Action::SetRelationView(
+                crate::model::relation::RelationView::Data
+            ))
+        );
+        assert_eq!(
+            keymap.map(key(KeyCode::Char('r')), &app),
+            Some(Action::RefreshActiveRelation)
+        );
+    }
 }

@@ -965,7 +965,9 @@ pub(crate) fn render_result_table(
     state: &mut UiState,
 ) {
     let overrides = grid.column_widths.clone();
-    data_grid::render(frame, area, result, grid, &overrides, theme, block, state);
+    data_grid::render(
+        frame, area, result, grid, &overrides, theme, block, state, None,
+    );
 }
 
 fn render_output(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {

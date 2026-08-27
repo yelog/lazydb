@@ -229,6 +229,27 @@ pub enum Action {
     GridSetColumnOffset {
         offset: usize,
     },
+    RelationEditCell,
+    RelationEditInsert(char),
+    RelationEditBackspace,
+    RelationEditDelete,
+    RelationEditMoveLeft,
+    RelationEditMoveRight,
+    RelationEditMoveHome,
+    RelationEditMoveEnd,
+    RelationEditConfirm,
+    RelationEditCancel,
+    RelationVisualLine,
+    RelationDeleteCurrent,
+    RelationDeleteSelected,
+    RelationYank,
+    RelationYankSelected,
+    RelationPaste,
+    RelationInsertRow,
+    RelationUndo,
+    RelationRedo,
+    RelationCommit,
+    RelationRollback,
     PreviewSelected,
     DdlSelected,
     RelationSucceeded {
@@ -238,6 +259,49 @@ pub enum Action {
     RelationFailed {
         request: crate::model::relation::RelationRequest,
         message: String,
+    },
+    RelationTransactionStarted {
+        tab_id: Uuid,
+        generation: u64,
+        connection: ConnectionIdentity,
+    },
+    RelationTransactionStartFailed {
+        tab_id: Uuid,
+        generation: u64,
+        connection: ConnectionIdentity,
+        message: String,
+    },
+    RelationMutationSucceeded {
+        request: crate::db::mutation::RelationMutationRequest,
+        result: crate::db::mutation::MutationResult,
+    },
+    RelationMutationFailed {
+        request: crate::db::mutation::RelationMutationRequest,
+        message: String,
+    },
+    RelationCommitted {
+        tab_id: Uuid,
+        generation: u64,
+        connection: ConnectionIdentity,
+    },
+    RelationCommitFailed {
+        tab_id: Uuid,
+        generation: u64,
+        connection: ConnectionIdentity,
+        message: String,
+        unknown: bool,
+    },
+    RelationRolledBack {
+        tab_id: Uuid,
+        generation: u64,
+        connection: ConnectionIdentity,
+    },
+    RelationRollbackFailed {
+        tab_id: Uuid,
+        generation: u64,
+        connection: ConnectionIdentity,
+        message: String,
+        unknown: bool,
     },
     RequestProfileConnect {
         profile_id: Uuid,
@@ -446,6 +510,19 @@ pub enum Command {
         tab_id: Uuid,
         query_generation: u64,
         transaction_generation: u64,
+    },
+    RelationMutation {
+        request: crate::db::mutation::RelationMutationRequest,
+    },
+    RelationCommit {
+        tab_id: Uuid,
+        generation: u64,
+        connection: ConnectionIdentity,
+    },
+    RelationRollback {
+        tab_id: Uuid,
+        generation: u64,
+        connection: ConnectionIdentity,
     },
     CancelQuery {
         tab_id: Uuid,

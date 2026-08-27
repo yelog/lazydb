@@ -1,6 +1,8 @@
 use unicode_width::UnicodeWidthStr;
 use uuid::Uuid;
 
+use super::relation_edit::RelationEditSession;
+use super::transaction::TransactionState;
 use super::{data_query::DataQueryOptions, data_query::DataQueryState, tab::DataGridState};
 use crate::db::{
     RelationPreview,
@@ -143,6 +145,10 @@ pub struct RelationTab {
     pub structure: RelationStructureLoad,
     pub grid: DataGridState,
     pub query: RelationQueryState,
+    pub edit: Option<RelationEditSession>,
+    pub transaction_state: TransactionState,
+    pub transaction_generation: u64,
+    pub transaction_snapshot: Option<RelationEditSession>,
 }
 
 impl RelationTab {
@@ -236,6 +242,10 @@ impl RelationTab {
                 capability: crate::model::data_query::DataQueryCapability::Relation,
                 ..RelationQueryState::default()
             },
+            edit: None,
+            transaction_state: TransactionState::Idle,
+            transaction_generation: 0,
+            transaction_snapshot: None,
         }
     }
 

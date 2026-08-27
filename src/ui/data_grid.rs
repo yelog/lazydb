@@ -24,6 +24,7 @@ pub(crate) fn render(
     theme: Theme,
     block: Block<'_>,
     state: &mut UiState,
+    edit: Option<&crate::model::relation_edit::RelationEditSession>,
 ) {
     if result.columns.is_empty() {
         frame.render_widget(
@@ -58,12 +59,21 @@ pub(crate) fn render(
         .map(|index| Constraint::Length(widths[*index]))
         .collect::<Vec<_>>();
 
+    let visible_rows = area.height.saturating_sub(4) as usize;
+    let row_offset = grid.row_offset.min(
+        result
+            .rows
+            .len()
+            .saturating_sub(visible_rows.min(result.rows.len())),
+    );
     let row_y = area.y.saturating_add(3);
-    for (row_index, _) in result
+    for (screen_row, row_index) in result
         .rows
         .iter()
-        .take(area.height.saturating_sub(if overflow { 5 } else { 4 }) as usize)
+        .skip(row_offset)
+        .take(visible_rows)
         .enumerate()
+        .map(|(index, _)| (index - row_offset, index))
     {
         let mut x = area.x.saturating_add(2);
         for column_index in &visible {
@@ -74,7 +84,7 @@ pub(crate) fn render(
             state.hit_regions.push(HitRegion {
                 area: Rect::new(
                     x,
-                    row_y.saturating_add(row_index as u16),
+                    row_y.saturating_add(screen_row as u16),
                     width.min(area.right().saturating_sub(x)),
                     1,
                 ),
@@ -108,18 +118,43 @@ pub(crate) fn render(
     }))
     .height(1)
     .bottom_margin(1);
-    let rows = result.rows.iter().map(|row| {
-        Row::new(visible.iter().map(|index| {
-            let value = row.get(*index).unwrap_or(&CellValue::Null);
-            let preview = value.preview(widths[*index].saturating_sub(2) as usize);
-            let style = match value {
-                CellValue::Null => Style::new().fg(theme.muted).add_modifier(Modifier::ITALIC),
-                CellValue::Unsupported { .. } => Style::new().fg(theme.warning),
-                _ => Style::new().fg(theme.text),
-            };
-            Cell::from(sanitize_terminal_text(&preview.text)).style(style)
-        }))
-    });
+    let rows = result
+        .rows
+        .iter()
+        .skip(row_offset)
+        .take(visible_rows)
+        .enumerate()
+        .map(|(screen_row, row)| {
+            let row_index = row_offset.saturating_add(screen_row);
+            let editable = edit.and_then(|session| session.rows.get(row_index));
+            let row_style = editable.map(|row| match row.state {
+                crate::model::relation_edit::EditableRowState::Deleted => {
+                    Style::new().fg(theme.row_deleted)
+                }
+                crate::model::relation_edit::EditableRowState::Updated { .. } => {
+                    Style::new().fg(theme.row_updated)
+                }
+                crate::model::relation_edit::EditableRowState::InsertDraft
+                | crate::model::relation_edit::EditableRowState::Inserted => {
+                    Style::new().fg(theme.row_inserted)
+                }
+                crate::model::relation_edit::EditableRowState::Conflict { .. } => {
+                    Style::new().fg(theme.row_deleted)
+                }
+                crate::model::relation_edit::EditableRowState::Clean => Style::new().fg(theme.text),
+            });
+            let row = editable.map(|row| row.current.as_slice()).unwrap_or(row);
+            Row::new(visible.iter().map(|index| {
+                let value = row.get(*index).unwrap_or(&CellValue::Null);
+                let preview = value.preview(widths[*index].saturating_sub(2) as usize);
+                let style = match value {
+                    CellValue::Null => Style::new().fg(theme.muted).add_modifier(Modifier::ITALIC),
+                    CellValue::Unsupported { .. } => Style::new().fg(theme.warning),
+                    _ => Style::new().fg(theme.text),
+                };
+                Cell::from(sanitize_terminal_text(&preview.text)).style(row_style.unwrap_or(style))
+            }))
+        });
     let table = Table::new(rows, constraints)
         .header(header)
         .block(block)
@@ -136,8 +171,9 @@ pub(crate) fn render(
         .iter()
         .position(|index| *index == grid.selected_column)
         .unwrap_or(0);
+    let selected_row = grid.selected_row.saturating_sub(row_offset);
     let mut table_state =
-        TableState::new().with_selected_cell(Some((grid.selected_row, selected_column)));
+        TableState::new().with_selected_cell(Some((selected_row, selected_column)));
     frame.render_stateful_widget(table, area, &mut table_state);
     if overflow {
         render_scrollbar(

@@ -1,4 +1,5 @@
 pub mod catalog;
+pub mod mutation;
 pub mod mysql;
 pub mod postgres;
 pub mod query;

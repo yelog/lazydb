@@ -73,6 +73,29 @@ pub(crate) fn render(
         RelationView::Data => render_data(frame, chunks[1], app, theme, state),
         RelationView::Structure => render_structure(frame, chunks[1], app, theme, state),
     }
+    if let Some(crate::model::relation_edit::RelationEditSession {
+        mode: crate::model::relation_edit::RelationGridMode::EditCell(editor),
+        ..
+    }) = &tab.edit
+    {
+        let popup = Rect::new(
+            area.x.saturating_add(4),
+            area.y.saturating_add(3),
+            area.width.saturating_sub(8).min(72),
+            3,
+        );
+        frame.render_widget(ratatui::widgets::Clear, popup);
+        frame.render_widget(
+            Paragraph::new(cell_editor_value(editor))
+                .block(panel_block(" CELL EDITOR ", true, theme))
+                .style(theme.base()),
+            popup,
+        );
+    }
+}
+
+fn cell_editor_value(editor: &crate::model::relation_edit::CellEditorState) -> String {
+    editor.input.value().to_owned()
 }
 
 fn render_data(
@@ -99,13 +122,16 @@ fn render_data(
         RelationLoad::Empty => (None, Some(("No relation data", false, false))),
     };
     if let Some(snapshot) = snapshot {
-        let result = snapshot
+        let mut result = snapshot
             .value
             .result
             .result_sets
             .last()
             .cloned()
             .unwrap_or_default();
+        if let Some(edit) = &tab.edit {
+            result.rows = edit.rows.iter().map(|row| row.current.clone()).collect();
+        }
         let query_height = if tab.query.error.is_some() { 3 } else { 2 };
         let body = if status.is_some() {
             Layout::default()
@@ -140,6 +166,7 @@ fn render_data(
             theme,
             block,
             state,
+            tab.edit.as_ref(),
         );
         let sql = sanitize_terminal_text(&snapshot.value.sql);
         let footer = Rect::new(
@@ -184,8 +211,11 @@ fn render_relation_result_table(
     theme: Theme,
     block: ratatui::widgets::Block<'_>,
     state: &mut super::UiState,
+    edit: Option<&crate::model::relation_edit::RelationEditSession>,
 ) {
-    super::data_grid::render(frame, area, result, grid, overrides, theme, block, state);
+    super::data_grid::render(
+        frame, area, result, grid, overrides, theme, block, state, edit,
+    );
 }
 
 fn render_status(
@@ -467,5 +497,24 @@ fn provenance_label(value: RelationSnapshotProvenance) -> &'static str {
         RelationSnapshotProvenance::OfflineSnapshot => "OFFLINE SNAPSHOT",
         RelationSnapshotProvenance::ProfileDeletedSnapshot => "PROFILE DELETED SNAPSHOT",
         RelationSnapshotProvenance::OutOfScopeSnapshot => "OUT OF SCOPE SNAPSHOT",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cell_editor_value;
+    use crate::model::{relation_edit::CellEditorState, text_input::TextInput};
+
+    #[test]
+    fn cell_editor_value_contains_only_the_cell_content() {
+        let editor = CellEditorState {
+            row: 5,
+            column: 8,
+            input: TextInput::from("failed"),
+        };
+
+        assert_eq!(cell_editor_value(&editor), "failed");
+        assert!(!cell_editor_value(&editor).contains("Edit cell"));
+        assert!(!cell_editor_value(&editor).contains("[6, 9]"));
     }
 }

@@ -31,6 +31,7 @@ use super::{
         DiscoveredDatabase, IndexMetadata, NamespaceModel, ObjectGroup, OptionalMetadata,
         QualifiedName, RelationStructure, finalize_keyset_page,
     },
+    mutation::{InputValue, MutationResult, RelationMutation, RelationMutationRequest},
     query::{ColumnMeta, QueryOutcome, QueryOutcomeAccumulator, RELATION_PREVIEW_LIMIT, ResultSet},
     value::CellValue,
 };
@@ -1208,6 +1209,210 @@ impl TransactionBackend for PostgresTransactionBackend {
             .await
             .map_err(Into::into)
     }
+    async fn relation_mutation(
+        &mut self,
+        request: RelationMutationRequest,
+    ) -> Result<MutationResult, TransactionError> {
+        let [_, schema, relation, _] = request.relation.native_path.as_slice() else {
+            return Err(TransactionError(
+                "PostgreSQL relation has no canonical database, schema, table, and oid path".into(),
+            ));
+        };
+        let columns = &request.metadata.columns;
+        let quoted_table = format!(
+            "{}.{}",
+            quote_identifier(schema),
+            quote_identifier(relation)
+        );
+        match request.operation {
+            RelationMutation::DeleteRows(rows) => {
+                for mutation in &rows {
+                    if mutation.row.columns.len() != mutation.row.values.len()
+                        || mutation.original.len() != columns.len()
+                    {
+                        return Err(TransactionError(
+                            "PostgreSQL delete mutation is malformed".into(),
+                        ));
+                    }
+                    let mut sql = format!("DELETE FROM {quoted_table} WHERE ");
+                    let mut predicates = Vec::new();
+                    for index in &mutation.row.columns {
+                        if *index >= columns.len() {
+                            return Err(TransactionError(
+                                "PostgreSQL row locator column is out of range".into(),
+                            ));
+                        }
+                        let name = quote_identifier(&columns[*index].0);
+                        predicates.push(format!("{name} IS NOT DISTINCT FROM $PLACEHOLDER"));
+                    }
+                    for column in columns {
+                        predicates.push(format!(
+                            "{} IS NOT DISTINCT FROM $PLACEHOLDER",
+                            quote_identifier(&column.0)
+                        ));
+                    }
+                    let mut bind = 1;
+                    for _ in &predicates {
+                        let replacement = format!("${bind}");
+                        sql = sql.replacen("$PLACEHOLDER", &replacement, 1);
+                        bind += 1;
+                    }
+                    sql.push_str(" RETURNING 1");
+                    let mut query = sqlx::query(AssertSqlSafe(sql));
+                    for value in &mutation.row.values {
+                        query = bind_cell(query, value)?;
+                    }
+                    for value in &mutation.original {
+                        query = bind_cell(query, value)?;
+                    }
+                    if query
+                        .fetch_optional(&mut *self.connection)
+                        .await
+                        .map_err(|e| TransactionError(e.to_string()))?
+                        .is_none()
+                    {
+                        return Err(TransactionError(
+                            "PostgreSQL relation mutation conflict".into(),
+                        ));
+                    }
+                }
+                return Ok(MutationResult::Deleted { rows: rows.len() });
+            }
+            RelationMutation::InsertRow(insert) => {
+                if insert.columns.len() != insert.values.len()
+                    || insert.columns.iter().any(|i| *i >= columns.len())
+                {
+                    return Err(TransactionError(
+                        "PostgreSQL insert mutation is malformed".into(),
+                    ));
+                }
+                let mut supplied = Vec::new();
+                let mut expressions = Vec::new();
+                let mut bind_count = 1;
+                for (index, value) in insert.columns.iter().zip(&insert.values) {
+                    supplied.push(quote_identifier(&columns[*index].0));
+                    if matches!(value, InputValue::Default) {
+                        expressions.push("DEFAULT".into());
+                    } else {
+                        expressions.push(format!("${bind_count}"));
+                        bind_count += 1;
+                    }
+                }
+                let sql = if supplied.is_empty() {
+                    format!("INSERT INTO {quoted_table} DEFAULT VALUES RETURNING *")
+                } else {
+                    format!(
+                        "INSERT INTO {quoted_table} ({}) VALUES ({}) RETURNING *",
+                        supplied.join(", "),
+                        expressions.join(", ")
+                    )
+                };
+                let mut query = sqlx::query(AssertSqlSafe(sql));
+                for value in &insert.values {
+                    match value {
+                        InputValue::Default => {}
+                        InputValue::Null => query = query.bind(Option::<String>::None),
+                        InputValue::Value(value) => query = query.bind(value),
+                    }
+                }
+                let row = query
+                    .fetch_one(&mut *self.connection)
+                    .await
+                    .map_err(|e| TransactionError(e.to_string()))?;
+                return Ok(MutationResult::Inserted {
+                    row: decode_row(&row),
+                });
+            }
+            RelationMutation::UpdateCell(update) => {
+                let Some((column_name, _, _)) = columns.get(update.column) else {
+                    return Err(TransactionError(
+                        "PostgreSQL update column is out of range".into(),
+                    ));
+                };
+                if update.row.columns.len() != update.row.values.len() {
+                    return Err(TransactionError(
+                        "PostgreSQL row locator is malformed".into(),
+                    ));
+                }
+                let primary_key_columns = request
+                    .metadata
+                    .primary_key
+                    .iter()
+                    .map(|name| {
+                        columns
+                            .iter()
+                            .position(|(column, _, _)| column == name)
+                            .ok_or_else(|| {
+                                TransactionError("PostgreSQL primary key column is missing".into())
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                if primary_key_columns != update.row.columns {
+                    return Err(TransactionError(
+                        "PostgreSQL row locator must contain the primary key columns in order"
+                            .into(),
+                    ));
+                }
+                if update
+                    .row
+                    .columns
+                    .iter()
+                    .any(|index| *index >= columns.len())
+                {
+                    return Err(TransactionError(
+                        "PostgreSQL row locator column is out of range".into(),
+                    ));
+                }
+
+                let quoted_column = quote_identifier(column_name);
+                let mut sql = format!("UPDATE {quoted_table} SET {quoted_column} = ");
+                let mut bind_count = 1;
+                match update.value {
+                    InputValue::Default => sql.push_str("DEFAULT"),
+                    InputValue::Null | InputValue::Value(_) => {
+                        sql.push_str(&format!("${bind_count}"));
+                        bind_count += 1;
+                    }
+                }
+                sql.push_str(" WHERE ");
+                for (position, column_index) in update.row.columns.iter().enumerate() {
+                    if position > 0 {
+                        sql.push_str(" AND ");
+                    }
+                    let name = quote_identifier(&columns[*column_index].0);
+                    sql.push_str(&format!("{name} IS NOT DISTINCT FROM ${bind_count}"));
+                    bind_count += 1;
+                }
+                if !update.row.columns.is_empty() {
+                    sql.push_str(" AND ");
+                }
+                sql.push_str(&format!(
+                    "{quoted_column} IS NOT DISTINCT FROM ${bind_count} RETURNING *"
+                ));
+
+                let mut query = sqlx::query(AssertSqlSafe(sql));
+                match &update.value {
+                    InputValue::Default => {}
+                    InputValue::Null => query = query.bind(Option::<String>::None),
+                    InputValue::Value(value) => query = query.bind(value),
+                }
+                for value in &update.row.values {
+                    query = bind_cell(query, value)?;
+                }
+                query = bind_cell(query, &update.original)?;
+                let row = query
+                    .fetch_optional(&mut *self.connection)
+                    .await
+                    .map_err(|error| TransactionError(error.to_string()))?
+                    .ok_or_else(|| {
+                        TransactionError("PostgreSQL relation mutation conflict".into())
+                    })?;
+                Ok(MutationResult::Updated {
+                    row: decode_row(&row),
+                })
+            }
+        }
+    }
     async fn commit(&mut self) -> Result<(), TransactionError> {
         <Postgres as sqlx::Database>::TransactionManager::commit(&mut self.connection)
             .await
@@ -1424,6 +1629,28 @@ fn catalog_internal(message: impl AsRef<str>) -> DatabaseError {
 
 fn sql_error(error: sqlx::Error) -> DatabaseError {
     DatabaseError::from_sqlx(error, ErrorCategory::Sql)
+}
+
+fn bind_cell<'q>(
+    query: sqlx::query::Query<'q, Postgres, sqlx::postgres::PgArguments>,
+    value: &CellValue,
+) -> Result<sqlx::query::Query<'q, Postgres, sqlx::postgres::PgArguments>, TransactionError> {
+    Ok(match value {
+        CellValue::Null => query.bind(Option::<String>::None),
+        CellValue::Boolean(value) => query.bind(*value),
+        CellValue::Integer(value) => query.bind(*value),
+        CellValue::Unsigned(value) => query.bind(i64::try_from(*value).map_err(|_| {
+            TransactionError("PostgreSQL cannot bind an unsigned value larger than i64".into())
+        })?),
+        CellValue::Float(value) => query.bind(*value),
+        CellValue::Text(value) => query.bind(value.clone()),
+        CellValue::Bytes(value) => query.bind(value.clone()),
+        CellValue::Unsupported { .. } => {
+            return Err(TransactionError(
+                "PostgreSQL cannot bind an unsupported cell value".into(),
+            ));
+        }
+    })
 }
 
 pub const fn supports_server_version(server_version_num: i32) -> bool {

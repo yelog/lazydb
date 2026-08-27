@@ -13,6 +13,9 @@ pub struct Theme {
     pub warning: Color,
     pub error: Color,
     pub selection: Color,
+    pub row_updated: Color,
+    pub row_deleted: Color,
+    pub row_inserted: Color,
 }
 
 impl Default for Theme {
@@ -35,6 +38,9 @@ impl Theme {
             warning: Color::Rgb(244, 184, 96),
             error: Color::Rgb(255, 107, 122),
             selection: Color::Rgb(26, 55, 70),
+            row_updated: Color::Rgb(244, 184, 96),
+            row_deleted: Color::Rgb(255, 107, 122),
+            row_inserted: Color::Rgb(101, 167, 255),
         }
     }
 

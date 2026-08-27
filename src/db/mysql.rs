@@ -32,6 +32,7 @@ use super::{
         IndexMetadata, NamespaceModel, ObjectGroup, OptionalMetadata, QualifiedName,
         RelationStructure, finalize_keyset_page,
     },
+    mutation::{InputValue, MutationResult, RelationMutation, RelationMutationRequest},
     query::{ColumnMeta, QueryOutcome, QueryOutcomeAccumulator, RELATION_PREVIEW_LIMIT, ResultSet},
     sanitize_terminal_text,
     value::CellValue,
@@ -1315,6 +1316,296 @@ impl TransactionBackend for MySqlTransactionBackend {
             .await
             .map_err(Into::into)
     }
+    async fn relation_mutation(
+        &mut self,
+        request: RelationMutationRequest,
+    ) -> Result<MutationResult, TransactionError> {
+        let [database, _, relation] = request.relation.native_path.as_slice() else {
+            return Err(TransactionError(
+                "MySQL relation has no canonical database, schema, and table path".into(),
+            ));
+        };
+        let columns = &request.metadata.columns;
+        let quoted_table = format!(
+            "{}.{}",
+            quote_identifier(database),
+            quote_identifier(relation)
+        );
+        match request.operation {
+            RelationMutation::DeleteRows(rows) => {
+                for mutation in &rows {
+                    if mutation.row.columns.len() != mutation.row.values.len()
+                        || mutation.original.len() != columns.len()
+                    {
+                        return Err(TransactionError(
+                            "MySQL delete mutation is malformed".into(),
+                        ));
+                    }
+                    let mut sql = format!("DELETE FROM {quoted_table} WHERE ");
+                    let mut predicates = Vec::new();
+                    for index in &mutation.row.columns {
+                        if *index >= columns.len() {
+                            return Err(TransactionError(
+                                "MySQL row locator column is out of range".into(),
+                            ));
+                        }
+                        let name = quote_identifier(&columns[*index].0);
+                        predicates
+                            .push(format!("(({name} = ?) OR ({name} IS NULL AND ? IS NULL))"));
+                    }
+                    for column in columns {
+                        let name = quote_identifier(&column.0);
+                        predicates
+                            .push(format!("(({name} = ?) OR ({name} IS NULL AND ? IS NULL))"));
+                    }
+                    sql.push_str(&predicates.join(" AND "));
+                    let mut query = sqlx::query(AssertSqlSafe(sql));
+                    for value in &mutation.row.values {
+                        query = bind_cell(query, value)?;
+                        query = bind_cell(query, value)?;
+                    }
+                    for value in &mutation.original {
+                        query = bind_cell(query, value)?;
+                        query = bind_cell(query, value)?;
+                    }
+                    if query
+                        .execute(&mut *self.connection)
+                        .await
+                        .map_err(|e| TransactionError(e.to_string()))?
+                        .rows_affected()
+                        != 1
+                    {
+                        return Err(TransactionError("MySQL relation mutation conflict".into()));
+                    }
+                }
+                return Ok(MutationResult::Deleted { rows: rows.len() });
+            }
+            RelationMutation::InsertRow(insert) => {
+                if insert.columns.len() != insert.values.len()
+                    || insert.columns.iter().any(|i| *i >= columns.len())
+                {
+                    return Err(TransactionError(
+                        "MySQL insert mutation is malformed".into(),
+                    ));
+                }
+                let supplied = insert
+                    .columns
+                    .iter()
+                    .map(|i| quote_identifier(&columns[*i].0))
+                    .collect::<Vec<_>>();
+                let expressions = insert
+                    .values
+                    .iter()
+                    .map(|v| {
+                        if matches!(v, InputValue::Default) {
+                            "DEFAULT".into()
+                        } else {
+                            "?".into()
+                        }
+                    })
+                    .collect::<Vec<String>>();
+                let sql = if supplied.is_empty() {
+                    format!("INSERT INTO {quoted_table} () VALUES ()")
+                } else {
+                    format!(
+                        "INSERT INTO {quoted_table} ({}) VALUES ({})",
+                        supplied.join(", "),
+                        expressions.join(", ")
+                    )
+                };
+                let mut query = sqlx::query(AssertSqlSafe(sql));
+                for value in &insert.values {
+                    match value {
+                        InputValue::Default => {}
+                        InputValue::Null => query = query.bind(Option::<String>::None),
+                        InputValue::Value(value) => query = query.bind(value),
+                    }
+                }
+                let result = query
+                    .execute(&mut *self.connection)
+                    .await
+                    .map_err(|e| TransactionError(e.to_string()))?;
+                let primary_key = request.metadata.primary_key.first().ok_or_else(|| {
+                    TransactionError("MySQL inserted row has no primary key".into())
+                })?;
+                let primary_key_index = columns
+                    .iter()
+                    .position(|(name, _, _)| name == primary_key)
+                    .ok_or_else(|| {
+                        TransactionError("MySQL primary key column is missing".into())
+                    })?;
+                let primary_key_value = insert
+                    .columns
+                    .iter()
+                    .position(|index| *index == primary_key_index)
+                    .and_then(|position| insert.values.get(position));
+                let mut sql = format!(
+                    "SELECT * FROM {quoted_table} WHERE {} = ?",
+                    quote_identifier(primary_key)
+                );
+                let mut select = sqlx::query(AssertSqlSafe(sql));
+                select = match primary_key_value {
+                    Some(InputValue::Value(value)) => select.bind(value),
+                    Some(InputValue::Null) => {
+                        sql = format!(
+                            "SELECT * FROM {quoted_table} WHERE {} IS NULL",
+                            quote_identifier(primary_key)
+                        );
+                        sqlx::query(AssertSqlSafe(sql))
+                    }
+                    Some(InputValue::Default) | None => select.bind(result.last_insert_id()),
+                };
+                let row = select
+                    .fetch_one(&mut *self.connection)
+                    .await
+                    .map_err(|e| TransactionError(e.to_string()))?;
+                return Ok(MutationResult::Inserted {
+                    row: decode_row(&row),
+                });
+            }
+            RelationMutation::UpdateCell(update) => {
+                let Some((column_name, _, _)) = columns.get(update.column) else {
+                    return Err(TransactionError(
+                        "MySQL update column is out of range".into(),
+                    ));
+                };
+                if update.row.columns.len() != update.row.values.len() {
+                    return Err(TransactionError("MySQL row locator is malformed".into()));
+                }
+                let primary_key_columns = request
+                    .metadata
+                    .primary_key
+                    .iter()
+                    .map(|name| {
+                        columns
+                            .iter()
+                            .position(|(column, _, _)| column == name)
+                            .ok_or_else(|| {
+                                TransactionError("MySQL primary key column is missing".into())
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                if primary_key_columns != update.row.columns {
+                    return Err(TransactionError(
+                        "MySQL row locator must contain the primary key columns in order".into(),
+                    ));
+                }
+                if update
+                    .row
+                    .columns
+                    .iter()
+                    .any(|index| *index >= columns.len())
+                {
+                    return Err(TransactionError(
+                        "MySQL row locator column is out of range".into(),
+                    ));
+                }
+                let quoted_column = quote_identifier(column_name);
+                let set_sql = match update.value {
+                    InputValue::Default => format!("{quoted_column} = DEFAULT"),
+                    InputValue::Null | InputValue::Value(_) => format!("{quoted_column} = ?"),
+                };
+                let mut sql = format!("UPDATE {quoted_table} SET {set_sql} WHERE ");
+                for (position, column_index) in update.row.columns.iter().enumerate() {
+                    if position > 0 {
+                        sql.push_str(" AND ");
+                    }
+                    let name = quote_identifier(&columns[*column_index].0);
+                    sql.push_str(&format!("(({name} = ?) OR ({name} IS NULL AND ? IS NULL))"));
+                }
+                if !update.row.columns.is_empty() {
+                    sql.push_str(" AND ");
+                }
+                sql.push_str(&format!(
+                    "(({quoted_column} = ?) OR ({quoted_column} IS NULL AND ? IS NULL))"
+                ));
+                let mut query = sqlx::query(AssertSqlSafe(sql));
+                match &update.value {
+                    InputValue::Default => {}
+                    InputValue::Null => query = query.bind(Option::<String>::None),
+                    InputValue::Value(value) => query = query.bind(value),
+                }
+                for value in &update.row.values {
+                    query = bind_cell(query, value)?;
+                    query = bind_cell(query, value)?;
+                }
+                query = bind_cell(query, &update.original)?;
+                query = bind_cell(query, &update.original)?;
+                let affected = query
+                    .execute(&mut *self.connection)
+                    .await
+                    .map_err(|error| TransactionError(error.to_string()))?
+                    .rows_affected();
+                if affected > 1 {
+                    return Err(TransactionError(
+                        "MySQL relation mutation matched multiple rows".into(),
+                    ));
+                }
+                if affected == 0 {
+                    let mut original_check = format!("SELECT 1 FROM {quoted_table} WHERE ");
+                    for (position, column_index) in update.row.columns.iter().enumerate() {
+                        if position > 0 {
+                            original_check.push_str(" AND ");
+                        }
+                        let name = quote_identifier(&columns[*column_index].0);
+                        original_check
+                            .push_str(&format!("(({name} = ?) OR ({name} IS NULL AND ? IS NULL))"));
+                    }
+                    if !update.row.columns.is_empty() {
+                        original_check.push_str(" AND ");
+                    }
+                    original_check.push_str(&format!(
+                        "(({quoted_column} = ?) OR ({quoted_column} IS NULL AND ? IS NULL))"
+                    ));
+                    let mut original_query = sqlx::query(AssertSqlSafe(original_check));
+                    for value in &update.row.values {
+                        original_query = bind_cell(original_query, value)?;
+                        original_query = bind_cell(original_query, value)?;
+                    }
+                    original_query = bind_cell(original_query, &update.original)?;
+                    original_query = bind_cell(original_query, &update.original)?;
+                    if original_query
+                        .fetch_optional(&mut *self.connection)
+                        .await
+                        .map_err(|error| TransactionError(error.to_string()))?
+                        .is_none()
+                    {
+                        return Err(TransactionError("MySQL relation mutation conflict".into()));
+                    }
+                }
+                let mut select = format!("SELECT * FROM {quoted_table} WHERE ");
+                for (position, column_index) in update.row.columns.iter().enumerate() {
+                    if position > 0 {
+                        select.push_str(" AND ");
+                    }
+                    select.push_str(&format!(
+                        "{} = ?",
+                        quote_identifier(&columns[*column_index].0)
+                    ));
+                }
+                let mut select_query = sqlx::query(AssertSqlSafe(select));
+                for (column_index, value) in update.row.columns.iter().zip(&update.row.values) {
+                    if *column_index == update.column {
+                        select_query = match &update.value {
+                            InputValue::Value(value) => select_query.bind(value),
+                            InputValue::Null => select_query.bind(Option::<String>::None),
+                            InputValue::Default => bind_cell(select_query, value)?,
+                        };
+                    } else {
+                        select_query = bind_cell(select_query, value)?;
+                    }
+                }
+                let row = select_query
+                    .fetch_optional(&mut *self.connection)
+                    .await
+                    .map_err(|error| TransactionError(error.to_string()))?
+                    .ok_or_else(|| TransactionError("MySQL relation mutation conflict".into()))?;
+                Ok(MutationResult::Updated {
+                    row: decode_row(&row),
+                })
+            }
+        }
+    }
     async fn commit(&mut self) -> Result<(), TransactionError> {
         <MySql as sqlx::Database>::TransactionManager::commit(&mut self.connection)
             .await
@@ -1813,6 +2104,26 @@ fn catalog_internal(message: impl AsRef<str>) -> DatabaseError {
 
 fn sql_error(error: sqlx::Error) -> DatabaseError {
     DatabaseError::from_sqlx(error, ErrorCategory::Sql)
+}
+
+fn bind_cell<'q>(
+    query: sqlx::query::Query<'q, MySql, sqlx::mysql::MySqlArguments>,
+    value: &CellValue,
+) -> Result<sqlx::query::Query<'q, MySql, sqlx::mysql::MySqlArguments>, TransactionError> {
+    Ok(match value {
+        CellValue::Null => query.bind(Option::<String>::None),
+        CellValue::Boolean(value) => query.bind(*value),
+        CellValue::Integer(value) => query.bind(*value),
+        CellValue::Unsigned(value) => query.bind(*value),
+        CellValue::Float(value) => query.bind(*value),
+        CellValue::Text(value) => query.bind(value.clone()),
+        CellValue::Bytes(value) => query.bind(value.clone()),
+        CellValue::Unsupported { .. } => {
+            return Err(TransactionError(
+                "MySQL cannot bind an unsupported cell value".into(),
+            ));
+        }
+    })
 }
 
 pub fn supports_catalog_version(version: &str) -> bool {

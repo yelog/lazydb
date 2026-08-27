@@ -108,6 +108,8 @@ pub struct Runtime {
     profile_tasks: Vec<JoinHandle<()>>,
     completion_tasks: HashMap<Uuid, JoinHandle<()>>,
     manual_transactions: HashMap<Uuid, ManualTransactionEntry>,
+    relation_transactions: HashMap<Uuid, ManualTransactionEntry>,
+    relation_mutation_blocked: Arc<StdMutex<HashSet<(Uuid, ConnectionIdentity)>>>,
 }
 
 impl Runtime {
@@ -164,6 +166,8 @@ impl Runtime {
             profile_tasks: Vec::new(),
             completion_tasks: HashMap::new(),
             manual_transactions: HashMap::new(),
+            relation_transactions: HashMap::new(),
+            relation_mutation_blocked: Arc::new(StdMutex::new(HashSet::new())),
         }
     }
 
@@ -272,6 +276,17 @@ impl Runtime {
                 query_generation,
                 transaction_generation,
             } => self.manual_rollback(connection, tab_id, query_generation, transaction_generation),
+            Command::RelationMutation { request } => self.relation_mutation(request),
+            Command::RelationCommit {
+                tab_id,
+                generation,
+                connection,
+            } => self.relation_transaction_end(tab_id, generation, connection, true),
+            Command::RelationRollback {
+                tab_id,
+                generation,
+                connection,
+            } => self.relation_transaction_end(tab_id, generation, connection, false),
             Command::CancelQuery { tab_id, generation } => {
                 if let Some(task) = self.query_tasks.remove(&(tab_id, generation)) {
                     task.abort();
@@ -964,6 +979,314 @@ impl Runtime {
         );
     }
 
+    fn relation_mutation(&mut self, request: crate::db::mutation::RelationMutationRequest) {
+        let tab_id = request.tab_id;
+        if self
+            .relation_mutation_blocked
+            .lock()
+            .is_ok_and(|blocked| blocked.contains(&(tab_id, request.connection)))
+        {
+            let _ = self.event_sender.send(Action::RelationMutationFailed {
+                request,
+                message: "Relation transaction outcome is unknown; reconnect before mutating"
+                    .into(),
+            });
+            return;
+        }
+        if self
+            .relation_transactions
+            .get(&tab_id)
+            .is_some_and(|entry| entry.worker_handle.is_finished())
+        {
+            self.relation_transactions.remove(&tab_id);
+        }
+        let generation = request.edit_generation;
+        let (reply, result) = tokio::sync::oneshot::channel();
+        let (cancel, cancellation) = tokio::sync::oneshot::channel();
+        self.ensure_relation_worker(request.clone(), cancellation, reply);
+        let sender = self.event_sender.clone();
+        let blocked = Arc::clone(&self.relation_mutation_blocked);
+        self.background_tasks.push(tokio::spawn(async move {
+            match result.await {
+                Ok(Ok(result)) => {
+                    let _ = sender.send(Action::RelationMutationSucceeded { request, result });
+                }
+                Ok(Err(error)) => {
+                    let _ = sender.send(Action::RelationMutationFailed {
+                        request,
+                        message: error.0,
+                    });
+                }
+                Err(_) => {
+                    if let Ok(mut blocked) = blocked.lock() {
+                        blocked.insert((tab_id, request.connection));
+                    }
+                    let _ = sender.send(Action::RelationMutationFailed {
+                        request,
+                        message: "Relation mutation acknowledgement was lost".into(),
+                    });
+                }
+            }
+        }));
+        if let Some(entry) = self.relation_transactions.get_mut(&tab_id) {
+            entry.cancellation_sender = Some(cancel);
+        }
+        let _ = generation;
+    }
+
+    fn relation_transaction_end(
+        &mut self,
+        tab_id: Uuid,
+        generation: u64,
+        connection: ConnectionIdentity,
+        commit: bool,
+    ) {
+        self.relation_transactions
+            .retain(|_, entry| !entry.worker_handle.is_finished());
+        let Some(entry) = self.relation_transactions.get(&tab_id) else {
+            let action = if commit {
+                Action::RelationCommitFailed {
+                    tab_id,
+                    generation,
+                    connection,
+                    message: "Relation transaction acknowledgement was lost".into(),
+                    unknown: true,
+                }
+            } else {
+                Action::RelationRollbackFailed {
+                    tab_id,
+                    generation,
+                    connection,
+                    message: "Relation transaction acknowledgement was lost".into(),
+                    unknown: true,
+                }
+            };
+            let _ = self.event_sender.send(action);
+            self.relation_mutation_blocked
+                .lock()
+                .expect("relation mutation gate mutex poisoned")
+                .insert((tab_id, connection));
+            return;
+        };
+        let (reply, result) = tokio::sync::oneshot::channel();
+        let request = if commit {
+            TransactionRequest::Commit { reply }
+        } else {
+            TransactionRequest::Rollback { reply }
+        };
+        if entry.request_sender.send(request).is_err() {
+            let message = "Relation transaction acknowledgement was lost".into();
+            let action = if commit {
+                Action::RelationCommitFailed {
+                    tab_id,
+                    generation,
+                    connection,
+                    message,
+                    unknown: true,
+                }
+            } else {
+                Action::RelationRollbackFailed {
+                    tab_id,
+                    generation,
+                    connection,
+                    message,
+                    unknown: true,
+                }
+            };
+            let _ = self.event_sender.send(action);
+            self.relation_mutation_blocked
+                .lock()
+                .expect("relation mutation gate mutex poisoned")
+                .insert((tab_id, connection));
+            return;
+        }
+        let sender = self.event_sender.clone();
+        let blocked = Arc::clone(&self.relation_mutation_blocked);
+        self.background_tasks.push(tokio::spawn(async move {
+            match result.await {
+                Ok(Ok(())) => {
+                    if let Ok(mut blocked) = blocked.lock() {
+                        blocked.remove(&(tab_id, connection));
+                    }
+                    let _ = sender.send(if commit {
+                        Action::RelationCommitted {
+                            tab_id,
+                            generation,
+                            connection,
+                        }
+                    } else {
+                        Action::RelationRolledBack {
+                            tab_id,
+                            generation,
+                            connection,
+                        }
+                    });
+                }
+                Ok(Err(error)) => {
+                    if let Ok(mut blocked) = blocked.lock() {
+                        blocked.insert((tab_id, connection));
+                    }
+                    let message = error.0;
+                    let _ = sender.send(if commit {
+                        Action::RelationCommitFailed {
+                            tab_id,
+                            generation,
+                            connection,
+                            message,
+                            unknown: true,
+                        }
+                    } else {
+                        Action::RelationRollbackFailed {
+                            tab_id,
+                            generation,
+                            connection,
+                            message,
+                            unknown: true,
+                        }
+                    });
+                }
+                Err(_) => {
+                    if let Ok(mut blocked) = blocked.lock() {
+                        blocked.insert((tab_id, connection));
+                    }
+                    let message = "Relation transaction acknowledgement was lost".into();
+                    let _ = sender.send(if commit {
+                        Action::RelationCommitFailed {
+                            tab_id,
+                            generation,
+                            connection,
+                            message,
+                            unknown: true,
+                        }
+                    } else {
+                        Action::RelationRollbackFailed {
+                            tab_id,
+                            generation,
+                            connection,
+                            message,
+                            unknown: true,
+                        }
+                    });
+                }
+            }
+        }));
+    }
+
+    fn ensure_relation_worker(
+        &mut self,
+        request: crate::db::mutation::RelationMutationRequest,
+        cancel: tokio::sync::oneshot::Receiver<()>,
+        reply: tokio::sync::oneshot::Sender<
+            Result<crate::db::mutation::MutationResult, crate::db::transaction::TransactionError>,
+        >,
+    ) {
+        let tab_id = request.tab_id;
+        if let Some(entry) = self.relation_transactions.get(&tab_id) {
+            let _ = entry
+                .request_sender
+                .send(TransactionRequest::RelationMutation {
+                    request,
+                    cancel,
+                    reply,
+                });
+            return;
+        }
+        let (proxy, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let active = Arc::clone(&self.connection);
+        let sender = self.event_sender.clone();
+        let connection = request.connection;
+        let transaction_generation = request.edit_generation;
+        let target = request.target.clone();
+        let worker_target = target.clone();
+        let worker_request = request.clone();
+        let worker_handle = tokio::spawn(async move {
+            let Some(database) =
+                active_database_for_target(active.clone(), connection, &worker_target).await
+            else {
+                let _ = sender.send(Action::RelationTransactionStartFailed {
+                    tab_id,
+                    generation: request.edit_generation,
+                    connection,
+                    message: "No active database connection".into(),
+                });
+                let _ = sender.send(Action::RelationMutationFailed {
+                    request: worker_request.clone(),
+                    message: "No active database connection".into(),
+                });
+                return crate::db::transaction::WorkerDisposition::Quarantine;
+            };
+            let invalidates = matches!(database, DatabaseConnection::Sqlite(_));
+            let worker = match database.start_transaction_worker().await {
+                Ok(worker) => worker,
+                Err(error) => {
+                    let _ = sender.send(Action::RelationTransactionStartFailed {
+                        tab_id,
+                        generation: request.edit_generation,
+                        connection,
+                        message: error.to_string(),
+                    });
+                    let _ = sender.send(Action::RelationMutationFailed {
+                        request: worker_request.clone(),
+                        message: error.to_string(),
+                    });
+                    return crate::db::transaction::WorkerDisposition::Quarantine;
+                }
+            };
+            let crate::runtime::transaction::TransactionWorkerHandle {
+                requests,
+                worker,
+                readiness,
+                ..
+            } = worker;
+            if let Ok(Ok(())) = readiness.await {
+                let _ = sender.send(Action::RelationTransactionStarted {
+                    tab_id,
+                    generation: request.edit_generation,
+                    connection,
+                });
+            } else {
+                let _ = sender.send(Action::RelationTransactionStartFailed {
+                    tab_id,
+                    generation: request.edit_generation,
+                    connection,
+                    message: "Relation transaction could not be started".into(),
+                });
+                let _ = sender.send(Action::RelationMutationFailed {
+                    request: worker_request.clone(),
+                    message: "Relation transaction could not be started".into(),
+                });
+                return crate::db::transaction::WorkerDisposition::Quarantine;
+            }
+            tokio::pin!(worker);
+            loop {
+                tokio::select! {
+                    item = receiver.recv() => { let Some(item) = item else { break }; if requests.send(item).is_err() { break; } }
+                    disposition = &mut worker => { let disposition = disposition.unwrap_or(crate::db::transaction::WorkerDisposition::Quarantine); if disposition == crate::db::transaction::WorkerDisposition::Quarantine && invalidates { handle_quarantined_connection(active.clone(), sender.clone(), connection).await; } return disposition; }
+                }
+            }
+            worker
+                .await
+                .unwrap_or(crate::db::transaction::WorkerDisposition::Quarantine)
+        });
+        self.relation_transactions.insert(
+            tab_id,
+            ManualTransactionEntry {
+                connection,
+                target,
+                transaction_generation,
+                request_sender: proxy.clone(),
+                worker_handle,
+                cancellation_sender: None,
+                forced_close_handle: ForcedCloseHandle::new(),
+            },
+        );
+        let _ = proxy.send(TransactionRequest::RelationMutation {
+            request,
+            cancel,
+            reply,
+        });
+    }
+
     fn manual_execute(
         &mut self,
         connection: ConnectionIdentity,
@@ -1340,6 +1663,12 @@ impl Runtime {
                 })
                 .await;
             }
+        }
+        for (_, entry) in self.relation_transactions.drain() {
+            let _ = entry
+                .request_sender
+                .send(crate::db::transaction::TransactionRequest::Shutdown);
+            let _ = entry.worker_handle.await;
         }
         if let Some(connection) = self.connection.lock().await.take() {
             connection.database.close().await;
