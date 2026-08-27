@@ -8,6 +8,7 @@ use crate::db::{
     ServerInfo,
     catalog::{CatalogEntry, CatalogId, CatalogKind, CatalogNode, OptionalMetadata},
 };
+use crate::help::HelpState;
 use crate::model::execution_target::ExecutionTarget;
 use crate::model::explorer::{
     ExplorerConnectionStatus, ExplorerNodeId, ExplorerTreeState, ProfileProvenance, StatusRowKind,
@@ -47,7 +48,7 @@ impl Focus {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Overlay {
-    Help(Focus),
+    Help(HelpState),
     ProfileManager,
     Message {
         title: String,

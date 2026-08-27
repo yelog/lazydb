@@ -1047,7 +1047,7 @@ fn render_overlay(
     icons: icons::IconSet,
 ) {
     match overlay {
-        Overlay::Help(focus) => render_help(frame, area, *focus, app, theme),
+        Overlay::Help(help) => render_help(frame, area, help, app, state, theme),
         Overlay::ProfileManager => {
             profiles::render_profile_manager(frame, area, app, state, theme, icons)
         }
@@ -1309,86 +1309,96 @@ fn render_substitute_confirm(frame: &mut Frame<'_>, area: Rect, remaining: usize
     );
 }
 
-fn render_help(frame: &mut Frame<'_>, area: Rect, focus: Focus, app: &App, theme: Theme) {
-    let popup = centered(area, 74, 22);
+fn render_help(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    help: &crate::help::HelpState,
+    app: &App,
+    state: &mut UiState,
+    theme: Theme,
+) {
+    let focus = help.context;
+    let popup = centered(area, 74, area.height.saturating_sub(2).clamp(12, 28));
     frame.render_widget(Clear, popup);
     let title = format!(" KEYMAP // {} ", focus_name(focus));
-    let mut lines = vec![
-        key_line("? / F1", "open contextual keymap", theme),
-        key_line("Esc", "close overlay / return to Normal", theme),
-        key_line("Ctrl-w h/j/k/l", "move between panels", theme),
-        key_line("[ then t / ] then t", "previous / next tab", theme),
-        key_line("Space n", "new SQL console", theme),
-        key_line("Space s", "go to first SQL console", theme),
-        Line::raw(""),
-    ];
+    let block = Block::default()
+        .title(title)
+        .title_style(theme.title(true))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(theme.accent))
+        .style(Style::new().bg(theme.surface_raised));
+    frame.render_widget(block, popup);
     let relation_data = matches!(
         app.tabs.get(app.active_tab),
         Some(WorkspaceTab::Relation(tab))
             if tab.view == crate::model::relation::RelationView::Data
     );
-    match focus {
-        Focus::Explorer => lines.extend([
-            key_line("j / k", "move selection", theme),
-            key_line("h / l", "collapse / expand", theme),
-            key_line("o", "toggle expand / collapse", theme),
-            key_line("Enter", "open table preview / activate", theme),
-            key_line("n / e / d", "new / edit / delete connection", theme),
-            key_line("c / x", "connect / disconnect", theme),
-            key_line("r", "refresh connection or catalog", theme),
-        ]),
-        Focus::Editor => lines.extend([
-            key_line("i / Esc", "Insert / Normal mode", theme),
-            key_line("h j k l", "move cursor in Normal mode", theme),
-            key_line("w b e  0 $  gg G", "word and line motions", theme),
-            key_line("d y c r", "operators and replacement", theme),
-            key_line("v V Ctrl-v", "Visual Char / Line / Block", theme),
-            key_line("u / Ctrl-r", "undo / redo", theme),
-            key_line("Space tt", "toggle AUTO / MANUAL", theme),
-            key_line("Space tc / Space tr", "commit / rollback", theme),
-            key_line("Space d", "choose editor connection target", theme),
-            key_line(":connection NAME", "set editor profile", theme),
-            key_line(":database NAME", "set editor database", theme),
-            key_line(":schema NAME", "set editor schema", theme),
-            key_line("Editor title", "shows target and transaction state", theme),
-            key_line("F5 / Space r", "execute SQL buffer", theme),
-        ]),
-        Focus::Results => {
-            lines.extend([
-                key_line("h j k l", "move through cells", theme),
-                key_line("Tab", "switch Data / Output", theme),
-            ]);
-            if relation_data {
-                lines.extend([
-                    key_line("/", "focus WHERE filter", theme),
-                    key_line("s", "focus ORDER BY", theme),
-                    key_line("Enter / Esc", "apply / cancel preview inputs", theme),
-                    key_line("[ ] / =", "resize / reset selected column", theme),
-                    key_line("r", "refresh relation preview", theme),
-                ]);
-            }
-        }
-    }
-    lines.push(Line::raw(""));
-    lines.push(Line::from(Span::styled(
-        "Context first: the footer always shows the shortest path.",
-        Style::new().fg(theme.muted).add_modifier(Modifier::ITALIC),
-    )));
+    let entries = crate::help::filtered_shortcuts(focus, relation_data, &help.query);
+    let inner = Block::default().borders(Borders::ALL).inner(popup);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
     frame.render_widget(
-        Paragraph::new(lines)
-            .block(
-                Block::default()
-                    .title(title)
-                    .title_style(theme.title(true))
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .border_style(Style::new().fg(theme.accent))
-                    .style(Style::new().bg(theme.surface_raised)),
-            )
+        Paragraph::new(format!("Search {query}", query = help.query))
+            .style(Style::new().fg(theme.accent).bg(theme.surface_raised)),
+        chunks[0],
+    );
+    let visible_height = chunks[2].height as usize;
+    let start = if visible_height == 0 {
+        0
+    } else {
+        help.selected
+            .saturating_sub(visible_height.saturating_sub(1))
+    };
+    let rows = entries
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(visible_height)
+        .map(|(index, shortcut)| {
+            let marker = if index == help.selected { ">" } else { " " };
+            Line::from(vec![
+                Span::styled(
+                    format!("{marker} {:<18}", shortcut.key),
+                    Style::new().fg(theme.action).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(shortcut.description, Style::new().fg(theme.text)),
+            ])
+        })
+        .collect::<Vec<_>>();
+    let list = if rows.is_empty() {
+        vec![Line::from(Span::styled(
+            "No matching shortcuts",
+            Style::new().fg(theme.muted),
+        ))]
+    } else {
+        rows
+    };
+    frame.render_widget(
+        Paragraph::new(list)
             .style(Style::new().fg(theme.text).bg(theme.surface_raised))
             .wrap(Wrap { trim: false }),
-        popup,
+        chunks[2],
     );
+    frame.render_widget(
+        Paragraph::new("Up/Down select   Enter run   Esc close   Ctrl-u clear")
+            .style(Style::new().fg(theme.muted).bg(theme.surface_raised)),
+        chunks[3],
+    );
+    state.cursor_style = Some(CursorStyle::Bar);
+    let cursor_x = chunks[0]
+        .x
+        .saturating_add("Search ".cell_width())
+        .saturating_add(help.query.cell_width())
+        .min(chunks[0].right().saturating_sub(1));
+    frame.set_cursor_position(Position::new(cursor_x, chunks[0].y));
 }
 
 fn render_message(frame: &mut Frame<'_>, area: Rect, title: &str, body: &str, theme: Theme) {
@@ -1437,16 +1447,6 @@ fn panel_block<'a>(title: &'a str, focused: bool, theme: Theme) -> Block<'a> {
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(if focused { theme.accent } else { theme.border }))
         .style(Style::new().bg(theme.surface))
-}
-
-fn key_line<'a>(key: &'a str, description: &'a str, theme: Theme) -> Line<'a> {
-    Line::from(vec![
-        Span::styled(
-            format!("  {key:<18}"),
-            Style::new().fg(theme.action).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(description, Style::new().fg(theme.text)),
-    ])
 }
 
 fn connection_status_spans(

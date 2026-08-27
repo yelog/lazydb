@@ -21,6 +21,57 @@ fn ctrl(character: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL)
 }
 
+#[test]
+fn help_overlay_owns_text_selection_and_execution_keys() {
+    let mut app = App::new(Vec::new());
+    app.focus = Focus::Explorer;
+    app.update(Action::ShowHelp);
+    let mut keymap = Keymap::default();
+
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('q')), &app),
+        Some(Action::HelpInsert('q'))
+    );
+    app.update(Action::HelpInsert('q'));
+    assert_eq!(
+        keymap.map(key(KeyCode::Backspace), &app),
+        Some(Action::HelpBackspace)
+    );
+    app.update(Action::HelpBackspace);
+    assert_eq!(keymap.map(ctrl('u'), &app), Some(Action::HelpClear));
+    app.update(Action::HelpClear);
+    assert_eq!(
+        keymap.map(key(KeyCode::Down), &app),
+        Some(Action::HelpMove(1))
+    );
+    app.update(Action::HelpMove(1));
+    assert_eq!(
+        keymap.map(key(KeyCode::Up), &app),
+        Some(Action::HelpMove(-1))
+    );
+    app.update(Action::HelpMove(-1));
+    assert_eq!(
+        keymap.map(key(KeyCode::Enter), &app),
+        Some(Action::ExecuteHelpShortcut(
+            lazydb::help::HelpShortcutId::FocusExplorer
+        ))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Esc), &app),
+        Some(Action::DismissOverlay)
+    );
+}
+
+#[test]
+fn help_overlay_accepts_pasted_search_text() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::ShowHelp);
+    assert_eq!(
+        map_paste("ctrl\neditor".into(), &app),
+        [Action::HelpPaste("ctrl\neditor".into())]
+    );
+}
+
 fn profile(name: &str) -> ConnectionProfile {
     import_connection_url(":memory:", Some(name))
         .unwrap()
@@ -663,11 +714,14 @@ fn profile_form_overlay_routes_before_generic_dismissal() {
     assert_eq!(keymap.map(ctrl('d'), &app), None);
     assert_eq!(keymap.map(key(KeyCode::Char('?')), &app), None);
 
-    app.overlay = Some(Overlay::Help(Focus::Editor));
-    assert_eq!(keymap.map(key(KeyCode::Char('?')), &app), None);
+    app.overlay = Some(Overlay::Help(lazydb::help::HelpState::new(Focus::Editor)));
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('?')), &app),
+        Some(Action::HelpInsert('?'))
+    );
     assert_eq!(
         keymap.map(key(KeyCode::Char('q')), &app),
-        Some(Action::DismissOverlay)
+        Some(Action::HelpInsert('q'))
     );
     assert_eq!(
         keymap.map(
@@ -859,8 +913,11 @@ fn profile_confirmation_and_paste_are_contextual_and_redacted() {
     app.update(Action::CloseProfileManager);
     app.focus = Focus::Editor;
     app.update(Action::EditorKey(key(KeyCode::Char('i'))));
-    app.overlay = Some(Overlay::Help(Focus::Editor));
-    assert!(map_paste("hidden".into(), &app).is_empty());
+    app.overlay = Some(Overlay::Help(lazydb::help::HelpState::new(Focus::Editor)));
+    assert_eq!(
+        map_paste("hidden".into(), &app),
+        [Action::HelpPaste("hidden".into())]
+    );
     app.overlay = Some(Overlay::Message {
         title: "Notice".into(),
         body: "Body".into(),

@@ -10,6 +10,7 @@ use crate::db::{
     query::QueryOutcome,
 };
 use crate::{
+    help::HelpShortcutId,
     model::{
         execution_target::ExecutionTarget,
         explorer::ExplorerNodeId,
@@ -35,6 +36,12 @@ pub enum Action {
     Focus(Focus),
     ShowHelp,
     DismissOverlay,
+    HelpInsert(char),
+    HelpPaste(String),
+    HelpBackspace,
+    HelpClear,
+    HelpMove(isize),
+    ExecuteHelpShortcut(HelpShortcutId),
     SubstituteYes,
     SubstituteNo,
     SubstituteAll,

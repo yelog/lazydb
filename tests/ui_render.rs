@@ -394,7 +394,7 @@ fn relation_page_renders_contextual_help_overlay() {
         .push(WorkspaceTab::Relation(RelationTab::new("users")));
     app.active_tab = 1;
     app.focus = Focus::Results;
-    app.overlay = Some(Overlay::Help(Focus::Results));
+    app.overlay = Some(Overlay::Help(lazydb::help::HelpState::new(Focus::Results)));
 
     let (output, state) = render_with_state(&app, 120, 36);
 
@@ -614,17 +614,13 @@ fn editor_help_documents_target_context_controls() {
     let mut app = fixture();
     app.update(Action::ShowHelp);
     let (output, _) = render_with_state(&app, 80, 24);
-    for text in [
-        "Space d",
-        ":connection",
-        ":database",
-        ":schema",
-        "Space tt",
-        "Space tc",
-        "Space tr",
-    ] {
+    for text in ["Space d", "Space tt", "Space tc", "Space tr"] {
         assert!(output.contains(text), "missing {text}");
     }
+    assert!(output.contains("Search"));
+    assert!(!output.contains(":connection"));
+    assert!(!output.contains(":database"));
+    assert!(!output.contains(":schema"));
 }
 
 #[test]
