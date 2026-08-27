@@ -165,6 +165,25 @@ fn relation_grid_actions_update_relation_grid_using_preview_dimensions() {
 }
 
 #[test]
+fn shared_query_actions_preserve_relation_editing_and_submission() {
+    let mut app = lazydb::app::App::new(Vec::new());
+    app.tabs
+        .push(WorkspaceTab::Relation(RelationTab::new("users")));
+    app.active_tab = 1;
+
+    app.update(Action::FocusDataQueryInput(
+        lazydb::model::data_query::DataQueryInput::Where,
+    ));
+    app.update(Action::DataQueryInsert('i'));
+    assert_eq!(relation_query(&app).where_input.value(), "i");
+    assert!(app.update(Action::SubmitDataQuery).is_empty());
+    assert_eq!(
+        relation_query(&app).submitted.where_clause.as_deref(),
+        Some("i")
+    );
+}
+
+#[test]
 fn relation_focus_cycles_only_explorer_and_results() {
     let mut app = lazydb::app::App::new(Vec::new());
     app.tabs
@@ -247,6 +266,13 @@ fn import_profile(id: Uuid) -> lazydb::profile::ConnectionProfile {
 fn relation_view(app: &lazydb::app::App) -> RelationView {
     match &app.tabs[app.active_tab] {
         WorkspaceTab::Relation(tab) => tab.view,
+        WorkspaceTab::Sql(_) => panic!("expected relation tab"),
+    }
+}
+
+fn relation_query(app: &lazydb::app::App) -> &lazydb::model::data_query::DataQueryState {
+    match &app.tabs[app.active_tab] {
+        WorkspaceTab::Relation(tab) => &tab.query,
         WorkspaceTab::Sql(_) => panic!("expected relation tab"),
     }
 }

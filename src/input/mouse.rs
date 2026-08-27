@@ -16,14 +16,14 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                 return None;
             }
             let (column, start_width, start_x) = (*ui.relation_resize.borrow())?;
-            Some(Action::SetRelationColumnWidth {
+            Some(Action::GridSetColumnWidth {
                 column,
                 width: start_width.saturating_add_signed(event.column as i16 - start_x as i16),
             })
         }
         MouseEventKind::Up(MouseButton::Left) => {
             ui.relation_resize.borrow_mut().take();
-            Some(Action::EndRelationColumnResize)
+            Some(Action::GridEndColumnResize)
         }
         MouseEventKind::Down(MouseButton::Left) => {
             ui.relation_resize.borrow_mut().take();
@@ -63,12 +63,10 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                 HitTarget::RelationView(view) => Some(Action::SetRelationView(view)),
                 HitTarget::RelationRetry => Some(Action::RefreshActiveRelation),
                 HitTarget::RelationCancel => Some(Action::CancelActiveRelationRequest),
-                HitTarget::RelationQueryInput(input) => {
-                    Some(Action::FocusRelationQueryInput(input))
-                }
+                HitTarget::DataQueryInput(input) => Some(Action::FocusDataQueryInput(input)),
                 HitTarget::RelationColumnResize { column, width } => {
                     *ui.relation_resize.borrow_mut() = Some((column, width, event.column));
-                    Some(Action::StartRelationColumnResize { column, width })
+                    Some(Action::GridStartColumnResize { column, width })
                 }
                 HitTarget::HeaderProfile => app.connection.profile_id.map_or(
                     Some(Action::Focus(Focus::Explorer)),
@@ -151,7 +149,7 @@ fn focus_at(ui: &UiState, column: u16, row: u16) -> Option<Focus> {
         | HitTarget::ToggleResultView
         | HitTarget::RelationView(_)
         | HitTarget::RelationRetry
-        | HitTarget::RelationQueryInput(_)
+        | HitTarget::DataQueryInput(_)
         | HitTarget::RelationColumnResize { .. } => Some(Focus::Results),
         HitTarget::RelationCancel => Some(Focus::Results),
         HitTarget::Tab(_)

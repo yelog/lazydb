@@ -132,9 +132,6 @@ impl Keymap {
                 _ => None,
             };
         }
-        if let Some(action) = map_relation_query(event, app) {
-            return Some(action);
-        }
         if app
             .active_console_opt()
             .is_some_and(|tab| tab.completion.is_some())
@@ -165,6 +162,10 @@ impl Keymap {
                 .is_some_and(|tab| tab_id == tab.id())
             && let Some(action) = map_pending(pending, event)
         {
+            return Some(action);
+        }
+
+        if let Some(action) = map_data_query(event, app) {
             return Some(action);
         }
 
@@ -548,6 +549,9 @@ fn map_explorer(code: KeyCode, app: &App) -> Option<Action> {
 
 fn map_results(code: KeyCode, app: &App) -> Option<Action> {
     match code {
+        KeyCode::Char('[') => Some(Action::GridResizeColumn(-1)),
+        KeyCode::Char(']') => Some(Action::GridResizeColumn(1)),
+        KeyCode::Char('=') => Some(Action::GridResetColumnWidth),
         KeyCode::Char('h') | KeyCode::Left => Some(Action::GridMove {
             rows: 0,
             columns: -1,
@@ -583,9 +587,9 @@ fn map_results(code: KeyCode, app: &App) -> Option<Action> {
 
 fn map_relation(code: KeyCode, app: &App) -> Option<Action> {
     match code {
-        KeyCode::Char('[') => Some(Action::ResizeRelationColumn(-1)),
-        KeyCode::Char(']') => Some(Action::ResizeRelationColumn(1)),
-        KeyCode::Char('=') => Some(Action::ResetRelationColumnWidth),
+        KeyCode::Char('[') => Some(Action::GridResizeColumn(-1)),
+        KeyCode::Char(']') => Some(Action::GridResizeColumn(1)),
+        KeyCode::Char('=') => Some(Action::GridResetColumnWidth),
         KeyCode::Char('o') => map_results(code, app),
         KeyCode::Char('p') => Some(Action::SetRelationView(
             crate::model::relation::RelationView::Data,
@@ -598,49 +602,63 @@ fn map_relation(code: KeyCode, app: &App) -> Option<Action> {
     }
 }
 
-fn map_relation_query(event: KeyEvent, app: &App) -> Option<Action> {
-    let Some(crate::model::tab::WorkspaceTab::Relation(tab)) = app.tabs.get(app.active_tab) else {
-        return None;
-    };
-    if tab.view != crate::model::relation::RelationView::Data {
+fn map_data_query(event: KeyEvent, app: &App) -> Option<Action> {
+    let query = match app.tabs.get(app.active_tab) {
+        Some(crate::model::tab::WorkspaceTab::Relation(tab))
+            if tab.view == crate::model::relation::RelationView::Data =>
+        {
+            Some(&tab.query)
+        }
+        Some(crate::model::tab::WorkspaceTab::Sql(tab))
+            if tab.result_view == crate::model::tab::ResultView::Data =>
+        {
+            Some(&tab.query)
+        }
+        _ => None,
+    }?;
+    if !matches!(
+        query.capability,
+        crate::model::data_query::DataQueryCapability::Relation
+            | crate::model::data_query::DataQueryCapability::Sql
+    ) {
         return None;
     }
-    if let Some(input) = tab.query.focus {
-        use crate::model::relation::RelationQueryInput;
+    if let Some(input) = query.focus {
+        use crate::model::data_query::DataQueryInput;
         if event.modifiers.contains(KeyModifiers::CONTROL) {
             return match event.code {
-                KeyCode::Char('u') => Some(Action::RelationQueryClear),
+                KeyCode::Char('u') => Some(Action::DataQueryClear),
                 _ => None,
             };
         }
         return match event.code {
-            KeyCode::Esc => Some(Action::CancelRelationQueryInput),
-            KeyCode::Enter => Some(Action::SubmitRelationQuery),
-            KeyCode::Tab => Some(Action::FocusRelationQueryInput(match input {
-                RelationQueryInput::Where => RelationQueryInput::OrderBy,
-                RelationQueryInput::OrderBy => RelationQueryInput::Where,
+            KeyCode::Esc => Some(Action::CancelDataQueryInput),
+            KeyCode::Enter => Some(Action::SubmitDataQuery),
+            KeyCode::Tab => Some(Action::FocusDataQueryInput(match input {
+                DataQueryInput::Where => DataQueryInput::OrderBy,
+                DataQueryInput::OrderBy => DataQueryInput::Where,
             })),
-            KeyCode::BackTab => Some(Action::FocusRelationQueryInput(match input {
-                RelationQueryInput::Where => RelationQueryInput::OrderBy,
-                RelationQueryInput::OrderBy => RelationQueryInput::Where,
+            KeyCode::BackTab => Some(Action::FocusDataQueryInput(match input {
+                DataQueryInput::Where => DataQueryInput::OrderBy,
+                DataQueryInput::OrderBy => DataQueryInput::Where,
             })),
-            KeyCode::Backspace => Some(Action::RelationQueryBackspace),
-            KeyCode::Delete => Some(Action::RelationQueryDelete),
-            KeyCode::Left => Some(Action::RelationQueryMoveLeft),
-            KeyCode::Right => Some(Action::RelationQueryMoveRight),
-            KeyCode::Home => Some(Action::RelationQueryMoveHome),
-            KeyCode::End => Some(Action::RelationQueryMoveEnd),
-            KeyCode::Char(character) => Some(Action::RelationQueryInsert(character)),
+            KeyCode::Backspace => Some(Action::DataQueryBackspace),
+            KeyCode::Delete => Some(Action::DataQueryDelete),
+            KeyCode::Left => Some(Action::DataQueryMoveLeft),
+            KeyCode::Right => Some(Action::DataQueryMoveRight),
+            KeyCode::Home => Some(Action::DataQueryMoveHome),
+            KeyCode::End => Some(Action::DataQueryMoveEnd),
+            KeyCode::Char(character) => Some(Action::DataQueryInsert(character)),
             _ => None,
         };
     }
     if app.focus == Focus::Results {
         return match event.code {
-            KeyCode::Char('/') => Some(Action::FocusRelationQueryInput(
-                crate::model::relation::RelationQueryInput::Where,
+            KeyCode::Char('/') => Some(Action::FocusDataQueryInput(
+                crate::model::data_query::DataQueryInput::Where,
             )),
-            KeyCode::Char('s') => Some(Action::FocusRelationQueryInput(
-                crate::model::relation::RelationQueryInput::OrderBy,
+            KeyCode::Char('s') => Some(Action::FocusDataQueryInput(
+                crate::model::data_query::DataQueryInput::OrderBy,
             )),
             _ => None,
         };

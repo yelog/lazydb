@@ -655,6 +655,36 @@ fn standard_layout_shows_stable_workspace_regions() {
 }
 
 #[test]
+fn sql_data_renders_shared_query_bar_above_the_grid() {
+    let app = fixture();
+    let (output, state) = render_with_state(&app, 120, 36);
+
+    assert!(output.contains("WHERE"), "{output}");
+    assert!(output.contains("ORDER BY"), "{output}");
+    assert!(output.contains("Run a read-only query first"), "{output}");
+    let cell = state
+        .hit_regions
+        .iter()
+        .find(|region| matches!(region.target, HitTarget::ResultCell { .. }))
+        .unwrap();
+    assert!(cell.area.y > 0);
+}
+
+#[test]
+fn sql_query_bar_is_inert_until_derived_execution_exists() {
+    let mut app = fixture();
+    app.focus = Focus::Results;
+    let before = app.active_console().query.clone();
+
+    app.update(Action::FocusDataQueryInput(
+        lazydb::model::data_query::DataQueryInput::Where,
+    ));
+    app.update(Action::DataQueryInsert('x'));
+    assert_eq!(app.active_console().query, before);
+    assert!(app.update(Action::SubmitDataQuery).is_empty());
+}
+
+#[test]
 fn target_selector_renders_real_target_and_navigation_hint() {
     let mut app = fixture();
     app.update(Action::OpenTargetSelector);
@@ -763,7 +793,6 @@ fn server_profile_form_shows_all_fields_and_never_reveals_passwords() {
     let (output, state) = render_with_state(&app, 120, 36);
     for label in [
         "DRIVER",
-        "URL FORMAT",
         "URL",
         "NAME",
         "HOST",
@@ -784,6 +813,9 @@ fn server_profile_form_shows_all_fields_and_never_reveals_passwords() {
     ] {
         assert!(output.contains(label), "missing {label}");
     }
+    assert!(!output.contains("URL FORMAT"));
+    assert!(output.contains("EXAMPLES"));
+    assert!(output.contains("postgres://user:password@host:5432/database"));
     assert!(!output.contains("super-secret"));
     assert!(output.contains("••••••••••••"));
     assert!(
@@ -958,6 +990,8 @@ fn profile_form_remains_actionable_in_compact_layout() {
     assert!(output.contains("SQLITE"), "{output}");
     assert!(output.contains("HOST"));
     assert!(output.contains("PASSWORD"));
+    assert!(output.contains("URL"));
+    assert!(output.contains("postgres://user:password@host:5432/database"));
     assert!(output.contains("SAVE & CONNECT"));
     assert!(output.contains("Esc cancel"));
 }

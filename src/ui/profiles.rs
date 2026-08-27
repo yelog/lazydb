@@ -16,7 +16,7 @@ use crate::{
         },
         text_input::TextInput,
     },
-    profile::{ConnectionUrlFormat, DatabaseKind, Environment, PasswordStorageChoice, SslMode},
+    profile::{DatabaseKind, Environment, PasswordStorageChoice, SslMode},
     security::sanitize_terminal_text,
 };
 
@@ -85,20 +85,24 @@ fn render_form(
 
     let buttons_y = inner.bottom().saturating_sub(2);
     let message_y = buttons_y.saturating_sub(2);
-    let fields = draft
+    let structured_fields = draft
         .visible_fields()
         .iter()
         .copied()
-        .filter(|field| !is_button_field(*field))
+        .filter(|field| !is_button_field(*field) && *field != ProfileField::Url)
         .collect::<Vec<_>>();
-    let row_capacity = usize::from(message_y.saturating_sub(inner.y.saturating_add(1)));
-    let selected_index = fields
+    let content_height = usize::from(message_y.saturating_sub(inner.y.saturating_add(1)));
+    let example_count = examples(draft.kind).len();
+    let fixed_height = 2usize.saturating_add(example_count.min(content_height.saturating_sub(2)));
+    let fixed_height = fixed_height.min(content_height);
+    let row_capacity = content_height.saturating_sub(fixed_height);
+    let selected_index = structured_fields
         .iter()
         .position(|field| *field == manager.selected_field)
         .unwrap_or(0);
-    let start = viewport_start(selected_index, fields.len(), row_capacity);
+    let start = viewport_start(selected_index, structured_fields.len(), row_capacity);
     let mut row_y = inner.y.saturating_add(1);
-    for field in fields.into_iter().skip(start).take(row_capacity) {
+    for field in structured_fields.into_iter().skip(start).take(row_capacity) {
         if row_y >= message_y {
             break;
         }
@@ -128,6 +132,53 @@ fn render_form(
             render_field_cursor(frame, row, draft, field);
         }
         row_y = row_y.saturating_add(1);
+    }
+
+    let url_y = message_y
+        .saturating_sub(u16::try_from(fixed_height).unwrap_or(u16::MAX))
+        .saturating_add(1);
+    if fixed_height >= 2 {
+        let url_row = Rect::new(inner.x, url_y, inner.width, 1);
+        render_field(
+            frame,
+            url_row,
+            draft,
+            ProfileField::Url,
+            manager.selected_field,
+            busy,
+            state,
+            theme,
+            icons,
+        );
+        if !busy {
+            state.hit_regions.push(HitRegion {
+                area: url_row,
+                target: HitTarget::ProfileField(ProfileField::Url),
+            });
+        }
+        if manager.selected_field == ProfileField::Url && !busy {
+            render_field_cursor(frame, url_row, draft, ProfileField::Url);
+        }
+
+        for (index, example) in examples(draft.kind)
+            .iter()
+            .take(fixed_height.saturating_sub(2))
+            .enumerate()
+        {
+            let y = url_y.saturating_add(1 + index as u16);
+            let label = if index == 0 { "EXAMPLES" } else { "         " };
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(
+                        format!("  {label:<20}"),
+                        Style::new().fg(theme.muted).bg(theme.surface),
+                    ),
+                    Span::styled(*example, Style::new().fg(theme.muted).bg(theme.surface)),
+                ]))
+                .style(Style::new().fg(theme.muted).bg(theme.surface)),
+                Rect::new(inner.x, y, inner.width, 1),
+            );
+        }
     }
 
     render_message_line(frame, manager, inner, message_y, theme);
@@ -596,7 +647,7 @@ fn text_input(draft: &ProfileDraft, field: ProfileField) -> Option<&TextInput> {
 fn field_value(draft: &ProfileDraft, field: ProfileField) -> String {
     match field {
         ProfileField::Kind => kind_name(draft.kind).to_owned(),
-        ProfileField::UrlFormat => url_format_name(draft.url_format).to_owned(),
+        ProfileField::UrlFormat => String::new(),
         ProfileField::Url => safe_line(&draft.url_display()),
         ProfileField::Name => safe_line(draft.name.value()),
         ProfileField::Host => safe_line(draft.host.value()),
@@ -701,16 +752,22 @@ fn kind_name(kind: DatabaseKind) -> &'static str {
     }
 }
 
-fn url_format_name(format: ConnectionUrlFormat) -> &'static str {
-    match format {
-        ConnectionUrlFormat::Postgres => "postgres://",
-        ConnectionUrlFormat::PostgreSql => "postgresql://",
-        ConnectionUrlFormat::JdbcPostgreSql => "jdbc:postgresql://",
-        ConnectionUrlFormat::MySql => "mysql://",
-        ConnectionUrlFormat::JdbcMySql => "jdbc:mysql://",
-        ConnectionUrlFormat::Sqlite => "sqlite:",
-        ConnectionUrlFormat::FileUri => "file:",
-        ConnectionUrlFormat::JdbcSqlite => "jdbc:sqlite:",
+fn examples(kind: DatabaseKind) -> &'static [&'static str] {
+    match kind {
+        DatabaseKind::Postgres => &[
+            "postgres://user:password@host:5432/database",
+            "postgresql://user:password@host:5432/database",
+            "jdbc:postgresql://host:5432/database",
+        ],
+        DatabaseKind::MySql => &[
+            "mysql://user:password@host:3306/database",
+            "jdbc:mysql://host:3306/database",
+        ],
+        DatabaseKind::Sqlite => &[
+            "sqlite:///path/to/database.db",
+            "file:/path/to/database.db",
+            "jdbc:sqlite:/path/to/database.db",
+        ],
     }
 }
 

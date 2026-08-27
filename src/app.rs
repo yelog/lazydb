@@ -13,6 +13,7 @@ use crate::{
     },
     editor::{EditorEffect, EditorError, EditorWorkspace},
     model::{
+        data_query::{DataQueryCapability, DataQueryInput, DataQueryOptions},
         editor::{EditorMode, EditorRenderSnapshot, EditorViewport},
         execution_target::ExecutionTarget,
         explorer::{
@@ -24,13 +25,12 @@ use crate::{
             ProfileOperation,
         },
         relation::{
-            RelationDescriptor, RelationKey, RelationLoad, RelationQueryInput, RelationRequest,
-            RelationRequestKind, RelationSnapshot, RelationTab, RelationView,
-            automatic_relation_column_widths,
+            RelationDescriptor, RelationKey, RelationLoad, RelationRequest, RelationRequestKind,
+            RelationSnapshot, RelationTab, RelationView, automatic_relation_column_widths,
         },
         tab::{
-            CompletionPopup, ConsoleTab, ExecutionResult, LastExecution, OutputEntry, OutputKind,
-            ResultView, WorkspaceTab,
+            CompletionPopup, ConsoleTab, DataGridState, DerivedResultState, ExecutionResult,
+            LastExecution, OutputEntry, OutputKind, ResultView, WorkspaceTab,
         },
         transaction::{
             self, DeferredIntent, DeferredIntentQueue, DeferredTransactionPrompt, TransactionEvent,
@@ -367,7 +367,38 @@ impl App {
     pub fn update(&mut self, action: Action) -> Vec<Command> {
         if self.active_console_opt().is_none()
             && !(self.is_active_relation_tab()
-                && matches!(action, Action::GridMove { .. } | Action::GridSelect { .. }))
+                && matches!(
+                    action,
+                    Action::GridMove { .. }
+                        | Action::GridSelect { .. }
+                        | Action::GridResizeColumn(_)
+                        | Action::GridResetColumnWidth
+                        | Action::GridStartColumnResize { .. }
+                        | Action::GridSetColumnWidth { .. }
+                        | Action::GridEndColumnResize
+                        | Action::FocusDataQueryInput(_)
+                        | Action::DataQueryInsert(_)
+                        | Action::DataQueryBackspace
+                        | Action::DataQueryDelete
+                        | Action::DataQueryMoveLeft
+                        | Action::DataQueryMoveRight
+                        | Action::DataQueryMoveHome
+                        | Action::DataQueryMoveEnd
+                        | Action::DataQueryClear
+                        | Action::SubmitDataQuery
+                        | Action::CancelDataQueryInput
+                        | Action::FocusRelationQueryInput(_)
+                        | Action::RelationQueryInsert(_)
+                        | Action::RelationQueryBackspace
+                        | Action::RelationQueryDelete
+                        | Action::RelationQueryMoveLeft
+                        | Action::RelationQueryMoveRight
+                        | Action::RelationQueryMoveHome
+                        | Action::RelationQueryMoveEnd
+                        | Action::RelationQueryClear
+                        | Action::SubmitRelationQuery
+                        | Action::CancelRelationQueryInput
+                ))
             && matches!(
                 action,
                 Action::EditorKey(_)
@@ -386,6 +417,11 @@ impl App {
                     | Action::ClearTransactionOutcome
                     | Action::GridMove { .. }
                     | Action::GridSelect { .. }
+                    | Action::GridResizeColumn(_)
+                    | Action::GridResetColumnWidth
+                    | Action::GridStartColumnResize { .. }
+                    | Action::GridSetColumnWidth { .. }
+                    | Action::GridEndColumnResize
                     | Action::CompletionExplicit
                     | Action::CompletionNext
                     | Action::CompletionPrevious
@@ -1322,82 +1358,101 @@ impl App {
                     .into_iter()
                     .collect()
             }
-            Action::FocusRelationQueryInput(input) => {
-                if let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab)
-                    && tab.view == RelationView::Data
+            Action::FocusDataQueryInput(input) => {
+                if let Some(query) = self.active_data_query_mut()
+                    && matches!(
+                        query.capability,
+                        DataQueryCapability::Relation | DataQueryCapability::Sql
+                    )
                 {
-                    tab.query.focus = Some(input);
-                    tab.query.error = None;
+                    query.focus = Some(input);
+                    query.error = None;
                 }
                 Vec::new()
+            }
+            Action::DataQueryInsert(character) => {
+                self.with_active_data_query(|input| input.insert(character));
+                Vec::new()
+            }
+            Action::DataQueryBackspace => {
+                self.with_active_data_query(|input| input.backspace());
+                Vec::new()
+            }
+            Action::DataQueryDelete => {
+                self.with_active_data_query(|input| input.delete());
+                Vec::new()
+            }
+            Action::DataQueryMoveLeft => {
+                self.with_active_data_query(|input| input.move_left());
+                Vec::new()
+            }
+            Action::DataQueryMoveRight => {
+                self.with_active_data_query(|input| input.move_right());
+                Vec::new()
+            }
+            Action::DataQueryMoveHome => {
+                self.with_active_data_query(|input| input.move_home());
+                Vec::new()
+            }
+            Action::DataQueryMoveEnd => {
+                self.with_active_data_query(|input| input.move_end());
+                Vec::new()
+            }
+            Action::DataQueryClear => {
+                self.with_active_data_query(|input| input.set(""));
+                Vec::new()
+            }
+            Action::CancelDataQueryInput => {
+                self.cancel_active_data_query();
+                Vec::new()
+            }
+            Action::SubmitDataQuery => self.submit_data_query(),
+            Action::FocusRelationQueryInput(input) => {
+                self.update(Action::FocusDataQueryInput(input))
             }
             Action::RelationQueryInsert(character) => {
-                self.with_active_relation_query(|input| input.insert(character));
-                Vec::new()
+                self.update(Action::DataQueryInsert(character))
             }
-            Action::RelationQueryBackspace => {
-                self.with_active_relation_query(|input| input.backspace());
-                Vec::new()
-            }
-            Action::RelationQueryDelete => {
-                self.with_active_relation_query(|input| input.delete());
-                Vec::new()
-            }
-            Action::RelationQueryMoveLeft => {
-                self.with_active_relation_query(|input| input.move_left());
-                Vec::new()
-            }
-            Action::RelationQueryMoveRight => {
-                self.with_active_relation_query(|input| input.move_right());
-                Vec::new()
-            }
-            Action::RelationQueryMoveHome => {
-                self.with_active_relation_query(|input| input.move_home());
-                Vec::new()
-            }
-            Action::RelationQueryMoveEnd => {
-                self.with_active_relation_query(|input| input.move_end());
-                Vec::new()
-            }
-            Action::RelationQueryClear => {
-                self.with_active_relation_query(|input| input.set(""));
-                Vec::new()
-            }
-            Action::CancelRelationQueryInput => {
-                if let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab) {
-                    tab.query.focus = None;
-                    tab.query.error = None;
-                    tab.query
-                        .where_input
-                        .set(tab.query.submitted.where_clause.clone().unwrap_or_default());
-                    tab.query.order_by_input.set(
-                        tab.query
-                            .submitted
-                            .order_by_clause
-                            .clone()
-                            .unwrap_or_default(),
-                    );
-                }
-                Vec::new()
-            }
-            Action::SubmitRelationQuery => self.submit_relation_query(),
+            Action::RelationQueryBackspace => self.update(Action::DataQueryBackspace),
+            Action::RelationQueryDelete => self.update(Action::DataQueryDelete),
+            Action::RelationQueryMoveLeft => self.update(Action::DataQueryMoveLeft),
+            Action::RelationQueryMoveRight => self.update(Action::DataQueryMoveRight),
+            Action::RelationQueryMoveHome => self.update(Action::DataQueryMoveHome),
+            Action::RelationQueryMoveEnd => self.update(Action::DataQueryMoveEnd),
+            Action::RelationQueryClear => self.update(Action::DataQueryClear),
+            Action::CancelRelationQueryInput => self.update(Action::CancelDataQueryInput),
+            Action::SubmitRelationQuery => self.update(Action::SubmitDataQuery),
             Action::ResizeRelationColumn(delta) => {
-                self.resize_relation_column(delta);
+                self.resize_grid_column(delta);
                 Vec::new()
             }
             Action::ResetRelationColumnWidth => {
-                self.reset_relation_column_width();
+                self.reset_grid_column_width();
                 Vec::new()
             }
             Action::StartRelationColumnResize { column, width } => {
-                self.set_relation_column_width(column, width);
+                self.set_grid_column_width(column, width);
                 Vec::new()
             }
             Action::SetRelationColumnWidth { column, width } => {
-                self.set_relation_column_width(column, width);
+                self.set_grid_column_width(column, width);
                 Vec::new()
             }
             Action::EndRelationColumnResize => Vec::new(),
+            Action::GridResizeColumn(delta) => {
+                self.resize_grid_column(delta);
+                Vec::new()
+            }
+            Action::GridResetColumnWidth => {
+                self.reset_grid_column_width();
+                Vec::new()
+            }
+            Action::GridStartColumnResize { column, width }
+            | Action::GridSetColumnWidth { column, width } => {
+                self.set_grid_column_width(column, width);
+                Vec::new()
+            }
+            Action::GridEndColumnResize => Vec::new(),
             Action::PreviewSelected => self.open_selected_relation(RelationView::Data),
             Action::DdlSelected => self.ddl_selected(),
             Action::RelationSucceeded { request, snapshot } => {
@@ -1694,6 +1749,18 @@ impl App {
                 });
                 tab.outcome = Some(outcome);
                 tab.result_view = ResultView::Data;
+                tab.query.capability = tab.last_execution.as_ref().map_or(
+                    DataQueryCapability::Unavailable("Run a read-only query first".into()),
+                    |last| {
+                        if sql::derived_query_capable(&last.draft.sql, last.draft.dialect) {
+                            DataQueryCapability::Sql
+                        } else {
+                            DataQueryCapability::Unavailable(
+                                "SQL result filtering requires one read-only SELECT query".into(),
+                            )
+                        }
+                    },
+                );
                 if let Some(last) = tab.last_execution.as_mut()
                     && last.draft.query_generation + 1 == generation
                 {
@@ -1731,6 +1798,75 @@ impl App {
                 {
                     last.result = ExecutionResult::Failed;
                 }
+                Vec::new()
+            }
+            Action::DerivedQueryFinished {
+                tab_id,
+                source_generation,
+                derived_generation,
+                connection,
+                target,
+                outcome,
+            } => {
+                let Some(tab) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|tab| tab.id() == tab_id)
+                    .and_then(WorkspaceTab::as_console_mut)
+                else {
+                    return Vec::new();
+                };
+                if tab.generation != source_generation
+                    || self.connection.active_identity() != Some(connection)
+                    || tab.execution_target.as_ref() != Some(&target)
+                    || tab
+                        .derived
+                        .as_ref()
+                        .is_none_or(|derived| derived.generation != derived_generation)
+                {
+                    return Vec::new();
+                }
+                if let Some(derived) = tab.derived.as_mut() {
+                    derived.running = false;
+                    derived.error = None;
+                    derived.outcome = Some(outcome);
+                }
+                tab.query.error = None;
+                tab.result_view = ResultView::Data;
+                Vec::new()
+            }
+            Action::DerivedQueryFailed {
+                tab_id,
+                source_generation,
+                derived_generation,
+                connection,
+                target,
+                message,
+            } => {
+                let Some(tab) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|tab| tab.id() == tab_id)
+                    .and_then(WorkspaceTab::as_console_mut)
+                else {
+                    return Vec::new();
+                };
+                if tab.generation != source_generation
+                    || self.connection.active_identity() != Some(connection)
+                    || tab.execution_target.as_ref() != Some(&target)
+                    || tab
+                        .derived
+                        .as_ref()
+                        .is_none_or(|derived| derived.generation != derived_generation)
+                {
+                    return Vec::new();
+                }
+                let message = crate::security::sanitize_terminal_text(&message);
+                if let Some(derived) = tab.derived.as_mut() {
+                    derived.running = false;
+                    derived.error = Some(message.clone());
+                }
+                tab.query.error = Some(message);
                 Vec::new()
             }
             Action::ManualStarted {
@@ -2059,48 +2195,11 @@ impl App {
                 Vec::new()
             }
             Action::GridMove { rows, columns } => {
-                if self.is_active_relation_tab() {
-                    let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab)
-                    else {
-                        return Vec::new();
-                    };
-                    let (row_count, column_count) = relation_grid_dimensions(&tab.data);
-                    tab.grid.selected_row = move_bounded(tab.grid.selected_row, rows, row_count);
-                    tab.grid.selected_column =
-                        move_bounded(tab.grid.selected_column, columns, column_count);
-                } else {
-                    let tab = self.active_console_mut();
-                    let (row_count, column_count) = tab
-                        .outcome
-                        .as_ref()
-                        .and_then(|outcome| outcome.result_sets.last())
-                        .map(|result| (result.rows.len(), result.columns.len()))
-                        .unwrap_or((0, 0));
-                    tab.selected_row = move_bounded(tab.selected_row, rows, row_count);
-                    tab.selected_column = move_bounded(tab.selected_column, columns, column_count);
-                }
+                self.move_grid(rows, columns);
                 Vec::new()
             }
             Action::GridSelect { row, column } => {
-                if self.is_active_relation_tab() {
-                    let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab)
-                    else {
-                        return Vec::new();
-                    };
-                    let (row_count, column_count) = relation_grid_dimensions(&tab.data);
-                    tab.grid.selected_row = row.min(row_count.saturating_sub(1));
-                    tab.grid.selected_column = column.min(column_count.saturating_sub(1));
-                } else {
-                    let tab = self.active_console_mut();
-                    let (row_count, column_count) = tab
-                        .outcome
-                        .as_ref()
-                        .and_then(|outcome| outcome.result_sets.last())
-                        .map(|result| (result.rows.len(), result.columns.len()))
-                        .unwrap_or((0, 0));
-                    tab.selected_row = row.min(row_count.saturating_sub(1));
-                    tab.selected_column = column.min(column_count.saturating_sub(1));
-                }
+                self.select_grid(row, column);
                 Vec::new()
             }
             Action::ExplorerToggle => self.toggle_explorer_selected(),
@@ -4275,20 +4374,143 @@ impl App {
         self.open_selected_relation(RelationView::Structure)
     }
 
-    fn with_active_relation_query<F>(&mut self, edit: F)
+    fn active_data_query_mut(&mut self) -> Option<&mut crate::model::data_query::DataQueryState> {
+        match self.tabs.get_mut(self.active_tab) {
+            Some(WorkspaceTab::Relation(tab)) if tab.view == RelationView::Data => {
+                Some(&mut tab.query)
+            }
+            Some(WorkspaceTab::Sql(tab)) if tab.result_view == ResultView::Data => {
+                Some(&mut tab.query)
+            }
+            _ => None,
+        }
+    }
+
+    fn with_active_data_query<F>(&mut self, edit: F)
     where
         F: FnOnce(&mut crate::model::text_input::TextInput),
     {
-        if let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab)
-            && tab.view == RelationView::Data
-            && let Some(input) = tab.query.focus
+        let mut clear_derived = false;
+        if let Some(query) = self.active_data_query_mut()
+            && matches!(
+                query.capability,
+                DataQueryCapability::Relation | DataQueryCapability::Sql
+            )
+            && let Some(input) = query.focus
         {
             match input {
-                RelationQueryInput::Where => edit(&mut tab.query.where_input),
-                RelationQueryInput::OrderBy => edit(&mut tab.query.order_by_input),
+                DataQueryInput::Where => edit(&mut query.where_input),
+                DataQueryInput::OrderBy => edit(&mut query.order_by_input),
             }
-            tab.query.error = None;
+            query.error = None;
+            if matches!(query.capability, DataQueryCapability::Sql) {
+                clear_derived = query.where_input.value().trim().is_empty()
+                    && query.order_by_input.value().trim().is_empty();
+                query.submitted = DataQueryOptions::default();
+            }
         }
+        if clear_derived {
+            self.active_console_mut().derived = None;
+        }
+    }
+
+    fn cancel_active_data_query(&mut self) {
+        let mut clear_derived = false;
+        if let Some(query) = self.active_data_query_mut()
+            && matches!(
+                query.capability,
+                DataQueryCapability::Relation | DataQueryCapability::Sql
+            )
+        {
+            query.focus = None;
+            query.error = None;
+            query
+                .where_input
+                .set(query.submitted.where_clause.clone().unwrap_or_default());
+            query
+                .order_by_input
+                .set(query.submitted.order_by_clause.clone().unwrap_or_default());
+            clear_derived = matches!(query.capability, DataQueryCapability::Sql);
+        }
+        if clear_derived {
+            self.active_console_mut().derived = None;
+        }
+    }
+
+    fn submit_data_query(&mut self) -> Vec<Command> {
+        if matches!(
+            self.tabs.get(self.active_tab),
+            Some(WorkspaceTab::Relation(_))
+        ) {
+            self.submit_relation_query()
+        } else {
+            self.submit_sql_query()
+        }
+    }
+
+    fn submit_sql_query(&mut self) -> Vec<Command> {
+        let tab = self.active_console();
+        let Some(last) = tab.last_execution.clone() else {
+            return Vec::new();
+        };
+        let where_clause = tab.query.where_input.value().to_owned();
+        let order_by_clause = tab.query.order_by_input.value().to_owned();
+        if where_clause.trim().is_empty() && order_by_clause.trim().is_empty() {
+            let console = self.active_console_mut();
+            console.query.submitted = DataQueryOptions::default();
+            console.query.error = None;
+            console.query.focus = None;
+            console.derived = None;
+            return Vec::new();
+        }
+        let query = match sql::build_derived_query(
+            &last.draft.sql,
+            &where_clause,
+            &order_by_clause,
+            last.draft.dialect,
+        ) {
+            Ok(query) => query,
+            Err(error) => {
+                self.active_console_mut().query.error =
+                    Some(crate::security::sanitize_terminal_text(&error.to_string()));
+                return Vec::new();
+            }
+        };
+        let tab_id = tab.id;
+        let source_generation = tab.generation;
+        let derived_generation = tab
+            .derived
+            .as_ref()
+            .map_or(0, |derived| derived.generation)
+            .saturating_add(1);
+        let options = DataQueryOptions {
+            where_clause: (!where_clause.trim().is_empty()).then_some(where_clause),
+            order_by_clause: (!order_by_clause.trim().is_empty()).then_some(order_by_clause),
+        };
+        let target = tab.execution_target.clone().unwrap();
+        let Some(connection) = self.database_command_identity() else {
+            return Vec::new();
+        };
+        let console = self.active_console_mut();
+        console.query.submitted = options.clone();
+        console.query.focus = None;
+        console.query.error = None;
+        console.derived = Some(DerivedResultState {
+            source: last,
+            query: options,
+            generation: derived_generation,
+            outcome: None,
+            error: None,
+            running: true,
+        });
+        vec![Command::RunDerivedQuery {
+            connection,
+            target,
+            tab_id,
+            source_generation,
+            derived_generation,
+            sql: query,
+        }]
     }
 
     fn submit_relation_query(&mut self) -> Vec<Command> {
@@ -4334,48 +4556,98 @@ impl App {
         }
     }
 
-    fn resize_relation_column(&mut self, delta: i16) {
-        let widths = self
+    fn active_grid_dimensions(&self) -> (usize, usize) {
+        match self.tabs.get(self.active_tab) {
+            Some(WorkspaceTab::Relation(tab)) if tab.view == RelationView::Data => {
+                relation_grid_dimensions(&tab.data)
+            }
+            Some(WorkspaceTab::Sql(tab)) if tab.result_view == ResultView::Data => tab
+                .derived
+                .as_ref()
+                .and_then(|derived| derived.outcome.as_ref())
+                .or(tab.outcome.as_ref())
+                .and_then(|outcome| outcome.result_sets.last())
+                .map(|result| (result.rows.len(), result.columns.len()))
+                .unwrap_or((0, 0)),
+            _ => (0, 0),
+        }
+    }
+
+    fn with_active_grid(&mut self, f: impl FnOnce(&mut DataGridState, (usize, usize))) {
+        let dimensions = self.active_grid_dimensions();
+        match self.tabs.get_mut(self.active_tab) {
+            Some(WorkspaceTab::Relation(tab)) if tab.view == RelationView::Data => {
+                f(&mut tab.grid, dimensions)
+            }
+            Some(WorkspaceTab::Sql(tab)) if tab.result_view == ResultView::Data => {
+                f(&mut tab.grid, dimensions)
+            }
+            _ => {}
+        }
+    }
+
+    fn move_grid(&mut self, rows: isize, columns: isize) {
+        self.with_active_grid(|grid, (row_count, column_count)| {
+            grid.selected_row = move_bounded(grid.selected_row, rows, row_count);
+            grid.selected_column = move_bounded(grid.selected_column, columns, column_count);
+            grid.clamp(row_count, column_count);
+        });
+    }
+
+    fn select_grid(&mut self, row: usize, column: usize) {
+        self.with_active_grid(|grid, (row_count, column_count)| {
+            grid.selected_row = row.min(row_count.saturating_sub(1));
+            grid.selected_column = column.min(column_count.saturating_sub(1));
+            grid.clamp(row_count, column_count);
+        });
+    }
+
+    fn resize_grid_column(&mut self, delta: i16) {
+        let base = self
             .relation_result()
             .map(|result| automatic_relation_column_widths(&result));
-        let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab) else {
-            return;
-        };
-        if tab.view != RelationView::Data {
-            return;
-        }
-        let Some(base) = widths else { return };
-        let column = tab.grid.selected_column;
-        if column >= base.len() {
-            return;
-        }
-        if tab.column_widths.len() < base.len() {
-            tab.column_widths.resize(base.len(), None);
-        }
-        let current = tab.column_widths[column].unwrap_or(base[column]);
-        tab.column_widths[column] = Some((current as i16 + delta).clamp(6, 80) as u16);
+        let sql_base = self
+            .active_console_opt()
+            .and_then(|tab| {
+                tab.outcome
+                    .as_ref()
+                    .and_then(|outcome| outcome.result_sets.last())
+            })
+            .map(automatic_relation_column_widths);
+        let base = base.or(sql_base);
+        self.with_active_grid(|grid, (rows, columns)| {
+            let Some(base) = base.as_deref() else { return };
+            let column = grid.selected_column;
+            if column >= columns || column >= base.len() {
+                return;
+            }
+            if grid.column_widths.len() < base.len() {
+                grid.column_widths.resize(base.len(), None);
+            }
+            let current = grid.column_widths[column].unwrap_or(base[column]);
+            grid.column_widths[column] = Some((current as i16 + delta).clamp(6, 80) as u16);
+            grid.clamp(rows, columns);
+        });
     }
 
-    fn reset_relation_column_width(&mut self) {
-        if let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab)
-            && tab.view == RelationView::Data
-            && tab.grid.selected_column < tab.column_widths.len()
-        {
-            tab.column_widths[tab.grid.selected_column] = None;
-        }
+    fn reset_grid_column_width(&mut self) {
+        self.with_active_grid(|grid, (_, columns)| {
+            if grid.selected_column < columns && grid.selected_column < grid.column_widths.len() {
+                grid.column_widths[grid.selected_column] = None;
+            }
+        });
     }
 
-    fn set_relation_column_width(&mut self, column: usize, width: u16) {
-        let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab) else {
-            return;
-        };
-        if tab.view != RelationView::Data {
-            return;
-        }
-        if tab.column_widths.len() <= column {
-            tab.column_widths.resize(column + 1, None);
-        }
-        tab.column_widths[column] = Some(width.clamp(6, 80));
+    fn set_grid_column_width(&mut self, column: usize, width: u16) {
+        self.with_active_grid(|grid, (rows, columns)| {
+            if column < columns {
+                if grid.column_widths.len() <= column {
+                    grid.column_widths.resize(column + 1, None);
+                }
+                grid.column_widths[column] = Some(width.clamp(6, 80));
+                grid.clamp(rows, columns);
+            }
+        });
     }
 
     fn load_active_relation(&mut self, refresh: bool) -> Vec<Command> {
@@ -4769,6 +5041,44 @@ mod tests {
             result_sets: vec![ResultSet::default()],
             stats: QueryStats::new(Duration::from_millis(2), Duration::from_millis(3), 0),
         }
+    }
+
+    fn sql_result_app() -> App {
+        let mut app = App::new(Vec::new());
+        app.active_console_mut().outcome = Some(QueryOutcome {
+            result_sets: vec![ResultSet {
+                columns: vec![
+                    crate::db::query::ColumnMeta {
+                        name: "id".into(),
+                        type_name: "int".into(),
+                    },
+                    crate::db::query::ColumnMeta {
+                        name: "name".into(),
+                        type_name: "text".into(),
+                    },
+                ],
+                rows: vec![vec![
+                    crate::db::value::CellValue::Integer(1),
+                    crate::db::value::CellValue::Text("a".into()),
+                ]],
+                affected_rows: 0,
+            }],
+            stats: QueryStats::new(Duration::ZERO, Duration::ZERO, 1),
+        });
+        app
+    }
+
+    #[test]
+    fn sql_grid_resize_and_reset_use_shared_state() {
+        let mut app = sql_result_app();
+        app.update(Action::GridSelect { row: 0, column: 1 });
+        app.update(Action::GridResizeColumn(10));
+        assert_eq!(
+            app.active_console().grid.column_widths,
+            vec![None, Some(16)]
+        );
+        app.update(Action::GridResetColumnWidth);
+        assert_eq!(app.active_console().grid.column_widths, vec![None, None]);
     }
 
     #[test]

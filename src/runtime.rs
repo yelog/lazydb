@@ -217,6 +217,21 @@ impl Runtime {
                 generation,
                 sql,
             } => self.run_query(connection, target, tab_id, generation, sql),
+            Command::RunDerivedQuery {
+                connection,
+                target,
+                tab_id,
+                source_generation,
+                derived_generation,
+                sql,
+            } => self.run_derived_query(
+                connection,
+                target,
+                tab_id,
+                source_generation,
+                derived_generation,
+                sql,
+            ),
             Command::ManualBegin {
                 connection,
                 target,
@@ -878,6 +893,56 @@ impl Runtime {
             }
         });
         self.query_tasks.insert((tab_id, generation), task);
+    }
+
+    fn run_derived_query(
+        &mut self,
+        expected: ConnectionIdentity,
+        target: ExecutionTarget,
+        tab_id: Uuid,
+        source_generation: u64,
+        derived_generation: u64,
+        sql: String,
+    ) {
+        let sender = self.event_sender.clone();
+        let connection = Arc::clone(&self.connection);
+        let task = tokio::spawn(async move {
+            let Some(database) = active_database_for_target(connection, expected, &target).await
+            else {
+                let _ = sender.send(Action::DerivedQueryFailed {
+                    tab_id,
+                    source_generation,
+                    derived_generation,
+                    connection: expected,
+                    target,
+                    message: "Active connection does not match the execution target".into(),
+                });
+                return;
+            };
+            match database.execute(&sql).await {
+                Ok(outcome) => {
+                    let _ = sender.send(Action::DerivedQueryFinished {
+                        tab_id,
+                        source_generation,
+                        derived_generation,
+                        connection: expected,
+                        target,
+                        outcome,
+                    });
+                }
+                Err(error) => {
+                    let _ = sender.send(Action::DerivedQueryFailed {
+                        tab_id,
+                        source_generation,
+                        derived_generation,
+                        connection: expected,
+                        target,
+                        message: error.to_string(),
+                    });
+                }
+            }
+        });
+        self.query_tasks.insert((tab_id, derived_generation), task);
     }
 
     fn manual_begin(

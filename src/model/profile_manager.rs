@@ -1963,10 +1963,8 @@ fn redact_url_password(value: &str) -> (String, Option<(usize, usize)>) {
     )
 }
 
-const POSTGRES_FIELDS: [ProfileField; 19] = [
+const POSTGRES_FIELDS: [ProfileField; 18] = [
     ProfileField::Kind,
-    ProfileField::UrlFormat,
-    ProfileField::Url,
     ProfileField::Name,
     ProfileField::Host,
     ProfileField::Port,
@@ -1979,16 +1977,15 @@ const POSTGRES_FIELDS: [ProfileField; 19] = [
     ProfileField::Environment,
     ProfileField::ReadOnly,
     ProfileField::PasswordStorage,
+    ProfileField::Url,
     ProfileField::Test,
     ProfileField::Save,
     ProfileField::SaveAndConnect,
     ProfileField::Cancel,
 ];
 
-const MYSQL_FIELDS: [ProfileField; 18] = [
+const MYSQL_FIELDS: [ProfileField; 17] = [
     ProfileField::Kind,
-    ProfileField::UrlFormat,
-    ProfileField::Url,
     ProfileField::Name,
     ProfileField::Host,
     ProfileField::Port,
@@ -2000,35 +1997,34 @@ const MYSQL_FIELDS: [ProfileField; 18] = [
     ProfileField::Environment,
     ProfileField::ReadOnly,
     ProfileField::PasswordStorage,
+    ProfileField::Url,
     ProfileField::Test,
     ProfileField::Save,
     ProfileField::SaveAndConnect,
     ProfileField::Cancel,
 ];
 
-const SQLITE_FILE_FIELDS: [ProfileField; 12] = [
+const SQLITE_FILE_FIELDS: [ProfileField; 11] = [
     ProfileField::Kind,
-    ProfileField::UrlFormat,
-    ProfileField::Url,
     ProfileField::Name,
     ProfileField::SqliteMemory,
     ProfileField::SqlitePath,
     ProfileField::VisibleObjects,
     ProfileField::ReadOnly,
+    ProfileField::Url,
     ProfileField::Test,
     ProfileField::Save,
     ProfileField::SaveAndConnect,
     ProfileField::Cancel,
 ];
 
-const SQLITE_MEMORY_FIELDS: [ProfileField; 11] = [
+const SQLITE_MEMORY_FIELDS: [ProfileField; 10] = [
     ProfileField::Kind,
-    ProfileField::UrlFormat,
-    ProfileField::Url,
     ProfileField::Name,
     ProfileField::SqliteMemory,
     ProfileField::VisibleObjects,
     ProfileField::ReadOnly,
+    ProfileField::Url,
     ProfileField::Test,
     ProfileField::Save,
     ProfileField::SaveAndConnect,

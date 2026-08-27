@@ -613,7 +613,7 @@ fn url_format_cycles_only_compatible_values_and_driver_resets_default() {
     state.cycle(1);
     assert_eq!(
         state.draft.as_ref().unwrap().url_format,
-        ConnectionUrlFormat::JdbcPostgreSql
+        ConnectionUrlFormat::MySql
     );
     state.select_driver(DatabaseKind::MySql);
     assert_eq!(
@@ -637,8 +637,6 @@ fn visible_fields_follow_the_selected_driver_and_sqlite_mode() {
         postgres.visible_fields(),
         &[
             ProfileField::Kind,
-            ProfileField::UrlFormat,
-            ProfileField::Url,
             ProfileField::Name,
             ProfileField::Host,
             ProfileField::Port,
@@ -651,6 +649,7 @@ fn visible_fields_follow_the_selected_driver_and_sqlite_mode() {
             ProfileField::Environment,
             ProfileField::ReadOnly,
             ProfileField::PasswordStorage,
+            ProfileField::Url,
             ProfileField::Test,
             ProfileField::Save,
             ProfileField::SaveAndConnect,

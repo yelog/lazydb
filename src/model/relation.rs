@@ -1,7 +1,7 @@
 use unicode_width::UnicodeWidthStr;
 use uuid::Uuid;
 
-use super::tab::GridState;
+use super::{data_query::DataQueryOptions, data_query::DataQueryState, tab::DataGridState};
 use crate::db::{
     RelationPreview,
     catalog::{CatalogId, CatalogKind, QualifiedName, RelationStructure},
@@ -22,26 +22,9 @@ pub enum RelationView {
     Structure,
 }
 
-#[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
-pub struct RelationPreviewOptions {
-    pub where_clause: Option<String>,
-    pub order_by_clause: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RelationQueryInput {
-    Where,
-    OrderBy,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct RelationQueryState {
-    pub where_input: crate::model::text_input::TextInput,
-    pub order_by_input: crate::model::text_input::TextInput,
-    pub submitted: RelationPreviewOptions,
-    pub focus: Option<RelationQueryInput>,
-    pub error: Option<String>,
-}
+pub type RelationPreviewOptions = DataQueryOptions;
+pub type RelationQueryInput = crate::model::data_query::DataQueryInput;
+pub type RelationQueryState = DataQueryState;
 
 pub fn automatic_relation_column_widths(result: &crate::db::query::ResultSet) -> Vec<u16> {
     result
@@ -158,9 +141,8 @@ pub struct RelationTab {
     pub view: RelationView,
     pub data: RelationPreviewLoad,
     pub structure: RelationStructureLoad,
-    pub grid: GridState,
+    pub grid: DataGridState,
     pub query: RelationQueryState,
-    pub column_widths: Vec<Option<u16>>,
 }
 
 impl RelationTab {
@@ -249,9 +231,11 @@ impl RelationTab {
             view,
             data: RelationLoad::Empty,
             structure: RelationLoad::Empty,
-            grid: GridState::default(),
-            query: RelationQueryState::default(),
-            column_widths: Vec::new(),
+            grid: DataGridState::default(),
+            query: RelationQueryState {
+                capability: crate::model::data_query::DataQueryCapability::Relation,
+                ..RelationQueryState::default()
+            },
         }
     }
 

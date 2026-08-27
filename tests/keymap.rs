@@ -121,6 +121,19 @@ fn space_s_returns_to_the_first_sql_console_from_explorer() {
 }
 
 #[test]
+fn space_s_takes_priority_over_sql_result_order_input() {
+    let mut app = App::new(Vec::new());
+    app.focus = Focus::Results;
+    let mut keymap = Keymap::default();
+
+    assert_eq!(keymap.map(key(KeyCode::Char(' ')), &app), None);
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('s')), &app),
+        Some(Action::GotoSqlConsole)
+    );
+}
+
+#[test]
 fn maps_scope_picker_navigation_and_toggle() {
     let mut app = App::new(Vec::new());
     app.update(Action::OpenProfileManager);
@@ -772,11 +785,7 @@ fn profile_form_maps_navigation_editing_and_commands() {
     assert_eq!(keymap.map(key(KeyCode::Enter), &app), None);
     assert_eq!(keymap.map(key(KeyCode::Char(' ')), &app), None);
 
-    for field in [
-        ProfileField::UrlFormat,
-        ProfileField::SslMode,
-        ProfileField::Environment,
-    ] {
+    for field in [ProfileField::SslMode, ProfileField::Environment] {
         app.profile_manager.as_mut().unwrap().selected_field = field;
         for (code, expected) in [
             (KeyCode::Left, Action::ProfileCycle(-1)),

@@ -8,6 +8,8 @@ use super::workspace::QueryStatus;
 use super::{transaction::TransactionMode, transaction::TransactionState};
 use crate::sql::ExecutionDraft;
 
+use super::data_query::DataQueryOptions;
+use super::data_query::DataQueryState;
 use super::relation::RelationTab;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -17,10 +19,14 @@ pub enum TabKind {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct GridState {
+pub struct DataGridState {
     pub selected_row: usize,
     pub selected_column: usize,
+    pub column_widths: Vec<Option<u16>>,
 }
+
+/// Compatibility name for the shared grid state used by the current renderer.
+pub type GridState = DataGridState;
 
 #[derive(Clone, Debug, PartialEq)]
 #[allow(clippy::large_enum_variant)]
@@ -97,14 +103,25 @@ pub struct ConsoleTab {
     pub outcome: Option<QueryOutcome>,
     pub output: Vec<OutputEntry>,
     pub result_view: ResultView,
-    pub selected_row: usize,
-    pub selected_column: usize,
+    pub grid: DataGridState,
     pub completion: Option<CompletionPopup>,
     pub transaction_generation: u64,
     pub transaction_mode: TransactionMode,
     pub transaction_state: TransactionState,
     pub last_execution: Option<LastExecution>,
     pub execution_target: Option<ExecutionTarget>,
+    pub query: DataQueryState,
+    pub derived: Option<DerivedResultState>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DerivedResultState {
+    pub source: LastExecution,
+    pub query: DataQueryOptions,
+    pub generation: u64,
+    pub outcome: Option<QueryOutcome>,
+    pub error: Option<String>,
+    pub running: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -137,14 +154,58 @@ impl ConsoleTab {
             outcome: None,
             output: Vec::new(),
             result_view: ResultView::Data,
-            selected_row: 0,
-            selected_column: 0,
+            grid: DataGridState::default(),
             completion: None,
             transaction_generation: 0,
             transaction_mode: TransactionMode::Auto,
             transaction_state: TransactionState::Idle,
             last_execution: None,
             execution_target: None,
+            query: DataQueryState::default(),
+            derived: None,
         }
+    }
+}
+
+impl DataGridState {
+    pub fn clamp(&mut self, row_count: usize, column_count: usize) {
+        self.selected_row = self.selected_row.min(row_count.saturating_sub(1));
+        self.selected_column = self.selected_column.min(column_count.saturating_sub(1));
+        self.column_widths.truncate(column_count);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DataGridState;
+
+    #[test]
+    fn clamping_keeps_selection_and_widths_inside_result_dimensions() {
+        let mut state = DataGridState {
+            selected_row: 9,
+            selected_column: 8,
+            column_widths: vec![Some(10), Some(11), Some(12), Some(13)],
+        };
+
+        state.clamp(2, 3);
+
+        assert_eq!(state.selected_row, 1);
+        assert_eq!(state.selected_column, 2);
+        assert_eq!(state.column_widths, vec![Some(10), Some(11), Some(12)]);
+    }
+
+    #[test]
+    fn clamping_empty_dimensions_resets_selection() {
+        let mut state = DataGridState {
+            selected_row: 3,
+            selected_column: 4,
+            column_widths: vec![Some(10)],
+        };
+
+        state.clamp(0, 0);
+
+        assert_eq!(state.selected_row, 0);
+        assert_eq!(state.selected_column, 0);
+        assert!(state.column_widths.is_empty());
     }
 }

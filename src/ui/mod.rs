@@ -1,6 +1,8 @@
+pub mod data_grid;
 pub mod icons;
 pub mod layout;
 pub mod profiles;
+pub mod query_bar;
 pub mod relation;
 pub mod theme;
 
@@ -10,10 +12,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{
-        Block, BorderType, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table, TableState,
-        Wrap,
-    },
+    widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
 use std::{
     cell::RefCell,
@@ -59,7 +58,7 @@ pub enum HitTarget {
     RelationView(crate::model::relation::RelationView),
     RelationRetry,
     RelationCancel,
-    RelationQueryInput(crate::model::relation::RelationQueryInput),
+    DataQueryInput(crate::model::data_query::DataQueryInput),
     RelationColumnResize { column: usize, width: u16 },
     HeaderProfile,
     ProfileField(ProfileField),
@@ -887,10 +886,30 @@ fn render_results(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, st
 }
 
 fn render_data(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, state: &mut UiState) {
+    let Some(tab) = app.active_console_opt() else {
+        return;
+    };
+    let query_height = if !matches!(
+        tab.query.capability,
+        crate::model::data_query::DataQueryCapability::Relation
+            | crate::model::data_query::DataQueryCapability::Sql
+    ) {
+        3
+    } else {
+        2
+    };
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(query_height), Constraint::Min(1)])
+        .split(area);
+    query_bar::render(frame, chunks[0], &tab.query, theme, state);
+    let area = chunks[1];
     let block = panel_block(" RESULT SET ", app.focus == Focus::Results, theme);
-    let Some(result) = app
-        .active_console_opt()
-        .and_then(|tab| tab.outcome.as_ref())
+    let Some(result) = tab
+        .derived
+        .as_ref()
+        .and_then(|derived| derived.outcome.as_ref())
+        .or(tab.outcome.as_ref())
         .and_then(|outcome| outcome.result_sets.last())
     else {
         frame.render_widget(
@@ -902,19 +921,7 @@ fn render_data(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, state
         );
         return;
     };
-    render_result_table(
-        frame,
-        area,
-        result,
-        app.active_console_opt()
-            .map_or(Default::default(), |tab| crate::model::tab::GridState {
-                selected_row: tab.selected_row,
-                selected_column: tab.selected_column,
-            }),
-        theme,
-        block,
-        state,
-    );
+    render_result_table(frame, area, result, tab.grid.clone(), theme, block, state);
 }
 
 pub(crate) fn render_result_table(
@@ -926,94 +933,8 @@ pub(crate) fn render_result_table(
     block: Block<'_>,
     state: &mut UiState,
 ) {
-    if result.columns.is_empty() {
-        frame.render_widget(
-            Paragraph::new(format!(
-                "Statement complete · {} row(s) affected",
-                result.affected_rows
-            ))
-            .block(block)
-            .style(Style::new().fg(theme.accent).bg(theme.surface))
-            .alignment(Alignment::Center),
-            area,
-        );
-        return;
-    }
-    let available = area.width.saturating_sub(3).max(1);
-    let each = (available / result.columns.len().max(1) as u16).clamp(8, 28);
-    let widths = result
-        .columns
-        .iter()
-        .map(|_| Constraint::Length(each))
-        .collect::<Vec<_>>();
-    let row_y = area.y.saturating_add(3);
-    for (row_index, _) in result
-        .rows
-        .iter()
-        .take(area.height.saturating_sub(4) as usize)
-        .enumerate()
-    {
-        for column_index in 0..result.columns.len() {
-            let x = area
-                .x
-                .saturating_add(2)
-                .saturating_add(column_index as u16 * each.saturating_add(1));
-            if x >= area.right() {
-                break;
-            }
-            state.hit_regions.push(HitRegion {
-                area: Rect::new(
-                    x,
-                    row_y.saturating_add(row_index as u16),
-                    each.min(area.right().saturating_sub(x)),
-                    1,
-                ),
-                target: HitTarget::ResultCell {
-                    row: row_index,
-                    column: column_index,
-                },
-            });
-        }
-    }
-    let header = Row::new(result.columns.iter().map(|column| {
-        Cell::from(
-            sanitize_terminal_text(&column.name)
-                .chars()
-                .take(80)
-                .collect::<String>(),
-        )
-        .style(Style::new().fg(theme.accent).add_modifier(Modifier::BOLD))
-    }))
-    .height(1)
-    .bottom_margin(1);
-    let rows = result.rows.iter().map(|row| {
-        Row::new(row.iter().map(|value| {
-            let preview = value.preview(each.saturating_sub(2) as usize);
-            let style = match value {
-                crate::db::value::CellValue::Null => {
-                    Style::new().fg(theme.muted).add_modifier(Modifier::ITALIC)
-                }
-                crate::db::value::CellValue::Unsupported { .. } => Style::new().fg(theme.warning),
-                _ => Style::new().fg(theme.text),
-            };
-            Cell::from(sanitize_terminal_text(&preview.text)).style(style)
-        }))
-    });
-    let table = Table::new(rows, widths)
-        .header(header)
-        .block(block)
-        .column_spacing(1)
-        .row_highlight_style(Style::new().bg(theme.selection).fg(theme.text))
-        .cell_highlight_style(
-            Style::new()
-                .bg(theme.accent)
-                .fg(theme.background)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("▌");
-    let mut state =
-        TableState::new().with_selected_cell(Some((grid.selected_row, grid.selected_column)));
-    frame.render_stateful_widget(table, area, &mut state);
+    let overrides = grid.column_widths.clone();
+    data_grid::render(frame, area, result, grid, &overrides, theme, block, state);
 }
 
 fn render_output(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {

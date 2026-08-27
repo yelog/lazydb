@@ -3,9 +3,8 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Cell, Paragraph, Row, Table, Wrap},
+    widgets::{Paragraph, Wrap},
 };
-use unicode_width::UnicodeWidthStr;
 
 use super::{panel_block, theme::Theme};
 use crate::{
@@ -127,7 +126,7 @@ fn render_data(
                 ])
                 .split(area)
         };
-        render_query_inputs(frame, body[0], tab, theme, state);
+        super::query_bar::render(frame, body[0], &tab.query, theme, state);
         if let Some((message, retry, cancel)) = status {
             render_status(frame, body[1], message, retry, cancel, theme, state);
         }
@@ -137,7 +136,7 @@ fn render_data(
             body[2],
             &result,
             tab.grid.clone(),
-            &tab.column_widths,
+            &tab.grid.column_widths,
             theme,
             block,
             state,
@@ -170,7 +169,7 @@ fn render_data(
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(2), Constraint::Min(1)])
             .split(area);
-        render_query_inputs(frame, body[0], tab, theme, state);
+        super::query_bar::render(frame, body[0], &tab.query, theme, state);
         render_status(frame, body[1], message, retry, cancel, theme, state);
     }
 }
@@ -180,221 +179,13 @@ fn render_relation_result_table(
     frame: &mut Frame<'_>,
     area: Rect,
     result: &crate::db::query::ResultSet,
-    grid: crate::model::tab::GridState,
+    grid: crate::model::tab::DataGridState,
     overrides: &[Option<u16>],
     theme: Theme,
     block: ratatui::widgets::Block<'_>,
     state: &mut super::UiState,
 ) {
-    if result.columns.is_empty() {
-        super::render_result_table(frame, area, result, grid, theme, block, state);
-        return;
-    }
-    let auto = crate::model::relation::automatic_relation_column_widths(result);
-    let widths = auto
-        .iter()
-        .enumerate()
-        .map(|(index, width)| {
-            overrides
-                .get(index)
-                .and_then(|value| *value)
-                .unwrap_or(*width)
-        })
-        .collect::<Vec<_>>();
-    let available = area.width.saturating_sub(4).max(1);
-    let first = visible_column_start(&widths, grid.selected_column, available);
-    let visible = widths
-        .iter()
-        .enumerate()
-        .skip(first)
-        .scan(0u16, |used, (index, width)| {
-            let next = used.saturating_add(*width).saturating_add(1);
-            if *used == 0 || next <= available {
-                *used = next;
-                Some(index)
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>();
-    let constraints = visible
-        .iter()
-        .map(|index| Constraint::Length(widths[*index]))
-        .collect::<Vec<_>>();
-    let row_y = area.y.saturating_add(3);
-    for (row_index, _row) in result
-        .rows
-        .iter()
-        .take(area.height.saturating_sub(4) as usize)
-        .enumerate()
-    {
-        let mut x = area.x.saturating_add(2);
-        for column_index in &visible {
-            let width = widths[*column_index];
-            if x >= area.right() {
-                break;
-            }
-            state.hit_regions.push(HitRegion {
-                area: Rect::new(
-                    x,
-                    row_y + row_index as u16,
-                    width.min(area.right().saturating_sub(x)),
-                    1,
-                ),
-                target: HitTarget::ResultCell {
-                    row: row_index,
-                    column: *column_index,
-                },
-            });
-            x = x.saturating_add(width).saturating_add(1);
-        }
-        let mut boundary_x = area.x.saturating_add(2);
-        for column_index in &visible {
-            boundary_x = boundary_x.saturating_add(widths[*column_index]);
-            if boundary_x < area.right().saturating_sub(1) {
-                state.hit_regions.push(HitRegion {
-                    area: Rect::new(boundary_x, row_y, 1, 1),
-                    target: HitTarget::RelationColumnResize {
-                        column: *column_index,
-                        width: widths[*column_index],
-                    },
-                });
-            }
-            boundary_x = boundary_x.saturating_add(1);
-        }
-    }
-    let header = Row::new(visible.iter().map(|index| {
-        let column = &result.columns[*index];
-        Cell::from(sanitize_terminal_text(&column.name))
-            .style(Style::new().fg(theme.accent).add_modifier(Modifier::BOLD))
-    }))
-    .height(1)
-    .bottom_margin(1);
-    let rows = result.rows.iter().map(|row| {
-        Row::new(visible.iter().map(|index| {
-            let value = row
-                .get(*index)
-                .unwrap_or(&crate::db::value::CellValue::Null);
-            let width = widths[*index];
-            let preview = value.preview(width.saturating_sub(2) as usize);
-            let style = match value {
-                crate::db::value::CellValue::Null => {
-                    Style::new().fg(theme.muted).add_modifier(Modifier::ITALIC)
-                }
-                crate::db::value::CellValue::Unsupported { .. } => Style::new().fg(theme.warning),
-                _ => Style::new().fg(theme.text),
-            };
-            Cell::from(sanitize_terminal_text(&preview.text)).style(style)
-        }))
-    });
-    let table = Table::new(rows, constraints)
-        .header(header)
-        .block(block)
-        .column_spacing(1)
-        .row_highlight_style(Style::new().bg(theme.selection).fg(theme.text))
-        .cell_highlight_style(
-            Style::new()
-                .bg(theme.accent)
-                .fg(theme.background)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("▌");
-    let selected_column = visible
-        .iter()
-        .position(|index| *index == grid.selected_column)
-        .unwrap_or(0);
-    let mut table_state = ratatui::widgets::TableState::new()
-        .with_selected_cell(Some((grid.selected_row, selected_column)));
-    frame.render_stateful_widget(table, area, &mut table_state);
-}
-
-fn visible_column_start(widths: &[u16], selected: usize, available: u16) -> usize {
-    if widths.is_empty() {
-        return 0;
-    }
-    let mut start = selected.min(widths.len() - 1);
-    loop {
-        let total = widths[start..].iter().fold(0u16, |sum, width| {
-            sum.saturating_add(*width).saturating_add(1)
-        });
-        if total <= available || start + 1 >= widths.len() {
-            return start;
-        }
-        start += 1;
-    }
-}
-
-fn render_query_inputs(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    tab: &crate::model::relation::RelationTab,
-    theme: Theme,
-    state: &mut super::UiState,
-) {
-    if area.height == 0 {
-        return;
-    }
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
-    let fields = [
-        (
-            crate::model::relation::RelationQueryInput::Where,
-            "WHERE",
-            tab.query.where_input.value(),
-        ),
-        (
-            crate::model::relation::RelationQueryInput::OrderBy,
-            "ORDER BY",
-            tab.query.order_by_input.value(),
-        ),
-    ];
-    let input_area = Rect::new(area.x, area.y, area.width, 1);
-    for ((input, label, value), chunk) in fields.into_iter().zip(chunks.iter().copied()) {
-        let active = tab.query.focus == Some(input);
-        let text = format!("{label}  {value}");
-        frame.render_widget(
-            Paragraph::new(text).style(if active { theme.accent } else { theme.muted }),
-            chunk,
-        );
-        state.hit_regions.push(HitRegion {
-            area: chunk,
-            target: HitTarget::RelationQueryInput(input),
-        });
-        if active {
-            let cursor_index = match input {
-                crate::model::relation::RelationQueryInput::Where => tab.query.where_input.cursor(),
-                crate::model::relation::RelationQueryInput::OrderBy => {
-                    tab.query.order_by_input.cursor()
-                }
-            };
-            let cursor = UnicodeWidthStr::width(
-                &value[..value
-                    .char_indices()
-                    .nth(cursor_index)
-                    .map_or(value.len(), |(index, _)| index)],
-            );
-            frame.set_cursor_position(ratatui::layout::Position::new(
-                chunk
-                    .x
-                    .saturating_add(UnicodeWidthStr::width(label) as u16)
-                    .saturating_add(2)
-                    .saturating_add(cursor as u16)
-                    .min(chunk.right().saturating_sub(1)),
-                input_area.y,
-            ));
-        }
-    }
-    if let Some(error) = &tab.query.error
-        && area.height > 2
-    {
-        let error_area = Rect::new(area.x, area.y.saturating_add(2), area.width, 1);
-        frame.render_widget(
-            Paragraph::new(clean(error)).style(Style::new().fg(theme.warning)),
-            error_area,
-        );
-    }
+    super::data_grid::render(frame, area, result, grid, overrides, theme, block, state);
 }
 
 fn render_status(
