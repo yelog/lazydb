@@ -92,6 +92,47 @@ fn cursor_on_semicolon_selects_statement_but_gap_does_not() {
 }
 
 #[test]
+fn whitespace_inside_statement_resolves_to_current_scope() {
+    let text = "Select * from sys_user";
+
+    for cursor in text
+        .char_indices()
+        .filter_map(|(index, character)| character.is_whitespace().then_some(index))
+    {
+        assert_eq!(
+            resolve_scope(text, cursor, None, SqlDialect::Generic).map(|scope| scope.sql),
+            Some(text.to_owned()),
+            "cursor at byte {cursor} should resolve the statement",
+        );
+    }
+}
+
+#[test]
+fn multiline_whitespace_and_internal_comments_resolve_to_current_scope() {
+    let text = "select\n  /* explain projection */\n  *\nfrom sys_user;";
+
+    for marker in ["\n", "  /*", "explain", "\n  *", "\nfrom"] {
+        let cursor = text.find(marker).unwrap();
+        assert_eq!(
+            resolve_scope(text, cursor, None, SqlDialect::Generic).map(|scope| scope.sql),
+            Some(text.to_owned()),
+            "cursor at {marker:?} should resolve the statement",
+        );
+    }
+}
+
+#[test]
+fn adjacent_statement_start_belongs_to_the_second_statement() {
+    let text = "select 1;select 2;";
+    let cursor = text.find("select 2").unwrap();
+
+    assert_eq!(
+        resolve_scope(text, cursor, None, SqlDialect::Generic).map(|scope| scope.sql),
+        Some("select 2;".to_owned())
+    );
+}
+
+#[test]
 fn scanner_ignores_semicolons_inside_all_supported_constructs() {
     let text = "select ';', \";\", `;`, [;], /* outer ; /* inner ; */ ; */ 1;\n".to_owned()
         + "-- ;\nselect 2; # ;\nselect $$ ; $$, $tag$ ; $tag$;";

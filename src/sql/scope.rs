@@ -44,6 +44,12 @@ pub struct ResolvedScope {
     pub sql: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct StatementSpan {
+    execution: TextRange,
+    activation: TextRange,
+}
+
 /// Resolves the exact Visual selection first, then the statement containing
 /// `cursor`. A blank visual selection is intentionally a no-scope result.
 pub fn resolve_scope(
@@ -67,10 +73,24 @@ pub fn resolve_scope(
 /// Returns executable statement ranges. Each range includes its terminating
 /// semicolon, when present, and excludes only inter-statement whitespace.
 pub fn scan_statements(text: &str, dialect: SqlDialect) -> Vec<TextRange> {
-    let boundaries = statement_boundaries(text, dialect);
-    boundaries
+    scan_statement_spans(text, dialect)
         .into_iter()
-        .filter_map(|(start, end)| meaningful_range(text, TextRange::new(start, end), dialect))
+        .map(|statement| statement.execution)
+        .collect()
+}
+
+fn scan_statement_spans(text: &str, dialect: SqlDialect) -> Vec<StatementSpan> {
+    statement_boundaries(text, dialect)
+        .into_iter()
+        .filter_map(|(start, end)| {
+            let execution = meaningful_range(text, TextRange::new(start, end), dialect)?;
+            let sql = execution.get(text)?;
+            let activation_start = execution.start + first_code_offset(sql, dialect)?;
+            Some(StatementSpan {
+                execution,
+                activation: TextRange::new(activation_start, execution.end),
+            })
+        })
         .collect()
 }
 
@@ -114,81 +134,10 @@ fn resolve_selection(
 
 fn statement_at(text: &str, cursor: usize, dialect: SqlDialect) -> Option<TextRange> {
     let cursor = cursor.min(text.len());
-    scan_statements(text, dialect).into_iter().find(|range| {
-        range.start <= cursor
-            && cursor <= range.end
-            && (cursor == range.end - 1 || cursor_is_code(text, cursor, dialect))
-    })
-}
-
-fn cursor_is_code(text: &str, cursor: usize, dialect: SqlDialect) -> bool {
-    let bytes = text.as_bytes();
-    if cursor >= bytes.len() || bytes[cursor].is_ascii_whitespace() {
-        return false;
-    }
-    let mut index = 0;
-    let mut block_depth = 0usize;
-    let mut state = State::Normal;
-    while index <= cursor {
-        match state {
-            State::Normal => match bytes[index] {
-                b'\'' => state = State::SingleQuote,
-                b'"' => state = State::DoubleQuote,
-                b'`' if matches!(dialect, SqlDialect::MySql | SqlDialect::Generic) => {
-                    state = State::Backtick
-                }
-                b'[' if matches!(dialect, SqlDialect::Sqlite | SqlDialect::Generic) => {
-                    state = State::Bracket
-                }
-                b'-' if bytes.get(index + 1) == Some(&b'-')
-                    && dash_comment_allowed(bytes, index, dialect) =>
-                {
-                    state = State::LineComment;
-                    index += 1;
-                }
-                b'#' if matches!(dialect, SqlDialect::MySql | SqlDialect::Generic) => {
-                    state = State::LineComment;
-                }
-                b'/' if bytes.get(index + 1) == Some(&b'*') => {
-                    state = State::BlockComment;
-                    block_depth = 1;
-                    index += 1;
-                }
-                b'$' if matches!(dialect, SqlDialect::Postgres | SqlDialect::Generic) => {
-                    if let Some(end) = dollar_tag_end(text, index) {
-                        state = State::DollarQuote(TextRange::new(index, end));
-                        index = end - 1;
-                    }
-                }
-                _ => {}
-            },
-            State::LineComment => {
-                if bytes[index] == b'\n' {
-                    state = State::Normal;
-                }
-            }
-            State::BlockComment => {
-                if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'*') {
-                    block_depth += 1;
-                    index += 1;
-                } else if bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/') {
-                    block_depth -= 1;
-                    index += 1;
-                    if block_depth == 0 {
-                        state = State::Normal;
-                    }
-                }
-            }
-            State::DollarQuote(tag) if bytes[index..].starts_with(&bytes[tag.start..tag.end]) => {
-                state = State::Normal;
-                index += tag.end - tag.start - 1;
-            }
-            State::SingleQuote | State::DoubleQuote | State::Backtick | State::Bracket => {}
-            State::DollarQuote(_) => {}
-        }
-        index += 1;
-    }
-    !matches!(state, State::LineComment | State::BlockComment)
+    scan_statement_spans(text, dialect)
+        .into_iter()
+        .find(|statement| statement.activation.start <= cursor && cursor < statement.activation.end)
+        .map(|statement| statement.execution)
 }
 
 fn meaningful_range(text: &str, range: TextRange, dialect: SqlDialect) -> Option<TextRange> {
@@ -209,6 +158,10 @@ fn meaningful_range(text: &str, range: TextRange, dialect: SqlDialect) -> Option
 }
 
 fn has_code(text: &str, dialect: SqlDialect) -> bool {
+    first_code_offset(text, dialect).is_some()
+}
+
+fn first_code_offset(text: &str, dialect: SqlDialect) -> Option<usize> {
     let bytes = text.as_bytes();
     let mut index = 0;
     while index < bytes.len() {
@@ -231,10 +184,10 @@ fn has_code(text: &str, dialect: SqlDialect) -> bool {
         } else if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'*') {
             index = skip_block_comment(text, index);
         } else {
-            return true;
+            return Some(index);
         }
     }
-    false
+    None
 }
 
 fn statement_boundaries(text: &str, dialect: SqlDialect) -> Vec<(usize, usize)> {
