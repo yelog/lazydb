@@ -46,6 +46,7 @@ impl Default for TransactionSnapshot {
 pub enum TransactionExitChoice {
     Commit,
     Rollback,
+    Abandon,
     Cancel,
 }
 

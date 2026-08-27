@@ -1107,8 +1107,16 @@ fn render_overlay(
                     tab.transaction_state == crate::model::transaction::TransactionState::Aborted
                 })
             });
+            let outcome_unknown = tab.is_some_and(|tab| {
+                tab.as_console().is_some_and(|tab| {
+                    tab.transaction_state
+                        == crate::model::transaction::TransactionState::OutcomeUnknown
+                })
+            });
             let buttons = if running {
                 "Query running: wait or Ctrl-C to cancel"
+            } else if outcome_unknown {
+                "[Abandon local state]   Cancel"
             } else {
                 &format!(
                     "{}   {}   {}",
@@ -1132,9 +1140,11 @@ fn render_overlay(
                     tab.map(|tab| tab.title()).unwrap_or("unknown")
                 )),
                 Line::raw(buttons),
-                Line::raw(
-                    "Rollback is the default. Tab/Left/Right choose; Enter confirms; Esc cancels",
-                ),
+                Line::raw(if outcome_unknown {
+                    "Enter or 'a' abandons local state; Esc cancels"
+                } else {
+                    "Rollback is the default. Tab/Left/Right choose; Enter confirms; Esc cancels"
+                }),
             ];
             frame.render_widget(
                 Paragraph::new(lines)

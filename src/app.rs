@@ -1,4 +1,7 @@
-use std::collections::{BTreeSet, HashSet};
+use std::{
+    collections::{BTreeSet, HashSet},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use uuid::Uuid;
@@ -1329,7 +1332,22 @@ impl App {
                 Vec::new()
             }
             Action::ConfirmTransactionExit => {
-                self.resolve_transaction_exit(TransactionExitChoice::Commit)
+                let choice = match self.overlay {
+                    Some(Overlay::TransactionExitConfirm { prompt, .. })
+                        if self
+                            .tabs
+                            .iter()
+                            .find(|tab| tab.id() == prompt.console_id)
+                            .and_then(WorkspaceTab::as_console)
+                            .is_some_and(|tab| {
+                                tab.transaction_state == TransactionState::OutcomeUnknown
+                            }) =>
+                    {
+                        TransactionExitChoice::Abandon
+                    }
+                    _ => TransactionExitChoice::Commit,
+                };
+                self.resolve_transaction_exit(choice)
             }
             Action::ConfirmTransactionExitChoice(choice) => self.resolve_transaction_exit(choice),
             Action::CancelTransactionExit => {
@@ -1341,6 +1359,7 @@ impl App {
                     *choice = match choice {
                         TransactionExitChoice::Commit => TransactionExitChoice::Rollback,
                         TransactionExitChoice::Rollback => TransactionExitChoice::Commit,
+                        TransactionExitChoice::Abandon => TransactionExitChoice::Cancel,
                         TransactionExitChoice::Cancel => TransactionExitChoice::Rollback,
                     };
                 }
@@ -1832,6 +1851,7 @@ impl App {
                 self.connection_terminal_generation = self
                     .connection_terminal_generation
                     .max(connection.generation);
+                let invalidated_profile_id = connection.profile_id;
                 let pending_profile_id = self.connection.pending_profile_id;
                 self.connection.profile_id = None;
                 self.connection.generation = 0;
@@ -1847,7 +1867,7 @@ impl App {
                 } else {
                     ConnectionStatus::Failed
                 };
-                self.clear_active_catalog(connection.profile_id);
+                self.clear_active_catalog(invalidated_profile_id);
                 if let Some(state) = self
                     .explorer
                     .normalized
@@ -1901,45 +1921,17 @@ impl App {
                 connection,
                 outcome,
             } => {
-                let Some(tab) = self
+                let valid = self
                     .tabs
-                    .iter_mut()
+                    .iter()
                     .find(|tab| tab.id() == tab_id)
-                    .and_then(WorkspaceTab::as_console_mut)
-                else {
-                    return Vec::new();
-                };
-                if tab.generation != generation
-                    || self.connection.active_identity() != Some(connection)
-                {
+                    .and_then(WorkspaceTab::as_console)
+                    .is_some_and(|tab| tab.generation == generation)
+                    && self.connection.active_identity() == Some(connection);
+                if !valid {
                     return Vec::new();
                 }
-                let total_ms = outcome.stats.total().as_millis();
-                let rows = outcome.stats.row_count;
-                tab.query_status = QueryStatus::Idle;
-                tab.output.push(OutputEntry {
-                    kind: OutputKind::Success,
-                    message: format!("{rows} row(s) retrieved in {total_ms} ms"),
-                });
-                tab.outcome = Some(outcome);
-                tab.result_view = ResultView::Data;
-                tab.query.capability = tab.last_execution.as_ref().map_or(
-                    DataQueryCapability::Unavailable("Run a read-only query first".into()),
-                    |last| {
-                        if sql::derived_query_capable(&last.draft.sql, last.draft.dialect) {
-                            DataQueryCapability::Sql
-                        } else {
-                            DataQueryCapability::Unavailable(
-                                "SQL result filtering requires one read-only SELECT query".into(),
-                            )
-                        }
-                    },
-                );
-                if let Some(last) = tab.last_execution.as_mut()
-                    && last.draft.query_generation + 1 == generation
-                {
-                    last.result = ExecutionResult::Succeeded;
-                }
+                self.finish_query(tab_id, generation, outcome, false);
                 Vec::new()
             }
             Action::QueryFailed {
@@ -1962,10 +1954,7 @@ impl App {
                     return Vec::new();
                 }
                 tab.query_status = QueryStatus::Failed;
-                tab.output.push(OutputEntry {
-                    kind: OutputKind::Error,
-                    message,
-                });
+                append_failed_execution_output(tab, generation, message);
                 tab.result_view = ResultView::Output;
                 if let Some(last) = tab.last_execution.as_mut()
                     && last.draft.query_generation + 1 == generation
@@ -2145,10 +2134,7 @@ impl App {
                         .and_then(WorkspaceTab::as_console_mut)
                         .unwrap();
                     tab.query_status = QueryStatus::Failed;
-                    tab.output.push(OutputEntry {
-                        kind: OutputKind::Error,
-                        message,
-                    });
+                    append_failed_execution_output(tab, query_generation, message);
                     if postgres
                         && let Ok(next) = transaction::transition(
                             tab_snapshot(tab),
@@ -2457,10 +2443,16 @@ impl App {
         let Some(prompt) = self.deferred.pop() else {
             return;
         };
-        self.overlay = Some(Overlay::TransactionExitConfirm {
-            prompt,
-            choice: TransactionExitChoice::Rollback,
-        });
+        let choice = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id() == prompt.console_id)
+            .and_then(WorkspaceTab::as_console)
+            .filter(|tab| tab.transaction_state == TransactionState::OutcomeUnknown)
+            .map_or(TransactionExitChoice::Rollback, |_| {
+                TransactionExitChoice::Abandon
+            });
+        self.overlay = Some(Overlay::TransactionExitConfirm { prompt, choice });
     }
 
     fn resolve_transaction_exit(&mut self, choice: TransactionExitChoice) -> Vec<Command> {
@@ -2492,6 +2484,23 @@ impl App {
         if choice == TransactionExitChoice::Cancel {
             self.show_next_deferred();
             return Vec::new();
+        }
+        if tab.transaction_state == TransactionState::OutcomeUnknown {
+            let console_id = prompt.console_id;
+            if let Some(tab) = self
+                .tabs
+                .iter_mut()
+                .find(|tab| tab.id() == console_id)
+                .and_then(WorkspaceTab::as_console_mut)
+            {
+                tab.transaction_state = TransactionState::Idle;
+                tab.transaction_generation = tab.transaction_generation.saturating_add(1);
+                tab.output.push(OutputEntry {
+                    kind: OutputKind::Info,
+                    message: "Transaction outcome is unknown; local state abandoned".to_owned(),
+                });
+            }
+            return self.replay_deferred(prompt.intent);
         }
         if choice == TransactionExitChoice::Commit
             && tab.transaction_state == TransactionState::Aborted
@@ -3824,10 +3833,6 @@ impl App {
         tab.generation += 1;
         let generation = tab.generation;
         tab.query_status = QueryStatus::Running;
-        tab.output.push(OutputEntry {
-            kind: OutputKind::Info,
-            message: "Executing SQL".to_owned(),
-        });
         tab.last_execution = Some(LastExecution {
             draft: draft.clone(),
             result: ExecutionResult::Dispatched,
@@ -5072,13 +5077,53 @@ impl App {
         };
         let rows = outcome.stats.row_count;
         let total_ms = outcome.stats.total().as_millis();
+        let (is_query, execution_log) = tab
+            .last_execution
+            .as_ref()
+            .filter(|last| last.draft.query_generation + 1 == generation)
+            .map(|last| {
+                (
+                    last.draft.statement_count == 1
+                        && last.draft.risks.len() == 1
+                        && last.draft.risks[0] == sql::SqlRisk::ReadOnly,
+                    format_execution_log(last, &outcome),
+                )
+            })
+            .unwrap_or((true, None));
         tab.query_status = QueryStatus::Idle;
-        tab.output.push(OutputEntry {
-            kind: OutputKind::Success,
-            message: format!("{rows} row(s) retrieved in {total_ms} ms"),
-        });
+        if let Some((context, summary)) = execution_log {
+            tab.output.push(OutputEntry {
+                kind: OutputKind::Success,
+                message: context,
+            });
+            tab.output.push(OutputEntry {
+                kind: OutputKind::Success,
+                message: summary,
+            });
+        } else {
+            tab.output.push(OutputEntry {
+                kind: OutputKind::Success,
+                message: format!("{rows} row(s) retrieved in {total_ms} ms"),
+            });
+        }
         tab.outcome = Some(outcome);
-        tab.result_view = ResultView::Data;
+        tab.result_view = if is_query {
+            ResultView::Data
+        } else {
+            ResultView::Output
+        };
+        tab.query.capability = tab.last_execution.as_ref().map_or(
+            DataQueryCapability::Unavailable("Run a read-only query first".into()),
+            |last| {
+                if sql::derived_query_capable(&last.draft.sql, last.draft.dialect) {
+                    DataQueryCapability::Sql
+                } else {
+                    DataQueryCapability::Unavailable(
+                        "SQL result filtering requires one read-only SELECT query".into(),
+                    )
+                }
+            },
+        );
         if let Some(last) = tab.last_execution.as_mut()
             && last.draft.query_generation + 1 == generation
         {
@@ -5156,6 +5201,114 @@ fn apply_transaction_snapshot(tab: &mut ConsoleTab, snapshot: transaction::Trans
     tab.transaction_generation = snapshot.generation;
 }
 
+fn append_failed_execution_output(tab: &mut ConsoleTab, generation: u64, message: String) {
+    if let Some(last) = tab
+        .last_execution
+        .as_ref()
+        .filter(|last| last.draft.query_generation + 1 == generation)
+    {
+        let target = crate::security::sanitize_terminal_text(&format!(
+            "{}{}",
+            last.draft.target.database,
+            last.draft
+                .target
+                .schema
+                .as_deref()
+                .map_or(String::new(), |schema| format!(".{schema}"))
+        ));
+        let sql = crate::security::sanitize_terminal_text(&last.draft.sql)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let elapsed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .map(|elapsed| format_timestamp(elapsed.as_secs(), elapsed.subsec_millis()));
+        let timestamp = elapsed.map_or_else(|| "unknown time".to_owned(), |value| value);
+        tab.output.push(OutputEntry {
+            kind: OutputKind::Info,
+            message: format!("[{timestamp}] {target}> {sql}"),
+        });
+    }
+    tab.output.push(OutputEntry {
+        kind: OutputKind::Error,
+        message,
+    });
+}
+
+fn format_execution_log(
+    last: &LastExecution,
+    outcome: &crate::db::query::QueryOutcome,
+) -> Option<(String, String)> {
+    let elapsed = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
+    let timestamp = format_timestamp(elapsed.as_secs(), elapsed.subsec_millis());
+    let target = crate::security::sanitize_terminal_text(&format!(
+        "{}{}",
+        last.draft.target.database,
+        last.draft
+            .target
+            .schema
+            .as_deref()
+            .map_or(String::new(), |schema| format!(".{schema}"))
+    ));
+    let sql = crate::security::sanitize_terminal_text(&last.draft.sql)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let context = format!("[{timestamp}] {target}> {sql}");
+    let stats = &outcome.stats;
+    let total_ms = stats.total().as_millis();
+    let summary = if last.draft.statement_count == 1
+        && last.draft.risks.len() == 1
+        && last.draft.risks[0] == sql::SqlRisk::ReadOnly
+    {
+        format!(
+            "[{timestamp}] {} rows retrieved starting from 1 in {total_ms} ms (execution: {} ms, fetching: {} ms)",
+            stats.row_count,
+            stats.execution.as_millis(),
+            stats.fetch.as_millis(),
+        )
+    } else {
+        let affected_rows = outcome
+            .result_sets
+            .iter()
+            .map(|result| result.affected_rows)
+            .sum::<u64>();
+        format!(
+            "[{timestamp}] {affected_rows} row(s) affected in {total_ms} ms (execution: {} ms, fetching: {} ms)",
+            stats.execution.as_millis(),
+            stats.fetch.as_millis(),
+        )
+    };
+    Some((context, summary))
+}
+
+fn format_timestamp(seconds: u64, millis: u32) -> String {
+    let days = (seconds / 86_400) as i64;
+    let day_seconds = seconds % 86_400;
+    let (year, month, day) = civil_date(days);
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02}:{millis:03}",
+        day_seconds / 3_600,
+        day_seconds / 60 % 60,
+        day_seconds % 60,
+    )
+}
+
+fn civil_date(days_since_epoch: i64) -> (i64, i64, i64) {
+    let days = days_since_epoch + 719_468;
+    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
+    let day_of_era = days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_part = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_part + 2) / 5 + 1;
+    let month = month_part + if month_part < 10 { 3 } else { -9 };
+    (year + i64::from(month <= 2), month, day)
+}
+
 fn cursor_byte(text: &str, line: usize, column: usize) -> usize {
     let mut offset = 0;
     for (index, value) in text.split('\n').enumerate() {
@@ -5204,13 +5357,16 @@ fn relation_grid_dimensions(load: &RelationLoad<crate::db::RelationPreview>) -> 
 mod tests {
     use std::time::Duration;
 
+    use uuid::Uuid;
+
     use super::App;
     use crate::{
         action::{Action, Command},
         db::query::{QueryOutcome, QueryStats, ResultSet},
         model::explorer::ExplorerConnectionStatus,
         model::relation::RelationTab,
-        model::tab::WorkspaceTab,
+        model::tab::{ResultView, WorkspaceTab},
+        model::transaction::{TransactionExitChoice, TransactionMode, TransactionState},
         model::workspace::{ConnectionIdentity, ConnectionStatus, Focus, Overlay, QueryStatus},
         profile::import_connection_url,
     };
@@ -5220,6 +5376,146 @@ mod tests {
             result_sets: vec![ResultSet::default()],
             stats: QueryStats::new(Duration::from_millis(2), Duration::from_millis(3), 0),
         }
+    }
+
+    fn connected_query_app(sql: &str) -> (App, Uuid, u64) {
+        let profile = import_connection_url("postgres://localhost/kms", Some("kms"))
+            .unwrap()
+            .profile;
+        let profile_id = profile.id;
+        let mut app = App::new(vec![profile]);
+        app.connection.profile_id = Some(profile_id);
+        app.connection.generation = 1;
+        app.connection.status = ConnectionStatus::Connected;
+        app.connection.target = app.active_console().execution_target.clone();
+        app.update(Action::ReplaceEditor(sql.into()));
+        let mut commands = app.update(Action::RunActiveSql);
+        if commands.is_empty() {
+            app.update(Action::ToggleExecutionConfirmationFocus);
+            commands = app.update(Action::ConfirmExecution);
+        }
+        let (tab_id, generation) = match &commands[0] {
+            Command::RunQuery {
+                tab_id, generation, ..
+            } => (*tab_id, *generation),
+            command => panic!("unexpected command: {command:?}"),
+        };
+        (app, tab_id, generation)
+    }
+
+    #[test]
+    fn query_completion_focuses_data_and_records_execution_details() {
+        let (mut app, tab_id, generation) = connected_query_app("SELECT * FROM tools.sys_user");
+        app.update(Action::QueryFinished {
+            tab_id,
+            generation,
+            connection: app.connection.active_identity().unwrap(),
+            outcome: QueryOutcome {
+                result_sets: vec![ResultSet {
+                    rows: vec![vec![]; 137],
+                    ..ResultSet::default()
+                }],
+                stats: QueryStats::new(Duration::from_millis(21), Duration::from_millis(397), 137),
+            },
+        });
+
+        let tab = app.active_console();
+        assert_eq!(tab.result_view, ResultView::Data);
+        assert!(
+            tab.output
+                .iter()
+                .any(|entry| { entry.message.contains("> SELECT * FROM tools.sys_user") })
+        );
+        assert!(tab.output.iter().any(|entry| {
+            entry
+                .message
+                .contains("137 rows retrieved starting from 1 in 418 ms")
+                && entry.message.contains("execution: 21 ms")
+                && entry.message.contains("fetching: 397 ms")
+        }));
+    }
+
+    #[test]
+    fn query_failure_records_sql_before_database_error() {
+        let (mut app, tab_id, generation) = connected_query_app("SELECT * FROM sys_user1;");
+        app.update(Action::QueryFailed {
+            tab_id,
+            generation,
+            connection: app.connection.active_identity().unwrap(),
+            message: "relation \"sys_user1\" does not exist".into(),
+        });
+
+        let entries = &app.active_console().output;
+        assert_eq!(entries.len(), 2);
+        assert!(entries[0].message.contains("> SELECT * FROM sys_user1;"));
+        assert_eq!(entries[1].message, "relation \"sys_user1\" does not exist");
+    }
+
+    #[test]
+    fn starting_sql_execution_does_not_add_placeholder_output() {
+        let (app, _, _) = connected_query_app("SELECT 1");
+        assert!(
+            app.active_console()
+                .output
+                .iter()
+                .all(|entry| entry.message != "Executing SQL")
+        );
+    }
+
+    #[test]
+    fn non_query_completion_focuses_output_and_appends_execution_details() {
+        let (mut app, tab_id, generation) =
+            connected_query_app("UPDATE tools.sys_user SET enabled = true");
+        let connection = app.connection.active_identity().unwrap();
+        let outcome = QueryOutcome {
+            result_sets: vec![ResultSet {
+                affected_rows: 3,
+                ..ResultSet::default()
+            }],
+            stats: QueryStats::new(Duration::from_millis(9), Duration::ZERO, 0),
+        };
+        app.update(Action::QueryFinished {
+            tab_id,
+            generation,
+            connection,
+            outcome: outcome.clone(),
+        });
+        let first_count = app.active_console().output.len();
+
+        let (tab_id, generation) = {
+            app.update(Action::ReplaceEditor("DELETE FROM tools.sys_user".into()));
+            let mut commands = app.update(Action::RunActiveSql);
+            if commands.is_empty() {
+                app.update(Action::ToggleExecutionConfirmationFocus);
+                commands = app.update(Action::ConfirmExecution);
+            }
+            match &commands[0] {
+                Command::RunQuery {
+                    tab_id, generation, ..
+                } => (*tab_id, *generation),
+                command => panic!("unexpected command: {command:?}"),
+            }
+        };
+        app.update(Action::QueryFinished {
+            tab_id,
+            generation,
+            connection,
+            outcome,
+        });
+
+        let tab = app.active_console();
+        assert_eq!(tab.result_view, ResultView::Output);
+        assert!(tab.output.len() > first_count);
+        assert!(tab.output.iter().any(|entry| {
+            entry
+                .message
+                .contains("> UPDATE tools.sys_user SET enabled = true")
+        }));
+        assert!(tab.output.iter().any(|entry| {
+            entry.message.contains("3 row(s) affected in 9 ms")
+                && entry.message.contains("execution: 9 ms")
+                && entry.message.contains("fetching: 0 ms")
+        }));
     }
 
     fn sql_result_app() -> App {
@@ -5505,6 +5801,51 @@ mod tests {
         assert_eq!(
             app.explorer.normalized.profiles[&second.id].status,
             ExplorerConnectionStatus::Failed
+        );
+    }
+
+    #[test]
+    fn unknown_transaction_outcome_can_exit_without_retrying_database_command() {
+        let profile = import_connection_url("sqlite::memory:", Some("offline"))
+            .unwrap()
+            .profile;
+        let mut app = App::new(vec![profile.clone()]);
+        let connection = ConnectionIdentity {
+            profile_id: profile.id,
+            generation: 1,
+        };
+        app.connection.profile_id = Some(connection.profile_id);
+        app.connection.generation = connection.generation;
+        app.connection.status = ConnectionStatus::Connected;
+        app.connection.target = app.active_console().execution_target.clone();
+        app.active_console_mut().transaction_mode = TransactionMode::Manual;
+        app.active_console_mut().transaction_state = TransactionState::Active;
+
+        app.update(Action::ConnectionInvalidated {
+            connection,
+            message: "connection lost".into(),
+        });
+        assert_eq!(
+            app.active_console().transaction_state,
+            TransactionState::OutcomeUnknown
+        );
+
+        assert!(app.update(Action::Quit).is_empty());
+        assert!(matches!(
+            app.overlay,
+            Some(Overlay::TransactionExitConfirm {
+                choice: TransactionExitChoice::Abandon,
+                ..
+            })
+        ));
+        assert!(matches!(
+            app.update(Action::ConfirmTransactionExit).as_slice(),
+            [Command::Quit]
+        ));
+        assert!(app.should_quit);
+        assert_eq!(
+            app.active_console().transaction_state,
+            TransactionState::Idle
         );
     }
 

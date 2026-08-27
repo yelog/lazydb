@@ -100,6 +100,9 @@ impl Keymap {
             self.pending = None;
             return match event.code {
                 KeyCode::Enter => Some(Action::ConfirmTransactionExit),
+                KeyCode::Char('a') => Some(Action::ConfirmTransactionExitChoice(
+                    crate::model::transaction::TransactionExitChoice::Abandon,
+                )),
                 KeyCode::Char('r') => Some(Action::ConfirmTransactionExitChoice(
                     crate::model::transaction::TransactionExitChoice::Rollback,
                 )),
