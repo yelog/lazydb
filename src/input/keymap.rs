@@ -159,7 +159,10 @@ impl Keymap {
             && started.elapsed() <= SEQUENCE_TIMEOUT
             && focus == app.focus
             && editor_mode == app.active_editor_mode()
-            && app.active_console_opt().is_some_and(|tab| tab_id == tab.id)
+            && app
+                .tabs
+                .get(app.active_tab)
+                .is_some_and(|tab| tab_id == tab.id())
             && let Some(action) = map_pending(pending, event)
         {
             return Some(action);

@@ -65,6 +65,23 @@ fn maps_global_sequences_and_function_keys() {
 }
 
 #[test]
+fn space_n_opens_console_from_explorer_on_relation_tab() {
+    let mut app = App::new(Vec::new());
+    app.tabs.push(lazydb::model::tab::WorkspaceTab::Relation(
+        lazydb::model::relation::RelationTab::new("users"),
+    ));
+    app.active_tab = 1;
+    app.focus = Focus::Explorer;
+    let mut keymap = Keymap::default();
+
+    assert_eq!(keymap.map(key(KeyCode::Char(' ')), &app), None);
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('n')), &app),
+        Some(Action::NewConsole)
+    );
+}
+
+#[test]
 fn maps_scope_picker_navigation_and_toggle() {
     let mut app = App::new(Vec::new());
     app.update(Action::OpenProfileManager);

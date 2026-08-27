@@ -478,7 +478,7 @@ fn render_explorer(
         } else if app.connection.status == ConnectionStatus::Connected {
             "No visible objects"
         } else {
-            "No active connection\n\nPress Space c to create or choose a profile"
+            "No active connection\n\nPress n or Enter to create a profile"
         };
         frame.render_widget(
             Paragraph::new(message)
@@ -1375,6 +1375,9 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, focus: Focus, app: &App, theme
             key_line("h / l", "collapse / expand", theme),
             key_line("o", "toggle expand / collapse", theme),
             key_line("Enter", "open table preview / activate", theme),
+            key_line("n / e / d", "new / edit / delete connection", theme),
+            key_line("c / x", "connect / disconnect", theme),
+            key_line("r", "refresh connection or catalog", theme),
         ]),
         Focus::Editor => lines.extend([
             key_line("i / Esc", "Insert / Normal mode", theme),

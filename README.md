@@ -96,7 +96,7 @@ profile and per current-process session profile. Roots show `SAVED` or `SESSION`
 and `OFFLINE`, `LINKING`, `ONLINE`, `SYNCING`, or `FAILED`; catalog loading,
 stale data, permission failures, and retries are shown below the owning root.
 
-Press `Space c` from any normal-mode workspace to open the manager later. Use
+Press `Space c` from any normal-mode workspace to focus the connection Explorer. Use
 `Test Connection` to validate a draft without persistence or changing the active
 connection. A successful test also discovers databases and schemas for the
 hierarchical scope picker. The picker supports `All` or `Selected` databases
@@ -131,8 +131,8 @@ selects a saved profile by name; if both are supplied, `--url` wins.
 | Context | Keys |
 | --- | --- |
 | Global | `F1` help, `Ctrl-w h/j/k/l` panels, `[t`/`]t` tabs, `Space n` new console, `Q` quit |
-| Profiles | `Space c` open manager; `j/k` or arrows select; `h/l` or left/right change choices; `Tab`/`Shift-Tab` move fields; `Esc` close |
-| Explorer | `j/k` move, `h/l/Enter` collapse/expand, `r` refresh, `p` preview, `D` DDL |
+| Profiles | Explorer `n` create, `e` edit, `c` connect, `x` disconnect, `d` delete; `Tab`/`Shift-Tab` move form fields; `Esc` close |
+| Explorer | `Space c` focus, `j/k` move, `h/l/Enter` collapse/expand, `r` refresh, `p` preview, `D` DDL |
 | Editor Normal | `h/j/k/l`, `i/a/o`, `x`, `0/$`, `F5` scoped run, `Shift-F5` full run |
 | Editor Insert | `Esc` or idle `Ctrl-c` Normal mode, Tab insert, `Ctrl-W/U/H`, arrows, Backspace/Delete |
 | Results | `h/j/k/l` cell movement, `o` switch Data/Output |

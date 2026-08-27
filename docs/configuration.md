@@ -18,7 +18,7 @@ popup. `--profile NAME` selects a saved profile by name at startup. `--url URL`
 creates an ad-hoc session profile for the current process and takes precedence
 over `--profile`; it is never persisted.
 
-`Space c` opens the manager while LazyDB is running. The Explorer keeps roots by
+`Space c` focuses the connection Explorer while LazyDB is running. The Explorer keeps roots by
 profile UUID. Temporary roots are marked `SESSION`; saved roots have no
 provenance label. Connection status is shown with a compact marker, with text
 retained for connecting, syncing, and failed states. Refresh, expand, retry, and relation

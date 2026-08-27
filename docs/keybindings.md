@@ -18,7 +18,7 @@ Editor Normal mode but contextual help outside the editor.
 | `Space n` | New SQL console |
 | `Ctrl-c` | Cancel active query; otherwise leave Insert mode |
 | `Q` | Quit LazyDB in Normal mode |
-| `Space c` | Open the connection Profile Manager |
+| `Space c` | Focus the connection Explorer |
 
 ## Profile Manager
 
@@ -64,6 +64,10 @@ selected driver, and URL applies on Enter, field exit, Test, or Save.
 | `h/l`, left/right | Collapse or expand |
 | `o` | Toggle expansion only |
 | `Enter` | Activate; open the owning table/view preview for relations and descendants |
+| `n` | Create a connection profile |
+| `e` | Edit the selected connection profile |
+| `c`, `x` | Connect/disconnect the selected profile |
+| `d` | Delete the selected connection profile |
 | `r` | Reload catalog |
 | `p` | Open a 500-row table/view preview |
 | `D` | Open available object DDL in a new SQL tab |
