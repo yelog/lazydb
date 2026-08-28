@@ -529,6 +529,60 @@ fn relation_loading_with_previous_snapshot_keeps_data_visible_and_exposes_cancel
 }
 
 #[test]
+fn empty_relation_preview_renders_clean_empty_state() {
+    let mut app = fixture();
+    let connection = app.connection.active_identity().unwrap();
+    let mut outcome = app.active_console().outcome.clone().unwrap();
+    outcome.result_sets[0].rows.clear();
+    let mut relation = RelationTab::new("users");
+    relation.data =
+        lazydb::model::relation::RelationLoad::Ready(lazydb::model::relation::OwnedSnapshot::new(
+            lazydb::db::RelationPreview {
+                sql: "SELECT id, name, active FROM users".into(),
+                result: outcome,
+            },
+            connection,
+            lazydb::profile::CatalogScope::for_profile(DatabaseKind::Sqlite, "db", None),
+        ));
+    app.tabs.push(WorkspaceTab::Relation(relation));
+    app.active_tab = 1;
+    app.focus = Focus::Results;
+
+    let output = render(&app, 120, 36);
+    let header_line = output
+        .lines()
+        .find(|line| line.contains("#│id"))
+        .expect("grid header line");
+    let empty_line = output
+        .lines()
+        .find(|line| line.contains("No rows"))
+        .expect("empty-state line");
+    let header_chars = header_line.chars().collect::<Vec<_>>();
+    let row_number_x = header_chars
+        .iter()
+        .position(|character| *character == '#')
+        .expect("row-number header");
+    let grid_left = header_chars[..row_number_x]
+        .iter()
+        .rposition(|character| *character == '│')
+        .expect("grid left border");
+    let grid_right = header_chars
+        .iter()
+        .rposition(|character| *character == '│')
+        .expect("grid right border");
+    let empty_chars = empty_line.chars().collect::<Vec<_>>();
+
+    assert!(output.contains('─'), "{output}");
+    assert!(empty_line.contains("No rows"), "{output}");
+    assert!(
+        empty_chars[grid_left + 1..grid_right]
+            .iter()
+            .all(|character| !matches!(character, '│' | '▌')),
+        "{output}"
+    );
+}
+
+#[test]
 fn relation_page_renders_data_ddl_selectors_and_relation_layout() {
     let mut app = App::new(Vec::new());
     app.tabs

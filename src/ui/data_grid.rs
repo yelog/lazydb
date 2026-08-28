@@ -1,6 +1,6 @@
 use ratatui::{
     Frame,
-    layout::{Constraint, Rect},
+    layout::{Alignment, Constraint, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Cell, Paragraph, Row, Table, TableState},
@@ -174,15 +174,30 @@ pub(crate) fn render(
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("▌");
-    let selected_column = visible
-        .iter()
-        .position(|index| *index == grid.selected_column)
-        .map_or_else(|| selected_data_cell(0), selected_data_cell);
-    let selected_row = grid.selected_row.saturating_sub(row_offset);
-    let mut table_state =
-        TableState::new().with_selected_cell(Some((selected_row, selected_column)));
+    let selected_cell = (!result.rows.is_empty()).then(|| {
+        let selected_column = visible
+            .iter()
+            .position(|index| *index == grid.selected_column)
+            .map_or_else(|| selected_data_cell(0), selected_data_cell);
+        let selected_row = grid.selected_row.saturating_sub(row_offset);
+        (selected_row, selected_column)
+    });
+    let mut table_state = TableState::new().with_selected_cell(selected_cell);
     frame.render_stateful_widget(table, area, &mut table_state);
     render_header_rule(frame, area, &visible, &widths, number_width, theme);
+    if result.rows.is_empty() && area.height >= 4 {
+        frame.render_widget(
+            Paragraph::new("No rows")
+                .style(Style::new().fg(theme.muted).bg(theme.surface))
+                .alignment(Alignment::Center),
+            Rect::new(
+                area.x.saturating_add(2),
+                area.y.saturating_add(3),
+                area.width.saturating_sub(4),
+                1,
+            ),
+        );
+    }
     if overflow {
         render_scrollbar(
             frame,
