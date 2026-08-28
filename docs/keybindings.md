@@ -70,6 +70,7 @@ selected driver, and URL applies on Enter, field exit, Test, or Save.
 | --- | --- |
 | `j/k`, arrows | Move selection |
 | `Home/End` | First/last visible object |
+| `/` | Open inline catalog search |
 | `h/l`, left/right | Collapse or expand |
 | `o` | Toggle expansion only |
 | `Enter` | Activate; open the owning table/view preview for relations and descendants |
@@ -87,6 +88,13 @@ more...`; `r` refreshes the selected UUID-owned target. A refresh can retain the
 previous page as stale data until the replacement arrives. Late pages whose
 connection identity, catalog epoch, request id, target, or cursor no longer
 matches are ignored.
+
+Inline search queries every actual object in the active connection's configured
+catalog scope, including objects and relation children not loaded in the lazy
+tree. Matching is case-insensitive over names and qualified paths. Type to edit,
+use `j/k`, arrows, `Home/End` to select, `Enter` to locate and retain a hit in the
+normal tree, `Esc` to close, `Backspace` to delete, and `Ctrl-U` to clear. Failed
+searches use `r` to retry. Results are limited to 100; refine a truncated search.
 
 ## SQL Editor
 

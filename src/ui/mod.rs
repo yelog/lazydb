@@ -519,6 +519,10 @@ fn render_explorer(
     let block = panel_block(" EXPLORER ", app.focus == Focus::Explorer, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    if let Some(search) = app.explorer.search.as_ref() {
+        render_explorer_search(frame, inner, search, theme, icons);
+        return;
+    }
     let visible = app.explorer.visible();
     if visible.is_empty() {
         let message = if app.connection.status == ConnectionStatus::Connecting {
@@ -654,6 +658,168 @@ fn render_explorer(
         List::new(items).style(Style::new().bg(theme.surface)),
         inner,
     );
+}
+
+fn render_explorer_search(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    search: &crate::model::workspace::ExplorerSearchState,
+    theme: Theme,
+    icons: icons::IconSet,
+) {
+    if area.is_empty() {
+        return;
+    }
+    let input = format!("/ {}", sanitize_terminal_text(&search.query));
+    frame.render_widget(
+        Paragraph::new(input.clone()).style(
+            Style::new()
+                .fg(theme.action)
+                .bg(theme.surface)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+    frame.set_cursor_position(Position::new(
+        area.x
+            .saturating_add(explorer_search_cursor_column(&input, area.width)),
+        area.y,
+    ));
+
+    let result_height = area.height.saturating_sub(2) as usize;
+    let start = search
+        .scroll
+        .max(
+            search
+                .selected
+                .saturating_sub(result_height.saturating_sub(1)),
+        )
+        .min(search.hits.len().saturating_sub(1));
+    let items = search
+        .hits
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(result_height)
+        .map(|(index, hit)| {
+            let selected = index == search.selected;
+            let located = search.located.as_ref() == Some(&hit.entry.id);
+            let background = if selected {
+                theme.selection
+            } else {
+                theme.surface
+            };
+            let primary = if selected { theme.accent } else { theme.text };
+            let name = sanitize_terminal_text(&hit.entry.qualified_name.object);
+            let path = sanitize_terminal_text(&hit.qualified_path());
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    if located {
+                        "* "
+                    } else if selected {
+                        "> "
+                    } else {
+                        "  "
+                    },
+                    Style::new().fg(theme.action).bg(background),
+                ),
+                Span::styled(
+                    format!("{} ", icons.catalog(hit.entry.kind)),
+                    Style::new()
+                        .fg(kind_color(hit.entry.kind, theme))
+                        .bg(background),
+                ),
+                Span::styled(
+                    name,
+                    Style::new()
+                        .fg(primary)
+                        .bg(background)
+                        .add_modifier(if selected {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                ),
+                Span::styled(
+                    format!("  {path}"),
+                    Style::new().fg(theme.muted).bg(background),
+                ),
+            ]))
+        })
+        .collect::<Vec<_>>();
+    if !items.is_empty() {
+        frame.render_widget(
+            List::new(items).style(Style::new().bg(theme.surface)),
+            Rect::new(
+                area.x,
+                area.y.saturating_add(1),
+                area.width,
+                result_height as u16,
+            ),
+        );
+    } else if result_height > 0 {
+        let message = match &search.lifecycle {
+            crate::model::workspace::ExplorerSearchLifecycle::Idle => {
+                "Type to search all objects".to_owned()
+            }
+            crate::model::workspace::ExplorerSearchLifecycle::Loading => "Searching...".to_owned(),
+            crate::model::workspace::ExplorerSearchLifecycle::Ready => {
+                format!(
+                    "No objects match \"{}\"",
+                    sanitize_terminal_text(&search.query)
+                )
+            }
+            crate::model::workspace::ExplorerSearchLifecycle::Failed(message) => {
+                format!("{}  Ctrl+R retry", sanitize_terminal_text(message))
+            }
+        };
+        frame.render_widget(
+            Paragraph::new(message)
+                .style(Style::new().fg(theme.muted).bg(theme.surface))
+                .wrap(Wrap { trim: true }),
+            Rect::new(
+                area.x,
+                area.y.saturating_add(1),
+                area.width,
+                result_height as u16,
+            ),
+        );
+    }
+
+    if area.height > 1 {
+        let status = match &search.lifecycle {
+            crate::model::workspace::ExplorerSearchLifecycle::Loading => "Searching...".to_owned(),
+            crate::model::workspace::ExplorerSearchLifecycle::Failed(message) => {
+                if search.hits.is_empty() {
+                    format!(
+                        "Search failed: {}  Ctrl+R retry",
+                        sanitize_terminal_text(message)
+                    )
+                } else {
+                    format!(
+                        "{} retained | {}",
+                        search.hits.len(),
+                        sanitize_terminal_text(message)
+                    )
+                }
+            }
+            _ if search.truncated => {
+                format!("{}+ results - refine your search", search.hits.len())
+            }
+            _ => format!(
+                "{} results  Enter locate  Esc close",
+                search.total_count.unwrap_or(search.hits.len())
+            ),
+        };
+        frame.render_widget(
+            Paragraph::new(status).style(Style::new().fg(theme.muted).bg(theme.surface)),
+            Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
+        );
+    }
+}
+
+fn explorer_search_cursor_column(input: &str, width: u16) -> u16 {
+    input.cell_width().min(width.saturating_sub(1))
 }
 
 fn render_editor(
@@ -1562,6 +1728,12 @@ fn contains(area: Rect, column: u16, row: u16) -> bool {
 #[cfg(test)]
 mod completion_popup_tests {
     use super::*;
+
+    #[test]
+    fn explorer_search_cursor_uses_terminal_cell_width() {
+        assert_eq!(explorer_search_cursor_column("/ 界", 20), 4);
+        assert_eq!(explorer_search_cursor_column("/ 界", 4), 3);
+    }
 
     #[test]
     fn places_popup_below_the_cursor_when_it_fits() {

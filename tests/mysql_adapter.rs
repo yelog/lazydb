@@ -7,8 +7,9 @@ use lazydb::{
         catalog::{
             CatalogCapabilities, CatalogCompleteness, CatalogCount, CatalogCursor, CatalogEntry,
             CatalogId, CatalogKind, CatalogMetadata, CatalogRequest, CatalogRequestKey,
-            CatalogTarget, ColumnMetadata, ColumnMetadataCapabilities, ConstraintMembership,
-            ConstraintMetadata, IndexMetadata, NamespaceModel, ObjectGroup, OptionalMetadata,
+            CatalogSearchRequest, CatalogTarget, ColumnMetadata, ColumnMetadataCapabilities,
+            ConstraintMembership, ConstraintMetadata, IndexMetadata, NamespaceModel, ObjectGroup,
+            OptionalMetadata,
         },
         mysql::{self, MySqlAdapter},
         value::CellValue,
@@ -72,6 +73,27 @@ fn quotes_mysql_identifiers_and_uses_information_schema() {
         mysql::CATALOG_PAGE_BEGIN_SQL.find("WITH CONSISTENT SNAPSHOT")
             < mysql::CATALOG_PAGE_BEGIN_SQL.find("READ ONLY")
     );
+}
+
+#[test]
+fn mysql_catalog_search_sql_pushes_literal_matching_ranking_scope_and_bound() {
+    let sql = mysql::CATALOG_SEARCH_CANDIDATES_SQL;
+    assert!(sql.contains("information_schema.schemata"));
+    assert!(sql.contains("information_schema.tables"));
+    assert!(sql.contains("information_schema.routines"));
+    assert!(sql.contains("information_schema.triggers"));
+    assert!(sql.contains("information_schema.columns"));
+    assert!(sql.contains("information_schema.statistics"));
+    assert!(sql.contains("information_schema.table_constraints"));
+    assert!(sql.contains("{scope_predicate}"));
+    assert!(sql.contains("LOCATE(LOWER(?), LOWER(object_name))"));
+    assert!(sql.contains("LOCATE(LOWER(?), LOWER(qualified_path))"));
+    assert!(sql.contains("WHEN LOWER(object_name)=LOWER(?) THEN 0"));
+    assert!(sql.contains("LIMIT 101"));
+    assert!(!sql.to_ascii_lowercase().contains(" like "));
+    for unsupported in ["materialized", "sequence", "check_constraint", "type'"] {
+        assert!(!sql.to_ascii_lowercase().contains(unsupported));
+    }
 }
 
 #[test]
@@ -256,14 +278,10 @@ async fn catalog_page_exposes_scoped_mysql_objects_and_rich_metadata_when_config
     let selected_database = database_fixture
         .selected_database(&requested_database)
         .to_owned();
-    let prefix = if database_fixture.created_databases() {
-        String::new()
-    } else {
-        format!("lazydb_{suffix}_")
-    };
+    let prefix = format!("lazydb_{suffix}_");
     let parent = format!("{prefix}parent");
     let child = format!("{prefix}child");
-    let second = format!("{prefix}second");
+    let second = format!("{prefix}literal%second");
     let view = format!("{prefix}child_view");
     let function = format!("{prefix}do_work");
     let procedure = format!("{prefix}run_work");
@@ -586,6 +604,94 @@ async fn catalog_page_exposes_scoped_mysql_objects_and_rich_metadata_when_config
 
         let repeated = database.load_catalog_page(&catalog_request(profile_id, children_target, scope.clone(), 100, None, 71)).await.unwrap();
         assert_eq!(children.entries.iter().map(|entry| &entry.id).collect::<Vec<_>>(), repeated.entries.iter().map(|entry| &entry.id).collect::<Vec<_>>());
+
+        let DatabaseConnection::MySql(adapter) = &database else {
+            unreachable!("MySQL fixture returned another adapter")
+        };
+        let search_request = CatalogSearchRequest {
+            connection: ConnectionIdentity { profile_id, generation: 7 },
+            session_id: 11,
+            generation: 13,
+            query: prefix.clone(),
+            scope: scope.clone(),
+            limit: 100,
+        };
+        let search = adapter.search_catalog(&search_request).await.unwrap();
+        search.validate_for(&search_request).unwrap();
+        assert_eq!(search.connection, search_request.connection);
+        assert_eq!(search.session_id, 11);
+        assert_eq!(search.generation, 13);
+        assert_eq!(search.total_count, None);
+        for kind in [
+            CatalogKind::Table,
+            CatalogKind::View,
+            CatalogKind::Function,
+            CatalogKind::Procedure,
+            CatalogKind::Trigger,
+            CatalogKind::Column,
+            CatalogKind::Index,
+            CatalogKind::PrimaryKey,
+            CatalogKind::UniqueConstraint,
+            CatalogKind::ForeignKey,
+        ] {
+            assert!(search.hits.iter().any(|hit| hit.entry.kind == kind), "missing search kind {kind:?}");
+        }
+        let trigger_hit = search.hits.iter().find(|hit| hit.entry.kind == CatalogKind::Trigger).unwrap();
+        assert_eq!(trigger_hit.entry.parent_id.as_ref(), Some(&schema_id));
+        assert_eq!(trigger_hit.ancestors.len(), 3);
+        assert_eq!(trigger_hit.ancestors[2].id, *trigger_hit.entry.relation_id.as_ref().unwrap());
+        let routine_hit = search.hits.iter().find(|hit| hit.entry.kind == CatalogKind::Function).unwrap();
+        assert_eq!(routine_hit.entry.id.native_path.len(), 4);
+        let child_hit = search.hits.iter().find(|hit| hit.entry.kind == CatalogKind::Column).unwrap();
+        assert!(!matches!(child_hit.entry.metadata, CatalogMetadata::None));
+        assert_eq!(child_hit.ancestors.len(), 3);
+
+        let namespace_request = CatalogSearchRequest {
+            query: selected_database.to_ascii_uppercase(),
+            ..search_request.clone()
+        };
+        let namespaces = adapter.search_catalog(&namespace_request).await.unwrap();
+        let namespace_hits = namespaces
+            .hits
+            .iter()
+            .filter(|hit| matches!(hit.entry.kind, CatalogKind::Database | CatalogKind::Schema))
+            .collect::<Vec<_>>();
+        assert_eq!(namespace_hits.len(), 2);
+        assert_eq!(namespace_hits[0].entry.kind, CatalogKind::Database);
+        assert_eq!(namespace_hits[1].entry.kind, CatalogKind::Schema);
+        assert_eq!(namespace_hits[0].qualified_path(), selected_database);
+        assert_eq!(namespace_hits[1].qualified_path(), selected_database);
+        assert_ne!(namespace_hits[0].entry.id, namespace_hits[1].entry.id);
+        if database_fixture.created_databases() {
+            let excluded_request = CatalogSearchRequest {
+                query: excluded_database.clone(),
+                ..search_request.clone()
+            };
+            assert!(adapter.search_catalog(&excluded_request).await.unwrap().hits.is_empty());
+        }
+
+        let literal_request = CatalogSearchRequest {
+            query: "%second".to_owned(),
+            limit: 100,
+            ..search_request.clone()
+        };
+        let literal = adapter.search_catalog(&literal_request).await.unwrap();
+        assert!(!literal.hits.is_empty());
+        assert!(literal.hits.iter().all(|hit| hit.qualified_path().to_lowercase().contains("%second")));
+        assert!(literal.hits.iter().any(|hit| hit.entry.qualified_name.object == second));
+
+        let limited_request = CatalogSearchRequest { limit: 1, ..search_request.clone() };
+        let limited = adapter.search_catalog(&limited_request).await.unwrap();
+        assert_eq!(limited.hits.len(), 1);
+        assert!(limited.truncated);
+        assert_eq!(limited.hits[0].entry.kind, CatalogKind::Table);
+
+        let wrong_profile = CatalogSearchRequest {
+            connection: ConnectionIdentity { profile_id: Uuid::new_v4(), generation: 7 },
+            ..search_request.clone()
+        };
+        let error = adapter.search_catalog(&wrong_profile).await.unwrap_err();
+        assert_eq!(error.code.as_deref(), Some("invalid_catalog_request"));
 
         let wrong_case = selected_database.to_ascii_uppercase();
         // Mode 0 is the only mode where wrong-case rejection reflects server lookup truth.

@@ -4,10 +4,10 @@ use lazydb::{
         catalog::{
             CatalogCapabilities, CatalogCompleteness, CatalogCount, CatalogCursor, CatalogEntry,
             CatalogGroupSummary, CatalogId, CatalogKind, CatalogMetadata, CatalogPage,
-            CatalogRequest, CatalogRequestKey, CatalogTarget, ColumnMetadata,
-            ColumnMetadataCapabilities, ConstraintMembership, ConstraintMetadata, IndexMetadata,
-            MAX_CATALOG_PAGE_SIZE, NamespaceModel, ObjectGroup, OptionalMetadata, QualifiedName,
-            finalize_keyset_page,
+            CatalogRequest, CatalogRequestKey, CatalogSearchHit, CatalogSearchPage,
+            CatalogSearchRequest, CatalogTarget, ColumnMetadata, ColumnMetadataCapabilities,
+            ConstraintMembership, ConstraintMetadata, IndexMetadata, MAX_CATALOG_PAGE_SIZE,
+            NamespaceModel, ObjectGroup, OptionalMetadata, QualifiedName, finalize_keyset_page,
         },
     },
     identity::ConnectionIdentity,
@@ -52,6 +52,146 @@ fn identical_native_paths_are_profile_scoped() {
     let second = CatalogId::new(Uuid::new_v4(), CatalogKind::Table, path);
 
     assert_ne!(first, second);
+}
+
+#[test]
+fn catalog_search_contract_validates_identity_limits_and_ancestors() {
+    let profile_id = Uuid::new_v4();
+    let connection = ConnectionIdentity {
+        profile_id,
+        generation: 7,
+    };
+    let scope = CatalogScope::for_profile(DatabaseKind::Sqlite, "app", Some("main"));
+    let request = CatalogSearchRequest {
+        connection,
+        session_id: 1,
+        generation: 3,
+        query: "users".into(),
+        scope: scope.clone(),
+        limit: 100,
+    };
+    assert!(request.validate().is_ok());
+
+    let database = CatalogEntry::database(
+        CatalogId::new(profile_id, CatalogKind::Database, ["app"]),
+        QualifiedName {
+            database: Some("app".into()),
+            schema: None,
+            object: "app".into(),
+        },
+        "database",
+        OptionalMetadata::Unsupported,
+        true,
+    )
+    .unwrap();
+    let schema = CatalogEntry::schema(
+        CatalogId::new(profile_id, CatalogKind::Schema, ["app", "main"]),
+        database.id.clone(),
+        QualifiedName {
+            database: Some("app".into()),
+            schema: Some("main".into()),
+            object: "main".into(),
+        },
+        "schema",
+        OptionalMetadata::Unsupported,
+        true,
+    )
+    .unwrap();
+    let table = CatalogEntry::relation(
+        CatalogId::new(profile_id, CatalogKind::Table, ["app", "main", "users"]),
+        schema.id.clone(),
+        QualifiedName {
+            database: Some("app".into()),
+            schema: Some("main".into()),
+            object: "users".into(),
+        },
+        "table",
+        OptionalMetadata::Unsupported,
+        true,
+    )
+    .unwrap();
+    let hit = CatalogSearchHit {
+        entry: table,
+        ancestors: vec![database, schema],
+    };
+    let page = CatalogSearchPage::new(&request, vec![hit], Some(1), false).unwrap();
+    assert_eq!(page.connection, connection);
+    assert_eq!(page.generation, 3);
+
+    let mut stale = request.clone();
+    stale.generation += 1;
+    assert!(page.validate_for(&stale).is_err());
+    let mut empty = request.clone();
+    empty.query.clear();
+    assert!(empty.validate().is_err());
+    let mut excessive = request;
+    excessive.limit = 101;
+    assert!(excessive.validate().is_err());
+}
+
+#[test]
+fn catalog_search_page_rejects_duplicate_ids_and_inconsistent_counts() {
+    let profile_id = Uuid::new_v4();
+    let connection = ConnectionIdentity {
+        profile_id,
+        generation: 1,
+    };
+    let request = CatalogSearchRequest {
+        connection,
+        session_id: 1,
+        generation: 1,
+        query: "users".into(),
+        scope: CatalogScope::for_profile(DatabaseKind::Sqlite, "app", Some("main")),
+        limit: 10,
+    };
+    let database = CatalogEntry::database(
+        CatalogId::new(profile_id, CatalogKind::Database, ["app"]),
+        QualifiedName {
+            database: Some("app".into()),
+            schema: None,
+            object: "app".into(),
+        },
+        "database",
+        OptionalMetadata::Unsupported,
+        true,
+    )
+    .unwrap();
+    let schema = CatalogEntry::schema(
+        CatalogId::new(profile_id, CatalogKind::Schema, ["app", "main"]),
+        database.id.clone(),
+        QualifiedName {
+            database: Some("app".into()),
+            schema: Some("main".into()),
+            object: "main".into(),
+        },
+        "schema",
+        OptionalMetadata::Unsupported,
+        true,
+    )
+    .unwrap();
+    let table = CatalogEntry::relation(
+        CatalogId::new(profile_id, CatalogKind::Table, ["app", "main", "users"]),
+        schema.id.clone(),
+        QualifiedName {
+            database: Some("app".into()),
+            schema: Some("main".into()),
+            object: "users".into(),
+        },
+        "table",
+        OptionalMetadata::Unsupported,
+        true,
+    )
+    .unwrap();
+    let hit = CatalogSearchHit {
+        entry: table,
+        ancestors: vec![database, schema],
+    };
+
+    assert!(
+        CatalogSearchPage::new(&request, vec![hit.clone(), hit.clone()], Some(2), false).is_err()
+    );
+    assert!(CatalogSearchPage::new(&request, vec![hit.clone()], Some(0), false).is_err());
+    assert!(CatalogSearchPage::new(&request, vec![hit], Some(1), true).is_err());
 }
 
 #[test]

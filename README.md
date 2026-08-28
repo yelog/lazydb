@@ -31,8 +31,9 @@ integration.
 - Password storage with Local Encrypted as the cross-platform default, plus
   detected macOS Login Keychain or Linux Secret Service support.
 - UUID-owned Explorer roots for saved and session-only profiles, lazy catalog
-  loading, object tree refresh, relation Data/Structure tabs, table/view preview
-  with an adapter-owned 500-row limit, and DDL in a new tab.
+  loading, server-backed `/` search across unloaded objects and relation children,
+  object tree refresh, relation Data/Structure tabs, table/view preview with an
+  adapter-owned 500-row limit, and DDL in a new tab.
 - Responsive 80-column focus mode, standard split layout, truecolor theme,
   contextual help, bounded TachyonFX transitions, and mouse hit regions.
 - A thin `lazydb.nvim` floating-terminal plugin with one process per Neovim tab.
@@ -148,7 +149,7 @@ selects a saved profile by name; if both are supplied, `--url` wins.
 | --- | --- |
 | Global | `F1` help, `Ctrl-w h/j/k/l` panels, `[t`/`]t` tabs, `Space n` new console, `Q` quit |
 | Profiles | Explorer `n` create, `e` edit, `c` connect, `x` disconnect, `d` delete; `Tab`/`Shift-Tab` move form fields; `Esc` close |
-| Explorer | `Space c` focus, `j/k` move, `h/l/Enter` collapse/expand, `r` refresh, `p` preview, `D` DDL |
+| Explorer | `Space c` focus, `/` catalog search, `j/k` move, `h/l/Enter` collapse/expand, `r` refresh, `p` preview, `D` DDL |
 | Editor Normal | `h/j/k/l`, `i/a/o`, `x`, `0/$`, `F5` scoped run, `Shift-F5` full run |
 | Editor Insert | `Esc` or idle `Ctrl-c` Normal mode, Tab insert, `Ctrl-W/U/H`, arrows, Backspace/Delete |
 | Results | `h/j/k/l` cell movement, `o` switch Data/Output |

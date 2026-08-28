@@ -27,10 +27,10 @@ use super::{
     catalog::{
         CatalogCapabilities, CatalogCount, CatalogDiscovery, CatalogEntry, CatalogGroupSummary,
         CatalogId, CatalogKind, CatalogMetadata, CatalogPage, CatalogRequest, CatalogRequestKey,
-        CatalogTarget, CatalogValidationError, ColumnMetadata, ColumnMetadataCapabilities,
-        ConstraintMembership, ConstraintMetadata, Ddl, DdlProvenance, DiscoveredDatabase,
-        IndexMetadata, NamespaceModel, ObjectGroup, OptionalMetadata, QualifiedName,
-        RelationStructure, finalize_keyset_page,
+        CatalogSearchHit, CatalogSearchPage, CatalogSearchRequest, CatalogTarget,
+        CatalogValidationError, ColumnMetadata, ColumnMetadataCapabilities, ConstraintMembership,
+        ConstraintMetadata, Ddl, DdlProvenance, DiscoveredDatabase, IndexMetadata, NamespaceModel,
+        ObjectGroup, OptionalMetadata, QualifiedName, RelationStructure, finalize_keyset_page,
     },
     mutation::{InputValue, MutationResult, RelationMutation, RelationMutationRequest},
     query::{ColumnMeta, QueryOutcome, QueryOutcomeAccumulator, RELATION_PREVIEW_LIMIT, ResultSet},
@@ -70,6 +70,70 @@ const PROBE_SQL: &str = "SELECT VERSION() AS version, DATABASE() AS current_data
 
 pub const CATALOG_PAGE_BEGIN_SQL: &str = "START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY";
 
+pub const CATALOG_SEARCH_CANDIDATES_SQL: &str = r#"
+WITH candidates AS (
+    SELECT 'database' AS kind, schema_name AS database_name, schema_name AS object_name,
+           NULL AS relation_name, NULL AS relation_type, schema_name AS native_identity,
+           schema_name AS qualified_path, NULL AS comment
+    FROM information_schema.schemata
+    WHERE schema_name NOT IN ('information_schema','mysql','performance_schema','sys')
+    UNION ALL
+    SELECT 'schema', schema_name, schema_name, NULL, NULL, schema_name, schema_name, NULL
+    FROM information_schema.schemata
+    WHERE schema_name NOT IN ('information_schema','mysql','performance_schema','sys')
+    UNION ALL
+    SELECT IF(table_type='VIEW','view','table'), table_schema, table_name, table_name, table_type,
+           table_name, CONCAT(table_schema,'.',table_name), table_comment
+    FROM information_schema.tables WHERE table_type IN ('BASE TABLE','VIEW')
+    UNION ALL
+    SELECT LOWER(routine_type), routine_schema, routine_name, NULL, NULL, specific_name,
+           CONCAT(routine_schema,'.',routine_name), routine_comment
+    FROM information_schema.routines WHERE routine_type IN ('FUNCTION','PROCEDURE')
+    UNION ALL
+    SELECT 'trigger', tr.trigger_schema, tr.trigger_name, tr.event_object_table, t.table_type,
+           tr.trigger_name, CONCAT(tr.trigger_schema,'.',tr.event_object_table,'.',tr.trigger_name), NULL
+    FROM information_schema.triggers tr JOIN information_schema.tables t
+      ON BINARY t.table_schema=BINARY tr.event_object_schema
+     AND BINARY t.table_name=BINARY tr.event_object_table
+     AND t.table_type IN ('BASE TABLE','VIEW')
+    UNION ALL
+    SELECT 'column', c.table_schema, c.column_name, c.table_name, t.table_type,
+           CAST(c.ordinal_position AS CHAR), CONCAT(c.table_schema,'.',c.table_name,'.',c.column_name), NULL
+    FROM information_schema.columns c JOIN information_schema.tables t
+      ON BINARY t.table_schema=BINARY c.table_schema AND BINARY t.table_name=BINARY c.table_name
+     AND t.table_type IN ('BASE TABLE','VIEW')
+    UNION ALL
+    SELECT 'index', s.table_schema, s.index_name, s.table_name, t.table_type, s.index_name,
+           CONCAT(s.table_schema,'.',s.table_name,'.',s.index_name), NULL
+    FROM information_schema.statistics s JOIN information_schema.tables t
+      ON BINARY t.table_schema=BINARY s.table_schema AND BINARY t.table_name=BINARY s.table_name
+     AND t.table_type IN ('BASE TABLE','VIEW')
+    GROUP BY s.table_schema, s.table_name, s.index_name, t.table_type
+    UNION ALL
+    SELECT CASE constraint_type WHEN 'PRIMARY KEY' THEN 'primary_key'
+               WHEN 'UNIQUE' THEN 'unique_constraint' ELSE 'foreign_key' END,
+           tc.table_schema, tc.constraint_name, tc.table_name, t.table_type, tc.constraint_name,
+           CONCAT(tc.table_schema,'.',tc.table_name,'.',tc.constraint_name), NULL
+    FROM information_schema.table_constraints tc JOIN information_schema.tables t
+      ON BINARY t.table_schema=BINARY tc.table_schema AND BINARY t.table_name=BINARY tc.table_name
+     AND t.table_type IN ('BASE TABLE','VIEW')
+    WHERE tc.constraint_type IN ('PRIMARY KEY','UNIQUE','FOREIGN KEY')
+)
+SELECT kind, database_name, object_name, relation_name, relation_type, native_identity, comment
+FROM candidates
+WHERE {scope_predicate}
+  AND database_name NOT IN ('information_schema','mysql','performance_schema','sys')
+  AND (LOCATE(LOWER(?), LOWER(object_name)) > 0
+       OR LOCATE(LOWER(?), LOWER(qualified_path)) > 0)
+ORDER BY CASE
+    WHEN LOWER(object_name)=LOWER(?) THEN 0
+    WHEN LOCATE(LOWER(?), LOWER(object_name))=1 THEN 1
+    WHEN LOCATE(LOWER(?), LOWER(object_name))>0 THEN 2
+    ELSE 3 END,
+    LOWER(qualified_path), kind, BINARY native_identity
+LIMIT 101
+"#;
+
 pub const CATALOG_DATABASES_SQL: &str = r#"
 SELECT schema_name
 FROM information_schema.schemata
@@ -82,6 +146,54 @@ pub struct MySqlAdapter {
     pool: MySqlPool,
     connection_id: Uuid,
     catalog_scope: CatalogScope,
+}
+
+#[derive(Debug)]
+struct MySqlSearchCandidate {
+    kind: CatalogKind,
+    database: String,
+    name: String,
+    relation_name: Option<String>,
+    relation_type: Option<String>,
+    native_identity: String,
+    comment: Option<String>,
+}
+
+#[derive(Debug)]
+struct MySqlHydratedRelation {
+    entry: CatalogEntry,
+    children: Option<Vec<CatalogEntry>>,
+}
+
+impl MySqlSearchCandidate {
+    fn try_from_row(row: MySqlRow) -> Result<Self, DatabaseError> {
+        let native_kind: String = row.try_get("kind").map_err(decode_error)?;
+        Ok(Self {
+            kind: search_catalog_kind(&native_kind)?,
+            database: row.try_get("database_name").map_err(decode_error)?,
+            name: row.try_get("object_name").map_err(decode_error)?,
+            relation_name: row.try_get("relation_name").map_err(decode_error)?,
+            relation_type: row.try_get("relation_type").map_err(decode_error)?,
+            native_identity: row.try_get("native_identity").map_err(decode_error)?,
+            comment: row.try_get("comment").map_err(decode_error)?,
+        })
+    }
+
+    fn id(&self, connection_id: Uuid) -> CatalogId {
+        let mut path = match self.kind {
+            CatalogKind::Database => vec![self.database.clone()],
+            CatalogKind::Schema => vec![self.database.clone(), self.database.clone()],
+            _ => vec![
+                self.database.clone(),
+                self.database.clone(),
+                self.name.clone(),
+            ],
+        };
+        if matches!(self.kind, CatalogKind::Function | CatalogKind::Procedure) {
+            path.push(self.native_identity.clone());
+        }
+        CatalogId::new(connection_id, self.kind, path)
+    }
 }
 
 impl MySqlAdapter {
@@ -285,13 +397,7 @@ impl MySqlAdapter {
             .await
             .map_err(sql_error)?;
         if !supports_catalog_version(&version) {
-            return Err(DatabaseError {
-                category: ErrorCategory::Unsupported,
-                code: Some("mysql_catalog_version_unsupported".to_owned()),
-                message: sanitize_terminal_text(&format!(
-                    "MySQL catalog pages require Oracle MySQL 8.0.13 or newer; server reported {version}"
-                )),
-            });
+            return Err(unsupported_catalog_version(&version));
         }
         let mut transaction = connection
             .begin_with(CATALOG_PAGE_BEGIN_SQL)
@@ -346,6 +452,279 @@ impl MySqlAdapter {
                 Err(page_error)
             }
         }
+    }
+
+    pub async fn search_catalog(
+        &self,
+        request: &CatalogSearchRequest,
+    ) -> Result<CatalogSearchPage, DatabaseError> {
+        request
+            .validate()
+            .map_err(DatabaseError::invalid_catalog_request)?;
+        if request.connection.profile_id != self.connection_id {
+            return Err(DatabaseError::invalid_catalog_request(
+                CatalogValidationError::ProfileMismatch {
+                    child_profile_id: request.connection.profile_id,
+                    parent_profile_id: self.connection_id,
+                },
+            ));
+        }
+        validate_catalog_scope(&request.scope)?;
+
+        let mut connection = self.pool.acquire().await.map_err(sql_error)?;
+        let version: String = sqlx::query_scalar("SELECT VERSION()")
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(sql_error)?;
+        if !supports_catalog_version(&version) {
+            return Err(unsupported_catalog_version(&version));
+        }
+        let mut transaction = connection
+            .begin_with(CATALOG_PAGE_BEGIN_SQL)
+            .await
+            .map_err(sql_error)?;
+        let lower_case_table_names: i64 = sqlx::query_scalar("SELECT @@lower_case_table_names")
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(sql_error)?;
+        if !(0..=2).contains(&lower_case_table_names) {
+            return Err(catalog_internal(format!(
+                "MySQL returned unsupported lower_case_table_names value {lower_case_table_names}"
+            )));
+        }
+        let result = self
+            .search_catalog_snapshot(&mut transaction, request)
+            .await;
+        match result {
+            Ok(page) => {
+                transaction.commit().await.map_err(sql_error)?;
+                Ok(page)
+            }
+            Err(error) => {
+                let _ = transaction.rollback().await;
+                Err(error)
+            }
+        }
+    }
+
+    async fn search_catalog_snapshot(
+        &self,
+        connection: &mut MySqlConnection,
+        request: &CatalogSearchRequest,
+    ) -> Result<CatalogSearchPage, DatabaseError> {
+        let selected = selected_search_databases(&request.scope);
+        let scope_predicate = selected
+            .as_ref()
+            .map(|databases| {
+                if databases.is_empty() {
+                    "FALSE".to_owned()
+                } else {
+                    format!(
+                        "BINARY database_name IN ({})",
+                        placeholders(databases.len())
+                    )
+                }
+            })
+            .unwrap_or_else(|| "TRUE".to_owned());
+        let sql = CATALOG_SEARCH_CANDIDATES_SQL.replace("{scope_predicate}", &scope_predicate);
+        let mut query = sqlx::query(AssertSqlSafe(sql));
+        if let Some(databases) = selected.as_ref() {
+            for database in databases {
+                query = query.bind(database);
+            }
+        }
+        for _ in 0..5 {
+            query = query.bind(&request.query);
+        }
+        let rows = query.fetch_all(&mut *connection).await.map_err(sql_error)?;
+        let candidates = rows
+            .into_iter()
+            .map(MySqlSearchCandidate::try_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut relation_cache = HashMap::<(String, String), MySqlHydratedRelation>::new();
+        for candidate in &candidates {
+            if !candidate.kind.is_relation_child() && candidate.kind != CatalogKind::Trigger {
+                continue;
+            }
+            let relation_name = candidate
+                .relation_name
+                .as_ref()
+                .ok_or_else(|| catalog_internal("MySQL search candidate has no owner"))?;
+            let key = (candidate.database.clone(), relation_name.clone());
+            if let Some(relation) = relation_cache.get(&key) {
+                if candidate.kind.is_relation_child() && relation.children.is_none() {
+                    let loaded = self
+                        .load_relation_children(
+                            connection,
+                            &candidate.database,
+                            relation_name,
+                            &relation.entry.id,
+                        )
+                        .await?;
+                    relation_cache
+                        .get_mut(&key)
+                        .expect("cached relation")
+                        .children = Some(loaded);
+                }
+                continue;
+            }
+            let relation = self.relation_entry(
+                &candidate.database,
+                relation_name,
+                candidate.relation_type.as_deref(),
+                None,
+            )?;
+            let children = if candidate.kind.is_relation_child() {
+                Some(
+                    self.load_relation_children(
+                        connection,
+                        &candidate.database,
+                        relation_name,
+                        &relation.id,
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            };
+            relation_cache.insert(
+                key,
+                MySqlHydratedRelation {
+                    entry: relation,
+                    children,
+                },
+            );
+        }
+
+        let mut hits = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            hits.push(self.hydrate_search_candidate(candidate, &relation_cache)?);
+        }
+        hits.dedup_by(|left, right| left.entry.id == right.entry.id);
+        let truncated = hits.len() > request.limit;
+        hits.truncate(request.limit);
+        CatalogSearchPage::new(request, hits, None, truncated)
+            .map_err(DatabaseError::invalid_catalog_request)
+    }
+
+    fn hydrate_search_candidate(
+        &self,
+        candidate: MySqlSearchCandidate,
+        relation_cache: &HashMap<(String, String), MySqlHydratedRelation>,
+    ) -> Result<CatalogSearchHit, DatabaseError> {
+        let database = self.database_entry(&candidate.database)?;
+        if candidate.kind == CatalogKind::Database {
+            return Ok(CatalogSearchHit {
+                entry: database,
+                ancestors: Vec::new(),
+            });
+        }
+        let schema = self.schema_entry(&candidate.database)?;
+        let mut ancestors = vec![database, schema.clone()];
+        let entry = if candidate.kind == CatalogKind::Schema {
+            ancestors.pop();
+            schema
+        } else if candidate.kind.is_relation() {
+            self.relation_entry(
+                &candidate.database,
+                &candidate.name,
+                candidate.relation_type.as_deref(),
+                candidate.comment,
+            )?
+        } else if let Some(relation_name) = candidate.relation_name.as_ref() {
+            let relation = relation_cache
+                .get(&(candidate.database.clone(), relation_name.clone()))
+                .ok_or_else(|| catalog_internal("MySQL search relation was not hydrated"))?;
+            if candidate.kind == CatalogKind::Trigger {
+                ancestors.push(relation.entry.clone());
+                CatalogEntry::relation_object(
+                    candidate.id(self.connection_id),
+                    schema.id,
+                    relation.entry.id.clone(),
+                    qualified_object(&candidate.database, &candidate.name),
+                    "trigger",
+                    OptionalMetadata::Unsupported,
+                )
+                .map_err(catalog_invariant)?
+            } else if candidate.kind.is_relation_child() {
+                ancestors.push(relation.entry.clone());
+                relation
+                    .children
+                    .as_ref()
+                    .ok_or_else(|| catalog_internal("MySQL search child metadata was not loaded"))?
+                    .iter()
+                    .find(|entry| {
+                        entry.kind == candidate.kind
+                            && entry.id.native_path.last() == Some(&candidate.native_identity)
+                    })
+                    .cloned()
+                    .ok_or_else(|| catalog_internal("MySQL search child was not hydrated"))?
+            } else {
+                relation.entry.clone()
+            }
+        } else {
+            CatalogEntry::object(
+                candidate.id(self.connection_id),
+                schema.id,
+                qualified_object(&candidate.database, &candidate.name),
+                search_native_kind(candidate.kind),
+                OptionalMetadata::Supported(empty_as_none(candidate.comment)),
+                false,
+            )
+            .map_err(catalog_invariant)?
+        };
+        Ok(CatalogSearchHit { entry, ancestors })
+    }
+
+    fn database_entry(&self, database: &str) -> Result<CatalogEntry, DatabaseError> {
+        CatalogEntry::database(
+            CatalogId::new(self.connection_id, CatalogKind::Database, [database]),
+            qualified_database(database),
+            "database",
+            OptionalMetadata::Unsupported,
+            true,
+        )
+        .map_err(catalog_invariant)
+    }
+
+    fn schema_entry(&self, database: &str) -> Result<CatalogEntry, DatabaseError> {
+        CatalogEntry::schema(
+            CatalogId::new(
+                self.connection_id,
+                CatalogKind::Schema,
+                [database, database],
+            ),
+            CatalogId::new(self.connection_id, CatalogKind::Database, [database]),
+            qualified_schema(database),
+            "schema",
+            OptionalMetadata::Unsupported,
+            true,
+        )
+        .map_err(catalog_invariant)
+    }
+
+    fn relation_entry(
+        &self,
+        database: &str,
+        name: &str,
+        table_type: Option<&str>,
+        comment: Option<String>,
+    ) -> Result<CatalogEntry, DatabaseError> {
+        let kind = relation_kind(table_type)?;
+        CatalogEntry::relation(
+            CatalogId::new(self.connection_id, kind, [database, database, name]),
+            CatalogId::new(
+                self.connection_id,
+                CatalogKind::Schema,
+                [database, database],
+            ),
+            qualified_object(database, name),
+            table_type.unwrap_or("BASE TABLE"),
+            OptionalMetadata::Supported(empty_as_none(comment)),
+            true,
+        )
+        .map_err(catalog_invariant)
     }
 
     async fn load_database_page(
@@ -721,11 +1100,27 @@ impl MySqlAdapter {
                 lower_case_table_names,
             )
             .await?;
+        let mut entries = self
+            .load_relation_children(connection, &database, &relation_name, relation)
+            .await?;
+        let total_count = exact_count(entries.len())?;
+        let next_cursor =
+            paginate_in_memory(&mut entries, request, child_sort_key, child_tie_breaker)?;
+        CatalogPage::new(request, entries, total_count, next_cursor).map_err(catalog_invariant)
+    }
+
+    async fn load_relation_children(
+        &self,
+        connection: &mut MySqlConnection,
+        database: &str,
+        relation_name: &str,
+        relation: &CatalogId,
+    ) -> Result<Vec<CatalogEntry>, DatabaseError> {
         let indexes = self
-            .load_index_metadata(connection, &database, &relation_name)
+            .load_index_metadata(connection, database, relation_name)
             .await?;
         let constraints = self
-            .load_constraint_metadata(connection, &database, &relation_name)
+            .load_constraint_metadata(connection, database, relation_name)
             .await?;
         let mut memberships: HashMap<String, Vec<ConstraintMembership>> = HashMap::new();
         let mut entries = Vec::new();
@@ -735,7 +1130,7 @@ impl MySqlAdapter {
                 CatalogEntry::relation_child(
                     relation_child_id(relation, CatalogKind::Index, &index.name),
                     relation.clone(),
-                    qualified_object(&database, &index.name),
+                    qualified_object(database, &index.name),
                     "index",
                     OptionalMetadata::Unsupported,
                     CatalogMetadata::Index(IndexMetadata {
@@ -782,7 +1177,7 @@ impl MySqlAdapter {
                 CatalogEntry::relation_child(
                     id,
                     relation.clone(),
-                    qualified_object(&database, &constraint.name),
+                    qualified_object(database, &constraint.name),
                     "constraint",
                     OptionalMetadata::Unsupported,
                     metadata,
@@ -798,8 +1193,8 @@ impl MySqlAdapter {
              FROM information_schema.columns WHERE BINARY table_schema=BINARY ? AND BINARY table_name=BINARY ? \
              ORDER BY ordinal_position",
         )
-        .bind(&database)
-        .bind(&relation_name)
+        .bind(database)
+        .bind(relation_name)
         .fetch_all(&mut *connection)
         .await
         .map_err(sql_error)?;
@@ -879,7 +1274,7 @@ impl MySqlAdapter {
                 CatalogEntry::relation_child(
                     relation_child_id(relation, CatalogKind::Column, &ordinal.to_string()),
                     relation.clone(),
-                    qualified_object(&database, &name),
+                    qualified_object(database, &name),
                     "column",
                     OptionalMetadata::Supported(empty_as_none(
                         row.try_get("column_comment").map_err(decode_error)?,
@@ -889,10 +1284,7 @@ impl MySqlAdapter {
                 .map_err(catalog_invariant)?,
             );
         }
-        let total_count = exact_count(entries.len())?;
-        let next_cursor =
-            paginate_in_memory(&mut entries, request, child_sort_key, child_tie_breaker)?;
-        CatalogPage::new(request, entries, total_count, next_cursor).map_err(catalog_invariant)
+        Ok(entries)
     }
 
     async fn verify_database(
@@ -1882,6 +2274,54 @@ fn selected_databases(request: &CatalogRequest) -> Option<Vec<&str>> {
     }
 }
 
+fn selected_search_databases(scope: &CatalogScope) -> Option<Vec<&str>> {
+    match &scope.databases {
+        CatalogSelection::All => None,
+        CatalogSelection::Selected(databases) => Some(
+            databases
+                .iter()
+                .map(|database| database.name.as_str())
+                .collect(),
+        ),
+    }
+}
+
+fn search_catalog_kind(native_kind: &str) -> Result<CatalogKind, DatabaseError> {
+    match native_kind {
+        "database" => Ok(CatalogKind::Database),
+        "schema" => Ok(CatalogKind::Schema),
+        "table" => Ok(CatalogKind::Table),
+        "view" => Ok(CatalogKind::View),
+        "function" => Ok(CatalogKind::Function),
+        "procedure" => Ok(CatalogKind::Procedure),
+        "trigger" => Ok(CatalogKind::Trigger),
+        "column" => Ok(CatalogKind::Column),
+        "index" => Ok(CatalogKind::Index),
+        "primary_key" => Ok(CatalogKind::PrimaryKey),
+        "unique_constraint" => Ok(CatalogKind::UniqueConstraint),
+        "foreign_key" => Ok(CatalogKind::ForeignKey),
+        _ => Err(catalog_internal(format!(
+            "unexpected MySQL search catalog kind `{native_kind}`"
+        ))),
+    }
+}
+
+const fn search_native_kind(kind: CatalogKind) -> &'static str {
+    match kind {
+        CatalogKind::Function => "function",
+        CatalogKind::Procedure => "procedure",
+        _ => "object",
+    }
+}
+
+fn relation_kind(table_type: Option<&str>) -> Result<CatalogKind, DatabaseError> {
+    match table_type {
+        Some("BASE TABLE") => Ok(CatalogKind::Table),
+        Some("VIEW") => Ok(CatalogKind::View),
+        _ => Err(catalog_internal("unexpected MySQL search relation type")),
+    }
+}
+
 pub fn validate_catalog_scope(scope: &CatalogScope) -> Result<(), DatabaseError> {
     if let CatalogSelection::Selected(databases) = &scope.databases
         && let Some(database) = databases
@@ -2133,6 +2573,16 @@ pub fn supports_catalog_version(version: &str) -> bool {
     parse_version_triplet(version).is_some_and(|version| version >= (8, 0, 13))
 }
 
+fn unsupported_catalog_version(version: &str) -> DatabaseError {
+    DatabaseError {
+        category: ErrorCategory::Unsupported,
+        code: Some("mysql_catalog_version_unsupported".to_owned()),
+        message: sanitize_terminal_text(&format!(
+            "MySQL catalog pages require Oracle MySQL 8.0.13 or newer; server reported {version}"
+        )),
+    }
+}
+
 fn parse_version_triplet(version: &str) -> Option<(u32, u32, u32)> {
     let mut parts = version.split('.');
     let major = parts.next()?.parse().ok()?;
@@ -2234,7 +2684,7 @@ fn decode_error(error: sqlx::Error) -> DatabaseError {
 mod tests {
     use super::{
         MySqlConstraintPart, MySqlIndexPart, PROBE_SQL, group_constraint_parts, group_index_parts,
-        relation_path,
+        relation_kind, relation_path, search_catalog_kind,
     };
     use crate::db::catalog::{CatalogId, CatalogKind};
     use uuid::Uuid;
@@ -2253,6 +2703,35 @@ mod tests {
             ["app", "app", "users", "forged"],
         );
         assert!(relation_path(&id).is_none());
+    }
+
+    #[test]
+    fn search_kind_mapping_is_limited_to_supported_mysql_catalog_kinds() {
+        for native in [
+            "database",
+            "schema",
+            "table",
+            "view",
+            "function",
+            "procedure",
+            "trigger",
+            "column",
+            "index",
+            "primary_key",
+            "unique_constraint",
+            "foreign_key",
+        ] {
+            assert!(search_catalog_kind(native).is_ok(), "missing {native}");
+        }
+        for unsupported in ["materialized_view", "sequence", "check_constraint", "type"] {
+            assert!(search_catalog_kind(unsupported).is_err());
+        }
+        assert_eq!(
+            relation_kind(Some("BASE TABLE")).unwrap(),
+            CatalogKind::Table
+        );
+        assert_eq!(relation_kind(Some("VIEW")).unwrap(), CatalogKind::View);
+        assert!(relation_kind(Some("SYSTEM VIEW")).is_err());
     }
 
     #[test]

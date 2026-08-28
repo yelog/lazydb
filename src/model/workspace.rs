@@ -4,6 +4,7 @@ use uuid::Uuid;
 
 pub use crate::identity::ConnectionIdentity;
 
+use crate::db::catalog::{CatalogSearchHit, CatalogSearchPage};
 use crate::db::{
     ServerInfo,
     catalog::{CatalogEntry, CatalogId, CatalogKind, CatalogNode, OptionalMetadata},
@@ -166,6 +167,48 @@ pub struct ExplorerState {
     pub catalog_generation: u64,
     pub completion_index: CompletionIndex,
     pub active_profile: Option<Uuid>,
+    pub search: Option<ExplorerSearchState>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ExplorerSearchLifecycle {
+    Idle,
+    Loading,
+    Ready,
+    Failed(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExplorerSearchState {
+    pub connection: Option<ConnectionIdentity>,
+    pub session_id: u64,
+    pub query: String,
+    pub generation: u64,
+    pub lifecycle: ExplorerSearchLifecycle,
+    pub hits: Vec<CatalogSearchHit>,
+    pub selected: usize,
+    pub scroll: usize,
+    pub truncated: bool,
+    pub total_count: Option<usize>,
+    pub located: Option<crate::db::catalog::CatalogId>,
+}
+
+impl ExplorerSearchState {
+    fn new(connection: Option<ConnectionIdentity>, session_id: u64) -> Self {
+        Self {
+            connection,
+            session_id,
+            query: String::new(),
+            generation: 0,
+            lifecycle: ExplorerSearchLifecycle::Idle,
+            hits: Vec::new(),
+            selected: 0,
+            scroll: 0,
+            truncated: false,
+            total_count: None,
+            located: None,
+        }
+    }
 }
 
 impl ExplorerState {
@@ -177,6 +220,100 @@ impl ExplorerState {
         self.selected = 0;
         self.scroll = 0;
         self.active_profile = None;
+        self.search = None;
+    }
+
+    pub fn open_search(&mut self, connection: Option<ConnectionIdentity>, session_id: u64) {
+        self.search = Some(ExplorerSearchState::new(connection, session_id));
+    }
+
+    pub fn edit_search(&mut self, edit: impl FnOnce(&mut String)) -> Option<u64> {
+        let search = self.search.as_mut()?;
+        edit(&mut search.query);
+        search.generation = search.generation.saturating_add(1);
+        search.selected = 0;
+        search.scroll = 0;
+        search.total_count = None;
+        search.truncated = false;
+        search.located = None;
+        search.lifecycle = if search.query.trim().is_empty() {
+            search.hits.clear();
+            ExplorerSearchLifecycle::Idle
+        } else {
+            ExplorerSearchLifecycle::Loading
+        };
+        Some(search.generation)
+    }
+
+    pub fn accept_search_page(&mut self, page: CatalogSearchPage) -> bool {
+        let Some(search) = self.search.as_mut().filter(|search| {
+            search.connection == Some(page.connection)
+                && search.session_id == page.session_id
+                && search.generation == page.generation
+        }) else {
+            return false;
+        };
+        search.hits = page.hits;
+        search.total_count = page.total_count;
+        search.truncated = page.truncated;
+        search.selected = search.selected.min(search.hits.len().saturating_sub(1));
+        search.lifecycle = ExplorerSearchLifecycle::Ready;
+        true
+    }
+
+    pub fn move_search(&mut self, delta: isize) {
+        let Some(search) = self.search.as_mut() else {
+            return;
+        };
+        search.selected = search
+            .selected
+            .saturating_add_signed(delta)
+            .min(search.hits.len().saturating_sub(1));
+    }
+
+    pub fn locate_search_hit(&mut self) -> Result<bool, String> {
+        let Some(search) = self.search.as_ref() else {
+            return Ok(false);
+        };
+        let Some(hit) = search.hits.get(search.selected).cloned() else {
+            return Ok(false);
+        };
+        let profile_id = hit.entry.id.profile_id();
+        let profile = self
+            .normalized
+            .profiles
+            .get_mut(&profile_id)
+            .ok_or_else(|| "search result profile is unavailable".to_owned())?;
+        profile
+            .catalog
+            .merge_search_hit(&hit)
+            .map_err(|error| error.to_string())?;
+        self.normalized
+            .expanded
+            .insert(ExplorerNodeId::Profile(profile_id));
+        for entry in hit.ancestors.iter().chain(std::iter::once(&hit.entry)) {
+            if let Some(parent) = entry.parent_id.as_ref()
+                && parent.kind == CatalogKind::Schema
+                && let Some(group) = search_object_group(entry.kind)
+            {
+                self.normalized.expanded.insert(ExplorerNodeId::Group {
+                    parent: parent.clone(),
+                    group,
+                });
+            }
+            if entry.expandable || entry.id != hit.entry.id {
+                self.normalized
+                    .expanded
+                    .insert(ExplorerNodeId::Catalog(entry.id.clone()));
+            }
+        }
+        self.normalized.selected = Some(ExplorerNodeId::Catalog(hit.entry.id.clone()));
+        self.normalized.ensure_selected_visible(8);
+        self.sync_selected_index();
+        if let Some(search) = self.search.as_mut() {
+            search.located = Some(hit.entry.id);
+        }
+        Ok(true)
     }
 
     pub fn rebuild_projection(&mut self, profile_id: Uuid) {
@@ -449,6 +586,21 @@ impl ExplorerState {
             .position(|row| &row.id == selected)
             .unwrap_or(0);
         self.scroll = self.normalized.scroll;
+    }
+}
+
+fn search_object_group(kind: CatalogKind) -> Option<crate::db::catalog::ObjectGroup> {
+    use crate::db::catalog::ObjectGroup;
+    match kind {
+        CatalogKind::Table => Some(ObjectGroup::Tables),
+        CatalogKind::View => Some(ObjectGroup::Views),
+        CatalogKind::MaterializedView => Some(ObjectGroup::MaterializedViews),
+        CatalogKind::Sequence => Some(ObjectGroup::Sequences),
+        CatalogKind::Function => Some(ObjectGroup::Functions),
+        CatalogKind::Procedure => Some(ObjectGroup::Procedures),
+        CatalogKind::Type => Some(ObjectGroup::Types),
+        CatalogKind::Trigger => Some(ObjectGroup::Triggers),
+        _ => None,
     }
 }
 

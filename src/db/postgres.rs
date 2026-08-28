@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     time::{Duration, Instant},
 };
 
@@ -26,10 +26,11 @@ use super::{
     catalog::{
         CatalogCapabilities, CatalogCount, CatalogCursor, CatalogDiscovery, CatalogEntry,
         CatalogGroupSummary, CatalogId, CatalogKind, CatalogMetadata, CatalogPage, CatalogRequest,
-        CatalogRequestKey, CatalogTarget, CatalogValidationError, ColumnMetadata,
-        ColumnMetadataCapabilities, ConstraintMembership, ConstraintMetadata, Ddl, DdlProvenance,
-        DiscoveredDatabase, IndexMetadata, NamespaceModel, ObjectGroup, OptionalMetadata,
-        QualifiedName, RelationStructure, finalize_keyset_page,
+        CatalogRequestKey, CatalogSearchHit, CatalogSearchPage, CatalogSearchRequest,
+        CatalogTarget, CatalogValidationError, ColumnMetadata, ColumnMetadataCapabilities,
+        ConstraintMembership, ConstraintMetadata, Ddl, DdlProvenance, DiscoveredDatabase,
+        IndexMetadata, NamespaceModel, ObjectGroup, OptionalMetadata, QualifiedName,
+        RelationStructure, finalize_keyset_page,
     },
     mutation::{InputValue, MutationResult, RelationMutation, RelationMutationRequest},
     query::{ColumnMeta, QueryOutcome, QueryOutcomeAccumulator, RELATION_PREVIEW_LIMIT, ResultSet},
@@ -82,6 +83,126 @@ WHERE schemaname <> 'information_schema'
 ORDER BY schemaname, tablename, indexname
 "#;
 
+pub const SEARCH_CATALOG_SQL: &str = r#"
+WITH candidates AS (
+    SELECT 'database'::text AS kind, current_database() AS database_name,
+           NULL::text AS schema_name, current_database() AS object_name,
+           NULL::bigint AS object_oid, NULL::text AS relation_kind,
+           NULL::text AS relation_name, NULL::bigint AS relation_oid,
+           shobj_description(d.oid, 'pg_database') AS comment, NULL::text AS relation_comment,
+           shobj_description(d.oid, 'pg_database') AS database_comment,
+           NULL::text AS schema_comment,
+           current_database() AS qualified_path
+    FROM pg_database d
+    WHERE d.datname = current_database()
+    UNION ALL
+    SELECT 'schema', current_database(), n.nspname, n.nspname, n.oid::bigint,
+           NULL, NULL, NULL, obj_description(n.oid, 'pg_namespace'), NULL,
+           (SELECT shobj_description(oid, 'pg_database') FROM pg_database WHERE datname = current_database()),
+           obj_description(n.oid, 'pg_namespace'),
+           current_database() || '.' || n.nspname
+    FROM pg_namespace n
+    WHERE n.nspname <> 'information_schema'
+      AND n.nspname NOT LIKE 'pg\_%' ESCAPE '\'
+      AND ($2::text[] IS NULL OR n.nspname = ANY($2))
+    UNION ALL
+    SELECT CASE c.relkind WHEN 'r' THEN 'table' WHEN 'p' THEN 'table'
+               WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized_view' ELSE 'sequence' END,
+           current_database(), n.nspname, c.relname, c.oid::bigint,
+           NULL, NULL, NULL, obj_description(c.oid, 'pg_class'), NULL,
+           (SELECT shobj_description(oid, 'pg_database') FROM pg_database WHERE datname = current_database()),
+           obj_description(n.oid, 'pg_namespace'),
+           current_database() || '.' || n.nspname || '.' || c.relname
+    FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.relkind IN ('r', 'p', 'v', 'm', 'S')
+      AND n.nspname <> 'information_schema'
+      AND n.nspname NOT LIKE 'pg\_%' ESCAPE '\'
+      AND ($2::text[] IS NULL OR n.nspname = ANY($2))
+    UNION ALL
+    SELECT CASE p.prokind WHEN 'f' THEN 'function' ELSE 'procedure' END,
+           current_database(), n.nspname, p.proname, p.oid::bigint,
+           NULL, NULL, NULL, obj_description(p.oid, 'pg_proc'), NULL,
+           (SELECT shobj_description(oid, 'pg_database') FROM pg_database WHERE datname = current_database()),
+           obj_description(n.oid, 'pg_namespace'),
+           current_database() || '.' || n.nspname || '.' || p.proname
+    FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE p.prokind IN ('f', 'p')
+      AND n.nspname <> 'information_schema'
+      AND n.nspname NOT LIKE 'pg\_%' ESCAPE '\'
+      AND ($2::text[] IS NULL OR n.nspname = ANY($2))
+    UNION ALL
+    SELECT 'type', current_database(), n.nspname, t.typname, t.oid::bigint,
+           NULL, NULL, NULL, obj_description(t.oid, 'pg_type'), NULL,
+           (SELECT shobj_description(oid, 'pg_database') FROM pg_database WHERE datname = current_database()),
+           obj_description(n.oid, 'pg_namespace'),
+           current_database() || '.' || n.nspname || '.' || t.typname
+    FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+    WHERE t.typtype IN ('e', 'd') AND t.typisdefined AND t.typelem = 0
+      AND n.nspname <> 'information_schema'
+      AND n.nspname NOT LIKE 'pg\_%' ESCAPE '\'
+      AND ($2::text[] IS NULL OR n.nspname = ANY($2))
+    UNION ALL
+    SELECT 'column', current_database(), n.nspname, a.attname, a.attnum::bigint,
+           c.relkind::text, c.relname, c.oid::bigint, col_description(c.oid, a.attnum),
+           obj_description(c.oid, 'pg_class'),
+           (SELECT shobj_description(oid, 'pg_database') FROM pg_database WHERE datname = current_database()),
+           obj_description(n.oid, 'pg_namespace'),
+           current_database() || '.' || n.nspname || '.' || c.relname || '.' || a.attname
+    FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.relkind IN ('r', 'p', 'v', 'm') AND a.attnum > 0 AND NOT a.attisdropped
+      AND n.nspname <> 'information_schema'
+      AND n.nspname NOT LIKE 'pg\_%' ESCAPE '\'
+      AND ($2::text[] IS NULL OR n.nspname = ANY($2))
+    UNION ALL
+    SELECT 'index', current_database(), n.nspname, ic.relname, idx.indexrelid::bigint,
+           c.relkind::text, c.relname, c.oid::bigint, obj_description(ic.oid, 'pg_class'),
+           obj_description(c.oid, 'pg_class'),
+           (SELECT shobj_description(oid, 'pg_database') FROM pg_database WHERE datname = current_database()),
+           obj_description(n.oid, 'pg_namespace'),
+           current_database() || '.' || n.nspname || '.' || c.relname || '.' || ic.relname
+    FROM pg_index idx JOIN pg_class c ON c.oid = idx.indrelid
+         JOIN pg_class ic ON ic.oid = idx.indexrelid
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.relkind IN ('r', 'p', 'v', 'm')
+      AND n.nspname <> 'information_schema'
+      AND n.nspname NOT LIKE 'pg\_%' ESCAPE '\'
+      AND ($2::text[] IS NULL OR n.nspname = ANY($2))
+    UNION ALL
+    SELECT CASE con.contype WHEN 'p' THEN 'primary_key' WHEN 'u' THEN 'unique_constraint'
+               WHEN 'f' THEN 'foreign_key' ELSE 'check_constraint' END,
+           current_database(), n.nspname, con.conname, con.oid::bigint,
+           c.relkind::text, c.relname, c.oid::bigint, obj_description(con.oid, 'pg_constraint'),
+           obj_description(c.oid, 'pg_class'),
+           (SELECT shobj_description(oid, 'pg_database') FROM pg_database WHERE datname = current_database()),
+           obj_description(n.oid, 'pg_namespace'),
+           current_database() || '.' || n.nspname || '.' || c.relname || '.' || con.conname
+    FROM pg_constraint con JOIN pg_class c ON c.oid = con.conrelid
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE con.contype IN ('p', 'u', 'f', 'c') AND c.relkind IN ('r', 'p', 'v', 'm')
+      AND n.nspname <> 'information_schema'
+      AND n.nspname NOT LIKE 'pg\_%' ESCAPE '\'
+      AND ($2::text[] IS NULL OR n.nspname = ANY($2))
+), ranked AS (
+    SELECT *, CASE
+        WHEN lower(object_name) = lower($1) THEN 0
+        WHEN strpos(lower(object_name), lower($1)) = 1 THEN 1
+        WHEN strpos(lower(object_name), lower($1)) > 0 THEN 2
+        ELSE 3 END AS relevance
+    FROM candidates
+    WHERE $3
+      AND (strpos(lower(object_name), lower($1)) > 0
+           OR strpos(lower(qualified_path), lower($1)) > 0)
+)
+SELECT kind, database_name, schema_name, object_name, object_oid,
+       relation_kind, relation_name, relation_oid, comment, relation_comment,
+       database_comment, schema_comment
+FROM ranked
+ORDER BY relevance, lower(qualified_path) COLLATE "C", qualified_path COLLATE "C",
+         kind COLLATE "C", object_oid
+LIMIT $4
+"#;
+
 #[derive(Clone, Debug)]
 pub struct PostgresAdapter {
     pool: PgPool,
@@ -107,6 +228,21 @@ struct PgConstraintInfo {
     referenced_columns: Vec<String>,
     check_expression: Option<String>,
     comment: Option<String>,
+}
+
+struct PgSearchCandidate {
+    kind: CatalogKind,
+    database: String,
+    schema: Option<String>,
+    name: String,
+    oid: Option<i64>,
+    relation_kind: Option<String>,
+    relation_name: Option<String>,
+    relation_oid: Option<i64>,
+    comment: Option<String>,
+    relation_comment: Option<String>,
+    database_comment: Option<String>,
+    schema_comment: Option<String>,
 }
 
 impl PostgresAdapter {
@@ -372,6 +508,196 @@ impl PostgresAdapter {
             };
         }
         page
+    }
+
+    pub async fn search_catalog(
+        &self,
+        request: &CatalogSearchRequest,
+    ) -> Result<CatalogSearchPage, DatabaseError> {
+        request
+            .validate()
+            .map_err(DatabaseError::invalid_catalog_request)?;
+        if request.connection.profile_id != self.connection_id {
+            return Err(DatabaseError::invalid_catalog_request(
+                CatalogValidationError::ProfileMismatch {
+                    child_profile_id: request.connection.profile_id,
+                    parent_profile_id: self.connection_id,
+                },
+            ));
+        }
+
+        let mut connection = self.pool.acquire().await.map_err(sql_error)?;
+        let mut transaction = connection.begin().await.map_err(sql_error)?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            .execute(&mut *transaction)
+            .await
+            .map_err(sql_error)?;
+        let result = self
+            .search_catalog_snapshot(&mut transaction, request)
+            .await;
+        let rollback = transaction.rollback().await.map_err(sql_error);
+        if let Err(rollback_error) = rollback {
+            return result.and(Err(rollback_error));
+        }
+        result
+    }
+
+    async fn search_catalog_snapshot(
+        &self,
+        connection: &mut PgConnection,
+        request: &CatalogSearchRequest,
+    ) -> Result<CatalogSearchPage, DatabaseError> {
+        let database: String = sqlx::query_scalar("SELECT current_database()")
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(sql_error)?;
+        let database_allowed = request.scope.allows_database(&database);
+        let schemas = search_schemas(&request.scope, &database);
+        let sql_limit = i64::try_from(request.limit.saturating_add(1))
+            .map_err(|_| catalog_internal("PostgreSQL catalog search limit overflowed"))?;
+        let rows = sqlx::query(SEARCH_CATALOG_SQL)
+            .bind(&request.query)
+            .bind(schemas)
+            .bind(database_allowed)
+            .bind(sql_limit)
+            .fetch_all(&mut *connection)
+            .await
+            .map_err(sql_error)?;
+        let mut candidates = rows
+            .into_iter()
+            .map(decode_search_candidate)
+            .collect::<Result<Vec<_>, _>>()?;
+        let truncated = candidates.len() > request.limit;
+        candidates.truncate(request.limit);
+
+        let relation_ids = candidates
+            .iter()
+            .filter_map(|candidate| candidate_relation_id(self.connection_id, candidate))
+            .collect::<HashSet<_>>();
+        let mut children = HashMap::new();
+        for relation in &relation_ids {
+            let [database, schema, _, oid] = relation.native_path.as_slice() else {
+                return Err(catalog_internal(
+                    "invalid PostgreSQL search relation identity",
+                ));
+            };
+            let relation_oid = oid
+                .parse::<i64>()
+                .map_err(|_| catalog_internal("invalid PostgreSQL search relation OID"))?;
+            for child in self
+                .load_relation_children_entries(
+                    connection,
+                    database,
+                    schema,
+                    relation_oid,
+                    relation,
+                )
+                .await?
+            {
+                children.insert(child.id.clone(), child);
+            }
+        }
+
+        let mut hits = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            hits.push(self.search_hit(&database, candidate, &children)?);
+        }
+        CatalogSearchPage::new(request, hits, None, truncated)
+            .map_err(DatabaseError::invalid_catalog_request)
+    }
+
+    fn search_hit(
+        &self,
+        database: &str,
+        candidate: PgSearchCandidate,
+        children: &HashMap<CatalogId, CatalogEntry>,
+    ) -> Result<CatalogSearchHit, DatabaseError> {
+        let database_entry = CatalogEntry::database(
+            CatalogId::new(self.connection_id, CatalogKind::Database, [database]),
+            qualified_database(database),
+            "database",
+            OptionalMetadata::Supported(candidate.database_comment.clone()),
+            true,
+        )
+        .map_err(catalog_invariant)?;
+        if candidate.kind == CatalogKind::Database {
+            return Ok(CatalogSearchHit {
+                entry: database_entry,
+                ancestors: Vec::new(),
+            });
+        }
+        let schema = candidate
+            .schema
+            .as_deref()
+            .ok_or_else(|| catalog_internal("PostgreSQL search object has no schema"))?;
+        let schema_id = CatalogId::new(self.connection_id, CatalogKind::Schema, [database, schema]);
+        let schema_entry = CatalogEntry::schema(
+            schema_id.clone(),
+            database_entry.id.clone(),
+            qualified_schema(database, schema),
+            "schema",
+            OptionalMetadata::Supported(candidate.schema_comment.clone()),
+            true,
+        )
+        .map_err(catalog_invariant)?;
+        if candidate.kind == CatalogKind::Schema {
+            return Ok(CatalogSearchHit {
+                entry: schema_entry,
+                ancestors: vec![database_entry],
+            });
+        }
+
+        if candidate.kind.is_relation_child() {
+            let relation = candidate_relation_entry(self.connection_id, &candidate, &schema_id)?;
+            let child_id = candidate_child_id(&relation.id, &candidate)?;
+            let entry = children.get(&child_id).cloned().ok_or_else(|| {
+                catalog_internal("PostgreSQL search child disappeared during hydration")
+            })?;
+            return Ok(CatalogSearchHit {
+                entry,
+                ancestors: vec![database_entry, schema_entry, relation],
+            });
+        }
+
+        let oid = candidate
+            .oid
+            .ok_or_else(|| catalog_internal("PostgreSQL search object has no OID"))?;
+        let id = CatalogId::new(
+            self.connection_id,
+            candidate.kind,
+            [
+                database.to_owned(),
+                schema.to_owned(),
+                candidate.name.clone(),
+                oid.to_string(),
+            ],
+        );
+        let qualified = qualified_object(database, schema, &candidate.name);
+        let (native_kind, expandable) = search_kind_properties(candidate.kind)?;
+        let entry = if candidate.kind.is_relation() {
+            CatalogEntry::relation(
+                id,
+                schema_id,
+                qualified,
+                native_kind,
+                OptionalMetadata::Supported(candidate.comment),
+                expandable,
+            )
+        } else {
+            CatalogEntry::object(
+                id,
+                schema_id,
+                qualified,
+                native_kind,
+                OptionalMetadata::Supported(candidate.comment),
+                expandable,
+            )
+        }
+        .map_err(catalog_invariant)?;
+        Ok(CatalogSearchHit {
+            entry,
+            ancestors: vec![database_entry, schema_entry],
+        })
     }
 
     async fn load_database_page(
@@ -704,6 +1030,23 @@ impl PostgresAdapter {
         let (database, schema, _, relation_oid, _) = self
             .verify_relation(connection, relation, &request.key.target)
             .await?;
+        let mut entries = self
+            .load_relation_children_entries(connection, &database, &schema, relation_oid, relation)
+            .await?;
+        let total_count = exact_count(entries.len())?;
+        let next_cursor =
+            paginate_in_memory(&mut entries, request, child_sort_key, child_tie_breaker)?;
+        CatalogPage::new(request, entries, total_count, next_cursor).map_err(catalog_invariant)
+    }
+
+    async fn load_relation_children_entries(
+        &self,
+        connection: &mut PgConnection,
+        database: &str,
+        schema: &str,
+        relation_oid: i64,
+        relation: &CatalogId,
+    ) -> Result<Vec<CatalogEntry>, DatabaseError> {
         let indexes = self.load_pg_indexes(connection, relation_oid).await?;
         let constraints = self.load_pg_constraints(connection, relation_oid).await?;
         let mut memberships: HashMap<String, Vec<ConstraintMembership>> = HashMap::new();
@@ -714,7 +1057,7 @@ impl PostgresAdapter {
                 CatalogEntry::relation_child(
                     relation_child_id(relation, CatalogKind::Index, &index.oid.to_string()),
                     relation.clone(),
-                    qualified_object(&database, &schema, &index.name),
+                    qualified_object(database, schema, &index.name),
                     "index",
                     OptionalMetadata::Supported(index.comment),
                     CatalogMetadata::Index(IndexMetadata {
@@ -748,7 +1091,7 @@ impl PostgresAdapter {
                     CatalogMetadata::Constraint(ConstraintMetadata::ForeignKey {
                         columns: constraint.columns,
                         referenced_relation: QualifiedName {
-                            database: Some(database.clone()),
+                            database: Some(database.to_owned()),
                             schema: constraint.referenced_schema,
                             object: constraint.referenced_relation.ok_or_else(|| {
                                 catalog_internal("foreign key has no referenced relation")
@@ -770,7 +1113,7 @@ impl PostgresAdapter {
                 CatalogEntry::relation_child(
                     id,
                     relation.clone(),
-                    qualified_object(&database, &schema, &constraint.name),
+                    qualified_object(database, schema, &constraint.name),
                     "constraint",
                     OptionalMetadata::Supported(constraint.comment),
                     metadata,
@@ -847,7 +1190,7 @@ impl PostgresAdapter {
                 CatalogEntry::relation_child(
                     relation_child_id(relation, CatalogKind::Column, &ordinal.to_string()),
                     relation.clone(),
-                    qualified_object(&database, &schema, &name),
+                    qualified_object(database, schema, &name),
                     "column",
                     OptionalMetadata::Supported(row.try_get("comment").map_err(decode_error)?),
                     CatalogMetadata::Column(metadata),
@@ -855,10 +1198,7 @@ impl PostgresAdapter {
                 .map_err(catalog_invariant)?,
             );
         }
-        let total_count = exact_count(entries.len())?;
-        let next_cursor =
-            paginate_in_memory(&mut entries, request, child_sort_key, child_tie_breaker)?;
-        CatalogPage::new(request, entries, total_count, next_cursor).map_err(catalog_invariant)
+        Ok(entries)
     }
 
     async fn verify_database(
@@ -1463,6 +1803,154 @@ fn selected_schemas<'a>(request: &'a CatalogRequest, database: &str) -> Option<&
                 CatalogSelection::All => None,
                 CatalogSelection::Selected(schemas) => Some(schemas),
             }),
+    }
+}
+
+fn search_schemas(scope: &CatalogScope, database: &str) -> Option<Vec<String>> {
+    match &scope.databases {
+        CatalogSelection::All => None,
+        CatalogSelection::Selected(databases) => databases
+            .iter()
+            .find(|selected| selected.name == database)
+            .map_or_else(
+                || Some(Vec::new()),
+                |selected| match &selected.schemas {
+                    CatalogSelection::All => None,
+                    CatalogSelection::Selected(schemas) => Some(schemas.clone()),
+                },
+            ),
+    }
+}
+
+fn decode_search_candidate(row: PgRow) -> Result<PgSearchCandidate, DatabaseError> {
+    let native_kind: String = row.try_get("kind").map_err(decode_error)?;
+    let kind = match native_kind.as_str() {
+        "database" => CatalogKind::Database,
+        "schema" => CatalogKind::Schema,
+        "table" => CatalogKind::Table,
+        "view" => CatalogKind::View,
+        "materialized_view" => CatalogKind::MaterializedView,
+        "sequence" => CatalogKind::Sequence,
+        "function" => CatalogKind::Function,
+        "procedure" => CatalogKind::Procedure,
+        "type" => CatalogKind::Type,
+        "column" => CatalogKind::Column,
+        "index" => CatalogKind::Index,
+        "primary_key" => CatalogKind::PrimaryKey,
+        "unique_constraint" => CatalogKind::UniqueConstraint,
+        "foreign_key" => CatalogKind::ForeignKey,
+        "check_constraint" => CatalogKind::CheckConstraint,
+        _ => {
+            return Err(catalog_internal(
+                "unexpected PostgreSQL search catalog kind",
+            ));
+        }
+    };
+    Ok(PgSearchCandidate {
+        kind,
+        database: row.try_get("database_name").map_err(decode_error)?,
+        schema: row.try_get("schema_name").map_err(decode_error)?,
+        name: row.try_get("object_name").map_err(decode_error)?,
+        oid: row.try_get("object_oid").map_err(decode_error)?,
+        relation_kind: row.try_get("relation_kind").map_err(decode_error)?,
+        relation_name: row.try_get("relation_name").map_err(decode_error)?,
+        relation_oid: row.try_get("relation_oid").map_err(decode_error)?,
+        comment: row.try_get("comment").map_err(decode_error)?,
+        relation_comment: row.try_get("relation_comment").map_err(decode_error)?,
+        database_comment: row.try_get("database_comment").map_err(decode_error)?,
+        schema_comment: row.try_get("schema_comment").map_err(decode_error)?,
+    })
+}
+
+fn candidate_relation_id(profile_id: Uuid, candidate: &PgSearchCandidate) -> Option<CatalogId> {
+    if !candidate.kind.is_relation_child() {
+        return None;
+    }
+    let schema = candidate.schema.as_ref()?;
+    let name = candidate.relation_name.as_ref()?;
+    let oid = candidate.relation_oid?;
+    let (kind, _) = relation_kind(candidate.relation_kind.as_deref()?).ok()?;
+    Some(CatalogId::new(
+        profile_id,
+        kind,
+        [
+            candidate.database.clone(),
+            schema.clone(),
+            name.clone(),
+            oid.to_string(),
+        ],
+    ))
+}
+
+fn candidate_relation_entry(
+    profile_id: Uuid,
+    candidate: &PgSearchCandidate,
+    schema_id: &CatalogId,
+) -> Result<CatalogEntry, DatabaseError> {
+    let id = candidate_relation_id(profile_id, candidate)
+        .ok_or_else(|| catalog_internal("incomplete PostgreSQL search relation identity"))?;
+    let schema = candidate
+        .schema
+        .as_deref()
+        .ok_or_else(|| catalog_internal("PostgreSQL search relation has no schema"))?;
+    let name = candidate
+        .relation_name
+        .as_deref()
+        .ok_or_else(|| catalog_internal("PostgreSQL search relation has no name"))?;
+    let (_, native_kind) = relation_kind(
+        candidate
+            .relation_kind
+            .as_deref()
+            .ok_or_else(|| catalog_internal("PostgreSQL search relation has no native kind"))?,
+    )?;
+    CatalogEntry::relation(
+        id,
+        schema_id.clone(),
+        qualified_object(&candidate.database, schema, name),
+        native_kind,
+        OptionalMetadata::Supported(candidate.relation_comment.clone()),
+        true,
+    )
+    .map_err(catalog_invariant)
+}
+
+fn candidate_child_id(
+    relation: &CatalogId,
+    candidate: &PgSearchCandidate,
+) -> Result<CatalogId, DatabaseError> {
+    let oid = candidate
+        .oid
+        .ok_or_else(|| catalog_internal("PostgreSQL search child has no native identity"))?;
+    Ok(relation_child_id(
+        relation,
+        candidate.kind,
+        &oid.to_string(),
+    ))
+}
+
+fn relation_kind(native: &str) -> Result<(CatalogKind, &'static str), DatabaseError> {
+    match native {
+        "r" | "p" => Ok((CatalogKind::Table, "table")),
+        "v" => Ok((CatalogKind::View, "view")),
+        "m" => Ok((CatalogKind::MaterializedView, "materialized_view")),
+        _ => Err(catalog_internal(
+            "unexpected PostgreSQL search relation kind",
+        )),
+    }
+}
+
+fn search_kind_properties(kind: CatalogKind) -> Result<(&'static str, bool), DatabaseError> {
+    match kind {
+        CatalogKind::Table => Ok(("table", true)),
+        CatalogKind::View => Ok(("view", true)),
+        CatalogKind::MaterializedView => Ok(("materialized_view", true)),
+        CatalogKind::Sequence => Ok(("sequence", false)),
+        CatalogKind::Function => Ok(("function", false)),
+        CatalogKind::Procedure => Ok(("procedure", false)),
+        CatalogKind::Type => Ok(("type", false)),
+        _ => Err(catalog_internal(
+            "unexpected PostgreSQL top-level search kind",
+        )),
     }
 }
 

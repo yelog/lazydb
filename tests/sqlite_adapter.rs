@@ -7,8 +7,9 @@ use lazydb::{
         catalog::{
             CatalogCapabilities, CatalogCompleteness, CatalogCount, CatalogCursor, CatalogEntry,
             CatalogId, CatalogKind, CatalogMetadata, CatalogRequest, CatalogRequestKey,
-            CatalogTarget, ColumnMetadata, ColumnMetadataCapabilities, ConstraintMembership,
-            ConstraintMetadata, IndexMetadata, NamespaceModel, ObjectGroup, OptionalMetadata,
+            CatalogSearchRequest, CatalogTarget, ColumnMetadata, ColumnMetadataCapabilities,
+            ConstraintMembership, ConstraintMetadata, IndexMetadata, NamespaceModel, ObjectGroup,
+            OptionalMetadata,
         },
         value::CellValue,
     },
@@ -276,6 +277,324 @@ impl CatalogFixture {
     async fn close(self) {
         self.database.close().await;
     }
+
+    async fn search(
+        &self,
+        query: &str,
+        schemas: &[&str],
+        limit: usize,
+    ) -> lazydb::db::catalog::CatalogSearchPage {
+        self.database
+            .search_catalog(&CatalogSearchRequest {
+                connection: ConnectionIdentity {
+                    profile_id: self.profile_id,
+                    generation: 9,
+                },
+                session_id: 11,
+                generation: 12,
+                query: query.into(),
+                scope: self.scope(schemas),
+                limit,
+            })
+            .await
+            .unwrap()
+    }
+}
+
+#[tokio::test]
+async fn catalog_search_finds_unloaded_objects_children_paths_scope_and_limit() {
+    let fixture = CatalogFixture::new().await;
+    let connection = ConnectionIdentity {
+        profile_id: fixture.profile_id,
+        generation: 9,
+    };
+    let page = fixture
+        .database
+        .search_catalog(&CatalogSearchRequest {
+            connection,
+            session_id: 1,
+            generation: 4,
+            query: "CHILD.LABEL".into(),
+            scope: fixture.scope(&["main"]),
+            limit: 100,
+        })
+        .await
+        .unwrap();
+
+    assert!(page.hits.iter().any(|hit| {
+        hit.entry.kind == CatalogKind::Column
+            && hit.entry.qualified_name.object == "label"
+            && hit.qualified_path().to_lowercase().contains("child.label")
+    }));
+    assert!(page.hits.iter().all(|hit| {
+        hit.entry
+            .qualified_name
+            .schema
+            .as_deref()
+            .is_none_or(|schema| schema == "main")
+    }));
+
+    let limited = fixture
+        .database
+        .search_catalog(&CatalogSearchRequest {
+            connection,
+            session_id: 1,
+            generation: 5,
+            query: "a".into(),
+            scope: fixture.scope(&["main"]),
+            limit: 1,
+        })
+        .await
+        .unwrap();
+    assert_eq!(limited.hits.len(), 1);
+    assert!(limited.truncated);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn catalog_search_preserves_all_sqlite_kinds_metadata_and_ancestors() {
+    let fixture = CatalogFixture::new().await;
+
+    let cases = [
+        (&fixture.configured_database[..], CatalogKind::Database),
+        ("MAIN", CatalogKind::Schema),
+        ("child", CatalogKind::Table),
+        ("child_view", CatalogKind::View),
+        ("child_label_guard", CatalogKind::Trigger),
+        ("label_key", CatalogKind::Column),
+        ("child_lookup_idx", CatalogKind::Index),
+        ("sqlite_autoindex_child_1", CatalogKind::PrimaryKey),
+        ("sqlite_autoindex_child_2", CatalogKind::UniqueConstraint),
+        ("fk_child_0", CatalogKind::ForeignKey),
+    ];
+    for (query, kind) in cases {
+        let page = fixture.search(query, &["main"], 100).await;
+        assert_eq!(page.total_count, None);
+        let hit = page
+            .hits
+            .iter()
+            .find(|hit| {
+                hit.entry.kind == kind
+                    && hit.entry.qualified_name.object.eq_ignore_ascii_case(query)
+            })
+            .unwrap_or_else(|| panic!("missing {kind:?} search hit for {query}"));
+        assert_eq!(hit.entry.id.connection_id, fixture.profile_id);
+        if kind.is_relation_child() {
+            assert_eq!(hit.ancestors.len(), 3);
+            assert!(hit.ancestors[2].kind.is_relation());
+            assert_eq!(hit.entry.relation_id.as_ref(), Some(&hit.ancestors[2].id));
+        }
+    }
+
+    let fallback = fixture.search("primary_key", &["main"], 100).await;
+    let alpha_primary_key = fallback
+        .hits
+        .iter()
+        .find(|hit| {
+            hit.entry.kind == CatalogKind::PrimaryKey
+                && hit
+                    .ancestors
+                    .last()
+                    .is_some_and(|owner| owner.qualified_name.object == "Alpha")
+        })
+        .expect("INTEGER PRIMARY KEY must expose the fallback primary_key entry");
+    assert_eq!(
+        alpha_primary_key.entry.id.native_path.last().unwrap(),
+        "primary_key"
+    );
+    assert_eq!(
+        alpha_primary_key.entry.metadata,
+        CatalogMetadata::Constraint(ConstraintMetadata::PrimaryKey {
+            columns: vec!["id".to_owned()]
+        })
+    );
+
+    let trigger = fixture.search("child_label_guard", &["main"], 100).await;
+    let trigger = trigger
+        .hits
+        .iter()
+        .find(|hit| hit.entry.kind == CatalogKind::Trigger)
+        .unwrap();
+    assert_eq!(
+        trigger
+            .ancestors
+            .iter()
+            .map(|entry| entry.qualified_name.object.as_str())
+            .collect::<Vec<_>>(),
+        [fixture.configured_database.as_str(), "main", "child"]
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn catalog_search_is_case_insensitive_scoped_literal_and_globally_ranked() {
+    let fixture = CatalogFixture::new().await;
+    fixture
+        .database
+        .execute(
+            r#"
+            CREATE TABLE "literal%name" ("literal_value" TEXT);
+            CREATE TABLE "literal_name" (other TEXT);
+            CREATE TABLE rankneedle (path_only TEXT);
+            CREATE TABLE rankneedle_prefix (id INTEGER);
+            CREATE TABLE xrankneedlex (id INTEGER);
+            "#,
+        )
+        .await
+        .unwrap();
+
+    let percent = fixture.search("%", &["main"], 100).await;
+    assert!(
+        percent
+            .hits
+            .iter()
+            .any(|hit| hit.entry.qualified_name.object == "literal%name")
+    );
+    assert!(
+        percent
+            .hits
+            .iter()
+            .all(|hit| hit.qualified_path().contains('%'))
+    );
+
+    let underscore = fixture.search("_", &["main"], 100).await;
+    assert!(underscore.hits.iter().all(|hit| {
+        hit.entry.qualified_name.object.contains('_') || hit.qualified_path().contains('_')
+    }));
+    assert!(
+        underscore
+            .hits
+            .iter()
+            .all(|hit| hit.entry.qualified_name.object != "Alpha")
+    );
+
+    let scoped = fixture.search("SHARED_NAME", &[ATTACHED_ALIAS], 100).await;
+    assert!(scoped.hits.iter().any(|hit| {
+        hit.entry.kind == CatalogKind::Table
+            && hit.entry.qualified_name.schema.as_deref() == Some(ATTACHED_ALIAS)
+    }));
+    assert!(scoped.hits.iter().all(|hit| {
+        hit.entry
+            .qualified_name
+            .schema
+            .as_deref()
+            .is_none_or(|schema| schema == ATTACHED_ALIAS)
+    }));
+
+    let ranked = fixture.search("RANKNEEDLE", &["main"], 100).await;
+    let ranks = ranked
+        .hits
+        .iter()
+        .map(|hit| {
+            let name = hit.entry.qualified_name.object.to_lowercase();
+            if name == "rankneedle" {
+                0
+            } else if name.starts_with("rankneedle") {
+                1
+            } else if name.contains("rankneedle") {
+                2
+            } else {
+                3
+            }
+        })
+        .collect::<Vec<_>>();
+    assert!(ranks.windows(2).all(|pair| pair[0] <= pair[1]));
+    assert_eq!(ranks.first(), Some(&0));
+    assert!(
+        ranks.contains(&3),
+        "qualified owner paths must participate in ranking"
+    );
+
+    let repeated = fixture.search("rankneedle", &["main"], 100).await;
+    assert_eq!(
+        ranked
+            .hits
+            .iter()
+            .map(|hit| &hit.entry.id)
+            .collect::<Vec<_>>(),
+        repeated
+            .hits
+            .iter()
+            .map(|hit| &hit.entry.id)
+            .collect::<Vec<_>>()
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn catalog_search_rejects_wrong_profile_and_skips_unrelated_relation_hydration() {
+    let fixture = CatalogFixture::new().await;
+    fixture
+        .database
+        .execute("CREATE TABLE poison (value INTEGER REFERENCES missing_parent);")
+        .await
+        .unwrap();
+
+    let page = fixture.search("child.label", &["main"], 100).await;
+    assert!(
+        page.hits
+            .iter()
+            .any(|hit| hit.entry.qualified_name.object == "label")
+    );
+
+    let error = fixture
+        .database
+        .search_catalog(&CatalogSearchRequest {
+            connection: ConnectionIdentity {
+                profile_id: Uuid::new_v4(),
+                generation: 9,
+            },
+            session_id: 1,
+            generation: 1,
+            query: "child".into(),
+            scope: fixture.scope(&["main"]),
+            limit: 100,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(error.category, ErrorCategory::Configuration);
+    assert_eq!(error.code.as_deref(), Some("invalid_catalog_request"));
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn catalog_search_trigger_path_uses_the_canonical_owner() {
+    let fixture = CatalogFixture::new().await;
+    fixture
+        .database
+        .execute(
+            r#"
+            CREATE TABLE MixedOwner (id INTEGER PRIMARY KEY);
+            CREATE TRIGGER mixed_table_guard BEFORE INSERT ON mixedowner
+                BEGIN SELECT 1; END;
+            PRAGMA writable_schema = ON;
+            INSERT INTO sqlite_schema (type, name, tbl_name, rootpage, sql)
+                VALUES (
+                    'view',
+                    'mixedowner',
+                    'mixedowner',
+                    0,
+                    'CREATE VIEW mixedowner AS SELECT 1 AS id'
+                );
+            PRAGMA writable_schema = OFF;
+            "#,
+        )
+        .await
+        .unwrap();
+
+    let page = fixture
+        .search("mixedowner.mixed_table_guard", &["main"], 100)
+        .await;
+    let trigger = page
+        .hits
+        .iter()
+        .find(|hit| hit.entry.kind == CatalogKind::Trigger)
+        .expect("trigger owner path should be searchable");
+    let owner = trigger.ancestors.last().unwrap();
+    assert_eq!(owner.kind, CatalogKind::Table);
+    assert_eq!(owner.qualified_name.object, "MixedOwner");
+    assert_eq!(trigger.entry.relation_id.as_ref(), Some(&owner.id));
+    fixture.close().await;
 }
 
 fn selected_scope(database: &str, schemas: &[&str]) -> CatalogScope {

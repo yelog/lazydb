@@ -20,7 +20,8 @@ use crate::{
 use self::{
     catalog::{
         CatalogCapabilities, CatalogDiscovery, CatalogId, CatalogKind, CatalogPage, CatalogRequest,
-        CatalogTarget, CatalogValidationError, RelationStructure,
+        CatalogSearchPage, CatalogSearchRequest, CatalogTarget, CatalogValidationError,
+        RelationStructure,
     },
     mysql::MySqlAdapter,
     postgres::PostgresAdapter,
@@ -223,6 +224,17 @@ impl DatabaseConnection {
             Self::Postgres(adapter) => adapter.load_catalog_page(request).await,
             Self::MySql(adapter) => adapter.load_catalog_page(request).await,
             Self::Sqlite(adapter) => adapter.load_catalog_page(request).await,
+        }
+    }
+
+    pub async fn search_catalog(
+        &self,
+        request: &CatalogSearchRequest,
+    ) -> Result<CatalogSearchPage, DatabaseError> {
+        match self {
+            Self::Postgres(adapter) => adapter.search_catalog(request).await,
+            Self::MySql(adapter) => adapter.search_catalog(request).await,
+            Self::Sqlite(adapter) => adapter.search_catalog(request).await,
         }
     }
 

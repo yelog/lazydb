@@ -138,6 +138,29 @@ impl Keymap {
                 _ => None,
             };
         }
+        if app.focus == Focus::Explorer && app.explorer.search.is_some() {
+            self.pending = None;
+            if event.modifiers == KeyModifiers::CONTROL && event.code == KeyCode::Char('u') {
+                return Some(Action::ExplorerSearchClear);
+            }
+            if event.modifiers == KeyModifiers::CONTROL && event.code == KeyCode::Char('r') {
+                return Some(Action::ExplorerSearchRetry);
+            }
+            if !event.modifiers.is_empty() && event.modifiers != KeyModifiers::SHIFT {
+                return None;
+            }
+            return match event.code {
+                KeyCode::Esc => Some(Action::ExplorerSearchClose),
+                KeyCode::Enter => Some(Action::ExplorerSearchLocate),
+                KeyCode::Backspace => Some(Action::ExplorerSearchBackspace),
+                KeyCode::Down => Some(Action::ExplorerSearchMove(1)),
+                KeyCode::Up => Some(Action::ExplorerSearchMove(-1)),
+                KeyCode::Home => Some(Action::ExplorerSearchMove(isize::MIN)),
+                KeyCode::End => Some(Action::ExplorerSearchMove(isize::MAX)),
+                KeyCode::Char(character) => Some(Action::ExplorerSearchInsert(character)),
+                _ => None,
+            };
+        }
         if app.focus == Focus::Editor && app.active_editor_mode() == EditorMode::Normal {
             match event.code {
                 KeyCode::Char('?') => return Some(Action::ShowHelp),
@@ -657,6 +680,7 @@ fn map_explorer(code: KeyCode, app: &App) -> Option<Action> {
         .as_ref()
         .and_then(|node| node.profile_id());
     match code {
+        KeyCode::Char('/') => return Some(Action::ExplorerSearchOpen),
         KeyCode::Char('n') => return Some(Action::ProfileStartNew),
         KeyCode::Char('e') => {
             return selected_profile.map(|profile_id| Action::ProfileStartEdit { profile_id });
@@ -841,6 +865,71 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn explorer_search_preempts_normal_bindings_and_edits_query() {
+        let mut app = App::new(Vec::new());
+        app.focus = Focus::Explorer;
+        app.explorer.open_search(
+            Some(crate::identity::ConnectionIdentity {
+                profile_id: uuid::Uuid::nil(),
+                generation: 1,
+            }),
+            1,
+        );
+        let mut keymap = Keymap::default();
+
+        assert_eq!(
+            keymap.map(key(KeyCode::Char('x')), &app),
+            Some(Action::ExplorerSearchInsert('x'))
+        );
+        assert_eq!(
+            keymap.map(key(KeyCode::Down), &app),
+            Some(Action::ExplorerSearchMove(1))
+        );
+        assert_eq!(
+            keymap.map(key(KeyCode::Char('j')), &app),
+            Some(Action::ExplorerSearchInsert('j'))
+        );
+        assert_eq!(
+            keymap.map(key(KeyCode::Char('k')), &app),
+            Some(Action::ExplorerSearchInsert('k'))
+        );
+        assert_eq!(
+            keymap.map(key(KeyCode::Home), &app),
+            Some(Action::ExplorerSearchMove(isize::MIN))
+        );
+        assert_eq!(
+            keymap.map(key(KeyCode::End), &app),
+            Some(Action::ExplorerSearchMove(isize::MAX))
+        );
+        assert_eq!(
+            keymap.map(key(KeyCode::Char('r')), &app),
+            Some(Action::ExplorerSearchInsert('r'))
+        );
+        assert_eq!(
+            keymap.map(
+                KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
+                &app
+            ),
+            Some(Action::ExplorerSearchRetry)
+        );
+        assert_eq!(
+            keymap.map(key(KeyCode::Enter), &app),
+            Some(Action::ExplorerSearchLocate)
+        );
+        assert_eq!(
+            keymap.map(key(KeyCode::Esc), &app),
+            Some(Action::ExplorerSearchClose)
+        );
+        assert_eq!(
+            keymap.map(
+                KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+                &app
+            ),
+            Some(Action::ExplorerSearchClear)
+        );
     }
 
     #[test]

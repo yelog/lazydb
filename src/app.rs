@@ -12,7 +12,8 @@ use crate::{
     db::{
         ErrorCategory,
         catalog::{
-            CatalogPage, CatalogRequest, CatalogRequestKey, CatalogTarget, MAX_CATALOG_PAGE_SIZE,
+            CatalogPage, CatalogRequest, CatalogRequestKey, CatalogSearchRequest, CatalogTarget,
+            MAX_CATALOG_PAGE_SIZE, MAX_CATALOG_SEARCH_RESULTS,
         },
     },
     editor::{EditorEffect, EditorError, EditorWorkspace},
@@ -80,6 +81,27 @@ fn cancel_pending_relation<T: Clone>(load: &mut RelationLoad<T>) -> Option<Relat
     pending
 }
 
+fn search_hit_is_in_scope(
+    hit: &crate::db::catalog::CatalogSearchHit,
+    scope: &crate::profile::CatalogScope,
+) -> bool {
+    hit.ancestors
+        .iter()
+        .chain(std::iter::once(&hit.entry))
+        .all(|entry| {
+            entry
+                .qualified_name
+                .database
+                .as_deref()
+                .is_some_and(|database| {
+                    entry.qualified_name.schema.as_deref().map_or_else(
+                        || scope.allows_database(database),
+                        |schema| scope.allows_schema(database, schema),
+                    )
+                })
+        })
+}
+
 pub struct App {
     pub profiles: Vec<ConnectionProfile>,
     pub connection: ConnectionState,
@@ -94,6 +116,7 @@ pub struct App {
     next_console_number: usize,
     connection_request_generation: u64,
     connection_terminal_generation: u64,
+    next_search_session: u64,
     editor: EditorWorkspace,
     confirmation_policy: ConfirmationPolicy,
     deferred: DeferredIntentQueue,
@@ -183,6 +206,7 @@ impl App {
             next_console_number: 2,
             connection_request_generation: 0,
             connection_terminal_generation: 0,
+            next_search_session: 0,
             editor,
             confirmation_policy,
             deferred: DeferredIntentQueue::default(),
@@ -545,6 +569,14 @@ impl App {
                         | Action::RelationQueryClear
                         | Action::SubmitRelationQuery
                         | Action::CancelRelationQueryInput
+                        | Action::ExplorerSearchOpen
+                        | Action::ExplorerSearchInsert(_)
+                        | Action::ExplorerSearchBackspace
+                        | Action::ExplorerSearchClear
+                        | Action::ExplorerSearchMove(_)
+                        | Action::ExplorerSearchLocate
+                        | Action::ExplorerSearchClose
+                        | Action::ExplorerSearchRetry
                 ))
             && matches!(
                 action,
@@ -1929,6 +1961,28 @@ impl App {
                 self.fail_catalog_page(&key, category, message);
                 Vec::new()
             }
+            Action::CatalogSearchSucceeded(page) => {
+                if self.database_command_identity() == Some(page.connection) {
+                    self.explorer.accept_search_page(page);
+                }
+                Vec::new()
+            }
+            Action::CatalogSearchFailed {
+                connection,
+                session_id,
+                generation,
+                message,
+            } => {
+                if self.database_command_identity() == Some(connection)
+                    && let Some(search) = self.explorer.search.as_mut().filter(|search| {
+                        search.session_id == session_id && search.generation == generation
+                    })
+                {
+                    search.lifecycle =
+                        crate::model::workspace::ExplorerSearchLifecycle::Failed(message);
+                }
+                Vec::new()
+            }
             Action::QueryFinished {
                 tab_id,
                 generation,
@@ -2362,6 +2416,62 @@ impl App {
             Action::ExplorerMove(delta) => {
                 self.explorer.move_selection(delta);
                 Vec::new()
+            }
+            Action::ExplorerSearchOpen => {
+                if self.focus == Focus::Explorer {
+                    self.next_search_session = self.next_search_session.saturating_add(1);
+                    self.explorer
+                        .open_search(self.database_command_identity(), self.next_search_session);
+                }
+                Vec::new()
+            }
+            Action::ExplorerSearchInsert(character) => {
+                self.edit_explorer_search(|query| query.push(character))
+            }
+            Action::ExplorerSearchBackspace => self.edit_explorer_search(|query| {
+                query.pop();
+            }),
+            Action::ExplorerSearchClear => self.edit_explorer_search(String::clear),
+            Action::ExplorerSearchMove(delta) => {
+                self.explorer.move_search(delta);
+                Vec::new()
+            }
+            Action::ExplorerSearchLocate => {
+                let valid = self.explorer.search.as_ref().is_some_and(|search| {
+                    self.database_command_identity() == search.connection
+                        && search.hits.get(search.selected).is_some_and(|hit| {
+                            self.profiles
+                                .iter()
+                                .find(|profile| {
+                                    Some(profile.id)
+                                        == search.connection.map(|connection| connection.profile_id)
+                                })
+                                .is_some_and(|profile| {
+                                    search_hit_is_in_scope(hit, &profile.catalog_scope)
+                                })
+                        })
+                });
+                if valid
+                    && let Err(message) = self.explorer.locate_search_hit()
+                    && let Some(search) = self.explorer.search.as_mut()
+                {
+                    search.lifecycle =
+                        crate::model::workspace::ExplorerSearchLifecycle::Failed(message);
+                }
+                Vec::new()
+            }
+            Action::ExplorerSearchClose => {
+                self.explorer.search = None;
+                vec![Command::CancelCatalogSearch]
+            }
+            Action::ExplorerSearchRetry => {
+                if let Some(search) = self.explorer.search.as_mut()
+                    && !search.query.trim().is_empty()
+                {
+                    search.generation = search.generation.saturating_add(1);
+                    search.lifecycle = crate::model::workspace::ExplorerSearchLifecycle::Loading;
+                }
+                self.catalog_search_command().into_iter().collect()
             }
             Action::ExplorerSelect(id) => {
                 self.explorer.select_id(id);
@@ -4112,6 +4222,42 @@ impl App {
             .insert(owner.clone(), ExplorerLoadState::Loading { request_id });
         state.pending_requests.insert(owner, request.clone());
         vec![Command::LoadCatalogPage(request)]
+    }
+
+    fn edit_explorer_search(&mut self, edit: impl FnOnce(&mut String)) -> Vec<Command> {
+        if self.explorer.search.is_none() {
+            return Vec::new();
+        }
+        self.explorer.edit_search(edit);
+        self.catalog_search_command().into_iter().collect()
+    }
+
+    fn catalog_search_command(&self) -> Option<Command> {
+        let connection = self.database_command_identity()?;
+        let search = self
+            .explorer
+            .search
+            .as_ref()
+            .filter(|search| !search.query.trim().is_empty())?;
+        if search.connection != Some(connection) {
+            return None;
+        }
+        let scope = self
+            .profiles
+            .iter()
+            .find(|profile| profile.id == connection.profile_id)?
+            .catalog_scope
+            .clone();
+        let request = CatalogSearchRequest {
+            connection,
+            session_id: search.session_id,
+            generation: search.generation,
+            query: search.query.clone(),
+            scope,
+            limit: MAX_CATALOG_SEARCH_RESULTS,
+        };
+        request.validate().ok()?;
+        Some(Command::SearchCatalog(request))
     }
 
     fn accept_catalog_page(&mut self, page: CatalogPage) -> Vec<Command> {

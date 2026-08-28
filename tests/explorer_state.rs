@@ -1,7 +1,8 @@
 use lazydb::{
     db::catalog::{
         CatalogCompleteness, CatalogCount, CatalogCursor, CatalogEntry, CatalogId, CatalogKind,
-        CatalogMetadata, ColumnMetadata, ObjectGroup, OptionalMetadata, QualifiedName,
+        CatalogMetadata, CatalogSearchHit, ColumnMetadata, ObjectGroup, OptionalMetadata,
+        QualifiedName,
     },
     model::explorer::{
         CatalogGroupState, CatalogTree, CatalogTreeError, ExplorerConnectionStatus,
@@ -68,6 +69,28 @@ fn catalog_tree_validates_profiles_parents_and_duplicate_ids() {
         tree.set_group_state(&fixture.database.id, ObjectGroup::Tables, complete_group(1),),
         Err(CatalogTreeError::InvalidGroupParent { .. })
     ));
+}
+
+#[test]
+fn search_hit_merge_preserves_partial_group_and_real_path() {
+    let profile = profile_id(1);
+    let fixture = fixture(profile);
+    let mut tree = CatalogTree::new(profile);
+    tree.merge_search_hit(&CatalogSearchHit {
+        entry: fixture.column.clone(),
+        ancestors: vec![
+            fixture.database.clone(),
+            fixture.schema.clone(),
+            fixture.table.clone(),
+        ],
+    })
+    .unwrap();
+
+    assert_eq!(tree.get(&fixture.column.id), Some(&fixture.column));
+    assert_eq!(
+        tree.group_state(&fixture.schema.id, ObjectGroup::Tables),
+        Some(&CatalogGroupState::default())
+    );
 }
 
 #[test]

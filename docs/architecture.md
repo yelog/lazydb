@@ -39,6 +39,13 @@ request id, target, cursor, and scope. Pages are loaded lazily, validated before
 mutation, and stale or mismatched results are discarded. A failed refresh
 preserves the previous tree as stale where possible.
 
+Explorer search is an independent server-backed catalog contract. Debounced
+requests carry active connection and query generations plus `CatalogScope`, and
+adapters enumerate native catalog pages without materializing them in the normal
+tree. Search results are a flat projection; locating one merges only its real
+ancestor chain and object into the normalized tree, leaving lazy-page completion
+state unchanged.
+
 The editor is an App-owned `EditorWorkspace` keyed by console UUID. Modalkit
 types stay behind that boundary; actions and UI consume LazyDB-owned editor
 snapshots, effects, selections, and UTF-8 byte ranges. SQL scope, risk,

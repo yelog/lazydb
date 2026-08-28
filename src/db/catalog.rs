@@ -356,6 +356,22 @@ pub enum CatalogValidationError {
     InitialExactCountMismatch { count: u64, payload_len: usize },
     #[error("catalog ID {id:?} does not preserve its owning native identity")]
     NativeIdentityMismatch { id: CatalogId },
+    #[error("catalog search query cannot be empty")]
+    EmptySearchQuery,
+    #[error("catalog search limit {found} is outside 1..={max}")]
+    InvalidSearchLimit { found: usize, max: usize },
+    #[error("catalog search page identity does not match its request")]
+    SearchIdentityMismatch,
+    #[error("catalog search page has {found} hits but the request permits {max}")]
+    TooManySearchHits { found: usize, max: usize },
+    #[error("catalog search page contains duplicate entry {id:?}")]
+    DuplicateSearchEntry { id: CatalogId },
+    #[error("catalog search total count {count} is smaller than its {hits} hits")]
+    SearchTotalCountBelowHits { count: usize, hits: usize },
+    #[error("catalog search page is truncated but its total count does not exceed its hits")]
+    InconsistentSearchTruncation,
+    #[error("catalog search hit ancestor chain is invalid for {id:?}")]
+    InvalidSearchAncestors { id: CatalogId },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -771,6 +787,173 @@ pub struct CatalogRequest {
     pub key: CatalogRequestKey,
     pub scope: CatalogScope,
     pub page_size: usize,
+}
+
+pub const MAX_CATALOG_SEARCH_RESULTS: usize = 100;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CatalogSearchRequest {
+    pub connection: ConnectionIdentity,
+    pub session_id: u64,
+    pub generation: u64,
+    pub query: String,
+    pub scope: CatalogScope,
+    pub limit: usize,
+}
+
+impl CatalogSearchRequest {
+    pub fn validate(&self) -> Result<(), CatalogValidationError> {
+        if self.query.trim().is_empty() {
+            return Err(CatalogValidationError::EmptySearchQuery);
+        }
+        if !(1..=MAX_CATALOG_SEARCH_RESULTS).contains(&self.limit) {
+            return Err(CatalogValidationError::InvalidSearchLimit {
+                found: self.limit,
+                max: MAX_CATALOG_SEARCH_RESULTS,
+            });
+        }
+        self.scope.validate("", None).map_err(Into::into)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CatalogSearchHit {
+    pub entry: CatalogEntry,
+    pub ancestors: Vec<CatalogEntry>,
+}
+
+impl CatalogSearchHit {
+    pub fn qualified_path(&self) -> String {
+        let mut parts = Vec::new();
+        for entry in self.ancestors.iter().chain(std::iter::once(&self.entry)) {
+            let name = &entry.qualified_name.object;
+            if parts.last() != Some(name) {
+                parts.push(name.clone());
+            }
+        }
+        parts.join(".")
+    }
+
+    fn validate(
+        &self,
+        profile_id: Uuid,
+        scope: &CatalogScope,
+    ) -> Result<(), CatalogValidationError> {
+        let mut available = HashSet::new();
+        for ancestor in &self.ancestors {
+            require_profile(&ancestor.id, profile_id)?;
+            validate_entry_scope(ancestor, scope)?;
+            if ancestor
+                .parent_id
+                .as_ref()
+                .is_some_and(|parent| !available.contains(parent))
+            {
+                return Err(CatalogValidationError::InvalidSearchAncestors {
+                    id: self.entry.id.clone(),
+                });
+            }
+            available.insert(ancestor.id.clone());
+        }
+        require_profile(&self.entry.id, profile_id)?;
+        validate_entry_scope(&self.entry, scope)?;
+        if self
+            .entry
+            .parent_id
+            .as_ref()
+            .is_some_and(|parent| !available.contains(parent))
+            || self
+                .entry
+                .relation_id
+                .as_ref()
+                .is_some_and(|relation| relation != &self.entry.id && !available.contains(relation))
+        {
+            return Err(CatalogValidationError::InvalidSearchAncestors {
+                id: self.entry.id.clone(),
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CatalogSearchPage {
+    pub connection: ConnectionIdentity,
+    pub session_id: u64,
+    pub generation: u64,
+    pub hits: Vec<CatalogSearchHit>,
+    pub total_count: Option<usize>,
+    pub truncated: bool,
+}
+
+impl CatalogSearchPage {
+    pub fn new(
+        request: &CatalogSearchRequest,
+        hits: Vec<CatalogSearchHit>,
+        total_count: Option<usize>,
+        truncated: bool,
+    ) -> Result<Self, CatalogValidationError> {
+        let page = Self {
+            connection: request.connection,
+            session_id: request.session_id,
+            generation: request.generation,
+            hits,
+            total_count,
+            truncated,
+        };
+        page.validate_for(request)?;
+        Ok(page)
+    }
+
+    pub fn validate_for(
+        &self,
+        request: &CatalogSearchRequest,
+    ) -> Result<(), CatalogValidationError> {
+        request.validate()?;
+        if self.connection != request.connection
+            || self.session_id != request.session_id
+            || self.generation != request.generation
+        {
+            return Err(CatalogValidationError::SearchIdentityMismatch);
+        }
+        if self.hits.len() > request.limit {
+            return Err(CatalogValidationError::TooManySearchHits {
+                found: self.hits.len(),
+                max: request.limit,
+            });
+        }
+        let mut hit_ids = HashSet::new();
+        for hit in &self.hits {
+            hit.validate(request.connection.profile_id, &request.scope)?;
+            if !hit_ids.insert(hit.entry.id.clone()) {
+                return Err(CatalogValidationError::DuplicateSearchEntry {
+                    id: hit.entry.id.clone(),
+                });
+            }
+            let mut path_ids = HashSet::new();
+            for entry in hit.ancestors.iter().chain(std::iter::once(&hit.entry)) {
+                if !path_ids.insert(entry.id.clone()) {
+                    return Err(CatalogValidationError::DuplicateSearchEntry {
+                        id: entry.id.clone(),
+                    });
+                }
+            }
+        }
+        if let Some(count) = self.total_count {
+            if count < self.hits.len() {
+                return Err(CatalogValidationError::SearchTotalCountBelowHits {
+                    count,
+                    hits: self.hits.len(),
+                });
+            }
+            if self.truncated && count <= self.hits.len() {
+                return Err(CatalogValidationError::InconsistentSearchTruncation);
+            }
+            if !self.truncated && count != self.hits.len() {
+                return Err(CatalogValidationError::InconsistentSearchTruncation);
+            }
+        }
+        Ok(())
+    }
 }
 
 pub const MAX_CATALOG_PAGE_SIZE: usize = 500;

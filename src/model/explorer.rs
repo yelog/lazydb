@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::db::catalog::{
     CatalogCompleteness, CatalogCount, CatalogCursor, CatalogEntry, CatalogId, CatalogKind,
-    CatalogRequest, CatalogTarget, ObjectGroup,
+    CatalogRequest, CatalogSearchHit, CatalogTarget, ObjectGroup,
 };
 use crate::profile::DatabaseKind;
 
@@ -177,6 +177,7 @@ pub struct CatalogTree {
     group_states: HashMap<(CatalogId, ObjectGroup), CatalogGroupState>,
     group_order: HashMap<CatalogId, Vec<ObjectGroup>>,
     group_children: HashMap<(CatalogId, ObjectGroup), Vec<CatalogId>>,
+    search_injected: HashSet<CatalogId>,
 }
 
 impl CatalogTree {
@@ -189,6 +190,7 @@ impl CatalogTree {
             group_states: HashMap::new(),
             group_order: HashMap::new(),
             group_children: HashMap::new(),
+            search_injected: HashSet::new(),
         }
     }
 
@@ -380,6 +382,38 @@ impl CatalogTree {
         Ok(())
     }
 
+    pub fn merge_search_hit(&mut self, hit: &CatalogSearchHit) -> Result<(), CatalogTreeError> {
+        let entries = hit
+            .ancestors
+            .iter()
+            .chain(std::iter::once(&hit.entry))
+            .filter(|entry| !self.entries.contains_key(&entry.id))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !entries.is_empty() {
+            let injected = entries
+                .iter()
+                .map(|entry| entry.id.clone())
+                .collect::<Vec<_>>();
+            self.insert_subtree(entries)?;
+            self.search_injected.extend(injected);
+        }
+        for entry in hit.ancestors.iter().chain(std::iter::once(&hit.entry)) {
+            if let Some(existing) = self.entries.get_mut(&entry.id) {
+                *existing = entry.clone();
+            }
+        }
+        for entry in hit.ancestors.iter().chain(std::iter::once(&hit.entry)) {
+            if let Some(group) = object_group(entry.kind)
+                && let Some(schema) = entry.parent_id.as_ref()
+                && self.group_state(schema, group).is_none()
+            {
+                self.set_group_state(schema, group, CatalogGroupState::default())?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn replace_subtree(
         &mut self,
         parent: &CatalogId,
@@ -432,8 +466,16 @@ impl CatalogTree {
     ) -> Result<(), CatalogTreeError> {
         self.validate_profile(owner.profile_id())?;
         self.validate_owner(owner)?;
-        self.validate_batch(&entries, &HashSet::new())?;
+        let injected_roots = entries
+            .iter()
+            .filter(|entry| self.search_injected.contains(&entry.id))
+            .map(|entry| entry.id.clone())
+            .collect::<Vec<_>>();
+        let removed = self.collect_subtrees(&injected_roots);
+        let removed_set = removed.iter().cloned().collect::<HashSet<_>>();
+        self.validate_batch(&entries, &removed_set)?;
         self.validate_replacement_scope(owner, &entries)?;
+        self.remove_ids(&removed, &removed_set);
         self.insert_validated(entries);
         Ok(())
     }
@@ -612,6 +654,7 @@ impl CatalogTree {
     }
 
     fn remove_ids(&mut self, removed: &[CatalogId], removed_set: &HashSet<CatalogId>) {
+        self.search_injected.retain(|id| !removed_set.contains(id));
         self.roots.retain(|id| !removed_set.contains(id));
 
         let mut retained_parents = HashSet::new();

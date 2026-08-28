@@ -30,10 +30,11 @@ use super::{
     catalog::{
         CatalogCapabilities, CatalogCount, CatalogCursor, CatalogDiscovery, CatalogEntry,
         CatalogGroupSummary, CatalogId, CatalogKind, CatalogMetadata, CatalogPage, CatalogRequest,
-        CatalogRequestKey, CatalogTarget, CatalogValidationError, ColumnMetadata,
-        ColumnMetadataCapabilities, ConstraintMembership, ConstraintMetadata, Ddl, DdlProvenance,
-        DiscoveredDatabase, IndexMetadata, NamespaceModel, ObjectGroup, OptionalMetadata,
-        QualifiedName, RelationStructure, finalize_keyset_page,
+        CatalogRequestKey, CatalogSearchHit, CatalogSearchPage, CatalogSearchRequest,
+        CatalogTarget, CatalogValidationError, ColumnMetadata, ColumnMetadataCapabilities,
+        ConstraintMembership, ConstraintMetadata, Ddl, DdlProvenance, DiscoveredDatabase,
+        IndexMetadata, NamespaceModel, ObjectGroup, OptionalMetadata, QualifiedName,
+        RelationStructure, finalize_keyset_page,
     },
     mutation::{InputValue, MutationResult, RelationMutation, RelationMutationRequest},
     query::{ColumnMeta, QueryOutcome, QueryOutcomeAccumulator, RELATION_PREVIEW_LIMIT, ResultSet},
@@ -429,6 +430,365 @@ impl SqliteAdapter {
         page
     }
 
+    pub async fn search_catalog(
+        &self,
+        request: &CatalogSearchRequest,
+    ) -> Result<CatalogSearchPage, DatabaseError> {
+        request
+            .validate()
+            .map_err(DatabaseError::invalid_catalog_request)?;
+        if request.connection.profile_id != self.connection_id {
+            return Err(DatabaseError::invalid_catalog_request(
+                CatalogValidationError::ProfileMismatch {
+                    child_profile_id: request.connection.profile_id,
+                    parent_profile_id: self.connection_id,
+                },
+            ));
+        }
+
+        let _operation_permit = self.acquire_operation().await?;
+        let mut connection = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Network))?;
+        <Sqlite as sqlx::Database>::TransactionManager::begin(&mut connection, None)
+            .await
+            .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Sql))?;
+        let result = self.search_catalog_snapshot(&mut connection, request).await;
+        let rollback = <Sqlite as sqlx::Database>::TransactionManager::rollback(&mut connection)
+            .await
+            .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Sql));
+        if let Err(error) = rollback {
+            let connection = connection.detach();
+            let _ = connection.close().await;
+            return result.and(Err(error));
+        }
+        result
+    }
+
+    async fn search_catalog_snapshot(
+        &self,
+        connection: &mut SqliteConnection,
+        request: &CatalogSearchRequest,
+    ) -> Result<CatalogSearchPage, DatabaseError> {
+        let query = request.query.to_lowercase();
+        let database = self.database_entry()?;
+        let database_path = database.qualified_name.object.to_lowercase();
+        let mut hits = Vec::new();
+        if request.scope.allows_database(&self.database)
+            && (database_path == query
+                || database_path.starts_with(&query)
+                || database_path.contains(&query))
+        {
+            hits.push(CatalogSearchHit {
+                entry: database.clone(),
+                ancestors: Vec::new(),
+            });
+        }
+
+        if request.scope.allows_database(&self.database) {
+            for schema_name in self.database_aliases(connection).await? {
+                if !request.scope.allows_schema(&self.database, &schema_name) {
+                    continue;
+                }
+                let schema = self.schema_entry(&database, &schema_name)?;
+                let schema_path = format!("{}.{}", self.database, schema_name).to_lowercase();
+                if schema_name.to_lowercase().contains(&query) || schema_path.contains(&query) {
+                    hits.push(CatalogSearchHit {
+                        entry: schema.clone(),
+                        ancestors: vec![database.clone()],
+                    });
+                }
+                self.search_schema(connection, &query, &database, &schema, &mut hits)
+                    .await?;
+            }
+        }
+
+        let mut ranked = hits
+            .into_iter()
+            .filter_map(|hit| search_rank(&hit, &query).map(|rank| (rank, hit)))
+            .collect::<Vec<_>>();
+        ranked.sort_by(|(left_rank, left), (right_rank, right)| {
+            left_rank
+                .cmp(right_rank)
+                .then_with(|| {
+                    left.qualified_path()
+                        .to_lowercase()
+                        .cmp(&right.qualified_path().to_lowercase())
+                })
+                .then_with(|| left.entry.id.native_path.cmp(&right.entry.id.native_path))
+        });
+        ranked.dedup_by(|left, right| left.1.entry.id == right.1.entry.id);
+        ranked.truncate(request.limit.saturating_add(1));
+        let truncated = ranked.len() > request.limit;
+        let hits = ranked
+            .into_iter()
+            .take(request.limit)
+            .map(|(_, hit)| hit)
+            .collect();
+        CatalogSearchPage::new(request, hits, None, truncated)
+            .map_err(DatabaseError::invalid_catalog_request)
+    }
+
+    async fn search_schema(
+        &self,
+        connection: &mut SqliteConnection,
+        query: &str,
+        database: &CatalogEntry,
+        schema: &CatalogEntry,
+        hits: &mut Vec<CatalogSearchHit>,
+    ) -> Result<(), DatabaseError> {
+        let schema_name = &schema.qualified_name.object;
+        let quoted_schema = self.quote_identifier(schema_name);
+        let path_prefix = format!("{}.{}.", self.database, schema_name);
+        let objects_sql = format!(
+            "SELECT object.type, object.name, \
+             (SELECT owner.type FROM {quoted_schema}.sqlite_schema AS owner \
+                WHERE owner.type IN ('table', 'view') \
+                  AND owner.name = object.tbl_name COLLATE NOCASE \
+                ORDER BY (owner.type = 'table') DESC, owner.name COLLATE BINARY LIMIT 1 \
+             ) AS owner_type, \
+             (SELECT owner.name FROM {quoted_schema}.sqlite_schema AS owner \
+                WHERE owner.type IN ('table', 'view') \
+                  AND owner.name = object.tbl_name COLLATE NOCASE \
+                ORDER BY (owner.type = 'table') DESC, owner.name COLLATE BINARY LIMIT 1 \
+             ) AS owner_name \
+             FROM {quoted_schema}.sqlite_schema AS object \
+             WHERE object.type IN ('table', 'view', 'trigger') \
+               AND object.name NOT GLOB 'sqlite_*' \
+               AND (object.type <> 'trigger' OR EXISTS ( \
+                   SELECT 1 FROM {quoted_schema}.sqlite_schema AS owner \
+                   WHERE owner.type IN ('table', 'view') \
+                     AND owner.name = object.tbl_name COLLATE NOCASE)) \
+               AND (instr(lower(object.name), ?) > 0 \
+                 OR instr(lower(CASE WHEN object.type = 'trigger' \
+                    THEN ? || (SELECT owner.name FROM {quoted_schema}.sqlite_schema AS owner \
+                         WHERE owner.type IN ('table', 'view') \
+                           AND owner.name = object.tbl_name COLLATE NOCASE \
+                         ORDER BY (owner.type = 'table') DESC, owner.name COLLATE BINARY LIMIT 1) \
+                         || '.' || object.name \
+                    ELSE ? || object.name END), ?) > 0) \
+             ORDER BY object.name COLLATE BINARY"
+        );
+        let rows = sqlx::query(AssertSqlSafe(objects_sql))
+            .bind(query)
+            .bind(&path_prefix)
+            .bind(&path_prefix)
+            .bind(query)
+            .fetch_all(&mut *connection)
+            .await
+            .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Sql))?;
+        for row in rows {
+            let entry = self.object_search_entry(schema, &row)?;
+            let mut ancestors = vec![database.clone(), schema.clone()];
+            if let Some(owner) = entry
+                .relation_id
+                .as_ref()
+                .filter(|owner| *owner != &entry.id)
+            {
+                ancestors.push(self.relation_entry(schema, owner)?);
+            }
+            hits.push(CatalogSearchHit { entry, ancestors });
+        }
+
+        let owners_sql = format!(
+            "SELECT relation.type, relation.name \
+             FROM {quoted_schema}.sqlite_schema AS relation \
+             WHERE relation.type IN ('table', 'view') \
+               AND relation.name NOT GLOB 'sqlite_*' \
+               AND (instr(lower(? || relation.name), ?) > 0 \
+                 OR EXISTS (SELECT 1 FROM pragma_table_xinfo(relation.name, ?) AS column \
+                    WHERE instr(lower(column.name), ?) > 0 \
+                       OR instr(lower(? || relation.name || '.' || column.name), ?) > 0) \
+                 OR (relation.type = 'table' AND EXISTS (\
+                    SELECT 1 FROM pragma_index_list(relation.name, ?) AS idx \
+                    WHERE instr(lower(idx.name), ?) > 0 \
+                       OR instr(lower(? || relation.name || '.' || idx.name), ?) > 0)) \
+                 OR (relation.type = 'table' AND EXISTS (\
+                    SELECT 1 FROM pragma_table_xinfo(relation.name, ?) AS pk_column \
+                    WHERE pk_column.pk > 0 \
+                      AND NOT EXISTS (SELECT 1 FROM pragma_index_list(relation.name, ?) AS pk_index \
+                                      WHERE pk_index.origin = 'pk') \
+                      AND (instr('primary_key', ?) > 0 \
+                        OR instr(lower(? || relation.name || '.primary_key'), ?) > 0))) \
+                 OR (relation.type = 'table' AND EXISTS (\
+                    SELECT 1 FROM pragma_foreign_key_list(relation.name, ?) AS fk \
+                    WHERE instr(lower(printf('fk_%s_%d', relation.name, fk.id)), ?) > 0 \
+                       OR instr(lower(? || relation.name || '.' || printf('fk_%s_%d', relation.name, fk.id)), ?) > 0))) \
+             ORDER BY relation.name COLLATE BINARY"
+        );
+        let owner_rows = sqlx::query(AssertSqlSafe(owners_sql))
+            .bind(&path_prefix)
+            .bind(query)
+            .bind(schema_name)
+            .bind(query)
+            .bind(&path_prefix)
+            .bind(query)
+            .bind(schema_name)
+            .bind(query)
+            .bind(&path_prefix)
+            .bind(query)
+            .bind(schema_name)
+            .bind(schema_name)
+            .bind(query)
+            .bind(&path_prefix)
+            .bind(query)
+            .bind(schema_name)
+            .bind(query)
+            .bind(&path_prefix)
+            .bind(query)
+            .fetch_all(&mut *connection)
+            .await
+            .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Sql))?;
+        for row in owner_rows {
+            let native_type: String = row.try_get("type").map_err(decode_error)?;
+            let relation_name: String = row.try_get("name").map_err(decode_error)?;
+            let kind = relation_kind(&native_type)?;
+            let relation_id = CatalogId::new(
+                self.connection_id,
+                kind,
+                [
+                    self.database.clone(),
+                    schema_name.clone(),
+                    relation_name.clone(),
+                ],
+            );
+            let relation = self.relation_entry(schema, &relation_id)?;
+            let children = self
+                .load_relation_child_entries(connection, &relation_id, schema_name, &relation_name)
+                .await?;
+            for entry in children {
+                hits.push(CatalogSearchHit {
+                    entry,
+                    ancestors: vec![database.clone(), schema.clone(), relation.clone()],
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn database_entry(&self) -> Result<CatalogEntry, DatabaseError> {
+        CatalogEntry::database(
+            CatalogId::new(
+                self.connection_id,
+                CatalogKind::Database,
+                [self.database.clone()],
+            ),
+            QualifiedName {
+                database: Some(self.database.clone()),
+                schema: None,
+                object: self.database.clone(),
+            },
+            "database",
+            OptionalMetadata::Unsupported,
+            true,
+        )
+        .map_err(catalog_invariant)
+    }
+
+    fn schema_entry(
+        &self,
+        database: &CatalogEntry,
+        schema: &str,
+    ) -> Result<CatalogEntry, DatabaseError> {
+        CatalogEntry::schema(
+            CatalogId::new(
+                self.connection_id,
+                CatalogKind::Schema,
+                [self.database.clone(), schema.to_owned()],
+            ),
+            database.id.clone(),
+            QualifiedName {
+                database: Some(self.database.clone()),
+                schema: Some(schema.to_owned()),
+                object: schema.to_owned(),
+            },
+            "schema",
+            OptionalMetadata::Unsupported,
+            true,
+        )
+        .map_err(catalog_invariant)
+    }
+
+    fn relation_entry(
+        &self,
+        schema: &CatalogEntry,
+        relation: &CatalogId,
+    ) -> Result<CatalogEntry, DatabaseError> {
+        let name = relation
+            .native_path
+            .last()
+            .ok_or_else(|| catalog_internal("SQLite relation ID has no name"))?;
+        CatalogEntry::relation(
+            relation.clone(),
+            schema.id.clone(),
+            child_qualified_name(&self.database, &schema.qualified_name.object, name),
+            match relation.kind {
+                CatalogKind::Table => "table",
+                CatalogKind::View => "view",
+                _ => return Err(catalog_internal("unexpected SQLite relation kind")),
+            },
+            OptionalMetadata::Unsupported,
+            true,
+        )
+        .map_err(catalog_invariant)
+    }
+
+    fn object_search_entry(
+        &self,
+        schema: &CatalogEntry,
+        row: &SqliteRow,
+    ) -> Result<CatalogEntry, DatabaseError> {
+        let native_type: String = row.try_get("type").map_err(decode_error)?;
+        let name: String = row.try_get("name").map_err(decode_error)?;
+        let kind = match native_type.as_str() {
+            "trigger" => CatalogKind::Trigger,
+            _ => relation_kind(&native_type)?,
+        };
+        let id = CatalogId::new(
+            self.connection_id,
+            kind,
+            [
+                self.database.clone(),
+                schema.qualified_name.object.clone(),
+                name.clone(),
+            ],
+        );
+        let qualified_name =
+            child_qualified_name(&self.database, &schema.qualified_name.object, &name);
+        if kind != CatalogKind::Trigger {
+            return CatalogEntry::relation(
+                id,
+                schema.id.clone(),
+                qualified_name,
+                native_type,
+                OptionalMetadata::Unsupported,
+                true,
+            )
+            .map_err(catalog_invariant);
+        }
+        let owner_type: String = row.try_get("owner_type").map_err(decode_error)?;
+        let owner_name: String = row.try_get("owner_name").map_err(decode_error)?;
+        CatalogEntry::relation_object(
+            id,
+            schema.id.clone(),
+            CatalogId::new(
+                self.connection_id,
+                relation_kind(&owner_type)?,
+                [
+                    self.database.clone(),
+                    schema.qualified_name.object.clone(),
+                    owner_name,
+                ],
+            ),
+            qualified_name,
+            native_type,
+            OptionalMetadata::Unsupported,
+        )
+        .map_err(catalog_invariant)
+    }
+
     fn load_database_page(
         &self,
         _connection: &mut SqliteConnection,
@@ -756,17 +1116,33 @@ impl SqliteAdapter {
         let (schema, relation_name, _) = self
             .verified_relation_id(connection, relation, &request.key.target)
             .await?;
+        let mut entries = self
+            .load_relation_child_entries(connection, relation, &schema, &relation_name)
+            .await?;
+        let total_count = exact_count(entries.len())?;
+        let next_cursor =
+            paginate_in_memory(&mut entries, request, child_sort_key, child_tie_breaker)?;
+        CatalogPage::new(request, entries, total_count, next_cursor).map_err(catalog_invariant)
+    }
+
+    async fn load_relation_child_entries(
+        &self,
+        connection: &mut SqliteConnection,
+        relation: &CatalogId,
+        schema: &str,
+        relation_name: &str,
+    ) -> Result<Vec<CatalogEntry>, DatabaseError> {
         let indexes = if relation.kind == CatalogKind::Table {
-            self.load_index_metadata(connection, &schema, &relation_name)
+            self.load_index_metadata(connection, schema, relation_name)
                 .await?
         } else {
             Vec::new()
         };
         let columns = self
-            .load_column_metadata(connection, &schema, &relation_name, &indexes)
+            .load_column_metadata(connection, schema, relation_name, &indexes)
             .await?;
         let foreign_keys = if relation.kind == CatalogKind::Table {
-            self.load_foreign_key_metadata(connection, &schema, &relation_name)
+            self.load_foreign_key_metadata(connection, schema, relation_name)
                 .await?
         } else {
             Vec::new()
@@ -781,7 +1157,7 @@ impl SqliteAdapter {
                 CatalogEntry::relation_child(
                     index_id,
                     relation.clone(),
-                    child_qualified_name(&self.database, &schema, &index.name),
+                    child_qualified_name(&self.database, schema, &index.name),
                     "index",
                     OptionalMetadata::Unsupported,
                     CatalogMetadata::Index(IndexMetadata {
@@ -819,7 +1195,7 @@ impl SqliteAdapter {
                     CatalogEntry::relation_child(
                         constraint_id,
                         relation.clone(),
-                        child_qualified_name(&self.database, &schema, &index.name),
+                        child_qualified_name(&self.database, schema, &index.name),
                         native_kind,
                         OptionalMetadata::Unsupported,
                         metadata,
@@ -847,7 +1223,7 @@ impl SqliteAdapter {
                 CatalogEntry::relation_child(
                     constraint_id,
                     relation.clone(),
-                    child_qualified_name(&self.database, &schema, native_identity),
+                    child_qualified_name(&self.database, schema, native_identity),
                     "primary_key",
                     OptionalMetadata::Unsupported,
                     CatalogMetadata::Constraint(ConstraintMetadata::PrimaryKey {
@@ -868,14 +1244,14 @@ impl SqliteAdapter {
                 CatalogEntry::relation_child(
                     constraint_id,
                     relation.clone(),
-                    child_qualified_name(&self.database, &schema, &name),
+                    child_qualified_name(&self.database, schema, &name),
                     "foreign_key",
                     OptionalMetadata::Unsupported,
                     CatalogMetadata::Constraint(ConstraintMetadata::ForeignKey {
                         columns: foreign_key.columns,
                         referenced_relation: QualifiedName {
                             database: Some(self.database.clone()),
-                            schema: Some(schema.clone()),
+                            schema: Some(schema.to_owned()),
                             object: foreign_key.referenced_relation,
                         },
                         referenced_columns: foreign_key.referenced_columns,
@@ -908,7 +1284,7 @@ impl SqliteAdapter {
                 CatalogEntry::relation_child(
                     relation_child_id(relation, CatalogKind::Column, &column.name),
                     relation.clone(),
-                    child_qualified_name(&self.database, &schema, &column.name),
+                    child_qualified_name(&self.database, schema, &column.name),
                     "column",
                     OptionalMetadata::Unsupported,
                     CatalogMetadata::Column(metadata),
@@ -917,10 +1293,7 @@ impl SqliteAdapter {
             );
         }
 
-        let total_count = exact_count(entries.len())?;
-        let next_cursor =
-            paginate_in_memory(&mut entries, request, child_sort_key, child_tie_breaker)?;
-        CatalogPage::new(request, entries, total_count, next_cursor).map_err(catalog_invariant)
+        Ok(entries)
     }
 
     async fn load_column_metadata(
@@ -1317,6 +1690,30 @@ fn append_preview_options(
     if let Some(clause) = &options.order_by_clause {
         sql.push_str(" ORDER BY ");
         sql.push_str(clause);
+    }
+}
+
+fn relation_kind(native_type: &str) -> Result<CatalogKind, DatabaseError> {
+    match native_type {
+        "table" => Ok(CatalogKind::Table),
+        "view" => Ok(CatalogKind::View),
+        _ => Err(catalog_internal("unexpected SQLite relation type")),
+    }
+}
+
+fn search_rank(hit: &CatalogSearchHit, query: &str) -> Option<u8> {
+    let name = hit.entry.qualified_name.object.to_lowercase();
+    let path = hit.qualified_path().to_lowercase();
+    if name == query {
+        Some(0)
+    } else if name.starts_with(query) {
+        Some(1)
+    } else if name.contains(query) {
+        Some(2)
+    } else if path.contains(query) {
+        Some(3)
+    } else {
+        None
     }
 }
 

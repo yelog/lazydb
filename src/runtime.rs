@@ -107,6 +107,7 @@ pub struct Runtime {
     background_tasks: Vec<JoinHandle<()>>,
     profile_tasks: Vec<JoinHandle<()>>,
     completion_tasks: HashMap<Uuid, JoinHandle<()>>,
+    catalog_search_task: Option<JoinHandle<()>>,
     manual_transactions: HashMap<Uuid, ManualTransactionEntry>,
     relation_transactions: HashMap<Uuid, ManualTransactionEntry>,
     relation_mutation_blocked: Arc<StdMutex<HashSet<(Uuid, ConnectionIdentity)>>>,
@@ -165,6 +166,7 @@ impl Runtime {
             background_tasks: Vec::new(),
             profile_tasks: Vec::new(),
             completion_tasks: HashMap::new(),
+            catalog_search_task: None,
             manual_transactions: HashMap::new(),
             relation_transactions: HashMap::new(),
             relation_mutation_blocked: Arc::new(StdMutex::new(HashSet::new())),
@@ -204,8 +206,19 @@ impl Runtime {
                 profile_id,
                 generation,
                 target,
-            } => self.connect(profile_id, generation, target),
+            } => {
+                if let Some(task) = self.catalog_search_task.take() {
+                    task.abort();
+                }
+                self.connect(profile_id, generation, target);
+            }
             Command::LoadCatalogPage(request) => self.load_catalog_page(request),
+            Command::SearchCatalog(request) => self.search_catalog(request),
+            Command::CancelCatalogSearch => {
+                if let Some(task) = self.catalog_search_task.take() {
+                    task.abort();
+                }
+            }
             Command::LoadRelationPreview(request) | Command::LoadRelationStructure(request) => {
                 self.load_relation(request)
             }
@@ -525,6 +538,9 @@ impl Runtime {
     }
 
     fn disconnect(&mut self, expected: ConnectionIdentity) {
+        if let Some(task) = self.catalog_search_task.take() {
+            task.abort();
+        }
         let connection = Arc::clone(&self.connection);
         let known_relations = Arc::clone(&self.known_relations);
         let mutation = Arc::clone(&self.profile_mutation);
@@ -786,6 +802,41 @@ impl Runtime {
                         category: error.category,
                         message: error.to_string(),
                     });
+                }
+            }
+        }));
+    }
+
+    fn search_catalog(&mut self, request: crate::db::catalog::CatalogSearchRequest) {
+        if let Some(task) = self.catalog_search_task.take() {
+            task.abort();
+        }
+        let sender = self.event_sender.clone();
+        let connection = Arc::clone(&self.connection);
+        self.catalog_search_task = Some(tokio::spawn(async move {
+            sleep(Duration::from_millis(150)).await;
+            let Some(database) = active_database(Arc::clone(&connection), request.connection).await
+            else {
+                return;
+            };
+            let identity = request.connection;
+            let session_id = request.session_id;
+            let generation = request.generation;
+            match database.search_catalog(&request).await {
+                Ok(page) => {
+                    if active_database(connection, identity).await.is_some() {
+                        let _ = sender.send(Action::CatalogSearchSucceeded(page));
+                    }
+                }
+                Err(error) => {
+                    if active_database(connection, identity).await.is_some() {
+                        let _ = sender.send(Action::CatalogSearchFailed {
+                            connection: identity,
+                            session_id,
+                            generation,
+                            message: sanitize_terminal_text(&error.to_string()),
+                        });
+                    }
                 }
             }
         }));
