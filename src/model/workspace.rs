@@ -361,7 +361,7 @@ impl ExplorerState {
             return false;
         }
         self.normalized.selected = Some(id.clone());
-        self.normalized.ensure_selected_visible(8);
+        self.normalized.ensure_selected_visible();
         self.sync_selected_index();
         true
     }
