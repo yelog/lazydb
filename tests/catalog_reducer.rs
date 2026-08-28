@@ -884,13 +884,21 @@ fn preview_uses_selected_relation_identity_without_opening_relation_tabs() {
         vec![relation.clone()],
         None,
     )));
-    app.explorer.normalized.selected = Some(ExplorerNodeId::Catalog(relation.id));
+    app.explorer.normalized.selected = Some(ExplorerNodeId::Catalog(relation.id.clone()));
 
     let commands = app.update(Action::PreviewSelected);
-    assert!(matches!(
-        commands.as_slice(),
-        [Command::LoadRelationPreview(request)] if request.relation.object_id.native_path == ["app", "public", "logical_view", "42", "native-suffix"]
-    ));
+    assert!(commands.iter().any(|command| matches!(
+        command,
+        Command::LoadRelationPreview(request)
+            if request.relation.object_id.native_path
+                == ["app", "public", "logical_view", "42", "native-suffix"]
+    )));
+    assert!(commands.iter().any(|command| matches!(
+        command,
+        Command::LoadCatalogPage(request)
+            if request.key.target
+                == CatalogTarget::relation_children(relation.id.clone()).unwrap()
+    )));
     assert_eq!(app.tabs.len(), 2);
 }
 

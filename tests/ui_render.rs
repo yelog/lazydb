@@ -15,6 +15,7 @@ use lazydb::{
         value::CellValue,
     },
     model::{
+        data_query::{DataQueryCandidate, DataQueryCompletion, DataQueryInput},
         explorer::{CatalogGroupState, ExplorerLoadState, ExplorerNodeId, ExplorerOwnerId},
         profile_manager::{ProfileField, ProfileManagerPage, ProfileOperation},
         relation::RelationTab,
@@ -637,6 +638,46 @@ fn empty_relation_preview_renders_clean_empty_state() {
 }
 
 #[test]
+fn relation_query_completion_is_anchored_to_active_input() {
+    let mut app = fixture();
+    let mut relation = RelationTab::new("users");
+    relation.data =
+        lazydb::model::relation::RelationLoad::Ready(lazydb::model::relation::OwnedSnapshot::new(
+            lazydb::db::RelationPreview {
+                sql: "SELECT * FROM users".into(),
+                result: app.active_console().outcome.clone().unwrap(),
+            },
+            lazydb::identity::ConnectionIdentity {
+                profile_id: uuid::Uuid::nil(),
+                generation: 0,
+            },
+            lazydb::profile::CatalogScope::for_profile(DatabaseKind::Sqlite, "db", None),
+        ));
+    relation.query.focus = Some(DataQueryInput::Where);
+    relation.query.where_input.set("userid");
+    relation.query.completion = Some(DataQueryCompletion {
+        candidates: vec![DataQueryCandidate {
+            name: "user_id".into(),
+            type_name: Some("bigint\x1b[31m".into()),
+        }],
+        selected: 0,
+        replace: TextRange::new(0, 6),
+    });
+    app.tabs.push(WorkspaceTab::Relation(relation));
+    app.active_tab = 1;
+    app.focus = Focus::Results;
+
+    let (output, state) = render_with_state(&app, 120, 36);
+    let popup = state.completion_popup.unwrap();
+
+    assert!(output.contains("user_id"), "{output}");
+    assert!(output.contains("bigint<ESC>[31m"), "{output}");
+    assert!(!output.contains('\x1b'));
+    assert!(popup.right() <= 120);
+    assert!(popup.bottom() <= 36);
+}
+
+#[test]
 fn relation_page_renders_data_ddl_selectors_and_relation_layout() {
     let mut app = App::new(Vec::new());
     app.tabs
@@ -815,7 +856,7 @@ fn completion_popup_is_anchored_below_the_editor_cursor() {
             replace: TextRange::new(0, 1),
             score: CompletionScore {
                 context: 4,
-                prefix: 1,
+                name_match: 2,
                 schema: 0,
             },
         }],
@@ -851,7 +892,7 @@ fn completion_popup_is_not_rendered_in_normal_mode() {
             replace: TextRange::new(0, 0),
             score: CompletionScore {
                 context: 3,
-                prefix: 1,
+                name_match: 2,
                 schema: 1,
             },
         }],

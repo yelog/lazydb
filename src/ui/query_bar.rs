@@ -1,7 +1,7 @@
 use crate::model::data_query::{DataQueryCapability, DataQueryInput, DataQueryState};
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout, Position, Rect},
     style::Style,
     widgets::Paragraph,
 };
@@ -14,9 +14,9 @@ pub(crate) fn render(
     query: &DataQueryState,
     theme: Theme,
     state: &mut UiState,
-) {
+) -> Option<Position> {
     if area.height == 0 {
-        return;
+        return None;
     }
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
@@ -34,6 +34,7 @@ pub(crate) fn render(
             query.order_by_input.value(),
         ),
     ];
+    let mut cursor = None;
     for ((input, label, value), chunk) in fields.into_iter().zip(chunks.iter().copied()) {
         let active = enabled && query.focus == Some(input);
         if active {
@@ -41,7 +42,7 @@ pub(crate) fn render(
                 DataQueryInput::Where => &query.where_input,
                 DataQueryInput::OrderBy => &query.order_by_input,
             };
-            render_text_input(
+            cursor = render_text_input(
                 frame,
                 chunk,
                 &format!("{label}  "),
@@ -51,11 +52,7 @@ pub(crate) fn render(
             );
         } else {
             frame.render_widget(
-                Paragraph::new(format!("{label}  {value}")).style(if !enabled {
-                    theme.muted
-                } else {
-                    theme.muted
-                }),
+                Paragraph::new(format!("{label}  {value}")).style(theme.muted),
                 chunk,
             );
         }
@@ -79,4 +76,5 @@ pub(crate) fn render(
             Rect::new(area.x, area.y.saturating_add(2), area.width, 1),
         );
     }
+    cursor
 }

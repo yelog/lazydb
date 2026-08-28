@@ -91,6 +91,7 @@ pub(crate) fn render(
     }
 }
 
+#[cfg(test)]
 fn cell_editor_value(editor: &crate::model::relation_edit::CellEditorState) -> String {
     editor.input.value().to_owned()
 }
@@ -149,7 +150,7 @@ fn render_data(
                 ])
                 .split(area)
         };
-        super::query_bar::render(frame, body[0], &tab.query, theme, state);
+        let query_cursor = super::query_bar::render(frame, body[0], &tab.query, theme, state);
         if let Some((message, retry, cancel)) = status {
             render_status(frame, body[1], message, retry, cancel, theme, state);
         }
@@ -189,13 +190,37 @@ fn render_data(
             .style(Style::new().fg(theme.muted).bg(theme.surface)),
             footer,
         );
+        if let (Some(completion), Some(cursor)) = (&tab.query.completion, query_cursor) {
+            super::render_data_query_completion_popup(
+                frame,
+                completion,
+                theme,
+                state,
+                super::CompletionAnchor {
+                    viewport: area,
+                    cursor,
+                },
+            );
+        }
     } else if let Some((message, retry, cancel)) = status {
         let body = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(2), Constraint::Min(1)])
             .split(area);
-        super::query_bar::render(frame, body[0], &tab.query, theme, state);
+        let query_cursor = super::query_bar::render(frame, body[0], &tab.query, theme, state);
         render_status(frame, body[1], message, retry, cancel, theme, state);
+        if let (Some(completion), Some(cursor)) = (&tab.query.completion, query_cursor) {
+            super::render_data_query_completion_popup(
+                frame,
+                completion,
+                theme,
+                state,
+                super::CompletionAnchor {
+                    viewport: area,
+                    cursor,
+                },
+            );
+        }
     }
 }
 

@@ -93,6 +93,16 @@ impl TextInput {
         self.cursor = self.value.chars().count();
     }
 
+    pub fn replace(&mut self, range: crate::sql::TextRange, replacement: &str) {
+        let start = self.byte_index(range.start.min(self.value.chars().count()));
+        let end = self.byte_index(range.end.min(self.value.chars().count()));
+        if start > end {
+            return;
+        }
+        self.value.replace_range(start..end, replacement);
+        self.cursor = range.start + replacement.chars().count();
+    }
+
     fn byte_index(&self, character_index: usize) -> usize {
         self.value
             .char_indices()

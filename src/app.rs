@@ -12,14 +12,18 @@ use crate::{
     db::{
         ErrorCategory,
         catalog::{
-            CatalogPage, CatalogRequest, CatalogRequestKey, CatalogTarget, MAX_CATALOG_PAGE_SIZE,
+            CatalogMetadata, CatalogPage, CatalogRequest, CatalogRequestKey, CatalogTarget,
+            MAX_CATALOG_PAGE_SIZE,
         },
         query::ColumnMeta,
         value::CellValue,
     },
     editor::{EditorEffect, EditorError, EditorWorkspace},
     model::{
-        data_query::{DataQueryCapability, DataQueryInput, DataQueryOptions},
+        data_query::{
+            DataQueryCandidate, DataQueryCapability, DataQueryCompletion, DataQueryInput,
+            DataQueryOptions,
+        },
         editor::{EditorMode, EditorRenderSnapshot, EditorViewport},
         execution_target::ExecutionTarget,
         explorer::{
@@ -80,6 +84,49 @@ fn cancel_pending_relation<T: Clone>(load: &mut RelationLoad<T>) -> Option<Relat
         };
     }
     pending
+}
+
+fn data_query_identifier(value: &str, cursor: usize) -> Option<(crate::sql::TextRange, String)> {
+    let characters = value.chars().collect::<Vec<_>>();
+    let cursor = cursor.min(characters.len());
+    let mut quote = None;
+    let mut index = 0;
+    while index < cursor {
+        let character = characters[index];
+        if let Some(active) = quote {
+            if character == active {
+                if index + 1 < cursor && characters[index + 1] == active {
+                    index += 1;
+                } else {
+                    quote = None;
+                }
+            }
+        } else if matches!(character, '\'' | '"' | '`') {
+            quote = Some(character);
+        }
+        index += 1;
+    }
+    if quote.is_some() {
+        return None;
+    }
+    let mut start = cursor;
+    while start > 0 && is_data_query_identifier_character(characters[start - 1]) {
+        start -= 1;
+    }
+    let mut end = cursor;
+    while end < characters.len() && is_data_query_identifier_character(characters[end]) {
+        end += 1;
+    }
+    (start < cursor).then(|| {
+        (
+            crate::sql::TextRange::new(start, end),
+            characters[start..cursor].iter().collect(),
+        )
+    })
+}
+
+fn is_data_query_identifier_character(character: char) -> bool {
+    character.is_alphanumeric() || matches!(character, '_' | '-')
 }
 
 pub struct App {
@@ -683,6 +730,10 @@ impl App {
                         | Action::DataQueryMoveHome
                         | Action::DataQueryMoveEnd
                         | Action::DataQueryClear
+                        | Action::DataQueryCompletionNext
+                        | Action::DataQueryCompletionPrevious
+                        | Action::DataQueryCompletionAccept
+                        | Action::DataQueryCompletionDismiss
                         | Action::SubmitDataQuery
                         | Action::CancelDataQueryInput
                         | Action::FocusRelationQueryInput(_)
@@ -1986,46 +2037,75 @@ impl App {
                     query.focus = Some(input);
                     query.error = None;
                 }
+                self.refresh_active_data_query_completion();
                 Vec::new()
             }
             Action::DataQueryInsert(character) => {
                 self.with_active_data_query(|input| input.insert(character));
+                self.refresh_active_data_query_completion();
                 Vec::new()
             }
             Action::DataQueryBackspace => {
                 self.with_active_data_query(|input| input.backspace());
+                self.refresh_active_data_query_completion();
                 Vec::new()
             }
             Action::DataQueryDeletePreviousWord => {
                 self.with_active_data_query(|input| input.delete_previous_word());
+                self.refresh_active_data_query_completion();
                 Vec::new()
             }
             Action::DataQueryDeleteToStart => {
                 self.with_active_data_query(|input| input.delete_to_start());
+                self.refresh_active_data_query_completion();
                 Vec::new()
             }
             Action::DataQueryDelete => {
                 self.with_active_data_query(|input| input.delete());
+                self.refresh_active_data_query_completion();
                 Vec::new()
             }
             Action::DataQueryMoveLeft => {
                 self.with_active_data_query(|input| input.move_left());
+                self.refresh_active_data_query_completion();
                 Vec::new()
             }
             Action::DataQueryMoveRight => {
                 self.with_active_data_query(|input| input.move_right());
+                self.refresh_active_data_query_completion();
                 Vec::new()
             }
             Action::DataQueryMoveHome => {
                 self.with_active_data_query(|input| input.move_home());
+                self.refresh_active_data_query_completion();
                 Vec::new()
             }
             Action::DataQueryMoveEnd => {
                 self.with_active_data_query(|input| input.move_end());
+                self.refresh_active_data_query_completion();
                 Vec::new()
             }
             Action::DataQueryClear => {
                 self.with_active_data_query(|input| input.set(""));
+                self.refresh_active_data_query_completion();
+                Vec::new()
+            }
+            Action::DataQueryCompletionNext => {
+                self.move_active_data_query_completion(1);
+                Vec::new()
+            }
+            Action::DataQueryCompletionPrevious => {
+                self.move_active_data_query_completion(-1);
+                Vec::new()
+            }
+            Action::DataQueryCompletionAccept => {
+                self.accept_active_data_query_completion();
+                Vec::new()
+            }
+            Action::DataQueryCompletionDismiss => {
+                if let Some(query) = self.active_data_query_mut() {
+                    query.completion = None;
+                }
                 Vec::new()
             }
             Action::CancelDataQueryInput => {
@@ -2086,7 +2166,9 @@ impl App {
             Action::PreviewSelected => self.open_selected_relation(RelationView::Data),
             Action::DdlSelected => self.ddl_selected(),
             Action::RelationSucceeded { request, snapshot } => {
-                self.accept_relation(request, Ok(*snapshot))
+                let commands = self.accept_relation(request, Ok(*snapshot));
+                self.refresh_active_data_query_completion();
+                commands
             }
             Action::RelationFailed { request, message } => {
                 self.accept_relation(request, Err(message))
@@ -2343,7 +2425,11 @@ impl App {
                 }
                 Vec::new()
             }
-            Action::CatalogPageLoaded(page) => self.accept_catalog_page(page),
+            Action::CatalogPageLoaded(page) => {
+                let commands = self.accept_catalog_page(page);
+                self.refresh_active_data_query_completion();
+                commands
+            }
             Action::CatalogPageFailed {
                 key,
                 category,
@@ -5390,7 +5476,9 @@ impl App {
             }
             self.focus = Focus::Results;
             self.active_tab = index;
-            return self.load_active_relation(false);
+            let mut commands = self.load_active_relation(false);
+            commands.extend(self.load_relation_columns_if_missing(&relation_id));
+            return commands;
         }
         let title = relation.qualified_name.object.clone();
         let descriptor = RelationDescriptor {
@@ -5405,7 +5493,28 @@ impl App {
             )));
         self.active_tab = self.tabs.len() - 1;
         self.focus = Focus::Results;
-        self.load_active_relation(true)
+        let mut commands = self.load_active_relation(true);
+        commands.extend(self.load_relation_columns_if_missing(&relation_id));
+        commands
+    }
+
+    fn load_relation_columns_if_missing(
+        &mut self,
+        relation: &crate::db::catalog::CatalogId,
+    ) -> Vec<Command> {
+        if self
+            .explorer
+            .completion_index
+            .relation_columns(relation)
+            .next()
+            .is_some()
+        {
+            return Vec::new();
+        }
+        let Ok(target) = CatalogTarget::relation_children(relation.clone()) else {
+            return Vec::new();
+        };
+        self.start_catalog_request(target, None, CatalogRequestIntent::Automatic)
     }
 
     fn ddl_selected(&mut self) -> Vec<Command> {
@@ -5421,6 +5530,122 @@ impl App {
                 Some(&mut tab.query)
             }
             _ => None,
+        }
+    }
+
+    fn refresh_active_data_query_completion(&mut self) {
+        let Some(WorkspaceTab::Relation(tab)) = self.tabs.get(self.active_tab) else {
+            if let Some(query) = self.active_data_query_mut() {
+                query.completion = None;
+            }
+            return;
+        };
+        if tab.view != RelationView::Data {
+            return;
+        }
+        let Some(input_kind) = tab.query.focus else {
+            return;
+        };
+        let input = match input_kind {
+            DataQueryInput::Where => &tab.query.where_input,
+            DataQueryInput::OrderBy => &tab.query.order_by_input,
+        };
+        let Some((replace, prefix)) = data_query_identifier(input.value(), input.cursor()) else {
+            if let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab) {
+                tab.query.completion = None;
+            }
+            return;
+        };
+        let mut candidates = self
+            .explorer
+            .completion_index
+            .relation_columns(&tab.descriptor.key.object_id)
+            .filter_map(|entry| {
+                let quality = sql::identifier_match(&entry.qualified_name.object, &prefix)?;
+                let type_name = match &entry.metadata {
+                    CatalogMetadata::Column(column) => Some(column.native_type.clone()),
+                    _ => None,
+                };
+                Some((
+                    quality,
+                    DataQueryCandidate {
+                        name: entry.qualified_name.object.clone(),
+                        type_name,
+                    },
+                ))
+            })
+            .collect::<Vec<_>>();
+        if let Some(result) = self.relation_result() {
+            candidates.extend(result.columns.iter().filter_map(|column| {
+                let quality = sql::identifier_match(&column.name, &prefix)?;
+                Some((
+                    quality,
+                    DataQueryCandidate {
+                        name: column.name.clone(),
+                        type_name: Some(column.type_name.clone()),
+                    },
+                ))
+            }));
+        }
+        let mut seen = std::collections::HashSet::new();
+        candidates.retain(|(_, candidate)| seen.insert(candidate.name.to_lowercase()));
+        candidates.sort_by(|(left_quality, left), (right_quality, right)| {
+            right_quality.cmp(left_quality).then_with(|| {
+                left.name
+                    .to_lowercase()
+                    .cmp(&right.name.to_lowercase())
+                    .then_with(|| left.name.cmp(&right.name))
+            })
+        });
+        candidates.truncate(10);
+        let completion = (!candidates.is_empty()).then(|| DataQueryCompletion {
+            candidates: candidates
+                .into_iter()
+                .map(|(_, candidate)| candidate)
+                .collect(),
+            selected: 0,
+            replace,
+        });
+        if let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab) {
+            tab.query.completion = completion;
+        }
+    }
+
+    fn move_active_data_query_completion(&mut self, delta: isize) {
+        let Some(completion) = self
+            .active_data_query_mut()
+            .and_then(|query| query.completion.as_mut())
+        else {
+            return;
+        };
+        let count = completion.candidates.len();
+        if count > 0 {
+            completion.selected = completion
+                .selected
+                .saturating_add_signed(delta)
+                .min(count - 1);
+        }
+    }
+
+    fn accept_active_data_query_completion(&mut self) {
+        let dialect = self.sql_dialect();
+        let accepted = self.active_data_query_mut().and_then(|query| {
+            let completion = query.completion.take()?;
+            let candidate = completion.candidates.get(completion.selected)?;
+            Some((
+                query.focus?,
+                completion.replace,
+                sql::quote_identifier(&candidate.name, dialect),
+            ))
+        });
+        let Some((focus, replace, insert_text)) = accepted else {
+            return;
+        };
+        if let Some(query) = self.active_data_query_mut() {
+            match focus {
+                DataQueryInput::Where => query.where_input.replace(replace, &insert_text),
+                DataQueryInput::OrderBy => query.order_by_input.replace(replace, &insert_text),
+            }
         }
     }
 
@@ -5461,6 +5686,7 @@ impl App {
             )
         {
             query.focus = None;
+            query.completion = None;
             query.error = None;
             query
                 .where_input
@@ -5498,6 +5724,7 @@ impl App {
             console.query.submitted = DataQueryOptions::default();
             console.query.error = None;
             console.query.focus = None;
+            console.query.completion = None;
             console.derived = None;
             return Vec::new();
         }
@@ -5532,6 +5759,7 @@ impl App {
         let console = self.active_console_mut();
         console.query.submitted = options.clone();
         console.query.focus = None;
+        console.query.completion = None;
         console.query.error = None;
         console.derived = Some(DerivedResultState {
             source: last,
@@ -5566,6 +5794,7 @@ impl App {
                 tab.query.submitted = options;
                 tab.query.error = None;
                 tab.query.focus = None;
+                tab.query.completion = None;
                 self.load_active_relation(true)
             }
             Err(error) => {
