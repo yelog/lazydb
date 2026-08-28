@@ -1046,8 +1046,8 @@ fn help_overlay_is_contextual() {
     let output = render(&app, 120, 36);
 
     assert!(output.contains("KEYMAP // EXPLORER"));
-    assert!(output.contains("toggle expand / collapse"));
-    assert!(output.contains("open table preview / activate"));
+    assert!(output.contains("select first node"));
+    assert!(output.contains("select last node"));
     assert!(output.contains("Esc"));
 }
 

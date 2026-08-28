@@ -25,6 +25,8 @@ enum Pending {
     RelationYank,
     GridGoto,
     GridAlign,
+    ExplorerGoto,
+    ExplorerAlign,
 }
 
 #[derive(Debug, Default)]
@@ -245,8 +247,31 @@ impl Keymap {
             if let Some(action) = map_pending(pending, event, app) {
                 return Some(action);
             }
-            if matches!(pending, Pending::GridGoto | Pending::GridAlign) {
+            if matches!(
+                pending,
+                Pending::GridGoto
+                    | Pending::GridAlign
+                    | Pending::ExplorerGoto
+                    | Pending::ExplorerAlign
+            ) {
                 return None;
+            }
+        }
+
+        if app.focus == Focus::Explorer
+            && app.explorer.search.is_none()
+            && event.modifiers.is_empty()
+        {
+            match event.code {
+                KeyCode::Char('g') => {
+                    self.set_pending(Pending::ExplorerGoto, app);
+                    return None;
+                }
+                KeyCode::Char('z') => {
+                    self.set_pending(Pending::ExplorerAlign, app);
+                    return None;
+                }
+                _ => {}
             }
         }
 
@@ -302,6 +327,33 @@ impl Keymap {
         }
 
         if event.modifiers.contains(KeyModifiers::CONTROL) {
+            if event.modifiers == KeyModifiers::CONTROL
+                && app.focus == Focus::Explorer
+                && app.explorer.search.is_none()
+            {
+                let action = match event.code {
+                    KeyCode::Char('d') => Some(Action::ExplorerScrollNodes {
+                        direction: 1,
+                        amount: crate::model::explorer::ExplorerScrollAmount::HalfPage,
+                    }),
+                    KeyCode::Char('u') => Some(Action::ExplorerScrollNodes {
+                        direction: -1,
+                        amount: crate::model::explorer::ExplorerScrollAmount::HalfPage,
+                    }),
+                    KeyCode::Char('f') => Some(Action::ExplorerScrollNodes {
+                        direction: 1,
+                        amount: crate::model::explorer::ExplorerScrollAmount::Page,
+                    }),
+                    KeyCode::Char('b') => Some(Action::ExplorerScrollNodes {
+                        direction: -1,
+                        amount: crate::model::explorer::ExplorerScrollAmount::Page,
+                    }),
+                    _ => None,
+                };
+                if action.is_some() {
+                    return action;
+                }
+            }
             if event.modifiers == KeyModifiers::CONTROL && is_grid_navigation_focus(app) {
                 use crate::model::tab::GridScrollAmount;
 
@@ -447,7 +499,7 @@ fn map_pending(pending: Pending, event: KeyEvent, app: &App) -> Option<Action> {
         || (pending == Pending::Leader
             && event.modifiers == KeyModifiers::SHIFT
             && event.code == KeyCode::Char('R'))
-        || (pending == Pending::Window && event.modifiers == KeyModifiers::CONTROL);
+        || pending == Pending::Window;
     if !valid_modifiers {
         return None;
     }
@@ -485,6 +537,18 @@ fn map_pending(pending: Pending, event: KeyEvent, app: &App) -> Option<Action> {
         )),
         (Pending::GridAlign, KeyCode::Char('b')) => Some(Action::GridAlignSelectedRow(
             crate::model::tab::GridRowAlignment::Bottom,
+        )),
+        (Pending::ExplorerGoto, KeyCode::Char('g')) => Some(Action::ExplorerSelectTarget(
+            crate::model::explorer::ExplorerNodeTarget::First,
+        )),
+        (Pending::ExplorerAlign, KeyCode::Char('z')) => Some(Action::ExplorerAlignSelected(
+            crate::model::explorer::ExplorerNodeAlignment::Middle,
+        )),
+        (Pending::ExplorerAlign, KeyCode::Char('t')) => Some(Action::ExplorerAlignSelected(
+            crate::model::explorer::ExplorerNodeAlignment::Top,
+        )),
+        (Pending::ExplorerAlign, KeyCode::Char('b')) => Some(Action::ExplorerAlignSelected(
+            crate::model::explorer::ExplorerNodeAlignment::Bottom,
         )),
         _ => None,
     }
@@ -821,6 +885,18 @@ fn map_explorer(code: KeyCode, app: &App) -> Option<Action> {
     match code {
         KeyCode::Char('j') | KeyCode::Down => Some(Action::ExplorerMove(1)),
         KeyCode::Char('k') | KeyCode::Up => Some(Action::ExplorerMove(-1)),
+        KeyCode::Char('G') => Some(Action::ExplorerSelectTarget(
+            crate::model::explorer::ExplorerNodeTarget::Last,
+        )),
+        KeyCode::Char('H') => Some(Action::ExplorerSelectTarget(
+            crate::model::explorer::ExplorerNodeTarget::ViewTop,
+        )),
+        KeyCode::Char('M') => Some(Action::ExplorerSelectTarget(
+            crate::model::explorer::ExplorerNodeTarget::ViewMiddle,
+        )),
+        KeyCode::Char('L') => Some(Action::ExplorerSelectTarget(
+            crate::model::explorer::ExplorerNodeTarget::ViewBottom,
+        )),
         KeyCode::Char('l') | KeyCode::Right => Some(Action::ExplorerExpand),
         KeyCode::Char('h') | KeyCode::Left => Some(Action::ExplorerCollapse),
         KeyCode::Enter => Some(Action::ExplorerOpenSelected),
@@ -832,8 +908,12 @@ fn map_explorer(code: KeyCode, app: &App) -> Option<Action> {
         KeyCode::Char('D') => Some(Action::OpenSelectedRelation {
             view: crate::model::relation::RelationView::Structure,
         }),
-        KeyCode::Home => Some(Action::ExplorerMove(isize::MIN)),
-        KeyCode::End => Some(Action::ExplorerMove(isize::MAX)),
+        KeyCode::Home => Some(Action::ExplorerSelectTarget(
+            crate::model::explorer::ExplorerNodeTarget::First,
+        )),
+        KeyCode::End => Some(Action::ExplorerSelectTarget(
+            crate::model::explorer::ExplorerNodeTarget::Last,
+        )),
         _ => None,
     }
 }

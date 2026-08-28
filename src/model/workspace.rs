@@ -12,7 +12,8 @@ use crate::db::{
 use crate::help::HelpState;
 use crate::model::execution_target::ExecutionTarget;
 use crate::model::explorer::{
-    ExplorerConnectionStatus, ExplorerNodeId, ExplorerTreeState, ProfileProvenance, StatusRowKind,
+    ExplorerConnectionStatus, ExplorerNodeAlignment, ExplorerNodeId, ExplorerNodeTarget,
+    ExplorerScrollAmount, ExplorerTreeState, ProfileProvenance, StatusRowKind,
 };
 use crate::model::transaction::{
     CancellationIntent, DeferredTransactionPrompt, TransactionExitChoice,
@@ -312,7 +313,7 @@ impl ExplorerState {
             }
         }
         self.normalized.selected = Some(ExplorerNodeId::Catalog(hit.entry.id.clone()));
-        self.normalized.ensure_selected_visible(8);
+        self.normalized.ensure_selected_visible();
         self.sync_selected_index();
         if let Some(search) = self.search.as_mut() {
             search.located = Some(hit.entry.id);
@@ -351,7 +352,7 @@ impl ExplorerState {
             .normalized
             .selected_visible_index_for_profile(profile_id)
             .unwrap_or(0);
-        self.normalized.ensure_selected_visible(8);
+        self.normalized.ensure_selected_visible();
         self.scroll = self
             .normalized
             .scroll
@@ -531,23 +532,29 @@ impl ExplorerState {
     }
 
     pub fn move_selection(&mut self, delta: isize) {
-        let rows = self.visible();
-        if rows.is_empty() {
-            self.selected = 0;
-            return;
-        }
-        let current = self
-            .normalized
-            .selected
-            .as_ref()
-            .and_then(|selected| rows.iter().position(|row| &row.id == selected))
-            .unwrap_or(0);
-        self.selected = current
-            .saturating_add_signed(delta)
-            .min(rows.len().saturating_sub(1));
-        self.normalized.selected = Some(rows[self.selected].id.clone());
-        self.normalized.ensure_selected_visible(8);
-        self.scroll = self.normalized.scroll;
+        let viewport_height = self.normalized.viewport_height;
+        self.normalized.move_selection(delta, viewport_height);
+        self.sync_selected_index();
+    }
+
+    pub fn set_viewport_height(&mut self, height: usize) {
+        self.normalized.set_viewport_height(height);
+        self.sync_selected_index();
+    }
+
+    pub fn select_target(&mut self, target: ExplorerNodeTarget) {
+        self.normalized.select_target(target);
+        self.sync_selected_index();
+    }
+
+    pub fn scroll_nodes(&mut self, direction: isize, amount: ExplorerScrollAmount) {
+        self.normalized.scroll_nodes(direction, amount);
+        self.sync_selected_index();
+    }
+
+    pub fn align_selected(&mut self, alignment: ExplorerNodeAlignment) {
+        self.normalized.align_selected(alignment);
+        self.sync_selected_index();
     }
 
     pub fn select_id(&mut self, id: ExplorerNodeId) -> bool {
@@ -557,7 +564,7 @@ impl ExplorerState {
         };
         self.selected = index;
         self.normalized.selected = Some(id);
-        self.normalized.ensure_selected_visible(8);
+        self.normalized.ensure_selected_visible();
         self.scroll = self.normalized.scroll;
         true
     }

@@ -105,6 +105,7 @@ pub struct UiState {
     pub editor_viewport: Option<EditorViewport>,
     pub completion_popup: Option<Rect>,
     pub grid_viewport: Option<DataGridViewport>,
+    pub explorer_viewport_rows: Option<usize>,
     pub cursor_style: Option<CursorStyle>,
     pub click_tracker: RefCell<Option<(crate::model::explorer::ExplorerNodeId, Instant)>>,
     pub relation_resize: RefCell<Option<(usize, u16, u16)>>,
@@ -133,6 +134,7 @@ impl UiState {
             editor_viewport: None,
             completion_popup: None,
             grid_viewport: None,
+            explorer_viewport_rows: None,
             cursor_style: None,
             click_tracker: RefCell::new(None),
             relation_resize: RefCell::new(None),
@@ -207,6 +209,7 @@ pub fn render_with_state_using_icons(
     state.editor_viewport = None;
     state.completion_popup = None;
     state.grid_viewport = None;
+    state.explorer_viewport_rows = None;
 
     if layout.mode == LayoutMode::TooSmall {
         render_too_small(frame, area, theme);
@@ -527,6 +530,7 @@ fn render_explorer(
     let block = panel_block(" EXPLORER ", app.focus == Focus::Explorer, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    state.explorer_viewport_rows = Some(inner.height as usize);
     if let Some(search) = app.explorer.search.as_ref() {
         render_explorer_search(frame, inner, search, theme, icons);
         return;
@@ -1212,7 +1216,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
         Focus::Results => ("DATA", theme.warning),
     };
     let hints = match app.focus {
-        Focus::Explorer => "j/k move   o toggle   Enter open   r refresh",
+        Focus::Explorer => "j/k move   gg/G ends   Ctrl-d/u page   Enter open",
         Focus::Editor => "Esc normal   i/a/o insert   F5 run   [ then t / ] then t tabs",
         Focus::Results if app.is_active_relation_tab() => {
             "h/j/k/l cells   Space s SQL console   Ctrl+w pane"

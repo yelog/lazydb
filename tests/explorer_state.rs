@@ -6,7 +6,8 @@ use lazydb::{
     },
     model::explorer::{
         CatalogGroupState, CatalogTree, CatalogTreeError, ExplorerConnectionStatus,
-        ExplorerLoadState, ExplorerNodeId, ExplorerOwnerId, ExplorerTreeState, StatusRowKind,
+        ExplorerLoadState, ExplorerNodeAlignment, ExplorerNodeId, ExplorerNodeTarget,
+        ExplorerOwnerId, ExplorerScrollAmount, ExplorerTreeState, StatusRowKind,
     },
 };
 use uuid::Uuid;
@@ -374,6 +375,48 @@ fn viewport_scroll_keeps_selection_visible() {
         Some(ExplorerNodeId::Profile(profiles[1]))
     );
     assert_eq!(explorer.scroll, 1);
+}
+
+#[test]
+fn vim_targets_page_moves_and_alignment_use_the_measured_viewport() {
+    let profiles: Vec<_> = (1..=12).map(profile_id).collect();
+    let mut explorer = ExplorerTreeState::default();
+    for profile in &profiles {
+        explorer.add_profile(*profile);
+    }
+    explorer.set_viewport_height(5);
+
+    for _ in 0..4 {
+        explorer.move_selection(1, 5);
+    }
+    assert_eq!(explorer.selected_visible_index(), Some(4));
+    assert_eq!(explorer.scroll, 0);
+    explorer.move_selection(1, 5);
+    assert_eq!(explorer.selected_visible_index(), Some(5));
+    assert_eq!(explorer.scroll, 1);
+
+    explorer.select_target(ExplorerNodeTarget::First);
+    assert_eq!(explorer.selected_visible_index(), Some(0));
+    assert_eq!(explorer.scroll, 0);
+    explorer.select_target(ExplorerNodeTarget::ViewBottom);
+    assert_eq!(explorer.selected_visible_index(), Some(4));
+    explorer.select_target(ExplorerNodeTarget::ViewMiddle);
+    assert_eq!(explorer.selected_visible_index(), Some(2));
+    explorer.select_target(ExplorerNodeTarget::Last);
+    assert_eq!(explorer.selected_visible_index(), Some(11));
+    assert_eq!(explorer.scroll, 7);
+
+    explorer.scroll_nodes(-1, ExplorerScrollAmount::Page);
+    assert_eq!(explorer.selected_visible_index(), Some(6));
+    assert_eq!(explorer.scroll, 2);
+    explorer.scroll_nodes(1, ExplorerScrollAmount::HalfPage);
+    assert_eq!(explorer.selected_visible_index(), Some(8));
+    assert_eq!(explorer.scroll, 4);
+
+    explorer.align_selected(ExplorerNodeAlignment::Top);
+    assert_eq!(explorer.scroll, 7);
+    explorer.align_selected(ExplorerNodeAlignment::Bottom);
+    assert_eq!(explorer.scroll, 4);
 }
 
 #[test]

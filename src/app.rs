@@ -461,6 +461,46 @@ impl App {
             Id::OpenSqlEditors => vec![Action::OpenSqlEditorList],
             Id::ExplorerMoveDown => vec![Action::ExplorerMove(1)],
             Id::ExplorerMoveUp => vec![Action::ExplorerMove(-1)],
+            Id::ExplorerFirst => vec![Action::ExplorerSelectTarget(
+                crate::model::explorer::ExplorerNodeTarget::First,
+            )],
+            Id::ExplorerLast => vec![Action::ExplorerSelectTarget(
+                crate::model::explorer::ExplorerNodeTarget::Last,
+            )],
+            Id::ExplorerViewTop => vec![Action::ExplorerSelectTarget(
+                crate::model::explorer::ExplorerNodeTarget::ViewTop,
+            )],
+            Id::ExplorerViewMiddle => vec![Action::ExplorerSelectTarget(
+                crate::model::explorer::ExplorerNodeTarget::ViewMiddle,
+            )],
+            Id::ExplorerViewBottom => vec![Action::ExplorerSelectTarget(
+                crate::model::explorer::ExplorerNodeTarget::ViewBottom,
+            )],
+            Id::ExplorerHalfPageDown => vec![Action::ExplorerScrollNodes {
+                direction: 1,
+                amount: crate::model::explorer::ExplorerScrollAmount::HalfPage,
+            }],
+            Id::ExplorerHalfPageUp => vec![Action::ExplorerScrollNodes {
+                direction: -1,
+                amount: crate::model::explorer::ExplorerScrollAmount::HalfPage,
+            }],
+            Id::ExplorerPageDown => vec![Action::ExplorerScrollNodes {
+                direction: 1,
+                amount: crate::model::explorer::ExplorerScrollAmount::Page,
+            }],
+            Id::ExplorerPageUp => vec![Action::ExplorerScrollNodes {
+                direction: -1,
+                amount: crate::model::explorer::ExplorerScrollAmount::Page,
+            }],
+            Id::ExplorerAlignMiddle => vec![Action::ExplorerAlignSelected(
+                crate::model::explorer::ExplorerNodeAlignment::Middle,
+            )],
+            Id::ExplorerAlignTop => vec![Action::ExplorerAlignSelected(
+                crate::model::explorer::ExplorerNodeAlignment::Top,
+            )],
+            Id::ExplorerAlignBottom => vec![Action::ExplorerAlignSelected(
+                crate::model::explorer::ExplorerNodeAlignment::Bottom,
+            )],
             Id::ExplorerExpand => vec![Action::ExplorerExpand],
             Id::ExplorerCollapse => vec![Action::ExplorerCollapse],
             Id::ExplorerToggle => vec![Action::ExplorerToggle],
@@ -2620,6 +2660,22 @@ impl App {
             }
             Action::ExplorerMove(delta) => {
                 self.explorer.move_selection(delta);
+                Vec::new()
+            }
+            Action::ExplorerViewportChanged(height) => {
+                self.explorer.set_viewport_height(height);
+                Vec::new()
+            }
+            Action::ExplorerSelectTarget(target) => {
+                self.explorer.select_target(target);
+                Vec::new()
+            }
+            Action::ExplorerScrollNodes { direction, amount } => {
+                self.explorer.scroll_nodes(direction, amount);
+                Vec::new()
+            }
+            Action::ExplorerAlignSelected(alignment) => {
+                self.explorer.align_selected(alignment);
                 Vec::new()
             }
             Action::ExplorerSearchOpen => {

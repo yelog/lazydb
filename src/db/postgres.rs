@@ -2047,11 +2047,11 @@ fn group_sort_key(group: ObjectGroup) -> &'static str {
 }
 
 fn child_sort_key(entry: &CatalogEntry) -> String {
-    format!(
-        "{:02}\0{}",
-        catalog_kind_rank(entry.kind),
-        entry.qualified_name.object
-    )
+    let value = match &entry.metadata {
+        CatalogMetadata::Column(column) => format!("{:010}", column.ordinal_position),
+        _ => entry.qualified_name.object.clone(),
+    };
+    format!("{:02}\0{}", catalog_kind_rank(entry.kind), value)
 }
 
 fn child_tie_breaker(entry: &CatalogEntry) -> String {

@@ -2456,6 +2456,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
         }
         sync_editor_viewport(&mut app, &mut runtime, &ui_state);
         sync_grid_viewport(&mut app, &mut runtime, &ui_state);
+        sync_explorer_viewport(&mut app, &mut runtime, &ui_state);
 
         while !app.should_quit {
             let mut redraw = false;
@@ -2513,6 +2514,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                 }
                 sync_editor_viewport(&mut app, &mut runtime, &ui_state);
                 sync_grid_viewport(&mut app, &mut runtime, &ui_state);
+                sync_explorer_viewport(&mut app, &mut runtime, &ui_state);
             }
         }
 
@@ -2556,6 +2558,15 @@ fn sync_grid_viewport(app: &mut App, runtime: &mut Runtime, state: &UiState) {
         return;
     };
     apply_action(app, runtime, Action::GridViewportChanged(viewport));
+}
+
+fn sync_explorer_viewport(app: &mut App, runtime: &mut Runtime, state: &UiState) {
+    let Some(rows) = state.explorer_viewport_rows else {
+        return;
+    };
+    if app.explorer.normalized.viewport_height != rows {
+        apply_action(app, runtime, Action::ExplorerViewportChanged(rows));
+    }
 }
 
 pub struct StartupProfiles {

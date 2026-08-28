@@ -69,7 +69,12 @@ selected driver, and URL applies on Enter, field exit, Test, or Save.
 | Key | Action |
 | --- | --- |
 | `j/k`, arrows | Move selection |
-| `Home/End` | First/last visible object |
+| `gg`, `Home` | First visible object |
+| `G`, `End` | Last visible object |
+| `H/M/L` | Top/middle/bottom object in the current viewport |
+| `Ctrl-f/Ctrl-b` | Move down/up one page |
+| `Ctrl-d/Ctrl-u` | Move down/up half a page |
+| `zz/zt/zb` | Align current selection to middle/top/bottom |
 | `/` | Open inline catalog search |
 | `h/l`, left/right | Collapse or expand |
 | `o` | Toggle expansion only |
@@ -95,6 +100,8 @@ tree. Matching is case-insensitive over names and qualified paths. Type to edit,
 use `j/k`, arrows, `Home/End` to select, `Enter` to locate and retain a hit in the
 normal tree, `Esc` to close, `Backspace` to delete, and `Ctrl-U` to clear. Failed
 searches use `r` to retry. Results are limited to 100; refine a truncated search.
+The Vim navigation commands above apply only to the normal Explorer tree; search
+input keeps its existing text-editing and result-navigation behavior.
 
 ## SQL Editor
 

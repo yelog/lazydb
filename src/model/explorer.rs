@@ -775,6 +775,28 @@ pub struct VisibleExplorerNode {
     pub depth: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExplorerNodeTarget {
+    First,
+    Last,
+    ViewTop,
+    ViewMiddle,
+    ViewBottom,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExplorerScrollAmount {
+    HalfPage,
+    Page,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExplorerNodeAlignment {
+    Top,
+    Middle,
+    Bottom,
+}
+
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum ExplorerTreeError {
     #[error("Explorer profile {profile_id} does not exist")]
@@ -790,6 +812,7 @@ pub struct ExplorerTreeState {
     pub selected: Option<ExplorerNodeId>,
     pub expanded: HashSet<ExplorerNodeId>,
     pub scroll: usize,
+    pub viewport_height: usize,
 }
 
 impl Default for ExplorerTreeState {
@@ -800,6 +823,7 @@ impl Default for ExplorerTreeState {
             selected: Some(ExplorerNodeId::EmptyProfiles),
             expanded: HashSet::new(),
             scroll: 0,
+            viewport_height: 0,
         }
     }
 }
@@ -965,7 +989,13 @@ impl ExplorerTreeState {
         true
     }
 
+    pub fn set_viewport_height(&mut self, viewport_height: usize) {
+        self.viewport_height = viewport_height;
+        self.ensure_selected_visible();
+    }
+
     pub fn move_selection(&mut self, delta: isize, viewport_height: usize) {
+        self.viewport_height = viewport_height;
         let rows = self.visible();
         if rows.is_empty() {
             self.selected = None;
@@ -981,7 +1011,7 @@ impl ExplorerTreeState {
             .saturating_add_signed(delta)
             .min(rows.len().saturating_sub(1));
         self.selected = Some(rows[selected_index].id.clone());
-        self.update_scroll(selected_index, rows.len(), viewport_height);
+        self.update_scroll(selected_index, rows.len());
     }
 
     pub fn selected_visible_index(&self) -> Option<usize> {
@@ -989,7 +1019,75 @@ impl ExplorerTreeState {
         self.visible().iter().position(|row| &row.id == selected)
     }
 
-    pub fn ensure_selected_visible(&mut self, viewport_height: usize) {
+    pub fn select_target(&mut self, target: ExplorerNodeTarget) {
+        let rows = self.visible();
+        if rows.is_empty() || self.viewport_height == 0 {
+            return;
+        }
+        let first = self.scroll.min(rows.len() - 1);
+        let last = first
+            .saturating_add(self.viewport_height - 1)
+            .min(rows.len() - 1);
+        let selected_index = match target {
+            ExplorerNodeTarget::First => 0,
+            ExplorerNodeTarget::Last => rows.len() - 1,
+            ExplorerNodeTarget::ViewTop => first,
+            ExplorerNodeTarget::ViewMiddle => first + (last - first) / 2,
+            ExplorerNodeTarget::ViewBottom => last,
+        };
+        self.selected = Some(rows[selected_index].id.clone());
+        self.update_scroll(selected_index, rows.len());
+    }
+
+    pub fn scroll_nodes(&mut self, direction: isize, amount: ExplorerScrollAmount) {
+        let rows = self.visible();
+        if rows.is_empty() || self.viewport_height == 0 || direction == 0 {
+            return;
+        }
+        let step = match amount {
+            ExplorerScrollAmount::HalfPage => (self.viewport_height / 2).max(1),
+            ExplorerScrollAmount::Page => self.viewport_height,
+        };
+        let delta = if direction.is_negative() {
+            -(step.min(isize::MAX as usize) as isize)
+        } else {
+            step.min(isize::MAX as usize) as isize
+        };
+        let current = self
+            .selected
+            .as_ref()
+            .and_then(|selected| rows.iter().position(|row| &row.id == selected))
+            .unwrap_or(0);
+        let selected_index = current.saturating_add_signed(delta).min(rows.len() - 1);
+        self.selected = Some(rows[selected_index].id.clone());
+        self.scroll = self.scroll.saturating_add_signed(delta);
+        self.update_scroll(selected_index, rows.len());
+    }
+
+    pub fn align_selected(&mut self, alignment: ExplorerNodeAlignment) {
+        let rows = self.visible();
+        let Some(selected_index) = self
+            .selected
+            .as_ref()
+            .and_then(|selected| rows.iter().position(|row| &row.id == selected))
+        else {
+            return;
+        };
+        if self.viewport_height == 0 {
+            return;
+        }
+        let screen_row = match alignment {
+            ExplorerNodeAlignment::Top => 0,
+            ExplorerNodeAlignment::Middle => (self.viewport_height - 1) / 2,
+            ExplorerNodeAlignment::Bottom => self.viewport_height - 1,
+        };
+        self.scroll = selected_index.saturating_sub(screen_row).min(
+            rows.len()
+                .saturating_sub(self.viewport_height.min(rows.len())),
+        );
+    }
+
+    pub fn ensure_selected_visible(&mut self) {
         let rows = self.visible();
         let Some(selected) = self.selected.as_ref() else {
             self.scroll = 0;
@@ -998,7 +1096,7 @@ impl ExplorerTreeState {
         let Some(selected_index) = rows.iter().position(|row| &row.id == selected) else {
             return;
         };
-        self.update_scroll(selected_index, rows.len(), viewport_height);
+        self.update_scroll(selected_index, rows.len());
     }
 
     pub fn replace_page(
@@ -1047,7 +1145,8 @@ impl ExplorerTreeState {
         Ok(removed)
     }
 
-    fn update_scroll(&mut self, selected_index: usize, row_count: usize, viewport_height: usize) {
+    fn update_scroll(&mut self, selected_index: usize, row_count: usize) {
+        let viewport_height = self.viewport_height;
         if viewport_height == 0 {
             self.scroll = selected_index;
             return;

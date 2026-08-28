@@ -435,6 +435,13 @@ pub enum Action {
         unknown: bool,
     },
     ExplorerMove(isize),
+    ExplorerViewportChanged(usize),
+    ExplorerSelectTarget(crate::model::explorer::ExplorerNodeTarget),
+    ExplorerScrollNodes {
+        direction: isize,
+        amount: crate::model::explorer::ExplorerScrollAmount,
+    },
+    ExplorerAlignSelected(crate::model::explorer::ExplorerNodeAlignment),
     ExplorerSearchOpen,
     ExplorerSearchInsert(char),
     ExplorerSearchBackspace,
