@@ -42,6 +42,31 @@ impl TextInput {
         self.cursor -= 1;
     }
 
+    pub fn delete_previous_word(&mut self) {
+        while self.cursor > 0
+            && self.value[..self.byte_index(self.cursor)]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_whitespace)
+        {
+            self.backspace();
+        }
+        while self.cursor > 0
+            && !self.value[..self.byte_index(self.cursor)]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_whitespace)
+        {
+            self.backspace();
+        }
+    }
+
+    pub fn delete_to_start(&mut self) {
+        let end = self.byte_index(self.cursor);
+        self.value.replace_range(..end, "");
+        self.cursor = 0;
+    }
+
     pub fn delete(&mut self) {
         let start = self.byte_index(self.cursor);
         if start == self.value.len() {
@@ -89,5 +114,44 @@ impl From<String> for TextInput {
         let mut input = Self::default();
         input.set(value);
         input
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TextInput;
+
+    #[test]
+    fn deletes_previous_word_and_leading_whitespace() {
+        let mut input = TextInput::from("alpha beta   ");
+
+        input.delete_previous_word();
+
+        assert_eq!(input.value(), "alpha ");
+        assert_eq!(input.cursor(), 6);
+    }
+
+    #[test]
+    fn deletes_only_from_cursor_to_start() {
+        let mut input = TextInput::from("alpha beta");
+        for _ in 0..4 {
+            input.move_left();
+        }
+
+        input.delete_to_start();
+
+        assert_eq!(input.value(), "beta");
+        assert_eq!(input.cursor(), 0);
+    }
+
+    #[test]
+    fn word_deletion_preserves_unicode_boundaries() {
+        let mut input = TextInput::from("你好 world");
+
+        input.delete_previous_word();
+        input.delete_previous_word();
+
+        assert_eq!(input.value(), "");
+        assert_eq!(input.cursor(), 0);
     }
 }

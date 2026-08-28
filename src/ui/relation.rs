@@ -7,7 +7,7 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::{panel_block, theme::Theme};
+use super::{panel_block, render_text_input, theme::Theme};
 use crate::{
     app::App,
     model::{
@@ -84,12 +84,10 @@ pub(crate) fn render(
             3,
         );
         frame.render_widget(ratatui::widgets::Clear, popup);
-        frame.render_widget(
-            Paragraph::new(cell_editor_value(editor))
-                .block(panel_block(" CELL EDITOR ", true, theme))
-                .style(theme.base()),
-            popup,
-        );
+        let block = panel_block(" CELL EDITOR ", true, theme);
+        let inner = block.inner(popup);
+        frame.render_widget(block, popup);
+        render_text_input(frame, inner, "", &editor.input, theme.base(), state);
     }
 }
 

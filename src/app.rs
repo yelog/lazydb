@@ -681,6 +681,8 @@ impl App {
                         | Action::FocusDataQueryInput(_)
                         | Action::DataQueryInsert(_)
                         | Action::DataQueryBackspace
+                        | Action::DataQueryDeletePreviousWord
+                        | Action::DataQueryDeleteToStart
                         | Action::DataQueryDelete
                         | Action::DataQueryMoveLeft
                         | Action::DataQueryMoveRight
@@ -2914,6 +2916,14 @@ impl App {
             }
             Action::RelationEditBackspace => {
                 self.relation_edit_input(|input| input.backspace());
+                Vec::new()
+            }
+            Action::RelationEditDeletePreviousWord => {
+                self.relation_edit_input(|input| input.delete_previous_word());
+                Vec::new()
+            }
+            Action::RelationEditDeleteToStart => {
+                self.relation_edit_input(|input| input.delete_to_start());
                 Vec::new()
             }
             Action::RelationEditDelete => {

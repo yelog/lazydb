@@ -1,14 +1,12 @@
+use crate::model::data_query::{DataQueryCapability, DataQueryInput, DataQueryState};
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout, Position, Rect},
+    layout::{Constraint, Direction, Layout, Rect},
     style::Style,
     widgets::Paragraph,
 };
-use unicode_width::UnicodeWidthStr;
 
-use crate::model::data_query::{DataQueryCapability, DataQueryInput, DataQueryState};
-
-use super::{HitRegion, HitTarget, UiState, theme::Theme};
+use super::{HitRegion, HitTarget, UiState, render_text_input, theme::Theme};
 
 pub(crate) fn render(
     frame: &mut Frame<'_>,
@@ -38,42 +36,34 @@ pub(crate) fn render(
     ];
     for ((input, label, value), chunk) in fields.into_iter().zip(chunks.iter().copied()) {
         let active = enabled && query.focus == Some(input);
-        frame.render_widget(
-            Paragraph::new(format!("{label}  {value}")).style(if !enabled {
-                theme.muted
-            } else if active {
-                theme.accent
-            } else {
-                theme.muted
-            }),
-            chunk,
-        );
+        if active {
+            let text_input = match input {
+                DataQueryInput::Where => &query.where_input,
+                DataQueryInput::OrderBy => &query.order_by_input,
+            };
+            render_text_input(
+                frame,
+                chunk,
+                &format!("{label}  "),
+                text_input,
+                Style::new().fg(theme.accent),
+                state,
+            );
+        } else {
+            frame.render_widget(
+                Paragraph::new(format!("{label}  {value}")).style(if !enabled {
+                    theme.muted
+                } else {
+                    theme.muted
+                }),
+                chunk,
+            );
+        }
         if enabled {
             state.hit_regions.push(HitRegion {
                 area: chunk,
                 target: HitTarget::DataQueryInput(input),
             });
-        }
-        if active {
-            let cursor_index = match input {
-                DataQueryInput::Where => query.where_input.cursor(),
-                DataQueryInput::OrderBy => query.order_by_input.cursor(),
-            };
-            let cursor = UnicodeWidthStr::width(
-                &value[..value
-                    .char_indices()
-                    .nth(cursor_index)
-                    .map_or(value.len(), |(index, _)| index)],
-            );
-            frame.set_cursor_position(Position::new(
-                chunk
-                    .x
-                    .saturating_add(UnicodeWidthStr::width(label) as u16)
-                    .saturating_add(2)
-                    .saturating_add(cursor as u16)
-                    .min(chunk.right().saturating_sub(1)),
-                chunk.y,
-            ));
         }
     }
     let message = query.error.as_ref().or(match &query.capability {

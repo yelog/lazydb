@@ -29,6 +29,19 @@ enum Pending {
     ExplorerAlign,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TextInputEdit {
+    Insert(char),
+    Backspace,
+    DeletePreviousWord,
+    DeleteToStart,
+    Delete,
+    MoveLeft,
+    MoveRight,
+    MoveHome,
+    MoveEnd,
+}
+
 #[derive(Debug, Default)]
 pub struct Keymap {
     pending: Option<(Pending, Instant, Focus, EditorMode, Uuid)>,
@@ -725,20 +738,20 @@ fn map_relation_data(event: KeyEvent, app: &App) -> Option<Action> {
         _ => None,
     });
     if let Some(RelationGridMode::EditCell(_)) = mode {
-        if !event.modifiers.is_empty() {
-            return None;
-        }
-        return match event.code {
-            KeyCode::Enter => Some(Action::RelationEditConfirm),
-            KeyCode::Esc => Some(Action::RelationEditCancel),
-            KeyCode::Backspace => Some(Action::RelationEditBackspace),
-            KeyCode::Delete => Some(Action::RelationEditDelete),
-            KeyCode::Left => Some(Action::RelationEditMoveLeft),
-            KeyCode::Right => Some(Action::RelationEditMoveRight),
-            KeyCode::Home => Some(Action::RelationEditMoveHome),
-            KeyCode::End => Some(Action::RelationEditMoveEnd),
-            KeyCode::Char(character) => Some(Action::RelationEditInsert(character)),
-            _ => None,
+        return match (event.modifiers, event.code) {
+            (KeyModifiers::NONE, KeyCode::Enter) => Some(Action::RelationEditConfirm),
+            (KeyModifiers::NONE, KeyCode::Esc) => Some(Action::RelationEditCancel),
+            _ => map_text_input_edit(event).map(|edit| match edit {
+                TextInputEdit::Insert(character) => Action::RelationEditInsert(character),
+                TextInputEdit::Backspace => Action::RelationEditBackspace,
+                TextInputEdit::DeletePreviousWord => Action::RelationEditDeletePreviousWord,
+                TextInputEdit::DeleteToStart => Action::RelationEditDeleteToStart,
+                TextInputEdit::Delete => Action::RelationEditDelete,
+                TextInputEdit::MoveLeft => Action::RelationEditMoveLeft,
+                TextInputEdit::MoveRight => Action::RelationEditMoveRight,
+                TextInputEdit::MoveHome => Action::RelationEditMoveHome,
+                TextInputEdit::MoveEnd => Action::RelationEditMoveEnd,
+            }),
         };
     }
 
@@ -779,6 +792,30 @@ fn map_relation_data(event: KeyEvent, app: &App) -> Option<Action> {
             KeyCode::Char('u') => Some(Action::RelationUndo),
             _ => None,
         },
+    }
+}
+
+fn map_text_input_edit(event: KeyEvent) -> Option<TextInputEdit> {
+    if event.modifiers == KeyModifiers::CONTROL {
+        return match event.code {
+            KeyCode::Char('w') => Some(TextInputEdit::DeletePreviousWord),
+            KeyCode::Char('u') => Some(TextInputEdit::DeleteToStart),
+            KeyCode::Char('h') => Some(TextInputEdit::Backspace),
+            _ => None,
+        };
+    }
+    if !event.modifiers.is_empty() && event.modifiers != KeyModifiers::SHIFT {
+        return None;
+    }
+    match event.code {
+        KeyCode::Backspace => Some(TextInputEdit::Backspace),
+        KeyCode::Delete => Some(TextInputEdit::Delete),
+        KeyCode::Left => Some(TextInputEdit::MoveLeft),
+        KeyCode::Right => Some(TextInputEdit::MoveRight),
+        KeyCode::Home => Some(TextInputEdit::MoveHome),
+        KeyCode::End => Some(TextInputEdit::MoveEnd),
+        KeyCode::Char(character) => Some(TextInputEdit::Insert(character)),
+        _ => None,
     }
 }
 
@@ -1096,31 +1133,30 @@ fn map_data_query(event: KeyEvent, app: &App) -> Option<Action> {
     }
     if let Some(input) = query.focus {
         use crate::model::data_query::DataQueryInput;
-        if event.modifiers.contains(KeyModifiers::CONTROL) {
-            return match event.code {
-                KeyCode::Char('u') => Some(Action::DataQueryClear),
-                _ => None,
-            };
-        }
         return match event.code {
-            KeyCode::Esc => Some(Action::CancelDataQueryInput),
-            KeyCode::Enter => Some(Action::SubmitDataQuery),
-            KeyCode::Tab => Some(Action::FocusDataQueryInput(match input {
-                DataQueryInput::Where => DataQueryInput::OrderBy,
-                DataQueryInput::OrderBy => DataQueryInput::Where,
-            })),
+            KeyCode::Esc if event.modifiers.is_empty() => Some(Action::CancelDataQueryInput),
+            KeyCode::Enter if event.modifiers.is_empty() => Some(Action::SubmitDataQuery),
+            KeyCode::Tab if event.modifiers.is_empty() => {
+                Some(Action::FocusDataQueryInput(match input {
+                    DataQueryInput::Where => DataQueryInput::OrderBy,
+                    DataQueryInput::OrderBy => DataQueryInput::Where,
+                }))
+            }
             KeyCode::BackTab => Some(Action::FocusDataQueryInput(match input {
                 DataQueryInput::Where => DataQueryInput::OrderBy,
                 DataQueryInput::OrderBy => DataQueryInput::Where,
             })),
-            KeyCode::Backspace => Some(Action::DataQueryBackspace),
-            KeyCode::Delete => Some(Action::DataQueryDelete),
-            KeyCode::Left => Some(Action::DataQueryMoveLeft),
-            KeyCode::Right => Some(Action::DataQueryMoveRight),
-            KeyCode::Home => Some(Action::DataQueryMoveHome),
-            KeyCode::End => Some(Action::DataQueryMoveEnd),
-            KeyCode::Char(character) => Some(Action::DataQueryInsert(character)),
-            _ => None,
+            _ => map_text_input_edit(event).map(|edit| match edit {
+                TextInputEdit::Insert(character) => Action::DataQueryInsert(character),
+                TextInputEdit::Backspace => Action::DataQueryBackspace,
+                TextInputEdit::DeletePreviousWord => Action::DataQueryDeletePreviousWord,
+                TextInputEdit::DeleteToStart => Action::DataQueryDeleteToStart,
+                TextInputEdit::Delete => Action::DataQueryDelete,
+                TextInputEdit::MoveLeft => Action::DataQueryMoveLeft,
+                TextInputEdit::MoveRight => Action::DataQueryMoveRight,
+                TextInputEdit::MoveHome => Action::DataQueryMoveHome,
+                TextInputEdit::MoveEnd => Action::DataQueryMoveEnd,
+            }),
         };
     }
     if app.focus == Focus::Results {

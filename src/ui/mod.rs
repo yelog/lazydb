@@ -18,6 +18,7 @@ use std::{
     cell::RefCell,
     time::{Duration, Instant},
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use uuid::Uuid;
 
 use crate::{
@@ -221,6 +222,7 @@ pub fn render_with_state_using_icons(
     state.grid_viewport = None;
     state.explorer_viewport_rows = None;
     state.ddl_viewport = None;
+    state.cursor_style = None;
 
     if layout.mode == LayoutMode::TooSmall {
         render_too_small(frame, area, theme);
@@ -291,6 +293,54 @@ pub fn render_with_state_using_icons(
     if let Some(overlay) = &app.overlay {
         render_overlay(frame, area, overlay, app, state, theme, icons);
     }
+}
+
+pub(crate) fn render_text_input(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    prefix: &str,
+    input: &crate::model::text_input::TextInput,
+    style: Style,
+    state: &mut UiState,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let projection = crate::security::project_editor_line(input.value());
+    let prefix_width = prefix.width();
+    let available = usize::from(area.width).saturating_sub(prefix_width);
+    let cursor_cells = projection
+        .source_to_display_cells
+        .get(input.cursor())
+        .copied()
+        .unwrap_or_else(|| projection.text.width());
+    let offset = cursor_cells
+        .saturating_sub(available.saturating_sub(1))
+        .min(projection.text.width());
+    let mut visible = String::new();
+    let mut cells = 0;
+    for character in projection.text.chars() {
+        let width = character.width().unwrap_or(0);
+        let end = cells + width;
+        if end > offset && cells < offset + available {
+            visible.push(character);
+        }
+        cells = end;
+        if cells >= offset + available {
+            break;
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(format!("{prefix}{visible}")).style(style),
+        area,
+    );
+    state.cursor_style = Some(CursorStyle::Bar);
+    let cursor_x = area
+        .x
+        .saturating_add(prefix_width as u16)
+        .saturating_add(cursor_cells.saturating_sub(offset) as u16)
+        .min(area.right().saturating_sub(1));
+    frame.set_cursor_position(Position::new(cursor_x, area.y));
 }
 
 // Relation pages are rendered by `ui::relation`; keeping them out of the SQL path
