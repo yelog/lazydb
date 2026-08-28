@@ -304,9 +304,9 @@ pub(crate) fn render_text_input(
     input: &crate::model::text_input::TextInput,
     style: Style,
     state: &mut UiState,
-) {
+) -> Option<Position> {
     if area.width == 0 || area.height == 0 {
-        return;
+        return None;
     }
     let projection = crate::security::project_editor_line(input.value());
     let prefix_width = prefix.width();
@@ -342,16 +342,18 @@ pub(crate) fn render_text_input(
         .saturating_add(prefix_width as u16)
         .saturating_add(cursor_cells.saturating_sub(offset) as u16)
         .min(area.right().saturating_sub(1));
-    frame.set_cursor_position(Position::new(cursor_x, area.y));
+    let cursor = Position::new(cursor_x, area.y);
+    frame.set_cursor_position(cursor);
+    Some(cursor)
 }
 
 // Relation pages are rendered by `ui::relation`; keeping them out of the SQL path
 // prevents accidental editor access when a relation tab is active.
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct CompletionAnchor {
-    viewport: Rect,
-    cursor: Position,
+pub(crate) struct CompletionAnchor {
+    pub(crate) viewport: Rect,
+    pub(crate) cursor: Position,
 }
 
 fn render_completion_popup(
@@ -422,6 +424,78 @@ fn render_completion_popup(
                         format!("  {detail}")
                     },
                     row_style.fg(if index == popup.selected {
+                        theme.background
+                    } else {
+                        theme.muted
+                    }),
+                ),
+            ]))
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Clear, area);
+    frame.render_widget(List::new(items), area);
+}
+
+pub(crate) fn render_data_query_completion_popup(
+    frame: &mut Frame<'_>,
+    completion: &crate::model::data_query::DataQueryCompletion,
+    theme: Theme,
+    state: &mut UiState,
+    anchor: CompletionAnchor,
+) {
+    if completion.candidates.is_empty() {
+        return;
+    }
+    let desired_height = completion.candidates.len().min(10) as u16;
+    let desired_width = completion
+        .candidates
+        .iter()
+        .map(|candidate| {
+            format!(
+                "CL {}  {}",
+                crate::security::sanitize_terminal_text(&candidate.name),
+                crate::security::sanitize_terminal_text(
+                    candidate.type_name.as_deref().unwrap_or_default()
+                )
+            )
+            .cell_width()
+            .saturating_add(1)
+        })
+        .max()
+        .unwrap_or(4)
+        .max(4);
+    let Some(area) = completion_popup_rect(anchor, desired_width, desired_height) else {
+        return;
+    };
+    state.completion_popup = Some(area);
+    let items = completion
+        .candidates
+        .iter()
+        .take(10)
+        .enumerate()
+        .map(|(index, candidate)| {
+            let selected = index == completion.selected;
+            let row_style = if selected {
+                Style::new().fg(theme.background).bg(theme.accent)
+            } else {
+                Style::new().fg(theme.text).bg(theme.surface_raised)
+            };
+            let name = crate::security::sanitize_terminal_text(&candidate.name);
+            let detail = candidate
+                .type_name
+                .as_deref()
+                .map(crate::security::sanitize_terminal_text)
+                .unwrap_or_default();
+            ListItem::new(Line::from(vec![
+                Span::styled("CL ", row_style),
+                Span::styled(name, row_style),
+                Span::styled(
+                    if detail.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  {detail}")
+                    },
+                    row_style.fg(if selected {
                         theme.background
                     } else {
                         theme.muted

@@ -294,11 +294,23 @@ async fn connects_loads_catalog_and_executes_through_runtime() {
     app.explorer.normalized.selected =
         Some(lazydb::model::explorer::ExplorerNodeId::Catalog(users));
     dispatch(&mut app, &mut runtime, Action::PreviewSelected);
-    let action = timeout(Duration::from_secs(3), receiver.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    dispatch(&mut app, &mut runtime, action);
+    loop {
+        let action = timeout(Duration::from_secs(3), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        dispatch(&mut app, &mut runtime, action);
+        if matches!(
+            app.tabs[app.active_tab],
+            lazydb::model::tab::WorkspaceTab::Relation(lazydb::model::relation::RelationTab {
+                data: lazydb::model::relation::RelationLoad::Ready(_),
+                ..
+            })
+        ) {
+            break;
+        }
+    }
+    drain_catalog(&mut app, &mut runtime, &mut receiver).await;
     assert!(matches!(
         app.tabs[app.active_tab],
         lazydb::model::tab::WorkspaceTab::Relation(lazydb::model::relation::RelationTab {

@@ -1,5 +1,18 @@
 use crate::model::text_input::TextInput;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DataQueryCandidate {
+    pub name: String,
+    pub type_name: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DataQueryCompletion {
+    pub candidates: Vec<DataQueryCandidate>,
+    pub selected: usize,
+    pub replace: crate::sql::TextRange,
+}
+
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
 pub struct DataQueryOptions {
     pub where_clause: Option<String>,
@@ -20,6 +33,7 @@ pub struct DataQueryState {
     pub focus: Option<DataQueryInput>,
     pub error: Option<String>,
     pub capability: DataQueryCapability,
+    pub completion: Option<DataQueryCompletion>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

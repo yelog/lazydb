@@ -212,6 +212,10 @@ pub enum Action {
     DataQueryMoveHome,
     DataQueryMoveEnd,
     DataQueryClear,
+    DataQueryCompletionNext,
+    DataQueryCompletionPrevious,
+    DataQueryCompletionAccept,
+    DataQueryCompletionDismiss,
     SubmitDataQuery,
     CancelDataQueryInput,
     // Kept as reducer aliases for callers using the pre-shared relation names.

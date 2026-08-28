@@ -4,10 +4,12 @@ use lazydb::{
     app::App,
     input::keymap::{Keymap, map_paste},
     model::{
+        data_query::{DataQueryCandidate, DataQueryCompletion, DataQueryInput},
         editor::EditorMode,
         explorer::ExplorerNodeId,
         profile_manager::ProfileField,
-        tab::CompletionPopup,
+        relation::RelationTab,
+        tab::{CompletionPopup, WorkspaceTab},
         workspace::{Focus, Overlay, QueryStatus},
     },
     profile::{ConnectionProfile, import_connection_url},
@@ -19,6 +21,58 @@ fn key(code: KeyCode) -> KeyEvent {
 
 fn ctrl(character: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL)
+}
+
+#[test]
+fn data_query_completion_keys_preempt_query_input_navigation() {
+    let mut app = App::new(Vec::new());
+    let mut tab = RelationTab::new("users");
+    tab.query.focus = Some(DataQueryInput::Where);
+    tab.query.completion = Some(DataQueryCompletion {
+        candidates: vec![DataQueryCandidate {
+            name: "user_id".into(),
+            type_name: Some("bigint".into()),
+        }],
+        selected: 0,
+        replace: lazydb::sql::TextRange::new(0, 0),
+    });
+    app.tabs.push(WorkspaceTab::Relation(tab));
+    app.active_tab = 1;
+    let mut keymap = Keymap::default();
+
+    assert_eq!(
+        keymap.map(ctrl('n'), &app),
+        Some(Action::DataQueryCompletionNext)
+    );
+    assert_eq!(
+        keymap.map(ctrl('p'), &app),
+        Some(Action::DataQueryCompletionPrevious)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Tab), &app),
+        Some(Action::DataQueryCompletionAccept)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Esc), &app),
+        Some(Action::DataQueryCompletionDismiss)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Enter), &app),
+        Some(Action::SubmitDataQuery)
+    );
+
+    let WorkspaceTab::Relation(tab) = &mut app.tabs[1] else {
+        panic!()
+    };
+    tab.query.completion = None;
+    assert_eq!(
+        keymap.map(key(KeyCode::Tab), &app),
+        Some(Action::FocusDataQueryInput(DataQueryInput::OrderBy))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Esc), &app),
+        Some(Action::CancelDataQueryInput)
+    );
 }
 
 #[test]

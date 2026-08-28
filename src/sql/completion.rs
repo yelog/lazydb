@@ -1,9 +1,12 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use uuid::Uuid;
 
 use crate::db::catalog::{CatalogEntry, CatalogId, CatalogKind, CatalogMetadata};
 use crate::profile::CatalogScope;
 
+use super::identifier_match::{
+    IdentifierMatch, compact_identifier, fold_identifier, identifier_match,
+};
 use super::scope::scan_statements;
 use super::{SqlDialect, TextRange};
 
@@ -36,7 +39,7 @@ pub enum CompletionKind {
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct CompletionScore {
     pub context: u8,
-    pub prefix: u8,
+    pub name_match: u8,
     pub schema: u8,
 }
 
@@ -53,6 +56,7 @@ pub struct CompletionCandidate {
 #[derive(Clone, Debug, Default)]
 pub struct CompletionIndex {
     by_name: BTreeMap<String, Vec<usize>>,
+    by_compact_name: BTreeMap<String, Vec<usize>>,
     children: HashMap<CatalogId, Vec<usize>>,
     entries: Vec<CatalogEntry>,
 }
@@ -91,12 +95,26 @@ impl CompletionIndex {
         &self.entries
     }
 
+    pub fn relation_columns(&self, relation: &CatalogId) -> impl Iterator<Item = &CatalogEntry> {
+        self.children
+            .get(relation)
+            .into_iter()
+            .flatten()
+            .filter_map(|position| self.entries.get(*position))
+            .filter(|entry| entry.kind == CatalogKind::Column)
+    }
+
     fn rebuild(&mut self) {
         self.by_name.clear();
+        self.by_compact_name.clear();
         self.children.clear();
         for (position, entry) in self.entries.iter().enumerate() {
             self.by_name
-                .entry(fold(&entry.qualified_name.object))
+                .entry(fold_identifier(&entry.qualified_name.object))
+                .or_default()
+                .push(position);
+            self.by_compact_name
+                .entry(compact_identifier(&entry.qualified_name.object))
                 .or_default()
                 .push(position);
             if let Some(parent) = &entry.parent_id {
@@ -157,7 +175,7 @@ pub fn complete(
     let statement = current_statement_text(text, replace.start, dialect);
     let bindings = relation_bindings(statement, dialect);
     let mut candidates = Vec::new();
-    let folded_prefix = fold(&prefix);
+    let folded_prefix = fold_identifier(&prefix);
     let candidate_indexes =
         qualified_candidate_indices(index, &qualifiers, &folded_prefix, &bindings);
     for node_index in candidate_indexes {
@@ -178,9 +196,9 @@ pub fn complete(
             continue;
         }
         let name = &entry.qualified_name.object;
-        if !name.to_lowercase().starts_with(&folded_prefix) {
+        let Some(name_match) = identifier_match(name, &prefix) else {
             continue;
-        }
+        };
         if context == Context::Relation
             && !matches!(
                 kind,
@@ -220,11 +238,7 @@ pub fn complete(
                 .any(|part| part.eq_ignore_ascii_case(schema))
         }));
         candidates.push(CompletionCandidate {
-            label: if matches!(kind, CompletionKind::Table | CompletionKind::View) {
-                display_text(name)
-            } else {
-                display_text(name)
-            },
+            label: display_text(name),
             insert_text: if matches!(kind, CompletionKind::Table | CompletionKind::View) {
                 relation_insert_text(entry, completion_context, dialect, &qualifiers)
             } else {
@@ -239,7 +253,11 @@ pub fn complete(
             replace,
             score: CompletionScore {
                 context: context_score,
-                prefix: u8::from(name.starts_with(&prefix)),
+                name_match: match name_match {
+                    IdentifierMatch::CompactPrefix => 1,
+                    IdentifierMatch::Prefix => 2,
+                    IdentifierMatch::Exact => 3,
+                },
                 schema: schema_score,
             },
         });
@@ -259,7 +277,7 @@ pub fn complete(
                             Context::Relation | Context::Routine => 1,
                             Context::Qualifier => 0,
                         },
-                        prefix: 1,
+                        name_match: 2,
                         schema: 0,
                     },
                 });
@@ -408,11 +426,26 @@ fn candidate_indices(
     if let Some(parent) = parent {
         return index.children.get(parent).cloned().unwrap_or_default();
     }
-    index
-        .by_name
+    let mut seen = HashSet::new();
+    let mut candidates = prefixed_indices(&index.by_name, prefix).collect::<Vec<_>>();
+    if !prefix.is_empty() {
+        candidates.extend(prefixed_indices(
+            &index.by_compact_name,
+            &compact_identifier(prefix),
+        ));
+    }
+    candidates.retain(|position| seen.insert(*position));
+    candidates
+}
+
+fn prefixed_indices<'a>(
+    names: &'a BTreeMap<String, Vec<usize>>,
+    prefix: &'a str,
+) -> impl Iterator<Item = usize> + 'a {
+    names
         .range(prefix.to_owned()..)
+        .take_while(move |(name, _)| name.starts_with(prefix))
         .flat_map(|(_, values)| values.iter().copied())
-        .collect()
 }
 
 fn completion_kind(kind: CatalogKind) -> Option<CompletionKind> {
@@ -658,10 +691,6 @@ fn keywords(dialect: SqlDialect) -> &'static [&'static str] {
             "DELETE",
         ],
     }
-}
-
-fn fold(value: &str) -> String {
-    value.chars().flat_map(char::to_lowercase).collect()
 }
 
 fn display_text(value: &str) -> String {

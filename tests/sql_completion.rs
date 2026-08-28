@@ -61,6 +61,107 @@ fn fixture() -> Vec<CatalogEntry> {
     ]
 }
 
+fn compact_match_fixture() -> Vec<CatalogEntry> {
+    let mut entries = fixture();
+    let connection = entries[0].id.profile_id();
+    let schema = entries[1].id.clone();
+    for name in ["sys_user", "sysuser_archive"] {
+        entries.push(
+            CatalogEntry::relation(
+                CatalogId::new(connection, CatalogKind::Table, ["app", "public", name]),
+                schema.clone(),
+                qualified("app", Some("public"), name),
+                "table",
+                OptionalMetadata::Supported(None),
+                true,
+            )
+            .unwrap(),
+        );
+    }
+    let users = entries[2].id.clone();
+    entries.push(
+        CatalogEntry::relation_child(
+            CatalogId::new(
+                connection,
+                CatalogKind::Column,
+                ["app", "public", "users", "user_id"],
+            ),
+            users,
+            qualified("app", Some("public"), "user_id"),
+            "column",
+            OptionalMetadata::Unsupported,
+            CatalogMetadata::Column(ColumnMetadata::new(2, "bigint", false)),
+        )
+        .unwrap(),
+    );
+    entries
+}
+
+#[test]
+fn relation_completion_ignores_identifier_separators() {
+    let index = CompletionIndex::new(&compact_match_fixture());
+    let sql = "select * from sysuser";
+    let candidates = complete(
+        sql,
+        sql.len(),
+        SqlDialect::Postgres,
+        &index,
+        CompletionContext {
+            database: Some("app"),
+            schema: Some("public"),
+        },
+    );
+
+    assert!(candidates.iter().any(|candidate| {
+        candidate.kind == CompletionKind::Table
+            && candidate.label == "sys_user"
+            && candidate.insert_text == "sys_user"
+    }));
+    assert_eq!(
+        candidates
+            .iter()
+            .filter(|candidate| candidate.label == "sys_user")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn ordinary_prefix_ranks_above_compact_prefix() {
+    let index = CompletionIndex::new(&compact_match_fixture());
+    let sql = "select * from sysuser";
+    let labels = complete(
+        sql,
+        sql.len(),
+        SqlDialect::Postgres,
+        &index,
+        CompletionContext::default(),
+    )
+    .into_iter()
+    .filter(|candidate| candidate.kind == CompletionKind::Table)
+    .map(|candidate| candidate.label)
+    .collect::<Vec<_>>();
+
+    assert_eq!(labels[..2], ["sysuser_archive", "sys_user"]);
+}
+
+#[test]
+fn alias_column_completion_ignores_identifier_separators() {
+    let index = CompletionIndex::new(&compact_match_fixture());
+    let sql = "select u.userid from users u";
+    let candidates = complete(
+        sql,
+        "select u.userid".len(),
+        SqlDialect::Postgres,
+        &index,
+        CompletionContext::default(),
+    );
+
+    assert!(candidates.iter().any(|candidate| {
+        candidate.kind == CompletionKind::Column && candidate.label == "user_id"
+    }));
+}
+
 #[test]
 fn completion_is_contextual_and_quotes_raw_names() {
     let index = CompletionIndex::new(&fixture());

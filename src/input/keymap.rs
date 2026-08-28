@@ -262,6 +262,18 @@ impl Keymap {
                 _ => None,
             };
         }
+        if app.overlay.is_some() {
+            self.pending = None;
+            return match event.code {
+                KeyCode::Esc | KeyCode::Char('q') => Some(Action::DismissOverlay),
+                _ => None,
+            };
+        }
+        if active_data_query_has_focus(app)
+            && let Some(action) = map_data_query(event, app)
+        {
+            return Some(action);
+        }
         if app.focus == Focus::Editor && app.active_editor_mode() == EditorMode::Normal {
             match event.code {
                 KeyCode::Char('?') => return Some(Action::ShowHelp),
@@ -275,13 +287,6 @@ impl Keymap {
             && event.code == KeyCode::Esc
         {
             return Some(Action::EditorKey(event));
-        }
-        if app.overlay.is_some() {
-            self.pending = None;
-            return match event.code {
-                KeyCode::Esc | KeyCode::Char('q') => Some(Action::DismissOverlay),
-                _ => None,
-            };
         }
         if app.active_console_opt().is_some_and(|tab| {
             tab.completion.is_some() && app.active_editor_mode() == EditorMode::Insert
@@ -1150,6 +1155,23 @@ fn map_data_query(event: KeyEvent, app: &App) -> Option<Action> {
     }
     if let Some(input) = query.focus {
         use crate::model::data_query::DataQueryInput;
+        if query.completion.is_some() {
+            match event.code {
+                KeyCode::Char('n') if event.modifiers.contains(KeyModifiers::CONTROL) => {
+                    return Some(Action::DataQueryCompletionNext);
+                }
+                KeyCode::Char('p') if event.modifiers.contains(KeyModifiers::CONTROL) => {
+                    return Some(Action::DataQueryCompletionPrevious);
+                }
+                KeyCode::Tab if event.modifiers.is_empty() => {
+                    return Some(Action::DataQueryCompletionAccept);
+                }
+                KeyCode::Esc if event.modifiers.is_empty() => {
+                    return Some(Action::DataQueryCompletionDismiss);
+                }
+                _ => {}
+            }
+        }
         return match event.code {
             KeyCode::Esc if event.modifiers.is_empty() => Some(Action::CancelDataQueryInput),
             KeyCode::Enter if event.modifiers.is_empty() => Some(Action::SubmitDataQuery),
@@ -1188,6 +1210,14 @@ fn map_data_query(event: KeyEvent, app: &App) -> Option<Action> {
         };
     }
     None
+}
+
+fn active_data_query_has_focus(app: &App) -> bool {
+    match app.tabs.get(app.active_tab) {
+        Some(crate::model::tab::WorkspaceTab::Relation(tab)) => tab.query.focus.is_some(),
+        Some(crate::model::tab::WorkspaceTab::Sql(tab)) => tab.query.focus.is_some(),
+        None => false,
+    }
 }
 
 #[cfg(test)]

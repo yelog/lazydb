@@ -937,13 +937,13 @@ impl ExplorerTreeState {
             let mut current = entry.id.clone();
             while let Some(parent) = profile.catalog.parent(&current).cloned() {
                 included.insert(ExplorerNodeId::Catalog(parent.clone()));
-                if parent.kind == CatalogKind::Schema {
-                    if let Some(group) = search_group(entry.kind) {
-                        included.insert(ExplorerNodeId::Group {
-                            parent: parent.clone(),
-                            group,
-                        });
-                    }
+                if parent.kind == CatalogKind::Schema
+                    && let Some(group) = search_group(entry.kind)
+                {
+                    included.insert(ExplorerNodeId::Group {
+                        parent: parent.clone(),
+                        group,
+                    });
                 }
                 current = parent;
             }

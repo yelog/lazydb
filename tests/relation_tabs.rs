@@ -291,6 +291,150 @@ fn shared_query_actions_preserve_relation_editing_and_submission() {
 }
 
 #[test]
+fn relation_query_suggests_only_current_relation_columns() {
+    let profile = Uuid::new_v4();
+    let current_relation = CatalogId::new(profile, CatalogKind::Table, ["db", "main", "users"]);
+    let other_relation = CatalogId::new(profile, CatalogKind::Table, ["db", "main", "roles"]);
+    let descriptor = RelationDescriptor {
+        key: RelationKey {
+            profile_id: profile,
+            object_id: current_relation.clone(),
+        },
+        qualified_name: QualifiedName {
+            database: Some("db".into()),
+            schema: Some("main".into()),
+            object: "users".into(),
+        },
+        kind: CatalogKind::Table,
+        title: "users".into(),
+    };
+    let columns = [
+        (current_relation, "user_id", "bigint"),
+        (other_relation, "role_id", "bigint"),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, (relation, name, native_type))| {
+        CatalogEntry::relation_child(
+            CatalogId::new(
+                profile,
+                CatalogKind::Column,
+                ["db", "main", relation.native_path.last().unwrap(), name],
+            ),
+            relation,
+            QualifiedName {
+                database: Some("db".into()),
+                schema: Some("main".into()),
+                object: name.into(),
+            },
+            "column",
+            OptionalMetadata::Unsupported,
+            CatalogMetadata::Column(ColumnMetadata::new(index as u32 + 1, native_type, false)),
+        )
+        .unwrap()
+    })
+    .collect::<Vec<_>>();
+    let mut app = lazydb::app::App::new(Vec::new());
+    app.explorer.completion_index.append(&columns);
+    app.tabs
+        .push(WorkspaceTab::Relation(RelationTab::with_descriptor(
+            descriptor,
+            RelationView::Data,
+        )));
+    app.active_tab = 1;
+
+    app.update(Action::FocusDataQueryInput(
+        lazydb::model::data_query::DataQueryInput::Where,
+    ));
+    for character in "userid".chars() {
+        app.update(Action::DataQueryInsert(character));
+    }
+
+    let completion = relation_query(&app).completion.as_ref().unwrap();
+    assert_eq!(completion.candidates.len(), 1);
+    assert_eq!(completion.candidates[0].name, "user_id");
+    assert_eq!(
+        completion.candidates[0].type_name.as_deref(),
+        Some("bigint")
+    );
+    assert_eq!(completion.replace, lazydb::sql::TextRange::new(0, 6));
+    app.update(Action::DataQueryCompletionAccept);
+    assert_eq!(relation_query(&app).where_input.value(), "\"user_id\"");
+    assert!(relation_query(&app).completion.is_none());
+
+    app.update(Action::FocusDataQueryInput(
+        lazydb::model::data_query::DataQueryInput::OrderBy,
+    ));
+    for character in "userid".chars() {
+        app.update(Action::DataQueryInsert(character));
+    }
+    assert_eq!(
+        relation_query(&app).completion.as_ref().unwrap().candidates[0].name,
+        "user_id"
+    );
+}
+
+#[test]
+fn relation_query_falls_back_to_preview_columns() {
+    let profile = Uuid::new_v4();
+    let connection = lazydb::identity::ConnectionIdentity {
+        profile_id: profile,
+        generation: 1,
+    };
+    let descriptor = RelationDescriptor {
+        key: RelationKey {
+            profile_id: profile,
+            object_id: CatalogId::new(profile, CatalogKind::Table, ["db", "main", "users"]),
+        },
+        qualified_name: QualifiedName {
+            database: Some("db".into()),
+            schema: Some("main".into()),
+            object: "users".into(),
+        },
+        kind: CatalogKind::Table,
+        title: "users".into(),
+    };
+    let mut tab = RelationTab::with_descriptor(descriptor, RelationView::Data);
+    tab.data =
+        lazydb::model::relation::RelationLoad::Ready(lazydb::model::relation::OwnedSnapshot::new(
+            lazydb::db::RelationPreview {
+                sql: "select * from users".into(),
+                result: QueryOutcome {
+                    result_sets: vec![ResultSet {
+                        columns: vec![ColumnMeta {
+                            name: "user_id".into(),
+                            type_name: "bigint".into(),
+                        }],
+                        rows: Vec::new(),
+                        affected_rows: 0,
+                    }],
+                    stats: QueryStats::new(std::time::Duration::ZERO, std::time::Duration::ZERO, 0),
+                },
+            },
+            connection,
+            lazydb::profile::CatalogScope::for_profile(
+                lazydb::profile::DatabaseKind::Sqlite,
+                "db",
+                None,
+            ),
+        ));
+    let mut app = lazydb::app::App::new(Vec::new());
+    app.tabs.push(WorkspaceTab::Relation(tab));
+    app.active_tab = 1;
+
+    app.update(Action::FocusDataQueryInput(
+        lazydb::model::data_query::DataQueryInput::Where,
+    ));
+    for character in "userid".chars() {
+        app.update(Action::DataQueryInsert(character));
+    }
+
+    let candidate = &relation_query(&app).completion.as_ref().unwrap().candidates[0];
+    assert_eq!(candidate.name, "user_id");
+    assert_eq!(candidate.type_name.as_deref(), Some("bigint"));
+}
+
+#[test]
 fn relation_focus_cycles_only_explorer_and_results() {
     let mut app = lazydb::app::App::new(Vec::new());
     app.tabs
