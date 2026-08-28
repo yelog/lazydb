@@ -63,6 +63,32 @@ fn help_overlay_owns_text_selection_and_execution_keys() {
 }
 
 #[test]
+fn record_view_owns_navigation_keys_and_goto_sequence() {
+    let mut app = App::new(Vec::new());
+    app.focus = Focus::Results;
+    let mut keymap = Keymap::default();
+    app.overlay = Some(Overlay::RecordView(Default::default()));
+
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('j')), &app),
+        Some(Action::RecordViewMoveFields(1))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('l')), &app),
+        Some(Action::RecordViewMoveRow(1))
+    );
+    assert_eq!(keymap.map(key(KeyCode::Char('g')), &app), None);
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('g')), &app),
+        Some(Action::RecordViewJumpFirstField)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('q')), &app),
+        Some(Action::CloseRecordView)
+    );
+}
+
+#[test]
 fn help_overlay_accepts_pasted_search_text() {
     let mut app = App::new(Vec::new());
     app.update(Action::ShowHelp);

@@ -169,11 +169,17 @@ connection unchanged.
 | `Ctrl-d`, `Ctrl-u` | Move down/up half a page |
 | `Ctrl-f`, `Ctrl-b` | Move down/up one page |
 | `zz`, `zt`, `zb` | Align the selected row to the middle/top/bottom |
+| `v` | Open read-only Record View for the selected row |
 | `o` | Switch Data/Output |
 
 Page movement moves the selected row with the viewport. The fixed `#` column
 shows one-based absolute row numbers and remains visible during horizontal
 scrolling.
+
+Record View shows fields in result-column order with their database types and
+bounded value previews. Inside it, `j/k` scroll fields, `h/l` browse records,
+`gg/G` jump to the first/last field, and `Esc`, `q`, or `v` closes the view.
+It is read-only and does not load complete LOB values or execute database I/O.
 
 Relation Data previews additionally support `/` to focus the `WHERE` input and
 `s` to focus `ORDER BY`. Press `Enter` to apply both clauses, or `Esc` to leave

@@ -3,6 +3,7 @@ pub mod icons;
 pub mod layout;
 pub mod profiles;
 pub mod query_bar;
+pub mod record_view;
 pub mod relation;
 pub mod theme;
 
@@ -108,6 +109,7 @@ pub struct UiState {
     pub editor_viewport: Option<EditorViewport>,
     pub completion_popup: Option<Rect>,
     pub grid_viewport: Option<DataGridViewport>,
+    pub record_view_fields: Option<(Uuid, usize)>,
     pub explorer_viewport_rows: Option<usize>,
     pub ddl_viewport: Option<DdlViewportMetrics>,
     pub cursor_style: Option<CursorStyle>,
@@ -146,6 +148,7 @@ impl UiState {
             editor_viewport: None,
             completion_popup: None,
             grid_viewport: None,
+            record_view_fields: None,
             explorer_viewport_rows: None,
             ddl_viewport: None,
             cursor_style: None,
@@ -222,6 +225,7 @@ pub fn render_with_state_using_icons(
     state.editor_viewport = None;
     state.completion_popup = None;
     state.grid_viewport = None;
+    state.record_view_fields = None;
     state.explorer_viewport_rows = None;
     state.ddl_viewport = None;
     state.cursor_style = None;
@@ -1642,6 +1646,7 @@ fn render_overlay(
 ) {
     match overlay {
         Overlay::Help(help) => render_help(frame, area, help, app, state, theme),
+        Overlay::RecordView(view) => record_view::render(frame, area, app, view, theme, state),
         Overlay::ProfileManager => {
             profiles::render_profile_manager(frame, area, app, state, theme, icons)
         }

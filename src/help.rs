@@ -65,6 +65,7 @@ pub enum HelpShortcutId {
     ResultsAlignMiddle,
     ResultsAlignTop,
     ResultsAlignBottom,
+    ResultsOpenRecordView,
     ResultsToggleView,
     RelationWhere,
     RelationOrderBy,
@@ -475,6 +476,11 @@ pub fn shortcuts(context: Focus, relation_data: bool) -> Vec<HelpShortcut> {
                     id: HelpShortcutId::ResultsToggleView,
                     key: "o",
                     description: "switch Data / Output",
+                },
+                HelpShortcut {
+                    id: HelpShortcutId::ResultsOpenRecordView,
+                    key: "v",
+                    description: "open Record View",
                 },
             ];
             if relation_data {

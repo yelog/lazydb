@@ -14,6 +14,8 @@ use crate::{
         catalog::{
             CatalogPage, CatalogRequest, CatalogRequestKey, CatalogTarget, MAX_CATALOG_PAGE_SIZE,
         },
+        query::ColumnMeta,
+        value::CellValue,
     },
     editor::{EditorEffect, EditorError, EditorWorkspace},
     model::{
@@ -610,6 +612,7 @@ impl App {
             Id::ResultsAlignBottom => vec![Action::GridAlignSelectedRow(
                 crate::model::tab::GridRowAlignment::Bottom,
             )],
+            Id::ResultsOpenRecordView => vec![Action::OpenRecordView],
             Id::ResultsToggleView => vec![Action::ToggleResultView],
             Id::RelationWhere => vec![Action::FocusRelationQueryInput(
                 crate::model::relation::RelationQueryInput::Where,
@@ -658,6 +661,13 @@ impl App {
                         | Action::GridSetColumnWidth { .. }
                         | Action::GridEndColumnResize
                         | Action::GridSetColumnOffset { .. }
+                        | Action::OpenRecordView
+                        | Action::RecordViewMoveFields(_)
+                        | Action::RecordViewJumpFirstField
+                        | Action::RecordViewJumpLastField
+                        | Action::RecordViewMoveRow(_)
+                        | Action::CloseRecordView
+                        | Action::RecordViewViewportChanged { .. }
                         | Action::DdlScroll { .. }
                         | Action::DdlScrollToStart
                         | Action::DdlScrollToEnd
@@ -754,6 +764,13 @@ impl App {
                     | Action::GridSetColumnWidth { .. }
                     | Action::GridEndColumnResize
                     | Action::GridSetColumnOffset { .. }
+                    | Action::OpenRecordView
+                    | Action::RecordViewMoveFields(_)
+                    | Action::RecordViewJumpFirstField
+                    | Action::RecordViewJumpLastField
+                    | Action::RecordViewMoveRow(_)
+                    | Action::CloseRecordView
+                    | Action::RecordViewViewportChanged { .. }
                     | Action::CompletionExplicit
                     | Action::CompletionNext
                     | Action::CompletionPrevious
@@ -986,6 +1003,63 @@ impl App {
             }
             Action::ShowHelp => {
                 self.overlay = Some(Overlay::Help(crate::help::HelpState::new(self.focus)));
+                Vec::new()
+            }
+            Action::OpenRecordView => {
+                if self.focus == Focus::Results {
+                    let (rows, columns) = self.active_grid_dimensions();
+                    if rows > 0 && columns > 0 {
+                        self.overlay = Some(Overlay::RecordView(Default::default()));
+                    }
+                }
+                Vec::new()
+            }
+            Action::RecordViewMoveFields(delta) => {
+                let (_, columns) = self.active_grid_dimensions();
+                if let Some(Overlay::RecordView(view)) = self.overlay.as_mut() {
+                    view.move_fields(delta, columns, view.visible_fields);
+                }
+                Vec::new()
+            }
+            Action::RecordViewJumpFirstField => {
+                if let Some(Overlay::RecordView(view)) = self.overlay.as_mut() {
+                    view.jump_first();
+                }
+                Vec::new()
+            }
+            Action::RecordViewJumpLastField => {
+                let (_, columns) = self.active_grid_dimensions();
+                if let Some(Overlay::RecordView(view)) = self.overlay.as_mut() {
+                    view.jump_last(columns, view.visible_fields);
+                }
+                Vec::new()
+            }
+            Action::RecordViewMoveRow(delta) => {
+                if matches!(self.overlay, Some(Overlay::RecordView(_))) {
+                    self.move_grid(delta, 0);
+                    if let Some(Overlay::RecordView(view)) = self.overlay.as_mut() {
+                        view.jump_first();
+                    }
+                }
+                Vec::new()
+            }
+            Action::CloseRecordView => {
+                if matches!(self.overlay, Some(Overlay::RecordView(_))) {
+                    self.overlay = None;
+                }
+                Vec::new()
+            }
+            Action::RecordViewViewportChanged {
+                tab_id,
+                visible_fields,
+            } => {
+                let current_tab_id = self.tabs.get(self.active_tab).map(WorkspaceTab::id);
+                let (_, columns) = self.active_grid_dimensions();
+                if current_tab_id == Some(tab_id) {
+                    if let Some(Overlay::RecordView(view)) = self.overlay.as_mut() {
+                        view.clamp(columns, visible_fields);
+                    }
+                }
                 Vec::new()
             }
             Action::HelpInsert(character) => {
@@ -5543,6 +5617,58 @@ impl App {
                 .unwrap_or((0, 0)),
             _ => (0, 0),
         }
+    }
+
+    pub(crate) fn active_record_snapshot(
+        &self,
+    ) -> Option<(Vec<ColumnMeta>, Vec<CellValue>, usize, usize)> {
+        match self.tabs.get(self.active_tab) {
+            Some(WorkspaceTab::Sql(tab)) if tab.result_view == ResultView::Data => {
+                let result = tab
+                    .derived
+                    .as_ref()
+                    .and_then(|derived| derived.outcome.as_ref())
+                    .or(tab.outcome.as_ref())
+                    .and_then(|outcome| outcome.result_sets.last())?;
+                let row = result.rows.get(tab.grid.selected_row)?.clone();
+                Some((
+                    result.columns.clone(),
+                    row,
+                    tab.grid.selected_row,
+                    result.rows.len(),
+                ))
+            }
+            Some(WorkspaceTab::Relation(tab)) if tab.view == RelationView::Data => {
+                let result = match &tab.data {
+                    RelationLoad::Ready(snapshot) => snapshot.value.result.result_sets.last(),
+                    RelationLoad::Loading { previous, .. }
+                    | RelationLoad::Failed { previous, .. }
+                    | RelationLoad::Cancelled { previous } => previous
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.value.result.result_sets.last()),
+                    RelationLoad::Empty => None,
+                }?;
+                let row = tab
+                    .edit
+                    .as_ref()
+                    .and_then(|edit| edit.rows.get(tab.grid.selected_row))
+                    .map(|row| row.current.clone())
+                    .or_else(|| result.rows.get(tab.grid.selected_row).cloned())?;
+                Some((
+                    result.columns.clone(),
+                    row,
+                    tab.grid.selected_row,
+                    tab.edit
+                        .as_ref()
+                        .map_or(result.rows.len(), |edit| edit.rows.len()),
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn active_grid_dimensions_for_input(&self) -> (usize, usize) {
+        self.active_grid_dimensions()
     }
 
     fn with_active_grid(&mut self, f: impl FnOnce(&mut DataGridState, (usize, usize))) {

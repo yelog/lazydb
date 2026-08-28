@@ -51,6 +51,7 @@ impl Focus {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Overlay {
     Help(HelpState),
+    RecordView(crate::model::record_view::RecordViewState),
     ProfileManager,
     Message {
         title: String,

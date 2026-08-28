@@ -493,6 +493,16 @@ pub enum Action {
     },
     GridAlignSelectedRow(crate::model::tab::GridRowAlignment),
     GridViewportChanged(crate::model::tab::DataGridViewport),
+    OpenRecordView,
+    RecordViewMoveFields(isize),
+    RecordViewJumpFirstField,
+    RecordViewJumpLastField,
+    RecordViewMoveRow(isize),
+    CloseRecordView,
+    RecordViewViewportChanged {
+        tab_id: Uuid,
+        visible_fields: usize,
+    },
     GridSelect {
         row: usize,
         column: usize,

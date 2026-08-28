@@ -25,6 +25,7 @@ enum Pending {
     RelationYank,
     GridGoto,
     GridAlign,
+    RecordViewGoto,
     ExplorerGoto,
     ExplorerAlign,
 }
@@ -80,6 +81,48 @@ impl Keymap {
         if app.overlay == Some(Overlay::ProfileManager) {
             self.pending = None;
             return map_profile_manager(event, app);
+        }
+        if matches!(app.overlay, Some(Overlay::RecordView(_))) {
+            let pending = self.pending.take();
+            return match event.code {
+                KeyCode::Char('g') => {
+                    if let Some((Pending::RecordViewGoto, started, focus, editor_mode, tab_id)) =
+                        pending
+                    {
+                        let current_tab = app
+                            .tabs
+                            .get(app.active_tab)
+                            .map_or(Uuid::nil(), |tab| tab.id());
+                        if started.elapsed() <= SEQUENCE_TIMEOUT
+                            && focus == app.focus
+                            && editor_mode == app.active_editor_mode()
+                            && tab_id == current_tab
+                        {
+                            return Some(Action::RecordViewJumpFirstField);
+                        }
+                    }
+                    self.pending = Some((
+                        Pending::RecordViewGoto,
+                        Instant::now(),
+                        app.focus,
+                        app.active_editor_mode(),
+                        app.tabs
+                            .get(app.active_tab)
+                            .map_or(Uuid::nil(), |tab| tab.id()),
+                    ));
+                    None
+                }
+                KeyCode::Char('j') | KeyCode::Down => Some(Action::RecordViewMoveFields(1)),
+                KeyCode::Char('k') | KeyCode::Up => Some(Action::RecordViewMoveFields(-1)),
+                KeyCode::Char('h') | KeyCode::Left => Some(Action::RecordViewMoveRow(-1)),
+                KeyCode::Char('l') | KeyCode::Right => Some(Action::RecordViewMoveRow(1)),
+                KeyCode::Char('G') | KeyCode::End => Some(Action::RecordViewJumpLastField),
+                KeyCode::Home => Some(Action::RecordViewJumpFirstField),
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('v') => {
+                    Some(Action::CloseRecordView)
+                }
+                _ => None,
+            };
         }
         if matches!(app.overlay, Some(Overlay::SubstituteConfirm { .. })) {
             self.pending = None;
@@ -317,6 +360,7 @@ impl Keymap {
             if matches!(
                 pending,
                 Pending::GridGoto
+                    | Pending::RecordViewGoto
                     | Pending::GridAlign
                     | Pending::ExplorerGoto
                     | Pending::ExplorerAlign
@@ -608,6 +652,7 @@ fn map_pending(pending: Pending, event: KeyEvent, app: &App) -> Option<Action> {
         (Pending::GridGoto, KeyCode::Char('g')) => Some(Action::GridSelectRow(
             crate::model::tab::GridRowTarget::First,
         )),
+        (Pending::RecordViewGoto, KeyCode::Char('g')) => Some(Action::RecordViewJumpFirstField),
         (Pending::GridAlign, KeyCode::Char('z')) => Some(Action::GridAlignSelectedRow(
             crate::model::tab::GridRowAlignment::Middle,
         )),
@@ -1065,6 +1110,12 @@ fn map_results(code: KeyCode, app: &App) -> Option<Action> {
         KeyCode::Char('[') => Some(Action::GridResizeColumn(-1)),
         KeyCode::Char(']') => Some(Action::GridResizeColumn(1)),
         KeyCode::Char('=') => Some(Action::GridResetColumnWidth),
+        KeyCode::Char('v')
+            if app.active_grid_dimensions_for_input().0 > 0
+                && app.active_grid_dimensions_for_input().1 > 0 =>
+        {
+            Some(Action::OpenRecordView)
+        }
         KeyCode::Char('h') | KeyCode::Left => Some(Action::GridMove {
             rows: 0,
             columns: -1,

@@ -3,6 +3,7 @@ pub mod editor;
 pub mod execution_target;
 pub mod explorer;
 pub mod profile_manager;
+pub mod record_view;
 pub mod relation;
 pub mod relation_edit;
 pub mod sql_editor_list;

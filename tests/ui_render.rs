@@ -1825,3 +1825,54 @@ fn editor_snapshot_scrolls_without_projecting_offscreen_lines() {
     assert_eq!(snapshot.lines[0].line, 5_000);
     assert!(!snapshot.lines[0].spans[0].text.contains("line-4999"));
 }
+#[test]
+fn record_view_renders_the_selected_row_as_ordered_fields() {
+    let mut app = fixture();
+    app.focus = Focus::Results;
+    app.update(Action::OpenRecordView);
+
+    let output = render(&app, 100, 30);
+
+    assert!(output.contains("RECORD VIEW"));
+    assert!(output.contains("ROW 1 / 1"));
+    assert!(output.contains("id"));
+    assert!(output.contains("INTEGER"));
+    assert!(output.contains("42"));
+    assert!(output.contains("name"));
+    assert!(output.contains("Ada"));
+    assert!(output.contains("active"));
+    assert!(output.contains("BOOLEAN"));
+}
+
+#[test]
+fn record_view_navigation_changes_record_and_closes_without_database_io() {
+    let mut app = fixture();
+    let tab_id = app.active_console().id;
+    let generation = app.active_console().generation;
+    let connection = app.connection.active_identity().unwrap();
+    app.update(Action::QueryFinished {
+        tab_id,
+        generation,
+        connection,
+        outcome: QueryOutcome {
+            result_sets: vec![ResultSet {
+                columns: vec![ColumnMeta {
+                    name: "id".into(),
+                    type_name: "INTEGER".into(),
+                }],
+                rows: vec![vec![CellValue::Integer(1)], vec![CellValue::Integer(2)]],
+                affected_rows: 0,
+            }],
+            stats: QueryStats::new(Duration::ZERO, Duration::ZERO, 2),
+        },
+    });
+    app.focus = Focus::Results;
+    app.update(Action::OpenRecordView);
+    app.update(Action::RecordViewMoveRow(1));
+
+    assert!(matches!(app.overlay, Some(Overlay::RecordView(_))));
+    assert_eq!(app.active_console().grid.selected_row, 1);
+    assert!(render(&app, 100, 30).contains("ROW 2 / 2"));
+    assert!(app.update(Action::CloseRecordView).is_empty());
+    assert!(app.overlay.is_none());
+}

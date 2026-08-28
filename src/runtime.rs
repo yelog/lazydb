@@ -2452,6 +2452,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
         }
         sync_editor_viewport(&mut app, &mut runtime, &ui_state);
         sync_grid_viewport(&mut app, &mut runtime, &ui_state);
+        sync_record_view_fields(&mut app, &mut runtime, &ui_state);
         sync_explorer_viewport(&mut app, &mut runtime, &ui_state);
         sync_ddl_viewport(&mut app, &mut runtime, &ui_state);
 
@@ -2511,6 +2512,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                 }
                 sync_editor_viewport(&mut app, &mut runtime, &ui_state);
                 sync_grid_viewport(&mut app, &mut runtime, &ui_state);
+                sync_record_view_fields(&mut app, &mut runtime, &ui_state);
                 sync_explorer_viewport(&mut app, &mut runtime, &ui_state);
                 sync_ddl_viewport(&mut app, &mut runtime, &ui_state);
             }
@@ -2556,6 +2558,20 @@ fn sync_grid_viewport(app: &mut App, runtime: &mut Runtime, state: &UiState) {
         return;
     };
     apply_action(app, runtime, Action::GridViewportChanged(viewport));
+}
+
+fn sync_record_view_fields(app: &mut App, runtime: &mut Runtime, state: &UiState) {
+    let Some((tab_id, visible_fields)) = state.record_view_fields else {
+        return;
+    };
+    apply_action(
+        app,
+        runtime,
+        Action::RecordViewViewportChanged {
+            tab_id,
+            visible_fields,
+        },
+    );
 }
 
 fn sync_explorer_viewport(app: &mut App, runtime: &mut Runtime, state: &UiState) {
