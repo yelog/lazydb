@@ -516,6 +516,7 @@ impl App {
                 && matches!(
                     action,
                     Action::GridMove { .. }
+                        | Action::GridViewportChanged(_)
                         | Action::GridSelect { .. }
                         | Action::GridResizeColumn(_)
                         | Action::GridResetColumnWidth
@@ -563,6 +564,7 @@ impl App {
                     | Action::RollbackTransaction
                     | Action::ClearTransactionOutcome
                     | Action::GridMove { .. }
+                    | Action::GridViewportChanged(_)
                     | Action::GridSelect { .. }
                     | Action::GridResizeColumn(_)
                     | Action::GridResetColumnWidth
@@ -1234,6 +1236,10 @@ impl App {
                     return Vec::new();
                 };
                 let _ = self.editor.set_viewport(id, viewport);
+                Vec::new()
+            }
+            Action::GridViewportChanged(viewport) => {
+                self.sync_grid_viewport(viewport);
                 Vec::new()
             }
             Action::EditorScroll { rows, columns } => {
@@ -4942,7 +4948,28 @@ impl App {
             grid.selected_row = move_bounded(grid.selected_row, rows, row_count);
             grid.selected_column = move_bounded(grid.selected_column, columns, column_count);
             grid.clamp(row_count, column_count);
+            grid.ensure_row_visible(row_count);
         });
+    }
+
+    fn sync_grid_viewport(&mut self, viewport: crate::model::tab::DataGridViewport) {
+        let (row_count, column_count) = self.active_grid_dimensions();
+        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+            return;
+        };
+        if tab.id() != viewport.tab_id {
+            return;
+        }
+        let grid = match tab {
+            WorkspaceTab::Sql(tab) if tab.result_view == ResultView::Data => &mut tab.grid,
+            WorkspaceTab::Relation(tab) if tab.view == RelationView::Data => &mut tab.grid,
+            _ => return,
+        };
+        grid.column_offset = viewport.column_offset;
+        grid.row_offset = viewport.row_offset;
+        grid.viewport_rows = viewport.visible_rows;
+        grid.clamp(row_count, column_count);
+        grid.ensure_row_visible(row_count);
     }
 
     fn relation_session_mut(&mut self) -> Option<&mut RelationEditSession> {
@@ -5632,6 +5659,7 @@ impl App {
             grid.selected_row = row.min(row_count.saturating_sub(1));
             grid.selected_column = column.min(column_count.saturating_sub(1));
             grid.clamp(row_count, column_count);
+            grid.ensure_row_visible(row_count);
         });
     }
 
@@ -6540,6 +6568,116 @@ mod tests {
         );
         app.update(Action::GridResetColumnWidth);
         assert_eq!(app.active_console().grid.column_widths, vec![None, None]);
+    }
+
+    #[test]
+    fn grid_viewport_sync_is_identity_safe_and_clamped() {
+        let mut app = sql_result_app();
+        let tab_id = app.active_console().id;
+        app.update(Action::GridViewportChanged(
+            crate::model::tab::DataGridViewport {
+                tab_id,
+                column_offset: 1,
+                row_offset: 9,
+                visible_rows: 3,
+            },
+        ));
+        assert_eq!(app.active_console().grid.column_offset, 1);
+        assert_eq!(app.active_console().grid.row_offset, 0);
+        assert_eq!(app.active_console().grid.viewport_rows, 3);
+
+        app.update(Action::GridViewportChanged(
+            crate::model::tab::DataGridViewport {
+                tab_id: Uuid::new_v4(),
+                column_offset: 0,
+                row_offset: 0,
+                visible_rows: 7,
+            },
+        ));
+        assert_eq!(app.active_console().grid.column_offset, 1);
+        assert_eq!(app.active_console().grid.viewport_rows, 3);
+    }
+
+    #[test]
+    fn grid_navigation_scrolls_rows_only_after_crossing_viewport_edges() {
+        let mut app = sql_result_app();
+        let result = app
+            .active_console_mut()
+            .outcome
+            .as_mut()
+            .unwrap()
+            .result_sets
+            .last_mut()
+            .unwrap();
+        result.rows = (0..10)
+            .map(|row| vec![CellValue::Integer(row), CellValue::Text(row.to_string())])
+            .collect();
+        let tab_id = app.active_console().id;
+        app.update(Action::GridViewportChanged(
+            crate::model::tab::DataGridViewport {
+                tab_id,
+                column_offset: 0,
+                row_offset: 0,
+                visible_rows: 3,
+            },
+        ));
+        app.update(Action::GridSelect { row: 1, column: 0 });
+
+        app.update(Action::GridMove {
+            rows: 1,
+            columns: 0,
+        });
+        assert_eq!(
+            (
+                app.active_console().grid.selected_row,
+                app.active_console().grid.row_offset
+            ),
+            (2, 0)
+        );
+        app.update(Action::GridMove {
+            rows: 1,
+            columns: 0,
+        });
+        assert_eq!(
+            (
+                app.active_console().grid.selected_row,
+                app.active_console().grid.row_offset
+            ),
+            (3, 1)
+        );
+        app.update(Action::GridMove {
+            rows: -1,
+            columns: 0,
+        });
+        assert_eq!(
+            (
+                app.active_console().grid.selected_row,
+                app.active_console().grid.row_offset
+            ),
+            (2, 1)
+        );
+        app.update(Action::GridMove {
+            rows: -1,
+            columns: 0,
+        });
+        assert_eq!(
+            (
+                app.active_console().grid.selected_row,
+                app.active_console().grid.row_offset
+            ),
+            (1, 1)
+        );
+        app.update(Action::GridMove {
+            rows: -1,
+            columns: 0,
+        });
+        assert_eq!(
+            (
+                app.active_console().grid.selected_row,
+                app.active_console().grid.row_offset
+            ),
+            (0, 0)
+        );
     }
 
     #[test]

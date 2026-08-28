@@ -160,6 +160,7 @@ fn render_data(
         render_relation_result_table(
             frame,
             body[2],
+            tab.id,
             &result,
             tab.grid.clone(),
             &tab.grid.column_widths,
@@ -205,6 +206,7 @@ fn render_data(
 fn render_relation_result_table(
     frame: &mut Frame<'_>,
     area: Rect,
+    tab_id: uuid::Uuid,
     result: &crate::db::query::ResultSet,
     grid: crate::model::tab::DataGridState,
     overrides: &[Option<u16>],
@@ -214,7 +216,7 @@ fn render_relation_result_table(
     edit: Option<&crate::model::relation_edit::RelationEditSession>,
 ) {
     super::data_grid::render(
-        frame, area, result, grid, overrides, theme, block, state, edit,
+        frame, area, tab_id, result, grid, overrides, theme, block, state, edit,
     );
 }
 

@@ -2394,6 +2394,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
             terminal.set_cursor_style(style)?;
         }
         sync_editor_viewport(&mut app, &mut runtime, &ui_state);
+        sync_grid_viewport(&mut app, &mut runtime, &ui_state);
 
         while !app.should_quit {
             let mut redraw = false;
@@ -2450,6 +2451,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                     terminal.set_cursor_style(style)?;
                 }
                 sync_editor_viewport(&mut app, &mut runtime, &ui_state);
+                sync_grid_viewport(&mut app, &mut runtime, &ui_state);
             }
         }
 
@@ -2486,6 +2488,13 @@ fn sync_editor_viewport(app: &mut App, runtime: &mut Runtime, state: &UiState) {
     if app.active_editor_viewport().ok() != Some(viewport) {
         apply_action(app, runtime, Action::EditorViewportChanged(viewport));
     }
+}
+
+fn sync_grid_viewport(app: &mut App, runtime: &mut Runtime, state: &UiState) {
+    let Some(viewport) = state.grid_viewport else {
+        return;
+    };
+    apply_action(app, runtime, Action::GridViewportChanged(viewport));
 }
 
 pub struct StartupProfiles {

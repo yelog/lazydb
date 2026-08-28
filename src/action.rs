@@ -430,6 +430,7 @@ pub enum Action {
         rows: isize,
         columns: isize,
     },
+    GridViewportChanged(crate::model::tab::DataGridViewport),
     GridSelect {
         row: usize,
         column: usize,

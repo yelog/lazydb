@@ -24,7 +24,16 @@ pub struct DataGridState {
     pub selected_column: usize,
     pub column_offset: usize,
     pub row_offset: usize,
+    pub viewport_rows: usize,
     pub column_widths: Vec<Option<u16>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DataGridViewport {
+    pub tab_id: Uuid,
+    pub column_offset: usize,
+    pub row_offset: usize,
+    pub visible_rows: usize,
 }
 
 /// Compatibility name for the shared grid state used by the current renderer.
@@ -181,10 +190,15 @@ impl DataGridState {
         self.column_widths.truncate(column_count);
     }
 
-    pub fn ensure_row_visible(&mut self, row_count: usize, visible_rows: usize) {
-        self.clamp(row_count, self.column_widths.len());
-        if row_count == 0 || visible_rows == 0 {
+    pub fn ensure_row_visible(&mut self, row_count: usize) {
+        self.selected_row = self.selected_row.min(row_count.saturating_sub(1));
+        self.row_offset = self.row_offset.min(row_count.saturating_sub(1));
+        if row_count == 0 {
             self.row_offset = 0;
+            return;
+        }
+        let visible_rows = self.viewport_rows;
+        if visible_rows == 0 {
             return;
         }
         if self.selected_row < self.row_offset {
@@ -209,6 +223,7 @@ mod tests {
             selected_column: 8,
             column_offset: 7,
             row_offset: 8,
+            viewport_rows: 5,
             column_widths: vec![Some(10), Some(11), Some(12), Some(13)],
         };
 
@@ -228,6 +243,7 @@ mod tests {
             selected_column: 4,
             column_offset: 2,
             row_offset: 3,
+            viewport_rows: 5,
             column_widths: vec![Some(10)],
         };
 
@@ -247,15 +263,60 @@ mod tests {
             selected_column: 0,
             column_offset: 0,
             row_offset: 0,
+            viewport_rows: 5,
             column_widths: vec![None],
         };
 
         state.selected_row = 6;
-        state.ensure_row_visible(10, 5);
+        state.ensure_row_visible(10);
         assert_eq!(state.row_offset, 2);
 
         state.selected_row = 1;
-        state.ensure_row_visible(10, 5);
+        state.ensure_row_visible(10);
         assert_eq!(state.row_offset, 1);
+    }
+
+    #[test]
+    fn row_viewport_scrolls_only_after_selection_crosses_an_edge() {
+        let mut state = DataGridState {
+            selected_row: 1,
+            row_offset: 0,
+            viewport_rows: 3,
+            ..DataGridState::default()
+        };
+
+        state.selected_row = 2;
+        state.ensure_row_visible(10);
+        assert_eq!(state.row_offset, 0);
+
+        state.selected_row = 3;
+        state.ensure_row_visible(10);
+        assert_eq!(state.row_offset, 1);
+
+        state.selected_row = 1;
+        state.ensure_row_visible(10);
+        assert_eq!(state.row_offset, 1);
+
+        state.selected_row = 0;
+        state.ensure_row_visible(10);
+        assert_eq!(state.row_offset, 0);
+    }
+
+    #[test]
+    fn ensuring_row_visibility_does_not_clamp_columns_from_width_overrides() {
+        let mut state = DataGridState {
+            selected_column: 5,
+            column_offset: 4,
+            selected_row: 6,
+            row_offset: 0,
+            viewport_rows: 5,
+            column_widths: Vec::new(),
+        };
+
+        state.ensure_row_visible(10);
+
+        assert_eq!(state.selected_column, 5);
+        assert_eq!(state.column_offset, 4);
+        assert_eq!(state.row_offset, 2);
     }
 }

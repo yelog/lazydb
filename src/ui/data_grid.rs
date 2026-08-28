@@ -6,6 +6,7 @@ use ratatui::{
     widgets::{Block, Cell, Paragraph, Row, Table, TableState},
 };
 use unicode_width::UnicodeWidthStr;
+use uuid::Uuid;
 
 use crate::{
     db::{query::ResultSet, value::CellValue},
@@ -18,6 +19,7 @@ use super::{HitRegion, HitTarget, UiState, theme::Theme};
 pub(crate) fn render(
     frame: &mut Frame<'_>,
     area: Rect,
+    tab_id: Uuid,
     result: &ResultSet,
     grid: crate::model::tab::DataGridState,
     overrides: &[Option<u16>],
@@ -56,13 +58,19 @@ pub(crate) fn render(
     let visible = visible_columns(&widths, first, available);
     let constraints = grid_constraints(&visible, &widths);
 
-    let visible_rows = area.height.saturating_sub(4) as usize;
-    let row_offset = grid.row_offset.min(
-        result
-            .rows
-            .len()
-            .saturating_sub(visible_rows.min(result.rows.len())),
+    let visible_rows = area.height.saturating_sub(4 + u16::from(overflow)) as usize;
+    let row_offset = row_viewport_start(
+        result.rows.len(),
+        visible_rows,
+        grid.row_offset,
+        grid.selected_row,
     );
+    state.grid_viewport = Some(crate::model::tab::DataGridViewport {
+        tab_id,
+        column_offset: first,
+        row_offset,
+        visible_rows,
+    });
     let row_y = area.y.saturating_add(3);
     for (screen_row, row_index) in result
         .rows
@@ -70,7 +78,7 @@ pub(crate) fn render(
         .skip(row_offset)
         .take(visible_rows)
         .enumerate()
-        .map(|(index, _)| (index - row_offset, index))
+        .map(|(screen_row, _)| (screen_row, row_offset.saturating_add(screen_row)))
     {
         let mut x = area.x.saturating_add(2);
         for column_index in &visible {
@@ -204,6 +212,25 @@ fn grid_constraints(visible: &[usize], widths: &[u16]) -> Vec<Constraint> {
         constraints.push(Constraint::Length(widths[*index]));
     }
     constraints
+}
+
+fn row_viewport_start(
+    row_count: usize,
+    visible_rows: usize,
+    offset: usize,
+    selected: usize,
+) -> usize {
+    if row_count == 0 || visible_rows == 0 {
+        return 0;
+    }
+    let selected = selected.min(row_count - 1);
+    let mut offset = offset.min(row_count.saturating_sub(visible_rows.min(row_count)));
+    if selected < offset {
+        offset = selected;
+    } else if selected >= offset.saturating_add(visible_rows) {
+        offset = selected + 1 - visible_rows;
+    }
+    offset.min(row_count.saturating_sub(visible_rows.min(row_count)))
 }
 
 fn header_cells(visible: &[usize], result: &ResultSet, theme: Theme) -> Vec<Cell<'static>> {
@@ -418,7 +445,7 @@ fn render_scrollbar(
 
 #[cfg(test)]
 mod tests {
-    use super::{total_width, viewport_start, visible_columns};
+    use super::{row_viewport_start, total_width, viewport_start, visible_columns};
 
     #[test]
     fn narrow_grid_starts_with_first_columns() {
@@ -441,6 +468,13 @@ mod tests {
     }
 
     #[test]
+    fn viewport_stays_put_at_left_edge_until_selection_crosses_it() {
+        let widths = vec![6; 10];
+        assert_eq!(viewport_start(&widths, 4, 4, 20), 4);
+        assert_eq!(viewport_start(&widths, 4, 3, 20), 3);
+    }
+
+    #[test]
     fn explicit_last_offset_reaches_last_column() {
         let widths = vec![6; 10];
         let start = viewport_start(&widths, 9, 9, 20);
@@ -452,5 +486,13 @@ mod tests {
         let widths = vec![6, 6];
         assert_eq!(total_width(&widths), 13);
         assert_eq!(visible_columns(&widths, 0, 13), vec![0, 1]);
+    }
+
+    #[test]
+    fn row_viewport_scrolls_only_after_selection_crosses_an_edge() {
+        assert_eq!(row_viewport_start(10, 3, 0, 2), 0);
+        assert_eq!(row_viewport_start(10, 3, 0, 3), 1);
+        assert_eq!(row_viewport_start(10, 3, 3, 3), 3);
+        assert_eq!(row_viewport_start(10, 3, 3, 2), 2);
     }
 }

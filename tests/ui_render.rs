@@ -392,9 +392,10 @@ fn relation_loading_with_previous_snapshot_keeps_data_visible_and_exposes_cancel
     };
     app.tabs.push(WorkspaceTab::Relation(relation));
     app.active_tab = 1;
-    let output = render(&app, 120, 36);
+    let (output, state) = render_with_state(&app, 120, 36);
     assert!(output.contains("RELATION DATA"), "{output}");
     assert!(output.contains("Refreshing"), "{output}");
+    assert_eq!(state.grid_viewport.unwrap().tab_id, app.tabs[1].id());
 }
 
 #[test]
@@ -714,6 +715,123 @@ fn data_grid_uses_header_rule_and_thin_column_separators() {
     assert!(output.contains('│'), "{output}");
     assert!(output.contains('┼'), "{output}");
     assert!(output.contains('─'), "{output}");
+}
+
+#[test]
+fn data_grid_publishes_and_clears_its_rendered_viewport() {
+    let mut app = fixture();
+    let (_, state) = render_with_state(&app, 120, 36);
+    let viewport = state
+        .grid_viewport
+        .expect("SQL DATA should publish a viewport");
+    assert_eq!(viewport.tab_id, app.active_console().id);
+    assert_eq!(viewport.column_offset, 0);
+    assert_eq!(viewport.row_offset, 0);
+    assert!(viewport.visible_rows > 0);
+
+    app.active_console_mut().result_view = lazydb::model::tab::ResultView::Output;
+    let (_, state) = render_with_state(&app, 120, 36);
+    assert_eq!(state.grid_viewport, None);
+}
+
+#[test]
+fn data_grid_updates_visible_row_capacity_after_terminal_resize() {
+    let app = fixture();
+    let (_, compact) = render_with_state(&app, 120, 24);
+    let (_, tall) = render_with_state(&app, 120, 40);
+
+    let compact = compact.grid_viewport.unwrap();
+    let tall = tall.grid_viewport.unwrap();
+    assert_eq!(compact.tab_id, tall.tab_id);
+    assert!(tall.visible_rows > compact.visible_rows);
+}
+
+#[test]
+fn data_grid_renders_scrolled_rows_with_absolute_hit_targets() {
+    let mut app = fixture();
+    app.focus = Focus::Results;
+    let result = app
+        .active_console_mut()
+        .outcome
+        .as_mut()
+        .unwrap()
+        .result_sets
+        .last_mut()
+        .unwrap();
+    result.rows = (0..30)
+        .map(|row| {
+            vec![
+                CellValue::Integer(row),
+                CellValue::Text(format!("row-{row}")),
+                CellValue::Boolean(true),
+            ]
+        })
+        .collect();
+    app.active_console_mut().grid.selected_row = 15;
+    app.active_console_mut().grid.row_offset = 15;
+
+    let (_, state) = render_with_state(&app, 80, 20);
+    let viewport = state.grid_viewport.unwrap();
+    assert!(viewport.row_offset > 0);
+    let first_row = state
+        .hit_regions
+        .iter()
+        .filter_map(|region| match region.target {
+            HitTarget::ResultCell { row, .. } => Some(row),
+            _ => None,
+        })
+        .min()
+        .unwrap();
+    assert_eq!(first_row, viewport.row_offset);
+}
+
+#[test]
+fn selected_row_scrolls_before_the_horizontal_scrollbar_would_cover_it() {
+    let mut app = fixture();
+    app.focus = Focus::Results;
+    let result = app
+        .active_console_mut()
+        .outcome
+        .as_mut()
+        .unwrap()
+        .result_sets
+        .last_mut()
+        .unwrap();
+    result.columns = (0..12)
+        .map(|column| ColumnMeta {
+            name: format!("column_{column}"),
+            type_name: "INTEGER".into(),
+        })
+        .collect();
+    result.rows = (0..30)
+        .map(|row| (0..12).map(|_| CellValue::Integer(row)).collect())
+        .collect();
+
+    let (_, initial) = render_with_state(&app, 80, 20);
+    let visible_rows = initial.grid_viewport.unwrap().visible_rows;
+    assert!(visible_rows > 0);
+
+    app.active_console_mut().grid.selected_row = visible_rows;
+    let (_, state) = render_with_state(&app, 80, 20);
+    let viewport = state.grid_viewport.unwrap();
+    assert_eq!(viewport.row_offset, 1);
+    let selected_y = state
+        .hit_regions
+        .iter()
+        .find_map(|region| match region.target {
+            HitTarget::ResultCell { row, .. } if row == visible_rows => Some(region.area.y),
+            _ => None,
+        })
+        .unwrap();
+    let scrollbar_y = state
+        .hit_regions
+        .iter()
+        .find_map(|region| match region.target {
+            HitTarget::GridScrollbarThumb { .. } => Some(region.area.y),
+            _ => None,
+        })
+        .unwrap();
+    assert!(selected_y < scrollbar_y);
 }
 
 #[test]
