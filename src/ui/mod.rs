@@ -699,10 +699,8 @@ fn render_explorer_find(
         return;
     }
     let (current, total) = app.explorer.find_match_position();
-    let input = format!(
-        "/ {} ({current}/{total})",
-        sanitize_terminal_text(&find.query)
-    );
+    let query = format!("/ {}", sanitize_terminal_text(&find.query));
+    let input = format!("{query} ({current}/{total})");
     frame.render_widget(
         Paragraph::new(input.clone()).style(Style::new().fg(theme.action).bg(theme.surface)),
         Rect::new(area.x, area.y, area.width, 1),
@@ -710,7 +708,7 @@ fn render_explorer_find(
     if find.phase == ExplorerSearchPhase::Editing {
         frame.set_cursor_position(Position::new(
             area.x
-                .saturating_add(explorer_search_cursor_column(&input, area.width)),
+                .saturating_add(explorer_search_cursor_column(&query, area.width)),
             area.y,
         ));
     }
@@ -1185,6 +1183,20 @@ fn render_editor(
         }
     }
     completion_anchor
+}
+
+fn editor_syntax_color(kind: EditorHighlightKind) -> theme::SyntaxColor {
+    match kind {
+        EditorHighlightKind::Keyword => theme::SyntaxColor::Keyword,
+        EditorHighlightKind::Identifier => theme::SyntaxColor::Identifier,
+        EditorHighlightKind::String => theme::SyntaxColor::String,
+        EditorHighlightKind::Number => theme::SyntaxColor::Number,
+        EditorHighlightKind::Comment => theme::SyntaxColor::Comment,
+        EditorHighlightKind::Operator => theme::SyntaxColor::Operator,
+        EditorHighlightKind::Punctuation => theme::SyntaxColor::Punctuation,
+        EditorHighlightKind::Parameter => theme::SyntaxColor::Parameter,
+        EditorHighlightKind::Plain => theme::SyntaxColor::Plain,
+    }
 }
 
 fn render_result_tabs(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
@@ -1989,6 +2001,18 @@ mod completion_popup_tests {
     fn explorer_search_cursor_uses_terminal_cell_width() {
         assert_eq!(explorer_search_cursor_column("/ 界", 20), 4);
         assert_eq!(explorer_search_cursor_column("/ 界", 4), 3);
+    }
+
+    #[test]
+    fn explorer_find_cursor_stops_before_match_status() {
+        let query = "/ time";
+        let rendered = format!("{query} (1/4)");
+
+        assert_eq!(explorer_search_cursor_column(query, 20), 6);
+        assert_ne!(
+            explorer_search_cursor_column(&rendered, 20),
+            explorer_search_cursor_column(query, 20)
+        );
     }
 
     #[test]

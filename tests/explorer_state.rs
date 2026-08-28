@@ -7,7 +7,7 @@ use lazydb::{
     model::explorer::{
         CatalogGroupState, CatalogTree, CatalogTreeError, ExplorerConnectionStatus,
         ExplorerLoadState, ExplorerNodeAlignment, ExplorerNodeId, ExplorerNodeTarget,
-        ExplorerOwnerId, ExplorerScrollAmount, ExplorerTreeState, StatusRowKind,
+        ExplorerOwnerId, ExplorerScrollAmount, ExplorerTreeState, ProfileProvenance, StatusRowKind,
     },
 };
 use uuid::Uuid;
@@ -529,6 +529,48 @@ fn visible_find_confirms_and_cycles_selection_with_wraparound() {
         state.selected_id(),
         Some(&ExplorerNodeId::Catalog(fixture.view.id.clone()))
     );
+}
+
+#[test]
+fn visible_find_centers_each_current_match_in_the_viewport() {
+    let profiles: Vec<_> = (1..=8).map(profile_id).collect();
+    let mut normalized = ExplorerTreeState::default();
+    for (index, profile) in profiles.iter().enumerate() {
+        normalized.add_profile_with_metadata(
+            *profile,
+            format!("profile-{index}"),
+            lazydb::profile::DatabaseKind::Sqlite,
+            String::new(),
+            ProfileProvenance::Saved,
+        );
+    }
+    let mut state = lazydb::model::workspace::ExplorerState {
+        normalized,
+        ..Default::default()
+    };
+    state.set_viewport_height(5);
+    state.open_find();
+    state.edit_find(|query| query.push_str("profile"));
+
+    assert!(state.confirm_find());
+    assert_eq!(state.normalized.selected_visible_index(), Some(0));
+    assert_eq!(state.normalized.scroll, 0);
+
+    assert!(state.move_find_match(1));
+    assert_eq!(state.normalized.selected_visible_index(), Some(1));
+    assert_eq!(state.normalized.scroll, 0);
+    assert!(state.move_find_match(1));
+    assert_eq!(state.normalized.selected_visible_index(), Some(2));
+    assert_eq!(state.normalized.scroll, 0);
+    assert!(state.move_find_match(1));
+    assert_eq!(state.normalized.selected_visible_index(), Some(3));
+    assert_eq!(state.normalized.scroll, 1);
+    assert!(state.move_find_match(1));
+    assert_eq!(state.normalized.selected_visible_index(), Some(4));
+    assert_eq!(state.normalized.scroll, 2);
+    assert!(state.move_find_match(-1));
+    assert_eq!(state.normalized.selected_visible_index(), Some(3));
+    assert_eq!(state.normalized.scroll, 1);
 }
 
 #[test]

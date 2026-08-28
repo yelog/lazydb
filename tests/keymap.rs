@@ -646,6 +646,46 @@ fn maps_explorer_and_result_actions_by_context() {
 }
 
 #[test]
+fn confirmed_explorer_find_keeps_navigation_keys_available() {
+    let mut app = App::new(Vec::new());
+    app.focus = Focus::Explorer;
+    app.explorer.open_find();
+    app.explorer.confirm_find();
+    let mut keymap = Keymap::default();
+
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('n')), &app),
+        Some(Action::ExplorerFindNext)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('N')), &app),
+        Some(Action::ExplorerFindPrevious)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('j')), &app),
+        Some(Action::ExplorerMove(1))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('k')), &app),
+        Some(Action::ExplorerMove(-1))
+    );
+    assert_eq!(
+        keymap.map(ctrl('d'), &app),
+        Some(Action::ExplorerScrollNodes {
+            direction: 1,
+            amount: lazydb::model::explorer::ExplorerScrollAmount::HalfPage,
+        })
+    );
+    assert_eq!(
+        keymap.map(ctrl('u'), &app),
+        Some(Action::ExplorerScrollNodes {
+            direction: -1,
+            amount: lazydb::model::explorer::ExplorerScrollAmount::HalfPage,
+        })
+    );
+}
+
+#[test]
 fn relation_keys_control_only_the_active_relation_view() {
     let mut app = App::new(Vec::new());
     app.tabs.push(lazydb::model::tab::WorkspaceTab::Relation(

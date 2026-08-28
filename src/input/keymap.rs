@@ -143,24 +143,37 @@ impl Keymap {
             };
         }
         if app.focus == Focus::Explorer && app.explorer.find.is_some() {
-            self.pending = None;
             let confirmed = app.explorer.find.as_ref().is_some_and(|find| {
                 find.phase == crate::model::workspace::ExplorerSearchPhase::Confirmed
             });
-            return match event.code {
-                KeyCode::Esc => Some(Action::ExplorerFindClose),
-                KeyCode::Enter if !confirmed => Some(Action::ExplorerFindConfirm),
-                KeyCode::Backspace if !confirmed => Some(Action::ExplorerFindBackspace),
-                KeyCode::Char('u') if event.modifiers == KeyModifiers::CONTROL && !confirmed => {
-                    Some(Action::ExplorerFindClear)
+            if !confirmed {
+                self.pending = None;
+                return match event.code {
+                    KeyCode::Esc => Some(Action::ExplorerFindClose),
+                    KeyCode::Enter => Some(Action::ExplorerFindConfirm),
+                    KeyCode::Backspace => Some(Action::ExplorerFindBackspace),
+                    KeyCode::Char('u') if event.modifiers == KeyModifiers::CONTROL => {
+                        Some(Action::ExplorerFindClear)
+                    }
+                    KeyCode::Char(character) => Some(Action::ExplorerFindInsert(character)),
+                    _ => None,
+                };
+            }
+            match event.code {
+                KeyCode::Esc => {
+                    self.pending = None;
+                    return Some(Action::ExplorerFindClose);
                 }
-                KeyCode::Char('n') if confirmed => Some(Action::ExplorerFindNext),
-                KeyCode::Char('N') if confirmed => Some(Action::ExplorerFindPrevious),
-                KeyCode::Char(character) if !confirmed => {
-                    Some(Action::ExplorerFindInsert(character))
+                KeyCode::Char('n') => {
+                    self.pending = None;
+                    return Some(Action::ExplorerFindNext);
                 }
-                _ => None,
-            };
+                KeyCode::Char('N') => {
+                    self.pending = None;
+                    return Some(Action::ExplorerFindPrevious);
+                }
+                _ => {}
+            }
         }
         if app.focus == Focus::Explorer && app.explorer.search.is_some() {
             self.pending = None;
@@ -284,6 +297,14 @@ impl Keymap {
             ) {
                 return None;
             }
+        }
+
+        // Resolve multi-key window commands before treating `h`/`j`/`k`/`l`
+        // as DDL scrolling commands.
+        if is_relation_ddl_focus(app)
+            && let Some(action) = map_relation_ddl(event)
+        {
+            return Some(action);
         }
 
         if app.focus == Focus::Explorer

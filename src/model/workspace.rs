@@ -361,7 +361,8 @@ impl ExplorerState {
             return false;
         }
         self.normalized.selected = Some(id.clone());
-        self.normalized.ensure_selected_visible();
+        self.normalized
+            .align_selected(ExplorerNodeAlignment::Middle);
         self.sync_selected_index();
         true
     }
