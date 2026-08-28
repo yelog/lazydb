@@ -1116,15 +1116,7 @@ fn render_editor(
             .spans
             .iter()
             .map(|span| {
-                let foreground = match span.kind {
-                    EditorHighlightKind::Keyword => theme.accent,
-                    EditorHighlightKind::Identifier => theme.action,
-                    EditorHighlightKind::String => theme.warning,
-                    EditorHighlightKind::Number | EditorHighlightKind::Parameter => theme.action,
-                    EditorHighlightKind::Comment => theme.muted,
-                    EditorHighlightKind::Operator | EditorHighlightKind::Punctuation => theme.text,
-                    EditorHighlightKind::Plain => theme.text,
-                };
+                let foreground = theme.syntax_color(editor_syntax_color(span.kind));
                 Span::styled(
                     span.text.clone(),
                     Style::new()

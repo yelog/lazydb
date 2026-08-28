@@ -1,5 +1,18 @@
 use ratatui::style::{Color, Modifier, Style};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SyntaxColor {
+    Keyword,
+    Identifier,
+    String,
+    Number,
+    Comment,
+    Operator,
+    Punctuation,
+    Parameter,
+    Plain,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Theme {
     pub background: Color,
@@ -57,5 +70,31 @@ impl Theme {
             .fg(if focused { self.accent } else { self.muted })
             .bg(self.surface)
             .add_modifier(Modifier::BOLD)
+    }
+
+    pub(crate) const fn syntax_color(self, kind: SyntaxColor) -> Color {
+        match kind {
+            SyntaxColor::Keyword => self.accent,
+            SyntaxColor::Identifier | SyntaxColor::Number | SyntaxColor::Parameter => self.action,
+            SyntaxColor::String => self.warning,
+            SyntaxColor::Comment => self.muted,
+            SyntaxColor::Operator | SyntaxColor::Punctuation | SyntaxColor::Plain => self.text,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SyntaxColor, Theme};
+
+    #[test]
+    fn syntax_categories_match_the_editor_palette() {
+        let theme = Theme::deep_space();
+
+        assert_eq!(theme.syntax_color(SyntaxColor::Keyword), theme.accent);
+        assert_eq!(theme.syntax_color(SyntaxColor::Identifier), theme.action);
+        assert_eq!(theme.syntax_color(SyntaxColor::String), theme.warning);
+        assert_eq!(theme.syntax_color(SyntaxColor::Comment), theme.muted);
+        assert_eq!(theme.syntax_color(SyntaxColor::Plain), theme.text);
     }
 }

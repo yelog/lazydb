@@ -244,12 +244,6 @@ impl Keymap {
                 _ => None,
             };
         }
-        if is_relation_ddl_focus(app)
-            && let Some(action) = map_relation_ddl(event)
-        {
-            return Some(action);
-        }
-
         if app.active_console_opt().is_some_and(|tab| {
             tab.completion.is_some() && app.active_editor_mode() == EditorMode::Insert
         }) {
@@ -1427,6 +1421,31 @@ mod tests {
         assert_eq!(
             keymap.map(key(KeyCode::Char('r')), &app),
             Some(Action::RefreshActiveRelation)
+        );
+    }
+
+    #[test]
+    fn relation_ddl_window_command_can_focus_explorer() {
+        let mut app = App::new(Vec::new());
+        app.tabs
+            .push(WorkspaceTab::Relation(RelationTab::new("users")));
+        app.active_tab = 1;
+        app.focus = Focus::Results;
+        app.update(Action::SetRelationView(
+            crate::model::relation::RelationView::Ddl,
+        ));
+        let mut keymap = Keymap::default();
+
+        assert_eq!(
+            keymap.map(
+                KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+                &app,
+            ),
+            None
+        );
+        assert_eq!(
+            keymap.map(key(KeyCode::Char('h')), &app),
+            Some(Action::Focus(Focus::Explorer))
         );
     }
 }

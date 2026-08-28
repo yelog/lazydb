@@ -4216,7 +4216,7 @@ impl App {
         self.apply_editor_effects()
     }
 
-    fn sql_dialect(&self) -> SqlDialect {
+    pub(crate) fn sql_dialect(&self) -> SqlDialect {
         match self.active_profile().map(|profile| profile.kind) {
             Some(DatabaseKind::Postgres) => SqlDialect::Postgres,
             Some(DatabaseKind::MySql) => SqlDialect::MySql,
