@@ -851,6 +851,12 @@ impl EditorWorkspace {
                     .pending_binding = Some(PendingBinding::Window);
                 Ok(())
             }
+            (EditorMode::Insert | EditorMode::Replace, EditorKey::Control('w')) => {
+                self.delete_previous_word(id)
+            }
+            (EditorMode::Insert | EditorMode::Replace, EditorKey::Control('u')) => {
+                self.delete_to_line_start(id)
+            }
             (_, key) => self.input_vim_key(id, key),
         }
     }
@@ -1060,6 +1066,9 @@ impl EditorWorkspace {
         let offset = char_position_to_byte(&old, position);
         let mut next = old.clone();
         let new_offset = edit(&mut next, offset);
+        if next == old {
+            return Ok(());
+        }
         if session.previous_text.is_none() {
             session.previous_text = Some(old);
         }

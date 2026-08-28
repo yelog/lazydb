@@ -453,6 +453,15 @@ impl Keymap {
                 }
             }
             return match event.code {
+                KeyCode::Char('u')
+                    if app.focus == Focus::Editor
+                        && matches!(
+                            app.active_editor_mode(),
+                            EditorMode::Insert | EditorMode::Replace
+                        ) =>
+                {
+                    Some(Action::EditorKey(event))
+                }
                 KeyCode::Char('w') if app.focus == Focus::Editor => Some(Action::EditorKey(event)),
                 KeyCode::Char('w') => {
                     self.set_pending(Pending::Window, app);

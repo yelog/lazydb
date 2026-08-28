@@ -221,7 +221,7 @@ pub fn complete(
         }));
         candidates.push(CompletionCandidate {
             label: if matches!(kind, CompletionKind::Table | CompletionKind::View) {
-                relation_label(entry)
+                display_text(name)
             } else {
                 display_text(name)
             },
@@ -231,7 +231,11 @@ pub fn complete(
                 quote_identifier(name, dialect)
             },
             kind,
-            detail: completion_detail(entry).map(|detail| display_text(&detail)),
+            detail: if matches!(kind, CompletionKind::Table | CompletionKind::View) {
+                relation_detail(entry)
+            } else {
+                completion_detail(entry).map(|detail| display_text(&detail))
+            },
             replace,
             score: CompletionScore {
                 context: context_score,
@@ -293,17 +297,17 @@ fn completion_detail(entry: &CatalogEntry) -> Option<String> {
     }
 }
 
-fn relation_label(entry: &CatalogEntry) -> String {
-    [
+fn relation_detail(entry: &CatalogEntry) -> Option<String> {
+    let mut parts = [
         entry.qualified_name.database.as_deref(),
         entry.qualified_name.schema.as_deref(),
-        Some(entry.qualified_name.object.as_str()),
     ]
     .into_iter()
     .flatten()
     .map(display_text)
-    .collect::<Vec<_>>()
-    .join(".")
+    .collect::<Vec<_>>();
+    parts.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
+    (!parts.is_empty()).then(|| format!("({})", parts.join(".")))
 }
 
 fn relation_insert_text(

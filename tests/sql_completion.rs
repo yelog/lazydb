@@ -123,7 +123,9 @@ fn completion_includes_databases_and_qualified_children() {
         CompletionContext::default(),
     );
     assert!(tables.iter().any(|candidate| {
-        candidate.kind == CompletionKind::Table && candidate.label == "app.public.users"
+        candidate.kind == CompletionKind::Table
+            && candidate.label == "users"
+            && candidate.detail.as_deref() == Some("(app.public)")
     }));
 }
 
@@ -392,7 +394,9 @@ fn app_completion_prefers_the_active_console_target_schema() {
     let scores = popup
         .candidates
         .iter()
-        .filter(|candidate| candidate.label == "app.public.orders")
+        .filter(|candidate| {
+            candidate.label == "orders" && candidate.detail.as_deref() == Some("(app.public)")
+        })
         .map(|candidate| candidate.score.schema)
         .collect::<Vec<_>>();
     assert_eq!(scores, [1]);
@@ -454,16 +458,18 @@ fn relation_completion_uses_shortest_target_relative_reference() {
         &index,
         context,
     );
-    let by_label = |label: &str| {
+    let by_detail = |detail: &str| {
         candidates
             .iter()
-            .find(|candidate| candidate.label == label)
+            .find(|candidate| {
+                candidate.label == "users" && candidate.detail.as_deref() == Some(detail)
+            })
             .unwrap()
     };
-    assert_eq!(by_label("app.public.users").insert_text, "users");
-    assert_eq!(by_label("app.audit.users").insert_text, "audit.users");
+    assert_eq!(by_detail("(app.public)").insert_text, "users");
+    assert_eq!(by_detail("(app.audit)").insert_text, "audit.users");
     assert_eq!(
-        by_label("analytics.bi.users").insert_text,
+        by_detail("(analytics.bi)").insert_text,
         "analytics.bi.users"
     );
 
@@ -480,8 +486,36 @@ fn relation_completion_uses_shortest_target_relative_reference() {
             .iter()
             .map(|candidate| candidate.label.as_str())
             .collect::<Vec<_>>(),
-        ["app.public.users"]
+        ["users"]
     );
+    assert_eq!(
+        qualified_candidates[0].detail.as_deref(),
+        Some("(app.public)")
+    );
+}
+
+#[test]
+fn relation_completion_deduplicates_mirrored_database_and_schema_detail() {
+    let connection = Uuid::new_v4();
+    let entry = CatalogEntry::relation(
+        CatalogId::new(connection, CatalogKind::Table, ["app", "app", "users"]),
+        CatalogId::new(connection, CatalogKind::Schema, ["app", "app"]),
+        qualified("app", Some("app"), "users"),
+        "table",
+        OptionalMetadata::Supported(None),
+        false,
+    )
+    .unwrap();
+    let candidates = complete(
+        "select * from us",
+        16,
+        SqlDialect::MySql,
+        &CompletionIndex::new(&[entry]),
+        CompletionContext::default(),
+    );
+
+    assert_eq!(candidates[0].label, "users");
+    assert_eq!(candidates[0].detail.as_deref(), Some("(app)"));
 }
 
 fn qualified(database: &str, schema: Option<&str>, object: &str) -> QualifiedName {

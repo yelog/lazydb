@@ -89,6 +89,26 @@ fn insert_control_keys_keep_vim_semantics() {
 }
 
 #[test]
+fn insert_control_u_deletes_only_to_the_current_unicode_line_start() {
+    let (mut workspace, id) = fixture("select 1\n用户🙂");
+    workspace.move_cursor_to_end(id).unwrap();
+    let revision = workspace.revision(id).unwrap();
+
+    workspace.press(id, EditorKey::Control('u')).unwrap();
+
+    assert_eq!(workspace.text(id).unwrap(), "select 1\n");
+    assert_eq!(workspace.revision(id).unwrap(), revision + 1);
+    assert_eq!(
+        workspace.position(id).unwrap(),
+        EditorPosition { line: 1, column: 0 }
+    );
+    workspace.press(id, EditorKey::Control('u')).unwrap();
+    assert_eq!(workspace.revision(id).unwrap(), revision + 1);
+    workspace.undo(id).unwrap();
+    assert_eq!(workspace.text(id).unwrap(), "select 1\n用户🙂");
+}
+
+#[test]
 fn replacement_resets_cursor_mode_and_history() {
     let (mut workspace, id) = fixture("old");
     workspace.move_cursor_to_end(id).unwrap();

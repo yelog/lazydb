@@ -113,6 +113,12 @@ enum CatalogRequestIntent {
     Completion,
 }
 
+#[derive(Clone, Copy)]
+enum CompletionAfterEdit {
+    Schedule,
+    Suppress,
+}
+
 impl App {
     pub(crate) fn is_active_relation_tab(&self) -> bool {
         matches!(
@@ -1070,7 +1076,7 @@ impl App {
                 if result.is_err() {
                     self.overlay = None;
                 }
-                self.apply_editor_effects()
+                self.apply_editor_effects(CompletionAfterEdit::Schedule)
             }
             Action::OpenProfileManager => {
                 if self.profile_manager.is_some() {
@@ -1496,7 +1502,7 @@ impl App {
                 if self.editor.key(id, key).is_err() {
                     return Vec::new();
                 }
-                self.apply_editor_effects()
+                self.apply_editor_effects(CompletionAfterEdit::Schedule)
             }
             Action::EditorPaste(text) => {
                 let Some(id) = self.active_console_opt().map(|tab| tab.id) else {
@@ -1506,7 +1512,7 @@ impl App {
                 if self.editor.paste(id, &text).is_err() {
                     return Vec::new();
                 }
-                self.apply_editor_effects()
+                self.apply_editor_effects(CompletionAfterEdit::Schedule)
             }
             Action::EditorViewportChanged(viewport) => {
                 let Some(id) = self.active_console_opt().map(|tab| tab.id) else {
@@ -4027,12 +4033,16 @@ impl App {
         })
     }
 
-    fn apply_editor_effects(&mut self) -> Vec<Command> {
+    fn apply_editor_effects(&mut self, completion: CompletionAfterEdit) -> Vec<Command> {
         let effects = self.editor.drain_effects();
         let mut commands = Vec::new();
         for effect in effects {
             let action = match effect {
                 EditorEffect::Changed { .. } => {
+                    if matches!(completion, CompletionAfterEdit::Suppress) {
+                        self.active_console_mut().completion = None;
+                        continue;
+                    }
                     if self.active_editor_mode() != EditorMode::Insert {
                         self.active_console_mut().completion = None;
                         continue;
@@ -4199,7 +4209,7 @@ impl App {
             &candidate.insert_text,
             crate::editor::ReplacementCursor::EndOfInsertion,
         );
-        self.apply_editor_effects()
+        self.apply_editor_effects(CompletionAfterEdit::Suppress)
     }
 
     pub(crate) fn sql_dialect(&self) -> SqlDialect {
