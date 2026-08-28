@@ -549,14 +549,16 @@ fn empty_relation_preview_renders_clean_empty_state() {
     app.focus = Focus::Results;
 
     let output = render(&app, 120, 36);
-    let header_line = output
-        .lines()
-        .find(|line| line.contains("#│id"))
+    let lines = output.lines().collect::<Vec<_>>();
+    let header_y = lines
+        .iter()
+        .position(|line| line.contains("#│id"))
         .expect("grid header line");
-    let empty_line = output
-        .lines()
-        .find(|line| line.contains("No rows"))
-        .expect("empty-state line");
+    let header_line = lines[header_y];
+    let empty_line = lines
+        .get(header_y + 1)
+        .filter(|line| line.contains("No rows"))
+        .expect("empty state immediately below the header");
     let header_chars = header_line.chars().collect::<Vec<_>>();
     let row_number_x = header_chars
         .iter()
@@ -928,12 +930,17 @@ fn standard_layout_shows_stable_workspace_regions() {
 }
 
 #[test]
-fn data_grid_uses_header_rule_and_thin_column_separators() {
+fn data_grid_places_rows_immediately_below_the_header() {
     let output = render(&fixture(), 120, 36);
+    let lines = output.lines().collect::<Vec<_>>();
+    let header_y = lines
+        .iter()
+        .position(|line| line.contains("#│id"))
+        .expect("grid header line");
 
     assert!(output.contains('│'), "{output}");
-    assert!(output.contains('┼'), "{output}");
-    assert!(output.contains('─'), "{output}");
+    assert!(!output.contains('┼'), "{output}");
+    assert!(lines[header_y + 1].contains("Ada"), "{output}");
 }
 
 #[test]

@@ -64,7 +64,7 @@ pub(crate) fn render(
     let visible = visible_columns(&widths, first, available);
     let constraints = grid_constraints(&visible, &widths, number_width);
 
-    let visible_rows = area.height.saturating_sub(4 + u16::from(overflow)) as usize;
+    let visible_rows = area.height.saturating_sub(3 + u16::from(overflow)) as usize;
     let row_offset = row_viewport_start(
         result.rows.len(),
         visible_rows,
@@ -77,7 +77,7 @@ pub(crate) fn render(
         row_offset,
         visible_rows,
     });
-    let row_y = area.y.saturating_add(3);
+    let row_y = area.y.saturating_add(2);
     for (screen_row, row_index) in result
         .rows
         .iter()
@@ -123,9 +123,7 @@ pub(crate) fn render(
         boundary_x = boundary_x.saturating_add(1);
     }
 
-    let header = Row::new(header_cells(&visible, result, number_width, theme))
-        .height(1)
-        .bottom_margin(1);
+    let header = Row::new(header_cells(&visible, result, number_width, theme)).height(1);
     let rows = result
         .rows
         .iter()
@@ -184,15 +182,14 @@ pub(crate) fn render(
     });
     let mut table_state = TableState::new().with_selected_cell(selected_cell);
     frame.render_stateful_widget(table, area, &mut table_state);
-    render_header_rule(frame, area, &visible, &widths, number_width, theme);
-    if result.rows.is_empty() && area.height >= 4 {
+    if result.rows.is_empty() && area.height >= 3 {
         frame.render_widget(
             Paragraph::new("No rows")
                 .style(Style::new().fg(theme.muted).bg(theme.surface))
                 .alignment(Alignment::Center),
             Rect::new(
                 area.x.saturating_add(2),
-                area.y.saturating_add(3),
+                area.y.saturating_add(2),
                 area.width.saturating_sub(4),
                 1,
             ),
@@ -328,43 +325,6 @@ fn body_cells(
         );
     }
     cells
-}
-
-fn render_header_rule(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    visible: &[usize],
-    widths: &[u16],
-    number_width: u16,
-    theme: Theme,
-) {
-    if area.height < 3 || visible.is_empty() {
-        return;
-    }
-    let mut spans = Vec::with_capacity(visible.len().saturating_mul(2).saturating_add(2));
-    spans.push(Span::styled(
-        "─".repeat(number_width as usize),
-        Style::new().fg(theme.grid_border),
-    ));
-    spans.push(Span::styled("┼", Style::new().fg(theme.grid_border)));
-    for (position, index) in visible.iter().enumerate() {
-        if position > 0 {
-            spans.push(Span::styled("┼", Style::new().fg(theme.grid_border)));
-        }
-        spans.push(Span::styled(
-            "─".repeat(widths[*index] as usize),
-            Style::new().fg(theme.grid_border),
-        ));
-    }
-    frame.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::new().bg(theme.surface)),
-        Rect::new(
-            area.x.saturating_add(2),
-            area.y.saturating_add(2),
-            area.width.saturating_sub(4),
-            1,
-        ),
-    );
 }
 
 fn total_width(widths: &[u16]) -> u16 {
