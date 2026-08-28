@@ -41,6 +41,18 @@ pub enum HelpShortcutId {
     ResultsMoveDown,
     ResultsMoveUp,
     ResultsMoveRight,
+    ResultsFirstRow,
+    ResultsLastRow,
+    ResultsViewTop,
+    ResultsViewMiddle,
+    ResultsViewBottom,
+    ResultsHalfPageDown,
+    ResultsHalfPageUp,
+    ResultsPageDown,
+    ResultsPageUp,
+    ResultsAlignMiddle,
+    ResultsAlignTop,
+    ResultsAlignBottom,
     ResultsToggleView,
     RelationWhere,
     RelationOrderBy,
@@ -328,6 +340,66 @@ pub fn shortcuts(context: Focus, relation_data: bool) -> Vec<HelpShortcut> {
                     description: "move through cells right",
                 },
                 HelpShortcut {
+                    id: HelpShortcutId::ResultsFirstRow,
+                    key: "gg",
+                    description: "select first row",
+                },
+                HelpShortcut {
+                    id: HelpShortcutId::ResultsLastRow,
+                    key: "G",
+                    description: "select last row",
+                },
+                HelpShortcut {
+                    id: HelpShortcutId::ResultsViewTop,
+                    key: "H",
+                    description: "select top visible row",
+                },
+                HelpShortcut {
+                    id: HelpShortcutId::ResultsViewMiddle,
+                    key: "M",
+                    description: "select middle visible row",
+                },
+                HelpShortcut {
+                    id: HelpShortcutId::ResultsViewBottom,
+                    key: "L",
+                    description: "select bottom visible row",
+                },
+                HelpShortcut {
+                    id: HelpShortcutId::ResultsHalfPageDown,
+                    key: "Ctrl-d",
+                    description: "move down half a page",
+                },
+                HelpShortcut {
+                    id: HelpShortcutId::ResultsHalfPageUp,
+                    key: "Ctrl-u",
+                    description: "move up half a page",
+                },
+                HelpShortcut {
+                    id: HelpShortcutId::ResultsPageDown,
+                    key: "Ctrl-f",
+                    description: "move down one page",
+                },
+                HelpShortcut {
+                    id: HelpShortcutId::ResultsPageUp,
+                    key: "Ctrl-b",
+                    description: "move up one page",
+                },
+                HelpShortcut {
+                    id: HelpShortcutId::ResultsAlignMiddle,
+                    key: "zz",
+                    description: "align selected row to middle",
+                },
+                HelpShortcut {
+                    id: HelpShortcutId::ResultsAlignTop,
+                    key: "zt",
+                    description: "align selected row to top",
+                },
+                HelpShortcut {
+                    id: HelpShortcutId::ResultsAlignBottom,
+                    key: "zb",
+                    description: "align selected row to bottom",
+                },
+                HelpShortcut {
                     id: HelpShortcutId::ResultsToggleView,
                     key: "o",
                     description: "switch Data / Output",
@@ -445,5 +517,17 @@ mod tests {
             .expect("format shortcut");
         assert_eq!(format.key, "Space f");
         assert!(format.description.contains("format"));
+    }
+
+    #[test]
+    fn results_help_includes_vim_viewport_navigation() {
+        let rows = shortcuts(Focus::Results, false);
+        let keys = rows.iter().map(|row| row.key).collect::<Vec<_>>();
+
+        for key in [
+            "gg", "G", "H", "M", "L", "Ctrl-d", "Ctrl-u", "Ctrl-f", "Ctrl-b", "zz", "zt", "zb",
+        ] {
+            assert!(keys.contains(&key), "missing Results help key {key}");
+        }
     }
 }

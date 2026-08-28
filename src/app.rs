@@ -546,6 +546,46 @@ impl App {
                 rows: 0,
                 columns: 1,
             }],
+            Id::ResultsFirstRow => vec![Action::GridSelectRow(
+                crate::model::tab::GridRowTarget::First,
+            )],
+            Id::ResultsLastRow => vec![Action::GridSelectRow(
+                crate::model::tab::GridRowTarget::Last,
+            )],
+            Id::ResultsViewTop => vec![Action::GridSelectRow(
+                crate::model::tab::GridRowTarget::ViewTop,
+            )],
+            Id::ResultsViewMiddle => vec![Action::GridSelectRow(
+                crate::model::tab::GridRowTarget::ViewMiddle,
+            )],
+            Id::ResultsViewBottom => vec![Action::GridSelectRow(
+                crate::model::tab::GridRowTarget::ViewBottom,
+            )],
+            Id::ResultsHalfPageDown => vec![Action::GridScrollRows {
+                direction: 1,
+                amount: crate::model::tab::GridScrollAmount::HalfPage,
+            }],
+            Id::ResultsHalfPageUp => vec![Action::GridScrollRows {
+                direction: -1,
+                amount: crate::model::tab::GridScrollAmount::HalfPage,
+            }],
+            Id::ResultsPageDown => vec![Action::GridScrollRows {
+                direction: 1,
+                amount: crate::model::tab::GridScrollAmount::Page,
+            }],
+            Id::ResultsPageUp => vec![Action::GridScrollRows {
+                direction: -1,
+                amount: crate::model::tab::GridScrollAmount::Page,
+            }],
+            Id::ResultsAlignMiddle => vec![Action::GridAlignSelectedRow(
+                crate::model::tab::GridRowAlignment::Middle,
+            )],
+            Id::ResultsAlignTop => vec![Action::GridAlignSelectedRow(
+                crate::model::tab::GridRowAlignment::Top,
+            )],
+            Id::ResultsAlignBottom => vec![Action::GridAlignSelectedRow(
+                crate::model::tab::GridRowAlignment::Bottom,
+            )],
             Id::ResultsToggleView => vec![Action::ToggleResultView],
             Id::RelationWhere => vec![Action::FocusRelationQueryInput(
                 crate::model::relation::RelationQueryInput::Where,
@@ -583,6 +623,9 @@ impl App {
                 && matches!(
                     action,
                     Action::GridMove { .. }
+                        | Action::GridSelectRow(_)
+                        | Action::GridScrollRows { .. }
+                        | Action::GridAlignSelectedRow(_)
                         | Action::GridViewportChanged(_)
                         | Action::GridSelect { .. }
                         | Action::GridResizeColumn(_)
@@ -648,6 +691,9 @@ impl App {
                     | Action::RollbackTransaction
                     | Action::ClearTransactionOutcome
                     | Action::GridMove { .. }
+                    | Action::GridSelectRow(_)
+                    | Action::GridScrollRows { .. }
+                    | Action::GridAlignSelectedRow(_)
                     | Action::GridViewportChanged(_)
                     | Action::GridSelect { .. }
                     | Action::GridResizeColumn(_)
@@ -2639,6 +2685,24 @@ impl App {
             }
             Action::GridMove { rows, columns } => {
                 self.move_grid(rows, columns);
+                Vec::new()
+            }
+            Action::GridSelectRow(target) => {
+                self.with_active_grid(|grid, (row_count, _)| {
+                    grid.select_row_target(target, row_count);
+                });
+                Vec::new()
+            }
+            Action::GridScrollRows { direction, amount } => {
+                self.with_active_grid(|grid, (row_count, _)| {
+                    grid.scroll_rows(direction, amount, row_count);
+                });
+                Vec::new()
+            }
+            Action::GridAlignSelectedRow(alignment) => {
+                self.with_active_grid(|grid, (row_count, _)| {
+                    grid.align_selected_row(alignment, row_count);
+                });
                 Vec::new()
             }
             Action::GridSelect { row, column } => {
@@ -6725,7 +6789,7 @@ mod tests {
         identity::ConnectionIdentity,
         model::explorer::ExplorerConnectionStatus,
         model::relation::RelationTab,
-        model::tab::{ResultView, WorkspaceTab},
+        model::tab::{GridRowAlignment, GridRowTarget, GridScrollAmount, ResultView, WorkspaceTab},
         model::transaction::{TransactionExitChoice, TransactionMode, TransactionState},
         model::workspace::{ConnectionStatus, Focus, Overlay, QueryStatus},
         model::{
@@ -6966,6 +7030,90 @@ mod tests {
         );
         app.update(Action::GridResetColumnWidth);
         assert_eq!(app.active_console().grid.column_widths, vec![None, None]);
+    }
+
+    #[test]
+    fn grid_vim_navigation_updates_only_vertical_state() {
+        let mut app = sql_result_app();
+        let result = app
+            .active_console_mut()
+            .outcome
+            .as_mut()
+            .unwrap()
+            .result_sets
+            .last_mut()
+            .unwrap();
+        result.rows = (0..20)
+            .map(|row| vec![CellValue::Integer(row), CellValue::Text(row.to_string())])
+            .collect();
+        let tab_id = app.active_console().id;
+        app.update(Action::GridSelect { row: 6, column: 1 });
+        app.update(Action::GridViewportChanged(
+            crate::model::tab::DataGridViewport {
+                tab_id,
+                column_offset: 1,
+                row_offset: 4,
+                visible_rows: 5,
+            },
+        ));
+        app.active_console_mut().grid.column_widths = vec![Some(10), Some(12)];
+        let horizontal = (
+            app.active_console().grid.selected_column,
+            app.active_console().grid.column_offset,
+            app.active_console().grid.column_widths.clone(),
+        );
+
+        app.update(Action::GridSelectRow(GridRowTarget::ViewMiddle));
+        assert_eq!(
+            (
+                app.active_console().grid.selected_row,
+                app.active_console().grid.row_offset
+            ),
+            (6, 4)
+        );
+        app.update(Action::GridScrollRows {
+            direction: 1,
+            amount: GridScrollAmount::HalfPage,
+        });
+        assert_eq!(
+            (
+                app.active_console().grid.selected_row,
+                app.active_console().grid.row_offset
+            ),
+            (8, 6)
+        );
+        app.update(Action::GridAlignSelectedRow(GridRowAlignment::Bottom));
+        assert_eq!(
+            (
+                app.active_console().grid.selected_row,
+                app.active_console().grid.row_offset
+            ),
+            (8, 4)
+        );
+        app.update(Action::GridSelectRow(GridRowTarget::Last));
+        assert_eq!(
+            (
+                app.active_console().grid.selected_row,
+                app.active_console().grid.row_offset
+            ),
+            (19, 15)
+        );
+        app.update(Action::GridSelectRow(GridRowTarget::First));
+        assert_eq!(
+            (
+                app.active_console().grid.selected_row,
+                app.active_console().grid.row_offset
+            ),
+            (0, 0)
+        );
+        assert_eq!(
+            (
+                app.active_console().grid.selected_column,
+                app.active_console().grid.column_offset,
+                app.active_console().grid.column_widths.clone(),
+            ),
+            horizontal
+        );
     }
 
     #[test]

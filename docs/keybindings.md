@@ -148,7 +148,16 @@ connection unchanged.
 | Key | Action |
 | --- | --- |
 | `h/j/k/l`, arrows | Move selected cell |
+| `gg`, `G` | Select the first/last row |
+| `H`, `M`, `L` | Select the top/middle/bottom visible row |
+| `Ctrl-d`, `Ctrl-u` | Move down/up half a page |
+| `Ctrl-f`, `Ctrl-b` | Move down/up one page |
+| `zz`, `zt`, `zb` | Align the selected row to the middle/top/bottom |
 | `o` | Switch Data/Output |
+
+Page movement moves the selected row with the viewport. The fixed `#` column
+shows one-based absolute row numbers and remains visible during horizontal
+scrolling.
 
 Relation Data previews additionally support `/` to focus the `WHERE` input and
 `s` to focus `ORDER BY`. Press `Enter` to apply both clauses, or `Esc` to leave

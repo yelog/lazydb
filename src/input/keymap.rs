@@ -23,6 +23,8 @@ enum Pending {
     Next,
     RelationDelete,
     RelationYank,
+    GridGoto,
+    GridAlign,
 }
 
 #[derive(Debug, Default)]
@@ -239,9 +241,27 @@ impl Keymap {
                 .tabs
                 .get(app.active_tab)
                 .is_some_and(|tab| tab_id == tab.id())
-            && let Some(action) = map_pending(pending, event, app)
         {
-            return Some(action);
+            if let Some(action) = map_pending(pending, event, app) {
+                return Some(action);
+            }
+            if matches!(pending, Pending::GridGoto | Pending::GridAlign) {
+                return None;
+            }
+        }
+
+        if is_grid_navigation_focus(app) && event.modifiers.is_empty() {
+            match event.code {
+                KeyCode::Char('g') => {
+                    self.set_pending(Pending::GridGoto, app);
+                    return None;
+                }
+                KeyCode::Char('z') => {
+                    self.set_pending(Pending::GridAlign, app);
+                    return None;
+                }
+                _ => {}
+            }
         }
 
         if is_relation_data_focus(app) {
@@ -282,6 +302,32 @@ impl Keymap {
         }
 
         if event.modifiers.contains(KeyModifiers::CONTROL) {
+            if event.modifiers == KeyModifiers::CONTROL && is_grid_navigation_focus(app) {
+                use crate::model::tab::GridScrollAmount;
+
+                let action = match event.code {
+                    KeyCode::Char('d') => Some(Action::GridScrollRows {
+                        direction: 1,
+                        amount: GridScrollAmount::HalfPage,
+                    }),
+                    KeyCode::Char('u') => Some(Action::GridScrollRows {
+                        direction: -1,
+                        amount: GridScrollAmount::HalfPage,
+                    }),
+                    KeyCode::Char('f') => Some(Action::GridScrollRows {
+                        direction: 1,
+                        amount: GridScrollAmount::Page,
+                    }),
+                    KeyCode::Char('b') => Some(Action::GridScrollRows {
+                        direction: -1,
+                        amount: GridScrollAmount::Page,
+                    }),
+                    _ => None,
+                };
+                if action.is_some() {
+                    return action;
+                }
+            }
             return match event.code {
                 KeyCode::Char('w') if app.focus == Focus::Editor => Some(Action::EditorKey(event)),
                 KeyCode::Char('w') => {
@@ -428,6 +474,18 @@ fn map_pending(pending: Pending, event: KeyEvent, app: &App) -> Option<Action> {
         (Pending::Next, KeyCode::Char('t')) => Some(Action::NextTab),
         (Pending::RelationDelete, KeyCode::Char('d')) => Some(Action::RelationDeleteCurrent),
         (Pending::RelationYank, KeyCode::Char('y')) => Some(Action::RelationYank),
+        (Pending::GridGoto, KeyCode::Char('g')) => Some(Action::GridSelectRow(
+            crate::model::tab::GridRowTarget::First,
+        )),
+        (Pending::GridAlign, KeyCode::Char('z')) => Some(Action::GridAlignSelectedRow(
+            crate::model::tab::GridRowAlignment::Middle,
+        )),
+        (Pending::GridAlign, KeyCode::Char('t')) => Some(Action::GridAlignSelectedRow(
+            crate::model::tab::GridRowAlignment::Top,
+        )),
+        (Pending::GridAlign, KeyCode::Char('b')) => Some(Action::GridAlignSelectedRow(
+            crate::model::tab::GridRowAlignment::Bottom,
+        )),
         _ => None,
     }
 }
@@ -482,6 +540,30 @@ fn relation_grid_is_browse(app: &App) -> bool {
             _ => None,
         })
         .is_none_or(|edit| matches!(edit.mode, RelationGridMode::Browse))
+}
+
+fn is_grid_navigation_focus(app: &App) -> bool {
+    if app.focus != Focus::Results {
+        return false;
+    }
+    match app.tabs.get(app.active_tab) {
+        Some(crate::model::tab::WorkspaceTab::Sql(tab)) => {
+            tab.result_view == crate::model::tab::ResultView::Data
+        }
+        Some(crate::model::tab::WorkspaceTab::Relation(tab))
+            if tab.view == crate::model::relation::RelationView::Data
+                && tab.query.focus.is_none() =>
+        {
+            tab.edit.as_ref().is_none_or(|edit| {
+                matches!(
+                    edit.mode,
+                    crate::model::relation_edit::RelationGridMode::Browse
+                        | crate::model::relation_edit::RelationGridMode::VisualLine { .. }
+                )
+            })
+        }
+        _ => false,
+    }
 }
 
 fn map_relation_data(event: KeyEvent, app: &App) -> Option<Action> {
@@ -777,6 +859,18 @@ fn map_results(code: KeyCode, app: &App) -> Option<Action> {
             rows: 0,
             columns: 1,
         }),
+        KeyCode::Char('G') => Some(Action::GridSelectRow(
+            crate::model::tab::GridRowTarget::Last,
+        )),
+        KeyCode::Char('H') => Some(Action::GridSelectRow(
+            crate::model::tab::GridRowTarget::ViewTop,
+        )),
+        KeyCode::Char('M') => Some(Action::GridSelectRow(
+            crate::model::tab::GridRowTarget::ViewMiddle,
+        )),
+        KeyCode::Char('L') => Some(Action::GridSelectRow(
+            crate::model::tab::GridRowTarget::ViewBottom,
+        )),
         KeyCode::Char('o') => match app.tabs.get(app.active_tab) {
             Some(crate::model::tab::WorkspaceTab::Relation(tab)) => {
                 Some(Action::SetRelationView(match tab.view {
@@ -884,7 +978,7 @@ mod tests {
         model::{
             relation::RelationTab,
             relation_edit::{RelationEditSession, RelationGridMode},
-            tab::WorkspaceTab,
+            tab::{GridRowAlignment, GridRowTarget, GridScrollAmount, WorkspaceTab},
             workspace::Focus,
         },
     };
@@ -1022,6 +1116,97 @@ mod tests {
         assert_eq!(
             keymap.map(key(KeyCode::Char('y')), &app),
             Some(Action::RelationYank)
+        );
+    }
+
+    #[test]
+    fn grid_maps_absolute_and_viewport_row_targets() {
+        let app = relation_app(RelationGridMode::Browse);
+        let mut keymap = Keymap::default();
+
+        for (code, target) in [
+            (KeyCode::Char('G'), GridRowTarget::Last),
+            (KeyCode::Char('H'), GridRowTarget::ViewTop),
+            (KeyCode::Char('M'), GridRowTarget::ViewMiddle),
+            (KeyCode::Char('L'), GridRowTarget::ViewBottom),
+        ] {
+            assert_eq!(
+                keymap.map(key(code), &app),
+                Some(Action::GridSelectRow(target))
+            );
+        }
+
+        assert_eq!(keymap.map(key(KeyCode::Char('g')), &app), None);
+        assert_eq!(
+            keymap.map(key(KeyCode::Char('g')), &app),
+            Some(Action::GridSelectRow(GridRowTarget::First))
+        );
+    }
+
+    #[test]
+    fn grid_maps_page_scroll_control_keys() {
+        let app = relation_app(RelationGridMode::Browse);
+        let mut keymap = Keymap::default();
+
+        for (character, direction, amount) in [
+            ('d', 1, GridScrollAmount::HalfPage),
+            ('u', -1, GridScrollAmount::HalfPage),
+            ('f', 1, GridScrollAmount::Page),
+            ('b', -1, GridScrollAmount::Page),
+        ] {
+            assert_eq!(
+                keymap.map(
+                    KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL),
+                    &app,
+                ),
+                Some(Action::GridScrollRows { direction, amount })
+            );
+        }
+    }
+
+    #[test]
+    fn grid_maps_selected_row_alignment_sequences() {
+        let app = relation_app(RelationGridMode::Browse);
+        let mut keymap = Keymap::default();
+
+        for (suffix, alignment) in [
+            ('z', GridRowAlignment::Middle),
+            ('t', GridRowAlignment::Top),
+            ('b', GridRowAlignment::Bottom),
+        ] {
+            assert_eq!(keymap.map(key(KeyCode::Char('z')), &app), None);
+            assert_eq!(
+                keymap.map(key(KeyCode::Char(suffix)), &app),
+                Some(Action::GridAlignSelectedRow(alignment))
+            );
+        }
+    }
+
+    #[test]
+    fn grid_navigation_does_not_steal_relation_cell_input() {
+        let app = relation_app(RelationGridMode::EditCell(
+            crate::model::relation_edit::CellEditorState {
+                row: 0,
+                column: 0,
+                input: Default::default(),
+            },
+        ));
+        let mut keymap = Keymap::default();
+
+        assert_eq!(
+            keymap.map(key(KeyCode::Char('g')), &app),
+            Some(Action::RelationEditInsert('g'))
+        );
+        assert_eq!(
+            keymap.map(key(KeyCode::Char('z')), &app),
+            Some(Action::RelationEditInsert('z'))
+        );
+        assert_eq!(
+            keymap.map(
+                KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+                &app,
+            ),
+            None
         );
     }
 

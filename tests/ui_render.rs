@@ -850,9 +850,14 @@ fn data_grid_renders_scrolled_rows_with_absolute_hit_targets() {
     app.active_console_mut().grid.selected_row = 15;
     app.active_console_mut().grid.row_offset = 15;
 
-    let (_, state) = render_with_state(&app, 80, 20);
+    let (output, state) = render_with_state(&app, 80, 20);
     let viewport = state.grid_viewport.unwrap();
     assert!(viewport.row_offset > 0);
+    assert!(output.contains('#'), "{output}");
+    assert!(
+        output.contains(&format!("{}│", viewport.row_offset + 1)),
+        "{output}"
+    );
     let first_row = state
         .hit_regions
         .iter()

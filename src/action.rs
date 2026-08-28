@@ -453,6 +453,12 @@ pub enum Action {
         rows: isize,
         columns: isize,
     },
+    GridSelectRow(crate::model::tab::GridRowTarget),
+    GridScrollRows {
+        direction: isize,
+        amount: crate::model::tab::GridScrollAmount,
+    },
+    GridAlignSelectedRow(crate::model::tab::GridRowAlignment),
     GridViewportChanged(crate::model::tab::DataGridViewport),
     GridSelect {
         row: usize,

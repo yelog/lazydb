@@ -29,6 +29,28 @@ pub struct DataGridState {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GridRowTarget {
+    First,
+    Last,
+    ViewTop,
+    ViewMiddle,
+    ViewBottom,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GridScrollAmount {
+    HalfPage,
+    Page,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GridRowAlignment {
+    Top,
+    Middle,
+    Bottom,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DataGridViewport {
     pub tab_id: Uuid,
     pub column_offset: usize,
@@ -219,11 +241,109 @@ impl DataGridState {
             .row_offset
             .min(row_count.saturating_sub(visible_rows.min(row_count)));
     }
+
+    pub fn select_row_target(&mut self, target: GridRowTarget, row_count: usize) {
+        if row_count == 0 {
+            self.selected_row = 0;
+            self.row_offset = 0;
+            return;
+        }
+
+        match target {
+            GridRowTarget::First => {
+                self.selected_row = 0;
+                self.row_offset = 0;
+            }
+            GridRowTarget::Last => {
+                self.selected_row = row_count - 1;
+                self.ensure_row_visible(row_count);
+            }
+            GridRowTarget::ViewTop | GridRowTarget::ViewMiddle | GridRowTarget::ViewBottom => {
+                if self.viewport_rows == 0 {
+                    return;
+                }
+                let first = self.row_offset.min(row_count - 1);
+                let last = first
+                    .saturating_add(self.viewport_rows.saturating_sub(1))
+                    .min(row_count - 1);
+                self.selected_row = match target {
+                    GridRowTarget::ViewTop => first,
+                    GridRowTarget::ViewMiddle => first + (last - first) / 2,
+                    GridRowTarget::ViewBottom => last,
+                    GridRowTarget::First | GridRowTarget::Last => unreachable!(),
+                };
+            }
+        }
+    }
+
+    pub fn scroll_rows(&mut self, direction: isize, amount: GridScrollAmount, row_count: usize) {
+        if row_count == 0 {
+            self.selected_row = 0;
+            self.row_offset = 0;
+            return;
+        }
+        if self.viewport_rows == 0 || direction == 0 {
+            return;
+        }
+
+        let step = match amount {
+            GridScrollAmount::HalfPage => (self.viewport_rows / 2).max(1),
+            GridScrollAmount::Page => self.viewport_rows,
+        };
+        let delta = if direction.is_negative() {
+            -(step.min(isize::MAX as usize) as isize)
+        } else {
+            step.min(isize::MAX as usize) as isize
+        };
+        self.selected_row = move_bounded(self.selected_row, delta, row_count);
+        self.row_offset = move_bounded(
+            self.row_offset,
+            delta,
+            self.max_row_offset(row_count).saturating_add(1),
+        );
+        self.ensure_row_visible(row_count);
+    }
+
+    pub fn align_selected_row(&mut self, alignment: GridRowAlignment, row_count: usize) {
+        if row_count == 0 {
+            self.selected_row = 0;
+            self.row_offset = 0;
+            return;
+        }
+        if self.viewport_rows == 0 {
+            return;
+        }
+
+        self.selected_row = self.selected_row.min(row_count - 1);
+        let screen_row = match alignment {
+            GridRowAlignment::Top => 0,
+            GridRowAlignment::Middle => self.viewport_rows.saturating_sub(1) / 2,
+            GridRowAlignment::Bottom => self.viewport_rows.saturating_sub(1),
+        };
+        self.row_offset = self
+            .selected_row
+            .saturating_sub(screen_row)
+            .min(self.max_row_offset(row_count));
+    }
+
+    fn max_row_offset(&self, row_count: usize) -> usize {
+        row_count.saturating_sub(self.viewport_rows.min(row_count))
+    }
+}
+
+fn move_bounded(current: usize, delta: isize, count: usize) -> usize {
+    if count == 0 {
+        0
+    } else {
+        current
+            .saturating_add_signed(delta)
+            .min(count.saturating_sub(1))
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::DataGridState;
+    use super::{DataGridState, GridRowAlignment, GridRowTarget, GridScrollAmount};
 
     #[test]
     fn clamping_keeps_selection_and_widths_inside_result_dimensions() {
@@ -327,5 +447,125 @@ mod tests {
         assert_eq!(state.selected_column, 5);
         assert_eq!(state.column_offset, 4);
         assert_eq!(state.row_offset, 2);
+    }
+
+    #[test]
+    fn semantic_row_targets_use_absolute_and_visible_bounds() {
+        let base = DataGridState {
+            selected_row: 6,
+            row_offset: 4,
+            viewport_rows: 5,
+            ..DataGridState::default()
+        };
+        let cases = [
+            (GridRowTarget::First, 0, 0),
+            (GridRowTarget::Last, 11, 7),
+            (GridRowTarget::ViewTop, 4, 4),
+            (GridRowTarget::ViewMiddle, 6, 4),
+            (GridRowTarget::ViewBottom, 8, 4),
+        ];
+
+        for (target, selected, offset) in cases {
+            let mut state = base.clone();
+            state.select_row_target(target, 12);
+            assert_eq!((state.selected_row, state.row_offset), (selected, offset));
+        }
+
+        let mut partial = DataGridState {
+            row_offset: 7,
+            viewport_rows: 5,
+            ..DataGridState::default()
+        };
+        partial.select_row_target(GridRowTarget::ViewMiddle, 10);
+        assert_eq!(partial.selected_row, 8);
+        partial.select_row_target(GridRowTarget::ViewBottom, 10);
+        assert_eq!(partial.selected_row, 9);
+    }
+
+    #[test]
+    fn page_scroll_moves_selection_and_viewport_together() {
+        let mut state = DataGridState {
+            selected_row: 6,
+            row_offset: 4,
+            viewport_rows: 5,
+            ..DataGridState::default()
+        };
+
+        state.scroll_rows(1, GridScrollAmount::HalfPage, 20);
+        assert_eq!((state.selected_row, state.row_offset), (8, 6));
+        state.scroll_rows(-1, GridScrollAmount::Page, 20);
+        assert_eq!((state.selected_row, state.row_offset), (3, 1));
+
+        state.scroll_rows(-1, GridScrollAmount::Page, 20);
+        assert_eq!((state.selected_row, state.row_offset), (0, 0));
+        state.scroll_rows(-1, GridScrollAmount::Page, 20);
+        assert_eq!((state.selected_row, state.row_offset), (0, 0));
+
+        state.selected_row = 18;
+        state.row_offset = 14;
+        state.scroll_rows(1, GridScrollAmount::Page, 20);
+        assert_eq!((state.selected_row, state.row_offset), (19, 15));
+        state.scroll_rows(1, GridScrollAmount::Page, 20);
+        assert_eq!((state.selected_row, state.row_offset), (19, 15));
+    }
+
+    #[test]
+    fn half_page_has_a_minimum_step_of_one() {
+        let mut state = DataGridState {
+            viewport_rows: 1,
+            ..DataGridState::default()
+        };
+
+        state.scroll_rows(1, GridScrollAmount::HalfPage, 3);
+
+        assert_eq!((state.selected_row, state.row_offset), (1, 1));
+    }
+
+    #[test]
+    fn selected_row_can_be_aligned_within_the_viewport() {
+        for (alignment, offset) in [
+            (GridRowAlignment::Top, 10),
+            (GridRowAlignment::Middle, 8),
+            (GridRowAlignment::Bottom, 6),
+        ] {
+            let mut state = DataGridState {
+                selected_row: 10,
+                viewport_rows: 5,
+                ..DataGridState::default()
+            };
+            state.align_selected_row(alignment, 30);
+            assert_eq!((state.selected_row, state.row_offset), (10, offset));
+        }
+
+        let mut at_end = DataGridState {
+            selected_row: 29,
+            viewport_rows: 5,
+            ..DataGridState::default()
+        };
+        at_end.align_selected_row(GridRowAlignment::Top, 30);
+        assert_eq!((at_end.selected_row, at_end.row_offset), (29, 25));
+    }
+
+    #[test]
+    fn empty_and_unknown_viewports_are_safe() {
+        let mut empty = DataGridState {
+            selected_row: 3,
+            row_offset: 2,
+            viewport_rows: 5,
+            ..DataGridState::default()
+        };
+        empty.select_row_target(GridRowTarget::Last, 0);
+        assert_eq!((empty.selected_row, empty.row_offset), (0, 0));
+
+        let mut unknown = DataGridState {
+            selected_row: 3,
+            row_offset: 2,
+            viewport_rows: 0,
+            ..DataGridState::default()
+        };
+        unknown.scroll_rows(1, GridScrollAmount::Page, 10);
+        unknown.align_selected_row(GridRowAlignment::Middle, 10);
+        unknown.select_row_target(GridRowTarget::ViewBottom, 10);
+        assert_eq!((unknown.selected_row, unknown.row_offset), (3, 2));
     }
 }
