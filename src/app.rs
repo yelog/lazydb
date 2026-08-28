@@ -5054,7 +5054,15 @@ impl App {
         else {
             return Vec::new();
         };
-        let value = parse_relation_value(state.input.value(), &old);
+        let value = match parse_relation_value(state.input.value(), &old) {
+            Ok(value) => value,
+            Err(message) => {
+                if let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab) {
+                    tab.query.error = Some(message);
+                }
+                return Vec::new();
+            }
+        };
         let Some(pk_columns) = metadata
             .primary_key
             .iter()
@@ -6207,29 +6215,45 @@ fn move_bounded(current: usize, delta: isize, count: usize) -> usize {
 fn parse_relation_value(
     value: &str,
     old: &crate::db::value::CellValue,
-) -> crate::db::value::CellValue {
+) -> Result<crate::db::value::CellValue, String> {
     use crate::db::value::CellValue;
     if value.eq_ignore_ascii_case("null") {
-        return CellValue::Null;
+        return Ok(CellValue::Null);
     }
     match old {
         CellValue::Boolean(_) => value
             .parse()
             .map(CellValue::Boolean)
-            .unwrap_or_else(|_| CellValue::Text(value.into())),
+            .map_err(|_| "invalid boolean".into()),
         CellValue::Integer(_) => value
             .parse()
             .map(CellValue::Integer)
-            .unwrap_or_else(|_| CellValue::Text(value.into())),
+            .map_err(|_| "invalid integer".into()),
         CellValue::Unsigned(_) => value
             .parse()
             .map(CellValue::Unsigned)
-            .unwrap_or_else(|_| CellValue::Text(value.into())),
+            .map_err(|_| "invalid unsigned integer".into()),
         CellValue::Float(_) => value
             .parse()
             .map(CellValue::Float)
-            .unwrap_or_else(|_| CellValue::Text(value.into())),
-        _ => CellValue::Text(value.into()),
+            .map_err(|_| "invalid floating-point number".into()),
+        CellValue::Date(_) => value
+            .parse()
+            .map(CellValue::Date)
+            .map_err(|_| "invalid date; expected YYYY-MM-DD".into()),
+        CellValue::Time(_) => value
+            .parse()
+            .map(CellValue::Time)
+            .map_err(|_| "invalid time; expected HH:MM:SS[.fraction]".into()),
+        CellValue::DateTime(_) => value
+            .parse()
+            .map(CellValue::DateTime)
+            .map_err(|_| "invalid datetime; expected YYYY-MM-DD HH:MM:SS[.fraction]".into()),
+        CellValue::Timestamp(_) => value
+            .parse()
+            .map(CellValue::Timestamp)
+            .map_err(|_| "invalid timestamp; expected an RFC 3339 timestamp".into()),
+        _ => Ok(CellValue::Text(value.into())),
     }
 }
 
@@ -6237,7 +6261,7 @@ fn input_value(value: &crate::db::value::CellValue) -> crate::db::mutation::Inpu
     use crate::db::mutation::InputValue;
     match value {
         crate::db::value::CellValue::Null => InputValue::Null,
-        _ => InputValue::Value(value.preview(usize::MAX).text),
+        _ => InputValue::Value(value.clone()),
     }
 }
 
@@ -6499,7 +6523,7 @@ mod tests {
             },
             operation: RelationMutation::InsertRow(crate::db::mutation::InsertRowMutation {
                 columns: vec![0],
-                values: vec![InputValue::Value("1".into())],
+                values: vec![InputValue::Value(CellValue::Integer(1))],
             }),
         };
         (app, request)

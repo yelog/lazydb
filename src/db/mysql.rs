@@ -3,6 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use futures_util::TryStreamExt;
 use secrecy::{ExposeSecret, SecretString};
 use sqlx::{
@@ -1418,7 +1419,7 @@ impl TransactionBackend for MySqlTransactionBackend {
                     match value {
                         InputValue::Default => {}
                         InputValue::Null => query = query.bind(Option::<String>::None),
-                        InputValue::Value(value) => query = query.bind(value),
+                        InputValue::Value(value) => query = bind_cell(query, value)?,
                     }
                 }
                 let result = query
@@ -1445,7 +1446,7 @@ impl TransactionBackend for MySqlTransactionBackend {
                 );
                 let mut select = sqlx::query(AssertSqlSafe(sql));
                 select = match primary_key_value {
-                    Some(InputValue::Value(value)) => select.bind(value),
+                    Some(InputValue::Value(value)) => bind_cell(select, value)?,
                     Some(InputValue::Null) => {
                         sql = format!(
                             "SELECT * FROM {quoted_table} WHERE {} IS NULL",
@@ -1523,7 +1524,7 @@ impl TransactionBackend for MySqlTransactionBackend {
                 match &update.value {
                     InputValue::Default => {}
                     InputValue::Null => query = query.bind(Option::<String>::None),
-                    InputValue::Value(value) => query = query.bind(value),
+                    InputValue::Value(value) => query = bind_cell(query, value)?,
                 }
                 for value in &update.row.values {
                     query = bind_cell(query, value)?;
@@ -1587,7 +1588,7 @@ impl TransactionBackend for MySqlTransactionBackend {
                 for (column_index, value) in update.row.columns.iter().zip(&update.row.values) {
                     if *column_index == update.column {
                         select_query = match &update.value {
-                            InputValue::Value(value) => select_query.bind(value),
+                            InputValue::Value(value) => bind_cell(select_query, value)?,
                             InputValue::Null => select_query.bind(Option::<String>::None),
                             InputValue::Default => bind_cell(select_query, value)?,
                         };
@@ -2118,6 +2119,10 @@ fn bind_cell<'q>(
         CellValue::Float(value) => query.bind(*value),
         CellValue::Text(value) => query.bind(value.clone()),
         CellValue::Bytes(value) => query.bind(value.clone()),
+        CellValue::Date(value) => query.bind(*value),
+        CellValue::Time(value) => query.bind(*value),
+        CellValue::DateTime(value) => query.bind(*value),
+        CellValue::Timestamp(value) => query.bind(value.naive_local()),
         CellValue::Unsupported { .. } => {
             return Err(TransactionError(
                 "MySQL cannot bind an unsupported cell value".into(),
@@ -2198,6 +2203,15 @@ fn decode_cell(row: &MySqlRow, index: usize) -> CellValue {
             .try_get_unchecked::<i64, _>(index)
             .map(CellValue::Integer),
         "FLOAT" | "DOUBLE" => row.try_get_unchecked::<f64, _>(index).map(CellValue::Float),
+        "DATE" => row
+            .try_get_unchecked::<NaiveDate, _>(index)
+            .map(CellValue::Date),
+        "TIME" => row
+            .try_get_unchecked::<NaiveTime, _>(index)
+            .map(CellValue::Time),
+        "DATETIME" | "TIMESTAMP" => row
+            .try_get_unchecked::<NaiveDateTime, _>(index)
+            .map(CellValue::DateTime),
         "BINARY" | "VARBINARY" | "TINYBLOB" | "BLOB" | "MEDIUMBLOB" | "LONGBLOB" => row
             .try_get_unchecked::<Vec<u8>, _>(index)
             .map(CellValue::Bytes),

@@ -3,6 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use futures_util::TryStreamExt;
 use secrecy::{ExposeSecret, SecretString};
 use sqlx::{
@@ -1312,7 +1313,7 @@ impl TransactionBackend for PostgresTransactionBackend {
                     match value {
                         InputValue::Default => {}
                         InputValue::Null => query = query.bind(Option::<String>::None),
-                        InputValue::Value(value) => query = query.bind(value),
+                        InputValue::Value(value) => query = bind_cell(query, value)?,
                     }
                 }
                 let row = query
@@ -1394,7 +1395,7 @@ impl TransactionBackend for PostgresTransactionBackend {
                 match &update.value {
                     InputValue::Default => {}
                     InputValue::Null => query = query.bind(Option::<String>::None),
-                    InputValue::Value(value) => query = query.bind(value),
+                    InputValue::Value(value) => query = bind_cell(query, value)?,
                 }
                 for value in &update.row.values {
                     query = bind_cell(query, value)?;
@@ -1645,6 +1646,10 @@ fn bind_cell<'q>(
         CellValue::Float(value) => query.bind(*value),
         CellValue::Text(value) => query.bind(value.clone()),
         CellValue::Bytes(value) => query.bind(value.clone()),
+        CellValue::Date(value) => query.bind(*value),
+        CellValue::Time(value) => query.bind(*value),
+        CellValue::DateTime(value) => query.bind(*value),
+        CellValue::Timestamp(value) => query.bind(*value),
         CellValue::Unsupported { .. } => {
             return Err(TransactionError(
                 "PostgreSQL cannot bind an unsupported cell value".into(),
@@ -1708,6 +1713,14 @@ fn decode_cell(row: &PgRow, index: usize) -> CellValue {
             .try_get::<f32, _>(index)
             .map(|value| CellValue::Float(f64::from(value))),
         "FLOAT8" => row.try_get::<f64, _>(index).map(CellValue::Float),
+        "DATE" => row.try_get::<NaiveDate, _>(index).map(CellValue::Date),
+        "TIME" => row.try_get::<NaiveTime, _>(index).map(CellValue::Time),
+        "TIMESTAMP" => row
+            .try_get::<NaiveDateTime, _>(index)
+            .map(CellValue::DateTime),
+        "TIMESTAMPTZ" => row
+            .try_get::<DateTime<Utc>, _>(index)
+            .map(|value| CellValue::Timestamp(value.fixed_offset())),
         "BYTEA" => row.try_get::<Vec<u8>, _>(index).map(CellValue::Bytes),
         "TEXT" | "VARCHAR" | "CHAR" | "NAME" | "UNKNOWN" => {
             row.try_get::<String, _>(index).map(CellValue::Text)

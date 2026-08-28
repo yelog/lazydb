@@ -54,10 +54,7 @@ pub(crate) fn render(
     let overflow = total_width(&widths) > available;
     let first = viewport_start(&widths, grid.column_offset, grid.selected_column, available);
     let visible = visible_columns(&widths, first, available);
-    let constraints = visible
-        .iter()
-        .map(|index| Constraint::Length(widths[*index]))
-        .collect::<Vec<_>>();
+    let constraints = grid_constraints(&visible, &widths);
 
     let visible_rows = area.height.saturating_sub(4) as usize;
     let row_offset = grid.row_offset.min(
@@ -112,12 +109,9 @@ pub(crate) fn render(
         boundary_x = boundary_x.saturating_add(1);
     }
 
-    let header = Row::new(visible.iter().map(|index| {
-        Cell::from(sanitize_terminal_text(&result.columns[*index].name))
-            .style(Style::new().fg(theme.accent).add_modifier(Modifier::BOLD))
-    }))
-    .height(1)
-    .bottom_margin(1);
+    let header = Row::new(header_cells(&visible, result, theme))
+        .height(1)
+        .bottom_margin(1);
     let rows = result
         .rows
         .iter()
@@ -144,21 +138,12 @@ pub(crate) fn render(
                 crate::model::relation_edit::EditableRowState::Clean => Style::new().fg(theme.text),
             });
             let row = editable.map(|row| row.current.as_slice()).unwrap_or(row);
-            Row::new(visible.iter().map(|index| {
-                let value = row.get(*index).unwrap_or(&CellValue::Null);
-                let preview = value.preview(widths[*index].saturating_sub(2) as usize);
-                let style = match value {
-                    CellValue::Null => Style::new().fg(theme.muted).add_modifier(Modifier::ITALIC),
-                    CellValue::Unsupported { .. } => Style::new().fg(theme.warning),
-                    _ => Style::new().fg(theme.text),
-                };
-                Cell::from(sanitize_terminal_text(&preview.text)).style(row_style.unwrap_or(style))
-            }))
+            Row::new(body_cells(&visible, &widths, row, row_style, theme))
         });
     let table = Table::new(rows, constraints)
         .header(header)
         .block(block)
-        .column_spacing(1)
+        .column_spacing(0)
         .row_highlight_style(Style::new().bg(theme.selection).fg(theme.text))
         .cell_highlight_style(
             Style::new()
@@ -170,11 +155,12 @@ pub(crate) fn render(
     let selected_column = visible
         .iter()
         .position(|index| *index == grid.selected_column)
-        .unwrap_or(0);
+        .map_or(0, |index| index.saturating_mul(2));
     let selected_row = grid.selected_row.saturating_sub(row_offset);
     let mut table_state =
         TableState::new().with_selected_cell(Some((selected_row, selected_column)));
     frame.render_stateful_widget(table, area, &mut table_state);
+    render_header_rule(frame, area, &visible, &widths, theme);
     if overflow {
         render_scrollbar(
             frame,
@@ -207,6 +193,93 @@ fn automatic_widths(result: &ResultSet) -> Vec<u16> {
             (UnicodeWidthStr::width(header.as_str()).max(content) + 2).clamp(6, 40) as u16
         })
         .collect()
+}
+
+fn grid_constraints(visible: &[usize], widths: &[u16]) -> Vec<Constraint> {
+    let mut constraints = Vec::with_capacity(visible.len().saturating_mul(2));
+    for (position, index) in visible.iter().enumerate() {
+        if position > 0 {
+            constraints.push(Constraint::Length(1));
+        }
+        constraints.push(Constraint::Length(widths[*index]));
+    }
+    constraints
+}
+
+fn header_cells(visible: &[usize], result: &ResultSet, theme: Theme) -> Vec<Cell<'static>> {
+    let header_style = Style::new()
+        .fg(theme.text)
+        .bg(theme.grid_header)
+        .add_modifier(Modifier::BOLD);
+    let separator_style = Style::new().fg(theme.grid_border).bg(theme.grid_header);
+    let mut cells = Vec::with_capacity(visible.len().saturating_mul(2));
+    for (position, index) in visible.iter().enumerate() {
+        if position > 0 {
+            cells.push(Cell::from("│").style(separator_style));
+        }
+        cells.push(
+            Cell::from(sanitize_terminal_text(&result.columns[*index].name)).style(header_style),
+        );
+    }
+    cells
+}
+
+fn body_cells(
+    visible: &[usize],
+    widths: &[u16],
+    row: &[CellValue],
+    row_style: Option<Style>,
+    theme: Theme,
+) -> Vec<Cell<'static>> {
+    let separator_style = Style::new().fg(theme.grid_border).bg(theme.surface);
+    let mut cells = Vec::with_capacity(visible.len().saturating_mul(2));
+    for (position, index) in visible.iter().enumerate() {
+        if position > 0 {
+            cells.push(Cell::from("│").style(separator_style));
+        }
+        let value = row.get(*index).unwrap_or(&CellValue::Null);
+        let preview = value.preview(widths[*index].saturating_sub(2) as usize);
+        let style = match value {
+            CellValue::Null => Style::new().fg(theme.muted).add_modifier(Modifier::ITALIC),
+            CellValue::Unsupported { .. } => Style::new().fg(theme.warning),
+            _ => Style::new().fg(theme.text),
+        };
+        cells.push(
+            Cell::from(sanitize_terminal_text(&preview.text)).style(row_style.unwrap_or(style)),
+        );
+    }
+    cells
+}
+
+fn render_header_rule(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    visible: &[usize],
+    widths: &[u16],
+    theme: Theme,
+) {
+    if area.height < 3 || visible.is_empty() {
+        return;
+    }
+    let mut spans = Vec::with_capacity(visible.len().saturating_mul(2));
+    for (position, index) in visible.iter().enumerate() {
+        if position > 0 {
+            spans.push(Span::styled("┼", Style::new().fg(theme.grid_border)));
+        }
+        spans.push(Span::styled(
+            "─".repeat(widths[*index] as usize),
+            Style::new().fg(theme.grid_border),
+        ));
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).style(Style::new().bg(theme.surface)),
+        Rect::new(
+            area.x.saturating_add(2),
+            area.y.saturating_add(2),
+            area.width.saturating_sub(4),
+            1,
+        ),
+    );
 }
 
 fn total_width(widths: &[u16]) -> u16 {

@@ -708,6 +708,68 @@ fn standard_layout_shows_stable_workspace_regions() {
 }
 
 #[test]
+fn data_grid_uses_header_rule_and_thin_column_separators() {
+    let output = render(&fixture(), 120, 36);
+
+    assert!(output.contains('│'), "{output}");
+    assert!(output.contains('┼'), "{output}");
+    assert!(output.contains('─'), "{output}");
+}
+
+#[test]
+fn data_grid_renders_temporal_values_without_confusing_them_with_bytes() {
+    use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime};
+
+    let mut app = fixture();
+    let date = NaiveDate::from_ymd_opt(2026, 8, 28).unwrap();
+    let datetime = NaiveDateTime::new(date, NaiveTime::from_hms_opt(10, 20, 31).unwrap());
+    let timestamp = DateTime::<FixedOffset>::from_naive_utc_and_offset(
+        datetime,
+        FixedOffset::east_opt(8 * 60 * 60).unwrap(),
+    );
+    app.active_console_mut()
+        .outcome
+        .as_mut()
+        .unwrap()
+        .result_sets
+        .last_mut()
+        .unwrap()
+        .columns
+        .extend([
+            ColumnMeta {
+                name: "date".into(),
+                type_name: "DATE".into(),
+            },
+            ColumnMeta {
+                name: "timestamp".into(),
+                type_name: "TIMESTAMPTZ".into(),
+            },
+            ColumnMeta {
+                name: "payload".into(),
+                type_name: "BYTEA".into(),
+            },
+        ]);
+    app.active_console_mut()
+        .outcome
+        .as_mut()
+        .unwrap()
+        .result_sets
+        .last_mut()
+        .unwrap()
+        .rows[0]
+        .extend([
+            CellValue::Date(date),
+            CellValue::Timestamp(timestamp),
+            CellValue::Bytes(vec![0, 1, 2, 255]),
+        ]);
+
+    let output = render(&app, 180, 36);
+    assert!(output.contains("2026-08-28"), "{output}");
+    assert!(output.contains("2026-08-28 18:20:31+08:00"), "{output}");
+    assert!(output.contains("0x000102FF"), "{output}");
+}
+
+#[test]
 fn sql_data_renders_shared_query_bar_above_the_grid() {
     let app = fixture();
     let (output, state) = render_with_state(&app, 120, 36);
