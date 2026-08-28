@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::model::{execution_target::ExecutionTarget, transaction::TransactionMode};
 
-const WORKSPACE_VERSION: u16 = 1;
+const WORKSPACE_VERSION: u16 = 2;
 
 #[derive(Debug, Error)]
 pub enum WorkspaceError {
@@ -40,6 +40,12 @@ pub struct PersistedConsole {
     pub sql_file: PathBuf,
     pub target: Option<ExecutionTarget>,
     pub transaction_mode: TransactionMode,
+    #[serde(default = "default_open")]
+    pub open: bool,
+}
+
+fn default_open() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -96,8 +102,13 @@ impl WorkspaceStore {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
         };
-        let file: WorkspaceFile = toml::from_str(&contents)?;
-        if file.version != WORKSPACE_VERSION {
+        let mut file: WorkspaceFile = toml::from_str(&contents)?;
+        if file.version == 1 {
+            for console in &mut file.consoles {
+                console.open = true;
+            }
+            file.version = WORKSPACE_VERSION;
+        } else if file.version != WORKSPACE_VERSION {
             return Err(WorkspaceError::UnsupportedVersion {
                 found: file.version,
                 expected: WORKSPACE_VERSION,
@@ -143,5 +154,14 @@ impl WorkspaceStore {
         manifest_file.sync_all()?;
         fs::rename(temporary, &self.manifest)?;
         Ok(())
+    }
+
+    pub fn delete_sql_file(&self, id: Uuid) -> Result<(), WorkspaceError> {
+        let path = self.sql_dir.join(format!("{id}.sql"));
+        match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
 }

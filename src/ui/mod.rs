@@ -1258,6 +1258,55 @@ fn render_overlay(
                 popup,
             );
         }
+        Overlay::DeleteConsole { console_id } => {
+            let popup = centered(area, 76, 8);
+            frame.render_widget(Clear, popup);
+            let name = app
+                .sql_editors
+                .iter()
+                .find(|record| record.id == *console_id)
+                .map_or("unknown", |record| record.name.as_str());
+            frame.render_widget(
+                Paragraph::new(vec![
+                    Line::from(Span::styled(" DELETE SQL EDITOR? ", theme.title(true))),
+                    Line::raw(format!(
+                        "Permanently delete '{name}' and its saved SQL file?"
+                    )),
+                    Line::raw("Enter confirms; Esc cancels"),
+                ])
+                .block(panel_block(" DELETE CONFIRMATION ", true, theme))
+                .style(Style::new().fg(theme.text).bg(theme.surface_raised)),
+                popup,
+            );
+        }
+        Overlay::SqlEditorList(list) => {
+            let popup = centered(area, 72, (app.sql_editors.len() as u16 + 5).clamp(8, 24));
+            frame.render_widget(Clear, popup);
+            let mut lines = vec![Line::raw(format!(" SQL EDITORS  search: {}", list.query))];
+            lines.extend(
+                app.sql_editors
+                    .iter()
+                    .filter(|record| {
+                        crate::model::sql_editor_list::SqlEditorListState::matches(
+                            &record.name,
+                            &list.query,
+                        )
+                    })
+                    .enumerate()
+                    .map(|(index, record)| {
+                        let marker = if index == list.selected { ">" } else { " " };
+                        let open = if record.open { " OPEN" } else { " hidden" };
+                        Line::raw(format!("{marker} {}{open}", record.name))
+                    }),
+            );
+            lines.push(Line::raw("j/k select  Enter activate  Esc cancel"));
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .block(panel_block(" SQL EDITOR LIST ", true, theme))
+                    .style(Style::new().fg(theme.text).bg(theme.surface_raised)),
+                popup,
+            );
+        }
     }
 }
 

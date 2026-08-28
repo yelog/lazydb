@@ -324,6 +324,16 @@ impl Runtime {
                     }));
                 }
             }
+            Command::DeleteSqlFile(id) => {
+                if let Some(store) = self.workspace_store.clone() {
+                    let mutation = Arc::clone(&self.workspace_mutation);
+                    self.background_tasks.push(tokio::spawn(async move {
+                        let _guard = mutation.lock().await;
+                        let _ =
+                            tokio::task::spawn_blocking(move || store.delete_sql_file(id)).await;
+                    }));
+                }
+            }
             Command::Quit => {}
         }
     }
