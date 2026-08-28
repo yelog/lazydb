@@ -411,6 +411,63 @@ fn viewport_scroll_keeps_selection_visible() {
 }
 
 #[test]
+fn viewport_pins_offscreen_ancestors_without_duplicating_the_body() {
+    let profile = profile_id(1);
+    let fixture = fixture(profile);
+    let mut explorer = explorer_with_fixture(&fixture);
+    explorer.expanded.extend(expanded_path(&fixture));
+    let selected = ExplorerNodeId::Catalog(fixture.column.id.clone());
+    assert!(explorer.select(selected.clone()));
+    explorer.scroll = 5;
+
+    let viewport = explorer.viewport(4);
+
+    assert_eq!(
+        viewport
+            .pinned
+            .iter()
+            .map(|row| &row.id)
+            .collect::<Vec<_>>(),
+        vec![
+            &ExplorerNodeId::Group {
+                parent: fixture.schema.id.clone(),
+                group: ObjectGroup::Tables,
+            },
+            &ExplorerNodeId::Catalog(fixture.table.id.clone()),
+        ]
+    );
+    assert_eq!(viewport.rows.len(), 1);
+    assert_eq!(viewport.rows[0].id, selected);
+    assert!(
+        !viewport
+            .rows
+            .iter()
+            .any(|row| { viewport.pinned.iter().any(|pinned| pinned.id == row.id) })
+    );
+}
+
+#[test]
+fn viewport_compacts_to_nearest_ancestor_at_two_rows() {
+    let profile = profile_id(1);
+    let fixture = fixture(profile);
+    let mut explorer = explorer_with_fixture(&fixture);
+    explorer.expanded.extend(expanded_path(&fixture));
+    let selected = ExplorerNodeId::Catalog(fixture.column.id.clone());
+    assert!(explorer.select(selected.clone()));
+    explorer.scroll = 5;
+
+    let viewport = explorer.viewport(2);
+
+    assert_eq!(viewport.pinned.len(), 1);
+    assert_eq!(
+        viewport.pinned[0].id,
+        ExplorerNodeId::Catalog(fixture.table.id)
+    );
+    assert_eq!(viewport.rows[0].id, selected);
+    assert_eq!(viewport.hidden_ancestor_count, 4);
+}
+
+#[test]
 fn vim_targets_page_moves_and_alignment_use_the_measured_viewport() {
     let profiles: Vec<_> = (1..=12).map(profile_id).collect();
     let mut explorer = ExplorerTreeState::default();

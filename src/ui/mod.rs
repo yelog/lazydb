@@ -29,7 +29,9 @@ use crate::{
         explorer::{ExplorerConnectionStatus, ProfileProvenance},
         profile_manager::ProfileField,
         tab::{DataGridViewport, OutputKind, ResultView, WorkspaceTab},
-        workspace::{ConnectionStatus, ExplorerSearchPhase, Focus, Overlay, QueryStatus},
+        workspace::{
+            ConnectionStatus, ExplorerSearchPhase, Focus, Overlay, QueryStatus, VisibleCatalogNode,
+        },
     },
     security::sanitize_terminal_text,
 };
@@ -591,17 +593,20 @@ fn render_explorer(
     let block = panel_block(" EXPLORER ", app.focus == Focus::Explorer, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    state.explorer_viewport_rows = Some(inner.height as usize);
+    let tree_height = inner
+        .height
+        .saturating_sub(u16::from(app.explorer.find.is_some()));
+    state.explorer_viewport_rows = Some(tree_height as usize);
     if let Some(find) = app.explorer.find.as_ref() {
-        render_explorer_find(frame, inner, app, find, theme, icons);
+        render_explorer_find(frame, inner, app, find, theme, state, icons);
         return;
     }
     if let Some(search) = app.explorer.search.as_ref() {
         render_explorer_search(frame, inner, app, search, theme, icons);
         return;
     }
-    let visible = app.explorer.visible();
-    if visible.is_empty() {
+    let viewport = app.explorer.viewport(inner.height as usize);
+    if viewport.pinned.is_empty() && viewport.rows.is_empty() {
         let message = if app.connection.status == ConnectionStatus::Connecting {
             "Synchronizing catalog..."
         } else if app.connection.status == ConnectionStatus::Connected {
@@ -628,113 +633,142 @@ fn render_explorer(
         return;
     }
 
-    let displayed = visible
-        .iter()
-        .enumerate()
-        .skip(app.explorer.normalized.scroll)
-        .take(inner.height as usize)
-        .collect::<Vec<_>>();
-    for (row, (_, visible)) in displayed.iter().enumerate() {
+    let pinned_rows = viewport.pinned.len();
+    let indicator_rows = usize::from(viewport.show_ancestor_indicator);
+    let displayed = viewport.rows.iter().collect::<Vec<_>>();
+    for (row, visible) in viewport.pinned.iter().enumerate() {
         state.hit_regions.push(HitRegion {
             area: Rect::new(inner.x, inner.y.saturating_add(row as u16), inner.width, 1),
             target: HitTarget::ExplorerRow(visible.id.clone()),
         });
     }
-    let items = displayed
-        .into_iter()
-        .map(|(_, visible)| {
-            let expanded = app.explorer.normalized.expanded.contains(&visible.id);
-            let marker = if visible.expandable {
-                if expanded { "▾" } else { "▸" }
-            } else {
-                " "
-            };
-            let icon = match &visible.id {
-                crate::model::explorer::ExplorerNodeId::Group { group, .. } => {
-                    icons.group(*group, expanded)
-                }
-                _ => visible.kind.map_or("·", |kind| icons.catalog(kind)),
-            };
-            let label = sanitize_terminal_text(&visible.label);
-            let selected = app.explorer.selected_id() == Some(&visible.id);
-            let label_style = if selected {
-                Style::new()
-                    .fg(theme.accent)
-                    .bg(theme.selection)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::new().fg(theme.text).bg(theme.surface)
-            };
-            let base = format!("{}{} ", "  ".repeat(visible.depth), marker);
-            let mut spans = vec![Span::styled(base, label_style)];
-            if let Some(kind) = visible.profile_kind {
-                spans.push(Span::styled(
-                    format!("{} ", icons.database(kind)),
-                    Style::new().fg(theme.action).bg(if selected {
-                        theme.selection
-                    } else {
-                        theme.surface
-                    }),
-                ));
-            } else {
-                spans.push(Span::styled(
-                    format!("{} ", icon),
-                    Style::new()
-                        .fg(visible
-                            .kind
-                            .map_or(theme.muted, |kind| kind_color(kind, theme)))
-                        .bg(if selected {
-                            theme.selection
-                        } else {
-                            theme.surface
-                        }),
-                ));
-            }
-            spans.push(Span::styled(label, label_style));
-            let secondary_style = Style::new().fg(theme.muted).bg(if selected {
-                theme.selection
-            } else {
-                theme.surface
-            });
-            if visible.provenance == Some(ProfileProvenance::Session) {
-                spans.push(Span::styled("  SESSION", secondary_style));
-            }
-            if let Some(status) = visible.connection_status {
-                spans.extend(connection_status_spans(status, theme, selected));
-            }
-            if let Some(endpoint) = visible
-                .endpoint
-                .as_deref()
-                .filter(|value| !value.is_empty())
-            {
-                spans.push(Span::styled(
-                    format!("  {}", sanitize_terminal_text(endpoint)),
-                    secondary_style,
-                ));
-            }
-            if let Some(metadata) = visible
-                .metadata
-                .as_deref()
-                .filter(|value| !value.is_empty())
-            {
-                spans.push(Span::styled(
-                    format!("  {}", sanitize_terminal_text(metadata)),
-                    secondary_style,
-                ));
-            }
-            if let Some(comment) = visible.comment.as_deref().filter(|value| !value.is_empty()) {
-                spans.push(Span::styled(
-                    format!("  {}", sanitize_terminal_text(comment)),
-                    secondary_style.add_modifier(Modifier::DIM),
-                ));
-            }
-            ListItem::new(Line::from(spans))
-        })
+    for (row, visible) in displayed.iter().enumerate() {
+        state.hit_regions.push(HitRegion {
+            area: Rect::new(
+                inner.x,
+                inner
+                    .y
+                    .saturating_add((pinned_rows + indicator_rows + row) as u16),
+                inner.width,
+                1,
+            ),
+            target: HitTarget::ExplorerRow(visible.id.clone()),
+        });
+    }
+    let mut items = viewport
+        .pinned
+        .iter()
+        .map(|visible| explorer_list_item(visible, app, theme, icons))
         .collect::<Vec<_>>();
+    if viewport.show_ancestor_indicator {
+        items.push(ListItem::new(Line::from(Span::styled(
+            format!("  ⋮ {} ancestors", viewport.hidden_ancestor_count),
+            Style::new().fg(theme.muted).bg(theme.surface),
+        ))));
+    }
+    items.extend(
+        displayed
+            .into_iter()
+            .map(|visible| explorer_list_item(visible, app, theme, icons)),
+    );
     frame.render_widget(
         List::new(items).style(Style::new().bg(theme.surface)),
         inner,
     );
+}
+
+fn explorer_list_item(
+    visible: &VisibleCatalogNode,
+    app: &App,
+    theme: Theme,
+    icons: icons::IconSet,
+) -> ListItem<'static> {
+    let expanded = app.explorer.normalized.expanded.contains(&visible.id);
+    let marker = if visible.expandable {
+        if expanded { "▾" } else { "▸" }
+    } else {
+        " "
+    };
+    let icon = match &visible.id {
+        crate::model::explorer::ExplorerNodeId::Group { group, .. } => {
+            icons.group(*group, expanded)
+        }
+        _ => visible.kind.map_or("·", |kind| icons.catalog(kind)),
+    };
+    let label = sanitize_terminal_text(&visible.label);
+    let selected = app.explorer.selected_id() == Some(&visible.id);
+    let label_style = if selected {
+        Style::new()
+            .fg(theme.accent)
+            .bg(theme.selection)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::new().fg(theme.text).bg(theme.surface)
+    };
+    let base = format!("{}{} ", "  ".repeat(visible.depth), marker);
+    let mut spans = vec![Span::styled(base, label_style)];
+    if let Some(kind) = visible.profile_kind {
+        spans.push(Span::styled(
+            format!("{} ", icons.database(kind)),
+            Style::new().fg(theme.action).bg(if selected {
+                theme.selection
+            } else {
+                theme.surface
+            }),
+        ));
+    } else {
+        spans.push(Span::styled(
+            format!("{} ", icon),
+            Style::new()
+                .fg(visible
+                    .kind
+                    .map_or(theme.muted, |kind| kind_color(kind, theme)))
+                .bg(if selected {
+                    theme.selection
+                } else {
+                    theme.surface
+                }),
+        ));
+    }
+    spans.push(Span::styled(label, label_style));
+    let secondary_style = Style::new().fg(theme.muted).bg(if selected {
+        theme.selection
+    } else {
+        theme.surface
+    });
+    if visible.provenance == Some(ProfileProvenance::Session) {
+        spans.push(Span::styled("  SESSION", secondary_style));
+    }
+    if let Some(status) = visible.connection_status {
+        spans.extend(connection_status_spans(status, theme, selected));
+    }
+    if let Some(endpoint) = visible
+        .endpoint
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        spans.push(Span::styled(
+            format!("  {}", sanitize_terminal_text(endpoint)),
+            secondary_style,
+        ));
+    }
+    if let Some(metadata) = visible
+        .metadata
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        spans.push(Span::styled(
+            format!("  {}", sanitize_terminal_text(metadata)),
+            secondary_style,
+        ));
+    }
+    if let Some(comment) = visible.comment.as_deref().filter(|value| !value.is_empty()) {
+        spans.push(Span::styled(
+            format!("  {}", sanitize_terminal_text(comment)),
+            secondary_style.add_modifier(Modifier::DIM),
+        ));
+    }
+    ListItem::new(Line::from(spans))
 }
 
 fn render_explorer_find(
@@ -743,6 +777,7 @@ fn render_explorer_find(
     app: &App,
     find: &crate::model::workspace::ExplorerFindState,
     theme: Theme,
+    state: &mut UiState,
     icons: icons::IconSet,
 ) {
     if area.is_empty() {
@@ -762,84 +797,119 @@ fn render_explorer_find(
             area.y,
         ));
     }
-    let visible = app.explorer.visible();
-    let rows = visible
+    let tree_area = Rect::new(
+        area.x,
+        area.y.saturating_add(1),
+        area.width,
+        area.height.saturating_sub(1),
+    );
+    let viewport = app.explorer.viewport(tree_area.height as usize);
+    let pinned_rows = viewport.pinned.len();
+    let indicator_rows = usize::from(viewport.show_ancestor_indicator);
+    let rows = viewport.pinned.iter().chain(viewport.rows.iter());
+    for (row, visible) in rows.clone().enumerate() {
+        // Find rows use the same stable IDs as normal Explorer rows.
+        state.hit_regions.push(HitRegion {
+            area: Rect::new(
+                tree_area.x,
+                tree_area.y.saturating_add(
+                    (row + usize::from(row >= pinned_rows) * indicator_rows) as u16,
+                ),
+                tree_area.width,
+                1,
+            ),
+            target: HitTarget::ExplorerRow(visible.id.clone()),
+        });
+    }
+    let mut items = viewport
+        .pinned
         .iter()
-        .skip(app.explorer.normalized.scroll)
-        .take(area.height.saturating_sub(1) as usize);
-    let items = rows
-        .map(|visible| {
-            let selected = app.explorer.selected_id() == Some(&visible.id);
-            let background = if selected {
-                theme.selection
-            } else {
-                theme.surface
-            };
-            let base_style = Style::new()
-                .fg(if selected { theme.accent } else { theme.text })
-                .bg(background);
-            let expanded = app.explorer.normalized.expanded.contains(&visible.id);
-            let marker = if visible.expandable {
-                if expanded { "▾" } else { "▸" }
-            } else {
-                " "
-            };
-            let icon = match &visible.id {
-                crate::model::explorer::ExplorerNodeId::Group { group, .. } => {
-                    icons.group(*group, expanded)
-                }
-                _ => visible.kind.map_or("·", |kind| icons.catalog(kind)),
-            };
-            let label = find
-                .rows
-                .iter()
-                .find(|row| row.id == visible.id)
-                .map(|row| row.label.as_str())
-                .unwrap_or(&visible.label);
-            let mut spans = vec![Span::styled(
-                format!("{}{} {} ", "  ".repeat(visible.depth), marker, icon,),
-                base_style,
-            )];
-            spans.extend(match_spans(
-                sanitize_terminal_text(label),
-                &find.query,
-                base_style,
-                Style::new()
-                    .fg(theme.action)
-                    .bg(background)
-                    .add_modifier(Modifier::BOLD),
-            ));
-            if let Some(metadata) = visible
-                .metadata
-                .as_deref()
-                .filter(|value| !value.is_empty())
-            {
-                spans.push(Span::styled(
-                    format!("  {}", sanitize_terminal_text(metadata)),
-                    Style::new().fg(theme.muted).bg(background),
-                ));
-            }
-            if let Some(comment) = visible.comment.as_deref().filter(|value| !value.is_empty()) {
-                spans.push(Span::styled(
-                    format!("  {}", sanitize_terminal_text(comment)),
-                    Style::new()
-                        .fg(theme.muted)
-                        .bg(background)
-                        .add_modifier(Modifier::DIM),
-                ));
-            }
-            ListItem::new(Line::from(spans))
-        })
+        .map(|visible| explorer_find_list_item(visible, app, find, theme, icons))
         .collect::<Vec<_>>();
+    if viewport.show_ancestor_indicator {
+        items.push(ListItem::new(Line::from(Span::styled(
+            format!("  ⋮ {} ancestors", viewport.hidden_ancestor_count),
+            Style::new().fg(theme.muted).bg(theme.surface),
+        ))));
+    }
+    items.extend(
+        rows.skip(pinned_rows)
+            .map(|visible| explorer_find_list_item(visible, app, find, theme, icons))
+            .collect::<Vec<_>>(),
+    );
     frame.render_widget(
         List::new(items).style(Style::new().bg(theme.surface)),
-        Rect::new(
-            area.x,
-            area.y.saturating_add(1),
-            area.width,
-            area.height.saturating_sub(1),
-        ),
+        tree_area,
     );
+}
+
+fn explorer_find_list_item(
+    visible: &VisibleCatalogNode,
+    app: &App,
+    find: &crate::model::workspace::ExplorerFindState,
+    theme: Theme,
+    icons: icons::IconSet,
+) -> ListItem<'static> {
+    let selected = app.explorer.selected_id() == Some(&visible.id);
+    let background = if selected {
+        theme.selection
+    } else {
+        theme.surface
+    };
+    let base_style = Style::new()
+        .fg(if selected { theme.accent } else { theme.text })
+        .bg(background);
+    let expanded = app.explorer.normalized.expanded.contains(&visible.id);
+    let marker = if visible.expandable {
+        if expanded { "▾" } else { "▸" }
+    } else {
+        " "
+    };
+    let icon = match &visible.id {
+        crate::model::explorer::ExplorerNodeId::Group { group, .. } => {
+            icons.group(*group, expanded)
+        }
+        _ => visible.kind.map_or("·", |kind| icons.catalog(kind)),
+    };
+    let label = find
+        .rows
+        .iter()
+        .find(|row| row.id == visible.id)
+        .map(|row| row.label.as_str())
+        .unwrap_or(&visible.label);
+    let mut spans = vec![Span::styled(
+        format!("{}{} {} ", "  ".repeat(visible.depth), marker, icon),
+        base_style,
+    )];
+    spans.extend(match_spans(
+        sanitize_terminal_text(label),
+        &find.query,
+        base_style,
+        Style::new()
+            .fg(theme.action)
+            .bg(background)
+            .add_modifier(Modifier::BOLD),
+    ));
+    if let Some(metadata) = visible
+        .metadata
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        spans.push(Span::styled(
+            format!("  {}", sanitize_terminal_text(metadata)),
+            Style::new().fg(theme.muted).bg(background),
+        ));
+    }
+    if let Some(comment) = visible.comment.as_deref().filter(|value| !value.is_empty()) {
+        spans.push(Span::styled(
+            format!("  {}", sanitize_terminal_text(comment)),
+            Style::new()
+                .fg(theme.muted)
+                .bg(background)
+                .add_modifier(Modifier::DIM),
+        ));
+    }
+    ListItem::new(Line::from(spans))
 }
 
 fn match_spans(text: String, query: &str, base: Style, matched: Style) -> Vec<Span<'static>> {

@@ -162,6 +162,15 @@ pub struct VisibleCatalogNode {
     pub expandable: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VisibleExplorerViewport {
+    pub pinned: Vec<VisibleCatalogNode>,
+    pub rows: Vec<VisibleCatalogNode>,
+    pub hidden_ancestor_count: usize,
+    pub show_ancestor_indicator: bool,
+    pub body_height: usize,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ExplorerState {
     pub normalized: ExplorerTreeState,
@@ -660,6 +669,17 @@ impl ExplorerState {
             .explorer_search_rows()
             .map_or_else(Vec::new, |rows| rows.to_vec());
         self.visible_rows(rows)
+    }
+
+    pub fn viewport(&self, height: usize) -> VisibleExplorerViewport {
+        let viewport = self.normalized.viewport(height);
+        VisibleExplorerViewport {
+            pinned: self.visible_rows(viewport.pinned),
+            rows: self.visible_rows(viewport.rows),
+            hidden_ancestor_count: viewport.hidden_ancestor_count,
+            show_ancestor_indicator: viewport.show_ancestor_indicator,
+            body_height: viewport.body_height,
+        }
     }
 
     fn visible_rows(
