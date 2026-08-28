@@ -52,6 +52,9 @@ impl Keymap {
         if matches!(event.kind, KeyEventKind::Release) {
             return None;
         }
+        if event.modifiers == KeyModifiers::CONTROL && event.code == KeyCode::Char('c') {
+            return Some(Action::Quit);
+        }
         if app
             .overlay
             .as_ref()
@@ -504,11 +507,6 @@ impl Keymap {
         }
         if event.code == KeyCode::F(1) {
             return Some(Action::ShowHelp);
-        }
-        if event.code == KeyCode::Char('Q')
-            && (app.focus != Focus::Editor || app.active_editor_mode() == EditorMode::Normal)
-        {
-            return Some(Action::Quit);
         }
         if app.focus == Focus::Editor {
             return Some(Action::EditorKey(event));

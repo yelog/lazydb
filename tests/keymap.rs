@@ -403,10 +403,7 @@ fn insert_mode_preserves_printable_characters() {
         keymap.map(key(KeyCode::Tab), &app),
         Some(Action::EditorKey(key(KeyCode::Tab)))
     );
-    assert_eq!(
-        keymap.map(ctrl('c'), &app),
-        Some(Action::EditorKey(ctrl('c')))
-    );
+    assert_eq!(keymap.map(ctrl('c'), &app), Some(Action::Quit));
 }
 
 #[test]
@@ -800,7 +797,7 @@ fn ddl_view_maps_navigation_without_using_grid_move() {
 }
 
 #[test]
-fn never_uses_lowercase_q_as_a_global_exit() {
+fn ctrl_c_is_the_global_exit_and_q_is_not() {
     let mut keymap = Keymap::default();
     let mut app = App::new(Vec::new());
     app.focus = Focus::Editor;
@@ -813,16 +810,21 @@ fn never_uses_lowercase_q_as_a_global_exit() {
         keymap.map(key(KeyCode::Char('Q')), &app),
         Some(Action::EditorKey(key(KeyCode::Char('Q'))))
     );
+    assert_eq!(keymap.map(ctrl('c'), &app), Some(Action::Quit));
+
+    app.active_console_mut().completion = Some(CompletionPopup::default());
+    assert_eq!(keymap.map(ctrl('c'), &app), Some(Action::Quit));
+
     app.update(Action::EditorKey(key(KeyCode::Esc)));
     assert_eq!(
         keymap.map(key(KeyCode::Char('Q')), &app),
-        Some(Action::Quit)
+        Some(Action::EditorKey(key(KeyCode::Char('Q'))))
     );
+    assert_eq!(keymap.map(ctrl('c'), &app), Some(Action::Quit));
+
     app.focus = Focus::Explorer;
-    assert_eq!(
-        keymap.map(key(KeyCode::Char('Q')), &app),
-        Some(Action::Quit)
-    );
+    assert_eq!(keymap.map(key(KeyCode::Char('Q')), &app), None);
+    assert_eq!(keymap.map(ctrl('c'), &app), Some(Action::Quit));
 }
 
 #[test]
@@ -876,7 +878,7 @@ fn space_c_focuses_explorer_from_every_normal_mode_focus() {
     app.update(Action::EditorKey(key(KeyCode::Esc)));
     app.active_console_mut().query_status = QueryStatus::Running;
     assert_eq!(keymap.map(key(KeyCode::Char(' ')), &app), None);
-    assert_eq!(keymap.map(ctrl('c'), &app), Some(Action::CancelActiveQuery));
+    assert_eq!(keymap.map(ctrl('c'), &app), Some(Action::Quit));
 
     app.active_console_mut().query_status = QueryStatus::Idle;
     app.focus = Focus::Editor;
