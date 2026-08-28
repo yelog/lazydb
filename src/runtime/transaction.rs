@@ -412,7 +412,7 @@ mod tests {
                 },
                 column: 1,
                 original: CellValue::Text("old".into()),
-                value: InputValue::Value("new".into()),
+                value: InputValue::Value(CellValue::Text("new".into())),
             }),
         };
         let (reply, result) = oneshot::channel();

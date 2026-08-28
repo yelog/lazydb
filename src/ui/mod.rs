@@ -18,6 +18,7 @@ use std::{
     cell::RefCell,
     time::{Duration, Instant},
 };
+use uuid::Uuid;
 
 use crate::{
     app::App,
@@ -26,7 +27,7 @@ use crate::{
         editor::{EditorHighlightKind, EditorMode, EditorViewport},
         explorer::{ExplorerConnectionStatus, ProfileProvenance},
         profile_manager::ProfileField,
-        tab::{OutputKind, ResultView, WorkspaceTab},
+        tab::{DataGridViewport, OutputKind, ResultView, WorkspaceTab},
         workspace::{ConnectionStatus, Focus, Overlay, QueryStatus},
     },
     security::sanitize_terminal_text,
@@ -103,6 +104,7 @@ pub struct UiState {
     pub hit_regions: Vec<HitRegion>,
     pub editor_viewport: Option<EditorViewport>,
     pub completion_popup: Option<Rect>,
+    pub grid_viewport: Option<DataGridViewport>,
     pub cursor_style: Option<CursorStyle>,
     pub click_tracker: RefCell<Option<(crate::model::explorer::ExplorerNodeId, Instant)>>,
     pub relation_resize: RefCell<Option<(usize, u16, u16)>>,
@@ -130,6 +132,7 @@ impl UiState {
             hit_regions: Vec::new(),
             editor_viewport: None,
             completion_popup: None,
+            grid_viewport: None,
             cursor_style: None,
             click_tracker: RefCell::new(None),
             relation_resize: RefCell::new(None),
@@ -203,6 +206,7 @@ pub fn render_with_state_using_icons(
     state.hit_regions.clear();
     state.editor_viewport = None;
     state.completion_popup = None;
+    state.grid_viewport = None;
 
     if layout.mode == LayoutMode::TooSmall {
         render_too_small(frame, area, theme);
@@ -1122,12 +1126,23 @@ fn render_data(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, state
         );
         return;
     };
-    render_result_table(frame, area, result, tab.grid.clone(), theme, block, state);
+    render_result_table(
+        frame,
+        area,
+        tab.id,
+        result,
+        tab.grid.clone(),
+        theme,
+        block,
+        state,
+    );
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_result_table(
     frame: &mut Frame<'_>,
     area: Rect,
+    tab_id: Uuid,
     result: &ResultSet,
     grid: crate::model::tab::GridState,
     theme: Theme,
@@ -1136,7 +1151,7 @@ pub(crate) fn render_result_table(
 ) {
     let overrides = grid.column_widths.clone();
     data_grid::render(
-        frame, area, result, grid, &overrides, theme, block, state, None,
+        frame, area, tab_id, result, grid, &overrides, theme, block, state, None,
     );
 }
 

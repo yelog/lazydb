@@ -129,9 +129,9 @@ pub fn editable_capability(
     })
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum InputValue {
-    Value(String),
+    Value(CellValue),
     Null,
     Default,
 }
@@ -199,11 +199,18 @@ pub struct ChangedColumns(pub BTreeSet<usize>);
 #[cfg(test)]
 mod tests {
     use super::{InputValue, MetadataFingerprint};
+    use crate::db::value::CellValue;
 
     #[test]
     fn input_values_keep_literal_and_sql_values_distinct() {
-        assert_ne!(InputValue::Value("NULL".into()), InputValue::Null);
-        assert_ne!(InputValue::Value("DEFAULT".into()), InputValue::Default);
+        assert_ne!(
+            InputValue::Value(CellValue::Text("NULL".into())),
+            InputValue::Null
+        );
+        assert_ne!(
+            InputValue::Value(CellValue::Text("DEFAULT".into())),
+            InputValue::Default
+        );
     }
 
     #[test]

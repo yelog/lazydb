@@ -6,6 +6,7 @@ use ratatui::{
     widgets::{Block, Cell, Paragraph, Row, Table, TableState},
 };
 use unicode_width::UnicodeWidthStr;
+use uuid::Uuid;
 
 use crate::{
     db::{query::ResultSet, value::CellValue},
@@ -18,6 +19,7 @@ use super::{HitRegion, HitTarget, UiState, theme::Theme};
 pub(crate) fn render(
     frame: &mut Frame<'_>,
     area: Rect,
+    tab_id: Uuid,
     result: &ResultSet,
     grid: crate::model::tab::DataGridState,
     overrides: &[Option<u16>],
@@ -54,18 +56,21 @@ pub(crate) fn render(
     let overflow = total_width(&widths) > available;
     let first = viewport_start(&widths, grid.column_offset, grid.selected_column, available);
     let visible = visible_columns(&widths, first, available);
-    let constraints = visible
-        .iter()
-        .map(|index| Constraint::Length(widths[*index]))
-        .collect::<Vec<_>>();
+    let constraints = grid_constraints(&visible, &widths);
 
-    let visible_rows = area.height.saturating_sub(4) as usize;
-    let row_offset = grid.row_offset.min(
-        result
-            .rows
-            .len()
-            .saturating_sub(visible_rows.min(result.rows.len())),
+    let visible_rows = area.height.saturating_sub(4 + u16::from(overflow)) as usize;
+    let row_offset = row_viewport_start(
+        result.rows.len(),
+        visible_rows,
+        grid.row_offset,
+        grid.selected_row,
     );
+    state.grid_viewport = Some(crate::model::tab::DataGridViewport {
+        tab_id,
+        column_offset: first,
+        row_offset,
+        visible_rows,
+    });
     let row_y = area.y.saturating_add(3);
     for (screen_row, row_index) in result
         .rows
@@ -73,7 +78,7 @@ pub(crate) fn render(
         .skip(row_offset)
         .take(visible_rows)
         .enumerate()
-        .map(|(index, _)| (index - row_offset, index))
+        .map(|(screen_row, _)| (screen_row, row_offset.saturating_add(screen_row)))
     {
         let mut x = area.x.saturating_add(2);
         for column_index in &visible {
@@ -112,12 +117,9 @@ pub(crate) fn render(
         boundary_x = boundary_x.saturating_add(1);
     }
 
-    let header = Row::new(visible.iter().map(|index| {
-        Cell::from(sanitize_terminal_text(&result.columns[*index].name))
-            .style(Style::new().fg(theme.accent).add_modifier(Modifier::BOLD))
-    }))
-    .height(1)
-    .bottom_margin(1);
+    let header = Row::new(header_cells(&visible, result, theme))
+        .height(1)
+        .bottom_margin(1);
     let rows = result
         .rows
         .iter()
@@ -144,21 +146,12 @@ pub(crate) fn render(
                 crate::model::relation_edit::EditableRowState::Clean => Style::new().fg(theme.text),
             });
             let row = editable.map(|row| row.current.as_slice()).unwrap_or(row);
-            Row::new(visible.iter().map(|index| {
-                let value = row.get(*index).unwrap_or(&CellValue::Null);
-                let preview = value.preview(widths[*index].saturating_sub(2) as usize);
-                let style = match value {
-                    CellValue::Null => Style::new().fg(theme.muted).add_modifier(Modifier::ITALIC),
-                    CellValue::Unsupported { .. } => Style::new().fg(theme.warning),
-                    _ => Style::new().fg(theme.text),
-                };
-                Cell::from(sanitize_terminal_text(&preview.text)).style(row_style.unwrap_or(style))
-            }))
+            Row::new(body_cells(&visible, &widths, row, row_style, theme))
         });
     let table = Table::new(rows, constraints)
         .header(header)
         .block(block)
-        .column_spacing(1)
+        .column_spacing(0)
         .row_highlight_style(Style::new().bg(theme.selection).fg(theme.text))
         .cell_highlight_style(
             Style::new()
@@ -170,11 +163,12 @@ pub(crate) fn render(
     let selected_column = visible
         .iter()
         .position(|index| *index == grid.selected_column)
-        .unwrap_or(0);
+        .map_or(0, |index| index.saturating_mul(2));
     let selected_row = grid.selected_row.saturating_sub(row_offset);
     let mut table_state =
         TableState::new().with_selected_cell(Some((selected_row, selected_column)));
     frame.render_stateful_widget(table, area, &mut table_state);
+    render_header_rule(frame, area, &visible, &widths, theme);
     if overflow {
         render_scrollbar(
             frame,
@@ -207,6 +201,112 @@ fn automatic_widths(result: &ResultSet) -> Vec<u16> {
             (UnicodeWidthStr::width(header.as_str()).max(content) + 2).clamp(6, 40) as u16
         })
         .collect()
+}
+
+fn grid_constraints(visible: &[usize], widths: &[u16]) -> Vec<Constraint> {
+    let mut constraints = Vec::with_capacity(visible.len().saturating_mul(2));
+    for (position, index) in visible.iter().enumerate() {
+        if position > 0 {
+            constraints.push(Constraint::Length(1));
+        }
+        constraints.push(Constraint::Length(widths[*index]));
+    }
+    constraints
+}
+
+fn row_viewport_start(
+    row_count: usize,
+    visible_rows: usize,
+    offset: usize,
+    selected: usize,
+) -> usize {
+    if row_count == 0 || visible_rows == 0 {
+        return 0;
+    }
+    let selected = selected.min(row_count - 1);
+    let mut offset = offset.min(row_count.saturating_sub(visible_rows.min(row_count)));
+    if selected < offset {
+        offset = selected;
+    } else if selected >= offset.saturating_add(visible_rows) {
+        offset = selected + 1 - visible_rows;
+    }
+    offset.min(row_count.saturating_sub(visible_rows.min(row_count)))
+}
+
+fn header_cells(visible: &[usize], result: &ResultSet, theme: Theme) -> Vec<Cell<'static>> {
+    let header_style = Style::new()
+        .fg(theme.text)
+        .bg(theme.grid_header)
+        .add_modifier(Modifier::BOLD);
+    let separator_style = Style::new().fg(theme.grid_border).bg(theme.grid_header);
+    let mut cells = Vec::with_capacity(visible.len().saturating_mul(2));
+    for (position, index) in visible.iter().enumerate() {
+        if position > 0 {
+            cells.push(Cell::from("│").style(separator_style));
+        }
+        cells.push(
+            Cell::from(sanitize_terminal_text(&result.columns[*index].name)).style(header_style),
+        );
+    }
+    cells
+}
+
+fn body_cells(
+    visible: &[usize],
+    widths: &[u16],
+    row: &[CellValue],
+    row_style: Option<Style>,
+    theme: Theme,
+) -> Vec<Cell<'static>> {
+    let separator_style = Style::new().fg(theme.grid_border).bg(theme.surface);
+    let mut cells = Vec::with_capacity(visible.len().saturating_mul(2));
+    for (position, index) in visible.iter().enumerate() {
+        if position > 0 {
+            cells.push(Cell::from("│").style(separator_style));
+        }
+        let value = row.get(*index).unwrap_or(&CellValue::Null);
+        let preview = value.preview(widths[*index].saturating_sub(2) as usize);
+        let style = match value {
+            CellValue::Null => Style::new().fg(theme.muted).add_modifier(Modifier::ITALIC),
+            CellValue::Unsupported { .. } => Style::new().fg(theme.warning),
+            _ => Style::new().fg(theme.text),
+        };
+        cells.push(
+            Cell::from(sanitize_terminal_text(&preview.text)).style(row_style.unwrap_or(style)),
+        );
+    }
+    cells
+}
+
+fn render_header_rule(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    visible: &[usize],
+    widths: &[u16],
+    theme: Theme,
+) {
+    if area.height < 3 || visible.is_empty() {
+        return;
+    }
+    let mut spans = Vec::with_capacity(visible.len().saturating_mul(2));
+    for (position, index) in visible.iter().enumerate() {
+        if position > 0 {
+            spans.push(Span::styled("┼", Style::new().fg(theme.grid_border)));
+        }
+        spans.push(Span::styled(
+            "─".repeat(widths[*index] as usize),
+            Style::new().fg(theme.grid_border),
+        ));
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).style(Style::new().bg(theme.surface)),
+        Rect::new(
+            area.x.saturating_add(2),
+            area.y.saturating_add(2),
+            area.width.saturating_sub(4),
+            1,
+        ),
+    );
 }
 
 fn total_width(widths: &[u16]) -> u16 {
@@ -345,7 +445,7 @@ fn render_scrollbar(
 
 #[cfg(test)]
 mod tests {
-    use super::{total_width, viewport_start, visible_columns};
+    use super::{row_viewport_start, total_width, viewport_start, visible_columns};
 
     #[test]
     fn narrow_grid_starts_with_first_columns() {
@@ -368,6 +468,13 @@ mod tests {
     }
 
     #[test]
+    fn viewport_stays_put_at_left_edge_until_selection_crosses_it() {
+        let widths = vec![6; 10];
+        assert_eq!(viewport_start(&widths, 4, 4, 20), 4);
+        assert_eq!(viewport_start(&widths, 4, 3, 20), 3);
+    }
+
+    #[test]
     fn explicit_last_offset_reaches_last_column() {
         let widths = vec![6; 10];
         let start = viewport_start(&widths, 9, 9, 20);
@@ -379,5 +486,13 @@ mod tests {
         let widths = vec![6, 6];
         assert_eq!(total_width(&widths), 13);
         assert_eq!(visible_columns(&widths, 0, 13), vec![0, 1]);
+    }
+
+    #[test]
+    fn row_viewport_scrolls_only_after_selection_crosses_an_edge() {
+        assert_eq!(row_viewport_start(10, 3, 0, 2), 0);
+        assert_eq!(row_viewport_start(10, 3, 0, 3), 1);
+        assert_eq!(row_viewport_start(10, 3, 3, 3), 3);
+        assert_eq!(row_viewport_start(10, 3, 3, 2), 2);
     }
 }

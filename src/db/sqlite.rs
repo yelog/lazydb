@@ -2004,7 +2004,7 @@ impl TransactionBackend for SqliteTransactionBackend {
                     match value {
                         InputValue::Default => unreachable!(),
                         InputValue::Null => query = query.bind(Option::<String>::None),
-                        InputValue::Value(value) => query = query.bind(value),
+                        InputValue::Value(value) => query = bind_cell(query, value)?,
                     }
                 }
                 let row = query
@@ -2078,7 +2078,7 @@ impl TransactionBackend for SqliteTransactionBackend {
                 match &update.value {
                     InputValue::Default => {}
                     InputValue::Null => query = query.bind(Option::<String>::None),
-                    InputValue::Value(value) => query = query.bind(value),
+                    InputValue::Value(value) => query = bind_cell(query, value)?,
                 }
                 for value in &update.row.values {
                     query = bind_cell(query, value)?;
@@ -2219,6 +2219,10 @@ fn bind_cell<'q>(
         CellValue::Float(value) => query.bind(*value),
         CellValue::Text(value) => query.bind(value.clone()),
         CellValue::Bytes(value) => query.bind(value.clone()),
+        CellValue::Date(value) => query.bind(value.format("%Y-%m-%d").to_string()),
+        CellValue::Time(value) => query.bind(value.format("%H:%M:%S%.f").to_string()),
+        CellValue::DateTime(value) => query.bind(value.format("%Y-%m-%d %H:%M:%S%.f").to_string()),
+        CellValue::Timestamp(value) => query.bind(value.to_rfc3339()),
         CellValue::Unsupported { .. } => {
             return Err(TransactionError(
                 "SQLite cannot bind an unsupported cell value".into(),
@@ -2333,7 +2337,7 @@ mod tests {
 
         let result = backend
             .relation_mutation(update_request(
-                InputValue::Value("updated".into()),
+                InputValue::Value(CellValue::Text("updated".into())),
                 CellValue::Null,
             ))
             .await
@@ -2350,7 +2354,7 @@ mod tests {
         backend.begin().await.unwrap();
         backend
             .relation_mutation(update_request(
-                InputValue::Value("committed".into()),
+                InputValue::Value(CellValue::Text("committed".into())),
                 CellValue::Null,
             ))
             .await
@@ -2383,7 +2387,7 @@ mod tests {
             .unwrap();
         let error = backend
             .relation_mutation(update_request(
-                InputValue::Value("new".into()),
+                InputValue::Value(CellValue::Text("new".into())),
                 CellValue::Text("stale".into()),
             ))
             .await
@@ -2499,7 +2503,10 @@ mod tests {
         backend.begin().await.unwrap();
         let request = mutation_request(RelationMutation::InsertRow(InsertRowMutation {
             columns: vec![0, 1],
-            values: vec![InputValue::Value("7".into()), InputValue::Default],
+            values: vec![
+                InputValue::Value(CellValue::Integer(7)),
+                InputValue::Default,
+            ],
         }));
         assert_eq!(
             backend.relation_mutation(request).await.unwrap(),
@@ -2513,7 +2520,7 @@ mod tests {
         );
         let request = mutation_request(RelationMutation::InsertRow(InsertRowMutation {
             columns: vec![0, 1],
-            values: vec![InputValue::Value("8".into()), InputValue::Null],
+            values: vec![InputValue::Value(CellValue::Integer(8)), InputValue::Null],
         }));
         assert_eq!(
             backend.relation_mutation(request).await.unwrap(),

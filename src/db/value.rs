@@ -1,3 +1,4 @@
+use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -9,6 +10,10 @@ pub enum CellValue {
     Float(f64),
     Text(String),
     Bytes(Vec<u8>),
+    Date(NaiveDate),
+    Time(NaiveTime),
+    DateTime(NaiveDateTime),
+    Timestamp(DateTime<FixedOffset>),
     Unsupported { type_name: String, preview: String },
 }
 
@@ -29,9 +34,39 @@ impl CellValue {
             Self::Float(value) => CellPreview::complete(value.to_string(), 1),
             Self::Text(value) => preview_text(value, max_len),
             Self::Bytes(value) => preview_bytes(value, max_len),
+            Self::Date(value) => preview_text(&value.format("%Y-%m-%d").to_string(), max_len),
+            Self::Time(value) => preview_text(&format_time(*value), max_len),
+            Self::DateTime(value) => preview_text(&format_datetime(*value), max_len),
+            Self::Timestamp(value) => preview_text(&format_timestamp(*value), max_len),
             Self::Unsupported { preview, .. } => preview_text(preview, max_len),
         }
     }
+}
+
+fn format_time(value: NaiveTime) -> String {
+    format_seconds(value.format("%H:%M:%S").to_string(), value.nanosecond())
+}
+
+fn format_datetime(value: NaiveDateTime) -> String {
+    format_seconds(
+        value.format("%Y-%m-%d %H:%M:%S").to_string(),
+        value.nanosecond(),
+    )
+}
+
+fn format_timestamp(value: DateTime<FixedOffset>) -> String {
+    let base = value.format("%Y-%m-%d %H:%M:%S").to_string();
+    let with_fraction = format_seconds(base, value.nanosecond());
+    format!("{with_fraction}{}", value.format("%:z"))
+}
+
+fn format_seconds(mut base: String, nanoseconds: u32) -> String {
+    if nanoseconds != 0 {
+        let fraction = format!("{nanoseconds:09}").trim_end_matches('0').to_owned();
+        base.push('.');
+        base.push_str(&fraction);
+    }
+    base
 }
 
 impl CellPreview {
@@ -78,6 +113,8 @@ fn preview_bytes(value: &[u8], max_len: usize) -> CellPreview {
 
 #[cfg(test)]
 mod tests {
+    use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime};
+
     use super::CellValue;
 
     #[test]
@@ -103,5 +140,40 @@ mod tests {
 
         assert_eq!(preview.text, "0x0001...");
         assert_eq!(preview.original_len, 4);
+    }
+
+    #[test]
+    fn temporal_previews_use_database_friendly_formats() {
+        let date = NaiveDate::from_ymd_opt(2026, 8, 28).unwrap();
+        let time = NaiveTime::from_hms_micro_opt(10, 20, 31, 120_000).unwrap();
+        let datetime = NaiveDateTime::new(date, time);
+        let zoned = DateTime::<FixedOffset>::from_naive_utc_and_offset(
+            datetime,
+            FixedOffset::east_opt(8 * 60 * 60).unwrap(),
+        );
+
+        assert_eq!(CellValue::Date(date).preview(40).text, "2026-08-28");
+        assert_eq!(CellValue::Time(time).preview(40).text, "10:20:31.12");
+        assert_eq!(
+            CellValue::DateTime(datetime).preview(40).text,
+            "2026-08-28 10:20:31.12"
+        );
+        assert_eq!(
+            CellValue::Timestamp(zoned).preview(40).text,
+            "2026-08-28 18:20:31.12+08:00"
+        );
+    }
+
+    #[test]
+    fn temporal_preview_omits_zero_fractional_seconds() {
+        let value = NaiveDateTime::new(
+            NaiveDate::from_ymd_opt(2026, 8, 28).unwrap(),
+            NaiveTime::from_hms_opt(10, 20, 31).unwrap(),
+        );
+
+        assert_eq!(
+            CellValue::DateTime(value).preview(40).text,
+            "2026-08-28 10:20:31"
+        );
     }
 }
