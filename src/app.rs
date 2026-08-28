@@ -4466,6 +4466,10 @@ impl App {
                             .normalized
                             .expanded
                             .remove(&ExplorerNodeId::Profile(*profile_id));
+                        if let Some(profile) = self.explorer.normalized.profiles.get_mut(profile_id)
+                        {
+                            profile.expand_after_connect = true;
+                        }
                         self.request_connection(*profile_id)
                     }
                     ExplorerConnectionStatus::Linking => Vec::new(),

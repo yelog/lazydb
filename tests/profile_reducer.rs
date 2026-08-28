@@ -79,6 +79,60 @@ fn profile_root_actions_target_exact_uuid_and_activation_never_disconnects() {
     );
 }
 
+#[test]
+fn opening_an_offline_profile_expands_it_after_connection_succeeds() {
+    let profile = sqlite_profile("first");
+    let profile_id = profile.id;
+    let mut app = App::new(vec![profile]);
+    app.explorer.normalized.selected = Some(ExplorerNodeId::Profile(profile_id));
+
+    let commands = app.update(Action::ExplorerToggle);
+    let generation = match commands.as_slice() {
+        [Command::Connect { generation, .. }] => *generation,
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+
+    app.update(Action::ConnectionSucceeded {
+        profile_id,
+        generation,
+        server: server(),
+    });
+
+    assert!(
+        app.explorer
+            .normalized
+            .expanded
+            .contains(&ExplorerNodeId::Profile(profile_id))
+    );
+}
+
+#[test]
+fn activating_an_offline_profile_expands_it_after_connection_succeeds() {
+    let profile = sqlite_profile("first");
+    let profile_id = profile.id;
+    let mut app = App::new(vec![profile]);
+    app.explorer.normalized.selected = Some(ExplorerNodeId::Profile(profile_id));
+
+    let commands = app.update(Action::ExplorerOpenSelected);
+    let generation = match commands.as_slice() {
+        [Command::Connect { generation, .. }] => *generation,
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+
+    app.update(Action::ConnectionSucceeded {
+        profile_id,
+        generation,
+        server: server(),
+    });
+
+    assert!(
+        app.explorer
+            .normalized
+            .expanded
+            .contains(&ExplorerNodeId::Profile(profile_id))
+    );
+}
+
 fn valid_new_profile(app: &mut App, name: &str) {
     let manager = app.profile_manager.as_mut().unwrap();
     let draft = manager.draft.as_mut().unwrap();

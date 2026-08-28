@@ -2538,8 +2538,6 @@ pub fn load_startup_profiles(cli: &Cli) -> Result<StartupProfiles> {
             cli.profile.as_deref().unwrap_or_default()
         );
     }
-    let selected = selected.or_else(|| profiles.first().map(|profile| profile.id));
-
     let startup_password = if session_secrets
         .keys()
         .copied()

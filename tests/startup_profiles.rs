@@ -87,6 +87,27 @@ fn profile_root_startup_preserves_registry_order_and_provenance() {
 }
 
 #[test]
+fn normal_startup_with_profiles_does_not_select_an_implicit_connection() {
+    let temp = TempDir::new().unwrap();
+    let first = import_connection_url(":memory:", Some("first"))
+        .unwrap()
+        .profile;
+    let second = import_connection_url(":memory:", Some("second"))
+        .unwrap()
+        .profile;
+    let path = temp.path().join("connections.toml");
+    ProfileStore::new(path.clone())
+        .save(&[first, second])
+        .unwrap();
+
+    let startup = load_startup_profiles(&cli(&path, &[])).unwrap();
+
+    assert_eq!(startup.profiles.len(), 2);
+    assert!(startup.selected.is_none());
+    assert!(startup.startup_password.is_none());
+}
+
+#[test]
 fn profile_root_direct_url_is_a_session_root() {
     let temp = TempDir::new().unwrap();
     let startup = load_startup_profiles(&cli(
