@@ -6331,9 +6331,7 @@ impl App {
                             scope: request.scope.clone(),
                         },
                     });
-                    if tab.edit.is_none() {
-                        tab.edit = rows.map(RelationEditSession::from_rows);
-                    }
+                    tab.edit = rows.map(RelationEditSession::from_rows);
                 }
             }
             (RelationRequestKind::Structure, Ok(RelationSnapshot::Structure(snapshot))) => {
@@ -6788,7 +6786,7 @@ mod tests {
         },
         identity::ConnectionIdentity,
         model::explorer::ExplorerConnectionStatus,
-        model::relation::RelationTab,
+        model::relation::{RelationRequest, RelationRequestKind, RelationSnapshot, RelationTab},
         model::tab::{GridRowAlignment, GridRowTarget, GridScrollAmount, ResultView, WorkspaceTab},
         model::transaction::{TransactionExitChoice, TransactionMode, TransactionState},
         model::workspace::{ConnectionStatus, Focus, Overlay, QueryStatus},
@@ -7113,6 +7111,77 @@ mod tests {
                 app.active_console().grid.column_widths.clone(),
             ),
             horizontal
+        );
+    }
+
+    #[test]
+    fn filtered_relation_preview_replaces_the_editable_rows() {
+        let mut profile = import_connection_url("sqlite::memory:", Some("test"))
+            .unwrap()
+            .profile;
+        profile.catalog_scope = CatalogScope::for_profile(DatabaseKind::Sqlite, "", None);
+        let profile_id = profile.id;
+        let mut app = App::new(vec![profile]);
+        app.connection.profile_id = Some(profile_id);
+        app.connection.generation = 1;
+        app.connection.status = ConnectionStatus::Connected;
+
+        let tab = RelationTab::new("users");
+        let tab_id = tab.id;
+        app.tabs.push(WorkspaceTab::Relation(tab));
+        app.active_tab = app.tabs.len() - 1;
+
+        let relation = match &app.tabs[app.active_tab] {
+            WorkspaceTab::Relation(tab) => tab.descriptor.key.clone(),
+            WorkspaceTab::Sql(_) => unreachable!(),
+        };
+        let scope = app.profiles[0].catalog_scope.clone();
+        let request = RelationRequest {
+            tab_id,
+            tab_generation: 0,
+            request_id: 1,
+            connection: app.connection.active_identity().unwrap(),
+            relation,
+            kind: RelationRequestKind::Preview,
+            scope: scope.clone(),
+            options: Default::default(),
+        };
+        if let WorkspaceTab::Relation(tab) = &mut app.tabs[app.active_tab] {
+            tab.data = crate::model::relation::RelationLoad::Loading {
+                request: request.clone(),
+                previous: None,
+            };
+            tab.edit = Some(RelationEditSession::from_rows(vec![vec![CellValue::Text(
+                "test100".into(),
+            )]]));
+        }
+
+        let result = ResultSet {
+            columns: vec![crate::db::query::ColumnMeta {
+                name: "username".into(),
+                type_name: "text".into(),
+            }],
+            rows: vec![vec![CellValue::Text("test".into())]],
+            affected_rows: 0,
+        };
+        app.update(Action::RelationSucceeded {
+            request,
+            snapshot: Box::new(RelationSnapshot::Preview(crate::db::RelationPreview {
+                sql: "SELECT * FROM users WHERE username = 'test'".into(),
+                result: QueryOutcome {
+                    result_sets: vec![result],
+                    stats: QueryStats::new(Duration::ZERO, Duration::ZERO, 1),
+                },
+            })),
+        });
+
+        let WorkspaceTab::Relation(tab) = &app.tabs[app.active_tab] else {
+            unreachable!()
+        };
+        assert_eq!(tab.edit.as_ref().unwrap().rows.len(), 1);
+        assert_eq!(
+            tab.edit.as_ref().unwrap().rows[0].current[0],
+            CellValue::Text("test".into())
         );
     }
 
