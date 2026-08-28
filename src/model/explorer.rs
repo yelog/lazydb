@@ -1192,6 +1192,7 @@ impl ExplorerTreeState {
             return false;
         };
         self.selected = Some(parent);
+        self.ensure_selected_visible();
         true
     }
 

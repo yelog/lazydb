@@ -245,6 +245,29 @@ fn directional_expand_collapse_and_parent_are_distinct() {
 }
 
 #[test]
+fn moving_to_parent_scrolls_the_new_selection_into_the_body() {
+    let profile = profile_id(1);
+    let fixture = fixture(profile);
+    let mut explorer = explorer_with_fixture(&fixture);
+    explorer.expanded.extend(expanded_path(&fixture));
+    explorer.set_viewport_height(3);
+
+    let table = ExplorerNodeId::Catalog(fixture.table.id.clone());
+    let group = ExplorerNodeId::Group {
+        parent: fixture.schema.id.clone(),
+        group: ObjectGroup::Tables,
+    };
+    assert!(explorer.select(table));
+    explorer.scroll = 5;
+
+    assert!(explorer.move_to_parent());
+    assert_eq!(explorer.selected, Some(group.clone()));
+
+    let viewport = explorer.viewport(3);
+    assert!(viewport.rows.iter().any(|row| row.id == group));
+}
+
+#[test]
 fn reveal_node_expands_the_complete_visible_parent_path() {
     let profile = profile_id(1);
     let fixture = fixture(profile);
