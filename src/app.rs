@@ -12,8 +12,7 @@ use crate::{
     db::{
         ErrorCategory,
         catalog::{
-            CatalogPage, CatalogRequest, CatalogRequestKey, CatalogSearchRequest, CatalogTarget,
-            MAX_CATALOG_PAGE_SIZE, MAX_CATALOG_SEARCH_RESULTS,
+            CatalogPage, CatalogRequest, CatalogRequestKey, CatalogTarget, MAX_CATALOG_PAGE_SIZE,
         },
     },
     editor::{EditorEffect, EditorError, EditorWorkspace},
@@ -79,27 +78,6 @@ fn cancel_pending_relation<T: Clone>(load: &mut RelationLoad<T>) -> Option<Relat
         };
     }
     pending
-}
-
-fn search_hit_is_in_scope(
-    hit: &crate::db::catalog::CatalogSearchHit,
-    scope: &crate::profile::CatalogScope,
-) -> bool {
-    hit.ancestors
-        .iter()
-        .chain(std::iter::once(&hit.entry))
-        .all(|entry| {
-            entry
-                .qualified_name
-                .database
-                .as_deref()
-                .is_some_and(|database| {
-                    entry.qualified_name.schema.as_deref().map_or_else(
-                        || scope.allows_database(database),
-                        |schema| scope.allows_schema(database, schema),
-                    )
-                })
-        })
 }
 
 pub struct App {
@@ -702,6 +680,18 @@ impl App {
                         | Action::RelationQueryClear
                         | Action::SubmitRelationQuery
                         | Action::CancelRelationQueryInput
+                        | Action::RelationEditCell
+                        | Action::RelationEditInsert(_)
+                        | Action::RelationEditBackspace
+                        | Action::RelationEditDeletePreviousWord
+                        | Action::RelationEditDeleteToStart
+                        | Action::RelationEditDelete
+                        | Action::RelationEditMoveLeft
+                        | Action::RelationEditMoveRight
+                        | Action::RelationEditMoveHome
+                        | Action::RelationEditMoveEnd
+                        | Action::RelationEditConfirm
+                        | Action::RelationEditCancel
                         | Action::ExplorerFindOpen
                         | Action::ExplorerFindInsert(_)
                         | Action::ExplorerFindBackspace
@@ -1926,6 +1916,14 @@ impl App {
                 self.with_active_data_query(|input| input.backspace());
                 Vec::new()
             }
+            Action::DataQueryDeletePreviousWord => {
+                self.with_active_data_query(|input| input.delete_previous_word());
+                Vec::new()
+            }
+            Action::DataQueryDeleteToStart => {
+                self.with_active_data_query(|input| input.delete_to_start());
+                Vec::new()
+            }
             Action::DataQueryDelete => {
                 self.with_active_data_query(|input| input.delete());
                 Vec::new()
@@ -2276,7 +2274,7 @@ impl App {
             }
             Action::CatalogSearchSucceeded(page) => {
                 if self.database_command_identity() == Some(page.connection) {
-                    self.explorer.accept_search_page(page);
+                    let _ = page;
                 }
                 Vec::new()
             }
@@ -2819,47 +2817,25 @@ impl App {
                 Vec::new()
             }
             Action::ExplorerSearchLocate => {
-                if self.explorer.search.as_ref().is_some_and(|search| {
-                    search.phase == crate::model::workspace::ExplorerSearchPhase::Editing
-                }) {
-                    self.explorer.confirm_search();
-                    return Vec::new();
-                }
-                let valid = self.explorer.search.as_ref().is_some_and(|search| {
-                    self.database_command_identity() == search.connection
-                        && search.hits.get(search.selected).is_some_and(|hit| {
-                            self.profiles
-                                .iter()
-                                .find(|profile| {
-                                    Some(profile.id)
-                                        == search.connection.map(|connection| connection.profile_id)
-                                })
-                                .is_some_and(|profile| {
-                                    search_hit_is_in_scope(hit, &profile.catalog_scope)
-                                })
-                        })
-                });
-                if valid
-                    && let Err(message) = self.explorer.locate_search_hit()
-                    && let Some(search) = self.explorer.search.as_mut()
-                {
-                    search.lifecycle =
-                        crate::model::workspace::ExplorerSearchLifecycle::Failed(message);
-                }
+                let _ = self.explorer.locate_search_hit();
                 Vec::new()
             }
             Action::ExplorerSearchClose => {
-                self.explorer.search = None;
-                vec![Command::CancelCatalogSearch]
+                let restore = self.explorer.search.as_ref().is_some_and(|search| {
+                    search.phase == crate::model::workspace::ExplorerSearchPhase::Editing
+                });
+                if let Some(search) = self.explorer.search.take()
+                    && restore
+                {
+                    self.explorer.normalized.selected = search.original_selected;
+                    self.explorer.normalized.scroll = search.original_scroll;
+                    self.explorer.sync_selected_index();
+                }
+                Vec::new()
             }
             Action::ExplorerSearchRetry => {
-                if let Some(search) = self.explorer.search.as_mut()
-                    && !search.query.trim().is_empty()
-                {
-                    search.generation = search.generation.saturating_add(1);
-                    search.lifecycle = crate::model::workspace::ExplorerSearchLifecycle::Loading;
-                }
-                self.catalog_search_command().into_iter().collect()
+                self.explorer.refresh_frontend_search();
+                Vec::new()
             }
             Action::ExplorerSelect(id) => {
                 self.explorer.select_id(id);
@@ -4739,35 +4715,8 @@ impl App {
             return Vec::new();
         }
         self.explorer.edit_search(edit);
-        self.catalog_search_command().into_iter().collect()
-    }
-
-    fn catalog_search_command(&self) -> Option<Command> {
-        let connection = self.database_command_identity()?;
-        let search = self
-            .explorer
-            .search
-            .as_ref()
-            .filter(|search| !search.query.trim().is_empty())?;
-        if search.connection != Some(connection) {
-            return None;
-        }
-        let scope = self
-            .profiles
-            .iter()
-            .find(|profile| profile.id == connection.profile_id)?
-            .catalog_scope
-            .clone();
-        let request = CatalogSearchRequest {
-            connection,
-            session_id: search.session_id,
-            generation: search.generation,
-            query: search.query.clone(),
-            scope,
-            limit: MAX_CATALOG_SEARCH_RESULTS,
-        };
-        request.validate().ok()?;
-        Some(Command::SearchCatalog(request))
+        self.explorer.refresh_frontend_search();
+        Vec::new()
     }
 
     fn accept_catalog_page(&mut self, page: CatalogPage) -> Vec<Command> {
@@ -4901,6 +4850,7 @@ impl App {
         }
         self.explorer.catalog_generation = self.explorer.catalog_generation.saturating_add(1);
         self.explorer.rebuild_projection(profile_id);
+        self.explorer.refresh_frontend_search();
 
         let mut commands = Vec::new();
         if let Some(cursor) = page.next_cursor {
@@ -4933,7 +4883,7 @@ impl App {
                 for summary in page
                     .group_summaries
                     .into_iter()
-                    .filter(|summary| completion_group(summary.group))
+                    .filter(|summary| search_preload_group(summary.group))
                 {
                     commands.extend(self.start_catalog_request(
                         CatalogTarget::objects(schema.clone(), summary.group).unwrap(),
@@ -6698,7 +6648,7 @@ fn relation_is_in_scope(tab: &RelationTab, scope: &crate::profile::CatalogScope)
     })
 }
 
-fn completion_group(group: crate::db::catalog::ObjectGroup) -> bool {
+fn search_preload_group(group: crate::db::catalog::ObjectGroup) -> bool {
     matches!(
         group,
         crate::db::catalog::ObjectGroup::Tables
@@ -6706,6 +6656,9 @@ fn completion_group(group: crate::db::catalog::ObjectGroup) -> bool {
             | crate::db::catalog::ObjectGroup::MaterializedViews
             | crate::db::catalog::ObjectGroup::Functions
             | crate::db::catalog::ObjectGroup::Procedures
+            | crate::db::catalog::ObjectGroup::Sequences
+            | crate::db::catalog::ObjectGroup::Types
+            | crate::db::catalog::ObjectGroup::Triggers
     )
 }
 

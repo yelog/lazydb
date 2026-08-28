@@ -5,9 +5,8 @@ use lazydb::{
         ErrorCategory, ServerInfo,
         catalog::{
             CatalogCompleteness, CatalogCount, CatalogCursor, CatalogEntry, CatalogGroupSummary,
-            CatalogId, CatalogKind, CatalogPage, CatalogRequest, CatalogRequestKey,
-            CatalogSearchHit, CatalogSearchPage, CatalogTarget, ObjectGroup, OptionalMetadata,
-            QualifiedName,
+            CatalogId, CatalogKind, CatalogPage, CatalogRequest, CatalogRequestKey, CatalogTarget,
+            ObjectGroup, OptionalMetadata, QualifiedName,
         },
     },
     model::explorer::{ExplorerLoadState, ExplorerNodeId, ExplorerOwnerId},
@@ -18,66 +17,96 @@ use uuid::Uuid;
 const PAGE_SIZE: usize = 100;
 
 #[test]
-fn explorer_search_suppresses_empty_queries_and_rejects_stale_results() {
+fn frontend_explorer_search_is_synchronous_and_local() {
     let (mut app, profile) = connected_app();
+    let database = install_database(&mut app, &profile);
+    let schema = install_schema(&mut app, &profile, &database);
+    let users = install_table(&mut app, &profile, &schema, "users");
     app.focus = lazydb::model::workspace::Focus::Explorer;
     assert!(app.update(Action::ExplorerSearchOpen).is_empty());
     assert!(app.update(Action::ExplorerSearchClear).is_empty());
 
-    let first = match app.update(Action::ExplorerSearchInsert('u')).as_slice() {
-        [Command::SearchCatalog(request)] => request.clone(),
-        commands => panic!("unexpected commands: {commands:?}"),
-    };
-    let second = match app.update(Action::ExplorerSearchInsert('s')).as_slice() {
-        [Command::SearchCatalog(request)] => request.clone(),
-        commands => panic!("unexpected commands: {commands:?}"),
-    };
-    assert!(second.generation > first.generation);
-
-    let stale = CatalogSearchPage::new(&first, Vec::new(), Some(0), false).unwrap();
-    app.update(Action::CatalogSearchSucceeded(stale));
+    for character in "users".chars() {
+        assert!(
+            app.update(Action::ExplorerSearchInsert(character))
+                .is_empty()
+        );
+    }
+    let search = app.explorer.search.as_ref().unwrap();
+    assert_eq!(search.frontend_match_rows.len(), 1);
+    assert!(
+        search
+            .frontend_rows
+            .iter()
+            .any(|row| row.id == ExplorerNodeId::Catalog(users.id.clone()))
+    );
+    assert!(search.hits.is_empty());
     assert!(matches!(
-        app.explorer.search.as_ref().unwrap().lifecycle,
-        lazydb::model::workspace::ExplorerSearchLifecycle::Loading
-    ));
-
-    let current = CatalogSearchPage::new(&second, Vec::new(), Some(0), false).unwrap();
-    app.update(Action::CatalogSearchSucceeded(current));
-    assert!(matches!(
-        app.explorer.search.as_ref().unwrap().lifecycle,
+        search.lifecycle,
         lazydb::model::workspace::ExplorerSearchLifecycle::Ready
     ));
-    assert_eq!(second.connection.profile_id, profile.id);
+    assert!(app.update(Action::ExplorerSearchClose).is_empty());
+    assert!(app.explorer.search.is_none());
 }
 
 #[test]
-fn reopened_search_rejects_queued_response_from_closed_session() {
+fn frontend_explorer_search_excludes_relation_children() {
+    let (mut app, profile) = connected_app();
+    let database = install_database(&mut app, &profile);
+    let schema = install_schema(&mut app, &profile, &database);
+    let users = install_table(&mut app, &profile, &schema, "users");
+    let column = CatalogEntry::relation_child(
+        id(
+            profile.id,
+            CatalogKind::Column,
+            &["app", "public", "users", "user_id"],
+        ),
+        users.id.clone(),
+        QualifiedName {
+            database: Some("app".into()),
+            schema: Some("public".into()),
+            object: "user_id".into(),
+        },
+        "column",
+        OptionalMetadata::Unsupported,
+        lazydb::db::catalog::CatalogMetadata::Column(lazydb::db::catalog::ColumnMetadata::new(
+            1, "bigint", false,
+        )),
+    )
+    .unwrap();
+    let request = load(
+        &mut app,
+        CatalogTarget::relation_children(users.id.clone()).unwrap(),
+    );
+    app.update(Action::CatalogPageLoaded(page(
+        &request,
+        vec![column.clone()],
+        None,
+    )));
+
+    app.focus = lazydb::model::workspace::Focus::Explorer;
+    app.update(Action::ExplorerSearchOpen);
+    for character in "user_id".chars() {
+        app.update(Action::ExplorerSearchInsert(character));
+    }
+    let search = app.explorer.search.as_ref().unwrap();
+    assert!(search.frontend_match_rows.is_empty());
+    assert!(
+        !search
+            .frontend_rows
+            .iter()
+            .any(|row| row.id == ExplorerNodeId::Catalog(column.id.clone()))
+    );
+}
+
+#[test]
+fn frontend_explorer_search_opens_freshly_after_close() {
     let (mut app, _) = connected_app();
     app.focus = lazydb::model::workspace::Focus::Explorer;
     app.update(Action::ExplorerSearchOpen);
-    let old = match app.update(Action::ExplorerSearchInsert('u')).as_slice() {
-        [Command::SearchCatalog(request)] => request.clone(),
-        commands => panic!("unexpected commands: {commands:?}"),
-    };
-    assert!(matches!(
-        app.update(Action::ExplorerSearchClose).as_slice(),
-        [Command::CancelCatalogSearch]
-    ));
+    assert!(app.update(Action::ExplorerSearchClose).is_empty());
     app.update(Action::ExplorerSearchOpen);
-    let current = match app.update(Action::ExplorerSearchInsert('u')).as_slice() {
-        [Command::SearchCatalog(request)] => request.clone(),
-        commands => panic!("unexpected commands: {commands:?}"),
-    };
-    assert_ne!(old.session_id, current.session_id);
-    assert_eq!(old.generation, current.generation);
-
-    app.update(Action::CatalogSearchSucceeded(
-        CatalogSearchPage::new(&old, Vec::new(), Some(0), false).unwrap(),
-    ));
-    assert!(matches!(
-        app.explorer.search.as_ref().unwrap().lifecycle,
-        lazydb::model::workspace::ExplorerSearchLifecycle::Loading
-    ));
+    assert!(app.explorer.search.is_some());
 }
 
 #[test]
@@ -85,7 +114,9 @@ fn search_edit_clears_query_metadata_and_empty_query_is_neutral() {
     let (mut app, _) = connected_app();
     app.focus = lazydb::model::workspace::Focus::Explorer;
     app.update(Action::ExplorerSearchOpen);
-    app.update(Action::ExplorerSearchInsert('u'));
+    for character in "users".chars() {
+        app.update(Action::ExplorerSearchInsert(character));
+    }
     let search = app.explorer.search.as_mut().unwrap();
     search.total_count = Some(50);
     search.truncated = true;
@@ -106,7 +137,7 @@ fn search_edit_clears_query_metadata_and_empty_query_is_neutral() {
 }
 
 #[test]
-fn locating_page_two_search_hit_does_not_break_pending_continuation() {
+fn frontend_search_locates_without_breaking_pending_continuation() {
     let (mut app, profile) = connected_app();
     let database = install_database(&mut app, &profile);
     let schema = install_schema(&mut app, &profile, &database);
@@ -124,18 +155,59 @@ fn locating_page_two_search_hit_does_not_break_pending_continuation() {
 
     app.focus = lazydb::model::workspace::Focus::Explorer;
     app.update(Action::ExplorerSearchOpen);
-    let search_request = match app.update(Action::ExplorerSearchInsert('w')).as_slice() {
-        [Command::SearchCatalog(request)] => request.clone(),
-        commands => panic!("unexpected commands: {commands:?}"),
-    };
-    let hit = CatalogSearchHit {
-        entry: page_two.clone(),
-        ancestors: vec![database, schema.clone()],
-    };
-    app.update(Action::CatalogSearchSucceeded(
-        CatalogSearchPage::new(&search_request, vec![hit], Some(1), false).unwrap(),
-    ));
+    for character in "users".chars() {
+        app.update(Action::ExplorerSearchInsert(character));
+    }
+    let search = app.explorer.search.as_ref().unwrap();
+    let row = &search.frontend_rows[search.frontend_match_rows[0]];
+    assert!(matches!(&row.id, ExplorerNodeId::Catalog(id) if id.kind == CatalogKind::Table));
+    app.explorer.normalized.expanded.clear();
     app.update(Action::ExplorerSearchLocate);
+    assert!(app.explorer.search.is_none());
+    let users = relation(profile.id, &schema.id, "users");
+    assert_eq!(
+        app.explorer.selected_id(),
+        Some(&ExplorerNodeId::Catalog(users.id.clone()))
+    );
+    assert!(
+        app.explorer
+            .normalized
+            .expanded
+            .contains(&ExplorerNodeId::Profile(profile.id))
+    );
+    assert!(
+        app.explorer
+            .normalized
+            .expanded
+            .contains(&ExplorerNodeId::Catalog(database.id.clone()))
+    );
+    assert!(
+        app.explorer
+            .normalized
+            .expanded
+            .contains(&ExplorerNodeId::Catalog(schema.id.clone()))
+    );
+    assert!(
+        app.explorer
+            .normalized
+            .expanded
+            .contains(&ExplorerNodeId::Group {
+                parent: schema.id.clone(),
+                group: ObjectGroup::Tables,
+            })
+    );
+    assert!(
+        !app.explorer
+            .normalized
+            .expanded
+            .contains(&ExplorerNodeId::Catalog(users.id.clone()))
+    );
+    assert!(
+        app.explorer
+            .visible()
+            .iter()
+            .any(|row| row.id == ExplorerNodeId::Catalog(users.id.clone()))
+    );
 
     app.update(Action::CatalogPageLoaded(page(
         &continuation,
@@ -602,7 +674,7 @@ fn group_continuations_append_in_order_and_reject_cross_page_duplicates_atomical
 }
 
 #[test]
-fn completion_auto_scheduling_skips_triggers_and_does_not_retry_failed_targets() {
+fn search_preload_schedules_supported_non_relation_groups() {
     let (mut app, profile) = connected_app();
     let database = install_database(&mut app, &profile);
     let schema = install_schema(&mut app, &profile, &database);
@@ -633,7 +705,7 @@ fn completion_auto_scheduling_skips_triggers_and_does_not_retry_failed_targets()
         Command::LoadCatalogPage(request)
             if matches!(request.key.target, CatalogTarget::Objects { group: ObjectGroup::Tables, .. })
     )));
-    assert!(!commands.iter().any(|command| matches!(
+    assert!(commands.iter().any(|command| matches!(
         command,
         Command::LoadCatalogPage(request)
             if matches!(request.key.target, CatalogTarget::Objects { group: ObjectGroup::Triggers, .. })
@@ -910,6 +982,42 @@ fn install_schema(
     let target = CatalogTarget::schemas(database.id.clone()).unwrap();
     let request = pending_request(app, profile.id, &target);
     let entry = schema(profile.id, &database.id, "public");
+    app.update(Action::CatalogPageLoaded(page(
+        &request,
+        vec![entry.clone()],
+        None,
+    )));
+    entry
+}
+
+fn install_table(
+    app: &mut App,
+    profile: &ConnectionProfile,
+    schema: &CatalogEntry,
+    name: &str,
+) -> CatalogEntry {
+    let target = CatalogTarget::groups(schema.id.clone()).unwrap();
+    let request = pending_request(app, profile.id, &target);
+    let commands = app.update(Action::CatalogPageLoaded(
+        CatalogPage::groups(
+            &request,
+            vec![CatalogGroupSummary {
+                group: ObjectGroup::Tables,
+                object_count: CatalogCount::Exact(1),
+            }],
+            CatalogCount::Exact(1),
+            None,
+        )
+        .unwrap(),
+    ));
+    assert!(commands.iter().any(|command| matches!(
+        command,
+        Command::LoadCatalogPage(request)
+            if request.key.target == CatalogTarget::objects(schema.id.clone(), ObjectGroup::Tables).unwrap()
+    )));
+    let target = CatalogTarget::objects(schema.id.clone(), ObjectGroup::Tables).unwrap();
+    let request = pending_request(app, profile.id, &target);
+    let entry = relation(profile.id, &schema.id, name);
     app.update(Action::CatalogPageLoaded(page(
         &request,
         vec![entry.clone()],

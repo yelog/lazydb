@@ -189,35 +189,45 @@ impl Keymap {
             }
         }
         if app.focus == Focus::Explorer && app.explorer.search.is_some() {
-            self.pending = None;
             let confirmed = app.explorer.search.as_ref().is_some_and(|search| {
                 search.phase == crate::model::workspace::ExplorerSearchPhase::Confirmed
             });
-            if event.modifiers == KeyModifiers::CONTROL && event.code == KeyCode::Char('u') {
-                return Some(Action::ExplorerSearchClear);
-            }
-            if event.modifiers == KeyModifiers::CONTROL && event.code == KeyCode::Char('r') {
-                return Some(Action::ExplorerSearchRetry);
-            }
-            if !event.modifiers.is_empty() && event.modifiers != KeyModifiers::SHIFT {
-                return None;
-            }
-            return match event.code {
-                KeyCode::Esc => Some(Action::ExplorerSearchClose),
-                KeyCode::Enter if !confirmed => Some(Action::ExplorerSearchLocate),
-                KeyCode::Enter if confirmed => Some(Action::ExplorerSearchLocate),
-                KeyCode::Backspace if !confirmed => Some(Action::ExplorerSearchBackspace),
-                KeyCode::Down => Some(Action::ExplorerSearchMove(1)),
-                KeyCode::Up => Some(Action::ExplorerSearchMove(-1)),
-                KeyCode::Home => Some(Action::ExplorerSearchMove(isize::MIN)),
-                KeyCode::End => Some(Action::ExplorerSearchMove(isize::MAX)),
-                KeyCode::Char('n') if confirmed => Some(Action::ExplorerSearchNext),
-                KeyCode::Char('N') if confirmed => Some(Action::ExplorerSearchPrevious),
-                KeyCode::Char(character) if !confirmed => {
-                    Some(Action::ExplorerSearchInsert(character))
+            if confirmed {
+                match event.code {
+                    KeyCode::Esc => {
+                        self.pending = None;
+                        return Some(Action::ExplorerSearchClose);
+                    }
+                    KeyCode::Char('n') => {
+                        self.pending = None;
+                        return Some(Action::ExplorerSearchNext);
+                    }
+                    KeyCode::Char('N') => {
+                        self.pending = None;
+                        return Some(Action::ExplorerSearchPrevious);
+                    }
+                    _ => {}
                 }
-                _ => None,
-            };
+            } else {
+                self.pending = None;
+                if event.modifiers == KeyModifiers::CONTROL && event.code == KeyCode::Char('u') {
+                    return Some(Action::ExplorerSearchClear);
+                }
+                if !event.modifiers.is_empty() && event.modifiers != KeyModifiers::SHIFT {
+                    return None;
+                }
+                return match event.code {
+                    KeyCode::Esc => Some(Action::ExplorerSearchClose),
+                    KeyCode::Enter => Some(Action::ExplorerSearchLocate),
+                    KeyCode::Backspace => Some(Action::ExplorerSearchBackspace),
+                    KeyCode::Down => Some(Action::ExplorerSearchMove(1)),
+                    KeyCode::Up => Some(Action::ExplorerSearchMove(-1)),
+                    KeyCode::Home => Some(Action::ExplorerSearchMove(isize::MIN)),
+                    KeyCode::End => Some(Action::ExplorerSearchMove(isize::MAX)),
+                    KeyCode::Char(character) => Some(Action::ExplorerSearchInsert(character)),
+                    _ => None,
+                };
+            }
         }
         if let Some(Overlay::SqlEditorList(list)) = app.overlay.as_ref() {
             self.pending = None;
@@ -1250,7 +1260,7 @@ mod tests {
                 KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
                 &app
             ),
-            Some(Action::ExplorerSearchRetry)
+            None
         );
         assert_eq!(
             keymap.map(key(KeyCode::Enter), &app),
@@ -1303,6 +1313,33 @@ mod tests {
                 )),
             ),
             Some(Action::RelationEditCancel)
+        );
+    }
+
+    #[test]
+    fn cell_editor_maps_line_editing_controls_before_global_bindings() {
+        let app = relation_app(RelationGridMode::EditCell(
+            crate::model::relation_edit::CellEditorState {
+                row: 0,
+                column: 0,
+                input: Default::default(),
+            },
+        ));
+        let mut keymap = Keymap::default();
+
+        assert_eq!(
+            keymap.map(
+                KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+                &app,
+            ),
+            Some(Action::RelationEditDeletePreviousWord)
+        );
+        assert_eq!(
+            keymap.map(
+                KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+                &app,
+            ),
+            Some(Action::RelationEditDeleteToStart)
         );
     }
 

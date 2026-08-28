@@ -8,8 +8,8 @@ use lazydb::{
     db::{
         ServerInfo,
         catalog::{
-            CatalogCount, CatalogCursor, CatalogEntry, CatalogId, CatalogKind, CatalogSearchHit,
-            CatalogSearchPage, ObjectGroup, OptionalMetadata, QualifiedName,
+            CatalogCount, CatalogCursor, CatalogEntry, CatalogId, CatalogKind, ObjectGroup,
+            OptionalMetadata, QualifiedName,
         },
         query::{ColumnMeta, QueryOutcome, QueryStats, ResultSet},
         value::CellValue,
@@ -118,52 +118,18 @@ fn explorer_search_renders_inline_empty_and_loading_states_at_compact_size() {
     app.update(Action::ExplorerSearchInsert('u'));
     let loading = render(&app, 80, 24);
     assert!(loading.contains("/ u"));
-    assert!(loading.contains("Searching..."));
+    assert!(loading.contains("No objects match \"u\""));
 }
 
 #[test]
-fn failed_new_search_labels_retained_results_and_contextual_error() {
+fn frontend_search_shows_no_match_state_without_server_loading() {
     let mut app = fixture();
     app.focus = Focus::Explorer;
     app.update(Action::ExplorerSearchOpen);
-    let profile_id = app.profiles[0].id;
-    let request = match app.update(Action::ExplorerSearchInsert('u')).as_slice() {
-        [lazydb::action::Command::SearchCatalog(request)] => request.clone(),
-        commands => panic!("unexpected commands: {commands:?}"),
-    };
-    let database = CatalogEntry::database(
-        CatalogId::new(profile_id, CatalogKind::Database, [":memory:"]),
-        QualifiedName {
-            database: Some(":memory:".into()),
-            schema: None,
-            object: ":memory:".into(),
-        },
-        "database",
-        OptionalMetadata::Supported(None),
-        true,
-    )
-    .unwrap();
-    let hit = CatalogSearchHit {
-        entry: database,
-        ancestors: Vec::new(),
-    };
-    app.update(Action::CatalogSearchSucceeded(
-        CatalogSearchPage::new(&request, vec![hit], Some(1), false).unwrap(),
-    ));
-    let failed = match app.update(Action::ExplorerSearchInsert('s')).as_slice() {
-        [lazydb::action::Command::SearchCatalog(request)] => request.clone(),
-        commands => panic!("unexpected commands: {commands:?}"),
-    };
-    app.update(Action::CatalogSearchFailed {
-        connection: failed.connection,
-        session_id: failed.session_id,
-        generation: failed.generation,
-        message: "permission denied".into(),
-    });
+    assert!(app.update(Action::ExplorerSearchInsert('u')).is_empty());
 
     let output = render(&app, 100, 24);
-    assert!(output.contains("1 retained"));
-    assert!(output.contains("permission denied"));
+    assert!(output.contains("No objects match \"u\""));
 }
 
 #[test]

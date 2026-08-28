@@ -828,7 +828,136 @@ impl Default for ExplorerTreeState {
     }
 }
 
+fn search_group(kind: CatalogKind) -> Option<ObjectGroup> {
+    match kind {
+        CatalogKind::Table => Some(ObjectGroup::Tables),
+        CatalogKind::View => Some(ObjectGroup::Views),
+        CatalogKind::MaterializedView => Some(ObjectGroup::MaterializedViews),
+        CatalogKind::Sequence => Some(ObjectGroup::Sequences),
+        CatalogKind::Function => Some(ObjectGroup::Functions),
+        CatalogKind::Procedure => Some(ObjectGroup::Procedures),
+        CatalogKind::Type => Some(ObjectGroup::Types),
+        CatalogKind::Trigger => Some(ObjectGroup::Triggers),
+        _ => None,
+    }
+}
+
+fn append_filtered_search_rows(
+    profile: &ExplorerProfileState,
+    id: &CatalogId,
+    included: &HashSet<ExplorerNodeId>,
+    depth: usize,
+    rows: &mut Vec<VisibleExplorerNode>,
+) {
+    let node = ExplorerNodeId::Catalog(id.clone());
+    if !included.contains(&node) {
+        return;
+    }
+    rows.push(VisibleExplorerNode { id: node, depth });
+    let Some(entry) = profile.catalog.get(id) else {
+        return;
+    };
+    if entry.kind.is_relation() {
+        return;
+    }
+    if entry.kind == CatalogKind::Schema {
+        for group in profile.catalog.groups(id) {
+            let group_node = ExplorerNodeId::Group {
+                parent: id.clone(),
+                group: *group,
+            };
+            if !included.contains(&group_node) {
+                continue;
+            }
+            rows.push(VisibleExplorerNode {
+                id: group_node,
+                depth: depth + 1,
+            });
+            for child in profile.catalog.group_children(id, *group) {
+                append_filtered_search_rows(profile, child, included, depth + 2, rows);
+            }
+        }
+    } else {
+        for child in profile.catalog.children(id) {
+            append_filtered_search_rows(profile, child, included, depth + 1, rows);
+        }
+    }
+}
+
 impl ExplorerTreeState {
+    pub fn filtered_search_rows(
+        &self,
+        profile_id: Option<Uuid>,
+        query: &str,
+    ) -> (Vec<VisibleExplorerNode>, Vec<usize>) {
+        let Some(profile_id) = profile_id else {
+            return (Vec::new(), Vec::new());
+        };
+        let Some(profile) = self.profiles.get(&profile_id) else {
+            return (Vec::new(), Vec::new());
+        };
+        let query = query.to_lowercase();
+        let mut included = HashSet::new();
+        let mut matches = HashSet::new();
+        for entry in profile.catalog.entries().values() {
+            if entry.kind.is_relation_child()
+                || entry
+                    .relation_id
+                    .as_ref()
+                    .is_some_and(|relation| relation != &entry.id)
+            {
+                continue;
+            }
+            let path = entry
+                .qualified_name
+                .database
+                .iter()
+                .chain(entry.qualified_name.schema.iter())
+                .chain(std::iter::once(&entry.qualified_name.object))
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(".")
+                .to_lowercase();
+            if !entry.qualified_name.object.to_lowercase().contains(&query)
+                && !path.contains(&query)
+            {
+                continue;
+            }
+            matches.insert(ExplorerNodeId::Catalog(entry.id.clone()));
+            included.insert(ExplorerNodeId::Catalog(entry.id.clone()));
+            let mut current = entry.id.clone();
+            while let Some(parent) = profile.catalog.parent(&current).cloned() {
+                included.insert(ExplorerNodeId::Catalog(parent.clone()));
+                if parent.kind == CatalogKind::Schema {
+                    if let Some(group) = search_group(entry.kind) {
+                        included.insert(ExplorerNodeId::Group {
+                            parent: parent.clone(),
+                            group,
+                        });
+                    }
+                }
+                current = parent;
+            }
+            included.insert(ExplorerNodeId::Profile(profile_id));
+        }
+        let mut rows = Vec::new();
+        if included.contains(&ExplorerNodeId::Profile(profile_id)) {
+            rows.push(VisibleExplorerNode {
+                id: ExplorerNodeId::Profile(profile_id),
+                depth: 0,
+            });
+            for root in profile.catalog.roots() {
+                append_filtered_search_rows(profile, root, &included, 1, &mut rows);
+            }
+        }
+        let match_rows = rows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| matches.contains(&row.id).then_some(index))
+            .collect();
+        (rows, match_rows)
+    }
+
     pub fn add_profile(&mut self, profile_id: Uuid) {
         self.add_profile_with_metadata(
             profile_id,
@@ -944,6 +1073,19 @@ impl ExplorerTreeState {
     pub fn select(&mut self, id: ExplorerNodeId) -> bool {
         if !self.node_exists(&id) {
             return false;
+        }
+        self.selected = Some(id);
+        true
+    }
+
+    pub fn reveal_node(&mut self, id: ExplorerNodeId) -> bool {
+        if !self.node_exists(&id) {
+            return false;
+        }
+        let mut parent = self.visible_parent(&id);
+        while let Some(node) = parent {
+            self.expanded.insert(node.clone());
+            parent = self.visible_parent(&node);
         }
         self.selected = Some(id);
         true

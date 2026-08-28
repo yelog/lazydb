@@ -245,6 +245,39 @@ fn directional_expand_collapse_and_parent_are_distinct() {
 }
 
 #[test]
+fn reveal_node_expands_the_complete_visible_parent_path() {
+    let profile = profile_id(1);
+    let fixture = fixture(profile);
+    let mut explorer = explorer_with_fixture(&fixture);
+    let table = ExplorerNodeId::Catalog(fixture.table.id.clone());
+    explorer.expanded.clear();
+
+    assert!(explorer.reveal_node(table.clone()));
+    assert_eq!(explorer.selected, Some(table.clone()));
+    assert!(
+        explorer
+            .expanded
+            .contains(&ExplorerNodeId::Profile(profile))
+    );
+    assert!(
+        explorer
+            .expanded
+            .contains(&ExplorerNodeId::Catalog(fixture.database.id.clone()))
+    );
+    assert!(
+        explorer
+            .expanded
+            .contains(&ExplorerNodeId::Catalog(fixture.schema.id.clone()))
+    );
+    assert!(explorer.expanded.contains(&ExplorerNodeId::Group {
+        parent: fixture.schema.id.clone(),
+        group: ObjectGroup::Tables,
+    }));
+    assert!(!explorer.expanded.contains(&table));
+    assert!(visible_ids(&explorer).contains(&table));
+}
+
+#[test]
 fn projection_inserts_groups_and_skips_collapsed_catalog_subtrees() {
     let profile = profile_id(1);
     let fixture = fixture(profile);
@@ -590,6 +623,36 @@ fn visible_find_close_can_restore_original_selection() {
 
     assert!(state.find.is_none());
     assert_eq!(state.selected_id(), Some(&ExplorerNodeId::Profile(profile)));
+}
+
+#[test]
+fn frontend_search_locates_the_current_match_instead_of_the_first() {
+    let profile = profile_id(1);
+    let fixture = fixture(profile);
+    let mut state = lazydb::model::workspace::ExplorerState {
+        normalized: explorer_with_fixture(&fixture),
+        ..Default::default()
+    };
+    state.open_search(
+        Some(lazydb::identity::ConnectionIdentity {
+            profile_id: profile,
+            generation: 1,
+        }),
+        1,
+    );
+    state.edit_search(|query| query.push_str("user"));
+    state.refresh_frontend_search();
+
+    let matches = state.search.as_ref().unwrap().frontend_match_rows.clone();
+    assert_eq!(matches.len(), 2);
+    let selected = state.search.as_ref().unwrap().frontend_rows[matches[1]]
+        .id
+        .clone();
+    state.search.as_mut().unwrap().selected = matches[1];
+
+    assert_eq!(state.locate_search_hit(), Ok(true));
+    assert!(state.search.is_none());
+    assert_eq!(state.selected_id(), Some(&selected));
 }
 
 #[test]

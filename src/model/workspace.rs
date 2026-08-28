@@ -222,6 +222,10 @@ pub struct ExplorerSearchState {
     pub located: Option<crate::db::catalog::CatalogId>,
     pub rows: Vec<ExplorerCatalogSearchRow>,
     pub match_rows: Vec<usize>,
+    pub frontend_rows: Vec<crate::model::explorer::VisibleExplorerNode>,
+    pub frontend_match_rows: Vec<usize>,
+    pub original_selected: Option<ExplorerNodeId>,
+    pub original_scroll: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -251,6 +255,10 @@ impl ExplorerSearchState {
             located: None,
             rows: Vec::new(),
             match_rows: Vec::new(),
+            frontend_rows: Vec::new(),
+            frontend_match_rows: Vec::new(),
+            original_selected: None,
+            original_scroll: 0,
         }
     }
 }
@@ -368,7 +376,10 @@ impl ExplorerState {
     }
 
     pub fn open_search(&mut self, connection: Option<ConnectionIdentity>, session_id: u64) {
-        self.search = Some(ExplorerSearchState::new(connection, session_id));
+        let mut search = ExplorerSearchState::new(connection, session_id);
+        search.original_selected = self.normalized.selected.clone();
+        search.original_scroll = self.normalized.scroll;
+        self.search = Some(search);
     }
 
     pub fn edit_search(&mut self, edit: impl FnOnce(&mut String)) -> Option<u64> {
@@ -380,6 +391,8 @@ impl ExplorerState {
         search.total_count = None;
         search.truncated = false;
         search.located = None;
+        search.frontend_rows.clear();
+        search.frontend_match_rows.clear();
         search.phase = ExplorerSearchPhase::Editing;
         search.lifecycle = if search.query.trim().is_empty() {
             search.hits.clear();
@@ -388,6 +401,40 @@ impl ExplorerState {
             ExplorerSearchLifecycle::Loading
         };
         Some(search.generation)
+    }
+
+    pub fn refresh_frontend_search(&mut self) {
+        let Some(search) = self.search.as_ref() else {
+            return;
+        };
+        if search.query.trim().is_empty() {
+            let Some(search) = self.search.as_mut() else {
+                return;
+            };
+            search.frontend_rows.clear();
+            search.frontend_match_rows.clear();
+            search.lifecycle = ExplorerSearchLifecycle::Idle;
+            return;
+        }
+        let profile_id = search.connection.map(|connection| connection.profile_id);
+        let query = search.query.clone();
+        let (rows, matches) = self.normalized.filtered_search_rows(profile_id, &query);
+        let selected_id = search
+            .frontend_rows
+            .get(search.selected)
+            .map(|row| row.id.clone());
+        let Some(search) = self.search.as_mut() else {
+            return;
+        };
+        search.frontend_rows = rows;
+        search.frontend_match_rows = matches;
+        search.selected = selected_id
+            .and_then(|id| search.frontend_rows.iter().position(|row| row.id == id))
+            .unwrap_or_else(|| search.frontend_match_rows.first().copied().unwrap_or(0));
+        search.scroll = search
+            .scroll
+            .min(search.frontend_rows.len().saturating_sub(1));
+        search.lifecycle = ExplorerSearchLifecycle::Ready;
     }
 
     pub fn accept_search_page(&mut self, page: CatalogSearchPage) -> bool {
@@ -418,32 +465,41 @@ impl ExplorerState {
         let Some(search) = self.search.as_mut() else {
             return;
         };
+        let rows = if search.frontend_rows.is_empty() {
+            search.rows.len()
+        } else {
+            search.frontend_rows.len()
+        };
         search.selected = search
             .selected
             .saturating_add_signed(delta)
-            .min(search.rows.len().saturating_sub(1));
+            .min(rows.saturating_sub(1));
     }
 
     pub fn move_search_match(&mut self, delta: isize) -> bool {
         let Some(search) = self.search.as_mut() else {
             return false;
         };
-        if search.match_rows.is_empty() {
+        let match_rows = if search.frontend_match_rows.is_empty() {
+            &search.match_rows
+        } else {
+            &search.frontend_match_rows
+        };
+        if match_rows.is_empty() {
             return false;
         }
-        let current = search
-            .match_rows
+        let current = match_rows
             .iter()
             .position(|row| *row == search.selected)
             .unwrap_or(0);
-        let len = search.match_rows.len();
+        let len = match_rows.len();
         let offset = delta.unsigned_abs() % len;
         let next = if delta.is_negative() {
             (current + len - offset) % len
         } else {
             (current + offset) % len
         };
-        search.selected = search.match_rows[next];
+        search.selected = match_rows[next];
         true
     }
 
@@ -452,8 +508,12 @@ impl ExplorerState {
             return false;
         };
         search.phase = ExplorerSearchPhase::Confirmed;
-        search
-            .match_rows
+        let match_rows = if search.frontend_match_rows.is_empty() {
+            &search.match_rows
+        } else {
+            &search.frontend_match_rows
+        };
+        match_rows
             .first()
             .copied()
             .map(|row| {
@@ -466,6 +526,27 @@ impl ExplorerState {
         let Some(search) = self.search.as_ref() else {
             return Ok(false);
         };
+        if !search.frontend_rows.is_empty() {
+            if !search.frontend_match_rows.contains(&search.selected) {
+                return Ok(false);
+            }
+            let Some(ExplorerNodeId::Catalog(id)) =
+                search.frontend_rows.get(search.selected).map(|row| &row.id)
+            else {
+                return Ok(false);
+            };
+            if !self
+                .normalized
+                .reveal_node(ExplorerNodeId::Catalog(id.clone()))
+            {
+                return Ok(false);
+            }
+            self.normalized
+                .align_selected(ExplorerNodeAlignment::Middle);
+            self.sync_selected_index();
+            self.search = None;
+            return Ok(true);
+        }
         let Some(hit_index) = search
             .rows
             .get(search.selected)
@@ -554,9 +635,21 @@ impl ExplorerState {
     }
 
     pub fn visible(&self) -> Vec<VisibleCatalogNode> {
-        self.normalized
-            .visible()
-            .into_iter()
+        self.visible_rows(self.normalized.visible())
+    }
+
+    pub fn visible_search(&self) -> Vec<VisibleCatalogNode> {
+        let rows = self
+            .explorer_search_rows()
+            .map_or_else(Vec::new, |rows| rows.to_vec());
+        self.visible_rows(rows)
+    }
+
+    fn visible_rows(
+        &self,
+        rows: Vec<crate::model::explorer::VisibleExplorerNode>,
+    ) -> Vec<VisibleCatalogNode> {
+        rows.into_iter()
             .map(|row| {
                 let profile = row
                     .id
@@ -707,6 +800,12 @@ impl ExplorerState {
                 }
             })
             .collect()
+    }
+
+    fn explorer_search_rows(&self) -> Option<&[crate::model::explorer::VisibleExplorerNode]> {
+        self.search
+            .as_ref()
+            .map(|search| search.frontend_rows.as_slice())
     }
 
     pub fn selected_id(&self) -> Option<&ExplorerNodeId> {

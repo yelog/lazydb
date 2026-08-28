@@ -597,7 +597,7 @@ fn render_explorer(
         return;
     }
     if let Some(search) = app.explorer.search.as_ref() {
-        render_explorer_search(frame, inner, search, theme, icons);
+        render_explorer_search(frame, inner, app, search, theme, icons);
         return;
     }
     let visible = app.explorer.visible();
@@ -885,6 +885,7 @@ fn match_spans(text: String, query: &str, base: Style, matched: Style) -> Vec<Sp
 fn render_explorer_search(
     frame: &mut Frame<'_>,
     area: Rect,
+    app: &App,
     search: &crate::model::workspace::ExplorerSearchState,
     theme: Theme,
     icons: icons::IconSet,
@@ -911,6 +912,7 @@ fn render_explorer_search(
     }
 
     let result_height = area.height.saturating_sub(2) as usize;
+    let visible = app.explorer.visible_search();
     let start = search
         .scroll
         .max(
@@ -918,9 +920,8 @@ fn render_explorer_search(
                 .selected
                 .saturating_sub(result_height.saturating_sub(1)),
         )
-        .min(search.rows.len().saturating_sub(1));
-    let items = search
-        .rows
+        .min(visible.len().saturating_sub(1));
+    let items = visible
         .iter()
         .enumerate()
         .skip(start)
@@ -932,10 +933,24 @@ fn render_explorer_search(
             } else {
                 theme.surface
             };
-            let primary = if selected { theme.accent } else { theme.text };
-            let icon = row.kind.map_or("·", |kind| icons.catalog(kind));
+            let expanded = app.explorer.normalized.expanded.contains(&row.id);
+            let marker = if row.expandable
+                && !matches!(
+                    row.kind,
+                    Some(CatalogKind::Table | CatalogKind::View | CatalogKind::MaterializedView)
+                ) {
+                if expanded { "▾" } else { "▸" }
+            } else {
+                " "
+            };
+            let icon = match &row.id {
+                crate::model::explorer::ExplorerNodeId::Group { group, .. } => {
+                    icons.group(*group, expanded)
+                }
+                _ => row.kind.map_or("·", |kind| icons.catalog(kind)),
+            };
             let label_style = Style::new()
-                .fg(primary)
+                .fg(if selected { theme.accent } else { theme.text })
                 .bg(background)
                 .add_modifier(if selected {
                     Modifier::BOLD
@@ -943,14 +958,22 @@ fn render_explorer_search(
                     Modifier::empty()
                 });
             let mut spans = vec![Span::styled(
-                format!(
-                    "{}{} {}",
-                    "  ".repeat(row.depth),
-                    if selected { ">" } else { " " },
-                    icon
-                ),
-                Style::new().fg(theme.action).bg(background),
+                format!("{}{} ", "  ".repeat(row.depth), marker),
+                label_style,
             )];
+            if let Some(kind) = row.profile_kind {
+                spans.push(Span::styled(
+                    format!("{} ", icons.database(kind)),
+                    Style::new().fg(theme.action).bg(background),
+                ));
+            } else {
+                spans.push(Span::styled(
+                    format!("{} ", icon),
+                    Style::new()
+                        .fg(row.kind.map_or(theme.muted, |kind| kind_color(kind, theme)))
+                        .bg(background),
+                ));
+            }
             spans.extend(match_spans(
                 sanitize_terminal_text(&row.label),
                 &search.query,
@@ -960,6 +983,21 @@ fn render_explorer_search(
                     .bg(background)
                     .add_modifier(Modifier::BOLD),
             ));
+            if let Some(metadata) = row.metadata.as_deref().filter(|value| !value.is_empty()) {
+                spans.push(Span::styled(
+                    format!("  {}", sanitize_terminal_text(metadata)),
+                    Style::new().fg(theme.muted).bg(background),
+                ));
+            }
+            if let Some(comment) = row.comment.as_deref().filter(|value| !value.is_empty()) {
+                spans.push(Span::styled(
+                    format!("  {}", sanitize_terminal_text(comment)),
+                    Style::new()
+                        .fg(theme.muted)
+                        .bg(background)
+                        .add_modifier(Modifier::DIM),
+                ));
+            }
             ListItem::new(Line::from(spans))
         })
         .collect::<Vec<_>>();
@@ -978,7 +1016,9 @@ fn render_explorer_search(
             crate::model::workspace::ExplorerSearchLifecycle::Idle => {
                 "Type to search all objects".to_owned()
             }
-            crate::model::workspace::ExplorerSearchLifecycle::Loading => "Searching...".to_owned(),
+            crate::model::workspace::ExplorerSearchLifecycle::Loading => {
+                "Indexing catalog...".to_owned()
+            }
             crate::model::workspace::ExplorerSearchLifecycle::Ready => {
                 format!(
                     "No objects match \"{}\"",
@@ -1006,7 +1046,7 @@ fn render_explorer_search(
         let status = match &search.lifecycle {
             crate::model::workspace::ExplorerSearchLifecycle::Loading => "Searching...".to_owned(),
             crate::model::workspace::ExplorerSearchLifecycle::Failed(message) => {
-                if search.hits.is_empty() {
+                if search.frontend_rows.is_empty() {
                     format!(
                         "Search failed: {}  Ctrl+R retry",
                         sanitize_terminal_text(message)
@@ -1014,17 +1054,14 @@ fn render_explorer_search(
                 } else {
                     format!(
                         "{} retained | {}",
-                        search.hits.len(),
+                        search.frontend_rows.len(),
                         sanitize_terminal_text(message)
                     )
                 }
             }
-            _ if search.truncated => {
-                format!("{}+ results - refine your search", search.hits.len())
-            }
             _ => format!(
                 "{} results  n/N next/prev  Enter locate  Esc close",
-                search.total_count.unwrap_or(search.match_rows.len())
+                search.frontend_match_rows.len()
             ),
         };
         frame.render_widget(
