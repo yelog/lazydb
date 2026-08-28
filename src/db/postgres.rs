@@ -359,6 +359,7 @@ impl PostgresAdapter {
 
         let pool = PgPoolOptions::new()
             .max_connections(6)
+            .acquire_timeout(Duration::from_secs(10))
             .connect_with(options)
             .await
             .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Network))?;

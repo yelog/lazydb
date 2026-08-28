@@ -12,7 +12,7 @@ use crate::{
     app::App,
     cli::{Cli, MouseMode},
     db::{
-        DatabaseConnection,
+        DatabaseConnection, DatabaseError,
         catalog::{CatalogDiscovery, DiscoveredDatabase},
         transaction::TransactionRequest,
     },
@@ -666,80 +666,76 @@ impl Runtime {
                 None
             };
             let reused_sqlite = reusable_sqlite.is_some();
-            let candidate = match reusable_sqlite {
-                Some(database) => Ok(database),
-                None => {
-                    DatabaseConnection::connect_target(&profile, password.as_ref(), &target).await
-                }
-            };
-            match candidate {
-                Ok(database) => match database.probe().await {
-                    Ok(server) => {
-                        let mutation_guard = mutation.lock().await;
-                        if !profile_revision_is_current(&registry, &profile, profile_revision).await
-                        {
-                            database.close().await;
-                            return;
-                        }
-                        let mut active = connection.lock().await;
-                        let mut candidate = Some(database);
-                        let installation = {
-                            let attempt_guard =
-                                attempts.lock().expect("connection attempt mutex poisoned");
-                            if attempt_guard.latest != Some(expected)
-                                || attempt_guard.cancelled == Some(expected)
-                            {
-                                None
-                            } else {
-                                if let Ok(mut known) = known_relations.lock() {
-                                    known.clear();
-                                }
-                                Some(active.replace(ActiveConnection {
-                                    profile_id,
-                                    generation,
-                                    target: target.clone(),
-                                    database:
-                                        candidate.take().expect("connection candidate exists"),
-                                }))
-                            }
-                        };
-                        drop(active);
-                        let Some(previous) = installation else {
-                            let candidate = candidate.take().expect("connection candidate exists");
-                            if !reused_sqlite {
-                                candidate.close().await;
-                            }
-                            return;
-                        };
-                        let _ = sender.send(Action::ConnectionSucceeded {
-                            profile_id,
-                            generation,
-                            server,
-                        });
-                        drop(mutation_guard);
-                        if let Some(previous) = previous
-                            && !reused_sqlite
-                        {
-                            previous.database.close().await;
-                        }
+            let candidate = timeout(Duration::from_secs(10), async {
+                let database = match reusable_sqlite {
+                    Some(database) => database,
+                    None => {
+                        DatabaseConnection::connect_target(&profile, password.as_ref(), &target)
+                            .await?
                     }
+                };
+                let server = match database.probe().await {
+                    Ok(server) => server,
                     Err(error) => {
                         if !reused_sqlite {
                             database.close().await;
                         }
-                        let _mutation_guard = mutation.lock().await;
-                        if profile_revision_is_current(&registry, &profile, profile_revision).await
-                            && connection_attempt_is_current(&attempts, expected)
+                        return Err(error);
+                    }
+                };
+                Ok::<_, crate::db::DatabaseError>((database, server))
+            })
+            .await
+            .map_err(|_| DatabaseError::configuration("connection timed out after 10 seconds"));
+            match candidate {
+                Ok(Ok((database, server))) => {
+                    let mutation_guard = mutation.lock().await;
+                    if !profile_revision_is_current(&registry, &profile, profile_revision).await {
+                        database.close().await;
+                        return;
+                    }
+                    let mut active = connection.lock().await;
+                    let mut candidate = Some(database);
+                    let installation = {
+                        let attempt_guard =
+                            attempts.lock().expect("connection attempt mutex poisoned");
+                        if attempt_guard.latest != Some(expected)
+                            || attempt_guard.cancelled == Some(expected)
                         {
-                            let _ = sender.send(Action::ConnectionFailed {
+                            None
+                        } else {
+                            if let Ok(mut known) = known_relations.lock() {
+                                known.clear();
+                            }
+                            Some(active.replace(ActiveConnection {
                                 profile_id,
                                 generation,
-                                message: error.to_string(),
-                            });
+                                target: target.clone(),
+                                database: candidate.take().expect("connection candidate exists"),
+                            }))
                         }
+                    };
+                    drop(active);
+                    let Some(previous) = installation else {
+                        let candidate = candidate.take().expect("connection candidate exists");
+                        if !reused_sqlite {
+                            candidate.close().await;
+                        }
+                        return;
+                    };
+                    let _ = sender.send(Action::ConnectionSucceeded {
+                        profile_id,
+                        generation,
+                        server,
+                    });
+                    drop(mutation_guard);
+                    if let Some(previous) = previous
+                        && !reused_sqlite
+                    {
+                        previous.database.close().await;
                     }
-                },
-                Err(error) => {
+                }
+                Ok(Err(error)) | Err(error) => {
                     let _mutation_guard = mutation.lock().await;
                     if profile_revision_is_current(&registry, &profile, profile_revision).await
                         && connection_attempt_is_current(&attempts, expected)

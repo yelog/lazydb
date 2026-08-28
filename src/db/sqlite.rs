@@ -166,6 +166,7 @@ impl SqliteAdapter {
 
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
+            .acquire_timeout(Duration::from_secs(10))
             .idle_timeout(None)
             .max_lifetime(None)
             .connect_with(options)

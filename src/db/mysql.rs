@@ -270,7 +270,9 @@ impl MySqlAdapter {
             options = options.password(password.expose_secret());
         }
 
-        let mut pool_options = MySqlPoolOptions::new().max_connections(6);
+        let mut pool_options = MySqlPoolOptions::new()
+            .max_connections(6)
+            .acquire_timeout(Duration::from_secs(10));
         if profile.read_only {
             pool_options = pool_options.after_connect(|connection, _| {
                 Box::pin(async move {
