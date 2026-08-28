@@ -22,7 +22,9 @@ pub use completion::{
     CompletionScore, complete, quote_identifier, relation_ids_for_completion,
     should_offer_completion,
 };
-pub use derived_result::{DerivedQueryError, build_derived_query, derived_query_capable};
+pub use derived_result::{
+    DerivedQueryError, bounded_query, build_derived_query, derived_query_capable,
+};
 pub use dialect::SqlDialect;
 pub use execution::ExecutionDraft;
 pub use format::{FormatError, format_sql};

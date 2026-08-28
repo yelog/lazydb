@@ -30,7 +30,9 @@ fn current_run_does_not_fall_back_to_the_whole_buffer() {
     app.update(Action::ReplaceEditor("SELECT 1; SELECT 2;".into()));
 
     let commands = app.update(Action::RunActiveSql);
-    assert!(matches!(commands.as_slice(), [Command::RunQuery { sql, .. }] if sql == "SELECT 1;"));
+    assert!(
+        matches!(commands.as_slice(), [Command::RunQuery { sql, .. }] if sql == "SELECT * FROM (SELECT 1) AS __lazydb_query LIMIT 500")
+    );
 }
 
 #[test]
@@ -48,7 +50,7 @@ fn current_run_executes_statement_when_cursor_is_on_internal_space() {
 
     assert!(matches!(
         commands.as_slice(),
-        [Command::RunQuery { sql, .. }] if sql == "SELECT 1;"
+        [Command::RunQuery { sql, .. }] if sql == "SELECT * FROM (SELECT 1) AS __lazydb_query LIMIT 500"
     ));
 }
 

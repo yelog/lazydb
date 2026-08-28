@@ -4566,7 +4566,8 @@ impl App {
             let connection = draft.connection;
             let target = draft.target.clone();
             let tab_id = draft.console_id;
-            let sql = draft.sql.clone();
+            let sql =
+                sql::bounded_query(&draft.sql, draft.dialect).unwrap_or_else(|| draft.sql.clone());
             let mode_state = tab.transaction_state;
             if mode_state == TransactionState::Idle || mode_state == TransactionState::Active {
                 let mut snapshot = tab_snapshot(tab);
@@ -4607,7 +4608,7 @@ impl App {
             target: draft.target,
             tab_id: draft.console_id,
             generation,
-            sql: draft.sql,
+            sql: sql::bounded_query(&draft.sql, draft.dialect).unwrap_or(draft.sql),
         }]
     }
 
