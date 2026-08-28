@@ -431,6 +431,35 @@ fn editor_mouse_scroll_is_a_viewport_action() {
 }
 
 #[test]
+fn ddl_view_mouse_scroll_is_vertical_ddl_scroll() {
+    let mut app = App::new(Vec::new());
+    app.tabs.push(lazydb::model::tab::WorkspaceTab::Relation(
+        lazydb::model::relation::RelationTab::new("users"),
+    ));
+    app.active_tab = 1;
+    app.focus = Focus::Results;
+    app.update(Action::SetRelationView(
+        lazydb::model::relation::RelationView::Ddl,
+    ));
+    let ui = UiState::new();
+
+    assert_eq!(
+        map_mouse(mouse(MouseEventKind::ScrollDown, 40, 8), &ui, &app),
+        Some(Action::DdlScroll {
+            rows: 3,
+            columns: 0
+        })
+    );
+    assert_eq!(
+        map_mouse(mouse(MouseEventKind::ScrollUp, 40, 8), &ui, &app),
+        Some(Action::DdlScroll {
+            rows: -3,
+            columns: 0
+        })
+    );
+}
+
+#[test]
 fn help_and_message_overlays_block_background_mouse_input() {
     let mut app = App::new(Vec::new());
     let mut ui = UiState::new();

@@ -85,7 +85,7 @@ fn every_mutated_request_identity_is_stale() {
             ..valid.clone()
         },
         RelationRequest {
-            kind: RelationRequestKind::Structure,
+            kind: RelationRequestKind::Ddl,
             ..valid.clone()
         },
     ];
@@ -238,7 +238,7 @@ fn stale_requests(valid: &RelationRequest) -> Vec<RelationRequest> {
             ..valid.clone()
         },
         RelationRequest {
-            kind: RelationRequestKind::Structure,
+            kind: RelationRequestKind::Ddl,
             ..valid.clone()
         },
     ]

@@ -29,10 +29,11 @@ use super::{
         CatalogGroupSummary, CatalogId, CatalogKind, CatalogMetadata, CatalogPage, CatalogRequest,
         CatalogRequestKey, CatalogSearchHit, CatalogSearchPage, CatalogSearchRequest,
         CatalogTarget, CatalogValidationError, ColumnMetadata, ColumnMetadataCapabilities,
-        ConstraintMembership, ConstraintMetadata, Ddl, DdlProvenance, DiscoveredDatabase,
-        IndexMetadata, NamespaceModel, ObjectGroup, OptionalMetadata, QualifiedName,
-        RelationStructure, finalize_keyset_page,
+        ConstraintMembership, ConstraintMetadata, DdlProvenance, DiscoveredDatabase, IndexMetadata,
+        NamespaceModel, ObjectGroup, OptionalMetadata, QualifiedName, RelationDdl,
+        finalize_keyset_page,
     },
+    ddl::{DdlSection, assemble_ddl},
     mutation::{InputValue, MutationResult, RelationMutation, RelationMutationRequest},
     query::{ColumnMeta, QueryOutcome, QueryOutcomeAccumulator, RELATION_PREVIEW_LIMIT, ResultSet},
     value::CellValue,
@@ -229,6 +230,35 @@ struct PgConstraintInfo {
     referenced_columns: Vec<String>,
     check_expression: Option<String>,
     comment: Option<String>,
+}
+
+#[derive(Debug)]
+struct PgDdlColumn {
+    name: String,
+    native_type: String,
+    default_expression: Option<String>,
+    not_null: bool,
+    identity_kind: String,
+    generated_kind: String,
+}
+
+#[derive(Debug)]
+struct PgDdlRelation {
+    schema: String,
+    name: String,
+    relation_kind: String,
+    persistence: String,
+    view_definition: Option<String>,
+    materialized_populated: bool,
+    partition_key: Option<String>,
+    partition_parent: Option<(String, String)>,
+    partition_bound: Option<String>,
+    columns: Vec<PgDdlColumn>,
+    constraints: Vec<(String, String)>,
+    relation_comment: Option<String>,
+    column_comments: Vec<(String, String)>,
+    indexes: Vec<(String, String)>,
+    triggers: Vec<(String, String)>,
 }
 
 struct PgSearchCandidate {
@@ -1358,17 +1388,31 @@ impl PostgresAdapter {
         })
     }
 
-    pub async fn relation_structure(
-        &self,
-        relation: &CatalogId,
-    ) -> Result<RelationStructure, DatabaseError> {
+    pub async fn relation_ddl(&self, relation: &CatalogId) -> Result<RelationDdl, DatabaseError> {
         let mut connection = self.pool.acquire().await.map_err(sql_error)?;
+        let mut transaction = connection.begin().await.map_err(sql_error)?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            .execute(&mut *transaction)
+            .await
+            .map_err(sql_error)?;
+        let result = self.relation_ddl_snapshot(&mut transaction, relation).await;
+        let rollback = transaction.rollback().await.map_err(sql_error);
+        if let Err(rollback_error) = rollback {
+            return result.and(Err(rollback_error));
+        }
+        result
+    }
+
+    async fn relation_ddl_snapshot(
+        &self,
+        connection: &mut PgConnection,
+        relation: &CatalogId,
+    ) -> Result<RelationDdl, DatabaseError> {
         let target = CatalogTarget::RelationChildren {
             relation: relation.clone(),
         };
-        let (database, schema, name, _, native_kind) = self
-            .verify_relation(&mut connection, relation, &target)
-            .await?;
+        let (database, schema, name, relation_oid, native_kind) =
+            self.verify_relation(connection, relation, &target).await?;
         if !self.catalog_scope.allows_schema(&database, &schema) {
             return Err(catalog_target_not_found(&target));
         }
@@ -1385,7 +1429,6 @@ impl PostgresAdapter {
             true,
         )
         .map_err(catalog_invariant)?;
-        drop(connection);
         let request = CatalogRequest {
             key: CatalogRequestKey {
                 connection: ConnectionIdentity {
@@ -1400,22 +1443,176 @@ impl PostgresAdapter {
             scope: self.catalog_scope.clone(),
             page_size: RELATION_PREVIEW_LIMIT,
         };
-        let children = self.load_catalog_page(&request).await?;
-        let ddl = self.object_ddl(relation.kind, &schema, &name).await?;
-        let provenance = if relation.kind == CatalogKind::MaterializedView {
-            DdlProvenance::AdapterGenerated
-        } else if ddl.is_some() {
-            DdlProvenance::NativeCatalog
-        } else {
-            DdlProvenance::AdapterGenerated
-        };
-        Ok(RelationStructure {
+        let children = self
+            .load_relation_children_page(connection, &request, relation)
+            .await?;
+        let ddl = self
+            .load_relation_ddl_parts(connection, relation_oid, &schema, &name)
+            .await?;
+        let sql = assemble_relation_ddl(ddl)?;
+        Ok(RelationDdl {
             relation: relation_entry,
             children,
-            ddl: Ddl {
-                sql: ddl,
-                provenance,
+            sql,
+            provenance: DdlProvenance::AdapterGenerated,
+        })
+    }
+
+    async fn load_relation_ddl_parts(
+        &self,
+        connection: &mut PgConnection,
+        relation_oid: i64,
+        schema: &str,
+        name: &str,
+    ) -> Result<PgDdlRelation, DatabaseError> {
+        let relation_row = sqlx::query(
+            "SELECT c.relkind::text AS relation_kind, c.relpersistence::text AS persistence, \
+             c.relispopulated AS materialized_populated, obj_description(c.oid, 'pg_class') AS comment, \
+             CASE WHEN c.relkind IN ('v','m') THEN pg_get_viewdef(c.oid, true) END AS view_definition, \
+             CASE WHEN c.relkind='p' THEN pg_get_partkeydef(c.oid) END AS partition_key, \
+             CASE WHEN c.relispartition THEN parent_ns.nspname END AS partition_parent_schema, \
+             CASE WHEN c.relispartition THEN parent.relname END AS partition_parent_name, \
+             CASE WHEN c.relispartition THEN pg_get_expr(c.relpartbound, c.oid, true) END AS partition_bound \
+             FROM pg_class c \
+             LEFT JOIN pg_inherits inh ON inh.inhrelid=c.oid \
+             LEFT JOIN pg_class parent ON parent.oid=inh.inhparent \
+             LEFT JOIN pg_namespace parent_ns ON parent_ns.oid=parent.relnamespace \
+             WHERE c.oid=$1::oid",
+        )
+        .bind(relation_oid)
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(sql_error)?
+        .ok_or_else(|| catalog_internal(format!("PostgreSQL relation {schema}.{name} has no main definition")))?;
+        let relation_kind: String = relation_row
+            .try_get("relation_kind")
+            .map_err(decode_error)?;
+
+        let column_rows = sqlx::query(
+            "SELECT a.attname AS name, format_type(a.atttypid,a.atttypmod) AS native_type, \
+             pg_get_expr(d.adbin,d.adrelid) AS default_expression, a.attnotnull AS not_null, \
+             a.attidentity::text AS identity_kind, a.attgenerated::text AS generated_kind, \
+             col_description(a.attrelid,a.attnum) AS comment \
+             FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum \
+             WHERE a.attrelid=$1::oid AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum",
+        )
+        .bind(relation_oid)
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(sql_error)?;
+        let mut columns = Vec::with_capacity(column_rows.len());
+        let mut column_comments = Vec::new();
+        for row in column_rows {
+            let column_name: String = row.try_get("name").map_err(decode_error)?;
+            if let Some(comment) = row.try_get("comment").map_err(decode_error)? {
+                column_comments.push((column_name.clone(), comment));
+            }
+            columns.push(PgDdlColumn {
+                name: column_name,
+                native_type: row.try_get("native_type").map_err(decode_error)?,
+                default_expression: row.try_get("default_expression").map_err(decode_error)?,
+                not_null: row.try_get("not_null").map_err(decode_error)?,
+                identity_kind: row.try_get("identity_kind").map_err(decode_error)?,
+                generated_kind: row.try_get("generated_kind").map_err(decode_error)?,
+            });
+        }
+
+        let constraints = sqlx::query(
+            "SELECT con.conname AS name, pg_get_constraintdef(con.oid, true) AS definition \
+             FROM pg_constraint con WHERE con.conrelid=$1::oid \
+               AND con.contype IN ('c','f','p','u','x') \
+             ORDER BY con.conname COLLATE \"C\", con.oid",
+        )
+        .bind(relation_oid)
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(sql_error)?
+        .into_iter()
+        .map(|row| {
+            Ok((
+                row.try_get("name").map_err(decode_error)?,
+                row.try_get("definition").map_err(decode_error)?,
+            ))
+        })
+        .collect::<Result<Vec<_>, DatabaseError>>()?;
+
+        let indexes = sqlx::query(
+            "SELECT ic.relname AS name, pg_get_indexdef(idx.indexrelid) AS definition \
+             FROM pg_index idx JOIN pg_class ic ON ic.oid=idx.indexrelid \
+             WHERE idx.indrelid=$1::oid AND idx.indisvalid AND idx.indisready \
+               AND NOT EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid=idx.indexrelid) \
+             ORDER BY ic.relname COLLATE \"C\", idx.indexrelid",
+        )
+        .bind(relation_oid)
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(sql_error)?
+        .into_iter()
+        .map(|row| {
+            Ok((
+                row.try_get("name").map_err(decode_error)?,
+                row.try_get("definition").map_err(decode_error)?,
+            ))
+        })
+        .collect::<Result<Vec<_>, DatabaseError>>()?;
+
+        let triggers = sqlx::query(
+            "SELECT t.tgname AS name, pg_get_triggerdef(t.oid, true) AS definition \
+             FROM pg_trigger t WHERE t.tgrelid=$1::oid AND NOT t.tgisinternal \
+             ORDER BY t.tgname COLLATE \"C\", t.oid",
+        )
+        .bind(relation_oid)
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(sql_error)?
+        .into_iter()
+        .map(|row| {
+            Ok((
+                row.try_get("name").map_err(decode_error)?,
+                row.try_get("definition").map_err(decode_error)?,
+            ))
+        })
+        .collect::<Result<Vec<_>, DatabaseError>>()?;
+
+        Ok(PgDdlRelation {
+            schema: schema.to_owned(),
+            name: name.to_owned(),
+            relation_kind,
+            persistence: relation_row.try_get("persistence").map_err(decode_error)?,
+            view_definition: relation_row
+                .try_get("view_definition")
+                .map_err(decode_error)?,
+            materialized_populated: relation_row
+                .try_get("materialized_populated")
+                .map_err(decode_error)?,
+            partition_key: relation_row
+                .try_get("partition_key")
+                .map_err(decode_error)?,
+            partition_parent: match (
+                relation_row
+                    .try_get("partition_parent_schema")
+                    .map_err(decode_error)?,
+                relation_row
+                    .try_get("partition_parent_name")
+                    .map_err(decode_error)?,
+            ) {
+                (Some(schema), Some(name)) => Some((schema, name)),
+                (None, None) => None,
+                _ => {
+                    return Err(catalog_internal(
+                        "PostgreSQL partition parent is incomplete",
+                    ));
+                }
             },
+            partition_bound: relation_row
+                .try_get("partition_bound")
+                .map_err(decode_error)?,
+            columns,
+            constraints,
+            relation_comment: relation_row.try_get("comment").map_err(decode_error)?,
+            column_comments,
+            indexes,
+            triggers,
         })
     }
 
@@ -1514,6 +1711,198 @@ impl PostgresAdapter {
     pub async fn close(self) {
         self.pool.close().await;
     }
+}
+
+fn assemble_relation_ddl(mut relation: PgDdlRelation) -> Result<String, DatabaseError> {
+    relation
+        .constraints
+        .sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
+    relation
+        .column_comments
+        .sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
+    relation
+        .indexes
+        .sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
+    relation
+        .triggers
+        .sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
+
+    let qualified = format!(
+        "{}.{}",
+        quote_identifier(&relation.schema),
+        quote_identifier(&relation.name)
+    );
+    let (main_label, main_sql, comment_kind) = match relation.relation_kind.as_str() {
+        "r" if relation.partition_parent.is_some() => {
+            let (parent_schema, parent_name) = relation.partition_parent.as_ref().unwrap();
+            let bound = relation.partition_bound.as_deref().ok_or_else(|| {
+                catalog_internal(format!(
+                    "PostgreSQL partition {}.{} has no partition bound",
+                    relation.schema, relation.name
+                ))
+            })?;
+            (
+                "Table",
+                format!(
+                    "CREATE TABLE {qualified} PARTITION OF {}.{} {bound}",
+                    quote_identifier(parent_schema),
+                    quote_identifier(parent_name)
+                ),
+                "TABLE",
+            )
+        }
+        "r" | "p" => {
+            let mut definitions = relation
+                .columns
+                .iter()
+                .map(column_definition)
+                .collect::<Result<Vec<_>, _>>()?;
+            definitions.extend(relation.constraints.iter().map(|(name, definition)| {
+                format!("CONSTRAINT {} {definition}", quote_identifier(name))
+            }));
+            let persistence = match relation.persistence.as_str() {
+                "p" => "",
+                "u" => "UNLOGGED ",
+                "t" => "TEMPORARY ",
+                value => {
+                    return Err(catalog_internal(format!(
+                        "unexpected PostgreSQL relation persistence {value}"
+                    )));
+                }
+            };
+            let mut statement = format!(
+                "CREATE {persistence}TABLE {qualified} (\n{}\n)",
+                definitions
+                    .iter()
+                    .map(|definition| format!("  {definition}"))
+                    .collect::<Vec<_>>()
+                    .join(",\n")
+            );
+            if relation.relation_kind == "p" {
+                let partition_key = relation.partition_key.as_deref().ok_or_else(|| {
+                    catalog_internal(format!(
+                        "PostgreSQL partitioned table {}.{} has no partition key",
+                        relation.schema, relation.name
+                    ))
+                })?;
+                statement.push_str(" PARTITION BY ");
+                statement.push_str(partition_key);
+            }
+            ("Table", statement, "TABLE")
+        }
+        "v" | "m" => {
+            let definition = relation
+                .view_definition
+                .as_deref()
+                .map(str::trim)
+                .filter(|definition| !definition.is_empty())
+                .ok_or_else(|| {
+                    catalog_internal(format!(
+                        "PostgreSQL relation {}.{} has no main view definition",
+                        relation.schema, relation.name
+                    ))
+                })?;
+            if relation.relation_kind == "v" {
+                (
+                    "View",
+                    format!("CREATE VIEW {qualified} AS\n{definition}"),
+                    "VIEW",
+                )
+            } else {
+                let no_data = if relation.materialized_populated {
+                    ""
+                } else {
+                    "\nWITH NO DATA"
+                };
+                (
+                    "View",
+                    format!("CREATE MATERIALIZED VIEW {qualified} AS\n{definition}{no_data}"),
+                    "MATERIALIZED VIEW",
+                )
+            }
+        }
+        value => {
+            return Err(catalog_internal(format!(
+                "unsupported PostgreSQL relation kind {value} for DDL"
+            )));
+        }
+    };
+
+    let mut comments = Vec::new();
+    if let Some(comment) = relation.relation_comment {
+        comments.push(format!(
+            "COMMENT ON {comment_kind} {qualified} IS {}",
+            quote_literal(&comment)
+        ));
+    }
+    comments.extend(
+        relation
+            .column_comments
+            .into_iter()
+            .map(|(column, comment)| {
+                format!(
+                    "COMMENT ON COLUMN {qualified}.{} IS {}",
+                    quote_identifier(&column),
+                    quote_literal(&comment)
+                )
+            }),
+    );
+
+    assemble_ddl(vec![
+        DdlSection {
+            label: main_label,
+            statements: vec![main_sql],
+        },
+        DdlSection {
+            label: "Comments",
+            statements: comments,
+        },
+        DdlSection {
+            label: "Indexes",
+            statements: relation.indexes.into_iter().map(|(_, sql)| sql).collect(),
+        },
+        DdlSection {
+            label: "Triggers",
+            statements: relation.triggers.into_iter().map(|(_, sql)| sql).collect(),
+        },
+    ])
+    .ok_or_else(|| catalog_internal("PostgreSQL relation DDL assembly produced no statements"))
+}
+
+fn column_definition(column: &PgDdlColumn) -> Result<String, DatabaseError> {
+    let mut definition = format!("{} {}", quote_identifier(&column.name), column.native_type);
+    match (
+        column.identity_kind.as_str(),
+        column.generated_kind.as_str(),
+    ) {
+        ("a", "") => definition.push_str(" GENERATED ALWAYS AS IDENTITY"),
+        ("d", "") => definition.push_str(" GENERATED BY DEFAULT AS IDENTITY"),
+        ("", "s") => {
+            let expression = column.default_expression.as_deref().ok_or_else(|| {
+                catalog_internal(format!(
+                    "PostgreSQL generated column {} has no expression",
+                    column.name
+                ))
+            })?;
+            definition.push_str(&format!(" GENERATED ALWAYS AS ({expression}) STORED"));
+        }
+        ("", "") => {
+            if let Some(expression) = &column.default_expression {
+                definition.push_str(" DEFAULT ");
+                definition.push_str(expression);
+            }
+        }
+        (identity, generated) => {
+            return Err(catalog_internal(format!(
+                "unsupported PostgreSQL identity/generated combination {identity:?}/{generated:?} for column {}",
+                column.name
+            )));
+        }
+    }
+    if column.not_null {
+        definition.push_str(" NOT NULL");
+    }
+    Ok(definition)
 }
 
 fn append_preview_options(
@@ -2154,6 +2543,10 @@ pub fn quote_identifier(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
 
+pub fn quote_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
 fn pg_ssl_mode(mode: SslMode) -> PgSslMode {
     match mode {
         SslMode::Disable => PgSslMode::Disable,
@@ -2237,4 +2630,153 @@ fn unsupported(type_name: &str, preview: &str) -> CellValue {
 
 fn decode_error(error: sqlx::Error) -> DatabaseError {
     DatabaseError::from_sqlx(error, ErrorCategory::Internal)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        PgDdlColumn, PgDdlRelation, assemble_relation_ddl, column_definition, quote_identifier,
+        quote_literal,
+    };
+
+    #[test]
+    fn ddl_quoting_escapes_postgres_identifiers_and_literals() {
+        assert_eq!(quote_identifier("odd\"name"), "\"odd\"\"name\"");
+        assert_eq!(quote_literal("owner's note"), "'owner''s note'");
+    }
+
+    #[test]
+    fn column_definition_uses_exactly_one_generated_identity_or_default_clause() {
+        let base = PgDdlColumn {
+            name: "id".to_owned(),
+            native_type: "bigint".to_owned(),
+            default_expression: Some("nextval('ignored')".to_owned()),
+            not_null: true,
+            identity_kind: "d".to_owned(),
+            generated_kind: String::new(),
+        };
+        assert_eq!(
+            column_definition(&base).unwrap(),
+            "\"id\" bigint GENERATED BY DEFAULT AS IDENTITY NOT NULL"
+        );
+
+        let generated = PgDdlColumn {
+            name: "slug".to_owned(),
+            native_type: "text".to_owned(),
+            default_expression: Some("lower(name)".to_owned()),
+            not_null: false,
+            identity_kind: String::new(),
+            generated_kind: "s".to_owned(),
+        };
+        assert_eq!(
+            column_definition(&generated).unwrap(),
+            "\"slug\" text GENERATED ALWAYS AS (lower(name)) STORED"
+        );
+
+        let defaulted = PgDdlColumn {
+            name: "active".to_owned(),
+            native_type: "boolean".to_owned(),
+            default_expression: Some("true".to_owned()),
+            not_null: false,
+            identity_kind: String::new(),
+            generated_kind: String::new(),
+        };
+        assert_eq!(
+            column_definition(&defaulted).unwrap(),
+            "\"active\" boolean DEFAULT true"
+        );
+    }
+
+    #[test]
+    fn assembles_table_constraints_comments_indexes_and_triggers_in_sections() {
+        let ddl = assemble_relation_ddl(PgDdlRelation {
+            schema: "odd schema".to_owned(),
+            name: "accounts".to_owned(),
+            relation_kind: "r".to_owned(),
+            persistence: "p".to_owned(),
+            view_definition: None,
+            materialized_populated: true,
+            partition_key: None,
+            partition_parent: None,
+            partition_bound: None,
+            columns: vec![PgDdlColumn {
+                name: "id".to_owned(),
+                native_type: "integer".to_owned(),
+                default_expression: None,
+                not_null: true,
+                identity_kind: String::new(),
+                generated_kind: String::new(),
+            }],
+            constraints: vec![("accounts_pk".to_owned(), "PRIMARY KEY (id)".to_owned())],
+            relation_comment: Some("owner's table".to_owned()),
+            column_comments: vec![("id".to_owned(), "primary key".to_owned())],
+            indexes: vec![("accounts_live_idx".to_owned(), "CREATE INDEX accounts_live_idx ON \"odd schema\".accounts (id)".to_owned())],
+            triggers: vec![("audit".to_owned(), "CREATE TRIGGER audit AFTER UPDATE ON \"odd schema\".accounts EXECUTE FUNCTION audit_row()".to_owned())],
+        })
+        .unwrap();
+
+        assert!(ddl.contains("-- Table\n\nCREATE TABLE \"odd schema\".\"accounts\" (\n  \"id\" integer NOT NULL,\n  CONSTRAINT \"accounts_pk\" PRIMARY KEY (id)\n);"));
+        assert!(ddl.contains(
+            "-- Comments\n\nCOMMENT ON TABLE \"odd schema\".\"accounts\" IS 'owner''s table';"
+        ));
+        assert!(
+            ddl.contains("COMMENT ON COLUMN \"odd schema\".\"accounts\".\"id\" IS 'primary key';")
+        );
+        assert!(ddl.contains("-- Indexes\n\nCREATE INDEX accounts_live_idx"));
+        assert!(ddl.contains("-- Triggers\n\nCREATE TRIGGER audit"));
+    }
+
+    #[test]
+    fn assembles_view_and_omits_empty_optional_sections() {
+        let ddl = assemble_relation_ddl(PgDdlRelation {
+            schema: "public".to_owned(),
+            name: "active_accounts".to_owned(),
+            relation_kind: "v".to_owned(),
+            persistence: "p".to_owned(),
+            view_definition: Some(" SELECT id FROM accounts ".to_owned()),
+            materialized_populated: true,
+            partition_key: None,
+            partition_parent: None,
+            partition_bound: None,
+            columns: vec![],
+            constraints: vec![],
+            relation_comment: None,
+            column_comments: vec![],
+            indexes: vec![],
+            triggers: vec![],
+        })
+        .unwrap();
+
+        assert_eq!(
+            ddl,
+            "-- View\n\nCREATE VIEW \"public\".\"active_accounts\" AS\nSELECT id FROM accounts;"
+        );
+        assert!(!ddl.contains("-- Comments"));
+        assert!(!ddl.contains("-- Indexes"));
+        assert!(!ddl.contains("-- Triggers"));
+    }
+
+    #[test]
+    fn rejects_a_missing_main_view_definition() {
+        let error = assemble_relation_ddl(PgDdlRelation {
+            schema: "public".to_owned(),
+            name: "missing_definition".to_owned(),
+            relation_kind: "v".to_owned(),
+            persistence: "p".to_owned(),
+            view_definition: Some("  ".to_owned()),
+            materialized_populated: true,
+            partition_key: None,
+            partition_parent: None,
+            partition_bound: None,
+            columns: vec![],
+            constraints: vec![],
+            relation_comment: None,
+            column_comments: vec![],
+            indexes: vec![],
+            triggers: vec![],
+        })
+        .unwrap_err();
+
+        assert!(error.message.contains("has no main view definition"));
+    }
 }

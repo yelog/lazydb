@@ -189,6 +189,18 @@ pub enum Action {
     SetRelationView(crate::model::relation::RelationView),
     RefreshActiveRelation,
     CancelActiveRelationRequest,
+    DdlScroll {
+        rows: isize,
+        columns: isize,
+    },
+    DdlScrollToStart,
+    DdlScrollToEnd,
+    SetDdlViewportMetrics {
+        visible_rows: usize,
+        visible_columns: usize,
+        total_rows: usize,
+        max_line_width: usize,
+    },
     FocusDataQueryInput(crate::model::data_query::DataQueryInput),
     DataQueryInsert(char),
     DataQueryBackspace,
@@ -506,7 +518,7 @@ pub enum Command {
     SearchCatalog(CatalogSearchRequest),
     CancelCatalogSearch,
     LoadRelationPreview(crate::model::relation::RelationRequest),
-    LoadRelationStructure(crate::model::relation::RelationRequest),
+    LoadRelationDdl(crate::model::relation::RelationRequest),
     CancelRelationRequest(crate::model::relation::RelationRequest),
     RunQuery {
         connection: ConnectionIdentity,

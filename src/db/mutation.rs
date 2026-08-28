@@ -9,7 +9,7 @@ use crate::{
 };
 
 use super::{
-    catalog::{CatalogId, CatalogKind, RelationStructure},
+    catalog::{CatalogId, CatalogKind, RelationDdl},
     query::ResultSet,
     value::CellValue,
 };
@@ -32,7 +32,7 @@ pub enum EditDisabledReason {
     ReadOnlyConnection,
     NotATable,
     SnapshotNotLive,
-    MissingStructure,
+    MissingDdl,
     MissingPrimaryKey,
     MissingPrimaryKeyColumn(String),
     UnsupportedRowValue,
@@ -44,8 +44,8 @@ pub enum EditableRelationCapability {
     ReadOnly(EditDisabledReason),
 }
 
-pub fn metadata_fingerprint(structure: &RelationStructure) -> MetadataFingerprint {
-    let columns = structure
+pub fn metadata_fingerprint(ddl: &RelationDdl) -> MetadataFingerprint {
+    let columns = ddl
         .children
         .entries
         .iter()
@@ -60,7 +60,7 @@ pub fn metadata_fingerprint(structure: &RelationStructure) -> MetadataFingerprin
             ))
         })
         .collect();
-    let primary_key = structure
+    let primary_key = ddl
         .children
         .entries
         .iter()
@@ -72,7 +72,7 @@ pub fn metadata_fingerprint(structure: &RelationStructure) -> MetadataFingerprin
         })
         .unwrap_or_default();
     MetadataFingerprint {
-        relation: structure.relation.qualified_name.object.clone(),
+        relation: ddl.relation.qualified_name.object.clone(),
         columns,
         primary_key,
     }
@@ -82,7 +82,7 @@ pub fn editable_capability(
     kind: CatalogKind,
     read_only: bool,
     live: bool,
-    structure: Option<&RelationStructure>,
+    ddl: Option<&RelationDdl>,
     result: &ResultSet,
 ) -> EditableRelationCapability {
     if read_only {
@@ -94,10 +94,10 @@ pub fn editable_capability(
     if !live {
         return EditableRelationCapability::ReadOnly(EditDisabledReason::SnapshotNotLive);
     }
-    let Some(structure) = structure else {
-        return EditableRelationCapability::ReadOnly(EditDisabledReason::MissingStructure);
+    let Some(ddl) = ddl else {
+        return EditableRelationCapability::ReadOnly(EditDisabledReason::MissingDdl);
     };
-    let fingerprint = metadata_fingerprint(structure);
+    let fingerprint = metadata_fingerprint(ddl);
     if fingerprint.primary_key.is_empty() {
         return EditableRelationCapability::ReadOnly(EditDisabledReason::MissingPrimaryKey);
     }
@@ -198,8 +198,25 @@ pub struct ChangedColumns(pub BTreeSet<usize>);
 
 #[cfg(test)]
 mod tests {
-    use super::{InputValue, MetadataFingerprint};
-    use crate::db::value::CellValue;
+    use uuid::Uuid;
+
+    use super::{
+        EditableRelationCapability, InputValue, MetadataFingerprint, editable_capability,
+        metadata_fingerprint,
+    };
+    use crate::{
+        db::{
+            catalog::{
+                CatalogCount, CatalogEntry, CatalogId, CatalogKind, CatalogMetadata, CatalogPage,
+                CatalogRequest, CatalogRequestKey, CatalogTarget, ColumnMetadata,
+                ConstraintMetadata, DdlProvenance, OptionalMetadata, QualifiedName, RelationDdl,
+            },
+            query::{ColumnMeta, ResultSet},
+            value::CellValue,
+        },
+        identity::ConnectionIdentity,
+        profile::{CatalogScope, DatabaseKind},
+    };
 
     #[test]
     fn input_values_keep_literal_and_sql_values_distinct() {
@@ -221,5 +238,144 @@ mod tests {
             primary_key: vec!["id".into()],
         };
         assert_eq!(left, left.clone());
+    }
+
+    #[test]
+    fn relation_ddl_metadata_fingerprint_preserves_columns_and_primary_key() {
+        let ddl = relation_ddl_with_primary_key();
+
+        assert_eq!(
+            metadata_fingerprint(&ddl),
+            MetadataFingerprint {
+                relation: "users".into(),
+                columns: vec![
+                    ("id".into(), "integer".into(), false),
+                    ("name".into(), "text".into(), true),
+                ],
+                primary_key: vec!["id".into()],
+            }
+        );
+    }
+
+    #[test]
+    fn relation_with_primary_key_metadata_is_editable() {
+        let ddl = relation_ddl_with_primary_key();
+        let result = ResultSet {
+            columns: vec![
+                ColumnMeta {
+                    name: "id".into(),
+                    type_name: "integer".into(),
+                },
+                ColumnMeta {
+                    name: "name".into(),
+                    type_name: "text".into(),
+                },
+            ],
+            rows: vec![vec![CellValue::Integer(1), CellValue::Text("Ada".into())]],
+            affected_rows: 0,
+        };
+
+        assert_eq!(
+            editable_capability(CatalogKind::Table, false, true, Some(&ddl), &result),
+            EditableRelationCapability::Editable(super::EditMetadata {
+                fingerprint: metadata_fingerprint(&ddl),
+                primary_key_columns: vec![0],
+            })
+        );
+    }
+
+    fn relation_ddl_with_primary_key() -> RelationDdl {
+        let profile_id = Uuid::new_v4();
+        let relation_id = CatalogId::new(profile_id, CatalogKind::Table, ["db", "public", "users"]);
+        let schema_id = CatalogId::new(profile_id, CatalogKind::Schema, ["db", "public"]);
+        let qualified_name = QualifiedName {
+            database: Some("db".into()),
+            schema: Some("public".into()),
+            object: "users".into(),
+        };
+        let relation = CatalogEntry::relation(
+            relation_id.clone(),
+            schema_id,
+            qualified_name.clone(),
+            "table",
+            OptionalMetadata::Unsupported,
+            true,
+        )
+        .unwrap();
+        let entries = vec![
+            CatalogEntry::relation_child(
+                CatalogId::new(
+                    profile_id,
+                    CatalogKind::Column,
+                    ["db", "public", "users", "id"],
+                ),
+                relation_id.clone(),
+                QualifiedName {
+                    object: "id".into(),
+                    ..qualified_name.clone()
+                },
+                "integer",
+                OptionalMetadata::Unsupported,
+                CatalogMetadata::Column(ColumnMetadata::new(1, "integer", false)),
+            )
+            .unwrap(),
+            CatalogEntry::relation_child(
+                CatalogId::new(
+                    profile_id,
+                    CatalogKind::Column,
+                    ["db", "public", "users", "name"],
+                ),
+                relation_id.clone(),
+                QualifiedName {
+                    object: "name".into(),
+                    ..qualified_name.clone()
+                },
+                "text",
+                OptionalMetadata::Unsupported,
+                CatalogMetadata::Column(ColumnMetadata::new(2, "text", true)),
+            )
+            .unwrap(),
+            CatalogEntry::relation_child(
+                CatalogId::new(
+                    profile_id,
+                    CatalogKind::PrimaryKey,
+                    ["db", "public", "users", "users_pkey"],
+                ),
+                relation_id.clone(),
+                QualifiedName {
+                    object: "users_pkey".into(),
+                    ..qualified_name
+                },
+                "primary_key",
+                OptionalMetadata::Unsupported,
+                CatalogMetadata::Constraint(ConstraintMetadata::PrimaryKey {
+                    columns: vec!["id".into()],
+                }),
+            )
+            .unwrap(),
+        ];
+        let request = CatalogRequest {
+            key: CatalogRequestKey {
+                connection: ConnectionIdentity {
+                    profile_id,
+                    generation: 1,
+                },
+                catalog_epoch: 1,
+                request_id: 1,
+                target: CatalogTarget::RelationChildren {
+                    relation: relation_id,
+                },
+                cursor: None,
+            },
+            scope: CatalogScope::for_profile(DatabaseKind::Postgres, "db", None),
+            page_size: 100,
+        };
+        let children = CatalogPage::new(&request, entries, CatalogCount::Exact(3), None).unwrap();
+        RelationDdl {
+            relation,
+            children,
+            sql: "CREATE TABLE users (id integer PRIMARY KEY, name text)".into(),
+            provenance: DdlProvenance::NativeCatalog,
+        }
     }
 }

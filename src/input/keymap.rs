@@ -216,6 +216,12 @@ impl Keymap {
                 _ => None,
             };
         }
+        if is_relation_ddl_focus(app)
+            && let Some(action) = map_relation_ddl(event)
+        {
+            return Some(action);
+        }
+
         if app.active_console_opt().is_some_and(|tab| {
             tab.completion.is_some() && app.active_editor_mode() == EditorMode::Insert
         }) {
@@ -594,6 +600,44 @@ fn is_relation_data_focus(app: &App) -> bool {
         )
 }
 
+fn is_relation_ddl_focus(app: &App) -> bool {
+    app.focus == Focus::Results
+        && matches!(
+            app.tabs.get(app.active_tab),
+            Some(crate::model::tab::WorkspaceTab::Relation(tab))
+                if tab.view == crate::model::relation::RelationView::Ddl
+        )
+}
+
+fn map_relation_ddl(event: KeyEvent) -> Option<Action> {
+    if !(event.modifiers.is_empty()
+        || event.modifiers == KeyModifiers::SHIFT && event.code == KeyCode::Char('G'))
+    {
+        return None;
+    }
+    match event.code {
+        KeyCode::Char('j') | KeyCode::Down => Some(Action::DdlScroll {
+            rows: 1,
+            columns: 0,
+        }),
+        KeyCode::Char('k') | KeyCode::Up => Some(Action::DdlScroll {
+            rows: -1,
+            columns: 0,
+        }),
+        KeyCode::Char('h') | KeyCode::Left => Some(Action::DdlScroll {
+            rows: 0,
+            columns: -1,
+        }),
+        KeyCode::Char('l') | KeyCode::Right => Some(Action::DdlScroll {
+            rows: 0,
+            columns: 1,
+        }),
+        KeyCode::Char('g') => Some(Action::DdlScrollToStart),
+        KeyCode::Char('G') => Some(Action::DdlScrollToEnd),
+        _ => None,
+    }
+}
+
 fn relation_grid_is_browse(app: &App) -> bool {
     use crate::model::relation_edit::RelationGridMode;
 
@@ -906,7 +950,7 @@ fn map_explorer(code: KeyCode, app: &App) -> Option<Action> {
             view: crate::model::relation::RelationView::Data,
         }),
         KeyCode::Char('D') => Some(Action::OpenSelectedRelation {
-            view: crate::model::relation::RelationView::Structure,
+            view: crate::model::relation::RelationView::Ddl,
         }),
         KeyCode::Home => Some(Action::ExplorerSelectTarget(
             crate::model::explorer::ExplorerNodeTarget::First,
@@ -955,9 +999,9 @@ fn map_results(code: KeyCode, app: &App) -> Option<Action> {
             Some(crate::model::tab::WorkspaceTab::Relation(tab)) => {
                 Some(Action::SetRelationView(match tab.view {
                     crate::model::relation::RelationView::Data => {
-                        crate::model::relation::RelationView::Structure
+                        crate::model::relation::RelationView::Ddl
                     }
-                    crate::model::relation::RelationView::Structure => {
+                    crate::model::relation::RelationView::Ddl => {
                         crate::model::relation::RelationView::Data
                     }
                 }))
@@ -978,7 +1022,7 @@ fn map_relation(code: KeyCode, app: &App) -> Option<Action> {
             crate::model::relation::RelationView::Data,
         )),
         KeyCode::Char('D') => Some(Action::SetRelationView(
-            crate::model::relation::RelationView::Structure,
+            crate::model::relation::RelationView::Ddl,
         )),
         KeyCode::Char('r') => Some(Action::RefreshActiveRelation),
         _ => map_results(code, app),
@@ -1337,7 +1381,7 @@ mod tests {
             Some(Action::RelationPaste)
         );
         app.update(Action::SetRelationView(
-            crate::model::relation::RelationView::Structure,
+            crate::model::relation::RelationView::Ddl,
         ));
         assert_eq!(
             keymap.map(key(KeyCode::Char('p')), &app),

@@ -32,8 +32,8 @@ integration.
   detected macOS Login Keychain or Linux Secret Service support.
 - UUID-owned Explorer roots for saved and session-only profiles, lazy catalog
   loading, server-backed `/` search across unloaded objects and relation children,
-  object tree refresh, relation Data/Structure tabs, table/view preview with an
-  adapter-owned 500-row limit, and DDL in a new tab.
+  object tree refresh, relation Data/DDL tabs, table/view preview with an
+  adapter-owned 500-row limit, complete adapter-owned DDL, and DDL in a new tab.
 - Responsive 80-column focus mode, standard split layout, truecolor theme,
   contextual help, bounded TachyonFX transitions, and mouse hit regions.
 - A thin `lazydb.nvim` floating-terminal plugin with one process per Neovim tab.
@@ -111,7 +111,7 @@ and schema selection. MySQL mirrors each database as its schema, so its schema
 rows are informational and not independently selectable. PostgreSQL exposes an
 optional default schema; while visibility is not customized, it also limits the
 Explorer to that database and schema. The URL field accepts native and JDBC
-forms, fills the structured fields, and is regenerated when those fields change.
+forms, fills the profile fields, and is regenerated when those fields change.
 Any URL password is moved into the secret-backed Password field and removed from
 the displayed URL. `Save` persists metadata, and `Save & Connect` persists and
   activates it. `Password Storage` defaults to `LOCAL ENCRYPTED`, which stores
@@ -152,7 +152,7 @@ selects a saved profile by name; if both are supplied, `--url` wins.
 | Explorer | `Space c` focus, `/` catalog search, `j/k` move, `h/l/Enter` collapse/expand, `r` refresh, `p` preview, `D` DDL |
 | Editor Normal | `h/j/k/l`, `i/a/o`, `x`, `0/$`, `F5` scoped run, `Shift-F5` full run |
 | Editor Insert | `Esc` or idle `Ctrl-c` Normal mode, Tab insert, `Ctrl-W/U/H`, arrows, Backspace/Delete |
-| Results | `h/j/k/l` cell movement, `o` switch Data/Output |
+| Results | Relation `D/p/o/r` switches/refreshes Data and DDL; `j/k/h/l` moves or scrolls, `g/G` jumps DDL, wheel scrolls |
 
 The footer and `?`/`F1` help show the active context. In Editor Normal mode `?`
 is backward search; F1 and `Space ?` open help. Lowercase `q` is never a global

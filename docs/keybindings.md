@@ -172,18 +172,40 @@ the inputs without applying drafts. `[` and `]` resize the selected column and
 `=` restores its automatic width. Preview queries retain the hard 500-row limit.
 
 Selecting a relation or one of its supported descendants opens a relation tab.
-Relation tabs have `DATA` and `STRUCTURE` pages. Data uses an adapter-generated,
-read-only preview with a hard `LIMIT 500`; the adapter owns the SQL and the
-limit. Zero-row results still retain and render column metadata. `r` retries a
-failed relation request and `Ctrl-C` cancels an in-flight relation request.
-Relation snapshots identify whether they are `LIVE`, `OFFLINE SNAPSHOT`,
-`PROFILE DELETED SNAPSHOT`, or `OUT OF SCOPE SNAPSHOT`.
+Relation tabs have `DATA` and `DDL` pages. The relation-local shortcuts are:
+
+| Key | Action |
+| --- | --- |
+| `D` | Switch to the adapter-owned relation DDL page |
+| `p` | Switch to the adapter-owned relation Data preview |
+| `o` | Toggle between Data and DDL |
+| `r` | Refresh the active relation; retry a failed request |
+| `j/k` | Move Data selection or scroll DDL vertically |
+| `h/l` | Move Data selection or scroll DDL horizontally |
+| `g` | Jump DDL viewport to the beginning |
+| `G` | Jump DDL viewport to the end |
+
+Data is a read-only, adapter-owned preview with a hard `LIMIT 500`, including
+the SQL construction and limit. Zero-row results still retain and render column
+metadata. DDL is a complete adapter-owned result; the UI does not reconstruct it
+from catalog rows. On DDL, `j/k/h/l` scroll one row/column at a time and `g/G`
+set both axes to the beginning/end. On Data, the same movement keys select a
+cell and the shared grid follows the selected row/column only as needed.
+
+The mouse wheel scrolls the panel under the pointer: Explorer and SQL editor
+move by three rows, Data moves the grid by three rows, and DDL moves its
+vertical viewport by three rows. Left/right DDL movement remains keyboard-only.
+`Ctrl-C` cancels an in-flight relation request. Relation snapshots identify
+whether they are `LIVE`, `OFFLINE SNAPSHOT`, `PROFILE DELETED SNAPSHOT`, or `OUT
+OF SCOPE SNAPSHOT`; this is snapshot provenance and is separate from DDL's
+`NativeCatalog` or `AdapterGenerated` provenance.
 
 ## Mouse
 
 - Left click switches panels, activates tabs, selects catalog rows, selects result
   cells, and toggles Data/Output.
-- Wheel scroll moves the panel under the pointer.
+- Wheel scroll moves the panel under the pointer; relation DDL scrolls vertically
+  by three rows and relation Data scrolls the grid by three rows.
 - Closing the Neovim floating window hides it without stopping LazyDB.
 # Workspace lifecycle
 

@@ -4,7 +4,11 @@ use std::time::Instant;
 use crate::{
     action::Action,
     app::App,
-    model::workspace::{Focus, Overlay},
+    model::{
+        relation::RelationView,
+        tab::WorkspaceTab,
+        workspace::{Focus, Overlay},
+    },
     ui::{HitTarget, ProfileButton, UiState},
 };
 
@@ -137,6 +141,10 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
             }
             match focus_at(ui, event.column, event.row).unwrap_or(app.focus) {
                 Focus::Explorer => Some(Action::ExplorerMove(3)),
+                Focus::Results if is_relation_ddl_focus(app) => Some(Action::DdlScroll {
+                    rows: 3,
+                    columns: 0,
+                }),
                 Focus::Results => Some(Action::GridMove {
                     rows: 3,
                     columns: 0,
@@ -153,6 +161,10 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
             }
             match focus_at(ui, event.column, event.row).unwrap_or(app.focus) {
                 Focus::Explorer => Some(Action::ExplorerMove(-3)),
+                Focus::Results if is_relation_ddl_focus(app) => Some(Action::DdlScroll {
+                    rows: -3,
+                    columns: 0,
+                }),
                 Focus::Results => Some(Action::GridMove {
                     rows: -3,
                     columns: 0,
@@ -200,4 +212,12 @@ fn focus_at(ui: &UiState, column: u16, row: u16) -> Option<Focus> {
         | HitTarget::ProfileScopeRow(_)
         | HitTarget::ProfileButton(_) => None,
     }
+}
+
+fn is_relation_ddl_focus(app: &App) -> bool {
+    app.focus == Focus::Results
+        && matches!(
+            app.tabs.get(app.active_tab),
+            Some(WorkspaceTab::Relation(tab)) if tab.view == RelationView::Ddl
+        )
 }

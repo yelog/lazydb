@@ -8,8 +8,8 @@ use lazydb::{
             CatalogCapabilities, CatalogCompleteness, CatalogCount, CatalogCursor, CatalogEntry,
             CatalogId, CatalogKind, CatalogMetadata, CatalogRequest, CatalogRequestKey,
             CatalogSearchRequest, CatalogTarget, ColumnMetadata, ColumnMetadataCapabilities,
-            ConstraintMembership, ConstraintMetadata, IndexMetadata, NamespaceModel, ObjectGroup,
-            OptionalMetadata,
+            ConstraintMembership, ConstraintMetadata, DdlProvenance, IndexMetadata, NamespaceModel,
+            ObjectGroup, OptionalMetadata,
         },
         mysql::{self, MySqlAdapter},
         value::CellValue,
@@ -286,6 +286,7 @@ async fn catalog_page_exposes_scoped_mysql_objects_and_rich_metadata_when_config
     let function = format!("{prefix}do_work");
     let procedure = format!("{prefix}run_work");
     let trigger = format!("{prefix}child_before_insert");
+    let second_trigger = format!("{prefix}child_after_update");
     let excluded_object = format!("{prefix}hidden_table");
     let qdb = mysql::quote_identifier(&selected_database);
     let qparent = mysql::quote_identifier(&parent);
@@ -295,6 +296,7 @@ async fn catalog_page_exposes_scoped_mysql_objects_and_rich_metadata_when_config
     let qfunction = mysql::quote_identifier(&function);
     let qprocedure = mysql::quote_identifier(&procedure);
     let qtrigger = mysql::quote_identifier(&trigger);
+    let qsecond_trigger = mysql::quote_identifier(&second_trigger);
     let qexcluded = mysql::quote_identifier(&excluded_object);
     let scope = selected_scope(&[&selected_database]);
     let database_id = CatalogId::new(
@@ -336,7 +338,8 @@ async fn catalog_page_exposes_scoped_mysql_objects_and_rich_metadata_when_config
                  CREATE VIEW {qdb}.{qview} AS SELECT tenant_id, id, code FROM {qdb}.{qchild}; \
                  CREATE FUNCTION {qdb}.{qfunction}(value INT) RETURNS INT DETERMINISTIC RETURN value + 1; \
                  CREATE PROCEDURE {qdb}.{qprocedure}() SELECT 1; \
-                 CREATE TRIGGER {qdb}.{qtrigger} BEFORE INSERT ON {qdb}.{qchild} FOR EACH ROW SET NEW.code = COALESCE(NEW.code, 'new')"
+                 CREATE TRIGGER {qdb}.{qtrigger} BEFORE INSERT ON {qdb}.{qchild} FOR EACH ROW SET NEW.code = COALESCE(NEW.code, 'new'); \
+                 CREATE TRIGGER {qdb}.{qsecond_trigger} AFTER UPDATE ON {qdb}.{qchild} FOR EACH ROW SET @lazydb_last_updated_id = NEW.id"
             ))
             .await
             .unwrap();
@@ -414,7 +417,7 @@ async fn catalog_page_exposes_scoped_mysql_objects_and_rich_metadata_when_config
         assert_count_delta(&baseline_counts, &counts, ObjectGroup::Views, 1);
         assert_count_delta(&baseline_counts, &counts, ObjectGroup::Functions, 1);
         assert_count_delta(&baseline_counts, &counts, ObjectGroup::Procedures, 1);
-        assert_count_delta(&baseline_counts, &counts, ObjectGroup::Triggers, 1);
+        assert_count_delta(&baseline_counts, &counts, ObjectGroup::Triggers, 2);
 
         let table_target = CatalogTarget::objects(schema_id.clone(), ObjectGroup::Tables).unwrap();
         let (table_names, table_ids, completeness) = collect_object_pages(
@@ -605,6 +608,30 @@ async fn catalog_page_exposes_scoped_mysql_objects_and_rich_metadata_when_config
         let repeated = database.load_catalog_page(&catalog_request(profile_id, children_target, scope.clone(), 100, None, 71)).await.unwrap();
         assert_eq!(children.entries.iter().map(|entry| &entry.id).collect::<Vec<_>>(), repeated.entries.iter().map(|entry| &entry.id).collect::<Vec<_>>());
 
+        let ddl = database.relation_ddl(&child_id).await.unwrap();
+        assert_eq!(ddl.children.entries, children.entries);
+        assert_eq!(ddl.provenance, DdlProvenance::AdapterGenerated);
+        assert!(ddl.sql.starts_with("-- Object\n\nCREATE TABLE"));
+        assert_eq!(ddl.sql.matches("CREATE TABLE").count(), 1);
+        assert_eq!(ddl.sql.matches(&format!("{prefix}child_owner_code_idx")).count(), 1);
+        let triggers_section = ddl.sql.find("\n\n-- Triggers\n\n").unwrap();
+        assert!(ddl.sql[..triggers_section].contains("COMMENT='child table comment'"));
+        assert!(ddl.sql[triggers_section..].find(&second_trigger).unwrap()
+            < ddl.sql[triggers_section..].find(&trigger).unwrap());
+        assert_eq!(ddl.sql.matches("CREATE DEFINER=").count(), 2);
+        assert!(!ddl.sql.contains("character_set_client"));
+        assert!(!ddl.sql.contains("collation_connection"));
+
+        let view_id = CatalogId::new(
+            profile_id,
+            CatalogKind::View,
+            [selected_database.clone(), selected_database.clone(), view.clone()],
+        );
+        let view_ddl = database.relation_ddl(&view_id).await.unwrap();
+        assert_eq!(view_ddl.provenance, DdlProvenance::NativeCatalog);
+        assert!(view_ddl.sql.starts_with("-- Object\n\nCREATE"));
+        assert!(!view_ddl.sql.contains("-- Triggers"));
+
         let DatabaseConnection::MySql(adapter) = &database else {
             unreachable!("MySQL fixture returned another adapter")
         };
@@ -733,6 +760,7 @@ async fn catalog_page_exposes_scoped_mysql_objects_and_rich_metadata_when_config
 
     let mut cleanup_errors = Vec::new();
     for statement in [
+        format!("DROP TRIGGER IF EXISTS {qdb}.{qsecond_trigger}"),
         format!("DROP TRIGGER IF EXISTS {qdb}.{qtrigger}"),
         format!("DROP PROCEDURE IF EXISTS {qdb}.{qprocedure}"),
         format!("DROP FUNCTION IF EXISTS {qdb}.{qfunction}"),

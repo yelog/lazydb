@@ -8,8 +8,8 @@ use lazydb::{
             CatalogCapabilities, CatalogCompleteness, CatalogCount, CatalogCursor, CatalogEntry,
             CatalogId, CatalogKind, CatalogMetadata, CatalogRequest, CatalogRequestKey,
             CatalogSearchRequest, CatalogTarget, ColumnMetadata, ColumnMetadataCapabilities,
-            ConstraintMembership, ConstraintMetadata, IndexMetadata, NamespaceModel, ObjectGroup,
-            OptionalMetadata,
+            ConstraintMembership, ConstraintMetadata, DdlProvenance, IndexMetadata, NamespaceModel,
+            ObjectGroup, OptionalMetadata,
         },
         value::CellValue,
     },
@@ -121,8 +121,8 @@ async fn relation_preview_preserves_metadata_limits_quotes_and_rejects_forged_id
 }
 
 #[tokio::test]
-async fn relation_structure_preserves_typed_children_and_ddl_provenance() {
-    let imported = import_connection_url("sqlite://:memory:", Some("relation-structure")).unwrap();
+async fn relation_ddl_with_only_the_relation_uses_native_catalog_provenance() {
+    let imported = import_connection_url("sqlite://:memory:", Some("relation-ddl")).unwrap();
     let profile_id = imported.profile.id;
     let database = DatabaseConnection::connect(&imported.profile, None)
         .await
@@ -136,29 +136,68 @@ async fn relation_structure_preserves_typed_children_and_ddl_provenance() {
         CatalogKind::Table,
         [":memory:", "main", "records"],
     );
-    let structure = database.relation_structure(&relation).await.unwrap();
-    assert_eq!(structure.relation.id, relation);
-    assert!(structure.children.entries.iter().any(|entry| {
-        entry.kind == CatalogKind::Column && matches!(entry.metadata, CatalogMetadata::Column(_))
-    }));
-    assert!(
-        structure
-            .ddl
-            .sql
-            .as_deref()
-            .unwrap()
-            .contains("CREATE TABLE records")
-    );
-    assert_eq!(
-        structure.ddl.provenance,
-        lazydb::db::catalog::DdlProvenance::NativeCatalog
-    );
-    assert_eq!(structure.relation.native_kind, "table");
+    let ddl = database.relation_ddl(&relation).await.unwrap();
+    assert_eq!(ddl.relation.id, relation);
+    assert!(ddl.sql.contains("CREATE TABLE records"));
+    assert_eq!(ddl.provenance, DdlProvenance::NativeCatalog);
+    assert_eq!(ddl.relation.native_kind, "table");
     database.close().await;
 }
 
 #[tokio::test]
-async fn relation_structure_rejects_excluded_scope_before_loading_children_or_ddl() {
+async fn relation_ddl_includes_explicit_indexes_and_triggers_but_not_autoindexes() {
+    let imported =
+        import_connection_url("sqlite://:memory:", Some("relation-composite-ddl")).unwrap();
+    let profile_id = imported.profile.id;
+    let database = DatabaseConnection::connect(&imported.profile, None)
+        .await
+        .unwrap();
+    database
+        .execute(
+            r#"
+            CREATE TABLE records (
+                id INTEGER PRIMARY KEY,
+                label TEXT NOT NULL UNIQUE,
+                updated_at TEXT
+            );
+            CREATE INDEX records_label_expression_idx ON records (lower(label));
+            CREATE TRIGGER records_set_updated_at
+            AFTER UPDATE ON records
+            BEGIN
+                UPDATE records SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
+            END;
+            "#,
+        )
+        .await
+        .unwrap();
+
+    let relation = CatalogId::new(
+        profile_id,
+        CatalogKind::Table,
+        [":memory:", "main", "records"],
+    );
+    let ddl = database.relation_ddl(&relation).await.unwrap();
+
+    assert!(ddl.sql.contains("-- Table\n\nCREATE TABLE records"));
+    assert!(ddl.sql.contains(
+        "-- Indexes\n\nCREATE INDEX records_label_expression_idx ON records (lower(label));"
+    ));
+    assert!(
+        ddl.sql
+            .contains("-- Triggers\n\nCREATE TRIGGER records_set_updated_at")
+    );
+    assert!(!ddl.sql.contains("sqlite_autoindex"));
+    assert!(ddl.sql.trim_end().ends_with("END;"));
+    assert_eq!(ddl.provenance, DdlProvenance::AdapterGenerated);
+    assert!(ddl.children.entries.iter().any(|entry| {
+        entry.kind == CatalogKind::Column && entry.qualified_name.object == "label"
+    }));
+
+    database.close().await;
+}
+
+#[tokio::test]
+async fn relation_ddl_rejects_excluded_scope_before_loading_ddl() {
     let imported = import_connection_url("sqlite://:memory:", Some("relation-scope")).unwrap();
     let profile_id = imported.profile.id;
     let mut profile = imported.profile;
@@ -174,7 +213,7 @@ async fn relation_structure_rejects_excluded_scope_before_loading_children_or_dd
         CatalogKind::Table,
         [":memory:", "main", "records"],
     );
-    let error = database.relation_structure(&relation).await.unwrap_err();
+    let error = database.relation_ddl(&relation).await.unwrap_err();
     assert_eq!(error.category, ErrorCategory::Configuration);
     database.close().await;
 }

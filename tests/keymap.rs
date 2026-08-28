@@ -596,7 +596,7 @@ fn maps_explorer_and_result_actions_by_context() {
     assert_eq!(
         keymap.map(key(KeyCode::Char('D')), &app),
         Some(Action::OpenSelectedRelation {
-            view: lazydb::model::relation::RelationView::Structure,
+            view: lazydb::model::relation::RelationView::Ddl,
         })
     );
     assert_eq!(
@@ -631,11 +631,11 @@ fn maps_explorer_and_result_actions_by_context() {
     assert_eq!(
         keymap.map(key(KeyCode::Char('o')), &app),
         Some(Action::SetRelationView(
-            lazydb::model::relation::RelationView::Structure
+            lazydb::model::relation::RelationView::Ddl
         ))
     );
     app.update(Action::SetRelationView(
-        lazydb::model::relation::RelationView::Structure,
+        lazydb::model::relation::RelationView::Ddl,
     ));
     assert_eq!(
         keymap.map(key(KeyCode::Char('o')), &app),
@@ -656,13 +656,13 @@ fn relation_keys_control_only_the_active_relation_view() {
     let mut keymap = Keymap::default();
 
     // Relation Data reserves p for paste; the view shortcut remains available
-    // when the Structure view is active.
+    // when the DDL view is active.
     assert_eq!(
         keymap.map(key(KeyCode::Char('p')), &app),
         Some(Action::RelationPaste)
     );
     app.update(Action::SetRelationView(
-        lazydb::model::relation::RelationView::Structure,
+        lazydb::model::relation::RelationView::Ddl,
     ));
     assert_eq!(
         keymap.map(key(KeyCode::Char('p')), &app),
@@ -673,13 +673,90 @@ fn relation_keys_control_only_the_active_relation_view() {
     assert_eq!(
         keymap.map(key(KeyCode::Char('D')), &app),
         Some(Action::SetRelationView(
-            lazydb::model::relation::RelationView::Structure
+            lazydb::model::relation::RelationView::Ddl
         ))
     );
     assert_eq!(
         keymap.map(key(KeyCode::Char('r')), &app),
         Some(Action::RefreshActiveRelation)
     );
+}
+
+#[test]
+fn ddl_view_maps_navigation_without_using_grid_move() {
+    let mut app = App::new(Vec::new());
+    app.tabs.push(lazydb::model::tab::WorkspaceTab::Relation(
+        lazydb::model::relation::RelationTab::new("users"),
+    ));
+    app.active_tab = 1;
+    app.focus = Focus::Results;
+    app.update(Action::SetRelationView(
+        lazydb::model::relation::RelationView::Ddl,
+    ));
+    let mut keymap = Keymap::default();
+
+    for (code, expected) in [
+        (
+            KeyCode::Char('j'),
+            Action::DdlScroll {
+                rows: 1,
+                columns: 0,
+            },
+        ),
+        (
+            KeyCode::Down,
+            Action::DdlScroll {
+                rows: 1,
+                columns: 0,
+            },
+        ),
+        (
+            KeyCode::Char('k'),
+            Action::DdlScroll {
+                rows: -1,
+                columns: 0,
+            },
+        ),
+        (
+            KeyCode::Up,
+            Action::DdlScroll {
+                rows: -1,
+                columns: 0,
+            },
+        ),
+        (
+            KeyCode::Char('h'),
+            Action::DdlScroll {
+                rows: 0,
+                columns: -1,
+            },
+        ),
+        (
+            KeyCode::Left,
+            Action::DdlScroll {
+                rows: 0,
+                columns: -1,
+            },
+        ),
+        (
+            KeyCode::Char('l'),
+            Action::DdlScroll {
+                rows: 0,
+                columns: 1,
+            },
+        ),
+        (
+            KeyCode::Right,
+            Action::DdlScroll {
+                rows: 0,
+                columns: 1,
+            },
+        ),
+        (KeyCode::Char('g'), Action::DdlScrollToStart),
+        (KeyCode::Char('G'), Action::DdlScrollToEnd),
+    ] {
+        assert_eq!(keymap.map(key(code), &app), Some(expected), "code={code:?}");
+    }
 }
 
 #[test]

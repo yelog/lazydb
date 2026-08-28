@@ -6,7 +6,7 @@ use super::transaction::TransactionState;
 use super::{data_query::DataQueryOptions, data_query::DataQueryState, tab::DataGridState};
 use crate::db::{
     RelationPreview,
-    catalog::{CatalogId, CatalogKind, QualifiedName, RelationStructure},
+    catalog::{CatalogId, CatalogKind, QualifiedName, RelationDdl},
 };
 use crate::identity::ConnectionIdentity;
 use crate::profile::CatalogScope;
@@ -21,7 +21,7 @@ pub struct RelationKey {
 pub enum RelationView {
     #[default]
     Data,
-    Structure,
+    Ddl,
 }
 
 pub type RelationPreviewOptions = DataQueryOptions;
@@ -51,7 +51,7 @@ pub fn automatic_relation_column_widths(result: &crate::db::query::ResultSet) ->
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum RelationRequestKind {
     Preview,
-    Structure,
+    Ddl,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -118,12 +118,37 @@ pub enum RelationLoad<T> {
 }
 
 pub type RelationPreviewLoad = RelationLoad<RelationPreview>;
-pub type RelationStructureLoad = RelationLoad<RelationStructure>;
+pub type RelationDdlLoad = RelationLoad<RelationDdl>;
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DdlViewportState {
+    pub row_offset: usize,
+    pub column_offset: usize,
+    pub visible_rows: usize,
+    pub visible_columns: usize,
+    pub total_rows: usize,
+    pub max_line_width: usize,
+}
+
+impl DdlViewportState {
+    pub fn max_row_offset(&self) -> usize {
+        self.total_rows.saturating_sub(self.visible_rows)
+    }
+
+    pub fn max_column_offset(&self) -> usize {
+        self.max_line_width.saturating_sub(self.visible_columns)
+    }
+
+    pub fn clamp(&mut self) {
+        self.row_offset = self.row_offset.min(self.max_row_offset());
+        self.column_offset = self.column_offset.min(self.max_column_offset());
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum RelationSnapshot {
     Preview(RelationPreview),
-    Structure(Box<RelationStructure>),
+    Ddl(Box<RelationDdl>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -142,7 +167,8 @@ pub struct RelationTab {
     pub descriptor: RelationDescriptor,
     pub view: RelationView,
     pub data: RelationPreviewLoad,
-    pub structure: RelationStructureLoad,
+    pub ddl: RelationDdlLoad,
+    pub ddl_viewport: DdlViewportState,
     pub grid: DataGridState,
     pub query: RelationQueryState,
     pub edit: Option<RelationEditSession>,
@@ -160,7 +186,7 @@ impl RelationTab {
     ) -> Option<RelationSnapshotProvenance> {
         let snapshot_connection = match view {
             RelationView::Data => relation_snapshot(&self.data)?.attribution.connection,
-            RelationView::Structure => relation_snapshot(&self.structure)?.attribution.connection,
+            RelationView::Ddl => relation_snapshot(&self.ddl)?.attribution.connection,
         };
         let Some(profile) = profile else {
             return Some(RelationSnapshotProvenance::ProfileDeletedSnapshot);
@@ -236,7 +262,8 @@ impl RelationTab {
             descriptor,
             view,
             data: RelationLoad::Empty,
-            structure: RelationLoad::Empty,
+            ddl: RelationLoad::Empty,
+            ddl_viewport: DdlViewportState::default(),
             grid: DataGridState::default(),
             query: RelationQueryState {
                 capability: crate::model::data_query::DataQueryCapability::Relation,

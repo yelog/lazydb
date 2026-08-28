@@ -219,7 +219,7 @@ impl Runtime {
                     task.abort();
                 }
             }
-            Command::LoadRelationPreview(request) | Command::LoadRelationStructure(request) => {
+            Command::LoadRelationPreview(request) | Command::LoadRelationDdl(request) => {
                 self.load_relation(request)
             }
             Command::CancelRelationRequest(request) => {
@@ -903,11 +903,11 @@ impl Runtime {
                     .preview_relation(&task_request.relation.object_id, &task_request.options)
                     .await
                     .map(crate::model::relation::RelationSnapshot::Preview),
-                crate::model::relation::RelationRequestKind::Structure => database
-                    .relation_structure(&task_request.relation.object_id)
+                crate::model::relation::RelationRequestKind::Ddl => database
+                    .relation_ddl(&task_request.relation.object_id)
                     .await
                     .map(|snapshot| {
-                        crate::model::relation::RelationSnapshot::Structure(Box::new(snapshot))
+                        crate::model::relation::RelationSnapshot::Ddl(Box::new(snapshot))
                     }),
             };
             match result {
@@ -2457,6 +2457,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
         sync_editor_viewport(&mut app, &mut runtime, &ui_state);
         sync_grid_viewport(&mut app, &mut runtime, &ui_state);
         sync_explorer_viewport(&mut app, &mut runtime, &ui_state);
+        sync_ddl_viewport(&mut app, &mut runtime, &ui_state);
 
         while !app.should_quit {
             let mut redraw = false;
@@ -2515,6 +2516,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                 sync_editor_viewport(&mut app, &mut runtime, &ui_state);
                 sync_grid_viewport(&mut app, &mut runtime, &ui_state);
                 sync_explorer_viewport(&mut app, &mut runtime, &ui_state);
+                sync_ddl_viewport(&mut app, &mut runtime, &ui_state);
             }
         }
 
@@ -2567,6 +2569,22 @@ fn sync_explorer_viewport(app: &mut App, runtime: &mut Runtime, state: &UiState)
     if app.explorer.normalized.viewport_height != rows {
         apply_action(app, runtime, Action::ExplorerViewportChanged(rows));
     }
+}
+
+fn sync_ddl_viewport(app: &mut App, runtime: &mut Runtime, state: &UiState) {
+    let Some(metrics) = state.ddl_viewport else {
+        return;
+    };
+    apply_action(
+        app,
+        runtime,
+        Action::SetDdlViewportMetrics {
+            visible_rows: metrics.visible_rows,
+            visible_columns: metrics.visible_columns,
+            total_rows: metrics.total_rows,
+            max_line_width: metrics.max_line_width,
+        },
+    );
 }
 
 pub struct StartupProfiles {

@@ -30,9 +30,10 @@ use super::{
         CatalogId, CatalogKind, CatalogMetadata, CatalogPage, CatalogRequest, CatalogRequestKey,
         CatalogSearchHit, CatalogSearchPage, CatalogSearchRequest, CatalogTarget,
         CatalogValidationError, ColumnMetadata, ColumnMetadataCapabilities, ConstraintMembership,
-        ConstraintMetadata, Ddl, DdlProvenance, DiscoveredDatabase, IndexMetadata, NamespaceModel,
-        ObjectGroup, OptionalMetadata, QualifiedName, RelationStructure, finalize_keyset_page,
+        ConstraintMetadata, DdlProvenance, DiscoveredDatabase, IndexMetadata, NamespaceModel,
+        ObjectGroup, OptionalMetadata, QualifiedName, RelationDdl, finalize_keyset_page,
     },
+    ddl::{DdlSection, assemble_ddl},
     mutation::{InputValue, MutationResult, RelationMutation, RelationMutationRequest},
     query::{ColumnMeta, QueryOutcome, QueryOutcomeAccumulator, RELATION_PREVIEW_LIMIT, ResultSet},
     sanitize_terminal_text,
@@ -1477,11 +1478,31 @@ impl MySqlAdapter {
         })
     }
 
-    pub async fn relation_structure(
-        &self,
-        relation: &CatalogId,
-    ) -> Result<RelationStructure, DatabaseError> {
+    pub async fn relation_ddl(&self, relation: &CatalogId) -> Result<RelationDdl, DatabaseError> {
+        validate_catalog_scope(&self.catalog_scope)?;
         let mut connection = self.pool.acquire().await.map_err(sql_error)?;
+        let mut transaction = connection
+            .begin_with(CATALOG_PAGE_BEGIN_SQL)
+            .await
+            .map_err(sql_error)?;
+        let result = self.relation_ddl_snapshot(&mut transaction, relation).await;
+        match result {
+            Ok(ddl) => {
+                transaction.commit().await.map_err(sql_error)?;
+                Ok(ddl)
+            }
+            Err(error) => {
+                let _ = transaction.rollback().await;
+                Err(error)
+            }
+        }
+    }
+
+    async fn relation_ddl_snapshot(
+        &self,
+        connection: &mut MySqlConnection,
+        relation: &CatalogId,
+    ) -> Result<RelationDdl, DatabaseError> {
         let target = CatalogTarget::RelationChildren {
             relation: relation.clone(),
         };
@@ -1490,7 +1511,7 @@ impl MySqlAdapter {
             .await
             .map_err(sql_error)?;
         let (database, name, native_kind) = self
-            .verify_relation(&mut connection, relation, &target, lower_case)
+            .verify_relation(connection, relation, &target, lower_case)
             .await?;
         if !self.catalog_scope.allows_schema(&database, &database) {
             return Err(catalog_target_not_found(&target));
@@ -1508,7 +1529,6 @@ impl MySqlAdapter {
             true,
         )
         .map_err(catalog_invariant)?;
-        drop(connection);
         let request = CatalogRequest {
             key: CatalogRequestKey {
                 connection: ConnectionIdentity {
@@ -1523,20 +1543,45 @@ impl MySqlAdapter {
             scope: self.catalog_scope.clone(),
             page_size: RELATION_PREVIEW_LIMIT,
         };
-        let children = self.load_catalog_page(&request).await?;
-        let ddl = self.object_ddl(relation.kind, &database, &name).await?;
-        let provenance = if ddl.is_some() {
-            DdlProvenance::NativeCatalog
-        } else {
-            DdlProvenance::AdapterGenerated
-        };
-        Ok(RelationStructure {
+        let children = self
+            .load_relation_children_page(connection, &request, relation, lower_case)
+            .await?;
+        let main_sql = show_create_relation(connection, relation.kind, &database, &name)
+            .await?
+            .filter(|sql| !sql.trim().is_empty())
+            .ok_or_else(|| {
+                catalog_internal(format!(
+                    "MySQL {native_kind} {database}.{name} has no SHOW CREATE statement"
+                ))
+            })?;
+        let trigger_names = sqlx::query_scalar::<_, String>(
+            "SELECT trigger_name FROM information_schema.triggers \
+             WHERE BINARY event_object_schema=BINARY ? AND BINARY event_object_table=BINARY ? \
+             ORDER BY BINARY trigger_name",
+        )
+        .bind(&database)
+        .bind(&name)
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(sql_error)?;
+        let mut triggers = Vec::with_capacity(trigger_names.len());
+        for trigger_name in trigger_names {
+            let sql = show_create_trigger(connection, &database, &trigger_name)
+                .await?
+                .filter(|sql| !sql.trim().is_empty())
+                .ok_or_else(|| {
+                    catalog_internal(format!(
+                        "MySQL trigger {database}.{trigger_name} has no SHOW CREATE statement"
+                    ))
+                })?;
+            triggers.push((trigger_name, sql));
+        }
+        let (sql, provenance) = assemble_relation_ddl(main_sql, triggers)?;
+        Ok(RelationDdl {
             relation: relation_entry,
             children,
-            ddl: Ddl {
-                sql: ddl,
-                provenance,
-            },
+            sql,
+            provenance,
         })
     }
 
@@ -1652,27 +1697,94 @@ impl MySqlAdapter {
         if !matches!(kind, CatalogKind::Table | CatalogKind::View) {
             return Ok(None);
         }
-        let statement = format!(
-            "SHOW CREATE {} {}.{}",
-            if kind == CatalogKind::View {
-                "VIEW"
-            } else {
-                "TABLE"
-            },
-            quote_identifier(schema),
-            quote_identifier(name)
-        );
-        let row = sqlx::query(AssertSqlSafe(statement))
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Sql))?;
-        row.map(|row| row.try_get::<String, _>(1).map_err(decode_error))
-            .transpose()
+        let mut connection = self.pool.acquire().await.map_err(sql_error)?;
+        show_create_relation(&mut connection, kind, schema, name).await
     }
 
     pub async fn close(self) {
         self.pool.close().await;
     }
+}
+
+async fn show_create_relation(
+    connection: &mut MySqlConnection,
+    kind: CatalogKind,
+    schema: &str,
+    name: &str,
+) -> Result<Option<String>, DatabaseError> {
+    let object_type = if kind == CatalogKind::View {
+        "VIEW"
+    } else {
+        "TABLE"
+    };
+    let statement = format!(
+        "SHOW CREATE {object_type} {}.{}",
+        quote_identifier(schema),
+        quote_identifier(name)
+    );
+    let row = sqlx::query(AssertSqlSafe(statement))
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(sql_error)?;
+    row.map(|row| show_create_statement(&row, &format!("Create {object_type}"), 1))
+        .transpose()
+}
+
+async fn show_create_trigger(
+    connection: &mut MySqlConnection,
+    schema: &str,
+    name: &str,
+) -> Result<Option<String>, DatabaseError> {
+    let statement = format!(
+        "SHOW CREATE TRIGGER {}.{}",
+        quote_identifier(schema),
+        quote_identifier(name)
+    );
+    let row = sqlx::query(AssertSqlSafe(statement))
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(sql_error)?;
+    row.map(|row| show_create_statement(&row, "SQL Original Statement", 2))
+        .transpose()
+}
+
+fn show_create_statement(
+    row: &MySqlRow,
+    column_name: &str,
+    column_index: usize,
+) -> Result<String, DatabaseError> {
+    row.try_get(column_name)
+        .or_else(|_| row.try_get(column_index))
+        .map_err(decode_error)
+}
+
+fn assemble_relation_ddl(
+    main_sql: String,
+    mut triggers: Vec<(String, String)>,
+) -> Result<(String, DdlProvenance), DatabaseError> {
+    if main_sql.trim().is_empty() {
+        return Err(catalog_internal(
+            "MySQL relation has no SHOW CREATE statement",
+        ));
+    }
+    triggers.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
+    let provenance = if triggers.is_empty() {
+        DdlProvenance::NativeCatalog
+    } else {
+        DdlProvenance::AdapterGenerated
+    };
+    let sql = assemble_ddl(vec![
+        DdlSection {
+            label: "Object",
+            statements: vec![main_sql],
+        },
+        DdlSection {
+            label: "Triggers",
+            statements: triggers.into_iter().map(|(_, sql)| sql).collect(),
+        },
+    ])
+    .ok_or_else(|| catalog_internal("MySQL relation DDL assembly produced no statements"))?;
+    Ok((sql, provenance))
 }
 
 fn append_preview_options(
@@ -2697,10 +2809,11 @@ fn decode_error(error: sqlx::Error) -> DatabaseError {
 #[cfg(test)]
 mod tests {
     use super::{
-        MySqlConstraintPart, MySqlIndexPart, PROBE_SQL, group_constraint_parts, group_index_parts,
-        relation_kind, relation_path, search_catalog_kind,
+        MySqlConstraintPart, MySqlIndexPart, PROBE_SQL, assemble_relation_ddl,
+        group_constraint_parts, group_index_parts, relation_kind, relation_path,
+        search_catalog_kind,
     };
-    use crate::db::catalog::{CatalogId, CatalogKind};
+    use crate::db::catalog::{CatalogId, CatalogKind, DdlProvenance};
     use uuid::Uuid;
 
     #[test]
@@ -2746,6 +2859,49 @@ mod tests {
         );
         assert_eq!(relation_kind(Some("VIEW")).unwrap(), CatalogKind::View);
         assert!(relation_kind(Some("SYSTEM VIEW")).is_err());
+    }
+
+    #[test]
+    fn relation_ddl_assembles_the_native_object_once_and_sorts_triggers() {
+        let main_sql = "CREATE TABLE `users` (`id` bigint PRIMARY KEY) COMMENT='accounts'";
+        let (sql, provenance) = assemble_relation_ddl(
+            main_sql.to_owned(),
+            vec![
+                (
+                    "users_zeta".to_owned(),
+                    "CREATE TRIGGER `users_zeta` BEFORE UPDATE ON `users` FOR EACH ROW SET NEW.`id` = OLD.`id`".to_owned(),
+                ),
+                (
+                    "users_alpha".to_owned(),
+                    "CREATE TRIGGER `users_alpha` BEFORE INSERT ON `users` FOR EACH ROW SET NEW.`id` = COALESCE(NEW.`id`, 1)".to_owned(),
+                ),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(sql.matches(main_sql).count(), 1);
+        assert!(sql.starts_with("-- Object\n\n"));
+        assert!(sql.contains("\n\n-- Triggers\n\n"));
+        assert!(sql.find("users_alpha").unwrap() < sql.find("users_zeta").unwrap());
+        assert_eq!(provenance, DdlProvenance::AdapterGenerated);
+    }
+
+    #[test]
+    fn relation_ddl_without_triggers_preserves_native_provenance() {
+        let (sql, provenance) =
+            assemble_relation_ddl("CREATE VIEW `active_users` AS SELECT 1".to_owned(), vec![])
+                .unwrap();
+
+        assert_eq!(sql, "-- Object\n\nCREATE VIEW `active_users` AS SELECT 1;");
+        assert_eq!(provenance, DdlProvenance::NativeCatalog);
+    }
+
+    #[test]
+    fn relation_ddl_requires_a_main_show_create_statement() {
+        let error = assemble_relation_ddl("  ".to_owned(), vec![]).unwrap_err();
+
+        assert_eq!(error.category, crate::db::ErrorCategory::Internal);
+        assert!(error.message.contains("no SHOW CREATE statement"));
     }
 
     #[test]
