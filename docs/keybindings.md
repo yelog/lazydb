@@ -75,7 +75,10 @@ selected driver, and URL applies on Enter, field exit, Test, or Save.
 | `Ctrl-f/Ctrl-b` | Move down/up one page |
 | `Ctrl-d/Ctrl-u` | Move down/up half a page |
 | `zz/zt/zb` | Align current selection to middle/top/bottom |
-| `/` | Open inline catalog search |
+| `Home/End` | First/last visible object |
+| `/` | Find within the currently visible Explorer tree |
+| `f` | Search all objects in the active catalog scope |
+| `n/N` | Next/previous confirmed `/` or `f` result |
 | `h/l`, left/right | Collapse or expand |
 | `o` | Toggle expansion only |
 | `Enter` | Activate; open the owning table/view preview for relations and descendants |
@@ -94,14 +97,20 @@ previous page as stale data until the replacement arrives. Late pages whose
 connection identity, catalog epoch, request id, target, or cursor no longer
 matches are ignored.
 
-Inline search queries every actual object in the active connection's configured
-catalog scope, including objects and relation children not loaded in the lazy
-tree. Matching is case-insensitive over names and qualified paths. Type to edit,
-use `j/k`, arrows, `Home/End` to select, `Enter` to locate and retain a hit in the
-normal tree, `Esc` to close, `Backspace` to delete, and `Ctrl-U` to clear. Failed
-searches use `r` to retry. Results are limited to 100; refine a truncated search.
-The Vim navigation commands above apply only to the normal Explorer tree; search
-input keeps its existing text-editing and result-navigation behavior.
+`/` finds primary node labels in the visible expanded-tree snapshot only. It does
+not load or search descendants hidden by collapsed nodes or missing from loaded
+pages. Matching is case-insensitive and highlights matching text in the normal
+tree. Type to edit, press `Enter` to confirm, then use `n/N` to cycle results;
+`Esc` clears the find state. `Backspace` deletes and `Ctrl-U` clears while editing.
+
+`f` searches every actual object in the active connection's configured catalog
+scope, including objects and relation children not loaded in the lazy tree.
+Matching is case-insensitive over names and qualified paths. Results preserve the
+ancestor and presentation-group tree structure and highlight matching labels.
+Type to edit, use `j/k`, arrows, `Home/End` to select, `Enter` to locate and retain
+a hit in the normal tree, `n/N` to cycle matching objects after confirmation, and
+`Esc` to close. `Backspace` deletes and `Ctrl-U` clears. Failed searches use `r` to
+retry. Results are limited to 100; refine a truncated search.
 
 ## SQL Editor
 

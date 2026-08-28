@@ -142,8 +142,31 @@ impl Keymap {
                 _ => None,
             };
         }
+        if app.focus == Focus::Explorer && app.explorer.find.is_some() {
+            self.pending = None;
+            let confirmed = app.explorer.find.as_ref().is_some_and(|find| {
+                find.phase == crate::model::workspace::ExplorerSearchPhase::Confirmed
+            });
+            return match event.code {
+                KeyCode::Esc => Some(Action::ExplorerFindClose),
+                KeyCode::Enter if !confirmed => Some(Action::ExplorerFindConfirm),
+                KeyCode::Backspace if !confirmed => Some(Action::ExplorerFindBackspace),
+                KeyCode::Char('u') if event.modifiers == KeyModifiers::CONTROL && !confirmed => {
+                    Some(Action::ExplorerFindClear)
+                }
+                KeyCode::Char('n') if confirmed => Some(Action::ExplorerFindNext),
+                KeyCode::Char('N') if confirmed => Some(Action::ExplorerFindPrevious),
+                KeyCode::Char(character) if !confirmed => {
+                    Some(Action::ExplorerFindInsert(character))
+                }
+                _ => None,
+            };
+        }
         if app.focus == Focus::Explorer && app.explorer.search.is_some() {
             self.pending = None;
+            let confirmed = app.explorer.search.as_ref().is_some_and(|search| {
+                search.phase == crate::model::workspace::ExplorerSearchPhase::Confirmed
+            });
             if event.modifiers == KeyModifiers::CONTROL && event.code == KeyCode::Char('u') {
                 return Some(Action::ExplorerSearchClear);
             }
@@ -155,13 +178,18 @@ impl Keymap {
             }
             return match event.code {
                 KeyCode::Esc => Some(Action::ExplorerSearchClose),
-                KeyCode::Enter => Some(Action::ExplorerSearchLocate),
-                KeyCode::Backspace => Some(Action::ExplorerSearchBackspace),
+                KeyCode::Enter if !confirmed => Some(Action::ExplorerSearchLocate),
+                KeyCode::Enter if confirmed => Some(Action::ExplorerSearchLocate),
+                KeyCode::Backspace if !confirmed => Some(Action::ExplorerSearchBackspace),
                 KeyCode::Down => Some(Action::ExplorerSearchMove(1)),
                 KeyCode::Up => Some(Action::ExplorerSearchMove(-1)),
                 KeyCode::Home => Some(Action::ExplorerSearchMove(isize::MIN)),
                 KeyCode::End => Some(Action::ExplorerSearchMove(isize::MAX)),
-                KeyCode::Char(character) => Some(Action::ExplorerSearchInsert(character)),
+                KeyCode::Char('n') if confirmed => Some(Action::ExplorerSearchNext),
+                KeyCode::Char('N') if confirmed => Some(Action::ExplorerSearchPrevious),
+                KeyCode::Char(character) if !confirmed => {
+                    Some(Action::ExplorerSearchInsert(character))
+                }
                 _ => None,
             };
         }
@@ -909,7 +937,8 @@ fn map_explorer(code: KeyCode, app: &App) -> Option<Action> {
         .as_ref()
         .and_then(|node| node.profile_id());
     match code {
-        KeyCode::Char('/') => return Some(Action::ExplorerSearchOpen),
+        KeyCode::Char('/') => return Some(Action::ExplorerFindOpen),
+        KeyCode::Char('f') => return Some(Action::ExplorerSearchOpen),
         KeyCode::Char('n') => return Some(Action::ProfileStartNew),
         KeyCode::Char('e') => {
             return selected_profile.map(|profile_id| Action::ProfileStartEdit { profile_id });
