@@ -394,17 +394,12 @@ pub enum DdlProvenance {
     AdapterGenerated,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct Ddl {
-    pub sql: Option<String>,
-    pub provenance: DdlProvenance,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RelationStructure {
+pub struct RelationDdl {
     pub relation: CatalogEntry,
     pub children: CatalogPage,
-    pub ddl: Ddl,
+    pub sql: String,
+    pub provenance: DdlProvenance,
 }
 
 #[derive(Default)]

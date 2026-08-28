@@ -708,8 +708,8 @@ async fn successful_switch_installs_the_new_database_and_rejects_stale_commands(
         next_action(&mut receiver).await,
         Action::RelationFailed { .. }
     ));
-    runtime.dispatch(Command::LoadRelationStructure(RelationRequest {
-        kind: RelationRequestKind::Structure,
+    runtime.dispatch(Command::LoadRelationDdl(RelationRequest {
+        kind: RelationRequestKind::Ddl,
         ..relation_request
     }));
     assert!(matches!(

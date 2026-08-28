@@ -503,7 +503,7 @@ impl App {
                 view: RelationView::Data,
             }],
             Id::ExplorerDdl => vec![Action::OpenSelectedRelation {
-                view: RelationView::Structure,
+                view: RelationView::Ddl,
             }],
             Id::EditorInsert => vec![editor_key(KeyCode::Char('i'))],
             Id::EditorNormal => vec![editor_key(KeyCode::Esc)],
@@ -591,6 +591,10 @@ impl App {
                         | Action::GridSetColumnWidth { .. }
                         | Action::GridEndColumnResize
                         | Action::GridSetColumnOffset { .. }
+                        | Action::DdlScroll { .. }
+                        | Action::DdlScrollToStart
+                        | Action::DdlScrollToEnd
+                        | Action::SetDdlViewportMetrics { .. }
                         | Action::FocusDataQueryInput(_)
                         | Action::DataQueryInsert(_)
                         | Action::DataQueryBackspace
@@ -724,10 +728,10 @@ impl App {
                         Some(WorkspaceTab::Relation(tab)) => {
                             let requests = [
                                 pending_relation_request(&tab.data),
-                                pending_relation_request(&tab.structure),
+                                pending_relation_request(&tab.ddl),
                             ];
                             tab.data = cancel_relation_load(&tab.data);
-                            tab.structure = cancel_relation_load(&tab.structure);
+                            tab.ddl = cancel_relation_load(&tab.ddl);
                             requests
                                 .into_iter()
                                 .flatten()
@@ -1745,12 +1749,64 @@ impl App {
                 };
                 let request = match tab.view {
                     RelationView::Data => cancel_pending_relation(&mut tab.data),
-                    RelationView::Structure => cancel_pending_relation(&mut tab.structure),
+                    RelationView::Ddl => cancel_pending_relation(&mut tab.ddl),
                 };
                 request
                     .map(Command::CancelRelationRequest)
                     .into_iter()
                     .collect()
+            }
+            Action::DdlScroll { rows, columns } => {
+                if let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab)
+                    && tab.view == RelationView::Ddl
+                {
+                    tab.ddl_viewport.row_offset = tab
+                        .ddl_viewport
+                        .row_offset
+                        .saturating_add_signed(rows)
+                        .min(tab.ddl_viewport.max_row_offset());
+                    tab.ddl_viewport.column_offset = tab
+                        .ddl_viewport
+                        .column_offset
+                        .saturating_add_signed(columns)
+                        .min(tab.ddl_viewport.max_column_offset());
+                }
+                Vec::new()
+            }
+            Action::DdlScrollToStart => {
+                if let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab)
+                    && tab.view == RelationView::Ddl
+                {
+                    tab.ddl_viewport.row_offset = 0;
+                    tab.ddl_viewport.column_offset = 0;
+                }
+                Vec::new()
+            }
+            Action::DdlScrollToEnd => {
+                if let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab)
+                    && tab.view == RelationView::Ddl
+                {
+                    tab.ddl_viewport.row_offset = tab.ddl_viewport.max_row_offset();
+                    tab.ddl_viewport.column_offset = tab.ddl_viewport.max_column_offset();
+                }
+                Vec::new()
+            }
+            Action::SetDdlViewportMetrics {
+                visible_rows,
+                visible_columns,
+                total_rows,
+                max_line_width,
+            } => {
+                if let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab)
+                    && tab.view == RelationView::Ddl
+                {
+                    tab.ddl_viewport.visible_rows = visible_rows;
+                    tab.ddl_viewport.visible_columns = visible_columns;
+                    tab.ddl_viewport.total_rows = total_rows;
+                    tab.ddl_viewport.max_line_width = max_line_width;
+                    tab.ddl_viewport.clamp();
+                }
+                Vec::new()
             }
             Action::FocusDataQueryInput(input) => {
                 if let Some(query) = self.active_data_query_mut()
@@ -3664,7 +3720,7 @@ impl App {
             };
             for pending in [
                 cancel_pending_relation(&mut tab.data),
-                cancel_pending_relation(&mut tab.structure),
+                cancel_pending_relation(&mut tab.ddl),
             ] {
                 if let Some(request) = pending
                     && next_connection.is_none_or(|connection| request.connection != connection)
@@ -3684,7 +3740,7 @@ impl App {
             };
             for pending in [
                 cancel_pending_relation(&mut tab.data),
-                cancel_pending_relation(&mut tab.structure),
+                cancel_pending_relation(&mut tab.ddl),
             ] {
                 if let Some(request) = pending
                     && request.connection.profile_id == profile_id
@@ -3787,10 +3843,11 @@ impl App {
 
     fn has_running_query(&self) -> bool {
         self.tabs.iter().any(|tab| {
-            tab.as_console().is_some_and(|tab| tab.query_status == QueryStatus::Running)
+            tab.as_console()
+                .is_some_and(|tab| tab.query_status == QueryStatus::Running)
                 || matches!(tab, WorkspaceTab::Relation(relation) if match relation.view {
                     RelationView::Data => matches!(relation.data, RelationLoad::Loading { .. }),
-                    RelationView::Structure => matches!(relation.structure, RelationLoad::Loading { .. }),
+                    RelationView::Ddl => matches!(relation.ddl, RelationLoad::Loading { .. }),
                 })
         })
     }
@@ -5118,7 +5175,7 @@ impl App {
     }
 
     fn ddl_selected(&mut self) -> Vec<Command> {
-        self.open_selected_relation(RelationView::Structure)
+        self.open_selected_relation(RelationView::Ddl)
     }
 
     fn active_data_query_mut(&mut self) -> Option<&mut crate::model::data_query::DataQueryState> {
@@ -5290,7 +5347,7 @@ impl App {
         };
         let load = match tab.view {
             RelationView::Data => &tab.data,
-            RelationView::Structure => return None,
+            RelationView::Ddl => return None,
         };
         match load {
             RelationLoad::Ready(snapshot) => snapshot.value.result.result_sets.last().cloned(),
@@ -5454,7 +5511,7 @@ impl App {
                     .find(|p| p.id == connection.profile_id)?
                     .catalog_scope
                     .clone();
-                let metadata = match &tab.structure {
+                let metadata = match &tab.ddl {
                     RelationLoad::Ready(s) => crate::db::mutation::metadata_fingerprint(&s.value),
                     _ => return None,
                 };
@@ -5931,10 +5988,8 @@ impl App {
             .find(|profile| profile.id == connection.profile_id)?
             .catalog_scope
             .clone();
-        let metadata = match &tab.structure {
-            RelationLoad::Ready(structure) => {
-                crate::db::mutation::metadata_fingerprint(&structure.value)
-            }
+        let metadata = match &tab.ddl {
+            RelationLoad::Ready(ddl) => crate::db::mutation::metadata_fingerprint(&ddl.value),
             _ => return None,
         };
         let columns = self.relation_result()?.columns;
@@ -6146,7 +6201,7 @@ impl App {
         }
         let kind = match tab.view {
             RelationView::Data => RelationRequestKind::Preview,
-            RelationView::Structure => RelationRequestKind::Structure,
+            RelationView::Ddl => RelationRequestKind::Ddl,
         };
         let should_load = match tab.view {
             RelationView::Data => {
@@ -6158,10 +6213,10 @@ impl App {
                             | RelationLoad::Cancelled { .. }
                     )
             }
-            RelationView::Structure => {
+            RelationView::Ddl => {
                 refresh
                     || matches!(
-                        tab.structure,
+                        tab.ddl,
                         RelationLoad::Empty
                             | RelationLoad::Failed { .. }
                             | RelationLoad::Cancelled { .. }
@@ -6173,7 +6228,7 @@ impl App {
         }
         let previous_request = match tab.view {
             RelationView::Data => pending_relation_request(&tab.data),
-            RelationView::Structure => pending_relation_request(&tab.structure),
+            RelationView::Ddl => pending_relation_request(&tab.ddl),
         };
         let request = RelationRequest {
             tab_id: tab.id,
@@ -6205,22 +6260,22 @@ impl App {
                     .chain([Command::LoadRelationPreview(request)])
                     .collect()
             }
-            RelationRequestKind::Structure => {
-                let previous = match std::mem::replace(&mut tab.structure, RelationLoad::Empty) {
+            RelationRequestKind::Ddl => {
+                let previous = match std::mem::replace(&mut tab.ddl, RelationLoad::Empty) {
                     RelationLoad::Ready(snapshot) => Some(snapshot),
                     RelationLoad::Loading { previous, .. }
                     | RelationLoad::Failed { previous, .. }
                     | RelationLoad::Cancelled { previous } => previous,
                     RelationLoad::Empty => None,
                 };
-                tab.structure = RelationLoad::Loading {
+                tab.ddl = RelationLoad::Loading {
                     request: request.clone(),
                     previous,
                 };
                 previous_request
                     .map(Command::CancelRelationRequest)
                     .into_iter()
-                    .chain([Command::LoadRelationStructure(request)])
+                    .chain([Command::LoadRelationDdl(request)])
                     .collect()
             }
         }
@@ -6272,10 +6327,10 @@ impl App {
                     }
                 }
             }
-            (RelationRequestKind::Structure, Ok(RelationSnapshot::Structure(snapshot))) => {
-                if matches!(&tab.structure, RelationLoad::Loading { request: pending, .. } if pending == &request)
+            (RelationRequestKind::Ddl, Ok(RelationSnapshot::Ddl(snapshot))) => {
+                if matches!(&tab.ddl, RelationLoad::Loading { request: pending, .. } if pending == &request)
                 {
-                    tab.structure = RelationLoad::Ready(crate::model::relation::OwnedSnapshot {
+                    tab.ddl = RelationLoad::Ready(crate::model::relation::OwnedSnapshot {
                         value: *snapshot,
                         attribution: crate::model::relation::SnapshotAttribution {
                             connection: request.connection,
@@ -6298,14 +6353,14 @@ impl App {
                     };
                 }
             }
-            (RelationRequestKind::Structure, Err(message)) => {
+            (RelationRequestKind::Ddl, Err(message)) => {
                 if let RelationLoad::Loading {
                     previous,
                     request: pending,
-                } = &tab.structure
+                } = &tab.ddl
                     && pending == &request
                 {
-                    tab.structure = RelationLoad::Failed {
+                    tab.ddl = RelationLoad::Failed {
                         message,
                         previous: previous.clone(),
                     };
@@ -6325,8 +6380,8 @@ impl App {
                 RelationRequestKind::Preview => {
                     matches!(&tab.data, RelationLoad::Loading { request: pending, .. } if pending == request)
                 }
-                RelationRequestKind::Structure => matches!(
-                    &tab.structure,
+                RelationRequestKind::Ddl => matches!(
+                    &tab.ddl,
                     RelationLoad::Loading { request: pending, .. } if pending == request
                 ),
             }

@@ -105,10 +105,19 @@ pub struct UiState {
     pub editor_viewport: Option<EditorViewport>,
     pub completion_popup: Option<Rect>,
     pub grid_viewport: Option<DataGridViewport>,
+    pub ddl_viewport: Option<DdlViewportMetrics>,
     pub cursor_style: Option<CursorStyle>,
     pub click_tracker: RefCell<Option<(crate::model::explorer::ExplorerNodeId, Instant)>>,
     pub relation_resize: RefCell<Option<(usize, u16, u16)>>,
     pub grid_scrollbar_drag: RefCell<Option<GridScrollbarDrag>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DdlViewportMetrics {
+    pub visible_rows: usize,
+    pub visible_columns: usize,
+    pub total_rows: usize,
+    pub max_line_width: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -133,6 +142,7 @@ impl UiState {
             editor_viewport: None,
             completion_popup: None,
             grid_viewport: None,
+            ddl_viewport: None,
             cursor_style: None,
             click_tracker: RefCell::new(None),
             relation_resize: RefCell::new(None),
@@ -207,6 +217,7 @@ pub fn render_with_state_using_icons(
     state.editor_viewport = None;
     state.completion_popup = None;
     state.grid_viewport = None;
+    state.ddl_viewport = None;
 
     if layout.mode == LayoutMode::TooSmall {
         render_too_small(frame, area, theme);
@@ -1239,8 +1250,44 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
                 .add_modifier(Modifier::BOLD),
         ),
     ]);
+    let relation_context = app.tabs.get(app.active_tab).and_then(|tab| match tab {
+        WorkspaceTab::Relation(tab) if tab.view == crate::model::relation::RelationView::Ddl => {
+            let ddl_provenance = match &tab.ddl {
+                crate::model::relation::RelationLoad::Ready(snapshot)
+                | crate::model::relation::RelationLoad::Loading {
+                    previous: Some(snapshot),
+                    ..
+                }
+                | crate::model::relation::RelationLoad::Failed {
+                    previous: Some(snapshot),
+                    ..
+                }
+                | crate::model::relation::RelationLoad::Cancelled {
+                    previous: Some(snapshot),
+                } => format!("DDL: {:?}", snapshot.value.provenance),
+                _ => "DDL: NONE".to_owned(),
+            };
+            let snapshot = tab
+                .provenance(
+                    crate::model::relation::RelationView::Ddl,
+                    app.connection.active_identity(),
+                    app.active_profile(),
+                )
+                .map(crate::ui::relation::provenance_label)
+                .unwrap_or("UNKNOWN");
+            Some(format!(
+                "{ddl_provenance}  Rows: {}  Cols: {}  Snapshot: {snapshot}",
+                tab.ddl_viewport.row_offset.saturating_add(1),
+                tab.ddl_viewport.column_offset.saturating_add(1)
+            ))
+        }
+        _ => None,
+    });
     let second = Line::from(Span::styled(
-        app.connection.error.as_deref().unwrap_or("Ready"),
+        relation_context
+            .as_deref()
+            .or(app.connection.error.as_deref())
+            .unwrap_or("Ready"),
         Style::new()
             .fg(if app.connection.error.is_some() {
                 theme.error

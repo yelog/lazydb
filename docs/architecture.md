@@ -81,7 +81,7 @@ as a mirrored, non-toggleable schema row. Discovery is fingerprinted by the
 connection fields and credential revision; edits make a previous discovery
 stale and late test results are ignored.
 
-Structured profile fields are the sole connection source of truth. The form URL
+Profile fields are the sole connection source of truth. The form URL
 is a secret-backed editing projection with a persisted format preference. URL
 parsing applies fields atomically; field changes only format a new URL and never
 trigger reverse parsing. Parsed passwords move to `SecretString` storage and are
@@ -106,13 +106,33 @@ supports metadata from native schema tables and loads each page inside a
 transaction that is rolled back afterward. SQLite deliberately uses a single
 physical pool connection, and catalog operations do not write database state.
 
-Relation tabs are workspace tabs distinct from SQL consoles. Their Data and
-Structure loads retain owned snapshots attributed to connection identity,
-profile UUID, and catalog scope. Data previews are adapter-owned `SELECT * ...
-LIMIT 500` requests and keep column metadata when there are zero rows. Relation
-responses must match tab UUID, tab generation, request id, relation key, scope,
-and active connection. Snapshot provenance is Live, OfflineSnapshot,
-ProfileDeletedSnapshot, or OutOfScopeSnapshot.
+Relation tabs are workspace tabs distinct from SQL consoles. Their Data and DDL
+loads retain owned snapshots attributed to connection identity, profile UUID,
+and catalog scope. Data previews are adapter-owned `SELECT * ... LIMIT 500`
+requests: identifier quoting, preview filters/order, and the hard limit are all
+owned by the concrete adapter. Column metadata is retained when there are zero
+rows.
+
+DDL has the same ownership boundary. `DatabaseConnection` dispatches relation
+DDL to the concrete adapter, which validates the catalog identity, reads the
+relation and children in a consistent read, and returns a complete sectioned
+SQL string plus `DdlProvenance`. PostgreSQL reconstructs relation DDL from
+`pg_class`/`pg_attribute` and `pg_get_*` catalog functions in a read-only
+repeatable-read transaction. MySQL obtains the main object and triggers with
+`SHOW CREATE` plus `information_schema`. SQLite reads `sqlite_schema` on its
+single physical connection inside a transaction rolled back after the read.
+The shared DDL assembler only normalizes sections and statement terminators;
+the UI does not infer or generate DDL.
+
+`NativeCatalog` identifies a single native catalog/server statement;
+`AdapterGenerated` identifies a result assembled by the adapter from native
+statements or metadata. This DDL provenance is independent of relation snapshot
+provenance. Relation responses must match tab UUID, tab generation, request id,
+relation key, scope, and active connection. A previous owned Data or DDL
+snapshot can remain visible while a request loads, fails, or is cancelled.
+Snapshot provenance is `Live`, `OfflineSnapshot`, `ProfileDeletedSnapshot`, or
+`OutOfScopeSnapshot`, based on the current connection identity, profile, and
+catalog scope.
 
 Dynamic user SQL consumes SQLx `raw_sql().fetch_many()` so statement result
 markers are retained. Each adapter decodes its concrete row type into owned

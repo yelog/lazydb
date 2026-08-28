@@ -32,10 +32,11 @@ use super::{
         CatalogGroupSummary, CatalogId, CatalogKind, CatalogMetadata, CatalogPage, CatalogRequest,
         CatalogRequestKey, CatalogSearchHit, CatalogSearchPage, CatalogSearchRequest,
         CatalogTarget, CatalogValidationError, ColumnMetadata, ColumnMetadataCapabilities,
-        ConstraintMembership, ConstraintMetadata, Ddl, DdlProvenance, DiscoveredDatabase,
-        IndexMetadata, NamespaceModel, ObjectGroup, OptionalMetadata, QualifiedName,
-        RelationStructure, finalize_keyset_page,
+        ConstraintMembership, ConstraintMetadata, DdlProvenance, DiscoveredDatabase, IndexMetadata,
+        NamespaceModel, ObjectGroup, OptionalMetadata, QualifiedName, RelationDdl,
+        finalize_keyset_page,
     },
+    ddl::{DdlSection, assemble_ddl},
     mutation::{InputValue, MutationResult, RelationMutation, RelationMutationRequest},
     query::{ColumnMeta, QueryOutcome, QueryOutcomeAccumulator, RELATION_PREVIEW_LIMIT, ResultSet},
     value::CellValue,
@@ -277,23 +278,40 @@ impl SqliteAdapter {
         })
     }
 
-    pub async fn relation_structure(
+    pub async fn relation_ddl(&self, relation: &CatalogId) -> Result<RelationDdl, DatabaseError> {
+        let _permit = self.acquire_operation().await?;
+        let mut connection = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Network))?;
+        <Sqlite as sqlx::Database>::TransactionManager::begin(&mut connection, None)
+            .await
+            .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Sql))?;
+
+        let result = self.relation_ddl_snapshot(&mut connection, relation).await;
+        let rollback = <Sqlite as sqlx::Database>::TransactionManager::rollback(&mut connection)
+            .await
+            .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Sql));
+        if let Err(error) = rollback {
+            let connection = connection.detach();
+            let _ = connection.close().await;
+            return result.and(Err(error));
+        }
+        result
+    }
+
+    async fn relation_ddl_snapshot(
         &self,
+        connection: &mut SqliteConnection,
         relation: &CatalogId,
-    ) -> Result<RelationStructure, DatabaseError> {
+    ) -> Result<RelationDdl, DatabaseError> {
         let target = CatalogTarget::RelationChildren {
             relation: relation.clone(),
         };
-        let (schema, name, native_kind) = {
-            let _permit = self.acquire_operation().await?;
-            let mut connection = self
-                .pool
-                .acquire()
-                .await
-                .map_err(|e| DatabaseError::from_sqlx(e, ErrorCategory::Network))?;
-            self.verified_relation_id(&mut connection, relation, &target)
-                .await?
-        };
+        let (schema, name, native_kind) = self
+            .verified_relation_id(connection, relation, &target)
+            .await?;
         if !self.catalog_scope.allows_schema(&self.database, &schema) {
             return Err(catalog_target_not_found(&target));
         }
@@ -324,20 +342,75 @@ impl SqliteAdapter {
             scope: self.catalog_scope.clone(),
             page_size: RELATION_PREVIEW_LIMIT,
         };
-        let children = self.load_catalog_page(&request).await?;
-        let ddl = self.object_ddl(relation.kind, &schema, &name).await?;
-        let provenance = if ddl.is_some() {
-            DdlProvenance::NativeCatalog
+        let children = self
+            .load_relation_children_page(connection, &request, relation)
+            .await?;
+        let quoted_schema = self.quote_identifier(&schema);
+        let main_statement = format!(
+            "SELECT sql FROM {quoted_schema}.sqlite_schema \
+             WHERE type = ? AND name = ? COLLATE BINARY"
+        );
+        let main_sql = sqlx::query_scalar::<_, Option<String>>(AssertSqlSafe(main_statement))
+            .bind(native_kind)
+            .bind(&name)
+            .fetch_optional(&mut *connection)
+            .await
+            .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Sql))?
+            .flatten()
+            .filter(|sql| !sql.trim().is_empty())
+            .ok_or_else(|| {
+                catalog_internal(format!(
+                    "SQLite {native_kind} {schema}.{name} has no catalog DDL"
+                ))
+            })?;
+        let related_statement = format!(
+            "SELECT sql FROM {quoted_schema}.sqlite_schema \
+             WHERE type = ? AND tbl_name = ? COLLATE BINARY AND sql IS NOT NULL \
+             ORDER BY name COLLATE BINARY"
+        );
+        let indexes = sqlx::query_scalar::<_, String>(AssertSqlSafe(related_statement.clone()))
+            .bind("index")
+            .bind(&name)
+            .fetch_all(&mut *connection)
+            .await
+            .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Sql))?;
+        let triggers = sqlx::query_scalar::<_, String>(AssertSqlSafe(related_statement))
+            .bind("trigger")
+            .bind(&name)
+            .fetch_all(&mut *connection)
+            .await
+            .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Sql))?;
+        let has_related_objects = !indexes.is_empty() || !triggers.is_empty();
+        let main_label = if relation.kind == CatalogKind::Table {
+            "Table"
         } else {
-            DdlProvenance::AdapterGenerated
+            "View"
         };
-        Ok(RelationStructure {
+        let sql = assemble_ddl(vec![
+            DdlSection {
+                label: main_label,
+                statements: vec![main_sql],
+            },
+            DdlSection {
+                label: "Indexes",
+                statements: indexes,
+            },
+            DdlSection {
+                label: "Triggers",
+                statements: triggers,
+            },
+        ])
+        .ok_or_else(|| catalog_internal("SQLite relation DDL assembly produced no statements"))?;
+        let provenance = if has_related_objects {
+            DdlProvenance::AdapterGenerated
+        } else {
+            DdlProvenance::NativeCatalog
+        };
+        Ok(RelationDdl {
             relation: relation_entry,
             children,
-            ddl: Ddl {
-                sql: ddl,
-                provenance,
-            },
+            sql,
+            provenance,
         })
     }
 

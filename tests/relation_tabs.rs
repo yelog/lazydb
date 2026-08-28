@@ -97,16 +97,123 @@ fn opening_relation_is_a_semantic_action() {
 }
 
 #[test]
-fn relation_view_reducer_switches_between_data_and_structure() {
+fn relation_view_reducer_switches_between_data_and_ddl() {
     let mut app = lazydb::app::App::new(Vec::new());
     app.tabs
         .push(WorkspaceTab::Relation(RelationTab::new("users")));
     app.active_tab = 1;
 
-    app.update(Action::SetRelationView(RelationView::Structure));
-    assert_eq!(relation_view(&app), RelationView::Structure);
+    app.update(Action::SetRelationView(RelationView::Ddl));
+    assert_eq!(relation_view(&app), RelationView::Ddl);
     app.update(Action::SetRelationView(RelationView::Data));
     assert_eq!(relation_view(&app), RelationView::Data);
+}
+
+#[test]
+fn ddl_viewport_defaults_to_zero() {
+    let tab = RelationTab::new("users");
+
+    assert_eq!(tab.ddl_viewport.row_offset, 0);
+    assert_eq!(tab.ddl_viewport.column_offset, 0);
+    assert_eq!(tab.ddl_viewport.visible_rows, 0);
+    assert_eq!(tab.ddl_viewport.visible_columns, 0);
+    assert_eq!(tab.ddl_viewport.total_rows, 0);
+    assert_eq!(tab.ddl_viewport.max_line_width, 0);
+}
+
+#[test]
+fn ddl_scroll_saturates_and_clamps_to_viewport_bounds() {
+    let mut app = app_with_relation(RelationView::Ddl);
+    app.update(Action::SetDdlViewportMetrics {
+        visible_rows: 10,
+        visible_columns: 20,
+        total_rows: 25,
+        max_line_width: 50,
+    });
+
+    app.update(Action::DdlScroll {
+        rows: 100,
+        columns: 100,
+    });
+    assert_eq!(ddl_offsets(&app), (15, 30));
+
+    app.update(Action::DdlScroll {
+        rows: -100,
+        columns: -100,
+    });
+    assert_eq!(ddl_offsets(&app), (0, 0));
+}
+
+#[test]
+fn ddl_scroll_start_end_and_metric_changes_clamp_offsets() {
+    let mut app = app_with_relation(RelationView::Ddl);
+    app.update(Action::SetDdlViewportMetrics {
+        visible_rows: 0,
+        visible_columns: 0,
+        total_rows: 5,
+        max_line_width: 8,
+    });
+    app.update(Action::DdlScrollToEnd);
+    assert_eq!(ddl_offsets(&app), (5, 8));
+
+    app.update(Action::SetDdlViewportMetrics {
+        visible_rows: 4,
+        visible_columns: 7,
+        total_rows: 5,
+        max_line_width: 8,
+    });
+    assert_eq!(ddl_offsets(&app), (1, 1));
+
+    app.update(Action::DdlScrollToStart);
+    assert_eq!(ddl_offsets(&app), (0, 0));
+}
+
+#[test]
+fn ddl_viewport_actions_only_affect_the_active_relation_ddl_view() {
+    let mut app = app_with_relation(RelationView::Data);
+    app.update(Action::SetDdlViewportMetrics {
+        visible_rows: 1,
+        visible_columns: 1,
+        total_rows: 10,
+        max_line_width: 10,
+    });
+    app.update(Action::DdlScroll {
+        rows: 5,
+        columns: 5,
+    });
+    assert_eq!(ddl_offsets(&app), (0, 0));
+    assert_eq!(relation_tab(&app).ddl_viewport.total_rows, 0);
+
+    app.active_tab = 0;
+    app.update(Action::SetDdlViewportMetrics {
+        visible_rows: 1,
+        visible_columns: 1,
+        total_rows: 10,
+        max_line_width: 10,
+    });
+    assert_eq!(relation_tab_at(&app, 1).ddl_viewport.total_rows, 0);
+}
+
+#[test]
+fn ddl_viewport_survives_workspace_switches_and_refresh() {
+    let mut app = app_with_relation(RelationView::Ddl);
+    app.update(Action::SetDdlViewportMetrics {
+        visible_rows: 2,
+        visible_columns: 3,
+        total_rows: 10,
+        max_line_width: 12,
+    });
+    app.update(Action::DdlScroll {
+        rows: 4,
+        columns: 5,
+    });
+
+    app.update(Action::PreviousTab);
+    app.update(Action::NextTab);
+    assert_eq!(ddl_offsets(&app), (4, 5));
+
+    app.update(Action::RefreshActiveRelation);
+    assert_eq!(ddl_offsets(&app), (4, 5));
 }
 
 #[test]
@@ -288,6 +395,31 @@ fn relation_query(app: &lazydb::app::App) -> &lazydb::model::data_query::DataQue
         WorkspaceTab::Relation(tab) => &tab.query,
         WorkspaceTab::Sql(_) => panic!("expected relation tab"),
     }
+}
+
+fn app_with_relation(view: RelationView) -> lazydb::app::App {
+    let mut app = lazydb::app::App::new(Vec::new());
+    let mut tab = RelationTab::new("users");
+    tab.view = view;
+    app.tabs.push(WorkspaceTab::Relation(tab));
+    app.active_tab = 1;
+    app
+}
+
+fn relation_tab(app: &lazydb::app::App) -> &RelationTab {
+    relation_tab_at(app, app.active_tab)
+}
+
+fn relation_tab_at(app: &lazydb::app::App, index: usize) -> &RelationTab {
+    match &app.tabs[index] {
+        WorkspaceTab::Relation(tab) => tab,
+        WorkspaceTab::Sql(_) => panic!("expected relation tab"),
+    }
+}
+
+fn ddl_offsets(app: &lazydb::app::App) -> (usize, usize) {
+    let viewport = &relation_tab(app).ddl_viewport;
+    (viewport.row_offset, viewport.column_offset)
 }
 
 fn entry(profile: Uuid, kind: CatalogKind, name: &str, parent: Option<CatalogId>) -> CatalogEntry {

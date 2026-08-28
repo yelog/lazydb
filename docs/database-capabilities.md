@@ -48,18 +48,50 @@ not write database state.
 ## Relations
 
 Opening a table, view, materialized view, or supported relation child creates or
-activates a relation workspace tab. It has independent `Data` and `Structure`
-pages. Data is an adapter-owned read-only preview with a hard `LIMIT 500`, and
-callers do not append an arbitrary limit. Statement metadata is collected before
-rows, so zero-row relations still expose their columns. Structure includes
-relation, column, index/constraint, trigger, and available DDL metadata.
+activates a relation workspace tab. It has independent `Data` and `DDL` pages.
+Data is an adapter-owned read-only preview with a hard `LIMIT 500`; callers do
+not append an arbitrary limit. The adapter quotes the relation and applies the
+optional WHERE/ORDER BY preview clauses before applying that limit. Statement
+metadata is collected before rows, so zero-row relations still expose their
+columns.
+
+The `DDL` page is also adapter-owned end to end. The adapter validates the
+catalog identity, reads the relation and its children, assembles complete
+display SQL, and returns the SQL plus its provenance. The UI only renders and
+scrolls that result; it never reconstructs DDL from generic catalog rows.
+
+Driver-specific DDL behavior is:
+
+- PostgreSQL uses a read-only `REPEATABLE READ` transaction and native catalog
+  functions such as `pg_get_viewdef`, `pg_get_expr`, `pg_get_constraintdef`,
+  `pg_get_indexdef`, and `pg_get_triggerdef`. It assembles tables, views, and
+  materialized views with columns, identity/default/generated clauses,
+  constraints, comments, indexes, and non-internal triggers where available.
+- Oracle MySQL reads the main table/view and each trigger through `SHOW CREATE`,
+  discovers triggers through `information_schema`, and assembles the native
+  object statement with sorted trigger statements. MariaDB is not part of this
+  contract.
+- SQLite reads the main table/view and related indexes/triggers from each
+  schema's `sqlite_schema` table. The complete read runs on the single SQLite
+  connection inside a transaction that is rolled back afterward. A relation
+  with only its native statement has `NativeCatalog` provenance; adding related
+  statements makes the assembled result `AdapterGenerated`.
+
+`NativeCatalog` means the returned DDL is one native server/catalog statement.
+`AdapterGenerated` means the adapter combined native statements into a stable,
+sectioned result (and, for PostgreSQL, reconstructed the main statement from
+catalog metadata). Both are read-only display results and remain owned by the
+adapter.
 
 Every relation request carries tab UUID, tab generation, request id, connection
 identity, relation key, request kind, and catalog scope. Cancellation and stale
 responses cannot overwrite a newer request. A loading, failed, or cancelled
-request may continue displaying its previous owned snapshot. The UI attributes
-snapshots as `LIVE`, `OFFLINE SNAPSHOT`, `PROFILE DELETED SNAPSHOT`, or `OUT OF
-SCOPE SNAPSHOT`.
+request may continue displaying its previous owned Data or DDL snapshot. Each
+owned snapshot records connection identity, profile UUID, and catalog scope.
+The UI attributes snapshots as `LIVE`, `OFFLINE SNAPSHOT`, `PROFILE DELETED
+SNAPSHOT`, or `OUT OF SCOPE SNAPSHOT`; these labels describe the snapshot's
+relationship to the current connection/profile/scope, not whether its SQL was
+native or adapter-generated.
 
 ## Completion Cache
 

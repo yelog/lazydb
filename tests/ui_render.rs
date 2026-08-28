@@ -459,7 +459,7 @@ fn relation_loading_with_previous_snapshot_keeps_data_visible_and_exposes_cancel
 }
 
 #[test]
-fn relation_page_renders_data_structure_selectors_and_relation_layout() {
+fn relation_page_renders_data_ddl_selectors_and_relation_layout() {
     let mut app = App::new(Vec::new());
     app.tabs
         .push(WorkspaceTab::Relation(RelationTab::new("users")));
@@ -469,14 +469,15 @@ fn relation_page_renders_data_structure_selectors_and_relation_layout() {
     for (width, height) in [(80, 24), (120, 36), (180, 50)] {
         let (output, state) = render_with_state(&app, width, height);
         assert!(output.contains("DATA"), "{width}x{height}: {output}");
-        assert!(output.contains("STRUCTURE"), "{width}x{height}: {output}");
+        assert!(output.contains("DDL"), "{width}x{height}: {output}");
+        assert!(!output.contains("STRUCTURE"), "{width}x{height}: {output}");
         if width >= 100 {
             assert!(output.contains("EXPLORER"), "{width}x{height}: {output}");
         }
         assert!(state.hit_regions.iter().any(|region| region.target
             == HitTarget::RelationView(lazydb::model::relation::RelationView::Data)));
         assert!(state.hit_regions.iter().any(|region| region.target
-            == HitTarget::RelationView(lazydb::model::relation::RelationView::Structure)));
+            == HitTarget::RelationView(lazydb::model::relation::RelationView::Ddl)));
         let pane = state
             .hit_regions
             .iter()
@@ -498,6 +499,20 @@ fn relation_page_renders_data_structure_selectors_and_relation_layout() {
             Some(&selector.target)
         );
     }
+}
+
+#[test]
+fn empty_relation_ddl_uses_the_ddl_panel_empty_state() {
+    let mut app = App::new(Vec::new());
+    app.tabs
+        .push(WorkspaceTab::Relation(RelationTab::new("users")));
+    app.active_tab = 1;
+    app.update(Action::SetRelationView(
+        lazydb::model::relation::RelationView::Ddl,
+    ));
+    let output = render(&app, 120, 36);
+    assert!(output.contains("RELATION DDL"), "{output}");
+    assert!(output.contains("No DDL available"), "{output}");
 }
 
 #[test]

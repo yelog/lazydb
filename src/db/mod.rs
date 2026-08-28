@@ -1,4 +1,5 @@
 pub mod catalog;
+pub(crate) mod ddl;
 pub mod mutation;
 pub mod mysql;
 pub mod postgres;
@@ -21,7 +22,7 @@ use self::{
     catalog::{
         CatalogCapabilities, CatalogDiscovery, CatalogId, CatalogKind, CatalogPage, CatalogRequest,
         CatalogSearchPage, CatalogSearchRequest, CatalogTarget, CatalogValidationError,
-        RelationStructure,
+        RelationDdl,
     },
     mysql::MySqlAdapter,
     postgres::PostgresAdapter,
@@ -258,14 +259,11 @@ impl DatabaseConnection {
         }
     }
 
-    pub async fn relation_structure(
-        &self,
-        relation: &CatalogId,
-    ) -> Result<RelationStructure, DatabaseError> {
+    pub async fn relation_ddl(&self, relation: &CatalogId) -> Result<RelationDdl, DatabaseError> {
         match self {
-            Self::Postgres(adapter) => adapter.relation_structure(relation).await,
-            Self::MySql(adapter) => adapter.relation_structure(relation).await,
-            Self::Sqlite(adapter) => adapter.relation_structure(relation).await,
+            Self::Postgres(adapter) => adapter.relation_ddl(relation).await,
+            Self::MySql(adapter) => adapter.relation_ddl(relation).await,
+            Self::Sqlite(adapter) => adapter.relation_ddl(relation).await,
         }
     }
 

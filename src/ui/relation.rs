@@ -5,11 +5,11 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Paragraph, Wrap},
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::{panel_block, theme::Theme};
 use crate::{
     app::App,
-    db::catalog::{CatalogMetadata, ConstraintMetadata, IndexMetadata, OptionalMetadata},
     model::{
         relation::{RelationLoad, RelationSnapshotProvenance, RelationView},
         tab::WorkspaceTab,
@@ -38,7 +38,7 @@ pub(crate) fn render(
     } else {
         theme.muted
     };
-    let structure_style = if tab.view == RelationView::Structure {
+    let ddl_style = if tab.view == RelationView::Ddl {
         theme.accent
     } else {
         theme.muted
@@ -50,10 +50,8 @@ pub(crate) fn render(
         ),
         Span::raw(" "),
         Span::styled(
-            " STRUCTURE ",
-            Style::new()
-                .fg(structure_style)
-                .add_modifier(Modifier::BOLD),
+            " DDL ",
+            Style::new().fg(ddl_style).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!("  {}", sanitize_terminal_text(&tab.descriptor.title)),
@@ -67,11 +65,11 @@ pub(crate) fn render(
     });
     state.hit_regions.push(HitRegion {
         area: Rect::new(chunks[0].x.saturating_add(7), chunks[0].y, 11, 1),
-        target: HitTarget::RelationView(RelationView::Structure),
+        target: HitTarget::RelationView(RelationView::Ddl),
     });
     match tab.view {
         RelationView::Data => render_data(frame, chunks[1], app, theme, state),
-        RelationView::Structure => render_structure(frame, chunks[1], app, theme, state),
+        RelationView::Ddl => render_ddl(frame, chunks[1], app, theme, state),
     }
     if let Some(crate::model::relation_edit::RelationEditSession {
         mode: crate::model::relation_edit::RelationGridMode::EditCell(editor),
@@ -258,7 +256,7 @@ fn render_status(
     }
 }
 
-fn render_structure(
+fn render_ddl(
     frame: &mut Frame<'_>,
     area: Rect,
     app: &App,
@@ -268,232 +266,105 @@ fn render_structure(
     let Some(WorkspaceTab::Relation(tab)) = app.tabs.get(app.active_tab) else {
         return;
     };
-    let (body, status) = match &tab.structure {
-        RelationLoad::Ready(snapshot) => (structure_text(&snapshot.value, tab, app), None),
+    let (body, status) = match &tab.ddl {
+        RelationLoad::Ready(snapshot) => (ddl_text(&snapshot.value.sql), None),
         RelationLoad::Loading { previous, .. } => (
             previous
                 .as_ref()
-                .map(|s| structure_text(&s.value, tab, app))
+                .map(|s| ddl_text(&s.value.sql))
                 .unwrap_or_default(),
             Some(("Refreshing", false, true)),
         ),
         RelationLoad::Failed { message, previous } => (
             previous
                 .as_ref()
-                .map(|s| structure_text(&s.value, tab, app))
+                .map(|s| ddl_text(&s.value.sql))
                 .unwrap_or_default(),
             Some((message.as_str(), true, false)),
         ),
         RelationLoad::Cancelled { previous } => (
             previous
                 .as_ref()
-                .map(|s| structure_text(&s.value, tab, app))
+                .map(|s| ddl_text(&s.value.sql))
                 .unwrap_or_default(),
             Some(("Cancelled", true, false)),
         ),
-        RelationLoad::Empty => (String::new(), Some(("No structure data", false, false))),
+        RelationLoad::Empty => (String::new(), Some(("No DDL available", false, false))),
     };
+    let block = panel_block(" RELATION DDL ", app.focus == Focus::Results, theme);
     if let Some((message, retry, cancel)) = status {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(2), Constraint::Min(1)])
             .split(area);
         render_status(frame, chunks[0], message, retry, cancel, theme, _state);
-        frame.render_widget(
-            Paragraph::new(body)
-                .block(panel_block(
-                    " RELATION STRUCTURE ",
-                    app.focus == Focus::Results,
-                    theme,
-                ))
-                .style(Style::new().fg(theme.text).bg(theme.surface))
-                .wrap(Wrap { trim: true }),
+        render_ddl_body(
+            frame,
             chunks[1],
+            &body,
+            tab.ddl_viewport.row_offset,
+            tab.ddl_viewport.column_offset,
+            block,
+            theme,
         );
+        set_ddl_metrics(_state, chunks[1], &body);
         return;
     }
+    render_ddl_body(
+        frame,
+        area,
+        &body,
+        tab.ddl_viewport.row_offset,
+        tab.ddl_viewport.column_offset,
+        block,
+        theme,
+    );
+    set_ddl_metrics(_state, area, &body);
+}
+
+fn render_ddl_body(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    body: &str,
+    row_offset: usize,
+    column_offset: usize,
+    block: ratatui::widgets::Block<'_>,
+    theme: Theme,
+) {
+    let inner = block.inner(area);
+    let lines = body
+        .lines()
+        .skip(row_offset)
+        .take(inner.height as usize)
+        .map(|line| horizontal_slice(line, column_offset, inner.width as usize))
+        .map(Line::from)
+        .collect::<Vec<_>>();
     frame.render_widget(
-        Paragraph::new(body)
-            .block(panel_block(
-                " RELATION STRUCTURE ",
-                app.focus == Focus::Results,
-                theme,
-            ))
+        Paragraph::new(lines)
+            .block(block)
             .style(Style::new().fg(theme.text).bg(theme.surface))
-            .wrap(Wrap { trim: true }),
+            .wrap(Wrap { trim: false }),
         area,
     );
 }
 
-fn structure_text(
-    structure: &crate::db::catalog::RelationStructure,
-    tab: &crate::model::relation::RelationTab,
-    app: &App,
-) -> String {
-    let relation = &structure.relation;
-    let mut lines = vec![format!(
-        "{}  {}",
-        clean(&relation.qualified_name.object),
-        clean(&relation.native_kind)
-    )];
-    if let OptionalMetadata::Supported(Some(comment)) = &relation.comment {
-        lines.push(format!("Comment: {}", clean(comment)));
-    }
-    let mut columns = structure
-        .children
-        .entries
-        .iter()
-        .filter_map(|entry| match &entry.metadata {
-            CatalogMetadata::Column(column) => Some((
-                column.ordinal_position,
-                format!(
-                    "{}  {}  {}{}",
-                    clean(&entry.qualified_name.object),
-                    clean(&column.native_type),
-                    if column.nullable { "NULL" } else { "NOT NULL" },
-                    typed_metadata(column)
-                ),
-            )),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    columns.sort_by_key(|(ordinal, _)| *ordinal);
-    lines.push("\nCOLUMNS".into());
-    lines.extend(columns.into_iter().map(|(_, line)| line));
-    lines.push("\nINDEXES / CONSTRAINTS".into());
-    for entry in &structure.children.entries {
-        match &entry.metadata {
-            CatalogMetadata::Index(IndexMetadata { columns, unique }) => lines.push(format!(
-                "{}INDEX {} ({})",
-                if *unique { "UNIQUE " } else { "" },
-                clean(&entry.qualified_name.object),
-                columns
-                    .iter()
-                    .map(|s| clean(s))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )),
-            CatalogMetadata::Constraint(c) => lines.push(clean(&format_constraint(c))),
-            _ => {}
-        }
-    }
-    lines.push("\nTRIGGERS".into());
-    for entry in &structure.children.entries {
-        if entry.kind == crate::db::catalog::CatalogKind::Trigger {
-            lines.push(format!(
-                "{}  {}",
-                clean(&entry.qualified_name.object),
-                clean(&entry.native_kind)
-            ));
-        }
-    }
-    if let Some(sql) = &structure.ddl.sql {
-        lines.push(format!(
-            "\nDDL ({:?}):\n{}",
-            structure.ddl.provenance,
-            clean(sql)
-        ));
-    }
-    if let Some(provenance) = tab.provenance(
-        RelationView::Structure,
-        app.connection.active_identity(),
-        app.active_profile(),
-    ) {
-        lines.push(format!("\nSnapshot: {}", provenance_label(provenance)));
-    }
-    lines.join("\n")
+fn set_ddl_metrics(state: &mut super::UiState, area: Rect, body: &str) {
+    let inner = panel_block("", false, Theme::default()).inner(area);
+    state.ddl_viewport = Some(super::DdlViewportMetrics {
+        visible_rows: inner.height as usize,
+        visible_columns: inner.width as usize,
+        total_rows: body.lines().count().max(1),
+        max_line_width: body.lines().map(UnicodeWidthStr::width).max().unwrap_or(0),
+    });
 }
 
-fn format_constraint(c: &ConstraintMetadata) -> String {
-    match c {
-        ConstraintMetadata::PrimaryKey { columns } => format!(
-            "PRIMARY KEY ({})",
-            columns
-                .iter()
-                .map(|s| clean(s))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        ConstraintMetadata::Unique { columns } => format!(
-            "UNIQUE ({})",
-            columns
-                .iter()
-                .map(|s| clean(s))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        ConstraintMetadata::ForeignKey {
-            columns,
-            referenced_relation,
-            referenced_columns,
-        } => format!(
-            "FOREIGN KEY ({}) -> {} ({})",
-            columns
-                .iter()
-                .map(|s| clean(s))
-                .collect::<Vec<_>>()
-                .join(", "),
-            clean(&referenced_relation.object),
-            referenced_columns
-                .iter()
-                .map(|s| clean(s))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        ConstraintMetadata::Check { expression } => format!("CHECK ({})", clean(expression)),
-    }
+fn ddl_text(sql: &str) -> String {
+    sanitize_terminal_text(sql)
 }
 fn clean(value: &str) -> String {
     sanitize_terminal_text(value).chars().take(240).collect()
 }
-
-fn typed_metadata(column: &crate::db::catalog::ColumnMetadata) -> String {
-    let mut fields = Vec::new();
-    if let OptionalMetadata::Supported(Some(value)) = &column.default_expression {
-        fields.push(format!("DEFAULT {}", clean(value)));
-    }
-    if matches!(
-        &column.generated_expression,
-        OptionalMetadata::Supported(Some(_))
-    ) && let OptionalMetadata::Supported(Some(value)) = &column.generated_expression
-    {
-        fields.push(format!("GENERATED {}", clean(value)));
-    }
-    if matches!(column.identity, OptionalMetadata::Supported(Some(true))) {
-        fields.push("IDENTITY".into());
-    }
-    if matches!(
-        column.auto_increment,
-        OptionalMetadata::Supported(Some(true))
-    ) {
-        fields.push("AUTO_INCREMENT".into());
-    }
-    if let (
-        OptionalMetadata::Supported(Some(precision)),
-        OptionalMetadata::Supported(Some(scale)),
-    ) = (&column.numeric_precision, &column.numeric_scale)
-    {
-        fields.push(format!("PRECISION {precision}/{scale}"));
-    }
-    if let OptionalMetadata::Supported(Some(value)) = &column.collation {
-        fields.push(format!("COLLATION {}", clean(value)));
-    }
-    if !column.constraint_memberships.is_empty() {
-        fields.push(format!(
-            "MEMBERSHIPS {}",
-            column.constraint_memberships.len()
-        ));
-    }
-    if fields.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "  [{}]",
-            fields.join(" ").chars().take(180).collect::<String>()
-        )
-    }
-}
-fn provenance_label(value: RelationSnapshotProvenance) -> &'static str {
+pub(crate) fn provenance_label(value: RelationSnapshotProvenance) -> &'static str {
     match value {
         RelationSnapshotProvenance::Live => "LIVE",
         RelationSnapshotProvenance::OfflineSnapshot => "OFFLINE SNAPSHOT",
@@ -502,9 +373,24 @@ fn provenance_label(value: RelationSnapshotProvenance) -> &'static str {
     }
 }
 
+fn horizontal_slice(value: &str, offset: usize, width: usize) -> String {
+    let end = offset.saturating_add(width);
+    let mut result = String::new();
+    let mut cursor: usize = 0;
+    for character in value.chars() {
+        let character_width = character.width().unwrap_or(0);
+        let character_end = cursor.saturating_add(character_width);
+        if character_width > 0 && cursor >= offset && character_end <= end {
+            result.push(character);
+        }
+        cursor = character_end;
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
-    use super::cell_editor_value;
+    use super::{cell_editor_value, horizontal_slice};
     use crate::model::{relation_edit::CellEditorState, text_input::TextInput};
 
     #[test]
@@ -518,5 +404,21 @@ mod tests {
         assert_eq!(cell_editor_value(&editor), "failed");
         assert!(!cell_editor_value(&editor).contains("Edit cell"));
         assert!(!cell_editor_value(&editor).contains("[6, 9]"));
+    }
+
+    #[test]
+    fn horizontal_slice_respects_unicode_display_width() {
+        assert_eq!(horizontal_slice("a界b", 1, 2), "界");
+        assert_eq!(horizontal_slice("a界b", 2, 1), "");
+        assert_eq!(horizontal_slice("a界b", 3, 1), "b");
+    }
+
+    #[test]
+    fn ddl_text_sanitizes_without_the_clean_length_limit() {
+        let sql = "SELECT [31m".to_owned() + &"x".repeat(300);
+        let rendered = super::ddl_text(&sql);
+        assert!(rendered.len() > 240);
+        assert!(rendered.contains("<ESC>"));
+        assert!(!rendered.contains('\u{1b}'));
     }
 }

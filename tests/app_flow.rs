@@ -289,7 +289,7 @@ async fn connects_loads_catalog_and_executes_through_runtime() {
     dispatch(
         &mut app,
         &mut runtime,
-        Action::SetRelationView(lazydb::model::relation::RelationView::Structure),
+        Action::SetRelationView(lazydb::model::relation::RelationView::Ddl),
     );
     let action = timeout(Duration::from_secs(3), receiver.recv())
         .await
@@ -299,7 +299,7 @@ async fn connects_loads_catalog_and_executes_through_runtime() {
     assert!(matches!(
         app.tabs[app.active_tab],
         lazydb::model::tab::WorkspaceTab::Relation(lazydb::model::relation::RelationTab {
-            structure: lazydb::model::relation::RelationLoad::Ready(_),
+            ddl: lazydb::model::relation::RelationLoad::Ready(_),
             ..
         })
     ));
