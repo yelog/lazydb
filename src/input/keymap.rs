@@ -158,6 +158,9 @@ impl Keymap {
                 KeyCode::Home => Some(Action::ExplorerSearchMove(isize::MIN)),
                 KeyCode::End => Some(Action::ExplorerSearchMove(isize::MAX)),
                 KeyCode::Char(character) => Some(Action::ExplorerSearchInsert(character)),
+                _ => None,
+            };
+        }
         if let Some(Overlay::SqlEditorList(list)) = app.overlay.as_ref() {
             self.pending = None;
             return match event.code {
