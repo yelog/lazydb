@@ -396,6 +396,180 @@ fn compatibility_movement_updates_normalized_scroll() {
 }
 
 #[test]
+fn visible_find_snapshots_only_currently_visible_primary_labels() {
+    let profile = profile_id(1);
+    let fixture = fixture(profile);
+    let mut state = lazydb::model::workspace::ExplorerState {
+        normalized: explorer_with_fixture(&fixture),
+        ..Default::default()
+    };
+    state.normalized.expanded.extend([
+        ExplorerNodeId::Profile(profile),
+        ExplorerNodeId::Catalog(fixture.database.id.clone()),
+        ExplorerNodeId::Catalog(fixture.schema.id.clone()),
+        ExplorerNodeId::Group {
+            parent: fixture.schema.id.clone(),
+            group: ObjectGroup::Tables,
+        },
+    ]);
+
+    state.open_find();
+    state.edit_find(|query| query.push_str("USER"));
+
+    let find = state.find.as_ref().unwrap();
+    assert_eq!(
+        find.matches,
+        vec![ExplorerNodeId::Catalog(fixture.table.id.clone())]
+    );
+    assert_eq!(state.find_match_position(), (1, 1));
+    assert!(find.rows.iter().any(|row| row.label == "users"));
+    assert!(!find.rows.iter().any(|row| row.label == "id"));
+}
+
+#[test]
+fn visible_find_matches_primary_labels_not_metadata_and_empty_queries_are_idle() {
+    let profile = profile_id(1);
+    let fixture = fixture(profile);
+    let mut state = lazydb::model::workspace::ExplorerState {
+        normalized: explorer_with_fixture(&fixture),
+        ..Default::default()
+    };
+    state.normalized.expanded.extend(expanded_path(&fixture));
+    state.normalized.expanded.insert(ExplorerNodeId::Group {
+        parent: fixture.schema.id.clone(),
+        group: ObjectGroup::Views,
+    });
+    state.open_find();
+
+    state.edit_find(|query| query.push_str("BIGINT"));
+    assert!(state.find.as_ref().unwrap().matches.is_empty());
+    assert_eq!(state.find_match_position(), (0, 0));
+
+    state.edit_find(String::clear);
+    assert!(state.find.as_ref().unwrap().matches.is_empty());
+    assert_eq!(state.find_match_position(), (0, 0));
+}
+
+#[test]
+fn visible_find_confirms_and_cycles_selection_with_wraparound() {
+    let profile = profile_id(1);
+    let fixture = fixture(profile);
+    let mut state = lazydb::model::workspace::ExplorerState {
+        normalized: explorer_with_fixture(&fixture),
+        ..Default::default()
+    };
+    state.normalized.expanded.extend(expanded_path(&fixture));
+    state.normalized.expanded.insert(ExplorerNodeId::Group {
+        parent: fixture.schema.id.clone(),
+        group: ObjectGroup::Views,
+    });
+    state.open_find();
+    state.edit_find(|query| query.push_str("user"));
+
+    assert!(state.confirm_find());
+    assert_eq!(
+        state.selected_id(),
+        Some(&ExplorerNodeId::Catalog(fixture.table.id.clone()))
+    );
+    assert!(state.move_find_match(1));
+    assert_eq!(
+        state.selected_id(),
+        Some(&ExplorerNodeId::Catalog(fixture.view.id.clone()))
+    );
+    assert!(state.move_find_match(1));
+    assert_eq!(
+        state.selected_id(),
+        Some(&ExplorerNodeId::Catalog(fixture.table.id.clone()))
+    );
+    assert!(state.move_find_match(-1));
+    assert_eq!(
+        state.selected_id(),
+        Some(&ExplorerNodeId::Catalog(fixture.view.id.clone()))
+    );
+}
+
+#[test]
+fn visible_find_close_can_restore_original_selection() {
+    let profile = profile_id(1);
+    let fixture = fixture(profile);
+    let mut state = lazydb::model::workspace::ExplorerState {
+        normalized: explorer_with_fixture(&fixture),
+        ..Default::default()
+    };
+    state.normalized.selected = Some(ExplorerNodeId::Profile(profile));
+    state.normalized.expanded.extend(expanded_path(&fixture));
+    state.open_find();
+    state.edit_find(|query| query.push_str("user"));
+    state.confirm_find();
+    state.close_find(true);
+
+    assert!(state.find.is_none());
+    assert_eq!(state.selected_id(), Some(&ExplorerNodeId::Profile(profile)));
+}
+
+#[test]
+fn catalog_search_projection_deduplicates_ancestors_and_places_groups_before_hits() {
+    let profile = profile_id(1);
+    let fixture = fixture(profile);
+    let connection = lazydb::identity::ConnectionIdentity {
+        profile_id: profile,
+        generation: 1,
+    };
+    let mut state = lazydb::model::workspace::ExplorerState {
+        normalized: explorer_with_fixture(&fixture),
+        ..Default::default()
+    };
+    state.open_search(Some(connection), 1);
+    state.edit_search(|query| query.push('u'));
+    let page = lazydb::db::catalog::CatalogSearchPage {
+        connection,
+        session_id: 1,
+        generation: 1,
+        hits: vec![
+            CatalogSearchHit {
+                entry: fixture.table.clone(),
+                ancestors: vec![fixture.database.clone(), fixture.schema.clone()],
+            },
+            CatalogSearchHit {
+                entry: fixture.view.clone(),
+                ancestors: vec![fixture.database.clone(), fixture.schema.clone()],
+            },
+        ],
+        total_count: Some(2),
+        truncated: false,
+    };
+
+    assert!(state.accept_search_page(page));
+    let rows = &state.search.as_ref().unwrap().rows;
+    let schema = ExplorerNodeId::Catalog(fixture.schema.id.clone());
+    let tables = ExplorerNodeId::Group {
+        parent: fixture.schema.id.clone(),
+        group: ObjectGroup::Tables,
+    };
+    let table = ExplorerNodeId::Catalog(fixture.table.id.clone());
+    let views = ExplorerNodeId::Group {
+        parent: fixture.schema.id.clone(),
+        group: ObjectGroup::Views,
+    };
+    let view = ExplorerNodeId::Catalog(fixture.view.id.clone());
+    assert_eq!(rows.iter().filter(|row| row.id == schema).count(), 1);
+    assert!(
+        rows.iter().position(|row| row.id == tables).unwrap()
+            < rows.iter().position(|row| row.id == table).unwrap()
+    );
+    assert!(
+        rows.iter().position(|row| row.id == views).unwrap()
+            < rows.iter().position(|row| row.id == view).unwrap()
+    );
+    assert_eq!(rows.iter().filter(|row| row.is_match).count(), 2);
+    state.search.as_mut().unwrap().selected = rows.iter().position(|row| row.id == schema).unwrap();
+    assert!(!state.locate_search_hit().unwrap());
+    assert!(state.move_search_match(1));
+    let selected = state.search.as_ref().unwrap().selected;
+    assert!(state.search.as_ref().unwrap().rows[selected].is_match);
+}
+
+#[test]
 fn rebuilding_projection_preserves_user_collapse_state() {
     let profile = profile_id(1);
     let fixture = fixture(profile);

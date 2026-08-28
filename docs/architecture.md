@@ -39,12 +39,16 @@ request id, target, cursor, and scope. Pages are loaded lazily, validated before
 mutation, and stale or mismatched results are discarded. A failed refresh
 preserves the previous tree as stale where possible.
 
-Explorer search is an independent server-backed catalog contract. Debounced
-requests carry active connection and query generations plus `CatalogScope`, and
-adapters enumerate native catalog pages without materializing them in the normal
-tree. Search results are a flat projection; locating one merges only its real
-ancestor chain and object into the normalized tree, leaving lazy-page completion
-state unchanged.
+Explorer search has two projections. `/` is a synchronous find over a snapshot of
+the normal `visible()` projection, so collapsed descendants and unloaded pages are
+never searched and no database command is emitted. It highlights primary labels
+in the normal tree and cycles confirmed matches with `n/N`. `f` uses the independent
+server-backed catalog contract: debounced requests carry active connection and
+query generations plus `CatalogScope`, and adapters enumerate native catalog pages
+without materializing them in the normal tree. Its results are a temporary,
+ancestor-preserving tree projection with highlighted matches; locating one merges
+only its real ancestor chain and object into the normalized tree, leaving lazy-page
+completion state unchanged.
 
 The editor is an App-owned `EditorWorkspace` keyed by console UUID. Modalkit
 types stay behind that boundary; actions and UI consume LazyDB-owned editor

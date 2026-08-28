@@ -28,7 +28,7 @@ use crate::{
         explorer::{ExplorerConnectionStatus, ProfileProvenance},
         profile_manager::ProfileField,
         tab::{DataGridViewport, OutputKind, ResultView, WorkspaceTab},
-        workspace::{ConnectionStatus, Focus, Overlay, QueryStatus},
+        workspace::{ConnectionStatus, ExplorerSearchPhase, Focus, Overlay, QueryStatus},
     },
     security::sanitize_terminal_text,
 };
@@ -527,6 +527,10 @@ fn render_explorer(
     let block = panel_block(" EXPLORER ", app.focus == Focus::Explorer, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    if let Some(find) = app.explorer.find.as_ref() {
+        render_explorer_find(frame, inner, app, find, theme, icons);
+        return;
+    }
     if let Some(search) = app.explorer.search.as_ref() {
         render_explorer_search(frame, inner, search, theme, icons);
         return;
@@ -668,6 +672,153 @@ fn render_explorer(
     );
 }
 
+fn render_explorer_find(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    find: &crate::model::workspace::ExplorerFindState,
+    theme: Theme,
+    icons: icons::IconSet,
+) {
+    if area.is_empty() {
+        return;
+    }
+    let (current, total) = app.explorer.find_match_position();
+    let input = format!(
+        "/ {} ({current}/{total})",
+        sanitize_terminal_text(&find.query)
+    );
+    frame.render_widget(
+        Paragraph::new(input.clone()).style(Style::new().fg(theme.action).bg(theme.surface)),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+    if find.phase == ExplorerSearchPhase::Editing {
+        frame.set_cursor_position(Position::new(
+            area.x
+                .saturating_add(explorer_search_cursor_column(&input, area.width)),
+            area.y,
+        ));
+    }
+    let visible = app.explorer.visible();
+    let rows = visible
+        .iter()
+        .skip(app.explorer.normalized.scroll)
+        .take(area.height.saturating_sub(1) as usize);
+    let items = rows
+        .map(|visible| {
+            let selected = app.explorer.selected_id() == Some(&visible.id);
+            let background = if selected {
+                theme.selection
+            } else {
+                theme.surface
+            };
+            let base_style = Style::new()
+                .fg(if selected { theme.accent } else { theme.text })
+                .bg(background);
+            let expanded = app.explorer.normalized.expanded.contains(&visible.id);
+            let marker = if visible.expandable {
+                if expanded { "▾" } else { "▸" }
+            } else {
+                " "
+            };
+            let icon = match &visible.id {
+                crate::model::explorer::ExplorerNodeId::Group { group, .. } => {
+                    icons.group(*group, expanded)
+                }
+                _ => visible.kind.map_or("·", |kind| icons.catalog(kind)),
+            };
+            let label = find
+                .rows
+                .iter()
+                .find(|row| row.id == visible.id)
+                .map(|row| row.label.as_str())
+                .unwrap_or(&visible.label);
+            let mut spans = vec![Span::styled(
+                format!("{}{} {} ", "  ".repeat(visible.depth), marker, icon,),
+                base_style,
+            )];
+            spans.extend(match_spans(
+                sanitize_terminal_text(label),
+                &find.query,
+                base_style,
+                Style::new()
+                    .fg(theme.action)
+                    .bg(background)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            ListItem::new(Line::from(spans))
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        List::new(items).style(Style::new().bg(theme.surface)),
+        Rect::new(
+            area.x,
+            area.y.saturating_add(1),
+            area.width,
+            area.height.saturating_sub(1),
+        ),
+    );
+}
+
+fn match_spans(text: String, query: &str, base: Style, matched: Style) -> Vec<Span<'static>> {
+    if query.trim().is_empty() {
+        return vec![Span::styled(text, base)];
+    }
+    let query = query.to_lowercase();
+    let mut lowered = String::new();
+    let mut lowered_ranges = Vec::new();
+    for (start, character) in text.char_indices() {
+        let end = start + character.len_utf8();
+        let lowered_start = lowered.len();
+        lowered.extend(character.to_lowercase());
+        lowered_ranges.push((lowered_start, lowered.len(), start, end));
+    }
+    let mut matches = Vec::new();
+    let mut offset = 0;
+    while let Some(start) = lowered[offset..].find(&query) {
+        let lowered_start = offset + start;
+        let lowered_end = lowered_start + query.len();
+        let Some((_, _, start, _)) =
+            lowered_ranges
+                .iter()
+                .find(|(range_start, range_end, _, _)| {
+                    *range_start <= lowered_start && lowered_start < *range_end
+                })
+        else {
+            break;
+        };
+        let Some((_, _, _, end)) = lowered_ranges
+            .iter()
+            .find(|(range_start, range_end, _, _)| {
+                *range_start < lowered_end && lowered_end <= *range_end
+            })
+        else {
+            break;
+        };
+        matches.push((*start, *end));
+        offset = lowered_end;
+        if offset >= lowered.len() {
+            break;
+        }
+    }
+    if matches.is_empty() {
+        return vec![Span::styled(text, base)];
+    }
+    let mut spans = Vec::new();
+    let mut cursor = 0;
+    for (start, end) in matches {
+        if cursor < start {
+            spans.push(Span::styled(text[cursor..start].to_owned(), base));
+        }
+        spans.push(Span::styled(text[start..end].to_owned(), matched));
+        cursor = end;
+    }
+    if cursor < text.len() {
+        spans.push(Span::styled(text[cursor..].to_owned(), base));
+    }
+    spans
+}
+
 fn render_explorer_search(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -688,11 +839,13 @@ fn render_explorer_search(
         ),
         Rect::new(area.x, area.y, area.width, 1),
     );
-    frame.set_cursor_position(Position::new(
-        area.x
-            .saturating_add(explorer_search_cursor_column(&input, area.width)),
-        area.y,
-    ));
+    if search.phase == ExplorerSearchPhase::Editing {
+        frame.set_cursor_position(Position::new(
+            area.x
+                .saturating_add(explorer_search_cursor_column(&input, area.width)),
+            area.y,
+        ));
+    }
 
     let result_height = area.height.saturating_sub(2) as usize;
     let start = search
@@ -702,57 +855,49 @@ fn render_explorer_search(
                 .selected
                 .saturating_sub(result_height.saturating_sub(1)),
         )
-        .min(search.hits.len().saturating_sub(1));
+        .min(search.rows.len().saturating_sub(1));
     let items = search
-        .hits
+        .rows
         .iter()
         .enumerate()
         .skip(start)
         .take(result_height)
-        .map(|(index, hit)| {
+        .map(|(index, row)| {
             let selected = index == search.selected;
-            let located = search.located.as_ref() == Some(&hit.entry.id);
             let background = if selected {
                 theme.selection
             } else {
                 theme.surface
             };
             let primary = if selected { theme.accent } else { theme.text };
-            let name = sanitize_terminal_text(&hit.entry.qualified_name.object);
-            let path = sanitize_terminal_text(&hit.qualified_path());
-            ListItem::new(Line::from(vec![
-                Span::styled(
-                    if located {
-                        "* "
-                    } else if selected {
-                        "> "
-                    } else {
-                        "  "
-                    },
-                    Style::new().fg(theme.action).bg(background),
+            let icon = row.kind.map_or("·", |kind| icons.catalog(kind));
+            let label_style = Style::new()
+                .fg(primary)
+                .bg(background)
+                .add_modifier(if selected {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                });
+            let mut spans = vec![Span::styled(
+                format!(
+                    "{}{} {}",
+                    "  ".repeat(row.depth),
+                    if selected { ">" } else { " " },
+                    icon
                 ),
-                Span::styled(
-                    format!("{} ", icons.catalog(hit.entry.kind)),
-                    Style::new()
-                        .fg(kind_color(hit.entry.kind, theme))
-                        .bg(background),
-                ),
-                Span::styled(
-                    name,
-                    Style::new()
-                        .fg(primary)
-                        .bg(background)
-                        .add_modifier(if selected {
-                            Modifier::BOLD
-                        } else {
-                            Modifier::empty()
-                        }),
-                ),
-                Span::styled(
-                    format!("  {path}"),
-                    Style::new().fg(theme.muted).bg(background),
-                ),
-            ]))
+                Style::new().fg(theme.action).bg(background),
+            )];
+            spans.extend(match_spans(
+                sanitize_terminal_text(&row.label),
+                &search.query,
+                label_style,
+                Style::new()
+                    .fg(theme.action)
+                    .bg(background)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            ListItem::new(Line::from(spans))
         })
         .collect::<Vec<_>>();
     if !items.is_empty() {
@@ -815,8 +960,8 @@ fn render_explorer_search(
                 format!("{}+ results - refine your search", search.hits.len())
             }
             _ => format!(
-                "{} results  Enter locate  Esc close",
-                search.total_count.unwrap_or(search.hits.len())
+                "{} results  n/N next/prev  Enter locate  Esc close",
+                search.total_count.unwrap_or(search.match_rows.len())
             ),
         };
         frame.render_widget(

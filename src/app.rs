@@ -656,11 +656,21 @@ impl App {
                         | Action::RelationQueryClear
                         | Action::SubmitRelationQuery
                         | Action::CancelRelationQueryInput
+                        | Action::ExplorerFindOpen
+                        | Action::ExplorerFindInsert(_)
+                        | Action::ExplorerFindBackspace
+                        | Action::ExplorerFindClear
+                        | Action::ExplorerFindConfirm
+                        | Action::ExplorerFindNext
+                        | Action::ExplorerFindPrevious
+                        | Action::ExplorerFindClose
                         | Action::ExplorerSearchOpen
                         | Action::ExplorerSearchInsert(_)
                         | Action::ExplorerSearchBackspace
                         | Action::ExplorerSearchClear
                         | Action::ExplorerSearchMove(_)
+                        | Action::ExplorerSearchNext
+                        | Action::ExplorerSearchPrevious
                         | Action::ExplorerSearchLocate
                         | Action::ExplorerSearchClose
                         | Action::ExplorerSearchRetry
@@ -2622,8 +2632,53 @@ impl App {
                 self.explorer.move_selection(delta);
                 Vec::new()
             }
+            Action::ExplorerFindOpen => {
+                if self.focus == Focus::Explorer {
+                    let cancel = self.explorer.search.is_some();
+                    self.explorer.search = None;
+                    self.explorer.open_find();
+                    if cancel {
+                        return vec![Command::CancelCatalogSearch];
+                    }
+                }
+                Vec::new()
+            }
+            Action::ExplorerFindInsert(character) => {
+                self.explorer.edit_find(|query| query.push(character));
+                Vec::new()
+            }
+            Action::ExplorerFindBackspace => {
+                self.explorer.edit_find(|query| {
+                    query.pop();
+                });
+                Vec::new()
+            }
+            Action::ExplorerFindClear => {
+                self.explorer.edit_find(String::clear);
+                Vec::new()
+            }
+            Action::ExplorerFindConfirm => {
+                self.explorer.confirm_find();
+                Vec::new()
+            }
+            Action::ExplorerFindNext => {
+                self.explorer.move_find_match(1);
+                Vec::new()
+            }
+            Action::ExplorerFindPrevious => {
+                self.explorer.move_find_match(-1);
+                Vec::new()
+            }
+            Action::ExplorerFindClose => {
+                let restore = self.explorer.find.as_ref().is_some_and(|find| {
+                    find.phase == crate::model::workspace::ExplorerSearchPhase::Editing
+                });
+                self.explorer.close_find(restore);
+                Vec::new()
+            }
             Action::ExplorerSearchOpen => {
                 if self.focus == Focus::Explorer {
+                    self.explorer.find = None;
                     self.next_search_session = self.next_search_session.saturating_add(1);
                     self.explorer
                         .open_search(self.database_command_identity(), self.next_search_session);
@@ -2641,7 +2696,21 @@ impl App {
                 self.explorer.move_search(delta);
                 Vec::new()
             }
+            Action::ExplorerSearchNext => {
+                self.explorer.move_search_match(1);
+                Vec::new()
+            }
+            Action::ExplorerSearchPrevious => {
+                self.explorer.move_search_match(-1);
+                Vec::new()
+            }
             Action::ExplorerSearchLocate => {
+                if self.explorer.search.as_ref().is_some_and(|search| {
+                    search.phase == crate::model::workspace::ExplorerSearchPhase::Editing
+                }) {
+                    self.explorer.confirm_search();
+                    return Vec::new();
+                }
                 let valid = self.explorer.search.as_ref().is_some_and(|search| {
                     self.database_command_identity() == search.connection
                         && search.hits.get(search.selected).is_some_and(|hit| {
