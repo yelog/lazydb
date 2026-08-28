@@ -809,6 +809,25 @@ fn render_explorer_find(
                     .bg(background)
                     .add_modifier(Modifier::BOLD),
             ));
+            if let Some(metadata) = visible
+                .metadata
+                .as_deref()
+                .filter(|value| !value.is_empty())
+            {
+                spans.push(Span::styled(
+                    format!("  {}", sanitize_terminal_text(metadata)),
+                    Style::new().fg(theme.muted).bg(background),
+                ));
+            }
+            if let Some(comment) = visible.comment.as_deref().filter(|value| !value.is_empty()) {
+                spans.push(Span::styled(
+                    format!("  {}", sanitize_terminal_text(comment)),
+                    Style::new()
+                        .fg(theme.muted)
+                        .bg(background)
+                        .add_modifier(Modifier::DIM),
+                ));
+            }
             ListItem::new(Line::from(spans))
         })
         .collect::<Vec<_>>();

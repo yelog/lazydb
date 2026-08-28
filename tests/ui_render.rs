@@ -8,8 +8,8 @@ use lazydb::{
     db::{
         ServerInfo,
         catalog::{
-            CatalogCount, CatalogCursor, CatalogEntry, CatalogId, CatalogKind, ObjectGroup,
-            OptionalMetadata, QualifiedName,
+            CatalogCompleteness, CatalogCount, CatalogCursor, CatalogEntry, CatalogId, CatalogKind,
+            CatalogMetadata, ColumnMetadata, ObjectGroup, OptionalMetadata, QualifiedName,
         },
         query::{ColumnMeta, QueryOutcome, QueryStats, ResultSet},
         value::CellValue,
@@ -298,6 +298,110 @@ fn active_profile_explorer_renders_normalized_group_permission_and_load_more_row
     app.explorer.rebuild_projection(profile.id);
     let load_more = render(&app, 120, 36);
     assert!(load_more.contains("Load more..."));
+}
+
+#[test]
+fn explorer_find_keeps_group_counts_and_column_metadata_visible() {
+    let profile = import_connection_url(":memory:", Some("catalog-search-ui"))
+        .unwrap()
+        .profile;
+    let mut app = App::new(vec![profile.clone()]);
+    app.focus = Focus::Explorer;
+    app.connection.profile_id = Some(profile.id);
+    app.connection.generation = 1;
+    app.connection.status = ConnectionStatus::Connected;
+
+    let database_id = CatalogId::new(profile.id, CatalogKind::Database, ["app"]);
+    let database = CatalogEntry::database(
+        CatalogId::new(profile.id, CatalogKind::Database, ["app"]),
+        QualifiedName {
+            database: Some("app".into()),
+            schema: None,
+            object: "app".into(),
+        },
+        "database",
+        OptionalMetadata::Supported(None),
+        true,
+    )
+    .unwrap();
+    let schema = CatalogEntry::schema(
+        CatalogId::new(profile.id, CatalogKind::Schema, ["app", "public"]),
+        database.id.clone(),
+        QualifiedName {
+            database: Some("app".into()),
+            schema: Some("public".into()),
+            object: "public".into(),
+        },
+        "schema",
+        OptionalMetadata::Supported(None),
+        true,
+    )
+    .unwrap();
+    let table = CatalogEntry::relation(
+        CatalogId::new(profile.id, CatalogKind::Table, ["users"]),
+        schema.id.clone(),
+        QualifiedName {
+            database: Some("app".into()),
+            schema: Some("public".into()),
+            object: "users".into(),
+        },
+        "table",
+        OptionalMetadata::Supported(None),
+        true,
+    )
+    .unwrap();
+    let column = CatalogEntry::relation_child(
+        CatalogId::new(profile.id, CatalogKind::Column, ["users", "id"]),
+        table.id.clone(),
+        QualifiedName {
+            database: Some("app".into()),
+            schema: Some("public".into()),
+            object: "id".into(),
+        },
+        "column",
+        OptionalMetadata::Unsupported,
+        CatalogMetadata::Column(ColumnMetadata::new(1, "bigint", false)),
+    )
+    .unwrap();
+    let profile_state = app
+        .explorer
+        .normalized
+        .profiles
+        .get_mut(&profile.id)
+        .unwrap();
+    profile_state
+        .catalog
+        .insert_subtree(vec![database, schema.clone(), table, column])
+        .unwrap();
+    profile_state
+        .catalog
+        .set_group_state(
+            &schema.id,
+            ObjectGroup::Tables,
+            CatalogGroupState {
+                count: CatalogCount::Exact(2),
+                completeness: CatalogCompleteness::Complete,
+            },
+        )
+        .unwrap();
+    app.explorer.normalized.expanded.extend([
+        ExplorerNodeId::Profile(profile.id),
+        ExplorerNodeId::Catalog(database_id.clone()),
+        ExplorerNodeId::Catalog(schema.id.clone()),
+        ExplorerNodeId::Group {
+            parent: schema.id,
+            group: ObjectGroup::Tables,
+        },
+        ExplorerNodeId::Catalog(CatalogId::new(profile.id, CatalogKind::Table, ["users"])),
+    ]);
+    app.explorer.rebuild_projection(profile.id);
+    app.update(Action::ExplorerFindOpen);
+    app.update(Action::ExplorerFindInsert('u'));
+    let output = render(&app, 120, 36);
+
+    assert!(output.contains("Tables  2"), "{output}");
+    assert!(output.contains("users"), "{output}");
+    assert!(output.contains("id  bigint"), "{output}");
 }
 
 #[test]

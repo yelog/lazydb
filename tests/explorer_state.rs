@@ -565,6 +565,34 @@ fn visible_find_confirms_and_cycles_selection_with_wraparound() {
 }
 
 #[test]
+fn visible_find_starts_at_current_selection_and_wraps_downward() {
+    let profile = profile_id(1);
+    let fixture = fixture(profile);
+    let mut state = lazydb::model::workspace::ExplorerState {
+        normalized: explorer_with_fixture(&fixture),
+        ..Default::default()
+    };
+    state.normalized.expanded.extend(expanded_path(&fixture));
+    state.normalized.expanded.insert(ExplorerNodeId::Group {
+        parent: fixture.schema.id.clone(),
+        group: ObjectGroup::Views,
+    });
+    assert!(
+        state
+            .normalized
+            .select(ExplorerNodeId::Catalog(fixture.table.id.clone()))
+    );
+    state.open_find();
+    state.edit_find(|query| query.push_str("user"));
+
+    assert!(state.confirm_find());
+    assert_eq!(
+        state.selected_id(),
+        Some(&ExplorerNodeId::Catalog(fixture.table.id.clone()))
+    );
+}
+
+#[test]
 fn visible_find_centers_each_current_match_in_the_viewport() {
     let profiles: Vec<_> = (1..=8).map(profile_id).collect();
     let mut normalized = ExplorerTreeState::default();
@@ -653,6 +681,64 @@ fn frontend_search_locates_the_current_match_instead_of_the_first() {
     assert_eq!(state.locate_search_hit(), Ok(true));
     assert!(state.search.is_none());
     assert_eq!(state.selected_id(), Some(&selected));
+}
+
+#[test]
+fn frontend_search_starts_after_current_explorer_selection() {
+    let profile = profile_id(1);
+    let fixture = fixture(profile);
+    let mut state = lazydb::model::workspace::ExplorerState {
+        normalized: explorer_with_fixture(&fixture),
+        ..Default::default()
+    };
+    state.normalized.expanded.extend(expanded_path(&fixture));
+    assert!(
+        state
+            .normalized
+            .select(ExplorerNodeId::Catalog(fixture.table.id.clone()))
+    );
+    state.open_search(
+        Some(lazydb::identity::ConnectionIdentity {
+            profile_id: profile,
+            generation: 1,
+        }),
+        1,
+    );
+    state.edit_search(|query| query.push_str("user"));
+    state.refresh_frontend_search();
+
+    let search = state.search.as_ref().unwrap();
+    let selected = &search.frontend_rows[search.selected].id;
+    assert_eq!(selected, &ExplorerNodeId::Catalog(fixture.table.id.clone()));
+}
+
+#[test]
+fn frontend_search_wraps_to_first_match_after_current_position() {
+    let profile = profile_id(1);
+    let fixture = fixture(profile);
+    let mut state = lazydb::model::workspace::ExplorerState {
+        normalized: explorer_with_fixture(&fixture),
+        ..Default::default()
+    };
+    state.normalized.expanded.extend(expanded_path(&fixture));
+    assert!(
+        state
+            .normalized
+            .select(ExplorerNodeId::Catalog(fixture.view.id.clone()))
+    );
+    state.open_search(
+        Some(lazydb::identity::ConnectionIdentity {
+            profile_id: profile,
+            generation: 1,
+        }),
+        1,
+    );
+    state.edit_search(|query| query.push_str("user"));
+    state.refresh_frontend_search();
+
+    let search = state.search.as_ref().unwrap();
+    let selected = &search.frontend_rows[search.selected].id;
+    assert_eq!(selected, &ExplorerNodeId::Catalog(fixture.table.id.clone()));
 }
 
 #[test]

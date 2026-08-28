@@ -309,7 +309,24 @@ impl ExplorerState {
                 .map(|row| row.id.clone())
                 .collect()
         };
-        find.current = 0;
+        find.current = if find.matches.is_empty() {
+            0
+        } else {
+            let start = find
+                .original_selected
+                .as_ref()
+                .and_then(|id| find.rows.iter().position(|row| &row.id == id))
+                .unwrap_or(find.rows.len().saturating_sub(1));
+            find.matches
+                .iter()
+                .position(|id| {
+                    find.rows
+                        .iter()
+                        .position(|row| &row.id == id)
+                        .is_some_and(|position| position >= start)
+                })
+                .unwrap_or(0)
+        };
         true
     }
 
