@@ -78,6 +78,51 @@ fn profile(name: &str) -> ConnectionProfile {
         .profile
 }
 
+fn window_action(app: &App, direction: char) -> Option<Action> {
+    let mut keymap = Keymap::default();
+    assert_eq!(keymap.map(ctrl('w'), app), None);
+    keymap.map(key(KeyCode::Char(direction)), app)
+}
+
+#[test]
+fn relation_window_directions_target_existing_panes() {
+    let mut app = App::new(Vec::new());
+    app.tabs.push(lazydb::model::tab::WorkspaceTab::Relation(
+        lazydb::model::relation::RelationTab::new("users"),
+    ));
+    app.active_tab = 1;
+    app.focus = Focus::Explorer;
+
+    assert_eq!(
+        window_action(&app, 'h'),
+        Some(Action::Focus(Focus::Explorer))
+    );
+    for direction in ['j', 'k', 'l'] {
+        assert_eq!(
+            window_action(&app, direction),
+            Some(Action::Focus(Focus::Results)),
+            "direction={direction}"
+        );
+    }
+}
+
+#[test]
+fn sql_window_directions_keep_three_pane_mapping() {
+    let mut app = App::new(Vec::new());
+    app.focus = Focus::Explorer;
+
+    assert_eq!(
+        window_action(&app, 'h'),
+        Some(Action::Focus(Focus::Explorer))
+    );
+    assert_eq!(
+        window_action(&app, 'j'),
+        Some(Action::Focus(Focus::Results))
+    );
+    assert_eq!(window_action(&app, 'k'), Some(Action::Focus(Focus::Editor)));
+    assert_eq!(window_action(&app, 'l'), Some(Action::Focus(Focus::Editor)));
+}
+
 #[test]
 fn maps_global_sequences_and_function_keys() {
     let mut keymap = Keymap::default();

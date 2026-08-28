@@ -704,6 +704,7 @@ impl App {
             }
             Action::Focus(focus) => {
                 self.focus = focus;
+                self.normalize_focus();
                 Vec::new()
             }
             Action::ShowHelp => {
@@ -2373,6 +2374,7 @@ impl App {
                 Vec::new()
             }
             Action::GridSelect { row, column } => {
+                self.focus = Focus::Results;
                 self.select_grid(row, column);
                 Vec::new()
             }

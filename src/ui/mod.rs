@@ -222,6 +222,10 @@ pub fn render_with_state_using_icons(
             render_explorer(frame, area, app, theme, state, icons);
         }
         if let Some(area) = layout.relation {
+            state.hit_regions.push(HitRegion {
+                area,
+                target: HitTarget::Focus(Focus::Results),
+            });
             relation::render(frame, area, app, theme, state);
         }
         render_footer(frame, layout.footer, app, theme);

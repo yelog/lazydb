@@ -416,6 +416,26 @@ fn relation_page_renders_data_structure_selectors_and_relation_layout() {
             == HitTarget::RelationView(lazydb::model::relation::RelationView::Data)));
         assert!(state.hit_regions.iter().any(|region| region.target
             == HitTarget::RelationView(lazydb::model::relation::RelationView::Structure)));
+        let pane = state
+            .hit_regions
+            .iter()
+            .find(|region| region.target == HitTarget::Focus(Focus::Results))
+            .expect("relation pane focus region");
+        assert!(pane.area.width > 0);
+        assert!(pane.area.height > 0);
+
+        let selector = state
+            .hit_regions
+            .iter()
+            .find(|region| {
+                region.target
+                    == HitTarget::RelationView(lazydb::model::relation::RelationView::Data)
+            })
+            .expect("data selector");
+        assert_eq!(
+            state.target_at(selector.area.x, selector.area.y),
+            Some(&selector.target)
+        );
     }
 }
 

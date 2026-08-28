@@ -123,6 +123,7 @@ fn relation_view_and_retry_hit_targets_emit_semantic_actions() {
         lazydb::model::relation::RelationTab::new("users"),
     ));
     app.active_tab = 1;
+    app.focus = Focus::Explorer;
     let mut ui = UiState::new();
     ui.hit_regions.extend([
         HitRegion {
@@ -174,10 +175,36 @@ fn relation_result_cell_mouse_action_updates_relation_grid() {
     );
     assert_eq!(action, Some(Action::GridSelect { row: 2, column: 3 }));
     app.update(action.unwrap());
+    assert_eq!(app.focus, Focus::Results);
     let lazydb::model::tab::WorkspaceTab::Relation(tab) = &app.tabs[1] else {
         panic!()
     };
     assert_eq!((tab.grid.selected_row, tab.grid.selected_column), (0, 0));
+}
+
+#[test]
+fn relation_pane_background_click_focuses_results() {
+    let mut app = App::new(Vec::new());
+    app.tabs.push(lazydb::model::tab::WorkspaceTab::Relation(
+        lazydb::model::relation::RelationTab::new("users"),
+    ));
+    app.active_tab = 1;
+    app.focus = Focus::Explorer;
+    let mut ui = UiState::new();
+    ui.hit_regions.push(HitRegion {
+        area: Rect::new(10, 2, 40, 20),
+        target: HitTarget::Focus(Focus::Results),
+    });
+
+    let action = map_mouse(
+        mouse(MouseEventKind::Down(MouseButton::Left), 20, 10),
+        &ui,
+        &app,
+    );
+
+    assert_eq!(action, Some(Action::Focus(Focus::Results)));
+    app.update(action.unwrap());
+    assert_eq!(app.focus, Focus::Results);
 }
 
 #[test]
