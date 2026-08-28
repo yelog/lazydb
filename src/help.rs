@@ -10,6 +10,9 @@ pub enum HelpShortcutId {
     NextTab,
     NewConsole,
     GotoSqlConsole,
+    CloseTab,
+    DeleteConsole,
+    OpenSqlEditors,
     ExplorerMoveDown,
     ExplorerMoveUp,
     ExplorerExpand,
@@ -160,6 +163,21 @@ pub fn shortcuts(context: Focus, relation_data: bool) -> Vec<HelpShortcut> {
             id: HelpShortcutId::GotoSqlConsole,
             key: "Space s",
             description: "go to first SQL console",
+        },
+        HelpShortcut {
+            id: HelpShortcutId::CloseTab,
+            key: "Space q",
+            description: "close current tab",
+        },
+        HelpShortcut {
+            id: HelpShortcutId::DeleteConsole,
+            key: "Space x",
+            description: "permanently delete SQL editor",
+        },
+        HelpShortcut {
+            id: HelpShortcutId::OpenSqlEditors,
+            key: "Space e",
+            description: "search SQL editors",
         },
     ];
     entries.extend(match context {

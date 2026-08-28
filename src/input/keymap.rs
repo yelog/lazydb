@@ -158,6 +158,33 @@ impl Keymap {
                 KeyCode::Home => Some(Action::ExplorerSearchMove(isize::MIN)),
                 KeyCode::End => Some(Action::ExplorerSearchMove(isize::MAX)),
                 KeyCode::Char(character) => Some(Action::ExplorerSearchInsert(character)),
+        if let Some(Overlay::SqlEditorList(list)) = app.overlay.as_ref() {
+            self.pending = None;
+            return match event.code {
+                KeyCode::Enter => app
+                    .sql_editors
+                    .iter()
+                    .filter(|record| {
+                        crate::model::sql_editor_list::SqlEditorListState::matches(
+                            &record.name,
+                            &list.query,
+                        )
+                    })
+                    .nth(list.selected)
+                    .map(|record| Action::ActivateSqlEditor(record.id)),
+                KeyCode::Esc => Some(Action::DismissOverlay),
+                KeyCode::Up | KeyCode::Char('k') => Some(Action::SqlEditorListMove(-1)),
+                KeyCode::Down | KeyCode::Char('j') => Some(Action::SqlEditorListMove(1)),
+                KeyCode::Backspace => Some(Action::SqlEditorListBackspace),
+                KeyCode::Char(value) => Some(Action::SqlEditorListInsert(value)),
+                _ => None,
+            };
+        }
+        if matches!(app.overlay, Some(Overlay::DeleteConsole { .. })) {
+            self.pending = None;
+            return match event.code {
+                KeyCode::Enter => Some(Action::ConfirmDeleteConsole),
+                KeyCode::Esc => Some(Action::CancelDeleteConsole),
                 _ => None,
             };
         }
@@ -382,6 +409,9 @@ fn map_pending(pending: Pending, event: KeyEvent, app: &App) -> Option<Action> {
         (Pending::Leader, KeyCode::Char('r')) => Some(Action::RunActiveSql),
         (Pending::Leader, KeyCode::Char('R')) => Some(Action::RunAllSql),
         (Pending::Leader, KeyCode::Char('d')) => Some(Action::OpenTargetSelector),
+        (Pending::Leader, KeyCode::Char('q')) => Some(Action::CloseActiveTab),
+        (Pending::Leader, KeyCode::Char('x')) => Some(Action::RequestDeleteActiveConsole),
+        (Pending::Leader, KeyCode::Char('e')) => Some(Action::OpenSqlEditorList),
         (Pending::Window, KeyCode::Char('h')) => Some(Action::Focus(Focus::Explorer)),
         (Pending::Window, KeyCode::Char('j')) => Some(Action::Focus(Focus::Results)),
         (Pending::Window, KeyCode::Char('k' | 'l')) => {

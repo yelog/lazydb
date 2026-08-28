@@ -169,3 +169,8 @@ Relation snapshots identify whether they are `LIVE`, `OFFLINE SNAPSHOT`,
   cells, and toggles Data/Output.
 - Wheel scroll moves the panel under the pointer.
 - Closing the Neovim floating window hides it without stopping LazyDB.
+# Workspace lifecycle
+
+- `Space q`: close the current tab; SQL editors are hidden and retained.
+- `Space x`: request confirmed permanent deletion of the current SQL editor.
+- `Space e`: search and activate any persisted SQL editor, including hidden editors.

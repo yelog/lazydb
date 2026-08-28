@@ -126,6 +126,15 @@ pub struct ConsoleTab {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct ConsoleRecord {
+    pub id: Uuid,
+    pub name: String,
+    pub execution_target: Option<ExecutionTarget>,
+    pub transaction_mode: TransactionMode,
+    pub open: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct DerivedResultState {
     pub source: LastExecution,
     pub query: DataQueryOptions,

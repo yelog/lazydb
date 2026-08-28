@@ -158,6 +158,29 @@ fn maps_global_sequences_and_function_keys() {
         keymap.map(key(KeyCode::Char('n')), &app),
         Some(Action::NewConsole)
     );
+    assert_eq!(keymap.map(key(KeyCode::Char(' ')), &app), None);
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('q')), &app),
+        Some(Action::CloseActiveTab)
+    );
+}
+
+#[test]
+fn maps_sql_editor_delete_and_list_shortcuts() {
+    let mut keymap = Keymap::default();
+    let mut app = App::new(Vec::new());
+    app.focus = Focus::Explorer;
+
+    assert_eq!(keymap.map(key(KeyCode::Char(' ')), &app), None);
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('x')), &app),
+        Some(Action::RequestDeleteActiveConsole)
+    );
+    assert_eq!(keymap.map(key(KeyCode::Char(' ')), &app), None);
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('e')), &app),
+        Some(Action::OpenSqlEditorList)
+    );
 }
 
 #[test]

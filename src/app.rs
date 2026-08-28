@@ -38,8 +38,8 @@ use crate::{
             RelationMutationHistory,
         },
         tab::{
-            CompletionPopup, ConsoleTab, DataGridState, DerivedResultState, ExecutionResult,
-            LastExecution, OutputEntry, OutputKind, ResultView, WorkspaceTab,
+            CompletionPopup, ConsoleRecord, ConsoleTab, DataGridState, DerivedResultState,
+            ExecutionResult, LastExecution, OutputEntry, OutputKind, ResultView, WorkspaceTab,
         },
         transaction::{
             self, DeferredIntent, DeferredIntentQueue, DeferredTransactionPrompt, TransactionEvent,
@@ -107,6 +107,7 @@ pub struct App {
     pub connection: ConnectionState,
     pub explorer: ExplorerState,
     pub tabs: Vec<WorkspaceTab>,
+    pub sql_editors: Vec<ConsoleRecord>,
     pub active_tab: usize,
     pub focus: Focus,
     pub overlay: Option<Overlay>,
@@ -122,6 +123,7 @@ pub struct App {
     deferred: DeferredIntentQueue,
     resolving_deferred: Option<DeferredTransactionPrompt>,
     pending_target_console: Option<Uuid>,
+    pub sql_editor_list: crate::model::sql_editor_list::SqlEditorListState,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -176,6 +178,7 @@ impl App {
     ) -> Self {
         let mut tab = ConsoleTab::new("console");
         tab.execution_target = profiles.first().map(ExecutionTarget::from_profile);
+        let initial_target = tab.execution_target.clone();
         let tab_id = tab.id;
         let mut editor = EditorWorkspace::new();
         editor.open_console(tab_id, "");
@@ -196,6 +199,13 @@ impl App {
             connection: ConnectionState::default(),
             explorer,
             tabs: vec![WorkspaceTab::Sql(tab)],
+            sql_editors: vec![ConsoleRecord {
+                id: tab_id,
+                name: "console".into(),
+                execution_target: initial_target,
+                transaction_mode: TransactionMode::Auto,
+                open: true,
+            }],
             active_tab: 0,
             focus: Focus::Editor,
             overlay: None,
@@ -212,6 +222,7 @@ impl App {
             deferred: DeferredIntentQueue::default(),
             resolving_deferred: None,
             pending_target_console: None,
+            sql_editor_list: Default::default(),
         }
     }
 
@@ -315,15 +326,25 @@ impl App {
 
     pub fn workspace_snapshot(&self) -> WorkspaceSnapshot {
         let consoles = self
-            .tabs
+            .sql_editors
             .iter()
-            .filter_map(WorkspaceTab::as_console)
-            .map(|tab| PersistedConsole {
-                id: tab.id,
-                name: tab.name.clone(),
-                sql_file: format!("{}.sql", tab.id).into(),
-                target: tab.execution_target.clone(),
-                transaction_mode: tab.transaction_mode,
+            .map(|record| {
+                let open_tab = self
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.id() == record.id)
+                    .and_then(WorkspaceTab::as_console);
+                PersistedConsole {
+                    id: record.id,
+                    name: open_tab.map_or_else(|| record.name.clone(), |tab| tab.name.clone()),
+                    sql_file: format!("{}.sql", record.id).into(),
+                    target: open_tab
+                        .and_then(|tab| tab.execution_target.clone())
+                        .or_else(|| record.execution_target.clone()),
+                    transaction_mode: open_tab
+                        .map_or(record.transaction_mode, |tab| tab.transaction_mode),
+                    open: record.open,
+                }
             })
             .collect::<Vec<_>>();
         let sql = consoles
@@ -333,7 +354,12 @@ impl App {
         let active_console = self
             .active_console_opt()
             .map(|tab| tab.id)
-            .or_else(|| consoles.first().map(|console| console.id))
+            .or_else(|| {
+                consoles
+                    .iter()
+                    .find(|console| console.open)
+                    .map(|console| console.id)
+            })
             .unwrap_or(Uuid::nil());
         WorkspaceSnapshot {
             active_console,
@@ -353,8 +379,10 @@ impl App {
         let selected =
             selected_profile.and_then(|id| self.profiles.iter().find(|profile| profile.id == id));
         self.tabs.clear();
+        self.sql_editors.clear();
         self.editor = EditorWorkspace::new();
         for persisted in snapshot.consoles {
+            let open = persisted.open;
             let mut tab = ConsoleTab::new(persisted.name);
             tab.id = persisted.id;
             tab.transaction_mode = persisted.transaction_mode;
@@ -381,7 +409,19 @@ impl App {
                 .map(|(_, text)| text.as_str())
                 .unwrap_or_default();
             self.editor.open_console(tab.id, text);
-            self.tabs.push(WorkspaceTab::Sql(tab));
+            self.sql_editors.push(ConsoleRecord {
+                id: tab.id,
+                name: tab.name.clone(),
+                execution_target: tab.execution_target.clone(),
+                transaction_mode: tab.transaction_mode,
+                open,
+            });
+            if open {
+                self.tabs.push(WorkspaceTab::Sql(tab));
+            }
+        }
+        if self.tabs.is_empty() {
+            self.create_sql_editor_named("console".to_owned());
         }
         self.active_tab = self
             .tabs
@@ -416,6 +456,9 @@ impl App {
             Id::NextTab => vec![Action::NextTab],
             Id::NewConsole => vec![Action::NewConsole],
             Id::GotoSqlConsole => vec![Action::GotoSqlConsole],
+            Id::CloseTab => vec![Action::CloseActiveTab],
+            Id::DeleteConsole => vec![Action::RequestDeleteActiveConsole],
+            Id::OpenSqlEditors => vec![Action::OpenSqlEditorList],
             Id::ExplorerMoveDown => vec![Action::ExplorerMove(1)],
             Id::ExplorerMoveUp => vec![Action::ExplorerMove(-1)],
             Id::ExplorerExpand => vec![Action::ExplorerExpand],
@@ -578,6 +621,15 @@ impl App {
                         | Action::ExplorerSearchLocate
                         | Action::ExplorerSearchClose
                         | Action::ExplorerSearchRetry
+                        | Action::CloseActiveTab
+                        | Action::RequestDeleteActiveConsole
+                        | Action::ConfirmDeleteConsole
+                        | Action::CancelDeleteConsole
+                        | Action::OpenSqlEditorList
+                        | Action::SqlEditorListInsert(_)
+                        | Action::SqlEditorListBackspace
+                        | Action::SqlEditorListMove(_)
+                        | Action::ActivateSqlEditor(_)
                 ))
             && matches!(
                 action,
@@ -617,6 +669,14 @@ impl App {
                     | Action::CancelTargetSelector
                     | Action::ConfirmClearTransactionOutcome
                     | Action::CancelClearTransactionOutcome
+                    | Action::OpenSqlEditorList
+                    | Action::SqlEditorListInsert(_)
+                    | Action::SqlEditorListBackspace
+                    | Action::SqlEditorListMove(_)
+                    | Action::ActivateSqlEditor(_)
+                    | Action::RequestDeleteActiveConsole
+                    | Action::ConfirmDeleteConsole
+                    | Action::CancelDeleteConsole
             )
         {
             return Vec::new();
@@ -625,29 +685,41 @@ impl App {
             Action::NewConsole => {
                 let name = format!("console_{}", self.next_console_number);
                 self.next_console_number += 1;
-                let mut tab = ConsoleTab::new(name);
+                let mut tab = ConsoleTab::new(name.clone());
                 tab.execution_target = self.active_profile().map(ExecutionTarget::from_profile);
                 let id = tab.id;
                 self.tabs.push(WorkspaceTab::Sql(tab));
                 self.editor.open_console(id, "");
+                self.sql_editors.push(ConsoleRecord {
+                    id,
+                    name: name.clone(),
+                    execution_target: self
+                        .tabs
+                        .last()
+                        .and_then(WorkspaceTab::as_console)
+                        .and_then(|tab| tab.execution_target.clone()),
+                    transaction_mode: TransactionMode::Auto,
+                    open: true,
+                });
                 self.active_tab = self.tabs.len() - 1;
                 self.focus = Focus::Editor;
                 vec![self.persist_workspace_command()]
             }
             Action::CloseActiveTab => {
-                if self.tabs.len() > 1 {
+                if !self.tabs.is_empty() {
                     let was_console = self.tabs[self.active_tab].as_console().is_some();
                     let id = self.tabs[self.active_tab].id();
                     if self.active_console_opt().is_some() && self.transaction_needs_exit(id) {
                         return self.defer_intent(DeferredIntent::CloseConsole, [id]);
                     }
-                    let is_final_console = was_console
-                        && self
-                            .tabs
-                            .iter()
-                            .filter(|tab| tab.as_console().is_some())
-                            .count()
-                            == 1;
+                    if let Some(tab) = self.tabs[self.active_tab].as_console()
+                        && let Some(record) =
+                            self.sql_editors.iter_mut().find(|record| record.id == id)
+                    {
+                        record.name = tab.name.clone();
+                        record.execution_target = tab.execution_target.clone();
+                        record.transaction_mode = tab.transaction_mode;
+                    }
                     let cancel = match self.tabs.get_mut(self.active_tab) {
                         Some(WorkspaceTab::Relation(tab)) => {
                             let requests = [
@@ -665,34 +737,107 @@ impl App {
                         _ => Vec::new(),
                     };
                     self.tabs.remove(self.active_tab);
-                    if was_console {
-                        self.editor.close_console(id);
-                    }
-                    if is_final_console {
-                        let mut tab =
-                            ConsoleTab::new(format!("console_{}", self.next_console_number));
-                        tab.execution_target =
-                            self.active_profile().map(ExecutionTarget::from_profile);
-                        self.next_console_number += 1;
-                        let id = tab.id;
-                        self.tabs.push(WorkspaceTab::Sql(tab));
-                        self.editor.open_console(id, "");
+                    if was_console
+                        && let Some(record) =
+                            self.sql_editors.iter_mut().find(|record| record.id == id)
+                    {
+                        record.open = false;
                     }
                     self.active_tab = self.active_tab.saturating_sub(1);
                     self.normalize_focus();
                     let mut commands = cancel;
+                    if self.tabs.is_empty() {
+                        if let Some(replacement_id) = self
+                            .sql_editors
+                            .iter()
+                            .find(|record| record.id != id && !record.open)
+                            .map(|record| record.id)
+                        {
+                            self.open_sql_editor(replacement_id);
+                        } else {
+                            self.create_sql_editor_named("console".to_owned());
+                        }
+                        self.active_tab = 0;
+                        self.focus = Focus::Editor;
+                    }
                     commands.push(self.persist_workspace_command());
                     commands
                 } else {
                     Vec::new()
                 }
             }
+            Action::RequestDeleteActiveConsole => {
+                let Some(tab) = self.active_console_opt() else {
+                    return Vec::new();
+                };
+                let id = tab.id;
+                if self.transaction_needs_exit(id) {
+                    return self.defer_intent(DeferredIntent::DeleteConsole(id), [id]);
+                }
+                self.overlay = Some(Overlay::DeleteConsole { console_id: id });
+                Vec::new()
+            }
+            Action::ConfirmDeleteConsole => {
+                let Some(Overlay::DeleteConsole { console_id }) = self.overlay.take() else {
+                    return Vec::new();
+                };
+                self.delete_console(console_id)
+            }
+            Action::CancelDeleteConsole => {
+                if matches!(self.overlay, Some(Overlay::DeleteConsole { .. })) {
+                    self.overlay = None;
+                }
+                Vec::new()
+            }
+            Action::OpenSqlEditorList => {
+                self.sql_editor_list = Default::default();
+                self.overlay = Some(Overlay::SqlEditorList(self.sql_editor_list.clone()));
+                Vec::new()
+            }
+            Action::SqlEditorListInsert(value) => {
+                if let Some(Overlay::SqlEditorList(list)) = self.overlay.as_mut() {
+                    list.insert(value);
+                }
+                Vec::new()
+            }
+            Action::SqlEditorListBackspace => {
+                if let Some(Overlay::SqlEditorList(list)) = self.overlay.as_mut() {
+                    list.backspace();
+                }
+                Vec::new()
+            }
+            Action::SqlEditorListMove(delta) => {
+                let count = if let Some(Overlay::SqlEditorList(list)) = self.overlay.as_ref() {
+                    self.sql_editors
+                        .iter()
+                        .filter(|record| {
+                            crate::model::sql_editor_list::SqlEditorListState::matches(
+                                &record.name,
+                                &list.query,
+                            )
+                        })
+                        .count()
+                } else {
+                    0
+                };
+                if let Some(Overlay::SqlEditorList(list)) = self.overlay.as_mut() {
+                    list.move_selection(delta, count);
+                }
+                Vec::new()
+            }
+            Action::ActivateSqlEditor(id) => self.activate_sql_editor(id),
             Action::NextTab => {
+                if self.tabs.is_empty() {
+                    return Vec::new();
+                }
                 self.active_tab = (self.active_tab + 1) % self.tabs.len();
                 self.normalize_focus();
                 Vec::new()
             }
             Action::PreviousTab => {
+                if self.tabs.is_empty() {
+                    return Vec::new();
+                }
                 self.active_tab = self
                     .active_tab
                     .checked_sub(1)
@@ -785,6 +930,13 @@ impl App {
             }
             Action::ExecuteHelpShortcut(id) => self.execute_help_shortcut(id),
             Action::DismissOverlay => {
+                if matches!(
+                    self.overlay,
+                    Some(Overlay::DeleteConsole { .. } | Overlay::SqlEditorList(_))
+                ) {
+                    self.overlay = None;
+                    return Vec::new();
+                }
                 if matches!(self.overlay, Some(Overlay::ExecutionConfirm { .. })) {
                     if let Some(Overlay::ExecutionConfirm { draft, .. }) = self.overlay.take() {
                         self.retain_execution(draft, ExecutionResult::Cancelled);
@@ -2841,16 +2993,15 @@ impl App {
 
     fn replay_deferred(&mut self, intent: DeferredIntent) -> Vec<Command> {
         match intent {
+            DeferredIntent::DeleteConsole(id) => {
+                self.overlay = Some(Overlay::DeleteConsole { console_id: id });
+                Vec::new()
+            }
             DeferredIntent::CloseConsole => {
-                if self.tabs.len() > 1 {
-                    let id = self.active_console().id;
-                    if let Some(index) = self.tabs.iter().position(|tab| tab.id() == id) {
-                        self.tabs.remove(index);
-                        self.editor.close_console(id);
-                        self.active_tab = self.active_tab.min(self.tabs.len().saturating_sub(1));
-                    }
-                }
-                vec![self.persist_workspace_command()]
+                let Some(id) = self.active_console_opt().map(|tab| tab.id) else {
+                    return Vec::new();
+                };
+                self.close_console(id)
             }
             DeferredIntent::SetMode(TransactionMode::Auto) => {
                 self.set_transaction_mode(TransactionMode::Auto)
@@ -2874,6 +3025,99 @@ impl App {
                 self.set_transaction_mode(TransactionMode::Manual)
             }
         }
+    }
+
+    fn close_console(&mut self, id: Uuid) -> Vec<Command> {
+        if let Some(index) = self.tabs.iter().position(|tab| tab.id() == id) {
+            self.tabs.remove(index);
+            if let Some(record) = self.sql_editors.iter_mut().find(|record| record.id == id) {
+                record.open = false;
+            }
+            self.active_tab = self.active_tab.min(self.tabs.len().saturating_sub(1));
+            self.normalize_focus();
+        }
+        self.ensure_open_sql_editor();
+        vec![self.persist_workspace_command()]
+    }
+
+    fn ensure_open_sql_editor(&mut self) {
+        if !self.tabs.is_empty() {
+            return;
+        }
+        if let Some(id) = self
+            .sql_editors
+            .iter()
+            .find(|record| !record.open)
+            .map(|record| record.id)
+        {
+            self.open_sql_editor(id);
+        } else {
+            self.create_sql_editor();
+        }
+        self.active_tab = 0;
+        self.focus = Focus::Editor;
+    }
+
+    fn create_sql_editor(&mut self) {
+        let name = format!("console_{}", self.next_console_number);
+        self.next_console_number += 1;
+        self.create_sql_editor_named(name);
+    }
+
+    fn create_sql_editor_named(&mut self, name: String) {
+        let mut tab = ConsoleTab::new(name);
+        tab.execution_target = self.active_profile().map(ExecutionTarget::from_profile);
+        let id = tab.id;
+        self.editor.open_console(id, "");
+        self.sql_editors.push(ConsoleRecord {
+            id,
+            name: tab.name.clone(),
+            execution_target: tab.execution_target.clone(),
+            transaction_mode: tab.transaction_mode,
+            open: true,
+        });
+        self.tabs.push(WorkspaceTab::Sql(tab));
+    }
+
+    fn open_sql_editor(&mut self, id: Uuid) {
+        let Some(record) = self.sql_editors.iter().find(|record| record.id == id) else {
+            return;
+        };
+        let mut tab = ConsoleTab::new(record.name.clone());
+        tab.id = id;
+        tab.execution_target = record.execution_target.clone();
+        tab.transaction_mode = record.transaction_mode;
+        if self.editor_text(id).is_err() {
+            self.editor.open_console(id, "");
+        }
+        if let Some(record) = self.sql_editors.iter_mut().find(|record| record.id == id) {
+            record.open = true;
+        }
+        self.tabs.push(WorkspaceTab::Sql(tab));
+    }
+
+    fn delete_console(&mut self, id: Uuid) -> Vec<Command> {
+        self.tabs.retain(|tab| tab.id() != id);
+        self.editor.close_console(id);
+        self.sql_editors.retain(|record| record.id != id);
+        if self.sql_editors.is_empty() {
+            self.create_sql_editor();
+        }
+        self.ensure_open_sql_editor();
+        self.active_tab = self.active_tab.min(self.tabs.len().saturating_sub(1));
+        vec![self.persist_workspace_command(), Command::DeleteSqlFile(id)]
+    }
+
+    fn activate_sql_editor(&mut self, id: Uuid) -> Vec<Command> {
+        if let Some(index) = self.tabs.iter().position(|tab| tab.id() == id) {
+            self.active_tab = index;
+        } else if self.sql_editors.iter().any(|record| record.id == id) {
+            self.open_sql_editor(id);
+            self.active_tab = self.tabs.len() - 1;
+        }
+        self.focus = Focus::Editor;
+        self.overlay = None;
+        vec![self.persist_workspace_command()]
     }
 
     fn request_clear_outcome(&mut self) -> Vec<Command> {
@@ -3606,6 +3850,8 @@ impl App {
                 EditorEffect::NewConsole => Action::NewConsole,
                 EditorEffect::GotoSqlConsole => Action::GotoSqlConsole,
                 EditorEffect::CloseConsole => Action::CloseActiveTab,
+                EditorEffect::DeleteConsole => Action::RequestDeleteActiveConsole,
+                EditorEffect::OpenSqlEditorList => Action::OpenSqlEditorList,
                 EditorEffect::FocusPane(focus) => Action::Focus(focus),
                 EditorEffect::NextTab => Action::NextTab,
                 EditorEffect::PreviousTab => Action::PreviousTab,

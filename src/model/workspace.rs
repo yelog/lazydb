@@ -79,6 +79,10 @@ pub enum Overlay {
         candidates: Vec<ExecutionTarget>,
         selected: usize,
     },
+    DeleteConsole {
+        console_id: Uuid,
+    },
+    SqlEditorList(crate::model::sql_editor_list::SqlEditorListState),
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
