@@ -199,6 +199,19 @@ fn relation_focus_cycles_only_explorer_and_results() {
 }
 
 #[test]
+fn relation_tab_normalizes_direct_editor_focus_to_results() {
+    let mut app = lazydb::app::App::new(Vec::new());
+    app.tabs
+        .push(WorkspaceTab::Relation(RelationTab::new("users")));
+    app.active_tab = 1;
+    app.focus = lazydb::model::workspace::Focus::Explorer;
+
+    app.update(Action::Focus(lazydb::model::workspace::Focus::Editor));
+
+    assert_eq!(app.focus, lazydb::model::workspace::Focus::Results);
+}
+
+#[test]
 fn relation_snapshot_provenance_is_derived_from_current_connection_and_profile() {
     let profile = Uuid::new_v4();
     let connection = lazydb::identity::ConnectionIdentity {

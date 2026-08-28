@@ -209,7 +209,7 @@ impl Keymap {
                 .tabs
                 .get(app.active_tab)
                 .is_some_and(|tab| tab_id == tab.id())
-            && let Some(action) = map_pending(pending, event)
+            && let Some(action) = map_pending(pending, event, app)
         {
             return Some(action);
         }
@@ -366,7 +366,7 @@ impl Keymap {
     }
 }
 
-fn map_pending(pending: Pending, event: KeyEvent) -> Option<Action> {
+fn map_pending(pending: Pending, event: KeyEvent, app: &App) -> Option<Action> {
     let valid_modifiers = event.modifiers.is_empty()
         || (pending == Pending::Leader
             && event.modifiers == KeyModifiers::SHIFT
@@ -384,7 +384,13 @@ fn map_pending(pending: Pending, event: KeyEvent) -> Option<Action> {
         (Pending::Leader, KeyCode::Char('d')) => Some(Action::OpenTargetSelector),
         (Pending::Window, KeyCode::Char('h')) => Some(Action::Focus(Focus::Explorer)),
         (Pending::Window, KeyCode::Char('j')) => Some(Action::Focus(Focus::Results)),
-        (Pending::Window, KeyCode::Char('k' | 'l')) => Some(Action::Focus(Focus::Editor)),
+        (Pending::Window, KeyCode::Char('k' | 'l')) => {
+            Some(Action::Focus(if app.is_active_relation_tab() {
+                Focus::Results
+            } else {
+                Focus::Editor
+            }))
+        }
         (Pending::Previous, KeyCode::Char('t')) => Some(Action::PreviousTab),
         (Pending::Next, KeyCode::Char('t')) => Some(Action::NextTab),
         (Pending::RelationDelete, KeyCode::Char('d')) => Some(Action::RelationDeleteCurrent),
