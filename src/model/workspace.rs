@@ -939,14 +939,14 @@ fn entry_detail(entry: &CatalogEntry) -> Option<String> {
     use crate::db::catalog::{CatalogMetadata, ConstraintMetadata};
     match &entry.metadata {
         CatalogMetadata::Column(column) => {
-            let mut flags = Vec::new();
-            if !column.nullable {
-                flags.push("NOT NULL".to_owned());
-            }
+            let mut detail = column.native_type.clone();
             if let OptionalMetadata::Supported(Some(default)) = &column.default_expression {
-                flags.push(format!("DEFAULT {default}"));
+                if !detail.is_empty() {
+                    detail.push(' ');
+                }
+                detail.push_str(&format!("DEFAULT {default}"));
             }
-            (!flags.is_empty()).then(|| flags.join(" "))
+            (!detail.is_empty()).then_some(detail)
         }
         CatalogMetadata::Index(index) => Some(format!(
             "{} ({})",
@@ -989,5 +989,71 @@ fn catalog_count_label(count: crate::db::catalog::CatalogCount) -> Option<String
         crate::db::catalog::CatalogCount::Exact(value) => Some(value.to_string()),
         crate::db::catalog::CatalogCount::AtLeast(value) => Some(format!("{value}+")),
         crate::db::catalog::CatalogCount::Unknown => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::entry_detail;
+    use crate::db::catalog::{
+        CatalogEntry, CatalogId, CatalogKind, CatalogMetadata, ColumnMetadata, OptionalMetadata,
+    };
+    use uuid::Uuid;
+
+    fn column_detail(
+        native_type: &str,
+        nullable: bool,
+        default: OptionalMetadata<String>,
+    ) -> Option<String> {
+        let id = CatalogId::new(Uuid::nil(), CatalogKind::Column, ["1"]);
+        let mut metadata = ColumnMetadata::new(1, native_type, nullable);
+        metadata.default_expression = default;
+        entry_detail(&CatalogEntry {
+            id,
+            parent_id: None,
+            kind: CatalogKind::Column,
+            native_kind: native_type.to_owned(),
+            qualified_name: crate::db::catalog::QualifiedName {
+                database: None,
+                schema: None,
+                object: "column".to_owned(),
+            },
+            comment: OptionalMetadata::Unsupported,
+            metadata: CatalogMetadata::Column(metadata),
+            expandable: false,
+            relation_id: None,
+        })
+    }
+
+    #[test]
+    fn column_detail_shows_type_and_default_without_nullability_flag() {
+        assert_eq!(
+            column_detail(
+                "INTEGER",
+                false,
+                OptionalMetadata::Supported(Some("0".to_owned()))
+            ),
+            Some("INTEGER DEFAULT 0".to_owned())
+        );
+    }
+
+    #[test]
+    fn column_detail_shows_type_without_default() {
+        assert_eq!(
+            column_detail("TEXT", false, OptionalMetadata::Supported(None)),
+            Some("TEXT".to_owned())
+        );
+    }
+
+    #[test]
+    fn column_detail_preserves_parentheses_in_default_expression() {
+        assert_eq!(
+            column_detail(
+                "INTEGER",
+                true,
+                OptionalMetadata::Supported(Some("(nextval('seq'))".to_owned()))
+            ),
+            Some("INTEGER DEFAULT (nextval('seq'))".to_owned())
+        );
     }
 }
