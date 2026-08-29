@@ -1611,15 +1611,14 @@ impl MySqlAdapter {
             .into_iter()
             .map(|row| {
                 Ok(MySqlIndexPart {
-                    name: row.try_get("index_name").map_err(decode_error)?,
-                    unique: row.try_get::<i64, _>("non_unique").map_err(decode_error)? == 0,
+                    name: row.try_get(0).map_err(decode_error)?,
+                    unique: row.try_get::<i64, _>(1).map_err(decode_error)? == 0,
                     ordinal: checked_u32(
-                        row.try_get::<u64, _>("seq_in_index")
-                            .map_err(decode_error)?,
+                        row.try_get::<u64, _>(2).map_err(decode_error)?,
                         "index ordinal",
                     )?,
-                    column: row.try_get("column_name").map_err(decode_error)?,
-                    expression: row.try_get("expression").map_err(decode_error)?,
+                    column: row.try_get(3).map_err(decode_error)?,
+                    expression: row.try_get(4).map_err(decode_error)?,
                 })
             })
             .collect::<Result<Vec<_>, DatabaseError>>()?;
@@ -1658,7 +1657,7 @@ impl MySqlAdapter {
         let parts = rows
             .into_iter()
             .map(|row| {
-                let native_kind: String = row.try_get("constraint_type").map_err(decode_error)?;
+                let native_kind: String = row.try_get(5).map_err(decode_error)?;
                 let kind = match native_kind.as_str() {
                     "PRIMARY KEY" => CatalogKind::PrimaryKey,
                     "UNIQUE" => CatalogKind::UniqueConstraint,
@@ -1666,29 +1665,22 @@ impl MySqlAdapter {
                     _ => return Err(catalog_internal("unexpected MySQL constraint type")),
                 };
                 Ok(MySqlConstraintPart {
-                    catalog: row.try_get("constraint_catalog").map_err(decode_error)?,
-                    schema: row.try_get("constraint_schema").map_err(decode_error)?,
-                    table_schema: row.try_get("table_schema").map_err(decode_error)?,
-                    table: row.try_get("table_name").map_err(decode_error)?,
-                    name: row.try_get("constraint_name").map_err(decode_error)?,
+                    catalog: row.try_get(0).map_err(decode_error)?,
+                    schema: row.try_get(1).map_err(decode_error)?,
+                    table_schema: row.try_get(2).map_err(decode_error)?,
+                    table: row.try_get(3).map_err(decode_error)?,
+                    name: row.try_get(4).map_err(decode_error)?,
                     kind,
                     ordinal: checked_u32(
-                        row.try_get::<u64, _>("ordinal_position")
-                            .map_err(decode_error)?,
+                        row.try_get::<u64, _>(6).map_err(decode_error)?,
                         "constraint ordinal",
                     )?,
-                    column: row.try_get("column_name").map_err(decode_error)?,
-                    referenced_database: row
-                        .try_get("referenced_table_schema")
-                        .map_err(decode_error)?,
-                    referenced_relation: row
-                        .try_get("referenced_table_name")
-                        .map_err(decode_error)?,
-                    referenced_column: row
-                        .try_get("referenced_column_name")
-                        .map_err(decode_error)?,
+                    column: row.try_get(7).map_err(decode_error)?,
+                    referenced_database: row.try_get(8).map_err(decode_error)?,
+                    referenced_relation: row.try_get(9).map_err(decode_error)?,
+                    referenced_column: row.try_get(10).map_err(decode_error)?,
                     referenced_ordinal: row
-                        .try_get::<Option<u64>, _>("position_in_unique_constraint")
+                        .try_get::<Option<u64>, _>(11)
                         .map_err(decode_error)?
                         .map(|value| checked_u32(value, "referenced constraint ordinal"))
                         .transpose()?,
