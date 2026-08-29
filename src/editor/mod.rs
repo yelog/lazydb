@@ -1254,7 +1254,7 @@ impl EditorWorkspace {
             }
             EditorKey::Control('u') => {
                 if let Some(prompt) = self.prompt.as_mut() {
-                    prompt.text.truncate(0);
+                    prompt.text.clear();
                     prompt.cursor = 0;
                     prompt.error = None;
                 }

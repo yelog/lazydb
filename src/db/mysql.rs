@@ -799,7 +799,7 @@ impl MySqlAdapter {
         let mut entries = rows
             .into_iter()
             .map(|row| {
-                let name: String = row.try_get("schema_name").map_err(decode_error)?;
+                let name: String = row.try_get(0).map_err(decode_error)?;
                 CatalogEntry::database(
                     CatalogId::new(self.connection_id, CatalogKind::Database, [name.clone()]),
                     qualified_database(&name),
