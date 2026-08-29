@@ -237,7 +237,7 @@ pub fn render_with_state_using_icons(
 
     render_header(frame, layout.header, app, theme, state);
     if let Some(area) = layout.tabs {
-        render_tabs(frame, area, app, theme, state);
+        render_tabs(frame, area, app, theme, state, icons);
     }
     if is_relation {
         if let Some(area) = layout.explorer {
@@ -626,7 +626,14 @@ fn header_text(value: &str) -> String {
         .replace('\t', "<TAB>")
 }
 
-fn render_tabs(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, state: &mut UiState) {
+fn render_tabs(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    theme: Theme,
+    state: &mut UiState,
+    icons: icons::IconSet,
+) {
     let mut spans = Vec::new();
     let mut x = area.x;
     for (index, tab) in app.tabs.iter().enumerate() {
@@ -634,7 +641,27 @@ fn render_tabs(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, state
             .chars()
             .take(48)
             .collect::<String>();
-        let label = format!(" {:02} {} ", index + 1, title);
+        let icon = match tab {
+            WorkspaceTab::Relation(tab) => icons.catalog(tab.descriptor.kind),
+            WorkspaceTab::Sql(tab) => tab
+                .execution_target
+                .as_ref()
+                .and_then(|target| {
+                    app.profiles
+                        .iter()
+                        .find(|profile| profile.id == target.profile_id)
+                })
+                .or_else(|| app.active_profile())
+                .map(|profile| icons.database(profile.kind))
+                .or_else(|| {
+                    app.connection
+                        .server
+                        .as_ref()
+                        .map(|server| icons.database(server.kind))
+                })
+                .unwrap_or_else(|| icons.catalog(CatalogKind::Database)),
+        };
+        let label = format!(" {icon} {title} ");
         let width = label.cell_width();
         let active = index == app.active_tab;
         spans.push(Span::styled(

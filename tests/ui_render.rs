@@ -16,6 +16,7 @@ use lazydb::{
     },
     model::{
         data_query::{DataQueryCandidate, DataQueryCompletion, DataQueryInput},
+        execution_target::ExecutionTarget,
         explorer::{CatalogGroupState, ExplorerLoadState, ExplorerNodeId, ExplorerOwnerId},
         profile_manager::{ProfileField, ProfileManagerPage, ProfileOperation},
         relation::RelationTab,
@@ -241,6 +242,37 @@ fn render_with_icons(app: &App, width: u16, height: u16, icons: IconSet) -> (Str
         output.push('\n');
     }
     (output, state)
+}
+
+#[test]
+fn workspace_tabs_use_content_icons_instead_of_sequence_numbers() {
+    let mut app = fixture();
+    app.active_console_mut().name = "console_1".into();
+    app.tabs
+        .push(WorkspaceTab::Relation(RelationTab::new("users")));
+
+    let output = render_with_icons(&app, 120, 30, IconSet::new(IconMode::Ascii)).0;
+
+    assert!(output.contains("SQ console_1"), "{output}");
+    assert!(output.contains("TB users"), "{output}");
+    assert!(!output.contains("01 console_1"), "{output}");
+    assert!(!output.contains("02 users"), "{output}");
+}
+
+#[test]
+fn sql_tab_icon_prefers_its_bound_profile_over_the_active_connection() {
+    let postgres = import_connection_url("postgres://localhost/app", Some("postgres"))
+        .unwrap()
+        .profile;
+    let mut app = fixture();
+    app.profiles.push(postgres.clone());
+    app.active_console_mut().name = "console_1".into();
+    app.active_console_mut().execution_target = Some(ExecutionTarget::from_profile(&postgres));
+
+    let output = render_with_icons(&app, 120, 30, IconSet::new(IconMode::Ascii)).0;
+
+    assert!(output.contains("PG console_1"), "{output}");
+    assert!(!output.contains("SQ console_1"), "{output}");
 }
 
 #[test]
