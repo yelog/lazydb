@@ -58,7 +58,7 @@ fn data_query_completion_keys_preempt_query_input_navigation() {
     );
     assert_eq!(
         keymap.map(key(KeyCode::Enter), &app),
-        Some(Action::SubmitDataQuery)
+        Some(Action::DataQueryCompletionAccept)
     );
 
     let WorkspaceTab::Relation(tab) = &mut app.tabs[1] else {
@@ -72,6 +72,10 @@ fn data_query_completion_keys_preempt_query_input_navigation() {
     assert_eq!(
         keymap.map(key(KeyCode::Esc), &app),
         Some(Action::CancelDataQueryInput)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Enter), &app),
+        Some(Action::SubmitDataQuery)
     );
 }
 

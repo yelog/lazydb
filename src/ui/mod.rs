@@ -1525,7 +1525,7 @@ fn render_data(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, state
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(query_height), Constraint::Min(1)])
         .split(area);
-    query_bar::render(frame, chunks[0], &tab.query, theme, state);
+    let query_cursor = query_bar::render(frame, chunks[0], &tab.query, theme, state);
     let area = chunks[1];
     let block = panel_block(" RESULT SET ", app.focus == Focus::Results, theme);
     let Some(result) = tab
@@ -1554,6 +1554,18 @@ fn render_data(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, state
         block,
         state,
     );
+    if let (Some(completion), Some(cursor)) = (&tab.query.completion, query_cursor) {
+        render_data_query_completion_popup(
+            frame,
+            completion,
+            theme,
+            state,
+            CompletionAnchor {
+                viewport: area,
+                cursor,
+            },
+        );
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -19,8 +19,8 @@ use lazydb::{
         explorer::{CatalogGroupState, ExplorerLoadState, ExplorerNodeId, ExplorerOwnerId},
         profile_manager::{ProfileField, ProfileManagerPage, ProfileOperation},
         relation::RelationTab,
-        tab::CompletionPopup,
         tab::WorkspaceTab,
+        tab::{CompletionPopup, ResultView},
         workspace::{ConnectionStatus, Focus, Overlay},
     },
     persistence::secrets::keyring_ref,
@@ -1239,6 +1239,25 @@ fn sql_query_bar_is_inert_until_derived_execution_exists() {
     app.update(Action::DataQueryInsert('x'));
     assert_eq!(app.active_console().query, before);
     assert!(app.update(Action::SubmitDataQuery).is_empty());
+}
+
+#[test]
+fn sql_result_query_completion_is_rendered_above_the_grid() {
+    let mut app = fixture();
+    app.active_console_mut().query.capability = lazydb::model::data_query::DataQueryCapability::Sql;
+    app.active_console_mut().result_view = ResultView::Data;
+    app.update(Action::FocusDataQueryInput(DataQueryInput::Where));
+    for character in "act".chars() {
+        app.update(Action::DataQueryInsert(character));
+    }
+
+    let (output, state) = render_with_state(&app, 120, 36);
+
+    assert!(output.contains("active"), "{output}");
+    assert!(output.contains("BOOLEAN"), "{output}");
+    let popup = state.completion_popup.unwrap();
+    assert!(popup.right() <= 120);
+    assert!(popup.bottom() <= 36);
 }
 
 #[test]

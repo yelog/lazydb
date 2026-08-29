@@ -7,11 +7,12 @@ use lazydb::{
     db::query::{ColumnMeta, QueryOutcome, QueryStats, ResultSet},
     db::value::CellValue,
     model::{
+        data_query::DataQueryCapability,
         explorer::CatalogTree,
         relation::{
             RelationDescriptor, RelationKey, RelationSnapshotProvenance, RelationTab, RelationView,
         },
-        tab::WorkspaceTab,
+        tab::{ConsoleTab, ResultView, WorkspaceTab},
     },
 };
 use uuid::Uuid;
@@ -371,6 +372,73 @@ fn relation_query_suggests_only_current_relation_columns() {
     assert_eq!(
         relation_query(&app).completion.as_ref().unwrap().candidates[0].name,
         "user_id"
+    );
+}
+
+#[test]
+fn sql_result_query_suggests_output_columns_in_both_inputs() {
+    let mut app = lazydb::app::App::new(Vec::new());
+    let mut tab = ConsoleTab::new("search");
+    tab.result_view = ResultView::Data;
+    tab.query.capability = DataQueryCapability::Sql;
+    tab.outcome = Some(QueryOutcome {
+        result_sets: vec![ResultSet {
+            columns: vec![
+                ColumnMeta {
+                    name: "uid".into(),
+                    type_name: "bigint".into(),
+                },
+                ColumnMeta {
+                    name: "display_name".into(),
+                    type_name: "text".into(),
+                },
+            ],
+            rows: Vec::new(),
+            affected_rows: 0,
+        }],
+        stats: QueryStats::new(std::time::Duration::ZERO, std::time::Duration::ZERO, 0),
+    });
+    app.tabs.push(WorkspaceTab::Sql(tab));
+    app.active_tab = 1;
+
+    app.update(Action::FocusDataQueryInput(
+        lazydb::model::data_query::DataQueryInput::Where,
+    ));
+    for character in "display".chars() {
+        app.update(Action::DataQueryInsert(character));
+    }
+    let WorkspaceTab::Sql(tab) = &app.tabs[1] else {
+        panic!("expected SQL tab")
+    };
+    assert_eq!(
+        tab.query.completion.as_ref().unwrap().candidates[0].name,
+        "display_name"
+    );
+    assert_eq!(
+        tab.query.completion.as_ref().unwrap().candidates[0]
+            .type_name
+            .as_deref(),
+        Some("text")
+    );
+
+    app.update(Action::DataQueryCompletionAccept);
+    let WorkspaceTab::Sql(tab) = &app.tabs[1] else {
+        panic!("expected SQL tab")
+    };
+    assert_eq!(tab.query.where_input.value(), "\"display_name\"");
+
+    app.update(Action::FocusDataQueryInput(
+        lazydb::model::data_query::DataQueryInput::OrderBy,
+    ));
+    for character in "uid".chars() {
+        app.update(Action::DataQueryInsert(character));
+    }
+    let WorkspaceTab::Sql(tab) = &app.tabs[1] else {
+        panic!("expected SQL tab")
+    };
+    assert_eq!(
+        tab.query.completion.as_ref().unwrap().candidates[0].name,
+        "uid"
     );
 }
 

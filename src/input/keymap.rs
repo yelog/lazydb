@@ -1214,7 +1214,7 @@ fn map_data_query(event: KeyEvent, app: &App) -> Option<Action> {
                 KeyCode::Char('p') if event.modifiers.contains(KeyModifiers::CONTROL) => {
                     return Some(Action::DataQueryCompletionPrevious);
                 }
-                KeyCode::Tab if event.modifiers.is_empty() => {
+                KeyCode::Tab | KeyCode::Enter if event.modifiers.is_empty() => {
                     return Some(Action::DataQueryCompletionAccept);
                 }
                 KeyCode::Esc if event.modifiers.is_empty() => {

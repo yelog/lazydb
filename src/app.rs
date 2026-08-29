@@ -5534,59 +5534,75 @@ impl App {
     }
 
     fn refresh_active_data_query_completion(&mut self) {
-        let Some(WorkspaceTab::Relation(tab)) = self.tabs.get(self.active_tab) else {
+        let Some(input_kind) = (match self.tabs.get(self.active_tab) {
+            Some(WorkspaceTab::Relation(tab)) if tab.view == RelationView::Data => tab.query.focus,
+            Some(WorkspaceTab::Sql(tab)) if tab.result_view == ResultView::Data => tab.query.focus,
+            _ => None,
+        }) else {
+            return;
+        };
+        let (value, cursor, columns) = match self.tabs.get(self.active_tab) {
+            Some(WorkspaceTab::Relation(tab)) if tab.view == RelationView::Data => {
+                let mut columns = self
+                    .explorer
+                    .completion_index
+                    .relation_columns(&tab.descriptor.key.object_id)
+                    .map(|entry| {
+                        let type_name = match &entry.metadata {
+                            CatalogMetadata::Column(column) => Some(column.native_type.clone()),
+                            _ => None,
+                        };
+                        (entry.qualified_name.object.clone(), type_name)
+                    })
+                    .collect::<Vec<_>>();
+                if let Some(result) = self.relation_result() {
+                    columns.extend(
+                        result
+                            .columns
+                            .iter()
+                            .map(|column| (column.name.clone(), Some(column.type_name.clone()))),
+                    );
+                }
+                let input = match input_kind {
+                    DataQueryInput::Where => &tab.query.where_input,
+                    DataQueryInput::OrderBy => &tab.query.order_by_input,
+                };
+                (input.value().to_owned(), input.cursor(), columns)
+            }
+            Some(WorkspaceTab::Sql(tab)) if tab.result_view == ResultView::Data => {
+                let columns = tab
+                    .outcome
+                    .as_ref()
+                    .and_then(|outcome| outcome.result_sets.last())
+                    .map(|result| {
+                        result
+                            .columns
+                            .iter()
+                            .map(|column| (column.name.clone(), Some(column.type_name.clone())))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let input = match input_kind {
+                    DataQueryInput::Where => &tab.query.where_input,
+                    DataQueryInput::OrderBy => &tab.query.order_by_input,
+                };
+                (input.value().to_owned(), input.cursor(), columns)
+            }
+            _ => return,
+        };
+        let Some((replace, prefix)) = data_query_identifier(&value, cursor) else {
             if let Some(query) = self.active_data_query_mut() {
                 query.completion = None;
             }
             return;
         };
-        if tab.view != RelationView::Data {
-            return;
-        }
-        let Some(input_kind) = tab.query.focus else {
-            return;
-        };
-        let input = match input_kind {
-            DataQueryInput::Where => &tab.query.where_input,
-            DataQueryInput::OrderBy => &tab.query.order_by_input,
-        };
-        let Some((replace, prefix)) = data_query_identifier(input.value(), input.cursor()) else {
-            if let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab) {
-                tab.query.completion = None;
-            }
-            return;
-        };
-        let mut candidates = self
-            .explorer
-            .completion_index
-            .relation_columns(&tab.descriptor.key.object_id)
-            .filter_map(|entry| {
-                let quality = sql::identifier_match(&entry.qualified_name.object, &prefix)?;
-                let type_name = match &entry.metadata {
-                    CatalogMetadata::Column(column) => Some(column.native_type.clone()),
-                    _ => None,
-                };
-                Some((
-                    quality,
-                    DataQueryCandidate {
-                        name: entry.qualified_name.object.clone(),
-                        type_name,
-                    },
-                ))
+        let mut candidates = columns
+            .into_iter()
+            .filter_map(|(name, type_name)| {
+                let quality = sql::identifier_match(&name, &prefix)?;
+                Some((quality, DataQueryCandidate { name, type_name }))
             })
             .collect::<Vec<_>>();
-        if let Some(result) = self.relation_result() {
-            candidates.extend(result.columns.iter().filter_map(|column| {
-                let quality = sql::identifier_match(&column.name, &prefix)?;
-                Some((
-                    quality,
-                    DataQueryCandidate {
-                        name: column.name.clone(),
-                        type_name: Some(column.type_name.clone()),
-                    },
-                ))
-            }));
-        }
         let mut seen = std::collections::HashSet::new();
         candidates.retain(|(_, candidate)| seen.insert(candidate.name.to_lowercase()));
         candidates.sort_by(|(left_quality, left), (right_quality, right)| {
@@ -5606,8 +5622,8 @@ impl App {
             selected: 0,
             replace,
         });
-        if let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab) {
-            tab.query.completion = completion;
+        if let Some(query) = self.active_data_query_mut() {
+            query.completion = completion;
         }
     }
 
