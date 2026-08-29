@@ -876,11 +876,11 @@ impl MySqlAdapter {
             .await?;
         let row = sqlx::query(
             "SELECT \
-             (SELECT CAST(COUNT(*) AS SIGNED) FROM information_schema.tables WHERE BINARY table_schema=BINARY ? AND table_type='BASE TABLE') AS tables, \
-             (SELECT CAST(COUNT(*) AS SIGNED) FROM information_schema.tables WHERE BINARY table_schema=BINARY ? AND table_type='VIEW') AS views, \
-             (SELECT CAST(COUNT(*) AS SIGNED) FROM information_schema.routines WHERE BINARY routine_schema=BINARY ? AND routine_type='FUNCTION') AS functions, \
-             (SELECT CAST(COUNT(*) AS SIGNED) FROM information_schema.routines WHERE BINARY routine_schema=BINARY ? AND routine_type='PROCEDURE') AS procedures, \
-             (SELECT CAST(COUNT(*) AS SIGNED) FROM information_schema.triggers WHERE BINARY trigger_schema=BINARY ?) AS triggers",
+             (SELECT CAST(COUNT(*) AS CHAR) FROM information_schema.tables WHERE BINARY table_schema=BINARY ? AND table_type='BASE TABLE') AS tables, \
+             (SELECT CAST(COUNT(*) AS CHAR) FROM information_schema.tables WHERE BINARY table_schema=BINARY ? AND table_type='VIEW') AS views, \
+             (SELECT CAST(COUNT(*) AS CHAR) FROM information_schema.routines WHERE BINARY routine_schema=BINARY ? AND routine_type='FUNCTION') AS functions, \
+             (SELECT CAST(COUNT(*) AS CHAR) FROM information_schema.routines WHERE BINARY routine_schema=BINARY ? AND routine_type='PROCEDURE') AS procedures, \
+             (SELECT CAST(COUNT(*) AS CHAR) FROM information_schema.triggers WHERE BINARY trigger_schema=BINARY ?) AS triggers",
         )
         .bind(&database)
         .bind(&database)
@@ -900,9 +900,12 @@ impl MySqlAdapter {
         ] {
             summaries.push(CatalogGroupSummary {
                 group,
-                object_count: CatalogCount::Exact(non_negative_count(
-                    row.try_get(column).map_err(decode_error)?,
-                )?),
+                object_count: CatalogCount::Exact(
+                    row.try_get::<String, _>(column)
+                        .map_err(decode_error)?
+                        .parse::<u64>()
+                        .map_err(|_| catalog_internal("MySQL returned an invalid catalog count"))?,
+                ),
             });
         }
         let total_count = exact_count(summaries.len())?;
