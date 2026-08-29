@@ -299,6 +299,7 @@ fn body_cells(
     theme: Theme,
 ) -> Vec<Cell<'static>> {
     let separator_style = Style::new().fg(theme.grid_border).bg(theme.surface);
+    let row_number_style = row_number_style(row_style, theme);
     let mut cells = Vec::with_capacity(visible.len().saturating_mul(2).saturating_add(2));
     cells.push(
         Cell::from(format!(
@@ -306,7 +307,7 @@ fn body_cells(
             row_index.saturating_add(1),
             width = number_width as usize
         ))
-        .style(row_style.unwrap_or_else(|| Style::new().fg(theme.muted))),
+        .style(row_number_style),
     );
     cells.push(Cell::from("│").style(separator_style));
     for (position, index) in visible.iter().enumerate() {
@@ -325,6 +326,12 @@ fn body_cells(
         );
     }
     cells
+}
+
+fn row_number_style(row_style: Option<Style>, theme: Theme) -> Style {
+    row_style
+        .map(|style| style.fg(theme.muted))
+        .unwrap_or_else(|| Style::new().fg(theme.muted))
 }
 
 fn total_width(widths: &[u16]) -> u16 {
@@ -487,9 +494,12 @@ fn render_scrollbar(
 #[cfg(test)]
 mod tests {
     use super::{
-        row_number_width, row_viewport_start, selected_data_cell, total_width, viewport_start,
-        visible_columns,
+        row_number_style, row_number_width, row_viewport_start, selected_data_cell, total_width,
+        viewport_start, visible_columns,
     };
+    use ratatui::style::Style;
+
+    use crate::ui::theme::Theme;
 
     #[test]
     fn row_number_width_tracks_absolute_result_size() {
@@ -503,6 +513,16 @@ mod tests {
     fn selected_data_cells_follow_the_fixed_gutter() {
         assert_eq!(selected_data_cell(0), 2);
         assert_eq!(selected_data_cell(1), 4);
+    }
+
+    #[test]
+    fn row_number_stays_muted_when_row_is_selected() {
+        let theme = Theme::deep_space();
+        let selected_style = Style::new().fg(theme.text).bg(theme.selection);
+        let style = row_number_style(Some(selected_style), theme);
+
+        assert_eq!(style.fg, Some(theme.muted));
+        assert_eq!(style.bg, Some(theme.selection));
     }
 
     #[test]
