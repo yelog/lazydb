@@ -439,11 +439,9 @@ fn render_scrollbar(
     let thumb_width = ((rail_width as usize * visible.len().max(1)) / column_count)
         .clamp(1, rail_width as usize) as u16;
     let travel = rail_width.saturating_sub(thumb_width);
-    let thumb_offset = if max_offset == 0 {
-        0
-    } else {
-        ((travel as usize * first) / max_offset) as u16
-    };
+    let thumb_offset = ((travel as usize * first)
+        .checked_div(max_offset)
+        .unwrap_or(0)) as u16;
     let thumb_x = track.x.saturating_add(1).saturating_add(thumb_offset);
     let before = thumb_x.saturating_sub(track.x.saturating_add(1));
     let after = rail_width

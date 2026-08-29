@@ -1106,10 +1106,10 @@ impl App {
             } => {
                 let current_tab_id = self.tabs.get(self.active_tab).map(WorkspaceTab::id);
                 let (_, columns) = self.active_grid_dimensions();
-                if current_tab_id == Some(tab_id) {
-                    if let Some(Overlay::RecordView(view)) = self.overlay.as_mut() {
-                        view.clamp(columns, visible_fields);
-                    }
+                if current_tab_id == Some(tab_id)
+                    && let Some(Overlay::RecordView(view)) = self.overlay.as_mut()
+                {
+                    view.clamp(columns, visible_fields);
                 }
                 Vec::new()
             }

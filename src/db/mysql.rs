@@ -407,10 +407,15 @@ impl MySqlAdapter {
             .begin_with(CATALOG_PAGE_BEGIN_SQL)
             .await
             .map_err(sql_error)?;
-        let lower_case_table_names: i64 = sqlx::query_scalar("SELECT @@lower_case_table_names")
-            .fetch_one(&mut *transaction)
-            .await
-            .map_err(sql_error)?;
+        let lower_case_table_names: i64 =
+            sqlx::query_scalar::<_, String>("SELECT CAST(@@lower_case_table_names AS CHAR)")
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(sql_error)?
+                .parse()
+                .map_err(|_| {
+                    catalog_internal("MySQL returned an invalid lower_case_table_names value")
+                })?;
         if !(0..=2).contains(&lower_case_table_names) {
             return Err(catalog_internal(format!(
                 "MySQL returned unsupported lower_case_table_names value {lower_case_table_names}"

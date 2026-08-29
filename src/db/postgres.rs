@@ -1982,11 +1982,9 @@ impl TransactionBackend for PostgresTransactionBackend {
                             quote_identifier(&column.0)
                         ));
                     }
-                    let mut bind = 1;
-                    for _ in &predicates {
+                    for (bind, _) in (1..).zip(&predicates) {
                         let replacement = format!("${bind}");
                         sql = sql.replacen("$PLACEHOLDER", &replacement, 1);
-                        bind += 1;
                     }
                     sql.push_str(" RETURNING 1");
                     let mut query = sqlx::query(AssertSqlSafe(sql));
