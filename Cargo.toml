@@ -5,7 +5,11 @@ edition = "2024"
 rust-version = "1.94"
 description = "A keyboard-first terminal database IDE"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/lazydb/lazydb"
+repository = "https://github.com/yelog/lazydb"
+homepage = "https://github.com/yelog/lazydb"
+readme = "README.md"
+keywords = ["database", "sql", "terminal", "tui"]
+categories = ["command-line-utilities", "database"]
 
 [dependencies]
 anyhow = "1.0"

@@ -69,6 +69,50 @@ Requirements:
 cargo build --release
 ```
 
+## Install
+
+Stable releases are available from the project Homebrew tap on supported macOS
+systems:
+
+```bash
+brew install yelog/tap/lazydb
+```
+
+On macOS and Linux, the stable release can also be installed without a package
+manager. The installer verifies the downloaded archive against the release
+SHA-256 manifest and installs to `~/.local/bin` by default:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/yelog/lazydb/releases/latest/download/lazydb-installer.sh | sh
+```
+
+To inspect the script before running it, download it first and invoke it from
+the local file:
+
+```bash
+curl --proto '=https' --tlsv1.2 -fL \
+  https://github.com/yelog/lazydb/releases/latest/download/lazydb-installer.sh \
+  -o lazydb-installer.sh
+less lazydb-installer.sh
+sh lazydb-installer.sh --install-dir "$HOME/.local/bin"
+```
+
+Stable Linux releases also include native packages. These are release assets,
+not repositories, so use the local-file or direct-URL forms below:
+
+```bash
+sudo apt install ./lazydb_VERSION_ARCH.deb
+sudo dnf install https://github.com/yelog/lazydb/releases/download/TAG/lazydb-VERSION-ARCH.rpm
+sudo pacman -U https://github.com/yelog/lazydb/releases/download/TAG/lazydb-VERSION-ARCH.pkg.tar.zst
+```
+
+Beta versions are published as GitHub prereleases with binary archives and
+checksums only. Open the desired prerelease and download the archive matching
+your operating system and architecture. Verify it with the accompanying
+`SHA256SUMS` before extracting it. Beta versions do not update Homebrew or the
+stable `releases/latest` installer.
+
 Run an in-memory SQLite workspace:
 
 ```bash

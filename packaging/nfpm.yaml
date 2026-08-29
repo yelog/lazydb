@@ -1,0 +1,23 @@
+name: lazydb
+arch: "${NFPM_ARCH}"
+platform: linux
+version: "${NFPM_VERSION}"
+maintainer: "LazyDB Maintainers"
+homepage: https://github.com/yelog/lazydb
+license: "MIT OR Apache-2.0"
+contents:
+  - src: "${NFPM_BINARY}"
+    dst: /usr/bin/lazydb
+  - src: LICENSE-MIT
+    dst: /usr/share/licenses/lazydb/LICENSE-MIT
+  - src: LICENSE-APACHE
+    dst: /usr/share/licenses/lazydb/LICENSE-APACHE
+  - src: README.md
+    dst: /usr/share/doc/lazydb/README.md
+overrides:
+  deb:
+    depends: []
+  rpm:
+    depends: []
+  archlinux:
+    depends: []
