@@ -1372,13 +1372,13 @@ impl MySqlAdapter {
             .await
             .map_err(sql_error)?
             .ok_or_else(|| catalog_internal("owning relation was not found"))?;
-        let actual_name: String = row.try_get("table_name").map_err(decode_error)?;
+        let actual_name: String = row.try_get(0).map_err(decode_error)?;
         if actual_name != name {
             return Err(catalog_internal(
                 "MySQL owning relation name was not canonical",
             ));
         }
-        let table_type: String = row.try_get("table_type").map_err(decode_error)?;
+        let table_type: String = row.try_get(1).map_err(decode_error)?;
         Ok((
             actual_name,
             if table_type == "VIEW" {
@@ -1417,11 +1417,11 @@ impl MySqlAdapter {
             .await
             .map_err(sql_error)?
             .ok_or_else(|| catalog_target_not_found(target))?;
-        let actual_name: String = row.try_get("table_name").map_err(decode_error)?;
+        let actual_name: String = row.try_get(0).map_err(decode_error)?;
         if actual_name != name {
             return Err(catalog_target_not_found(target));
         }
-        let native_kind: String = row.try_get("table_type").map_err(decode_error)?;
+        let native_kind: String = row.try_get(1).map_err(decode_error)?;
         let (expected_kind, verified_native_kind) = if native_kind == "VIEW" {
             (CatalogKind::View, "VIEW")
         } else {
