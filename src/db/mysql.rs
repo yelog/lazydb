@@ -1040,16 +1040,16 @@ impl MySqlAdapter {
         .map_err(sql_error)?;
         let mut entries = Vec::with_capacity(rows.len());
         for row in rows {
-            let name: String = row.try_get("name").map_err(decode_error)?;
-            let native_identity: String = row.try_get("native_identity").map_err(decode_error)?;
-            let comment = empty_as_none(row.try_get("comment").map_err(decode_error)?);
+            let name: String = row.try_get(0).map_err(decode_error)?;
+            let native_identity: String = row.try_get(1).map_err(decode_error)?;
+            let comment = empty_as_none(row.try_get(2).map_err(decode_error)?);
             let mut path = vec![database.clone(), database.clone(), name.clone()];
             if matches!(kind, CatalogKind::Function | CatalogKind::Procedure) {
                 path.push(native_identity);
             }
             let id = CatalogId::new(self.connection_id, kind, path);
             let entry = if kind == CatalogKind::Trigger {
-                let owner: String = row.try_get("owner_name").map_err(decode_error)?;
+                let owner: String = row.try_get(3).map_err(decode_error)?;
                 let (owner_name, owner_kind) = self
                     .verify_relation_name(connection, &database, &owner, lower_case_table_names)
                     .await?;
