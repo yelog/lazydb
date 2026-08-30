@@ -187,6 +187,7 @@ pub enum Action {
         view: crate::model::relation::RelationView,
     },
     SetRelationView(crate::model::relation::RelationView),
+    SetResultView(crate::model::tab::ResultView),
     RefreshActiveRelation,
     CancelActiveRelationRequest,
     DdlScroll {

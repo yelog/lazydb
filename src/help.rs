@@ -67,6 +67,9 @@ pub enum HelpShortcutId {
     ResultsAlignBottom,
     ResultsOpenRecordView,
     ResultsToggleView,
+    ResultsData,
+    ResultsSecondaryView,
+    ResultsPlan,
     RelationWhere,
     RelationOrderBy,
     RelationApplyInputs,
@@ -152,31 +155,31 @@ pub fn shortcuts(context: Focus, relation_data: bool) -> Vec<HelpShortcut> {
         HelpShortcut {
             id: HelpShortcutId::FocusExplorer,
             key: "Ctrl-w h",
-            description: "focus Explorer",
+            description: "move focus left",
         },
         HelpShortcut {
             id: HelpShortcutId::FocusResults,
             key: "Ctrl-w j",
-            description: "focus Results",
+            description: "move focus down",
         },
         HelpShortcut {
             id: HelpShortcutId::FocusEditorFromK,
             key: "Ctrl-w k",
-            description: "focus Editor",
+            description: "move focus up to Editor",
         },
         HelpShortcut {
             id: HelpShortcutId::FocusEditorFromL,
             key: "Ctrl-w l",
-            description: "focus Editor",
+            description: "move focus right to Editor",
         },
         HelpShortcut {
             id: HelpShortcutId::PreviousTab,
-            key: "[ then t",
+            key: "gT (also [ then t)",
             description: "previous tab",
         },
         HelpShortcut {
             id: HelpShortcutId::NextTab,
-            key: "] then t",
+            key: "gt (also ] then t)",
             description: "next tab",
         },
         HelpShortcut {
@@ -478,6 +481,16 @@ pub fn shortcuts(context: Focus, relation_data: bool) -> Vec<HelpShortcut> {
                     description: "switch Data / Output",
                 },
                 HelpShortcut {
+                    id: HelpShortcutId::ResultsData,
+                    key: "1",
+                    description: "select Data view",
+                },
+                HelpShortcut {
+                    id: HelpShortcutId::ResultsSecondaryView,
+                    key: "2",
+                    description: "select Output / DDL view",
+                },
+                HelpShortcut {
                     id: HelpShortcutId::ResultsOpenRecordView,
                     key: "v",
                     description: "open Record View",
@@ -521,6 +534,12 @@ pub fn shortcuts(context: Focus, relation_data: bool) -> Vec<HelpShortcut> {
                         description: "refresh relation preview",
                     },
                 ]);
+            } else {
+                results.push(HelpShortcut {
+                    id: HelpShortcutId::ResultsPlan,
+                    key: "3",
+                    description: "select Plan view",
+                });
             }
             results
         }

@@ -215,6 +215,7 @@ enum PendingBinding {
     Leader,
     LeaderTransaction,
     Window,
+    Goto,
 }
 
 impl Default for EditorWorkspace {
@@ -851,6 +852,13 @@ impl EditorWorkspace {
                     .pending_binding = Some(PendingBinding::Window);
                 Ok(())
             }
+            (EditorMode::Normal, EditorKey::Character('g')) => {
+                self.sessions
+                    .get_mut(&id)
+                    .ok_or(EditorError::MissingSession(id))?
+                    .pending_binding = Some(PendingBinding::Goto);
+                Ok(())
+            }
             (EditorMode::Insert | EditorMode::Replace, EditorKey::Control('w')) => {
                 self.delete_previous_word(id)
             }
@@ -1098,9 +1106,15 @@ impl EditorWorkspace {
             .get_mut(&id)
             .ok_or(EditorError::MissingSession(id))?;
         session.current_sequence.push(key);
-        if let EditorKey::Character(character) = key
-            && let Some(binding) = session.pending_binding.take()
-        {
+        let pending_binding = if let EditorKey::Character(character) = key {
+            session
+                .pending_binding
+                .take()
+                .map(|binding| (binding, character))
+        } else {
+            None
+        };
+        if let Some((binding, character)) = pending_binding {
             match (binding, character) {
                 (PendingBinding::Leader, 'r') => self.effects.push(EditorEffect::RunCurrent),
                 (PendingBinding::Leader, 'R') => self.effects.push(EditorEffect::RunAll),
@@ -1130,15 +1144,17 @@ impl EditorWorkspace {
                 (PendingBinding::Window, 'j') => {
                     self.effects.push(EditorEffect::FocusPane(Focus::Results))
                 }
-                (PendingBinding::Window, 'k') => {
-                    self.effects.push(EditorEffect::FocusPane(Focus::Explorer))
-                }
-                (PendingBinding::Window, 'l') => {
-                    self.effects.push(EditorEffect::FocusPane(Focus::Results))
-                }
+                (PendingBinding::Window, 'k' | 'l') => {}
+                (PendingBinding::Goto, 'g') => self.input_vim_key(id, EditorKey::Character('g'))?,
+                (PendingBinding::Goto, 't') => self.effects.push(EditorEffect::NextTab),
+                (PendingBinding::Goto, 'T') => self.effects.push(EditorEffect::PreviousTab),
                 (_, _) => {}
             }
-            if session.pending_binding.is_some() {
+            if self
+                .sessions
+                .get(&id)
+                .is_some_and(|session| session.pending_binding.is_some())
+            {
                 return Ok(());
             }
             return Ok(());
