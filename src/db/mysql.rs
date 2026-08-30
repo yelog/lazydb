@@ -19,7 +19,9 @@ use uuid::Uuid;
 
 use crate::{
     identity::ConnectionIdentity,
-    profile::{CatalogScope, CatalogSelection, ConnectionProfile, DatabaseKind, SslMode},
+    profile::{
+        CatalogScope, CatalogSelection, ConnectionProfile, DatabaseKind, DatabaseScope, SslMode,
+    },
 };
 
 use super::transaction::{TransactionBackend, TransactionError};
@@ -1549,6 +1551,12 @@ impl MySqlAdapter {
             true,
         )
         .map_err(catalog_invariant)?;
+        let relation_scope = CatalogScope {
+            databases: CatalogSelection::Selected(vec![DatabaseScope {
+                name: database.clone(),
+                schemas: CatalogSelection::Selected(vec![database.clone()]),
+            }]),
+        };
         let request = CatalogRequest {
             key: CatalogRequestKey {
                 connection: ConnectionIdentity {
@@ -1560,7 +1568,7 @@ impl MySqlAdapter {
                 target,
                 cursor: None,
             },
-            scope: self.catalog_scope.clone(),
+            scope: relation_scope,
             page_size: RELATION_PREVIEW_LIMIT,
         };
         let children_entries = self
