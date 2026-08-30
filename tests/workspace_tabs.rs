@@ -634,6 +634,99 @@ fn connection_install_loads_only_active_restored_relation() {
     );
 }
 
+#[test]
+fn console_lifecycle_requires_an_active_profile_workspace() {
+    let profile = import_connection_url(":memory:", Some("saved"))
+        .unwrap()
+        .profile;
+    let mut app = App::new(vec![profile]);
+
+    app.update(Action::NewConsole);
+    app.update(Action::OpenSqlEditorList);
+    app.update(Action::ActivateSqlEditor(Uuid::new_v4()));
+    app.update(Action::CloseActiveTab);
+
+    assert!(app.tabs.is_empty());
+    assert!(app.sql_editors.is_empty());
+}
+
+#[test]
+fn restored_console_target_cannot_cross_profile_boundaries() {
+    let first = import_connection_url(":memory:", Some("first"))
+        .unwrap()
+        .profile;
+    let second = import_connection_url(":memory:", Some("second"))
+        .unwrap()
+        .profile;
+    let console_id = Uuid::new_v4();
+    let snapshot = WorkspaceSnapshot {
+        active_profile: Some(first.id),
+        profiles: vec![PersistedProfileWorkspace {
+            profile_id: first.id,
+            active_tab: Some(console_id),
+            consoles: vec![PersistedConsole {
+                id: console_id,
+                name: "cross-profile".into(),
+                sql_file: format!("{console_id}.sql").into(),
+                target: Some(
+                    lazydb::model::execution_target::ExecutionTarget::from_profile(&second),
+                ),
+                transaction_mode: TransactionMode::Auto,
+                open: true,
+            }],
+            tabs: vec![PersistedTab::Console { console_id }],
+        }],
+        active_console: Uuid::nil(),
+        consoles: Vec::new(),
+        sql: vec![(console_id, "select 1".into())],
+    };
+    let mut app = App::new(vec![first.clone(), second]);
+    app.connection.profile_id = Some(first.id);
+    app.restore_workspace(snapshot, Some(first.id));
+
+    assert_eq!(app.active_workspace_profile, Some(first.id));
+    assert_eq!(
+        app.active_console().execution_target,
+        Some(lazydb::model::execution_target::ExecutionTarget::from_profile(&first))
+    );
+}
+
+#[test]
+fn console_numbering_is_collision_free_within_each_workspace() {
+    let profile = import_connection_url(":memory:", Some("saved"))
+        .unwrap()
+        .profile;
+    let first_id = Uuid::new_v4();
+    let snapshot = WorkspaceSnapshot {
+        active_profile: Some(profile.id),
+        profiles: vec![PersistedProfileWorkspace {
+            profile_id: profile.id,
+            active_tab: Some(first_id),
+            consoles: vec![PersistedConsole {
+                id: first_id,
+                name: "console_1".into(),
+                sql_file: format!("{first_id}.sql").into(),
+                target: None,
+                transaction_mode: TransactionMode::Auto,
+                open: true,
+            }],
+            tabs: vec![PersistedTab::Console {
+                console_id: first_id,
+            }],
+        }],
+        active_console: Uuid::nil(),
+        consoles: Vec::new(),
+        sql: vec![(first_id, String::new())],
+    };
+    let mut app = App::new(vec![profile.clone()]);
+    app.connection.profile_id = Some(profile.id);
+    app.restore_workspace(snapshot, Some(profile.id));
+    app.update(Action::NewConsole);
+
+    assert_eq!(app.active_console().name, "console_2");
+    assert_eq!(app.sql_editors.len(), 2);
+}
+
 fn profile_id(app: &App, index: usize) -> Uuid {
     app.profiles[index].id
 }

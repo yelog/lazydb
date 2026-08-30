@@ -144,7 +144,6 @@ pub struct App {
     pub profile_manager: Option<ProfileManagerState>,
     pub system_credential_availability: crate::persistence::secrets::SecretStoreAvailability,
     pub should_quit: bool,
-    next_console_number: usize,
     connection_request_generation: u64,
     connection_terminal_generation: u64,
     next_search_session: u64,
@@ -266,7 +265,6 @@ impl App {
             system_credential_availability:
                 crate::persistence::secrets::SecretStoreAvailability::Unavailable,
             should_quit: false,
-            next_console_number: 2,
             connection_request_generation: 0,
             connection_terminal_generation: 0,
             next_search_session: 0,
@@ -282,6 +280,21 @@ impl App {
 
     fn active_tab_id(&self) -> Option<Uuid> {
         self.tabs.get(self.active_tab).map(WorkspaceTab::id)
+    }
+
+    fn has_active_workspace(&self) -> bool {
+        self.active_workspace_profile.is_some() || self.profiles.is_empty()
+    }
+
+    fn next_console_name(&self) -> String {
+        let used = self
+            .sql_editors
+            .iter()
+            .filter_map(|record| record.name.strip_prefix("console_"))
+            .filter_map(|number| number.parse::<usize>().ok())
+            .collect::<HashSet<_>>();
+        let number = (1..).find(|number| !used.contains(number)).unwrap_or(1);
+        format!("console_{number}")
     }
 
     fn take_active_workspace(&mut self) -> Option<(Uuid, ConnectionWorkspace)> {
@@ -395,20 +408,16 @@ impl App {
                 let Some(console) = tab.as_console_mut() else {
                     continue;
                 };
-                if console
-                    .execution_target
-                    .as_ref()
-                    .is_none_or(|candidate| !candidate.is_valid(profile))
-                {
+                if console.execution_target.as_ref().is_none_or(|candidate| {
+                    candidate.profile_id != profile_id || !candidate.is_valid(profile)
+                }) {
                     console.execution_target = Some(target.clone());
                 }
             }
             for record in &mut workspace.sql_editors {
-                if record
-                    .execution_target
-                    .as_ref()
-                    .is_none_or(|candidate| !candidate.is_valid(profile))
-                {
+                if record.execution_target.as_ref().is_none_or(|candidate| {
+                    candidate.profile_id != profile_id || !candidate.is_valid(profile)
+                }) {
                     record.execution_target = Some(target.clone());
                 }
             }
@@ -745,7 +754,6 @@ impl App {
             .iter()
             .position(|tab| Some(tab.id()) == active_tab)
             .unwrap_or(0);
-        self.next_console_number = self.tabs.len().saturating_add(1);
         self.focus = Focus::Editor;
     }
 
@@ -771,10 +779,8 @@ impl App {
                         tab.id = console.id;
                         tab.transaction_mode = console.transaction_mode;
                         tab.execution_target = console.target.clone().filter(|target| {
-                            self.profiles
-                                .iter()
-                                .find(|item| item.id == target.profile_id)
-                                .is_some_and(|item| target.is_valid(item))
+                            target.profile_id == profile.profile_id
+                                && selected.is_some_and(|item| target.is_valid(item))
                         });
                         if tab.execution_target.is_none() {
                             tab.execution_target = selected.map(ExecutionTarget::from_profile);
@@ -818,7 +824,10 @@ impl App {
                 .map(|console| ConsoleRecord {
                     id: console.id,
                     name: console.name,
-                    execution_target: console.target,
+                    execution_target: console.target.filter(|target| {
+                        target.profile_id == profile.profile_id
+                            && selected.is_some_and(|item| target.is_valid(item))
+                    }),
                     transaction_mode: console.transaction_mode,
                     open: console.open,
                 })
@@ -1217,8 +1226,29 @@ impl App {
                 {
                     return Vec::new();
                 }
-                let name = format!("console_{}", self.next_console_number);
-                self.next_console_number += 1;
+                if self.active_workspace_profile.is_none()
+                    && let Some(profile_id) = self.connection.profile_id
+                    && let Some(profile) = self
+                        .profiles
+                        .iter()
+                        .find(|profile| profile.id == profile_id)
+                {
+                    let target = self
+                        .connection
+                        .target
+                        .clone()
+                        .filter(|target| target.is_valid(profile))
+                        .unwrap_or_else(|| ExecutionTarget::from_profile(profile));
+                    let workspace = self
+                        .workspaces
+                        .remove(&profile_id)
+                        .unwrap_or_else(|| self.empty_workspace_for(profile_id, target));
+                    self.install_workspace(profile_id, workspace);
+                }
+                if !self.has_active_workspace() {
+                    return Vec::new();
+                }
+                let name = self.next_console_name();
                 let mut tab = ConsoleTab::new(name.clone());
                 tab.execution_target = self.active_profile().map(ExecutionTarget::from_profile);
                 let id = tab.id;
@@ -1240,7 +1270,7 @@ impl App {
                 vec![self.persist_workspace_command()]
             }
             Action::CloseActiveTab => {
-                if !self.tabs.is_empty() {
+                if self.has_active_workspace() && !self.tabs.is_empty() {
                     let was_console = self.tabs[self.active_tab].as_console().is_some();
                     let id = self.tabs[self.active_tab].id();
                     if self.active_console_opt().is_some() && self.transaction_needs_exit(id) {
@@ -1301,6 +1331,9 @@ impl App {
                 }
             }
             Action::RequestDeleteActiveConsole => {
+                if !self.has_active_workspace() {
+                    return Vec::new();
+                }
                 let Some(tab) = self.active_console_opt() else {
                     return Vec::new();
                 };
@@ -1324,6 +1357,9 @@ impl App {
                 Vec::new()
             }
             Action::OpenSqlEditorList => {
+                if !self.has_active_workspace() {
+                    return Vec::new();
+                }
                 self.sql_editor_list = Default::default();
                 self.overlay = Some(Overlay::SqlEditorList(self.sql_editor_list.clone()));
                 Vec::new()
@@ -3924,8 +3960,7 @@ impl App {
     }
 
     fn create_sql_editor(&mut self) {
-        let name = format!("console_{}", self.next_console_number);
-        self.next_console_number += 1;
+        let name = self.next_console_name();
         self.create_sql_editor_named(name);
     }
 
@@ -3945,6 +3980,9 @@ impl App {
     }
 
     fn open_sql_editor(&mut self, id: Uuid) {
+        if !self.has_active_workspace() {
+            return;
+        }
         let Some(record) = self.sql_editors.iter().find(|record| record.id == id) else {
             return;
         };
@@ -3962,6 +4000,9 @@ impl App {
     }
 
     fn delete_console(&mut self, id: Uuid) -> Vec<Command> {
+        if !self.has_active_workspace() || !self.sql_editors.iter().any(|record| record.id == id) {
+            return Vec::new();
+        }
         self.tabs.retain(|tab| tab.id() != id);
         self.editor.close_console(id);
         self.sql_editors.retain(|record| record.id != id);
@@ -3974,6 +4015,9 @@ impl App {
     }
 
     fn activate_sql_editor(&mut self, id: Uuid) -> Vec<Command> {
+        if !self.has_active_workspace() || !self.sql_editors.iter().any(|record| record.id == id) {
+            return Vec::new();
+        }
         if let Some(index) = self.tabs.iter().position(|tab| tab.id() == id) {
             self.active_tab = index;
         } else if self.sql_editors.iter().any(|record| record.id == id) {
@@ -4455,7 +4499,11 @@ impl App {
 
     fn request_connection_target(&mut self, target: ExecutionTarget) -> Vec<Command> {
         let profile_id = target.profile_id;
-        if !self.profiles.iter().any(|profile| target.is_valid(profile)) || self.has_running_query()
+        if !self
+            .profiles
+            .iter()
+            .any(|profile| profile.id == profile_id && target.is_valid(profile))
+            || self.has_running_query()
         {
             self.pending_target_console = None;
             return Vec::new();
