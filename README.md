@@ -147,6 +147,16 @@ profile and per current-process session profile. Roots show `SAVED` or `SESSION`
 and `OFFLINE`, `LINKING`, `ONLINE`, `SYNCING`, or `FAILED`; catalog loading,
 stale data, permission failures, and retries are shown below the owning root.
 
+### Per-Connection Workspaces
+
+Each connection profile has its own workspace of SQL and relation tabs. Switching
+profiles changes the visible workspace only after the new connection succeeds. If
+the connection attempt fails, the previous connection and workspace remain active.
+Disconnecting a profile hides its workspace but does not delete it. Relation tabs
+return as lazy shells when their workspace is shown again; their result data is
+not persisted across an application restart. Deleting a profile also deletes its
+workspace.
+
 Press `Space c` from any normal-mode workspace to focus the connection Explorer. Use
 `Test Connection` to validate a draft without persistence or changing the active
 connection. A successful test also discovers databases and schemas for the

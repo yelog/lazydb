@@ -222,8 +222,15 @@ OF SCOPE SNAPSHOT`; this is snapshot provenance and is separate from DDL's
 - Wheel scroll moves the panel under the pointer; relation DDL scrolls vertically
   by three rows and relation Data scrolls the grid by three rows.
 - Closing the Neovim floating window hides it without stopping LazyDB.
-# Workspace lifecycle
+# Workspace Lifecycle
 
 - `Space q`: close the current tab; SQL editors are hidden and retained.
 - `Space x`: request confirmed permanent deletion of the current SQL editor.
 - `Space e`: search and activate any persisted SQL editor, including hidden editors.
+
+Workspaces are per connection profile. Switching profiles changes the visible
+workspace only after the connection succeeds; a failed switch leaves the current
+connection and workspace unchanged. Disconnecting hides the profile's workspace
+without deleting it. Relation tabs restore as lazy shells, and their result data
+is not persisted across an application restart. Deleting a profile removes its
+workspace.
