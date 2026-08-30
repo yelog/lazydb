@@ -600,4 +600,12 @@ b5de0034e04af05e67b247fb9c1314da2e776a08) docs: design SQL editor and transactio
 
 Changes that are not part of a tagged release go here.
 
+### Added
+
+- Documented per-connection workspaces: profile switches are committed only
+  after a successful connection, failed switches preserve the current workspace,
+  disconnecting hides rather than deletes a workspace, relation tabs restore as
+  lazy shells without persisting result data across restarts, and profile
+  deletion removes the workspace.
+
 [unreleased]: https://github.com/yelog/lazydb/compare/HEAD...HEAD

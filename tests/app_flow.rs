@@ -221,7 +221,6 @@ async fn connects_loads_catalog_and_executes_through_runtime() {
     let profile = imported.profile;
     let profile_id = profile.id;
     let mut app = App::new(vec![profile.clone()]);
-    let tab_id = app.active_console().id;
     let (events, mut receiver) = mpsc::unbounded_channel();
     let mut runtime = Runtime::new(
         vec![profile],
@@ -238,8 +237,10 @@ async fn connects_loads_catalog_and_executes_through_runtime() {
         .await
         .unwrap()
         .unwrap();
+    assert!(matches!(action, Action::ConnectionSucceeded { .. }));
     dispatch(&mut app, &mut runtime, action);
     assert_eq!(app.connection.status, ConnectionStatus::Connected);
+    let tab_id = app.active_console().id;
 
     drain_catalog(&mut app, &mut runtime, &mut receiver).await;
 

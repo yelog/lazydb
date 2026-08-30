@@ -1,11 +1,11 @@
 use lazydb::{
     action::Action,
     app::App,
+    db::ServerInfo,
     db::catalog::{
         CatalogEntry, CatalogId, CatalogKind, CatalogMetadata, ColumnMetadata, OptionalMetadata,
         QualifiedName,
     },
-    model::workspace::ConnectionStatus,
     profile::{CatalogScope, CatalogSelection, DatabaseKind, DatabaseScope, import_connection_url},
     sql::{
         CompletionContext, CompletionIndex, CompletionKind, SqlDialect, complete, quote_identifier,
@@ -475,8 +475,15 @@ fn app_completion_prefers_the_active_console_target_schema() {
         })
         .to_vec();
     let mut app = App::new(vec![profile]);
-    app.connection.profile_id = Some(profile_id);
-    app.connection.status = ConnectionStatus::Connected;
+    app.update(Action::ConnectionSucceeded {
+        profile_id,
+        generation: 1,
+        server: ServerInfo {
+            kind: DatabaseKind::Postgres,
+            version: "16.4".into(),
+            database: "app".into(),
+        },
+    });
     app.active_console_mut()
         .execution_target
         .as_mut()

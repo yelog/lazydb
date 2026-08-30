@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use unicode_width::UnicodeWidthStr;
 use uuid::Uuid;
 
@@ -17,7 +18,8 @@ pub struct RelationKey {
     pub object_id: CatalogId,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RelationView {
     #[default]
     Data,
@@ -274,6 +276,12 @@ impl RelationTab {
             transaction_generation: 0,
             transaction_snapshot: None,
         }
+    }
+
+    pub fn restored(id: Uuid, descriptor: RelationDescriptor, view: RelationView) -> Self {
+        let mut tab = Self::with_descriptor(descriptor, view);
+        tab.id = id;
+        tab
     }
 
     pub fn title(&self) -> &str {

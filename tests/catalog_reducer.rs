@@ -917,7 +917,11 @@ fn connected_app() -> (App, ConnectionProfile) {
         generation,
         server: server(),
     });
-    assert!(matches!(commands.as_slice(), [Command::LoadCatalogPage(_)]));
+    assert!(
+        commands
+            .iter()
+            .any(|command| matches!(command, Command::LoadCatalogPage(_)))
+    );
     (app, profile)
 }
 

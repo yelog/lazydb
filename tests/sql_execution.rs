@@ -3,7 +3,8 @@ use lazydb::{
     action::{Action, Command},
     app::App,
     cli::{Cli, ConfirmationPolicy},
-    model::workspace::{ConnectionIdentity, ConnectionStatus, Overlay},
+    db::ServerInfo,
+    model::workspace::{ConnectionIdentity, Overlay},
     profile::import_connection_url,
     sql::{ExecutionDraft, ScopeKind, ScopeSource, SqlDialect, SqlRisk, TextRange},
 };
@@ -17,9 +18,15 @@ fn connected_app(policy: ConfirmationPolicy) -> App {
         generation: 1,
     };
     let mut app = App::with_confirmation_policy(vec![profile], policy);
-    app.connection.profile_id = Some(identity.profile_id);
-    app.connection.generation = identity.generation;
-    app.connection.status = ConnectionStatus::Connected;
+    app.update(Action::ConnectionSucceeded {
+        profile_id: identity.profile_id,
+        generation: identity.generation,
+        server: ServerInfo {
+            kind: lazydb::profile::DatabaseKind::Sqlite,
+            version: "3.50".into(),
+            database: ":memory:".into(),
+        },
+    });
     app.connection.target = app.active_console().execution_target.clone();
     app
 }

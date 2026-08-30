@@ -39,12 +39,14 @@ fn fixture() -> App {
         .unwrap()
         .profile;
     let mut app = App::new(vec![profile.clone()]);
-    app.connection.profile_id = Some(profile.id);
-    app.connection.status = ConnectionStatus::Connected;
-    app.connection.server = Some(ServerInfo {
-        kind: DatabaseKind::Sqlite,
-        version: "3.50.0".into(),
-        database: ":memory:".into(),
+    app.update(Action::ConnectionSucceeded {
+        profile_id: profile.id,
+        generation: 1,
+        server: ServerInfo {
+            kind: DatabaseKind::Sqlite,
+            version: "3.50.0".into(),
+            database: ":memory:".into(),
+        },
     });
     app.update(Action::ReplaceEditor(
         "SELECT id, name, active\nFROM users\nWHERE active = true;".into(),
@@ -854,9 +856,15 @@ fn execution_confirmation_preview_is_sanitized_and_shows_scope() {
         .unwrap()
         .profile;
     let mut app = App::with_confirmation_policy(vec![profile.clone()], ConfirmationPolicy::Always);
-    app.connection.profile_id = Some(profile.id);
-    app.connection.generation = 1;
-    app.connection.status = ConnectionStatus::Connected;
+    app.update(Action::ConnectionSucceeded {
+        profile_id: profile.id,
+        generation: 1,
+        server: ServerInfo {
+            kind: DatabaseKind::Sqlite,
+            version: "3.50.0".into(),
+            database: ":memory:".into(),
+        },
+    });
     app.update(Action::ReplaceEditor("SELECT 1;\x1b]8;;bad\x07".into()));
     app.update(Action::RunAllSql);
 
