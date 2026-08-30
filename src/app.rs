@@ -456,6 +456,8 @@ impl App {
             })
             .unwrap_or(Uuid::nil());
         WorkspaceSnapshot {
+            active_profile: self.active_workspace_profile,
+            profiles: Vec::new(),
             active_console,
             consoles,
             sql,
