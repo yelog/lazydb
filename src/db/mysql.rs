@@ -1566,9 +1566,12 @@ impl MySqlAdapter {
             scope: self.catalog_scope.clone(),
             page_size: RELATION_PREVIEW_LIMIT,
         };
-        let children = self
-            .load_relation_children_page(connection, &request, relation, lower_case)
+        let children_entries = self
+            .load_relation_children(connection, &database, &name, relation)
             .await?;
+        let children_count = exact_count(children_entries.len())?;
+        let children = CatalogPage::new(&request, children_entries, children_count, None)
+            .map_err(catalog_invariant)?;
         let main_sql = show_create_relation(connection, relation.kind, &database, &name)
             .await?
             .filter(|sql| !sql.trim().is_empty())
