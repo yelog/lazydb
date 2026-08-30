@@ -54,6 +54,11 @@ pub enum Overlay {
     Help(HelpState),
     RecordView(crate::model::record_view::RecordViewState),
     ProfileManager,
+    ProfileAccess {
+        profile_id: Uuid,
+        selected: usize,
+        options: Vec<ProfileAccessOption>,
+    },
     Message {
         title: String,
         body: String,
@@ -86,6 +91,12 @@ pub enum Overlay {
         console_id: Uuid,
     },
     SqlEditorList(crate::model::sql_editor_list::SqlEditorListState),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProfileAccessOption {
+    pub label: String,
+    pub change: crate::action::ProfileAccessChange,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

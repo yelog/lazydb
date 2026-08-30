@@ -656,7 +656,7 @@ pub enum Command {
     Quit,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProfileAccessChange {
     MakeGlobal,
     MakeProjectOnly(PathBuf),

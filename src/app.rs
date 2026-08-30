@@ -7,7 +7,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use uuid::Uuid;
 
 use crate::{
-    action::{Action, Command},
+    action::{Action, Command, ProfileAccessChange},
     cli::ConfirmationPolicy,
     clipboard::{ClipboardPayload, copy_cell, copy_row_tsv},
     db::{
@@ -2107,10 +2107,23 @@ impl App {
                 self.clipboard_notice = Some(ClipboardNotice::error(message, Instant::now()));
                 Vec::new()
             }
-            Action::OpenProfileAccess
-            | Action::ProfileAccessMove(_)
-            | Action::ProfileAccessConfirm
-            | Action::ProfileAccessCancel => Vec::new(),
+            Action::OpenProfileAccess => self.open_profile_access(),
+            Action::ProfileAccessMove(delta) => {
+                if let Some(Overlay::ProfileAccess {
+                    selected, options, ..
+                }) = self.overlay.as_mut()
+                {
+                    *selected = selected
+                        .saturating_add_signed(delta)
+                        .min(options.len().saturating_sub(1));
+                }
+                Vec::new()
+            }
+            Action::ProfileAccessConfirm => self.confirm_profile_access(),
+            Action::ProfileAccessCancel => {
+                self.overlay = None;
+                Vec::new()
+            }
             Action::ProfileDeleted {
                 request_id,
                 profile_id,
@@ -5953,6 +5966,97 @@ impl App {
 
     fn selected_catalog_target(&self) -> Option<CatalogTarget> {
         self.target_for_node(self.explorer.selected_id()?)
+    }
+
+    fn open_profile_access(&mut self) -> Vec<Command> {
+        let Some(profile_id) = self
+            .explorer
+            .selected_id()
+            .and_then(ExplorerNodeId::profile_id)
+        else {
+            return Vec::new();
+        };
+        let Some(profile) = self
+            .profiles
+            .iter()
+            .find(|profile| profile.id == profile_id)
+        else {
+            return Vec::new();
+        };
+        if !self
+            .explorer
+            .normalized
+            .profiles
+            .get(&profile_id)
+            .is_some_and(|state| state.provenance == ProfileProvenance::Saved)
+        {
+            self.clipboard_notice = Some(ClipboardNotice::error(
+                "Session connections have no saved access scope",
+                Instant::now(),
+            ));
+            return Vec::new();
+        }
+        let root = self.project.root.clone();
+        let options = match &profile.access {
+            ProfileAccess::Global => vec![crate::model::workspace::ProfileAccessOption {
+                label: format!("Make project-only for {}", self.project.display_name),
+                change: ProfileAccessChange::MakeProjectOnly(root),
+            }],
+            ProfileAccess::Projects { roots }
+                if roots.iter().any(|candidate| candidate == &root) =>
+            {
+                vec![
+                    crate::model::workspace::ProfileAccessOption {
+                        label: "Make global".to_owned(),
+                        change: ProfileAccessChange::MakeGlobal,
+                    },
+                    crate::model::workspace::ProfileAccessOption {
+                        label: format!("Remove from {}", self.project.display_name),
+                        change: ProfileAccessChange::RemoveProject(root),
+                    },
+                ]
+            }
+            ProfileAccess::Projects { .. } => vec![
+                crate::model::workspace::ProfileAccessOption {
+                    label: "Make global".to_owned(),
+                    change: ProfileAccessChange::MakeGlobal,
+                },
+                crate::model::workspace::ProfileAccessOption {
+                    label: format!("Add to {}", self.project.display_name),
+                    change: ProfileAccessChange::AddProject(root),
+                },
+            ],
+        };
+        self.overlay = Some(Overlay::ProfileAccess {
+            profile_id,
+            selected: 0,
+            options,
+        });
+        Vec::new()
+    }
+
+    fn confirm_profile_access(&mut self) -> Vec<Command> {
+        let Some(Overlay::ProfileAccess {
+            profile_id,
+            selected,
+            options,
+        }) = self.overlay.take()
+        else {
+            return Vec::new();
+        };
+        let Some(option) = options.get(selected) else {
+            return Vec::new();
+        };
+        vec![Command::UpdateProfileAccess {
+            request_id: self.next_profile_request_id(),
+            profile_id,
+            change: option.change.clone(),
+        }]
+    }
+
+    fn next_profile_request_id(&mut self) -> u64 {
+        self.connection_request_generation = self.connection_request_generation.saturating_add(1);
+        self.connection_request_generation
     }
 
     fn target_for_node(

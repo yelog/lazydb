@@ -20,6 +20,43 @@ fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
 
+#[test]
+fn explorer_s_opens_profile_access_menu() {
+    let profile = profile("access");
+    let profile_id = profile.id;
+    let mut app = App::new(vec![profile]);
+    app.focus = Focus::Explorer;
+    let mut keymap = Keymap::default();
+
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('s')), &app),
+        Some(Action::OpenProfileAccess)
+    );
+    app.update(Action::OpenProfileAccess);
+    assert!(matches!(
+        app.overlay,
+        Some(Overlay::ProfileAccess { profile_id: id, .. }) if id == profile_id
+    ));
+}
+
+#[test]
+fn profile_access_menu_navigates_and_cancels() {
+    let profile = profile("access");
+    let mut app = App::new(vec![profile]);
+    app.focus = Focus::Explorer;
+    app.update(Action::OpenProfileAccess);
+    let mut keymap = Keymap::default();
+
+    assert_eq!(
+        keymap.map(key(KeyCode::Down), &app),
+        Some(Action::ProfileAccessMove(1))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Esc), &app),
+        Some(Action::ProfileAccessCancel)
+    );
+}
+
 fn ctrl(character: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL)
 }
