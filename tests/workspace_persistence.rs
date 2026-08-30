@@ -79,7 +79,7 @@ fn workspace_v3_round_trip_restores_two_profile_workspaces_and_durable_state() {
     assert_eq!(restored.active_profile, Some(profile_b));
     assert_eq!(restored.profiles.len(), 2);
     assert_eq!(restored.profiles[0].tabs[1], snapshot.profiles[0].tabs[1]);
-    assert_eq!(restored.profiles[0].consoles[1].open, false);
+    assert!(!restored.profiles[0].consoles[1].open);
     assert_eq!(restored.sql, snapshot.sql);
     let manifest = std::fs::read_to_string(temp.path().join("state/workspace.toml")).unwrap();
     for transient in ["outcome", "transaction_state", "rows", "edit", "generation"] {

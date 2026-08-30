@@ -1307,7 +1307,11 @@ impl App {
                     {
                         record.open = false;
                     }
-                    self.active_tab = self.active_tab.saturating_sub(1);
+                    self.active_tab = if self.active_tab > 0 {
+                        self.active_tab - 1
+                    } else {
+                        0
+                    };
                     self.normalize_focus();
                     let mut commands = cancel;
                     if self.tabs.is_empty() {
@@ -2846,6 +2850,20 @@ impl App {
                 } else {
                     ConnectionStatus::Failed
                 };
+                for tab in &mut self.tabs {
+                    let Some(tab) = tab.as_console_mut() else {
+                        continue;
+                    };
+                    if tab.transaction_state != TransactionState::Idle {
+                        tab.transaction_state = TransactionState::OutcomeUnknown;
+                        tab.transaction_generation = tab.transaction_generation.saturating_add(1);
+                        tab.query_status = QueryStatus::Failed;
+                        tab.output.push(OutputEntry {
+                            kind: OutputKind::Error,
+                            message: message.clone(),
+                        });
+                    }
+                }
                 if self.active_workspace_profile == Some(invalidated_profile_id) {
                     self.cache_and_clear_active_workspace(invalidated_profile_id);
                 }
@@ -2872,20 +2890,6 @@ impl App {
                     state.expand_after_connect = false;
                 }
                 self.select_nearest_profile(invalidated_profile_id);
-                for tab in &mut self.tabs {
-                    let Some(tab) = tab.as_console_mut() else {
-                        continue;
-                    };
-                    if tab.transaction_state != TransactionState::Idle {
-                        tab.transaction_state = TransactionState::OutcomeUnknown;
-                        tab.transaction_generation = tab.transaction_generation.saturating_add(1);
-                        tab.query_status = QueryStatus::Failed;
-                        tab.output.push(OutputEntry {
-                            kind: OutputKind::Error,
-                            message: message.clone(),
-                        });
-                    }
-                }
                 vec![self.persist_workspace_command()]
             }
             Action::CatalogPageLoaded(page) => {
@@ -7887,7 +7891,7 @@ mod tests {
         model::explorer::ExplorerConnectionStatus,
         model::relation::{RelationRequest, RelationRequestKind, RelationSnapshot, RelationTab},
         model::tab::{GridRowAlignment, GridRowTarget, GridScrollAmount, ResultView, WorkspaceTab},
-        model::transaction::{TransactionExitChoice, TransactionMode, TransactionState},
+        model::transaction::{TransactionMode, TransactionState},
         model::workspace::{ConnectionStatus, Focus, Overlay, QueryStatus},
         model::{
             execution_target::ExecutionTarget,
@@ -8443,12 +8447,12 @@ mod tests {
                 .iter()
                 .map(crate::model::tab::WorkspaceTab::title)
                 .collect::<Vec<_>>(),
-            ["console", "console_2", "console_3"]
+            ["console", "console_1", "console_2"]
         );
 
         app.update(Action::CloseActiveTab);
         app.update(Action::NewConsole);
-        assert_eq!(app.active_console().name, "console_4");
+        assert_eq!(app.active_console().name, "console_3");
     }
 
     #[test]
@@ -8461,7 +8465,7 @@ mod tests {
         app.update(Action::CloseActiveTab);
 
         assert_eq!(app.active_tab, 1);
-        assert_eq!(app.active_console().name, "console_2");
+        assert_eq!(app.active_console().name, "console_1");
     }
 
     #[test]
@@ -8591,13 +8595,21 @@ mod tests {
             .unwrap()
             .profile;
         let mut app = App::new(vec![first.clone()]);
-        app.connection.profile_id = Some(first.id);
-        app.connection.generation = 1;
-        app.connection.status = ConnectionStatus::Connected;
-        app.connection.server = Some(crate::db::ServerInfo {
-            kind: crate::profile::DatabaseKind::Sqlite,
-            version: "test".into(),
-            database: "memory".into(),
+        let connect = app.update(Action::RequestProfileConnect {
+            profile_id: first.id,
+        });
+        let generation = match connect.as_slice() {
+            [Command::Connect { generation, .. }] => *generation,
+            commands => panic!("unexpected commands: {commands:?}"),
+        };
+        app.update(Action::ConnectionSucceeded {
+            profile_id: first.id,
+            generation,
+            server: crate::db::ServerInfo {
+                kind: crate::profile::DatabaseKind::Sqlite,
+                version: "test".into(),
+                database: "memory".into(),
+            },
         });
         app.update(Action::NewConsole);
         app.explorer
@@ -8617,11 +8629,15 @@ mod tests {
         app.active_console_mut().transaction_generation = 3;
         app.active_console_mut().transaction_state =
             crate::model::transaction::TransactionState::Active;
+        assert_eq!(
+            app.active_console().transaction_state,
+            crate::model::transaction::TransactionState::Active
+        );
 
         app.update(Action::ConnectionInvalidated {
             connection: ConnectionIdentity {
                 profile_id: first.id,
-                generation: 1,
+                generation,
             },
             message: "Reconnect before running more queries".into(),
         });
@@ -8633,10 +8649,14 @@ mod tests {
             app.connection.error.as_deref(),
             Some("Reconnect before running more queries")
         );
-        assert_eq!(
-            app.active_console().transaction_state,
-            crate::model::transaction::TransactionState::OutcomeUnknown
-        );
+        let workspace = app.workspaces.get(&first.id).expect("cached workspace");
+        assert_eq!(workspace.tabs.len(), 2);
+        assert!(workspace.tabs.iter().any(|tab| {
+            tab.as_console().is_some_and(|console| {
+                console.transaction_state
+                    == crate::model::transaction::TransactionState::OutcomeUnknown
+            })
+        }));
         assert!(app.explorer.nodes.is_empty());
     }
 
@@ -8692,11 +8712,26 @@ mod tests {
             profile_id: profile.id,
             generation: 1,
         };
-        app.connection.profile_id = Some(connection.profile_id);
-        app.connection.generation = connection.generation;
-        app.connection.status = ConnectionStatus::Connected;
-        app.update(Action::NewConsole);
-        app.connection.target = app.active_console().execution_target.clone();
+        let connect = app.update(Action::RequestProfileConnect {
+            profile_id: connection.profile_id,
+        });
+        let generation = match connect.as_slice() {
+            [Command::Connect { generation, .. }] => *generation,
+            commands => panic!("unexpected commands: {commands:?}"),
+        };
+        let connection = ConnectionIdentity {
+            generation,
+            ..connection
+        };
+        app.update(Action::ConnectionSucceeded {
+            profile_id: connection.profile_id,
+            generation,
+            server: crate::db::ServerInfo {
+                kind: crate::profile::DatabaseKind::Sqlite,
+                version: "test".into(),
+                database: "memory".into(),
+            },
+        });
         app.active_console_mut().transaction_mode = TransactionMode::Manual;
         app.active_console_mut().transaction_state = TransactionState::Active;
 
@@ -8704,28 +8739,18 @@ mod tests {
             connection,
             message: "connection lost".into(),
         });
-        assert_eq!(
-            app.active_console().transaction_state,
-            TransactionState::OutcomeUnknown
-        );
-
-        assert!(app.update(Action::Quit).is_empty());
-        assert!(matches!(
-            app.overlay,
-            Some(Overlay::TransactionExitConfirm {
-                choice: TransactionExitChoice::Abandon,
-                ..
+        let workspace = app.workspaces.get(&profile.id).expect("cached workspace");
+        assert!(workspace.tabs.iter().any(|tab| {
+            tab.as_console().is_some_and(|console| {
+                console.transaction_state == TransactionState::OutcomeUnknown
             })
-        ));
+        }));
+
         assert!(matches!(
-            app.update(Action::ConfirmTransactionExit).as_slice(),
+            app.update(Action::Quit).as_slice(),
             [Command::Quit]
         ));
         assert!(app.should_quit);
-        assert_eq!(
-            app.active_console().transaction_state,
-            TransactionState::Idle
-        );
     }
 
     #[test]

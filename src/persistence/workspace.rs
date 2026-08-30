@@ -1,7 +1,7 @@
 use std::{
     fs::{self, File, OpenOptions},
     io::Write,
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use serde::{Deserialize, Serialize};
@@ -274,7 +274,7 @@ pub fn validate_snapshot(snapshot: &WorkspaceSnapshot) -> Result<(), WorkspaceEr
             .map(|console| console.id)
             .collect::<std::collections::HashSet<_>>();
         for console in &profile.consoles {
-            if console.sql_file != PathBuf::from(format!("{}.sql", console.id)) {
+            if console.sql_file.as_path() != Path::new(&format!("{}.sql", console.id)) {
                 return Err(WorkspaceError::Invalid(format!(
                     "invalid SQL file for console {}",
                     console.id
