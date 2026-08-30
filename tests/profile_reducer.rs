@@ -1094,9 +1094,11 @@ fn active_scope_only_save_keeps_connection_clears_completion_and_reloads_catalog
     profile.catalog_scope =
         CatalogScope::for_profile(DatabaseKind::Sqlite, ":memory:", Some("main"));
     let mut app = App::new(vec![profile.clone()]);
-    app.connection.profile_id = Some(profile_id);
-    app.connection.generation = 3;
-    app.connection.status = ConnectionStatus::Connected;
+    app.update(Action::ConnectionSucceeded {
+        profile_id,
+        generation: 3,
+        server: server(),
+    });
     app.active_console_mut().completion = Some(Default::default());
     app.update(Action::ProfileStartEdit { profile_id });
     let request_id = match app
@@ -1152,13 +1154,32 @@ fn active_scope_only_save_keeps_connection_clears_completion_and_reloads_catalog
 }
 
 #[test]
+fn snapshot_without_an_installed_profile_workspace_stays_empty() {
+    let profile = sqlite_profile("connected-without-workspace");
+    let profile_id = profile.id;
+    let mut app = App::new(vec![profile]);
+    app.connection.profile_id = Some(profile_id);
+    app.connection.status = ConnectionStatus::Connected;
+
+    let snapshot = app.workspace_snapshot();
+
+    assert_eq!(app.active_workspace_profile, None);
+    assert!(app.tabs.is_empty());
+    assert!(snapshot.profiles.is_empty());
+    assert!(snapshot.consoles.is_empty());
+    assert!(snapshot.sql.is_empty());
+}
+
+#[test]
 fn query_started_while_save_is_in_flight_preserves_the_active_connection() {
     let profile = sqlite_profile("active");
     let profile_id = profile.id;
     let mut app = App::new(vec![profile]);
-    app.connection.profile_id = Some(profile_id);
-    app.connection.generation = 3;
-    app.connection.status = ConnectionStatus::Connected;
+    app.update(Action::ConnectionSucceeded {
+        profile_id,
+        generation: 3,
+        server: server(),
+    });
     app.update(Action::ProfileStartEdit { profile_id });
     let request_id = match app
         .update(Action::ProfileSave { connect: false })
@@ -1249,8 +1270,11 @@ fn running_queries_block_switching_active_profile_saves_and_deletion() {
     let active_id = active.id;
     let other_id = other.id;
     let mut app = App::new(vec![active, other]);
-    app.connection.profile_id = Some(active_id);
-    app.connection.status = ConnectionStatus::Connected;
+    app.update(Action::ConnectionSucceeded {
+        profile_id: active_id,
+        generation: 1,
+        server: server(),
+    });
     app.active_console_mut().query_status = QueryStatus::Running;
     assert!(
         app.update(Action::RequestProfileConnect {

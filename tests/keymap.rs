@@ -2,6 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use lazydb::{
     action::Action,
     app::App,
+    db::ServerInfo,
     input::keymap::{Keymap, map_paste},
     model::{
         data_query::{DataQueryCandidate, DataQueryCompletion, DataQueryInput},
@@ -589,7 +590,15 @@ fn editor_leader_opens_connection_target_selector() {
     let profile = profile("target");
     let profile_id = profile.id;
     let mut app = App::new(vec![profile]);
-    app.connection.profile_id = Some(profile_id);
+    app.update(Action::ConnectionSucceeded {
+        profile_id,
+        generation: 1,
+        server: ServerInfo {
+            kind: lazydb::profile::DatabaseKind::Sqlite,
+            version: "3.50".into(),
+            database: ":memory:".into(),
+        },
+    });
     app.update(Action::EditorKey(key(KeyCode::Esc)));
     app.update(Action::EditorKey(key(KeyCode::Char(' '))));
     assert_eq!(
@@ -1176,6 +1185,16 @@ fn profile_form_maps_navigation_editing_and_commands() {
 fn profile_confirmation_and_paste_are_contextual_and_redacted() {
     let profile = profile("delete");
     let mut app = App::new(vec![profile]);
+    let profile_id = app.profiles[0].id;
+    app.update(Action::ConnectionSucceeded {
+        profile_id,
+        generation: 1,
+        server: ServerInfo {
+            kind: lazydb::profile::DatabaseKind::Sqlite,
+            version: "3.50".into(),
+            database: ":memory:".into(),
+        },
+    });
     app.update(Action::OpenProfileManager);
     app.update(Action::ProfileRequestDelete {
         profile_id: app.profiles[0].id,

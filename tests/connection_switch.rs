@@ -846,6 +846,92 @@ fn unrelated_disconnect_completion_does_not_change_failed_state() {
     assert_eq!(app.connection.error.as_deref(), Some("unreachable"));
 }
 
+#[test]
+fn active_disconnect_caches_and_hides_workspace_until_reconnect() {
+    let profile = memory_profile("profile");
+    let profile_id = profile.id;
+    let mut app = App::new(vec![profile]);
+    let generation = match app.update(Action::RequestConnect(profile_id)).as_slice() {
+        [Command::Connect { generation, .. }] => *generation,
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+    app.update(Action::ConnectionSucceeded {
+        profile_id,
+        generation,
+        server: server("profile"),
+    });
+    let console_id = app.active_console().id;
+    app.update(Action::ReplaceEditor("SELECT cached".into()));
+    let commands = app.update(Action::DisconnectCompleted {
+        connection: ConnectionIdentity {
+            profile_id,
+            generation,
+        },
+    });
+
+    assert!(app.tabs.is_empty());
+    assert!(app.sql_editors.is_empty());
+    assert_eq!(app.active_editor_text().unwrap(), "");
+    assert!(commands.iter().any(|command| matches!(
+        command,
+        Command::PersistWorkspace(snapshot)
+            if snapshot.profiles.iter().any(|workspace| {
+                workspace.profile_id == profile_id
+                    && workspace.consoles.iter().any(|console| console.id == console_id)
+            })
+    )));
+
+    let reconnect_generation = match app.update(Action::RequestConnect(profile_id)).as_slice() {
+        [Command::Connect { generation, .. }] => *generation,
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+    app.update(Action::ConnectionSucceeded {
+        profile_id,
+        generation: reconnect_generation,
+        server: server("profile-again"),
+    });
+    assert_eq!(app.active_console().id, console_id);
+    assert_eq!(app.active_editor_text().unwrap(), "SELECT cached");
+}
+
+#[test]
+fn active_invalidation_caches_and_hides_workspace_but_stale_invalidation_is_ignored() {
+    let profile = memory_profile("profile");
+    let profile_id = profile.id;
+    let mut app = App::new(vec![profile]);
+    let generation = match app.update(Action::RequestConnect(profile_id)).as_slice() {
+        [Command::Connect { generation, .. }] => *generation,
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+    app.update(Action::ConnectionSucceeded {
+        profile_id,
+        generation,
+        server: server("profile"),
+    });
+    app.update(Action::ReplaceEditor("SELECT invalidated".into()));
+    app.update(Action::ConnectionInvalidated {
+        connection: ConnectionIdentity {
+            profile_id,
+            generation,
+        },
+        message: "connection lost".into(),
+    });
+    assert!(app.tabs.is_empty());
+    assert!(app.sql_editors.is_empty());
+    assert_eq!(app.active_editor_text().unwrap(), "");
+    assert_eq!(app.connection.error.as_deref(), Some("connection lost"));
+
+    app.update(Action::ConnectionInvalidated {
+        connection: ConnectionIdentity {
+            profile_id,
+            generation: generation + 1,
+        },
+        message: "stale".into(),
+    });
+    assert_eq!(app.connection.error.as_deref(), Some("connection lost"));
+    assert!(app.tabs.is_empty());
+}
+
 #[tokio::test]
 async fn successful_switch_installs_the_new_database_and_rejects_stale_commands() {
     let temp = TempDir::new().unwrap();
