@@ -21,8 +21,8 @@ enum Pending {
     Window,
     Previous,
     Next,
-    RelationDelete,
     RelationYank,
+    RelationDelete,
     GridAlign,
     RecordViewGoto,
     ExplorerAlign,
@@ -410,6 +410,18 @@ impl Keymap {
             return None;
         }
 
+        if is_sql_grid_focus(app) && event.modifiers.is_empty() {
+            match event.code {
+                KeyCode::Char('y') => return Some(Action::CopyGridCell),
+                KeyCode::Char('Y') => {
+                    return Some(Action::CopyGridRow {
+                        include_headers: false,
+                    });
+                }
+                _ => {}
+            }
+        }
+
         if is_relation_data_focus(app) {
             if event.modifiers.is_empty() && relation_grid_is_browse(app) {
                 match event.code {
@@ -420,6 +432,11 @@ impl Keymap {
                     KeyCode::Char('y') => {
                         self.set_pending(Pending::RelationYank, app);
                         return None;
+                    }
+                    KeyCode::Char('Y') => {
+                        return Some(Action::CopyGridRow {
+                            include_headers: false,
+                        });
                     }
                     _ => {}
                 }
@@ -656,6 +673,12 @@ fn map_pending(pending: Pending, event: KeyEvent, app: &App) -> Option<Action> {
         (Pending::Leader, KeyCode::Char('q')) => Some(Action::CloseActiveTab),
         (Pending::Leader, KeyCode::Char('x')) => Some(Action::RequestDeleteActiveConsole),
         (Pending::Leader, KeyCode::Char('e')) => Some(Action::OpenSqlEditorList),
+        (Pending::Leader, KeyCode::Char('Y')) if is_grid_navigation_focus(app) => {
+            Some(Action::CopyGridRow {
+                include_headers: true,
+            })
+        }
+        (Pending::RelationYank, KeyCode::Char('y')) => Some(Action::RelationYank),
         (Pending::Window, KeyCode::Char('j')) if app.focus == Focus::Editor => {
             Some(Action::Focus(Focus::Results))
         }
@@ -689,7 +712,6 @@ fn map_pending(pending: Pending, event: KeyEvent, app: &App) -> Option<Action> {
         (Pending::Previous, KeyCode::Char('t')) => Some(Action::PreviousTab),
         (Pending::Next, KeyCode::Char('t')) => Some(Action::NextTab),
         (Pending::RelationDelete, KeyCode::Char('d')) => Some(Action::RelationDeleteCurrent),
-        (Pending::RelationYank, KeyCode::Char('y')) => Some(Action::RelationYank),
         (Pending::RecordViewGoto, KeyCode::Char('g')) => Some(Action::RecordViewJumpFirstField),
         (Pending::GridAlign, KeyCode::Char('z')) => Some(Action::GridAlignSelectedRow(
             crate::model::tab::GridRowAlignment::Middle,
@@ -825,6 +847,15 @@ fn is_grid_navigation_focus(app: &App) -> bool {
         }
         _ => false,
     }
+}
+
+fn is_sql_grid_focus(app: &App) -> bool {
+    app.focus == Focus::Results
+        && matches!(
+            app.tabs.get(app.active_tab),
+            Some(crate::model::tab::WorkspaceTab::Sql(tab))
+                if tab.result_view == crate::model::tab::ResultView::Data
+        )
 }
 
 fn map_relation_data(event: KeyEvent, app: &App) -> Option<Action> {

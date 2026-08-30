@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -9,6 +9,7 @@ use uuid::Uuid;
 use crate::{
     action::{Action, Command},
     cli::ConfirmationPolicy,
+    clipboard::{ClipboardPayload, copy_cell, copy_row_tsv},
     db::{
         ErrorCategory,
         catalog::{
@@ -20,6 +21,7 @@ use crate::{
     },
     editor::{EditorEffect, EditorError, EditorWorkspace},
     model::{
+        clipboard::ClipboardNotice,
         data_query::{
             DataQueryCandidate, DataQueryCapability, DataQueryCompletion, DataQueryInput,
             DataQueryOptions,
@@ -154,6 +156,7 @@ pub struct App {
     pending_target_console: Option<Uuid>,
     pub sql_editor_list: crate::model::sql_editor_list::SqlEditorListState,
     workspaces: HashMap<Uuid, ConnectionWorkspace>,
+    pub clipboard_notice: Option<ClipboardNotice>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -275,6 +278,7 @@ impl App {
             pending_target_console: None,
             sql_editor_list: Default::default(),
             workspaces: HashMap::new(),
+            clipboard_notice: None,
         }
     }
 
@@ -470,6 +474,82 @@ impl App {
         self.editor.text(tab_id)
     }
 
+    fn copy_editor_statement(&mut self) -> Vec<Command> {
+        let Some(tab) = self.active_console_opt() else {
+            return Vec::new();
+        };
+        let Ok(Some(scope)) = self.editor.current_scope(tab.id, self.sql_dialect()) else {
+            self.clipboard_notice = Some(ClipboardNotice::error(
+                "Nothing to copy at the cursor",
+                Instant::now(),
+            ));
+            return Vec::new();
+        };
+        vec![Command::WriteClipboard(ClipboardPayload {
+            text: scope.sql,
+            description: "SQL statement".into(),
+            sensitive: false,
+        })]
+    }
+
+    fn copy_editor_buffer(&mut self) -> Vec<Command> {
+        let Ok(text) = self.active_editor_text() else {
+            return Vec::new();
+        };
+        if text.is_empty() {
+            self.clipboard_notice = Some(ClipboardNotice::error(
+                "Nothing to copy in the editor",
+                Instant::now(),
+            ));
+            return Vec::new();
+        }
+        vec![Command::WriteClipboard(ClipboardPayload {
+            description: "SQL buffer".into(),
+            text,
+            sensitive: false,
+        })]
+    }
+
+    fn copy_grid_cell(&mut self) -> Vec<Command> {
+        let Some((columns, row, _, _)) = self.active_record_snapshot() else {
+            self.clipboard_notice = Some(ClipboardNotice::error(
+                "Nothing to copy in the current Data view",
+                Instant::now(),
+            ));
+            return Vec::new();
+        };
+        let column = self.active_grid_column();
+        let Some(value) = row.get(column) else {
+            return Vec::new();
+        };
+        let label = columns
+            .get(column)
+            .map_or("cell", |meta| meta.name.as_str());
+        vec![Command::WriteClipboard(copy_cell(label, value))]
+    }
+
+    fn copy_grid_row(&mut self, include_headers: bool) -> Vec<Command> {
+        let Some((columns, row, _, _)) = self.active_record_snapshot() else {
+            self.clipboard_notice = Some(ClipboardNotice::error(
+                "Nothing to copy in the current Data view",
+                Instant::now(),
+            ));
+            return Vec::new();
+        };
+        copy_row_tsv(&columns, &row, include_headers)
+            .map(Command::WriteClipboard)
+            .into_iter()
+            .collect()
+    }
+
+    fn active_grid_column(&self) -> usize {
+        match self.tabs.get(self.active_tab) {
+            Some(WorkspaceTab::Sql(tab)) => tab.grid.selected_column,
+            Some(WorkspaceTab::Relation(tab)) => tab.grid.selected_column,
+            None => 0,
+        }
+    }
+
     pub fn active_editor_revision(&self) -> u64 {
         self.active_console_opt()
             .and_then(|tab| self.editor.revision(tab.id).ok())
@@ -480,6 +560,19 @@ impl App {
         self.active_console_opt()
             .and_then(|tab| self.editor.mode(tab.id).ok())
             .unwrap_or(EditorMode::Normal)
+    }
+
+    pub fn expire_clipboard_notice(&mut self, now: Instant) -> bool {
+        if self
+            .clipboard_notice
+            .as_ref()
+            .is_some_and(|notice| notice.is_expired(now))
+        {
+            self.clipboard_notice = None;
+            true
+        } else {
+            false
+        }
     }
 
     pub fn active_editor_viewport(&self) -> Result<EditorViewport, EditorError> {
@@ -959,6 +1052,8 @@ impl App {
                 editor_key(KeyCode::Char(' ')),
                 editor_key(KeyCode::Char('f')),
             ],
+            Id::EditorCopyStatement => vec![Action::CopyEditorStatement],
+            Id::EditorCopyBuffer => vec![Action::CopyEditorBuffer],
             Id::ToggleTransaction => vec![
                 editor_key(KeyCode::Char(' ')),
                 editor_key(KeyCode::Char('t')),
@@ -1032,6 +1127,13 @@ impl App {
                 crate::model::tab::GridRowAlignment::Bottom,
             )],
             Id::ResultsOpenRecordView => vec![Action::OpenRecordView],
+            Id::ResultsCopyCell => vec![Action::CopyGridCell],
+            Id::ResultsCopyRow => vec![Action::CopyGridRow {
+                include_headers: false,
+            }],
+            Id::ResultsCopyRowWithHeaders => vec![Action::CopyGridRow {
+                include_headers: true,
+            }],
             Id::ResultsToggleView => vec![Action::ToggleResultView],
             Id::ResultsData => match self.tabs.get(self.active_tab) {
                 Some(WorkspaceTab::Relation(_)) => {
@@ -1091,6 +1193,8 @@ impl App {
                         | Action::GridSetColumnWidth { .. }
                         | Action::GridEndColumnResize
                         | Action::GridSetColumnOffset { .. }
+                        | Action::CopyGridCell
+                        | Action::CopyGridRow { .. }
                         | Action::OpenRecordView
                         | Action::RecordViewMoveFields(_)
                         | Action::RecordViewJumpFirstField
@@ -2067,6 +2171,26 @@ impl App {
                     return Vec::new();
                 }
                 self.apply_editor_effects(CompletionAfterEdit::Schedule)
+            }
+            Action::ClipboardWritten { description } => {
+                self.clipboard_notice = Some(ClipboardNotice::success(
+                    format!("Copied {description}"),
+                    Instant::now(),
+                ));
+                Vec::new()
+            }
+            Action::CopyEditorYank(text) => vec![Command::WriteClipboard(ClipboardPayload {
+                description: format!("SQL selection: {} chars", text.chars().count()),
+                text,
+                sensitive: false,
+            })],
+            Action::CopyEditorStatement => self.copy_editor_statement(),
+            Action::CopyEditorBuffer => self.copy_editor_buffer(),
+            Action::CopyGridCell => self.copy_grid_cell(),
+            Action::CopyGridRow { include_headers } => self.copy_grid_row(include_headers),
+            Action::ClipboardWriteFailed { message } => {
+                self.clipboard_notice = Some(ClipboardNotice::error(message, Instant::now()));
+                Vec::new()
             }
             Action::EditorViewportChanged(viewport) => {
                 let Some(id) = self.active_console_opt().map(|tab| tab.id) else {
@@ -4811,6 +4935,9 @@ impl App {
                     }
                     continue;
                 }
+                EditorEffect::Yanked(text) => Action::CopyEditorYank(text),
+                EditorEffect::CopyStatement => Action::CopyEditorStatement,
+                EditorEffect::CopyBuffer => Action::CopyEditorBuffer,
                 EditorEffect::Message(_)
                 | EditorEffect::BackwardSearch
                 | EditorEffect::ClearTransactionOutcome

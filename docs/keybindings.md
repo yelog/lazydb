@@ -126,6 +126,8 @@ Normal mode:
 | `F5`, `Space r` | Execute the selected/current statement |
 | `Shift-F5`, `Space R` | Preview and execute the complete buffer |
 | `Space f` | Format the selected/current statement |
+| `Space y` | Copy the current SQL statement |
+| `Space Y` | Copy the complete SQL buffer |
 | `Ctrl-Space` | Trigger completion |
 | `Space d` | Select the active console's database/schema execution target |
 | `Ctrl-N/P` | Move through an open completion popup |
@@ -169,6 +171,9 @@ connection unchanged.
 | `Ctrl-f`, `Ctrl-b` | Move down/up one page |
 | `zz`, `zt`, `zb` | Align the selected row to the middle/top/bottom |
 | `v` | Open read-only Record View for the selected row |
+| `y` | Copy the complete selected cell value |
+| `Y` | Copy the selected row as TSV |
+| `Space Y` | Copy the selected row with column headers as TSV |
 | `o` | Switch Data/Output |
 | `1`, `2`, `3` | Select Data, Output, or Plan directly |
 
@@ -220,6 +225,10 @@ OF SCOPE SNAPSHOT`; this is snapshot provenance and is separate from DDL's
 
 - Left click switches panels, activates tabs, selects catalog rows, selects result
   cells, and toggles Data/Output.
+- Application copy uses the semantic target under the cursor. It copies complete
+  values even when the Grid preview is truncated. Terminal-native text selection
+  commonly uses Shift-drag while mouse capture is enabled; the exact modifier is
+  terminal-specific. Use `--mouse off` to prefer terminal-native selection.
 - Wheel scroll moves the panel under the pointer; relation DDL scrolls vertically
   by three rows and relation Data scrolls the grid by three rows.
 - Closing the Neovim floating window hides it without stopping LazyDB.

@@ -1670,11 +1670,11 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
     };
     let hints = match app.focus {
         Focus::Explorer => "j/k move   gg/G ends   Ctrl-d/u page   Enter open",
-        Focus::Editor => "Esc normal   i/a/o insert   F5 run   [ then t / ] then t tabs",
+        Focus::Editor => "Esc normal   i/a/o insert   Space y copy SQL   F5 run",
         Focus::Results if app.is_active_relation_tab() => {
-            "h/j/k/l cells   Space s SQL console   Ctrl+w pane"
+            "h/j/k/l cells   y cell   Y row   Space Y headers"
         }
-        Focus::Results => "h/j/k/l cells   Tab data/output   Ctrl+w pane",
+        Focus::Results => "h/j/k/l cells   y cell   Y row   Space Y headers",
     };
     let line = Line::from(vec![
         Span::styled(
@@ -1729,18 +1729,22 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
         }
         _ => None,
     });
+    let (second_text, second_color) = if let Some(notice) = &app.clipboard_notice {
+        let color = match notice.kind {
+            crate::model::clipboard::ClipboardNoticeKind::Success => theme.accent,
+            crate::model::clipboard::ClipboardNoticeKind::Error => theme.error,
+        };
+        (notice.message.as_str(), color)
+    } else if let Some(context) = relation_context.as_deref() {
+        (context, theme.muted)
+    } else if let Some(error) = app.connection.error.as_deref() {
+        (error, theme.error)
+    } else {
+        ("Ready", theme.muted)
+    };
     let second = Line::from(Span::styled(
-        relation_context
-            .as_deref()
-            .or(app.connection.error.as_deref())
-            .unwrap_or("Ready"),
-        Style::new()
-            .fg(if app.connection.error.is_some() {
-                theme.error
-            } else {
-                theme.muted
-            })
-            .bg(theme.surface),
+        second_text,
+        Style::new().fg(second_color).bg(theme.surface),
     ));
     frame.render_widget(
         Paragraph::new(vec![line, second]).style(Style::new().bg(theme.surface)),

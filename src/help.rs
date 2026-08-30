@@ -45,6 +45,8 @@ pub enum HelpShortcutId {
     EditorRedo,
     EditorRun,
     EditorFormat,
+    EditorCopyStatement,
+    EditorCopyBuffer,
     ToggleTransaction,
     CommitTransaction,
     RollbackTransaction,
@@ -66,6 +68,9 @@ pub enum HelpShortcutId {
     ResultsAlignTop,
     ResultsAlignBottom,
     ResultsOpenRecordView,
+    ResultsCopyCell,
+    ResultsCopyRow,
+    ResultsCopyRowWithHeaders,
     ResultsToggleView,
     ResultsData,
     ResultsSecondaryView,
@@ -392,6 +397,16 @@ pub fn shortcuts(context: Focus, relation_data: bool) -> Vec<HelpShortcut> {
                 key: "Space d",
                 description: "choose editor connection target",
             },
+            HelpShortcut {
+                id: HelpShortcutId::EditorCopyStatement,
+                key: "Space y",
+                description: "copy current SQL statement",
+            },
+            HelpShortcut {
+                id: HelpShortcutId::EditorCopyBuffer,
+                key: "Space Y",
+                description: "copy complete SQL buffer",
+            },
         ],
         Focus::Results => {
             let mut results = vec![
@@ -494,6 +509,21 @@ pub fn shortcuts(context: Focus, relation_data: bool) -> Vec<HelpShortcut> {
                     id: HelpShortcutId::ResultsOpenRecordView,
                     key: "v",
                     description: "open Record View",
+                },
+                HelpShortcut {
+                    id: HelpShortcutId::ResultsCopyCell,
+                    key: "y",
+                    description: "copy selected cell",
+                },
+                HelpShortcut {
+                    id: HelpShortcutId::ResultsCopyRow,
+                    key: "Y",
+                    description: "copy selected row as TSV",
+                },
+                HelpShortcut {
+                    id: HelpShortcutId::ResultsCopyRowWithHeaders,
+                    key: "Space Y",
+                    description: "copy row with headers",
                 },
             ];
             if relation_data {
