@@ -8,7 +8,7 @@ use std::{
 use uuid::Uuid;
 
 use crate::{
-    action::{Action, Command},
+    action::{Action, Command, ProfileAccessChange},
     app::App,
     cli::{Cli, MouseMode},
     db::{
@@ -201,6 +201,11 @@ impl Runtime {
                 request_id,
                 profile_id,
             } => self.delete_profile(request_id, profile_id),
+            Command::UpdateProfileAccess {
+                request_id,
+                profile_id,
+                change,
+            } => self.update_profile_access(request_id, profile_id, change),
             Command::Disconnect { connection } => self.disconnect(connection),
             Command::Connect {
                 profile_id,
@@ -559,6 +564,75 @@ impl Runtime {
                     });
                 }
             }
+        }));
+    }
+
+    fn update_profile_access(
+        &mut self,
+        request_id: u64,
+        profile_id: Uuid,
+        change: ProfileAccessChange,
+    ) {
+        let registry = Arc::clone(&self.registry);
+        let mutation = Arc::clone(&self.profile_mutation);
+        let profile_store = self.profile_store.clone();
+        let sender = self.event_sender.clone();
+        self.profile_tasks.push(tokio::spawn(async move {
+            let _mutation_guard = mutation.lock().await;
+            let snapshot = registry.lock().await.clone();
+            if !snapshot.profiles.contains_key(&profile_id) {
+                let _ = sender.send(Action::ProfileAccessUpdateFailed {
+                    request_id,
+                    profile_id,
+                    message: "Connection profile no longer exists".to_owned(),
+                });
+                return;
+            };
+            if !snapshot.persisted.contains(&profile_id) {
+                let _ = sender.send(Action::ProfileAccessUpdateFailed {
+                    request_id,
+                    profile_id,
+                    message: "Session connections have no saved access scope".to_owned(),
+                });
+                return;
+            }
+            let mut next = snapshot;
+            let profile = next
+                .profiles
+                .get_mut(&profile_id)
+                .expect("profile checked above");
+            match change {
+                ProfileAccessChange::MakeGlobal => {
+                    profile.access = crate::profile::ProfileAccess::Global
+                }
+                ProfileAccessChange::MakeProjectOnly(root) => {
+                    profile.access = crate::profile::ProfileAccess::Projects { roots: vec![root] };
+                }
+                ProfileAccessChange::AddProject(root) => {
+                    if let crate::profile::ProfileAccess::Global = profile.access {
+                        profile.access =
+                            crate::profile::ProfileAccess::Projects { roots: Vec::new() };
+                    }
+                    profile.access.add_project(root);
+                }
+                ProfileAccessChange::RemoveProject(root) => profile.access.remove_project(&root),
+            }
+            let access = profile.access.clone();
+            let persisted_profiles = next.ordered_persisted_profiles();
+            if let Err(message) = save_profiles(profile_store, persisted_profiles).await {
+                let _ = sender.send(Action::ProfileAccessUpdateFailed {
+                    request_id,
+                    profile_id,
+                    message,
+                });
+                return;
+            }
+            *registry.lock().await = next;
+            let _ = sender.send(Action::ProfileAccessUpdated {
+                request_id,
+                profile_id,
+                access,
+            });
         }));
     }
 

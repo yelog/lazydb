@@ -1,4 +1,5 @@
 use crossterm::event::KeyEvent;
+use std::path::PathBuf;
 use uuid::Uuid;
 
 use crate::db::{
@@ -125,6 +126,20 @@ pub enum Action {
     },
     ProfileSaveFailed {
         request_id: u64,
+        message: String,
+    },
+    OpenProfileAccess,
+    ProfileAccessMove(isize),
+    ProfileAccessConfirm,
+    ProfileAccessCancel,
+    ProfileAccessUpdated {
+        request_id: u64,
+        profile_id: Uuid,
+        access: crate::profile::ProfileAccess,
+    },
+    ProfileAccessUpdateFailed {
+        request_id: u64,
+        profile_id: Uuid,
         message: String,
     },
     ProfileDeleted {
@@ -549,6 +564,11 @@ pub enum Command {
         request_id: u64,
         profile_id: Uuid,
     },
+    UpdateProfileAccess {
+        request_id: u64,
+        profile_id: Uuid,
+        change: ProfileAccessChange,
+    },
     Disconnect {
         connection: ConnectionIdentity,
     },
@@ -634,4 +654,12 @@ pub enum Command {
     CheckSecretStoreAvailability,
     ScheduleCompletion(crate::sql::CompletionScheduleKey),
     Quit,
+}
+
+#[derive(Clone, Debug)]
+pub enum ProfileAccessChange {
+    MakeGlobal,
+    MakeProjectOnly(PathBuf),
+    AddProject(PathBuf),
+    RemoveProject(PathBuf),
 }

@@ -2084,6 +2084,33 @@ impl App {
                 }
                 Vec::new()
             }
+            Action::ProfileAccessUpdated {
+                profile_id, access, ..
+            } => {
+                if let Some(profile) = self
+                    .profiles
+                    .iter_mut()
+                    .find(|profile| profile.id == profile_id)
+                {
+                    profile.access = access;
+                    if let Some(state) = self.explorer.normalized.profiles.get_mut(&profile_id) {
+                        state.placement = profile_placement(profile, Some(&self.project.root));
+                    }
+                }
+                self.clipboard_notice = Some(ClipboardNotice::success(
+                    "Connection access updated",
+                    Instant::now(),
+                ));
+                Vec::new()
+            }
+            Action::ProfileAccessUpdateFailed { message, .. } => {
+                self.clipboard_notice = Some(ClipboardNotice::error(message, Instant::now()));
+                Vec::new()
+            }
+            Action::OpenProfileAccess
+            | Action::ProfileAccessMove(_)
+            | Action::ProfileAccessConfirm
+            | Action::ProfileAccessCancel => Vec::new(),
             Action::ProfileDeleted {
                 request_id,
                 profile_id,
