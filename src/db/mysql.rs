@@ -1551,10 +1551,20 @@ impl MySqlAdapter {
             true,
         )
         .map_err(catalog_invariant)?;
+        let relation_database = relation
+            .native_path
+            .first()
+            .cloned()
+            .ok_or_else(|| catalog_target_not_found(&target))?;
+        let relation_schema = relation
+            .native_path
+            .get(1)
+            .cloned()
+            .ok_or_else(|| catalog_target_not_found(&target))?;
         let relation_scope = CatalogScope {
             databases: CatalogSelection::Selected(vec![DatabaseScope {
-                name: database.clone(),
-                schemas: CatalogSelection::Selected(vec![database.clone()]),
+                name: relation_database,
+                schemas: CatalogSelection::Selected(vec![relation_schema]),
             }]),
         };
         let request = CatalogRequest {
