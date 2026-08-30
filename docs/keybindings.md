@@ -88,6 +88,7 @@ selected driver, and URL applies on Enter, field exit, Test, or Save.
 | `r` | Reload catalog |
 | `p` | Open a 500-row table/view preview |
 | `D` | Open available object DDL in a new SQL tab |
+| `s` | Open connection access menu |
 
 Expanding a database loads schemas, expanding a schema loads object groups, and
 expanding a group loads objects. Catalog pages are lazy and may show `Load

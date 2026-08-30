@@ -1676,7 +1676,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
         Focus::Results => ("DATA", theme.warning),
     };
     let hints = match app.focus {
-        Focus::Explorer => "j/k move   gg/G ends   Ctrl-d/u page   Enter open",
+        Focus::Explorer => "j/k move   gg/G ends   Ctrl-d/u page   s access   Enter open",
         Focus::Editor => "Esc normal   i/a/o insert   Space y copy SQL   F5 run",
         Focus::Results if app.is_active_relation_tab() => {
             "h/j/k/l cells   y cell   Y row   Space Y headers"

@@ -77,6 +77,13 @@ and is never persisted.
 `App` applies profile state only after matching runtime completion actions, so a
 failed save or switch can compensate without exposing a password.
 
+Saved profiles also carry mutually exclusive global or project-scoped access.
+Project roots are canonical absolute paths and may be shared by many projects.
+The current Git-root-first project context filters Explorer placement; it does
+not restrict database authorization. Access mutations use the same serialized
+profile mutation lock and atomic ProfileStore save as profile CRUD, without
+reconnecting active pools or changing workspace state.
+
 The Profile Manager owns one draft form. `Test Connection` uses a temporary
 connection, probes it, and performs read-only database/schema discovery for the
 hierarchical scope picker without persistence or active-connection mutation.
