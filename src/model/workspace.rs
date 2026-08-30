@@ -15,6 +15,7 @@ use crate::model::explorer::{
     ExplorerConnectionStatus, ExplorerNodeAlignment, ExplorerNodeId, ExplorerNodeTarget,
     ExplorerScrollAmount, ExplorerTreeState, ProfileProvenance, StatusRowKind,
 };
+use crate::model::tab::{ConsoleRecord, WorkspaceTab};
 use crate::model::transaction::{
     CancellationIntent, DeferredTransactionPrompt, TransactionExitChoice,
 };
@@ -130,6 +131,13 @@ pub struct ConnectionState {
     pub status: ConnectionStatus,
     pub server: Option<ServerInfo>,
     pub error: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct ConnectionWorkspace {
+    pub tabs: Vec<WorkspaceTab>,
+    pub sql_editors: Vec<ConsoleRecord>,
+    pub active_tab_id: Option<Uuid>,
 }
 
 impl ConnectionState {

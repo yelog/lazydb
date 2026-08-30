@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -51,8 +51,8 @@ use crate::{
             TransactionExitChoice, TransactionMode, TransactionState,
         },
         workspace::{
-            ConnectionIdentity, ConnectionState, ConnectionStatus, ExecutionConfirmFocus,
-            ExplorerState, Focus, ManualCancelFocus, Overlay, QueryStatus,
+            ConnectionIdentity, ConnectionState, ConnectionStatus, ConnectionWorkspace,
+            ExecutionConfirmFocus, ExplorerState, Focus, ManualCancelFocus, Overlay, QueryStatus,
         },
     },
     persistence::workspace::{PersistedConsole, WorkspaceSnapshot},
@@ -132,6 +132,7 @@ fn is_data_query_identifier_character(character: char) -> bool {
 pub struct App {
     pub profiles: Vec<ConnectionProfile>,
     pub connection: ConnectionState,
+    pub active_workspace_profile: Option<Uuid>,
     pub explorer: ExplorerState,
     pub tabs: Vec<WorkspaceTab>,
     pub sql_editors: Vec<ConsoleRecord>,
@@ -151,6 +152,7 @@ pub struct App {
     resolving_deferred: Option<DeferredTransactionPrompt>,
     pending_target_console: Option<Uuid>,
     pub sql_editor_list: crate::model::sql_editor_list::SqlEditorListState,
+    workspaces: HashMap<Uuid, ConnectionWorkspace>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -209,12 +211,7 @@ impl App {
         persisted: HashSet<Uuid>,
         confirmation_policy: ConfirmationPolicy,
     ) -> Self {
-        let mut tab = ConsoleTab::new("console");
-        tab.execution_target = profiles.first().map(ExecutionTarget::from_profile);
-        let initial_target = tab.execution_target.clone();
-        let tab_id = tab.id;
         let mut editor = EditorWorkspace::new();
-        editor.open_console(tab_id, "");
         let mut explorer = ExplorerState::default();
         for profile in &profiles {
             add_explorer_profile(
@@ -227,18 +224,31 @@ impl App {
                 },
             );
         }
+        let (tabs, sql_editors) = if profiles.is_empty() {
+            let tab = ConsoleTab::new("console");
+            let tab_id = tab.id;
+            editor.open_console(tab_id, "");
+            (
+                vec![WorkspaceTab::Sql(tab)],
+                vec![ConsoleRecord {
+                    id: tab_id,
+                    name: "console".into(),
+                    execution_target: None,
+                    transaction_mode: TransactionMode::Auto,
+                    open: true,
+                }],
+            )
+        } else {
+            (Vec::new(), Vec::new())
+        };
+
         Self {
             profiles,
             connection: ConnectionState::default(),
+            active_workspace_profile: None,
             explorer,
-            tabs: vec![WorkspaceTab::Sql(tab)],
-            sql_editors: vec![ConsoleRecord {
-                id: tab_id,
-                name: "console".into(),
-                execution_target: initial_target,
-                transaction_mode: TransactionMode::Auto,
-                open: true,
-            }],
+            tabs,
+            sql_editors,
             active_tab: 0,
             focus: Focus::Editor,
             overlay: None,
@@ -256,6 +266,57 @@ impl App {
             resolving_deferred: None,
             pending_target_console: None,
             sql_editor_list: Default::default(),
+            workspaces: HashMap::new(),
+        }
+    }
+
+    fn active_tab_id(&self) -> Option<Uuid> {
+        self.tabs.get(self.active_tab).map(WorkspaceTab::id)
+    }
+
+    fn take_active_workspace(&mut self) -> Option<(Uuid, ConnectionWorkspace)> {
+        let profile_id = self.active_workspace_profile?;
+        let active_tab_id = self.active_tab_id();
+        let workspace = ConnectionWorkspace {
+            tabs: std::mem::take(&mut self.tabs),
+            sql_editors: std::mem::take(&mut self.sql_editors),
+            active_tab_id,
+        };
+        self.active_workspace_profile = None;
+        self.active_tab = 0;
+        Some((profile_id, workspace))
+    }
+
+    fn install_workspace(&mut self, profile_id: Uuid, workspace: ConnectionWorkspace) {
+        self.tabs = workspace.tabs;
+        self.sql_editors = workspace.sql_editors;
+        self.active_tab = workspace
+            .active_tab_id
+            .and_then(|id| self.tabs.iter().position(|tab| tab.id() == id))
+            .unwrap_or(0)
+            .min(self.tabs.len().saturating_sub(1));
+        self.active_workspace_profile = Some(profile_id);
+        self.normalize_focus();
+    }
+
+    fn empty_workspace_for(
+        &mut self,
+        _profile_id: Uuid,
+        target: ExecutionTarget,
+    ) -> ConnectionWorkspace {
+        let mut tab = ConsoleTab::new("console");
+        tab.execution_target = Some(target.clone());
+        let id = tab.id;
+        ConnectionWorkspace {
+            tabs: vec![WorkspaceTab::Sql(tab)],
+            sql_editors: vec![ConsoleRecord {
+                id,
+                name: "console".into(),
+                execution_target: Some(target),
+                transaction_mode: TransactionMode::Auto,
+                open: true,
+            }],
+            active_tab_id: Some(id),
         }
     }
 

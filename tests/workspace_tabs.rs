@@ -27,6 +27,51 @@ fn workspace_tabs_expose_common_identity() {
 }
 
 #[test]
+fn new_app_with_profiles_has_no_active_workspace_until_connected() {
+    let profile = import_connection_url(":memory:", Some("saved"))
+        .unwrap()
+        .profile;
+    let app = App::new(vec![profile]);
+
+    assert_eq!(app.active_workspace_profile, None);
+    assert!(app.tabs.is_empty());
+    assert!(app.sql_editors.is_empty());
+    assert!(app.active_console_opt().is_none());
+}
+
+#[test]
+fn connection_workspace_preserves_mixed_tab_order() {
+    let console = ConsoleTab::new("sql");
+    let relation = RelationTab::new("users");
+    let console_id = console.id;
+    let relation_id = relation.id;
+    let workspace = lazydb::model::workspace::ConnectionWorkspace {
+        tabs: vec![WorkspaceTab::Relation(relation), WorkspaceTab::Sql(console)],
+        sql_editors: Vec::new(),
+        active_tab_id: Some(console_id),
+    };
+
+    assert_eq!(workspace.tabs[0].id(), relation_id);
+    assert_eq!(workspace.tabs[1].id(), console_id);
+    assert_eq!(workspace.active_tab_id, Some(console_id));
+}
+
+#[test]
+fn connection_workspace_active_tab_is_an_id_not_an_index() {
+    let first = ConsoleTab::new("first");
+    let second = ConsoleTab::new("second");
+    let second_id = second.id;
+    let workspace = lazydb::model::workspace::ConnectionWorkspace {
+        tabs: vec![WorkspaceTab::Sql(first), WorkspaceTab::Sql(second)],
+        sql_editors: Vec::new(),
+        active_tab_id: Some(second_id),
+    };
+
+    let reordered = [workspace.tabs[1].id(), workspace.tabs[0].id()];
+    assert_eq!(reordered[0], workspace.active_tab_id.unwrap());
+}
+
+#[test]
 fn relation_tabs_have_no_console_accessor() {
     let mut tab = WorkspaceTab::Relation(RelationTab::new("users"));
     assert!(tab.as_console().is_none());
@@ -112,11 +157,7 @@ fn closing_final_sql_console_creates_a_replacement_editor() {
 
 #[test]
 fn closing_and_reopening_sql_editor_preserves_persisted_text_and_target() {
-    let profile = import_connection_url(":memory:", Some("active"))
-        .unwrap()
-        .profile;
-    let expected = lazydb::model::execution_target::ExecutionTarget::from_profile(&profile);
-    let mut app = App::new(vec![profile.clone()]);
+    let mut app = App::new(Vec::new());
     let editor_id = app.active_console().id;
     app.update(Action::ReplaceEditor("select 42".into()));
     app.update(Action::CloseActiveTab);
@@ -135,10 +176,7 @@ fn closing_and_reopening_sql_editor_preserves_persisted_text_and_target() {
 
     assert_eq!(app.active_console().id, editor_id);
     assert_eq!(app.active_editor_text().unwrap(), "select 42");
-    assert_eq!(
-        app.active_console().execution_target.as_ref(),
-        Some(&expected)
-    );
+    assert!(app.active_console().execution_target.is_none());
 }
 
 #[test]
@@ -240,14 +278,11 @@ fn initial_and_new_consoles_use_the_active_profile_target() {
     let profile = import_connection_url(":memory:", Some("active"))
         .unwrap()
         .profile;
-    let expected = lazydb::model::execution_target::ExecutionTarget::from_profile(&profile);
     let mut app = App::new(vec![profile.clone()]);
-    assert_eq!(
-        app.active_console().execution_target.as_ref(),
-        Some(&expected)
-    );
+    assert!(app.active_console_opt().is_none());
 
     app.connection.profile_id = Some(profile.id);
+    let expected = lazydb::model::execution_target::ExecutionTarget::from_profile(&profile);
     app.update(Action::NewConsole);
     assert_eq!(
         app.active_console().execution_target.as_ref(),
