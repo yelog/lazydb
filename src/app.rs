@@ -266,14 +266,11 @@ impl App {
                 } else {
                     ProfileProvenance::Session
                 },
-                profile_placement(
-                    profile,
-                    if persisted.contains(&profile.id) {
-                        Some(&project.root)
-                    } else {
-                        None
-                    },
-                ),
+                if !persisted.contains(&profile.id) {
+                    crate::model::explorer::ProfilePlacement::CurrentProject
+                } else {
+                    profile_placement(profile, Some(&project.root))
+                },
             );
         }
         let (tabs, sql_editors) = if profiles.is_empty() {
@@ -889,6 +886,16 @@ impl App {
             .position(|tab| Some(tab.id()) == active_tab)
             .unwrap_or(0);
         self.focus = Focus::Editor;
+    }
+
+    pub fn reveal_startup_profile(&mut self, profile_id: Option<Uuid>) {
+        let Some(profile_id) = profile_id else {
+            return;
+        };
+        let _ = self
+            .explorer
+            .normalized
+            .reveal_node(ExplorerNodeId::Profile(profile_id));
     }
 
     fn restore_profile_workspace(

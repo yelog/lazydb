@@ -2513,6 +2513,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
     if let Some(workspace) = workspace {
         app.restore_workspace(workspace, startup.selected);
     }
+    app.reveal_startup_profile(startup.selected);
     app.focus = crate::model::workspace::Focus::Explorer;
     let (event_sender, mut event_receiver) = mpsc::unbounded_channel();
     let mut runtime = Runtime::new(
