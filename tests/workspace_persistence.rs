@@ -107,6 +107,59 @@ fn missing_workspace_is_empty_and_unsupported_version_is_rejected() {
     ));
 }
 
+#[test]
+fn workspace_v1_migrates_all_consoles_open_and_preserves_root_active_console() {
+    let temp = TempDir::new().unwrap();
+    let active = Uuid::new_v4();
+    let hidden = Uuid::new_v4();
+    let profile = Uuid::new_v4();
+    let store = WorkspaceStore::new(temp.path().join("workspace.toml"), temp.path().join("sql"));
+    std::fs::write(
+        temp.path().join("workspace.toml"),
+        format!(
+            "version = 1\nactive_console = \"{active}\"\n\n[[consoles]]\nid = \"{active}\"\nname = \"active\"\nsql_file = \"{active}.sql\"\ntarget = {{ profile_id = \"{profile}\", database = \"app\", schema = \"public\" }}\ntransaction_mode = \"auto\"\n\n[[consoles]]\nid = \"{hidden}\"\nname = \"hidden\"\nsql_file = \"{hidden}.sql\"\ntarget = {{ profile_id = \"{profile}\", database = \"app\", schema = \"public\" }}\ntransaction_mode = \"auto\"\n"
+        ),
+    )
+    .unwrap();
+
+    let snapshot = store.load().unwrap().unwrap();
+    assert_eq!(snapshot.active_console, active);
+    assert_eq!(snapshot.profiles.len(), 1);
+    assert_eq!(snapshot.profiles[0].active_tab, Some(active));
+    assert!(
+        snapshot.profiles[0]
+            .consoles
+            .iter()
+            .all(|console| console.open)
+    );
+    assert_eq!(snapshot.profiles[0].tabs.len(), 2);
+}
+
+#[test]
+fn workspace_v2_migrates_targeted_consoles_into_their_profiles() {
+    let temp = TempDir::new().unwrap();
+    let first_profile = Uuid::new_v4();
+    let second_profile = Uuid::new_v4();
+    let first_console = Uuid::new_v4();
+    let second_console = Uuid::new_v4();
+    let store = WorkspaceStore::new(temp.path().join("workspace.toml"), temp.path().join("sql"));
+    std::fs::write(
+        temp.path().join("workspace.toml"),
+        format!(
+            "version = 2\nactive_console = \"{second_console}\"\n\n[[consoles]]\nid = \"{first_console}\"\nname = \"first\"\nsql_file = \"{first_console}.sql\"\ntarget = {{ profile_id = \"{first_profile}\", database = \"one\", schema = \"public\" }}\ntransaction_mode = \"auto\"\nopen = true\n\n[[consoles]]\nid = \"{second_console}\"\nname = \"second\"\nsql_file = \"{second_console}.sql\"\ntarget = {{ profile_id = \"{second_profile}\", database = \"two\", schema = \"public\" }}\ntransaction_mode = \"manual\"\nopen = false\n"
+        ),
+    )
+    .unwrap();
+
+    let snapshot = store.load().unwrap().unwrap();
+    assert_eq!(snapshot.active_console, second_console);
+    assert_eq!(snapshot.profiles.len(), 2);
+    assert_eq!(snapshot.profiles[0].profile_id, first_profile);
+    assert_eq!(snapshot.profiles[1].profile_id, second_profile);
+    assert_eq!(snapshot.profiles[1].active_tab, None);
+    assert_eq!(snapshot.profiles[1].tabs.len(), 0);
+}
+
 fn console(profile_id: Uuid, id: Uuid, name: &str, open: bool) -> PersistedConsole {
     PersistedConsole {
         id,

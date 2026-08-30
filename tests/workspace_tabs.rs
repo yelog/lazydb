@@ -1,5 +1,7 @@
 use lazydb::model::transaction::TransactionMode;
-use lazydb::persistence::workspace::{PersistedConsole, WorkspaceSnapshot};
+use lazydb::persistence::workspace::{
+    PersistedConsole, PersistedProfileWorkspace, PersistedTab, WorkspaceSnapshot,
+};
 use lazydb::profile::import_connection_url;
 use lazydb::{
     action::{Action, Command},
@@ -219,6 +221,8 @@ fn sql_editor_list_reopens_a_hidden_editor() {
 fn workspace_restore_keeps_hidden_editors_hidden() {
     let id = Uuid::new_v4();
     let snapshot = WorkspaceSnapshot {
+        active_profile: None,
+        profiles: Vec::new(),
         active_console: Uuid::nil(),
         consoles: vec![PersistedConsole {
             id,
@@ -299,6 +303,8 @@ fn workspace_restore_preserves_valid_targets_and_defaults_missing_targets() {
     let first = Uuid::new_v4();
     let second = Uuid::new_v4();
     let snapshot = WorkspaceSnapshot {
+        active_profile: Some(profile.id),
+        profiles: Vec::new(),
         active_console: second,
         consoles: vec![
             PersistedConsole {
@@ -337,4 +343,132 @@ fn workspace_restore_preserves_valid_targets_and_defaults_missing_targets() {
         app.tabs[0].as_console().unwrap().execution_target.as_ref(),
         Some(&expected)
     );
+}
+
+#[test]
+fn workspace_restore_selects_targeted_profile_and_falls_back_to_startup_profile() {
+    let first = import_connection_url(":memory:", Some("first"))
+        .unwrap()
+        .profile;
+    let second = import_connection_url(":memory:", Some("second"))
+        .unwrap()
+        .profile;
+    let first_id = Uuid::new_v4();
+    let second_id = Uuid::new_v4();
+    let snapshot = WorkspaceSnapshot {
+        active_profile: Some(second.id),
+        profiles: vec![
+            profile_workspace(first.id, first_id, None),
+            profile_workspace(second.id, second_id, Some(second_id)),
+        ],
+        active_console: Uuid::nil(),
+        consoles: Vec::new(),
+        sql: vec![
+            (first_id, "select first".into()),
+            (second_id, "select second".into()),
+        ],
+    };
+    let mut app = App::new(vec![first.clone(), second.clone()]);
+    app.restore_workspace(snapshot, Some(first.id));
+
+    assert_eq!(app.sql_editors.len(), 1);
+    assert_eq!(app.sql_editors[0].id, first_id);
+    assert_eq!(
+        app.active_console()
+            .execution_target
+            .as_ref()
+            .unwrap()
+            .profile_id,
+        first.id
+    );
+}
+
+#[test]
+fn workspace_restore_ignores_invalid_or_deleted_targets_and_uses_first_profile() {
+    let profile = import_connection_url(":memory:", Some("startup"))
+        .unwrap()
+        .profile;
+    let invalid_id = Uuid::new_v4();
+    let deleted_profile = Uuid::new_v4();
+    let snapshot = WorkspaceSnapshot {
+        active_profile: None,
+        profiles: vec![profile_workspace(
+            deleted_profile,
+            invalid_id,
+            Some(invalid_id),
+        )],
+        active_console: Uuid::nil(),
+        consoles: Vec::new(),
+        sql: vec![(invalid_id, "select 1".into())],
+    };
+    let mut app = App::new(vec![profile.clone()]);
+    app.restore_workspace(snapshot, None);
+
+    assert_eq!(
+        app.active_console()
+            .execution_target
+            .as_ref()
+            .unwrap()
+            .profile_id,
+        profile.id
+    );
+}
+
+#[test]
+fn workspace_restore_assigns_targetless_consoles_to_startup_then_first_profile() {
+    let first = import_connection_url(":memory:", Some("first"))
+        .unwrap()
+        .profile;
+    let second = import_connection_url(":memory:", Some("second"))
+        .unwrap()
+        .profile;
+    let id = Uuid::new_v4();
+    let snapshot = WorkspaceSnapshot {
+        active_profile: None,
+        profiles: vec![profile_workspace(Uuid::nil(), id, Some(id))],
+        active_console: id,
+        consoles: Vec::new(),
+        sql: vec![(id, "select 1".into())],
+    };
+    let mut app = App::new(vec![first.clone(), second.clone()]);
+    app.restore_workspace(snapshot.clone(), Some(second.id));
+    assert_eq!(
+        app.active_console()
+            .execution_target
+            .as_ref()
+            .unwrap()
+            .profile_id,
+        second.id
+    );
+
+    let mut app = App::new(vec![first.clone(), second]);
+    app.restore_workspace(snapshot, None);
+    assert_eq!(
+        app.active_console()
+            .execution_target
+            .as_ref()
+            .unwrap()
+            .profile_id,
+        first.id
+    );
+}
+
+fn profile_workspace(
+    profile_id: Uuid,
+    console_id: Uuid,
+    active_tab: Option<Uuid>,
+) -> PersistedProfileWorkspace {
+    PersistedProfileWorkspace {
+        profile_id,
+        active_tab,
+        consoles: vec![PersistedConsole {
+            id: console_id,
+            name: "console".into(),
+            sql_file: format!("{console_id}.sql").into(),
+            target: None,
+            transaction_mode: TransactionMode::Auto,
+            open: true,
+        }],
+        tabs: vec![PersistedTab::Console { console_id }],
+    }
 }

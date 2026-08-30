@@ -55,7 +55,9 @@ use crate::{
             ExecutionConfirmFocus, ExplorerState, Focus, ManualCancelFocus, Overlay, QueryStatus,
         },
     },
-    persistence::workspace::{PersistedConsole, WorkspaceSnapshot},
+    persistence::workspace::{
+        PersistedConsole, PersistedProfileWorkspace, PersistedTab, WorkspaceSnapshot,
+    },
     profile::{ConnectionProfile, DatabaseKind},
     sql::{self, CompletionScheduleKey, ScopeSource, SqlDialect},
 };
@@ -455,9 +457,25 @@ impl App {
                     .map(|console| console.id)
             })
             .unwrap_or(Uuid::nil());
+        let profiles = self
+            .active_workspace_profile
+            .map_or_else(Vec::new, |profile_id| {
+                vec![PersistedProfileWorkspace {
+                    profile_id,
+                    active_tab: (active_console != Uuid::nil()).then_some(active_console),
+                    tabs: consoles
+                        .iter()
+                        .filter(|console| console.open)
+                        .map(|console| PersistedTab::Console {
+                            console_id: console.id,
+                        })
+                        .collect(),
+                    consoles: consoles.clone(),
+                }]
+            });
         WorkspaceSnapshot {
             active_profile: self.active_workspace_profile,
-            profiles: Vec::new(),
+            profiles,
             active_console,
             consoles,
             sql,
@@ -469,15 +487,38 @@ impl App {
         snapshot: WorkspaceSnapshot,
         selected_profile: Option<Uuid>,
     ) {
-        if snapshot.consoles.is_empty() {
+        let selected_profile_id = selected_profile
+            .or(snapshot.active_profile)
+            .or_else(|| snapshot.profiles.first().map(|profile| profile.profile_id));
+        let persisted_profile = selected_profile_id.and_then(|profile_id| {
+            snapshot
+                .profiles
+                .iter()
+                .find(|profile| profile.profile_id == profile_id)
+        });
+        let legacy_consoles = snapshot.consoles;
+        let mut consoles =
+            persisted_profile.map_or_else(Vec::new, |profile| profile.consoles.clone());
+        if let Some(targetless) = snapshot
+            .profiles
+            .iter()
+            .find(|profile| profile.profile_id == Uuid::nil())
+        {
+            consoles.extend(targetless.consoles.clone());
+        }
+        if consoles.is_empty() {
+            consoles = legacy_consoles;
+        }
+        if consoles.is_empty() {
             return;
         }
-        let selected =
-            selected_profile.and_then(|id| self.profiles.iter().find(|profile| profile.id == id));
+        let selected = selected_profile_id
+            .and_then(|id| self.profiles.iter().find(|profile| profile.id == id))
+            .or_else(|| self.profiles.first());
         self.tabs.clear();
         self.sql_editors.clear();
         self.editor = EditorWorkspace::new();
-        for persisted in snapshot.consoles {
+        for persisted in consoles {
             let open = persisted.open;
             let mut tab = ConsoleTab::new(persisted.name);
             tab.id = persisted.id;
@@ -519,10 +560,15 @@ impl App {
         if self.tabs.is_empty() {
             self.create_sql_editor_named("console".to_owned());
         }
+        let active_tab = persisted_profile
+            .and_then(|profile| profile.active_tab)
+            .or_else(|| {
+                (snapshot.active_console != Uuid::nil()).then_some(snapshot.active_console)
+            });
         self.active_tab = self
             .tabs
             .iter()
-            .position(|tab| tab.id() == snapshot.active_console)
+            .position(|tab| Some(tab.id()) == active_tab)
             .unwrap_or(0);
         self.next_console_number = self.tabs.len().saturating_add(1);
         self.focus = Focus::Editor;

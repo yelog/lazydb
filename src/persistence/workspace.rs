@@ -37,6 +37,14 @@ pub struct WorkspaceFile {
     pub profiles: Vec<PersistedProfileWorkspace>,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+struct LegacyWorkspaceFile {
+    #[serde(rename = "version")]
+    _version: u16,
+    active_console: Uuid,
+    consoles: Vec<PersistedConsole>,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct PersistedConsole {
     pub id: Uuid,
@@ -134,15 +142,29 @@ impl WorkspaceStore {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
         };
-        let file: WorkspaceFile = toml::from_str(&contents)?;
-        if file.version != WORKSPACE_VERSION {
+        let version = toml::from_str::<toml::Value>(&contents)?
+            .get("version")
+            .and_then(toml::Value::as_integer)
+            .and_then(|version| u16::try_from(version).ok())
+            .ok_or_else(|| WorkspaceError::Invalid("workspace version is missing".into()))?;
+        let (active_profile, active_console, profiles) = if version == WORKSPACE_VERSION {
+            let file: WorkspaceFile = toml::from_str(&contents)?;
+            (file.active_profile, Uuid::nil(), file.profiles)
+        } else if matches!(version, 1 | 2) {
+            let mut file: LegacyWorkspaceFile = toml::from_str(&contents)?;
+            if version == 1 {
+                for console in &mut file.consoles {
+                    console.open = true;
+                }
+            }
+            (None, file.active_console, migrate_legacy(file))
+        } else {
             return Err(WorkspaceError::UnsupportedVersion {
-                found: file.version,
+                found: version,
                 expected: WORKSPACE_VERSION,
             });
-        }
-        let sql = file
-            .profiles
+        };
+        let sql = profiles
             .iter()
             .flat_map(|profile| profile.consoles.iter())
             .map(|console| {
@@ -152,10 +174,10 @@ impl WorkspaceStore {
             })
             .collect();
         let snapshot = WorkspaceSnapshot {
-            active_profile: file.active_profile,
-            profiles: file.profiles,
+            active_profile,
+            profiles,
             sql,
-            active_console: Uuid::nil(),
+            active_console,
             consoles: Vec::new(),
         };
         validate_snapshot(&snapshot)?;
@@ -197,6 +219,39 @@ impl WorkspaceStore {
             Err(error) => Err(error.into()),
         }
     }
+}
+
+fn migrate_legacy(file: LegacyWorkspaceFile) -> Vec<PersistedProfileWorkspace> {
+    let mut profiles = Vec::<PersistedProfileWorkspace>::new();
+    for console in file.consoles {
+        let profile_id = console
+            .target
+            .as_ref()
+            .map_or(Uuid::nil(), |target| target.profile_id);
+        let profile_index = profiles
+            .iter()
+            .position(|profile| profile.profile_id == profile_id);
+        let profile_index = profile_index.unwrap_or_else(|| {
+            profiles.push(PersistedProfileWorkspace {
+                profile_id,
+                active_tab: None,
+                consoles: Vec::new(),
+                tabs: Vec::new(),
+            });
+            profiles.len() - 1
+        });
+        let profile = &mut profiles[profile_index];
+        if console.id == file.active_console && console.open {
+            profile.active_tab = Some(console.id);
+        }
+        if console.open {
+            profile.tabs.push(PersistedTab::Console {
+                console_id: console.id,
+            });
+        }
+        profile.consoles.push(console);
+    }
+    profiles
 }
 
 pub fn validate_snapshot(snapshot: &WorkspaceSnapshot) -> Result<(), WorkspaceError> {
