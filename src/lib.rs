@@ -1,6 +1,7 @@
 pub mod action;
 pub mod app;
 pub mod cli;
+pub mod clipboard;
 pub mod db;
 pub(crate) mod editor;
 pub mod help;

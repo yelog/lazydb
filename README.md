@@ -196,11 +196,15 @@ selects a saved profile by name; if both are supplied, `--url` wins.
 | Explorer | `Space c` focus, `/` catalog search, `j/k` move, `h/l/Enter` collapse/expand, `r` refresh, `p` preview, `D` DDL |
 | Editor Normal | `h/j/k/l`, `i/a/o`, `x`, `0/$`, `F5` scoped run, `Shift-F5` full run |
 | Editor Insert | `Esc` or idle `Ctrl-c` Normal mode, Tab insert, `Ctrl-W/U/H`, arrows, Backspace/Delete |
-| Results | Relation `D/p/o/r` switches/refreshes Data and DDL; `j/k/h/l` moves or scrolls, `g/G` jumps DDL, wheel scrolls |
+| Results | `y` copies cell, `Y` copies row TSV, `Space Y` copies row with headers; Relation `D/p/o/r` switches/refreshes Data and DDL |
 
 The footer and `?`/`F1` help show the active context. In Editor Normal mode `?`
 is backward search; F1 and `Space ?` open help. Lowercase `q` is never a global
 exit, so it remains available for future Vim macro semantics.
+
+When application mouse capture is enabled, terminal-native text selection is
+terminal-specific and commonly uses Shift-drag. Run with `--mouse off` when
+terminal selection should take priority.
 
 ## Neovim
 

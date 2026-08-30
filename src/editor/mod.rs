@@ -39,6 +39,9 @@ enum ApplicationAction {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum EditorEffect {
     Changed { console_id: Uuid, revision: u64 },
+    Yanked(String),
+    CopyStatement,
+    CopyBuffer,
     RunCurrent,
     RunAll,
     FormatCurrent,
@@ -1093,6 +1096,11 @@ impl EditorWorkspace {
 
     fn input_vim_key(&mut self, id: Uuid, key: EditorKey) -> Result<(), EditorError> {
         let before = self.text(id)?;
+        let was_visual = matches!(
+            self.mode(id)?,
+            EditorMode::VisualChar | EditorMode::VisualLine | EditorMode::VisualBlock
+        );
+        let unnamed_before = self.register('"').map(str::to_owned);
         let session = self
             .sessions
             .get_mut(&id)
@@ -1104,6 +1112,8 @@ impl EditorWorkspace {
             match (binding, character) {
                 (PendingBinding::Leader, 'r') => self.effects.push(EditorEffect::RunCurrent),
                 (PendingBinding::Leader, 'R') => self.effects.push(EditorEffect::RunAll),
+                (PendingBinding::Leader, 'y') => self.effects.push(EditorEffect::CopyStatement),
+                (PendingBinding::Leader, 'Y') => self.effects.push(EditorEffect::CopyBuffer),
                 (PendingBinding::Leader, 'f') => self.effects.push(EditorEffect::FormatCurrent),
                 (PendingBinding::Leader, 'n') => self.effects.push(EditorEffect::NewConsole),
                 (PendingBinding::Leader, 's') => self.effects.push(EditorEffect::GotoSqlConsole),
@@ -1154,6 +1164,12 @@ impl EditorWorkspace {
         }
         self.sync_session_from_buffer(id)?;
         self.sync_registers();
+        if was_visual && matches!(key, EditorKey::Character('y')) {
+            let copied = self.register('"').unwrap_or_default().to_owned();
+            if unnamed_before.as_deref() != Some(copied.as_str()) {
+                self.effects.push(EditorEffect::Yanked(copied));
+            }
+        }
         if before != self.text(id)? {
             let session = self
                 .sessions

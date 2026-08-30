@@ -25,6 +25,31 @@ pub struct CellPreview {
 }
 
 impl CellValue {
+    pub fn clipboard_text(&self) -> String {
+        match self {
+            Self::Null => String::new(),
+            Self::Boolean(value) => value.to_string(),
+            Self::Integer(value) => value.to_string(),
+            Self::Unsigned(value) => value.to_string(),
+            Self::Float(value) => value.to_string(),
+            Self::Text(value) => value.clone(),
+            Self::Bytes(value) => {
+                let mut text = String::with_capacity(2 + value.len() * 2);
+                text.push_str("0x");
+                for byte in value {
+                    use std::fmt::Write;
+                    let _ = write!(text, "{byte:02X}");
+                }
+                text
+            }
+            Self::Date(value) => value.format("%Y-%m-%d").to_string(),
+            Self::Time(value) => format_time(*value),
+            Self::DateTime(value) => format_datetime(*value),
+            Self::Timestamp(value) => format_timestamp(*value),
+            Self::Unsupported { preview, .. } => preview.clone(),
+        }
+    }
+
     pub fn preview(&self, max_len: usize) -> CellPreview {
         match self {
             Self::Null => CellPreview::complete("NULL", 0),

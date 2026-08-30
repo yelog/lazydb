@@ -347,6 +347,21 @@ impl Runtime {
                     }));
                 }
             }
+            Command::WriteClipboard(payload) => {
+                let sender = self.event_sender.clone();
+                task::spawn_blocking(move || {
+                    let description = payload.description.clone();
+                    let result = arboard::Clipboard::new()
+                        .and_then(|mut clipboard| clipboard.set_text(payload.text));
+                    let action = match result {
+                        Ok(()) => Action::ClipboardWritten { description },
+                        Err(error) => Action::ClipboardWriteFailed {
+                            message: format!("Clipboard unavailable: {error}"),
+                        },
+                    };
+                    let _ = sender.send(action);
+                });
+            }
             Command::Quit => {}
         }
     }
@@ -2496,7 +2511,8 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                     redraw = true;
                 }
                 _ = ticker.tick() => {
-                    redraw = app.tabs.iter().any(|tab| {
+                    redraw = app.expire_clipboard_notice(std::time::Instant::now())
+                        || app.tabs.iter().any(|tab| {
                         tab.as_console()
                             .is_some_and(|tab| tab.query_status == QueryStatus::Running)
                     });

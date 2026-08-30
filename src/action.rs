@@ -10,6 +10,7 @@ use crate::db::{
     query::QueryOutcome,
 };
 use crate::{
+    clipboard::ClipboardPayload,
     help::HelpShortcutId,
     model::{
         execution_target::ExecutionTarget,
@@ -146,6 +147,19 @@ pub enum Action {
     ReplaceEditor(String),
     EditorKey(KeyEvent),
     EditorPaste(String),
+    CopyEditorYank(String),
+    CopyEditorStatement,
+    CopyEditorBuffer,
+    CopyGridCell,
+    CopyGridRow {
+        include_headers: bool,
+    },
+    ClipboardWritten {
+        description: String,
+    },
+    ClipboardWriteFailed {
+        message: String,
+    },
     EditorViewportChanged(crate::model::editor::EditorViewport),
     EditorScroll {
         rows: isize,
@@ -615,6 +629,7 @@ pub enum Command {
     },
     PersistWorkspace(crate::persistence::workspace::WorkspaceSnapshot),
     DeleteSqlFile(Uuid),
+    WriteClipboard(ClipboardPayload),
     CheckSecretStoreAvailability,
     ScheduleCompletion(crate::sql::CompletionScheduleKey),
     Quit,

@@ -13,6 +13,7 @@ categories = ["command-line-utilities", "database"]
 
 [dependencies]
 anyhow = "1.0"
+arboard = { version = "3.6", default-features = false }
 async-trait = "0.1"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
