@@ -104,7 +104,7 @@ jobs:
           cp "target/$TARGET/release/lazydb" "$staging/lazydb"
           cp README.md LICENSE-MIT LICENSE-APACHE "$staging/"
           tar -cJf "dist/lazydb_${VERSION}_${TARGET}.tar.xz" -C dist/package "lazydb_${VERSION}_${TARGET}"
-      - uses: actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d6874 # v4.4.3
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4.4.3
         with:
           name: release-${{ matrix.target }}
           path: dist/*.tar.xz
@@ -133,7 +133,7 @@ jobs:
             tar -xJf "$archive" -C "dist/unpack/$target" --strip-components=1
             scripts/release/package-linux.sh "${{ needs.plan.outputs.version }}" "${target%%-*}" "dist/unpack/$target/lazydb" dist/packages
           done
-      - uses: actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d6874 # v4.4.3
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4.4.3
         with: { name: release-packages, path: dist/packages/*, if-no-files-found: error }
 
   publish:
