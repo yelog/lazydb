@@ -843,6 +843,13 @@ fn explorer_list_item(
     });
     if visible.provenance == Some(ProfileProvenance::Session) {
         spans.push(Span::styled("  SESSION", secondary_style));
+    } else if let Some(placement) = visible.placement {
+        let label = match placement {
+            crate::model::explorer::ProfilePlacement::CurrentProject => "  PROJECT",
+            crate::model::explorer::ProfilePlacement::Global => "  GLOBAL",
+            crate::model::explorer::ProfilePlacement::OtherProject => "  OTHER",
+        };
+        spans.push(Span::styled(label, secondary_style));
     }
     if let Some(status) = visible.connection_status {
         spans.extend(connection_status_spans(status, theme, selected));

@@ -13,7 +13,7 @@ use crate::help::HelpState;
 use crate::model::execution_target::ExecutionTarget;
 use crate::model::explorer::{
     ExplorerConnectionStatus, ExplorerNodeAlignment, ExplorerNodeId, ExplorerNodeTarget,
-    ExplorerScrollAmount, ExplorerTreeState, ProfileProvenance, StatusRowKind,
+    ExplorerScrollAmount, ExplorerTreeState, ProfilePlacement, ProfileProvenance, StatusRowKind,
 };
 use crate::model::tab::{ConsoleRecord, WorkspaceTab};
 use crate::model::transaction::{
@@ -178,6 +178,7 @@ pub struct VisibleCatalogNode {
     pub kind: Option<CatalogKind>,
     pub profile_kind: Option<DatabaseKind>,
     pub provenance: Option<ProfileProvenance>,
+    pub placement: Option<ProfilePlacement>,
     pub connection_status: Option<ExplorerConnectionStatus>,
     pub endpoint: Option<String>,
     pub expandable: bool,
@@ -720,6 +721,7 @@ impl ExplorerState {
                     kind,
                     profile_kind,
                     provenance,
+                    placement,
                     connection_status,
                     endpoint,
                     expandable,
@@ -737,6 +739,7 @@ impl ExplorerState {
                                     None,
                                     None,
                                     None,
+                                    None,
                                     false,
                                 )
                             },
@@ -746,6 +749,7 @@ impl ExplorerState {
                                     entry_detail(entry),
                                     entry_comment(entry),
                                     Some(entry.kind),
+                                    None,
                                     None,
                                     None,
                                     None,
@@ -767,12 +771,14 @@ impl ExplorerState {
                             None,
                             None,
                             None,
+                            None,
                             true,
                         )
                     }
                     ExplorerNodeId::Status { owner, kind } => (
                         status_label(*kind).to_owned(),
                         profile.and_then(|profile| profile.load_errors.get(owner).cloned()),
+                        None,
                         None,
                         None,
                         None,
@@ -790,10 +796,12 @@ impl ExplorerState {
                         None,
                         None,
                         None,
+                        None,
                         false,
                     ),
                     ExplorerNodeId::Empty { .. } => (
                         "No objects".to_owned(),
+                        None,
                         None,
                         None,
                         None,
@@ -814,6 +822,7 @@ impl ExplorerState {
                                 None,
                                 None,
                                 None,
+                                None,
                                 false,
                             )
                         },
@@ -825,6 +834,7 @@ impl ExplorerState {
                                 None,
                                 Some(profile.kind),
                                 Some(profile.provenance),
+                                Some(profile.placement),
                                 Some(profile.status),
                                 Some(profile.endpoint.clone()),
                                 true,
@@ -840,10 +850,21 @@ impl ExplorerState {
                         None,
                         None,
                         None,
+                        None,
                         false,
                     ),
                     ExplorerNodeId::Others => (
                         "OTHERS".to_owned(),
+                        Some(
+                            self.normalized
+                                .profiles
+                                .values()
+                                .filter(|profile| {
+                                    profile.placement == ProfilePlacement::OtherProject
+                                })
+                                .count()
+                                .to_string(),
+                        ),
                         None,
                         None,
                         None,
@@ -866,6 +887,7 @@ impl ExplorerState {
                     connection_status,
                     endpoint,
                     expandable,
+                    placement,
                 }
             })
             .collect()
