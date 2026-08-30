@@ -1069,6 +1069,69 @@ fn data_grid_places_rows_immediately_below_the_header() {
 }
 
 #[test]
+fn data_grid_renders_and_navigates_a_trailing_partial_column() {
+    let mut app = fixture();
+    app.focus = Focus::Results;
+    let result = app
+        .active_console_mut()
+        .outcome
+        .as_mut()
+        .unwrap()
+        .result_sets
+        .last_mut()
+        .unwrap();
+    result.columns = vec![
+        ColumnMeta {
+            name: "first_column".into(),
+            type_name: "TEXT".into(),
+        },
+        ColumnMeta {
+            name: "second_column".into(),
+            type_name: "TEXT".into(),
+        },
+        ColumnMeta {
+            name: "TRAILING_COLUMN_CONTENT".into(),
+            type_name: "TEXT".into(),
+        },
+    ];
+    result.rows = vec![vec![
+        CellValue::Text("first".into()),
+        CellValue::Text("second".into()),
+        CellValue::Text("TRAILING_VALUE_CONTENT".into()),
+    ]];
+    app.active_console_mut().grid.column_widths = vec![Some(20), Some(20), Some(40)];
+    app.active_console_mut().grid.selected_column = 1;
+
+    let (output, initial) = render_with_state(&app, 80, 24);
+    let partial = initial
+        .hit_regions
+        .iter()
+        .find(|region| matches!(region.target, HitTarget::ResultCell { row: 0, column: 2 }))
+        .expect("trailing column fragment should be interactive");
+    assert!(partial.area.width > 0 && partial.area.width < 40);
+    assert!(output.contains("TRAILING_"), "{output}");
+    assert!(!initial.hit_regions.iter().any(|region| {
+        matches!(
+            region.target,
+            HitTarget::RelationColumnResize { column: 2, .. }
+        )
+    }));
+
+    app.update(Action::GridMove {
+        rows: 0,
+        columns: 1,
+    });
+    let (_, revealed) = render_with_state(&app, 80, 24);
+    assert_eq!(revealed.grid_viewport.unwrap().column_offset, 1);
+    let selected = revealed
+        .hit_regions
+        .iter()
+        .find(|region| matches!(region.target, HitTarget::ResultCell { row: 0, column: 2 }))
+        .expect("selected column should remain interactive");
+    assert_eq!(selected.area.width, 40);
+}
+
+#[test]
 fn data_grid_publishes_and_clears_its_rendered_viewport() {
     let mut app = fixture();
     let (_, state) = render_with_state(&app, 120, 36);
