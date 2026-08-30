@@ -17,12 +17,11 @@ selectable.
 | --- | --- |
 | `F1` | Contextual help |
 | `?` | Contextual help outside Insert mode |
-| `Ctrl-w h` | Focus Explorer |
-| `Ctrl-w j` | Focus Results |
-| `Ctrl-w k` | Focus Editor |
-| `Ctrl-w l` | Focus Editor |
+| `Ctrl-w h/j/k/l` | Move focus left/down/up/right |
 | `Tab`, `Shift-Tab` | Next/previous panel outside Insert mode |
-| `[` then `t`, `]` then `t` | Previous/next LazyDB tab |
+| `gT`, `gt` | Previous/next LazyDB tab |
+| `Ctrl-PageUp`, `Ctrl-PageDown` | Previous/next LazyDB tab |
+| `[` then `t`, `]` then `t` | Compatibility aliases for previous/next LazyDB tab |
 | `Space n` | New SQL console |
 | `Space s` | Go to the first available SQL console and focus its editor |
 | `Ctrl-c` | Cancel active query; otherwise leave Insert mode |
@@ -171,6 +170,7 @@ connection unchanged.
 | `zz`, `zt`, `zb` | Align the selected row to the middle/top/bottom |
 | `v` | Open read-only Record View for the selected row |
 | `o` | Switch Data/Output |
+| `1`, `2`, `3` | Select Data, Output, or Plan directly |
 
 Page movement moves the selected row with the viewport. The fixed `#` column
 shows one-based absolute row numbers and remains visible during horizontal
@@ -194,6 +194,7 @@ Relation tabs have `DATA` and `DDL` pages. The relation-local shortcuts are:
 | `D` | Switch to the adapter-owned relation DDL page |
 | `p` | Switch to the adapter-owned relation Data preview |
 | `o` | Toggle between Data and DDL |
+| `1`, `2` | Select Data or DDL directly |
 | `r` | Refresh the active relation; retry a failed request |
 | `j/k` | Move Data selection or scroll DDL vertically |
 | `h/l` | Move Data selection or scroll DDL horizontally |

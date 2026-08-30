@@ -23,11 +23,10 @@ enum Pending {
     Next,
     RelationDelete,
     RelationYank,
-    GridGoto,
     GridAlign,
     RecordViewGoto,
-    ExplorerGoto,
     ExplorerAlign,
+    Goto,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -322,6 +321,10 @@ impl Keymap {
                 KeyCode::Char('?') => return Some(Action::ShowHelp),
                 KeyCode::Tab => return Some(Action::FocusNext),
                 KeyCode::BackTab => return Some(Action::FocusPrevious),
+                KeyCode::Char('g') => {
+                    self.set_pending(Pending::Goto, app);
+                    return None;
+                }
                 _ => {}
             }
         }
@@ -364,10 +367,9 @@ impl Keymap {
             }
             if matches!(
                 pending,
-                Pending::GridGoto
+                Pending::Window
                     | Pending::RecordViewGoto
                     | Pending::GridAlign
-                    | Pending::ExplorerGoto
                     | Pending::ExplorerAlign
             ) {
                 return None;
@@ -382,35 +384,30 @@ impl Keymap {
             return Some(action);
         }
 
+        if event.modifiers.is_empty()
+            && event.code == KeyCode::Char('g')
+            && (app.focus == Focus::Explorer
+                || (is_grid_navigation_focus(app) && relation_grid_is_browse(app)))
+        {
+            self.set_pending(Pending::Goto, app);
+            return None;
+        }
+
         if app.focus == Focus::Explorer
             && app.explorer.search.is_none()
             && event.modifiers.is_empty()
+            && event.code == KeyCode::Char('z')
         {
-            match event.code {
-                KeyCode::Char('g') => {
-                    self.set_pending(Pending::ExplorerGoto, app);
-                    return None;
-                }
-                KeyCode::Char('z') => {
-                    self.set_pending(Pending::ExplorerAlign, app);
-                    return None;
-                }
-                _ => {}
-            }
+            self.set_pending(Pending::ExplorerAlign, app);
+            return None;
         }
 
-        if is_grid_navigation_focus(app) && event.modifiers.is_empty() {
-            match event.code {
-                KeyCode::Char('g') => {
-                    self.set_pending(Pending::GridGoto, app);
-                    return None;
-                }
-                KeyCode::Char('z') => {
-                    self.set_pending(Pending::GridAlign, app);
-                    return None;
-                }
-                _ => {}
-            }
+        if is_grid_navigation_focus(app)
+            && event.modifiers.is_empty()
+            && event.code == KeyCode::Char('z')
+        {
+            self.set_pending(Pending::GridAlign, app);
+            return None;
         }
 
         if is_relation_data_focus(app) {
@@ -451,6 +448,13 @@ impl Keymap {
         }
 
         if event.modifiers.contains(KeyModifiers::CONTROL) {
+            if event.modifiers == KeyModifiers::CONTROL {
+                match event.code {
+                    KeyCode::PageDown => return Some(Action::NextTab),
+                    KeyCode::PageUp => return Some(Action::PreviousTab),
+                    _ => {}
+                }
+            }
             if event.modifiers == KeyModifiers::CONTROL
                 && app.focus == Focus::Explorer
                 && app.explorer.search.is_none()
@@ -578,6 +582,14 @@ impl Keymap {
                 self.set_pending(Pending::Previous, app);
                 return None;
             }
+            KeyCode::Char('g')
+                if app.focus != Focus::Editor
+                    && !is_relation_ddl_focus(app)
+                    && !is_relation_data_focus(app) =>
+            {
+                self.set_pending(Pending::Goto, app);
+                return None;
+            }
             KeyCode::Char(']') => {
                 self.set_pending(Pending::Next, app);
                 return None;
@@ -627,6 +639,9 @@ fn map_pending(pending: Pending, event: KeyEvent, app: &App) -> Option<Action> {
         || (pending == Pending::Leader
             && event.modifiers == KeyModifiers::SHIFT
             && event.code == KeyCode::Char('R'))
+        || (pending == Pending::Goto
+            && event.modifiers == KeyModifiers::SHIFT
+            && event.code == KeyCode::Char('T'))
         || pending == Pending::Window;
     if !valid_modifiers {
         return None;
@@ -641,22 +656,40 @@ fn map_pending(pending: Pending, event: KeyEvent, app: &App) -> Option<Action> {
         (Pending::Leader, KeyCode::Char('q')) => Some(Action::CloseActiveTab),
         (Pending::Leader, KeyCode::Char('x')) => Some(Action::RequestDeleteActiveConsole),
         (Pending::Leader, KeyCode::Char('e')) => Some(Action::OpenSqlEditorList),
-        (Pending::Window, KeyCode::Char('h')) => Some(Action::Focus(Focus::Explorer)),
-        (Pending::Window, KeyCode::Char('j')) => Some(Action::Focus(Focus::Results)),
-        (Pending::Window, KeyCode::Char('k' | 'l')) => {
+        (Pending::Window, KeyCode::Char('j')) if app.focus == Focus::Editor => {
+            Some(Action::Focus(Focus::Results))
+        }
+        (Pending::Window, KeyCode::Char('k'))
+            if app.focus == Focus::Results && !app.is_active_relation_tab() =>
+        {
+            Some(Action::Focus(Focus::Editor))
+        }
+        (Pending::Window, KeyCode::Char('l')) if app.focus == Focus::Explorer => {
             Some(Action::Focus(if app.is_active_relation_tab() {
                 Focus::Results
             } else {
                 Focus::Editor
             }))
         }
+        (Pending::Window, KeyCode::Char('h')) if app.focus == Focus::Editor => {
+            Some(Action::Focus(Focus::Explorer))
+        }
+        (Pending::Window, KeyCode::Char('h')) if app.focus == Focus::Results => {
+            Some(Action::Focus(Focus::Explorer))
+        }
+        (Pending::Window, KeyCode::Char('j')) if app.focus == Focus::Explorer => None,
+        (Pending::Goto, KeyCode::Char('g')) if app.focus == Focus::Explorer => Some(
+            Action::ExplorerSelectTarget(crate::model::explorer::ExplorerNodeTarget::First),
+        ),
+        (Pending::Goto, KeyCode::Char('g')) if is_grid_navigation_focus(app) => Some(
+            Action::GridSelectRow(crate::model::tab::GridRowTarget::First),
+        ),
+        (Pending::Goto, KeyCode::Char('t')) => Some(Action::NextTab),
+        (Pending::Goto, KeyCode::Char('T')) => Some(Action::PreviousTab),
         (Pending::Previous, KeyCode::Char('t')) => Some(Action::PreviousTab),
         (Pending::Next, KeyCode::Char('t')) => Some(Action::NextTab),
         (Pending::RelationDelete, KeyCode::Char('d')) => Some(Action::RelationDeleteCurrent),
         (Pending::RelationYank, KeyCode::Char('y')) => Some(Action::RelationYank),
-        (Pending::GridGoto, KeyCode::Char('g')) => Some(Action::GridSelectRow(
-            crate::model::tab::GridRowTarget::First,
-        )),
         (Pending::RecordViewGoto, KeyCode::Char('g')) => Some(Action::RecordViewJumpFirstField),
         (Pending::GridAlign, KeyCode::Char('z')) => Some(Action::GridAlignSelectedRow(
             crate::model::tab::GridRowAlignment::Middle,
@@ -666,9 +699,6 @@ fn map_pending(pending: Pending, event: KeyEvent, app: &App) -> Option<Action> {
         )),
         (Pending::GridAlign, KeyCode::Char('b')) => Some(Action::GridAlignSelectedRow(
             crate::model::tab::GridRowAlignment::Bottom,
-        )),
-        (Pending::ExplorerGoto, KeyCode::Char('g')) => Some(Action::ExplorerSelectTarget(
-            crate::model::explorer::ExplorerNodeTarget::First,
         )),
         (Pending::ExplorerAlign, KeyCode::Char('z')) => Some(Action::ExplorerAlignSelected(
             crate::model::explorer::ExplorerNodeAlignment::Middle,
@@ -1161,6 +1191,30 @@ fn map_results(code: KeyCode, app: &App) -> Option<Action> {
                 }))
             }
             _ => Some(Action::ToggleResultView),
+        },
+        KeyCode::Char('1') => match app.tabs.get(app.active_tab) {
+            Some(crate::model::tab::WorkspaceTab::Relation(_)) => Some(Action::SetRelationView(
+                crate::model::relation::RelationView::Data,
+            )),
+            Some(crate::model::tab::WorkspaceTab::Sql(_)) => {
+                Some(Action::SetResultView(crate::model::tab::ResultView::Data))
+            }
+            _ => None,
+        },
+        KeyCode::Char('2') => match app.tabs.get(app.active_tab) {
+            Some(crate::model::tab::WorkspaceTab::Relation(_)) => Some(Action::SetRelationView(
+                crate::model::relation::RelationView::Ddl,
+            )),
+            Some(crate::model::tab::WorkspaceTab::Sql(_)) => {
+                Some(Action::SetResultView(crate::model::tab::ResultView::Output))
+            }
+            _ => None,
+        },
+        KeyCode::Char('3') => match app.tabs.get(app.active_tab) {
+            Some(crate::model::tab::WorkspaceTab::Sql(_)) => {
+                Some(Action::SetResultView(crate::model::tab::ResultView::Plan))
+            }
+            _ => None,
         },
         _ => None,
     }

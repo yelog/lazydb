@@ -661,6 +661,17 @@ impl App {
             )],
             Id::ResultsOpenRecordView => vec![Action::OpenRecordView],
             Id::ResultsToggleView => vec![Action::ToggleResultView],
+            Id::ResultsData => match self.tabs.get(self.active_tab) {
+                Some(WorkspaceTab::Relation(_)) => {
+                    vec![Action::SetRelationView(RelationView::Data)]
+                }
+                _ => vec![Action::SetResultView(ResultView::Data)],
+            },
+            Id::ResultsSecondaryView => match self.tabs.get(self.active_tab) {
+                Some(WorkspaceTab::Relation(_)) => vec![Action::SetRelationView(RelationView::Ddl)],
+                _ => vec![Action::SetResultView(ResultView::Output)],
+            },
+            Id::ResultsPlan => vec![Action::SetResultView(ResultView::Plan)],
             Id::RelationWhere => vec![Action::FocusRelationQueryInput(
                 crate::model::relation::RelationQueryInput::Where,
             )],
@@ -828,6 +839,7 @@ impl App {
                     | Action::CompletionAccept
                     | Action::CompletionDismiss
                     | Action::ToggleResultView
+                    | Action::SetResultView(_)
                     | Action::ConfirmTransactionExitChoice(_)
                     | Action::OpenTargetSelector
                     | Action::MoveTargetSelector(_)
@@ -3046,6 +3058,10 @@ impl App {
                     ResultView::Data => ResultView::Output,
                     ResultView::Output | ResultView::Plan => ResultView::Data,
                 };
+                Vec::new()
+            }
+            Action::SetResultView(view) => {
+                self.active_console_mut().result_view = view;
                 Vec::new()
             }
             Action::RelationEditCell => {

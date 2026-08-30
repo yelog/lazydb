@@ -177,17 +177,20 @@ fn relation_window_directions_target_existing_panes() {
     app.active_tab = 1;
     app.focus = Focus::Explorer;
 
+    assert_eq!(window_action(&app, 'h'), None);
+    assert_eq!(window_action(&app, 'j'), None);
+    assert_eq!(window_action(&app, 'k'), None);
+    assert_eq!(
+        window_action(&app, 'l'),
+        Some(Action::Focus(Focus::Results))
+    );
+
+    app.focus = Focus::Results;
     assert_eq!(
         window_action(&app, 'h'),
         Some(Action::Focus(Focus::Explorer))
     );
-    for direction in ['j', 'k', 'l'] {
-        assert_eq!(
-            window_action(&app, direction),
-            Some(Action::Focus(Focus::Results)),
-            "direction={direction}"
-        );
-    }
+    assert_eq!(window_action(&app, 'k'), None);
 }
 
 #[test]
@@ -195,16 +198,13 @@ fn sql_window_directions_keep_three_pane_mapping() {
     let mut app = App::new(Vec::new());
     app.focus = Focus::Explorer;
 
-    assert_eq!(
-        window_action(&app, 'h'),
-        Some(Action::Focus(Focus::Explorer))
-    );
-    assert_eq!(
-        window_action(&app, 'j'),
-        Some(Action::Focus(Focus::Results))
-    );
-    assert_eq!(window_action(&app, 'k'), Some(Action::Focus(Focus::Editor)));
+    assert_eq!(window_action(&app, 'h'), None);
+    assert_eq!(window_action(&app, 'j'), None);
+    assert_eq!(window_action(&app, 'k'), None);
     assert_eq!(window_action(&app, 'l'), Some(Action::Focus(Focus::Editor)));
+
+    app.focus = Focus::Results;
+    assert_eq!(window_action(&app, 'k'), Some(Action::Focus(Focus::Editor)));
 }
 
 #[test]
@@ -223,15 +223,9 @@ fn maps_global_sequences_and_function_keys() {
     );
     assert_eq!(keymap.map(key(KeyCode::F(1)), &app), Some(Action::ShowHelp));
     assert_eq!(keymap.map(ctrl('w'), &app), None);
-    assert_eq!(
-        keymap.map(key(KeyCode::Char('h')), &app),
-        Some(Action::Focus(Focus::Explorer))
-    );
+    assert_eq!(keymap.map(key(KeyCode::Char('h')), &app), None);
     assert_eq!(keymap.map(ctrl('w'), &app), None);
-    assert_eq!(
-        keymap.map(ctrl('h'), &app),
-        Some(Action::Focus(Focus::Explorer))
-    );
+    assert_eq!(keymap.map(ctrl('h'), &app), None);
     assert_eq!(keymap.map(key(KeyCode::Char(']')), &app), None);
     assert_eq!(
         keymap.map(key(KeyCode::Char('t')), &app),
@@ -282,6 +276,68 @@ fn maps_tab_sequences_from_editor_normal_mode() {
     assert_eq!(
         keymap.map(key(KeyCode::Char('t')), &app),
         Some(Action::NextTab)
+    );
+
+    assert_eq!(keymap.map(key(KeyCode::Char('g')), &app), None);
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('T')), &app),
+        Some(Action::PreviousTab)
+    );
+    assert_eq!(
+        keymap.map(
+            KeyEvent::new(KeyCode::PageDown, KeyModifiers::CONTROL),
+            &app,
+        ),
+        Some(Action::NextTab)
+    );
+    assert_eq!(
+        keymap.map(KeyEvent::new(KeyCode::PageUp, KeyModifiers::CONTROL), &app,),
+        Some(Action::PreviousTab)
+    );
+}
+
+#[test]
+fn maps_direct_result_view_selection_without_stealing_query_input() {
+    let mut app = App::new(Vec::new());
+    app.focus = Focus::Results;
+    let mut keymap = Keymap::default();
+
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('1')), &app),
+        Some(Action::SetResultView(lazydb::model::tab::ResultView::Data))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('2')), &app),
+        Some(Action::SetResultView(
+            lazydb::model::tab::ResultView::Output
+        ))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('3')), &app),
+        Some(Action::SetResultView(lazydb::model::tab::ResultView::Plan))
+    );
+
+    let mut relation = RelationTab::new("users");
+    relation.query.focus = Some(DataQueryInput::Where);
+    app.tabs.push(WorkspaceTab::Relation(relation));
+    app.active_tab = 1;
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('1')), &app),
+        Some(Action::DataQueryInsert('1'))
+    );
+
+    app.tabs[1] = WorkspaceTab::Relation(RelationTab::new("users"));
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('1')), &app),
+        Some(Action::SetRelationView(
+            lazydb::model::relation::RelationView::Data
+        ))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('2')), &app),
+        Some(Action::SetRelationView(
+            lazydb::model::relation::RelationView::Ddl
+        ))
     );
 }
 
