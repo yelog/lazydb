@@ -1360,10 +1360,11 @@ impl MySqlAdapter {
         name: &str,
         lower_case_table_names: i64,
     ) -> Result<(String, CatalogKind), DatabaseError> {
+        let schema_comparison = canonical_name_comparison(lower_case_table_names, "table_schema")?;
         let name_comparison = canonical_name_comparison(lower_case_table_names, "table_name")?;
         let statement = format!(
             "SELECT table_name, table_type FROM information_schema.tables \
-             WHERE BINARY table_schema=BINARY ? AND {name_comparison} \
+             WHERE {schema_comparison} AND {name_comparison} \
              AND table_type IN ('BASE TABLE','VIEW')"
         );
         let row = sqlx::query(AssertSqlSafe(statement))
@@ -1405,10 +1406,11 @@ impl MySqlAdapter {
         if database != schema {
             return Err(catalog_target_not_found(target));
         }
+        let schema_comparison = canonical_name_comparison(lower_case_table_names, "table_schema")?;
         let name_comparison = canonical_name_comparison(lower_case_table_names, "table_name")?;
         let statement = format!(
             "SELECT table_name, table_type FROM information_schema.tables \
-             WHERE BINARY table_schema=BINARY ? AND {name_comparison} \
+             WHERE {schema_comparison} AND {name_comparison} \
              AND table_type IN ('BASE TABLE','VIEW')"
         );
         let row = sqlx::query(AssertSqlSafe(statement))
