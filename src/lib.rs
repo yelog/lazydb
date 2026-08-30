@@ -10,6 +10,7 @@ pub mod input;
 pub mod model;
 pub mod persistence;
 pub mod profile;
+pub mod project;
 pub mod runtime;
 pub mod security;
 pub mod sql;
