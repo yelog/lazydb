@@ -15,6 +15,19 @@ use crate::{
 
 use super::{HitRegion, HitTarget, UiState, theme::Theme};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct VisibleColumn {
+    index: usize,
+    natural_width: u16,
+    rendered_width: u16,
+}
+
+impl VisibleColumn {
+    fn is_complete(self) -> bool {
+        self.rendered_width == self.natural_width
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render(
     frame: &mut Frame<'_>,
@@ -62,7 +75,7 @@ pub(crate) fn render(
     let overflow = total_width(&widths) > available;
     let first = viewport_start(&widths, grid.column_offset, grid.selected_column, available);
     let visible = visible_columns(&widths, first, available);
-    let constraints = grid_constraints(&visible, &widths, number_width);
+    let constraints = grid_constraints(&visible, number_width);
 
     let visible_rows = area.height.saturating_sub(3 + u16::from(overflow)) as usize;
     let row_offset = row_viewport_start(
@@ -87,8 +100,8 @@ pub(crate) fn render(
         .map(|(screen_row, _)| (screen_row, row_offset.saturating_add(screen_row)))
     {
         let mut x = data_start_x(area, number_width);
-        for column_index in &visible {
-            let width = widths[*column_index];
+        for column in &visible {
+            let width = column.rendered_width;
             if x >= area.right() {
                 break;
             }
@@ -101,7 +114,7 @@ pub(crate) fn render(
                 ),
                 target: HitTarget::ResultCell {
                     row: row_index,
-                    column: *column_index,
+                    column: column.index,
                 },
             });
             x = x.saturating_add(width).saturating_add(1);
@@ -109,14 +122,14 @@ pub(crate) fn render(
     }
 
     let mut boundary_x = data_start_x(area, number_width);
-    for column_index in &visible {
-        boundary_x = boundary_x.saturating_add(widths[*column_index]);
-        if boundary_x < area.right().saturating_sub(1) {
+    for column in &visible {
+        boundary_x = boundary_x.saturating_add(column.rendered_width);
+        if column.is_complete() && boundary_x < area.right().saturating_sub(1) {
             state.hit_regions.push(HitRegion {
                 area: Rect::new(boundary_x, row_y, 1, 1),
                 target: HitTarget::RelationColumnResize {
-                    column: *column_index,
-                    width: widths[*column_index],
+                    column: column.index,
+                    width: column.natural_width,
                 },
             });
         }
@@ -152,7 +165,6 @@ pub(crate) fn render(
             let row = editable.map(|row| row.current.as_slice()).unwrap_or(row);
             Row::new(body_cells(
                 &visible,
-                &widths,
                 row_index,
                 number_width,
                 row,
@@ -175,7 +187,7 @@ pub(crate) fn render(
     let selected_cell = (!result.rows.is_empty()).then(|| {
         let selected_column = visible
             .iter()
-            .position(|index| *index == grid.selected_column)
+            .position(|column| column.index == grid.selected_column)
             .map_or_else(|| selected_data_cell(0), selected_data_cell);
         let selected_row = grid.selected_row.saturating_sub(row_offset);
         (selected_row, selected_column)
@@ -196,11 +208,16 @@ pub(crate) fn render(
         );
     }
     if overflow {
+        let complete_visible = visible
+            .iter()
+            .filter(|column| column.is_complete())
+            .count()
+            .max(1);
         render_scrollbar(
             frame,
             area,
             first,
-            &visible,
+            complete_visible,
             widths.len(),
             last_page_start(&widths, available),
             number_width,
@@ -230,15 +247,15 @@ fn automatic_widths(result: &ResultSet) -> Vec<u16> {
         .collect()
 }
 
-fn grid_constraints(visible: &[usize], widths: &[u16], number_width: u16) -> Vec<Constraint> {
+fn grid_constraints(visible: &[VisibleColumn], number_width: u16) -> Vec<Constraint> {
     let mut constraints = Vec::with_capacity(visible.len().saturating_mul(2).saturating_add(2));
     constraints.push(Constraint::Length(number_width));
     constraints.push(Constraint::Length(1));
-    for (position, index) in visible.iter().enumerate() {
+    for (position, column) in visible.iter().enumerate() {
         if position > 0 {
             constraints.push(Constraint::Length(1));
         }
-        constraints.push(Constraint::Length(widths[*index]));
+        constraints.push(Constraint::Length(column.rendered_width));
     }
     constraints
 }
@@ -263,7 +280,7 @@ fn row_viewport_start(
 }
 
 fn header_cells(
-    visible: &[usize],
+    visible: &[VisibleColumn],
     result: &ResultSet,
     number_width: u16,
     theme: Theme,
@@ -278,20 +295,20 @@ fn header_cells(
         Cell::from(format!("{:>width$}", "#", width = number_width as usize)).style(header_style),
     );
     cells.push(Cell::from("│").style(separator_style));
-    for (position, index) in visible.iter().enumerate() {
+    for (position, column) in visible.iter().enumerate() {
         if position > 0 {
             cells.push(Cell::from("│").style(separator_style));
         }
         cells.push(
-            Cell::from(sanitize_terminal_text(&result.columns[*index].name)).style(header_style),
+            Cell::from(sanitize_terminal_text(&result.columns[column.index].name))
+                .style(header_style),
         );
     }
     cells
 }
 
 fn body_cells(
-    visible: &[usize],
-    widths: &[u16],
+    visible: &[VisibleColumn],
     row_index: usize,
     number_width: u16,
     row: &[CellValue],
@@ -310,12 +327,12 @@ fn body_cells(
         .style(row_number_style),
     );
     cells.push(Cell::from("│").style(separator_style));
-    for (position, index) in visible.iter().enumerate() {
+    for (position, column) in visible.iter().enumerate() {
         if position > 0 {
             cells.push(Cell::from("│").style(separator_style));
         }
-        let value = row.get(*index).unwrap_or(&CellValue::Null);
-        let preview = value.preview(widths[*index].saturating_sub(2) as usize);
+        let value = row.get(column.index).unwrap_or(&CellValue::Null);
+        let preview = value.preview(column.rendered_width.saturating_sub(2) as usize);
         let style = match value {
             CellValue::Null => Style::new().fg(theme.muted).add_modifier(Modifier::ITALIC),
             CellValue::Unsupported { .. } => Style::new().fg(theme.warning),
@@ -365,22 +382,46 @@ fn data_start_x(area: Rect, number_width: u16) -> u16 {
         .saturating_add(1)
 }
 
-fn visible_columns(widths: &[u16], first: usize, available: u16) -> Vec<usize> {
-    widths
+fn visible_columns(widths: &[u16], first: usize, available: u16) -> Vec<VisibleColumn> {
+    if available == 0 {
+        return Vec::new();
+    }
+
+    let mut visible = Vec::new();
+    let mut remaining = available;
+    for (index, natural_width) in widths
         .iter()
+        .copied()
         .enumerate()
         .skip(first.min(widths.len()))
-        .scan(0u16, |used, (index, width)| {
-            let spacing = u16::from(index > first);
-            let next = used.saturating_add(spacing).saturating_add(*width);
-            if *used == 0 || next <= available {
-                *used = next;
-                Some(index)
-            } else {
-                None
-            }
-        })
-        .collect()
+    {
+        let spacing = u16::from(!visible.is_empty());
+        if remaining <= spacing {
+            break;
+        }
+
+        remaining = remaining.saturating_sub(spacing);
+        let rendered_width = natural_width.min(remaining);
+        visible.push(VisibleColumn {
+            index,
+            natural_width,
+            rendered_width,
+        });
+        remaining = remaining.saturating_sub(rendered_width);
+
+        if rendered_width < natural_width || remaining == 0 {
+            break;
+        }
+    }
+    visible
+}
+
+fn selection_is_revealed(visible: &[VisibleColumn], selected: usize) -> bool {
+    visible.iter().any(|column| {
+        column.index == selected
+            && (column.is_complete()
+                || visible.first().is_some_and(|first| first.index == selected))
+    })
 }
 
 fn viewport_start(widths: &[u16], offset: usize, selected: usize, available: u16) -> usize {
@@ -392,7 +433,8 @@ fn viewport_start(widths: &[u16], offset: usize, selected: usize, available: u16
     if selected < start {
         return selected;
     }
-    while !visible_columns(widths, start, available).contains(&selected) && start + 1 < widths.len()
+    while !selection_is_revealed(&visible_columns(widths, start, available), selected)
+        && start + 1 < widths.len()
     {
         start += 1;
     }
@@ -417,7 +459,7 @@ fn render_scrollbar(
     frame: &mut Frame<'_>,
     area: Rect,
     first: usize,
-    visible: &[usize],
+    visible_column_count: usize,
     column_count: usize,
     max_offset: usize,
     number_width: u16,
@@ -436,7 +478,7 @@ fn render_scrollbar(
         return;
     }
     let rail_width = track.width.saturating_sub(2);
-    let thumb_width = ((rail_width as usize * visible.len().max(1)) / column_count)
+    let thumb_width = ((rail_width as usize * visible_column_count) / column_count)
         .clamp(1, rail_width as usize) as u16;
     let travel = rail_width.saturating_sub(thumb_width);
     let thumb_offset = ((travel as usize * first)
@@ -462,7 +504,7 @@ fn render_scrollbar(
         track,
     );
 
-    let page = visible.len().max(1) as isize;
+    let page = visible_column_count as isize;
     state.hit_regions.push(HitRegion {
         area: Rect::new(track.x, track.y, thumb_x.saturating_sub(track.x), 1),
         target: HitTarget::GridScrollbarPage {
@@ -492,8 +534,8 @@ fn render_scrollbar(
 #[cfg(test)]
 mod tests {
     use super::{
-        row_number_style, row_number_width, row_viewport_start, selected_data_cell, total_width,
-        viewport_start, visible_columns,
+        VisibleColumn, row_number_style, row_number_width, row_viewport_start, selected_data_cell,
+        total_width, viewport_start, visible_columns,
     };
     use ratatui::style::Style;
 
@@ -528,7 +570,13 @@ mod tests {
         let widths = vec![6; 10];
         let start = viewport_start(&widths, 0, 0, 20);
         assert_eq!(start, 0);
-        assert_eq!(visible_columns(&widths, start, 20), vec![0, 1, 2]);
+        assert_eq!(
+            visible_columns(&widths, start, 20)
+                .iter()
+                .map(|column| column.index)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
     }
 
     #[test]
@@ -554,14 +602,110 @@ mod tests {
     fn explicit_last_offset_reaches_last_column() {
         let widths = vec![6; 10];
         let start = viewport_start(&widths, 9, 9, 20);
-        assert_eq!(visible_columns(&widths, start, 20), vec![7, 8, 9]);
+        assert_eq!(
+            visible_columns(&widths, start, 20)
+                .iter()
+                .map(|column| column.index)
+                .collect::<Vec<_>>(),
+            vec![7, 8, 9]
+        );
     }
 
     #[test]
     fn exact_fit_does_not_add_trailing_spacing() {
         let widths = vec![6, 6];
         assert_eq!(total_width(&widths), 13);
-        assert_eq!(visible_columns(&widths, 0, 13), vec![0, 1]);
+        assert_eq!(
+            visible_columns(&widths, 0, 13),
+            vec![
+                VisibleColumn {
+                    index: 0,
+                    natural_width: 6,
+                    rendered_width: 6,
+                },
+                VisibleColumn {
+                    index: 1,
+                    natural_width: 6,
+                    rendered_width: 6,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn remaining_space_renders_one_trailing_partial_column() {
+        let widths = vec![6, 6];
+
+        assert_eq!(
+            visible_columns(&widths, 0, 10),
+            vec![
+                VisibleColumn {
+                    index: 0,
+                    natural_width: 6,
+                    rendered_width: 6,
+                },
+                VisibleColumn {
+                    index: 1,
+                    natural_width: 6,
+                    rendered_width: 3,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn visible_columns_handle_narrow_boundaries() {
+        assert!(visible_columns(&[6, 6], 0, 0).is_empty());
+        assert_eq!(
+            visible_columns(&[6, 6], 0, 7),
+            vec![VisibleColumn {
+                index: 0,
+                natural_width: 6,
+                rendered_width: 6,
+            }]
+        );
+        assert_eq!(
+            visible_columns(&[20, 6], 0, 10),
+            vec![VisibleColumn {
+                index: 0,
+                natural_width: 20,
+                rendered_width: 10,
+            }]
+        );
+        assert!(visible_columns(&[6, 6], 2, 20).is_empty());
+    }
+
+    #[test]
+    fn trailing_partial_column_stops_the_visible_range() {
+        assert_eq!(
+            visible_columns(&[6, 6, 6], 0, 10),
+            vec![
+                VisibleColumn {
+                    index: 0,
+                    natural_width: 6,
+                    rendered_width: 6,
+                },
+                VisibleColumn {
+                    index: 1,
+                    natural_width: 6,
+                    rendered_width: 3,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn viewport_scrolls_when_selection_enters_a_trailing_partial_column() {
+        assert_eq!(viewport_start(&[6, 6, 6], 0, 1, 10), 1);
+    }
+
+    #[test]
+    fn oversized_selected_column_is_valid_as_the_first_column() {
+        let widths = vec![6, 20, 6];
+        let start = viewport_start(&widths, 0, 1, 10);
+
+        assert_eq!(start, 1);
+        assert_eq!(visible_columns(&widths, start, 10)[0].rendered_width, 10);
     }
 
     #[test]
