@@ -210,15 +210,17 @@ local function ensure_autocmds()
   vim.api.nvim_create_autocmd("TabClosed", {
     group = autocmd_group,
     callback = function()
-      local closed = {}
-      for tabpage, session in pairs(sessions) do
-        if not vim.api.nvim_tabpage_is_valid(tabpage) then
-          closed[#closed + 1] = session
+      vim.schedule(function()
+        local closed = {}
+        for tabpage, session in pairs(sessions) do
+          if not vim.api.nvim_tabpage_is_valid(tabpage) then
+            closed[#closed + 1] = session
+          end
         end
-      end
-      for _, session in ipairs(closed) do
-        dispose(session, { stop_job = true })
-      end
+        for _, session in ipairs(closed) do
+          dispose(session, { stop_job = true })
+        end
+      end)
     end,
   })
 

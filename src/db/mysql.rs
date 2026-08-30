@@ -1212,31 +1212,26 @@ impl MySqlAdapter {
         .map_err(sql_error)?;
         for row in rows {
             let ordinal = checked_u32(
-                row.try_get::<u64, _>("ordinal_position")
-                    .map_err(decode_error)?,
+                row.try_get::<u64, _>(0).map_err(decode_error)?,
                 "column ordinal",
             )?;
-            let name: String = row.try_get("column_name").map_err(decode_error)?;
-            let extra: String = row.try_get("extra").map_err(decode_error)?;
-            let generation_expression: String =
-                row.try_get("generation_expression").map_err(decode_error)?;
+            let name: String = row.try_get(1).map_err(decode_error)?;
+            let extra: String = row.try_get(6).map_err(decode_error)?;
+            let generation_expression: String = row.try_get(7).map_err(decode_error)?;
             let generated = !generation_expression.is_empty()
                 || extra.to_ascii_uppercase().contains("VIRTUAL GENERATED")
                 || extra.to_ascii_uppercase().contains("STORED GENERATED");
             let mut metadata = ColumnMetadata::new(
                 ordinal,
-                row.try_get::<String, _>("column_type")
-                    .map_err(decode_error)?,
-                row.try_get::<String, _>("is_nullable")
-                    .map_err(decode_error)?
-                    == "YES",
+                row.try_get::<String, _>(2).map_err(decode_error)?,
+                row.try_get::<String, _>(4).map_err(decode_error)? == "YES",
             );
             metadata.type_family =
-                OptionalMetadata::Supported(Some(row.try_get("data_type").map_err(decode_error)?));
+                OptionalMetadata::Supported(Some(row.try_get(3).map_err(decode_error)?));
             metadata.default_expression = OptionalMetadata::Supported(if generated {
                 None
             } else {
-                row.try_get("column_default").map_err(decode_error)?
+                row.try_get(5).map_err(decode_error)?
             });
             metadata.identity = OptionalMetadata::Unsupported;
             metadata.auto_increment = OptionalMetadata::Supported(Some(
@@ -1251,26 +1246,23 @@ impl MySqlAdapter {
             });
             metadata.hidden = OptionalMetadata::Unsupported;
             metadata.numeric_precision = OptionalMetadata::Supported(
-                row.try_get::<Option<u64>, _>("numeric_precision")
+                row.try_get::<Option<u64>, _>(8)
                     .map_err(decode_error)?
                     .map(|value| checked_u32(value, "numeric precision"))
                     .transpose()?,
             );
             metadata.numeric_scale = OptionalMetadata::Supported(
-                row.try_get::<Option<u64>, _>("numeric_scale")
+                row.try_get::<Option<u64>, _>(9)
                     .map_err(decode_error)?
                     .map(|value| checked_u32(value, "numeric scale"))
                     .transpose()?,
             );
-            metadata.character_maximum_length = OptionalMetadata::Supported(
-                row.try_get("character_maximum_length")
-                    .map_err(decode_error)?,
-            );
+            metadata.character_maximum_length =
+                OptionalMetadata::Supported(row.try_get(10).map_err(decode_error)?);
             metadata.collation =
-                OptionalMetadata::Supported(row.try_get("collation_name").map_err(decode_error)?);
-            metadata.character_set = OptionalMetadata::Supported(
-                row.try_get("character_set_name").map_err(decode_error)?,
-            );
+                OptionalMetadata::Supported(row.try_get(11).map_err(decode_error)?);
+            metadata.character_set =
+                OptionalMetadata::Supported(row.try_get(12).map_err(decode_error)?);
             metadata.constraint_memberships = memberships.remove(&name).unwrap_or_default();
             metadata.constraint_memberships.sort_by(|left, right| {
                 catalog_kind_rank(left.constraint_id.kind)
@@ -1289,7 +1281,7 @@ impl MySqlAdapter {
                     qualified_object(database, &name),
                     "column",
                     OptionalMetadata::Supported(empty_as_none(
-                        row.try_get("column_comment").map_err(decode_error)?,
+                        row.try_get(13).map_err(decode_error)?,
                     )),
                     CatalogMetadata::Column(metadata),
                 )

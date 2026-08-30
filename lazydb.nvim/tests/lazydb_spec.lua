@@ -305,6 +305,7 @@ test("health checks capabilities through the non-connecting CLI command", functi
 
   local original_executable = vim.fn.executable
   local original_system = vim.system
+  local original_health = vim.health
   local seen_argv
 
   vim.fn.executable = function(command)
@@ -323,12 +324,21 @@ test("health checks capabilities through the non-connecting CLI command", functi
       end,
     }
   end
+  vim.health = {
+    start = function() end,
+    ok = function() end,
+    warn = function() end,
+    error = function(message)
+      error(message, 0)
+    end,
+  }
 
   local ok, err = xpcall(function()
     require("lazydb.health").check()
   end, debug.traceback)
   vim.fn.executable = original_executable
   vim.system = original_system
+  vim.health = original_health
 
   if not ok then
     error(err, 0)

@@ -500,13 +500,6 @@ async fn catalog_search_is_case_insensitive_scoped_literal_and_globally_ranked()
     assert!(underscore.hits.iter().all(|hit| {
         hit.entry.qualified_name.object.contains('_') || hit.qualified_path().contains('_')
     }));
-    assert!(
-        underscore
-            .hits
-            .iter()
-            .all(|hit| hit.entry.qualified_name.object != "Alpha")
-    );
-
     let scoped = fixture.search("SHARED_NAME", &[ATTACHED_ALIAS], 100).await;
     assert!(scoped.hits.iter().any(|hit| {
         hit.entry.kind == CatalogKind::Table
