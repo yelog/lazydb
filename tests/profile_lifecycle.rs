@@ -38,6 +38,16 @@ async fn apply_next(
     action
 }
 
+async fn apply_next_with_commands(
+    app: &mut App,
+    runtime: &mut Runtime,
+    receiver: &mut mpsc::UnboundedReceiver<Action>,
+) -> (Action, Vec<Command>) {
+    let action = next_action(receiver).await;
+    let commands = dispatch(app, runtime, action.clone());
+    (action, commands)
+}
+
 async fn drain_catalog(
     app: &mut App,
     runtime: &mut Runtime,
@@ -270,6 +280,17 @@ async fn two_sqlite_profiles_complete_the_full_runtime_lifecycle() {
     ));
     drain_catalog(&mut app, &mut runtime, &mut receiver).await;
 
+    let beta_console_ids = app
+        .workspace_snapshot()
+        .profiles
+        .iter()
+        .find(|workspace| workspace.profile_id == beta_id)
+        .unwrap()
+        .consoles
+        .iter()
+        .map(|console| console.id)
+        .collect::<HashSet<_>>();
+
     dispatch(
         &mut app,
         &mut runtime,
@@ -278,7 +299,7 @@ async fn two_sqlite_profiles_complete_the_full_runtime_lifecycle() {
         },
     );
     dispatch(&mut app, &mut runtime, Action::ProfileConfirmDelete);
-    let deleted = apply_next(&mut app, &mut runtime, &mut receiver).await;
+    let (deleted, commands) = apply_next_with_commands(&mut app, &mut runtime, &mut receiver).await;
     assert!(matches!(
         deleted,
         Action::ProfileDeleted {
@@ -287,7 +308,23 @@ async fn two_sqlite_profiles_complete_the_full_runtime_lifecycle() {
             ..
         } if profile_id == beta_id
     ));
+    assert_eq!(
+        commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::DeleteSqlFile(id) => Some(*id),
+                _ => None,
+            })
+            .collect::<HashSet<_>>(),
+        beta_console_ids
+    );
     assert_eq!(app.profiles.len(), 1);
+    assert!(
+        !app.workspace_snapshot()
+            .profiles
+            .iter()
+            .any(|workspace| { workspace.profile_id == beta_id })
+    );
     assert_eq!(
         ProfileStore::new(store_path.clone()).load().unwrap().len(),
         1
@@ -316,6 +353,7 @@ async fn two_sqlite_profiles_complete_the_full_runtime_lifecycle() {
     ));
     assert!(app.profiles.is_empty());
     assert!(app.connection.profile_id.is_none());
+    assert!(app.workspace_snapshot().profiles.is_empty());
     assert!(
         ProfileStore::new(store_path.clone())
             .load()

@@ -4412,11 +4412,43 @@ impl App {
         if !self.profile_operation_matches(request_id, &[ProfileOperation::Deleting]) {
             return Vec::new();
         }
+        let deleted_console_ids = self.remove_profile_workspace(profile_id);
         self.explorer.normalized.remove_profile(profile_id);
         self.profiles.retain(|profile| profile.id != profile_id);
         self.profile_manager = None;
         self.overlay = None;
-        self.retire_profile_connections(profile_id, active_connection)
+        let mut commands = self.retire_profile_connections(profile_id, active_connection);
+        commands.extend(deleted_console_ids.into_iter().map(Command::DeleteSqlFile));
+        commands.push(self.persist_workspace_command());
+        commands
+    }
+
+    fn remove_profile_workspace(&mut self, profile_id: Uuid) -> Vec<Uuid> {
+        let mut console_ids = self
+            .workspaces
+            .remove(&profile_id)
+            .map(|workspace| {
+                workspace
+                    .sql_editors
+                    .into_iter()
+                    .map(|record| record.id)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        if self.active_workspace_profile == Some(profile_id) {
+            console_ids.extend(self.sql_editors.iter().map(|record| record.id));
+            self.tabs.clear();
+            self.sql_editors.clear();
+            self.active_workspace_profile = None;
+            self.active_tab = 0;
+        }
+
+        for id in &console_ids {
+            self.editor.close_console(*id);
+        }
+
+        console_ids
     }
 
     fn profile_operation_matches(&self, request_id: u64, operations: &[ProfileOperation]) -> bool {

@@ -108,6 +108,39 @@ fn missing_workspace_is_empty_and_unsupported_version_is_rejected() {
 }
 
 #[test]
+fn deleting_a_sql_file_is_idempotent_and_only_removes_that_console() {
+    let temp = TempDir::new().unwrap();
+    let store = WorkspaceStore::new(temp.path().join("workspace.toml"), temp.path().join("sql"));
+    let deleted = Uuid::new_v4();
+    let retained = Uuid::new_v4();
+    std::fs::create_dir_all(temp.path().join("sql")).unwrap();
+    std::fs::write(
+        temp.path().join("sql").join(format!("{deleted}.sql")),
+        "delete",
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("sql").join(format!("{retained}.sql")),
+        "retain",
+    )
+    .unwrap();
+
+    store.delete_sql_file(deleted).unwrap();
+    store.delete_sql_file(deleted).unwrap();
+    assert!(
+        !temp
+            .path()
+            .join("sql")
+            .join(format!("{deleted}.sql"))
+            .exists()
+    );
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("sql").join(format!("{retained}.sql"))).unwrap(),
+        "retain"
+    );
+}
+
+#[test]
 fn workspace_v1_migrates_all_consoles_open_and_preserves_root_active_console() {
     let temp = TempDir::new().unwrap();
     let active = Uuid::new_v4();

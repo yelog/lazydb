@@ -972,18 +972,15 @@ fn deleting_or_saving_a_pending_profile_clears_its_connection_state() {
         [Command::DeleteProfile { request_id, .. }] => *request_id,
         commands => panic!("unexpected commands: {commands:?}"),
     };
+    let commands = deleting.update(Action::ProfileDeleted {
+        request_id,
+        profile_id,
+        active_connection: None,
+    });
     assert!(matches!(
-        deleting
-            .update(Action::ProfileDeleted {
-                request_id,
-                profile_id,
-                active_connection: None,
-            })
-            .as_slice(),
-        [Command::Disconnect { connection }] if *connection == ConnectionIdentity {
-            profile_id,
-            generation: 1,
-        }
+        commands.as_slice(),
+        [Command::Disconnect { connection }, Command::PersistWorkspace(_)]
+            if *connection == ConnectionIdentity { profile_id, generation: 1 }
     ));
 
     let mut saving = App::new(vec![profile]);
@@ -1255,7 +1252,8 @@ fn deleting_an_active_profile_retires_it_before_disconnect_completes() {
     });
     assert!(matches!(
         commands.as_slice(),
-        [Command::Disconnect { connection: disconnected }] if *disconnected == connection
+        [Command::Disconnect { connection: disconnected }, Command::PersistWorkspace(_)]
+            if *disconnected == connection
     ));
     assert!(app.connection.profile_id.is_none());
     assert_eq!(app.connection.status, ConnectionStatus::Disconnected);
