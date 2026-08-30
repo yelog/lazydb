@@ -61,6 +61,7 @@ use crate::{
         PersistedConsole, PersistedProfileWorkspace, PersistedTab, WorkspaceSnapshot,
     },
     profile::{ConnectionProfile, DatabaseKind},
+    project::ProjectContext,
     sql::{self, CompletionScheduleKey, ScopeSource, SqlDialect},
 };
 
@@ -134,6 +135,7 @@ fn is_data_query_identifier_character(character: char) -> bool {
 }
 
 pub struct App {
+    pub project: ProjectContext,
     pub profiles: Vec<ConnectionProfile>,
     pub connection: ConnectionState,
     pub active_workspace_profile: Option<Uuid>,
@@ -192,14 +194,24 @@ impl App {
 
     pub fn new(profiles: Vec<ConnectionProfile>) -> Self {
         let persisted = profiles.iter().map(|profile| profile.id).collect();
-        Self::with_profiles(profiles, persisted, ConfirmationPolicy::RiskyOnly)
+        Self::with_profiles(
+            profiles,
+            persisted,
+            ConfirmationPolicy::RiskyOnly,
+            ProjectContext::resolve_current().expect("current project must be resolvable"),
+        )
     }
 
     pub fn with_startup_profiles(
         profiles: Vec<ConnectionProfile>,
         persisted: HashSet<Uuid>,
     ) -> Self {
-        Self::with_profiles(profiles, persisted, ConfirmationPolicy::RiskyOnly)
+        Self::with_profiles(
+            profiles,
+            persisted,
+            ConfirmationPolicy::RiskyOnly,
+            ProjectContext::resolve_current().expect("current project must be resolvable"),
+        )
     }
 
     pub fn with_confirmation_policy(
@@ -207,7 +219,12 @@ impl App {
         confirmation_policy: ConfirmationPolicy,
     ) -> Self {
         let persisted = profiles.iter().map(|profile| profile.id).collect();
-        Self::with_profiles(profiles, persisted, confirmation_policy)
+        Self::with_profiles(
+            profiles,
+            persisted,
+            confirmation_policy,
+            ProjectContext::resolve_current().expect("current project must be resolvable"),
+        )
     }
 
     pub fn with_startup_profiles_and_confirmation_policy(
@@ -215,13 +232,28 @@ impl App {
         persisted: HashSet<Uuid>,
         confirmation_policy: ConfirmationPolicy,
     ) -> Self {
-        Self::with_profiles(profiles, persisted, confirmation_policy)
+        Self::with_profiles(
+            profiles,
+            persisted,
+            confirmation_policy,
+            ProjectContext::resolve_current().expect("current project must be resolvable"),
+        )
+    }
+
+    pub fn with_startup_project(
+        profiles: Vec<ConnectionProfile>,
+        persisted: HashSet<Uuid>,
+        confirmation_policy: ConfirmationPolicy,
+        project: ProjectContext,
+    ) -> Self {
+        Self::with_profiles(profiles, persisted, confirmation_policy, project)
     }
 
     fn with_profiles(
         profiles: Vec<ConnectionProfile>,
         persisted: HashSet<Uuid>,
         confirmation_policy: ConfirmationPolicy,
+        project: ProjectContext,
     ) -> Self {
         let mut editor = EditorWorkspace::new();
         let mut explorer = ExplorerState::default();
@@ -255,6 +287,7 @@ impl App {
         };
 
         Self {
+            project,
             profiles,
             connection: ConnectionState::default(),
             active_workspace_profile: None,

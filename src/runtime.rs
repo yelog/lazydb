@@ -2424,14 +2424,17 @@ async fn handle_quarantined_connection(
 }
 
 pub async fn run_tui(cli: Cli) -> Result<()> {
+    let project = crate::project::ProjectContext::resolve_current()
+        .context("failed to resolve current project")?;
     let startup = load_startup_profiles(&cli)?;
     let paths = AppPaths::discover()?;
     let workspace_store = WorkspaceStore::new(paths.workspace_file(), paths.workspace_sql_dir());
     let workspace = workspace_store.load().context("failed to load workspace")?;
-    let mut app = App::with_startup_profiles_and_confirmation_policy(
+    let mut app = App::with_startup_project(
         startup.profiles.clone(),
         startup.persisted.clone(),
         cli.confirm_execution,
+        project,
     );
     if let Some(workspace) = workspace {
         app.restore_workspace(workspace, startup.selected);
