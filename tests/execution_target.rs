@@ -2,7 +2,7 @@ use lazydb::{
     model::execution_target::ExecutionTarget,
     profile::{
         ConnectionProfile, ConnectionUrlFormat, CredentialPolicy, DatabaseKind, Environment,
-        SslMode,
+        ProfileAccess, SslMode,
     },
 };
 use std::path::PathBuf;
@@ -13,6 +13,7 @@ fn profile(kind: DatabaseKind) -> ConnectionProfile {
     ConnectionProfile {
         id,
         name: "target".into(),
+        access: ProfileAccess::Global,
         kind,
         url_format: ConnectionUrlFormat::default_for(kind),
         host: Some("localhost".into()),

@@ -60,7 +60,7 @@ use crate::{
     persistence::workspace::{
         PersistedConsole, PersistedProfileWorkspace, PersistedTab, WorkspaceSnapshot,
     },
-    profile::{ConnectionProfile, DatabaseKind},
+    profile::{ConnectionProfile, DatabaseKind, ProfileAccess},
     project::ProjectContext,
     sql::{self, CompletionScheduleKey, ScopeSource, SqlDialect},
 };
@@ -266,6 +266,14 @@ impl App {
                 } else {
                     ProfileProvenance::Session
                 },
+                profile_placement(
+                    profile,
+                    if persisted.contains(&profile.id) {
+                        Some(&project.root)
+                    } else {
+                        None
+                    },
+                ),
             );
         }
         let (tabs, sql_editors) = if profiles.is_empty() {
@@ -4495,7 +4503,12 @@ impl App {
         } else {
             Vec::new()
         };
-        add_explorer_profile(&mut self.explorer, &profile, ProfileProvenance::Saved);
+        add_explorer_profile(
+            &mut self.explorer,
+            &profile,
+            ProfileProvenance::Saved,
+            profile_placement(&profile, Some(&self.project.root)),
+        );
         if scope_changed && let Some(state) = self.explorer.normalized.profiles.get_mut(&profile_id)
         {
             if state.advance_catalog_epoch().is_none() {
@@ -5929,6 +5942,7 @@ impl App {
             | ExplorerNodeId::Empty { owner }
             | ExplorerNodeId::LoadMore { parent: owner, .. } => self.target_for_owner(owner),
             ExplorerNodeId::EmptyProfiles => None,
+            ExplorerNodeId::Others => None,
         }
     }
 
@@ -6017,6 +6031,10 @@ impl App {
                 }
             }
             ExplorerNodeId::EmptyProfiles => self.update(Action::ProfileStartNew),
+            ExplorerNodeId::Others => {
+                self.explorer.toggle_selected();
+                Vec::new()
+            }
             ExplorerNodeId::Status { .. } | ExplorerNodeId::Empty { .. } => Vec::new(),
         }
     }
@@ -7802,6 +7820,7 @@ fn add_explorer_profile(
     explorer: &mut ExplorerState,
     profile: &ConnectionProfile,
     provenance: ProfileProvenance,
+    placement: crate::model::explorer::ProfilePlacement,
 ) {
     let endpoint = match profile.kind {
         DatabaseKind::Sqlite => profile
@@ -7817,13 +7836,29 @@ fn add_explorer_profile(
                 .map_or_else(|| host.to_owned(), |port| format!("{host}:{port}"))
         }
     };
-    explorer.normalized.add_profile_with_metadata(
+    explorer.normalized.add_profile_with_placement(
         profile.id,
         profile.name.clone(),
         profile.kind,
         endpoint,
         provenance,
+        placement,
     );
+}
+
+fn profile_placement(
+    profile: &ConnectionProfile,
+    project_root: Option<&std::path::Path>,
+) -> crate::model::explorer::ProfilePlacement {
+    if profile.access == ProfileAccess::Global {
+        return crate::model::explorer::ProfilePlacement::Global;
+    }
+    match project_root {
+        Some(root) if profile.access.contains_project(root) => {
+            crate::model::explorer::ProfilePlacement::CurrentProject
+        }
+        _ => crate::model::explorer::ProfilePlacement::OtherProject,
+    }
 }
 
 fn tab_snapshot(tab: &ConsoleTab) -> transaction::TransactionSnapshot {

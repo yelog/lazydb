@@ -831,6 +831,17 @@ impl ExplorerState {
                         None,
                         false,
                     ),
+                    ExplorerNodeId::Others => (
+                        "OTHERS".to_owned(),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        true,
+                    ),
                 };
                 VisibleCatalogNode {
                     id: row.id,
