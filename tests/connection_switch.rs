@@ -247,6 +247,106 @@ fn pending_switch_keeps_active_identity_and_rejects_new_queries() {
 }
 
 #[test]
+fn failed_switch_keeps_visible_workspace_and_editor_text_unchanged() {
+    let first = memory_profile("first");
+    let second = memory_profile("second");
+    let first_id = first.id;
+    let second_id = second.id;
+    let mut app = App::new(vec![first, second]);
+
+    let first_generation = match app.update(Action::RequestConnect(first_id)).as_slice() {
+        [Command::Connect { generation, .. }] => *generation,
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+    app.update(Action::ConnectionSucceeded {
+        profile_id: first_id,
+        generation: first_generation,
+        server: server("first"),
+    });
+    app.update(Action::ReplaceEditor("SELECT first".into()));
+    let first_tab = app.active_console().id;
+
+    let second_generation = match app.update(Action::RequestConnect(second_id)).as_slice() {
+        [Command::Connect { generation, .. }] => *generation,
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+    assert_eq!(app.active_workspace_profile, Some(first_id));
+    assert_eq!(app.active_console().id, first_tab);
+    assert_eq!(app.active_editor_text().unwrap(), "SELECT first");
+
+    app.update(Action::ConnectionFailed {
+        profile_id: second_id,
+        generation: second_generation,
+        message: "failed".into(),
+    });
+    assert_eq!(app.active_workspace_profile, Some(first_id));
+    assert_eq!(app.active_console().id, first_tab);
+    assert_eq!(app.active_editor_text().unwrap(), "SELECT first");
+}
+
+#[test]
+fn successful_switch_caches_and_restores_profile_workspace_once() {
+    let first = memory_profile("first");
+    let second = memory_profile("second");
+    let first_id = first.id;
+    let second_id = second.id;
+    let mut app = App::new(vec![first, second]);
+
+    let first_generation = match app.update(Action::RequestConnect(first_id)).as_slice() {
+        [Command::Connect { generation, .. }] => *generation,
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+    app.update(Action::ConnectionSucceeded {
+        profile_id: first_id,
+        generation: first_generation,
+        server: server("first"),
+    });
+    app.update(Action::ReplaceEditor("SELECT first".into()));
+    let first_tab = app.active_console().id;
+
+    let second_generation = match app.update(Action::RequestConnect(second_id)).as_slice() {
+        [Command::Connect { generation, .. }] => *generation,
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+    let commands = app.update(Action::ConnectionSucceeded {
+        profile_id: second_id,
+        generation: second_generation,
+        server: server("second"),
+    });
+    assert_eq!(app.active_workspace_profile, Some(second_id));
+    assert_eq!(app.tabs.len(), 1);
+    assert_eq!(app.sql_editors.len(), 1);
+    assert_ne!(app.active_console().id, first_tab);
+    assert_eq!(
+        app.active_console()
+            .execution_target
+            .as_ref()
+            .unwrap()
+            .profile_id,
+        second_id
+    );
+    assert!(
+        commands
+            .iter()
+            .any(|command| matches!(command, Command::PersistWorkspace(_)))
+    );
+
+    let first_generation = match app.update(Action::RequestConnect(first_id)).as_slice() {
+        [Command::Connect { generation, .. }] => *generation,
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+    app.update(Action::ConnectionSucceeded {
+        profile_id: first_id,
+        generation: first_generation,
+        server: server("first-again"),
+    });
+    assert_eq!(app.active_workspace_profile, Some(first_id));
+    assert_eq!(app.active_console().id, first_tab);
+    assert_eq!(app.active_editor_text().unwrap(), "SELECT first");
+    assert_eq!(app.tabs.len(), 1);
+}
+
+#[test]
 fn target_selector_switches_only_after_matching_connection_success() {
     let mut profile = memory_profile("target");
     profile.catalog_scope.databases = CatalogSelection::All;
@@ -372,7 +472,11 @@ fn target_selector_requires_an_active_connection_and_blocks_manual_transactions(
     app.connection.profile_id = Some(profile_id);
     app.connection.generation = 1;
     app.connection.status = ConnectionStatus::Connected;
-    app.connection.target = app.active_console().execution_target.clone();
+    app.update(Action::ConnectionSucceeded {
+        profile_id,
+        generation: 2,
+        server: server(":memory:"),
+    });
     app.update(Action::OpenTargetSelector);
     app.active_console_mut().transaction_mode = lazydb::model::transaction::TransactionMode::Manual;
     app.active_console_mut().transaction_state =

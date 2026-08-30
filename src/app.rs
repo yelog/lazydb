@@ -279,6 +279,18 @@ impl App {
     fn take_active_workspace(&mut self) -> Option<(Uuid, ConnectionWorkspace)> {
         let profile_id = self.active_workspace_profile?;
         let active_tab_id = self.active_tab_id();
+        for record in &mut self.sql_editors {
+            if let Some(tab) = self
+                .tabs
+                .iter()
+                .find(|tab| tab.id() == record.id)
+                .and_then(WorkspaceTab::as_console)
+            {
+                record.name = tab.name.clone();
+                record.execution_target = tab.execution_target.clone();
+                record.transaction_mode = tab.transaction_mode;
+            }
+        }
         let sql = self
             .sql_editors
             .iter()
@@ -331,6 +343,56 @@ impl App {
             sql: vec![(id, String::new())],
             active_tab_id: Some(id),
         }
+    }
+
+    fn activate_profile_workspace(
+        &mut self,
+        profile_id: Uuid,
+        target: ExecutionTarget,
+    ) -> Vec<Command> {
+        let mut commands = Vec::new();
+        if self.active_workspace_profile != Some(profile_id) || self.tabs.is_empty() {
+            commands.extend(self.cancel_relation_requests_for_connection(None));
+            if let Some((old_profile_id, workspace)) = self.take_active_workspace() {
+                self.workspaces.insert(old_profile_id, workspace);
+            }
+
+            let workspace = self
+                .workspaces
+                .remove(&profile_id)
+                .unwrap_or_else(|| self.empty_workspace_for(profile_id, target.clone()));
+            let Some(profile) = self
+                .profiles
+                .iter()
+                .find(|profile| profile.id == profile_id)
+            else {
+                return commands;
+            };
+            let mut workspace = workspace;
+            for tab in &mut workspace.tabs {
+                let Some(console) = tab.as_console_mut() else {
+                    continue;
+                };
+                if console
+                    .execution_target
+                    .as_ref()
+                    .is_none_or(|candidate| !candidate.is_valid(profile))
+                {
+                    console.execution_target = Some(target.clone());
+                }
+            }
+            for record in &mut workspace.sql_editors {
+                if record
+                    .execution_target
+                    .as_ref()
+                    .is_none_or(|candidate| !candidate.is_valid(profile))
+                {
+                    record.execution_target = Some(target.clone());
+                }
+            }
+            self.install_workspace(profile_id, workspace);
+        }
+        commands
     }
 
     pub fn set_confirmation_policy(&mut self, policy: ConfirmationPolicy) {
@@ -1108,7 +1170,6 @@ impl App {
                     | Action::CompletionDismiss
                     | Action::ToggleResultView
                     | Action::ConfirmTransactionExitChoice(_)
-                    | Action::OpenTargetSelector
                     | Action::MoveTargetSelector(_)
                     | Action::ConfirmTargetSelector
                     | Action::CancelTargetSelector
@@ -2076,14 +2137,33 @@ impl App {
                 Vec::new()
             }
             Action::OpenTargetSelector => {
-                let Some(profile) = self.active_profile() else {
+                let Some(profile) = self.active_profile().cloned() else {
                     self.status_message("No active connection; connect before selecting a target");
                     return Vec::new();
                 };
-                let candidates = self.execution_target_candidates(profile);
-                let current = self.active_console().execution_target.as_ref();
-                let selected = current
-                    .and_then(|target| candidates.iter().position(|candidate| candidate == target))
+                if self.active_workspace_profile != Some(profile.id) || self.tabs.is_empty() {
+                    let target = self
+                        .connection
+                        .target
+                        .clone()
+                        .filter(|target| target.is_valid(&profile))
+                        .unwrap_or_else(|| ExecutionTarget::from_profile(&profile));
+                    let commands = self.activate_profile_workspace(profile.id, target);
+                    if !commands.is_empty() {
+                        return commands;
+                    }
+                }
+                let candidates = self.execution_target_candidates(&profile);
+                let Some(current) = self
+                    .active_console_opt()
+                    .and_then(|tab| tab.execution_target.as_ref())
+                else {
+                    self.status_message("No active console; connect before selecting a target");
+                    return Vec::new();
+                };
+                let selected = candidates
+                    .iter()
+                    .position(|candidate| candidate == current)
                     .unwrap_or(0);
                 self.overlay = Some(Overlay::TargetSelector {
                     candidates,
@@ -2113,7 +2193,9 @@ impl App {
                 let Some(target) = candidates.get(selected).cloned() else {
                     return Vec::new();
                 };
-                let tab = self.active_console();
+                let Some(tab) = self.active_console_opt() else {
+                    return Vec::new();
+                };
                 if tab.execution_target.as_ref() == Some(&target) {
                     return Vec::new();
                 }
@@ -2488,7 +2570,25 @@ impl App {
                 let Some(target) = target else {
                     return Vec::new();
                 };
+                let Some(profile) = self
+                    .profiles
+                    .iter()
+                    .find(|profile| profile.id == profile_id)
+                else {
+                    return Vec::new();
+                };
+                if !target.is_valid(profile) {
+                    return Vec::new();
+                }
                 let old_profile_id = self.connection.profile_id;
+                let should_activate_workspace = pending_matches
+                    || self.connection.profile_id.is_none()
+                    || self.connection.profile_id == Some(profile_id);
+                let mut workspace_commands = if should_activate_workspace {
+                    self.activate_profile_workspace(profile_id, target.clone())
+                } else {
+                    Vec::new()
+                };
                 self.connection_terminal_generation = generation;
                 self.connection.profile_id = Some(profile_id);
                 self.connection.generation = generation;
@@ -2523,11 +2623,6 @@ impl App {
                 if pending_matches {
                     self.connection.pending_target = None;
                 }
-                let relation_cancellations =
-                    self.cancel_relation_requests_for_connection(Some(ConnectionIdentity {
-                        profile_id,
-                        generation,
-                    }));
                 self.explorer.connection_changed();
                 if let Some(old_profile_id) = old_profile_id.filter(|id| *id != profile_id) {
                     self.clear_profile_catalog(old_profile_id, ExplorerConnectionStatus::Offline);
@@ -2600,9 +2695,12 @@ impl App {
                         .expanded
                         .insert(crate::model::explorer::ExplorerNodeId::Profile(profile_id));
                 }
-                let mut commands = relation_cancellations;
+                let mut commands = std::mem::take(&mut workspace_commands);
                 commands.extend(commands_for_catalog);
-                if persist_target {
+                if should_activate_workspace && self.is_active_relation_tab() {
+                    commands.extend(self.load_active_relation(false));
+                }
+                if persist_target || should_activate_workspace {
                     commands.push(self.persist_workspace_command());
                 }
                 commands
