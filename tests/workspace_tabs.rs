@@ -50,6 +50,7 @@ fn connection_workspace_preserves_mixed_tab_order() {
     let workspace = lazydb::model::workspace::ConnectionWorkspace {
         tabs: vec![WorkspaceTab::Relation(relation), WorkspaceTab::Sql(console)],
         sql_editors: Vec::new(),
+        sql: Vec::new(),
         active_tab_id: Some(console_id),
     };
 
@@ -66,6 +67,7 @@ fn connection_workspace_active_tab_is_an_id_not_an_index() {
     let workspace = lazydb::model::workspace::ConnectionWorkspace {
         tabs: vec![WorkspaceTab::Sql(first), WorkspaceTab::Sql(second)],
         sql_editors: Vec::new(),
+        sql: Vec::new(),
         active_tab_id: Some(second_id),
     };
 
@@ -346,7 +348,7 @@ fn workspace_restore_preserves_valid_targets_and_defaults_missing_targets() {
 }
 
 #[test]
-fn workspace_restore_selects_targeted_profile_and_falls_back_to_startup_profile() {
+fn workspace_restore_caches_profiles_without_exposing_a_workspace() {
     let first = import_connection_url(":memory:", Some("first"))
         .unwrap()
         .profile;
@@ -371,16 +373,19 @@ fn workspace_restore_selects_targeted_profile_and_falls_back_to_startup_profile(
     let mut app = App::new(vec![first.clone(), second.clone()]);
     app.restore_workspace(snapshot, Some(first.id));
 
-    assert_eq!(app.sql_editors.len(), 1);
-    assert_eq!(app.sql_editors[0].id, first_id);
+    assert!(app.tabs.is_empty());
+    assert!(app.sql_editors.is_empty());
+    assert_eq!(app.active_workspace_profile, None);
+    let restored = app.workspace_snapshot();
     assert_eq!(
-        app.active_console()
-            .execution_target
-            .as_ref()
-            .unwrap()
-            .profile_id,
-        first.id
+        restored
+            .profiles
+            .iter()
+            .map(|profile| profile.profile_id)
+            .collect::<Vec<_>>(),
+        vec![first.id, second.id]
     );
+    assert_eq!(restored.sql.len(), 2);
 }
 
 #[test]
@@ -404,14 +409,9 @@ fn workspace_restore_ignores_invalid_or_deleted_targets_and_uses_first_profile()
     let mut app = App::new(vec![profile.clone()]);
     app.restore_workspace(snapshot, None);
 
-    assert_eq!(
-        app.active_console()
-            .execution_target
-            .as_ref()
-            .unwrap()
-            .profile_id,
-        profile.id
-    );
+    assert!(app.tabs.is_empty());
+    assert!(app.sql_editors.is_empty());
+    assert_eq!(app.active_workspace_profile, None);
 }
 
 #[test]
@@ -432,25 +432,96 @@ fn workspace_restore_assigns_targetless_consoles_to_startup_then_first_profile()
     };
     let mut app = App::new(vec![first.clone(), second.clone()]);
     app.restore_workspace(snapshot.clone(), Some(second.id));
-    assert_eq!(
-        app.active_console()
-            .execution_target
-            .as_ref()
-            .unwrap()
-            .profile_id,
-        second.id
-    );
+    assert!(app.tabs.is_empty());
+    assert!(app.sql_editors.is_empty());
 
     let mut app = App::new(vec![first.clone(), second]);
     app.restore_workspace(snapshot, None);
-    assert_eq!(
-        app.active_console()
-            .execution_target
-            .as_ref()
-            .unwrap()
-            .profile_id,
-        first.id
-    );
+    assert!(app.tabs.is_empty());
+    assert!(app.sql_editors.is_empty());
+}
+
+#[test]
+fn workspace_restore_rebuilds_all_profile_tabs_and_preserves_hidden_sql() {
+    let first = import_connection_url(":memory:", Some("first"))
+        .unwrap()
+        .profile;
+    let second = import_connection_url(":memory:", Some("second"))
+        .unwrap()
+        .profile;
+    let console_id = Uuid::new_v4();
+    let hidden_id = Uuid::new_v4();
+    let relation_id = Uuid::new_v4();
+    let other_console_id = Uuid::new_v4();
+    let snapshot = WorkspaceSnapshot {
+        active_profile: Some(first.id),
+        profiles: vec![
+            PersistedProfileWorkspace {
+                profile_id: first.id,
+                active_tab: Some(relation_id),
+                consoles: vec![
+                    persisted_console(console_id, "first", true),
+                    persisted_console(hidden_id, "hidden", false),
+                ],
+                tabs: vec![
+                    PersistedTab::Console { console_id },
+                    PersistedTab::Relation(lazydb::persistence::workspace::PersistedRelationTab {
+                        id: relation_id,
+                        object_id: lazydb::db::catalog::CatalogId::new(
+                            first.id,
+                            lazydb::db::catalog::CatalogKind::Table,
+                            ["users"],
+                        ),
+                        qualified_name: lazydb::db::catalog::QualifiedName {
+                            database: None,
+                            schema: Some("public".into()),
+                            object: "users".into(),
+                        },
+                        catalog_kind: lazydb::db::catalog::CatalogKind::Table,
+                        title: "users".into(),
+                        view: lazydb::model::relation::RelationView::Ddl,
+                    }),
+                ],
+            },
+            profile_workspace(second.id, other_console_id, Some(other_console_id)),
+        ],
+        active_console: Uuid::nil(),
+        consoles: Vec::new(),
+        sql: vec![
+            (console_id, "select first".into()),
+            (hidden_id, "select hidden".into()),
+            (other_console_id, "select second".into()),
+        ],
+    };
+    let mut app = App::new(vec![first.clone(), second]);
+    app.restore_workspace(snapshot.clone(), Some(first.id));
+
+    assert!(app.tabs.is_empty());
+    assert!(app.sql_editors.is_empty());
+    assert_eq!(app.active_workspace_profile, None);
+
+    let restored = app.workspace_snapshot();
+    assert_eq!(restored.profiles.len(), 2);
+    assert_eq!(restored.sql, snapshot.sql);
+    assert!(matches!(
+        restored.profiles[0].tabs[0],
+        PersistedTab::Console { console_id: id } if id == console_id
+    ));
+    assert!(matches!(
+        restored.profiles[0].tabs[1],
+        PersistedTab::Relation(ref relation) if relation.id == relation_id
+    ));
+}
+
+fn persisted_console(id: Uuid, name: &str, open: bool) -> PersistedConsole {
+    PersistedConsole {
+        id,
+        name: name.into(),
+        sql_file: format!("{id}.sql").into(),
+        target: None,
+        transaction_mode: TransactionMode::Auto,
+        open,
+    }
 }
 
 fn profile_workspace(

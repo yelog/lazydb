@@ -279,9 +279,15 @@ impl App {
     fn take_active_workspace(&mut self) -> Option<(Uuid, ConnectionWorkspace)> {
         let profile_id = self.active_workspace_profile?;
         let active_tab_id = self.active_tab_id();
+        let sql = self
+            .sql_editors
+            .iter()
+            .map(|record| (record.id, self.editor_text(record.id).unwrap_or_default()))
+            .collect();
         let workspace = ConnectionWorkspace {
             tabs: std::mem::take(&mut self.tabs),
             sql_editors: std::mem::take(&mut self.sql_editors),
+            sql,
             active_tab_id,
         };
         self.active_workspace_profile = None;
@@ -292,6 +298,10 @@ impl App {
     fn install_workspace(&mut self, profile_id: Uuid, workspace: ConnectionWorkspace) {
         self.tabs = workspace.tabs;
         self.sql_editors = workspace.sql_editors;
+        self.editor = EditorWorkspace::new();
+        for (id, text) in &workspace.sql {
+            self.editor.open_console(*id, text);
+        }
         self.active_tab = workspace
             .active_tab_id
             .and_then(|id| self.tabs.iter().position(|tab| tab.id() == id))
@@ -318,6 +328,7 @@ impl App {
                 transaction_mode: TransactionMode::Auto,
                 open: true,
             }],
+            sql: vec![(id, String::new())],
             active_tab_id: Some(id),
         }
     }
@@ -421,64 +432,122 @@ impl App {
     }
 
     pub fn workspace_snapshot(&self) -> WorkspaceSnapshot {
-        let consoles = self
+        let active_workspace = self.active_workspace_profile.map(|profile_id| {
+            (
+                profile_id,
+                ConnectionWorkspace {
+                    tabs: self.tabs.clone(),
+                    sql_editors: self.sql_editors.clone(),
+                    sql: self
+                        .sql_editors
+                        .iter()
+                        .map(|record| (record.id, self.editor_text(record.id).unwrap_or_default()))
+                        .collect(),
+                    active_tab_id: self.active_tab_id(),
+                },
+            )
+        });
+        let mut workspaces = self.workspaces.clone();
+        if let Some((profile_id, workspace)) = active_workspace.clone() {
+            workspaces.insert(profile_id, workspace);
+        }
+        let mut workspaces = workspaces.into_iter().collect::<Vec<_>>();
+        workspaces.sort_by_key(|(profile_id, _)| {
+            self.profiles
+                .iter()
+                .position(|profile| profile.id == *profile_id)
+                .unwrap_or(usize::MAX)
+        });
+        let has_profile_workspaces = !workspaces.is_empty();
+        let sql = workspaces
+            .iter()
+            .flat_map(|(_, workspace)| workspace.sql.iter().cloned())
+            .collect();
+        let profiles = workspaces
+            .into_iter()
+            .map(|(profile_id, workspace)| self.persisted_workspace(profile_id, workspace))
+            .collect::<Vec<_>>();
+        let legacy_consoles = if active_workspace.is_none() && !has_profile_workspaces {
+            self.sql_editors
+                .iter()
+                .map(|record| self.persisted_console(record, None))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let sql = if active_workspace.is_none() && !has_profile_workspaces {
+            self.sql_editors
+                .iter()
+                .map(|record| (record.id, self.editor_text(record.id).unwrap_or_default()))
+                .collect()
+        } else {
+            sql
+        };
+        WorkspaceSnapshot {
+            active_profile: self.active_workspace_profile,
+            profiles,
+            active_console: self.active_tab_id().unwrap_or(Uuid::nil()),
+            consoles: legacy_consoles,
+            sql,
+        }
+    }
+
+    fn persisted_console(
+        &self,
+        record: &ConsoleRecord,
+        open_tab: Option<&ConsoleTab>,
+    ) -> PersistedConsole {
+        PersistedConsole {
+            id: record.id,
+            name: open_tab.map_or_else(|| record.name.clone(), |tab| tab.name.clone()),
+            sql_file: format!("{}.sql", record.id).into(),
+            target: open_tab
+                .and_then(|tab| tab.execution_target.clone())
+                .or_else(|| record.execution_target.clone()),
+            transaction_mode: open_tab.map_or(record.transaction_mode, |tab| tab.transaction_mode),
+            open: record.open,
+        }
+    }
+
+    fn persisted_workspace(
+        &self,
+        profile_id: Uuid,
+        workspace: ConnectionWorkspace,
+    ) -> PersistedProfileWorkspace {
+        let consoles = workspace
             .sql_editors
             .iter()
             .map(|record| {
-                let open_tab = self
+                let tab = workspace
                     .tabs
                     .iter()
                     .find(|tab| tab.id() == record.id)
                     .and_then(WorkspaceTab::as_console);
-                PersistedConsole {
-                    id: record.id,
-                    name: open_tab.map_or_else(|| record.name.clone(), |tab| tab.name.clone()),
-                    sql_file: format!("{}.sql", record.id).into(),
-                    target: open_tab
-                        .and_then(|tab| tab.execution_target.clone())
-                        .or_else(|| record.execution_target.clone()),
-                    transaction_mode: open_tab
-                        .map_or(record.transaction_mode, |tab| tab.transaction_mode),
-                    open: record.open,
+                self.persisted_console(record, tab)
+            })
+            .collect();
+        let tabs = workspace
+            .tabs
+            .iter()
+            .map(|tab| match tab {
+                WorkspaceTab::Sql(tab) => PersistedTab::Console { console_id: tab.id },
+                WorkspaceTab::Relation(tab) => {
+                    PersistedTab::Relation(crate::persistence::workspace::PersistedRelationTab {
+                        id: tab.id,
+                        object_id: tab.descriptor.key.object_id.clone(),
+                        qualified_name: tab.descriptor.qualified_name.clone(),
+                        catalog_kind: tab.descriptor.kind,
+                        title: tab.descriptor.title.clone(),
+                        view: tab.view,
+                    })
                 }
             })
-            .collect::<Vec<_>>();
-        let sql = consoles
-            .iter()
-            .map(|console| (console.id, self.editor_text(console.id).unwrap_or_default()))
             .collect();
-        let active_console = self
-            .active_console_opt()
-            .map(|tab| tab.id)
-            .or_else(|| {
-                consoles
-                    .iter()
-                    .find(|console| console.open)
-                    .map(|console| console.id)
-            })
-            .unwrap_or(Uuid::nil());
-        let profiles = self
-            .active_workspace_profile
-            .map_or_else(Vec::new, |profile_id| {
-                vec![PersistedProfileWorkspace {
-                    profile_id,
-                    active_tab: (active_console != Uuid::nil()).then_some(active_console),
-                    tabs: consoles
-                        .iter()
-                        .filter(|console| console.open)
-                        .map(|console| PersistedTab::Console {
-                            console_id: console.id,
-                        })
-                        .collect(),
-                    consoles: consoles.clone(),
-                }]
-            });
-        WorkspaceSnapshot {
-            active_profile: self.active_workspace_profile,
-            profiles,
-            active_console,
+        PersistedProfileWorkspace {
+            profile_id,
+            active_tab: workspace.active_tab_id,
             consoles,
-            sql,
+            tabs,
         }
     }
 
@@ -490,6 +559,28 @@ impl App {
         let selected_profile_id = selected_profile
             .or(snapshot.active_profile)
             .or_else(|| snapshot.profiles.first().map(|profile| profile.profile_id));
+        self.workspaces.clear();
+        for profile in &snapshot.profiles {
+            self.workspaces.insert(
+                profile.profile_id,
+                self.restore_profile_workspace(profile, &snapshot.sql),
+            );
+        }
+        if !snapshot.profiles.is_empty() && self.connection.profile_id.is_none() {
+            self.tabs.clear();
+            self.sql_editors.clear();
+            self.editor = EditorWorkspace::new();
+            self.active_workspace_profile = None;
+            self.active_tab = 0;
+            return;
+        }
+        if let Some(profile_id) = selected_profile_id
+            && self.profiles.iter().any(|profile| profile.id == profile_id)
+            && let Some(workspace) = self.workspaces.get(&profile_id).cloned()
+        {
+            self.install_workspace(profile_id, workspace);
+            return;
+        }
         let persisted_profile = selected_profile_id.and_then(|profile_id| {
             snapshot
                 .profiles
@@ -572,6 +663,85 @@ impl App {
             .unwrap_or(0);
         self.next_console_number = self.tabs.len().saturating_add(1);
         self.focus = Focus::Editor;
+    }
+
+    fn restore_profile_workspace(
+        &self,
+        profile: &PersistedProfileWorkspace,
+        sql: &[(Uuid, String)],
+    ) -> ConnectionWorkspace {
+        let selected = self
+            .profiles
+            .iter()
+            .find(|item| item.id == profile.profile_id);
+        let mut records = profile.consoles.clone();
+        let mut tabs = Vec::new();
+        for persisted in &profile.tabs {
+            match persisted {
+                PersistedTab::Console { console_id } => {
+                    if let Some(console) =
+                        records.iter_mut().find(|console| console.id == *console_id)
+                    {
+                        console.open = true;
+                        let mut tab = ConsoleTab::new(console.name.clone());
+                        tab.id = console.id;
+                        tab.transaction_mode = console.transaction_mode;
+                        tab.execution_target = console.target.clone().filter(|target| {
+                            self.profiles
+                                .iter()
+                                .find(|item| item.id == target.profile_id)
+                                .is_some_and(|item| target.is_valid(item))
+                        });
+                        if tab.execution_target.is_none() {
+                            tab.execution_target = selected.map(ExecutionTarget::from_profile);
+                        }
+                        tabs.push(WorkspaceTab::Sql(tab));
+                    }
+                }
+                PersistedTab::Relation(relation) => {
+                    let mut tab = RelationTab::with_descriptor(
+                        RelationDescriptor {
+                            key: RelationKey {
+                                profile_id: profile.profile_id,
+                                object_id: relation.object_id.clone(),
+                            },
+                            qualified_name: relation.qualified_name.clone(),
+                            kind: relation.catalog_kind,
+                            title: relation.title.clone(),
+                        },
+                        relation.view,
+                    );
+                    tab.id = relation.id;
+                    tabs.push(WorkspaceTab::Relation(tab));
+                }
+            }
+        }
+        let text = records
+            .iter()
+            .map(|console| {
+                (
+                    console.id,
+                    sql.iter()
+                        .find(|(id, _)| *id == console.id)
+                        .map_or(String::new(), |(_, text)| text.clone()),
+                )
+            })
+            .collect();
+        ConnectionWorkspace {
+            tabs,
+            sql_editors: records
+                .into_iter()
+                .map(|console| ConsoleRecord {
+                    id: console.id,
+                    name: console.name,
+                    execution_target: console.target,
+                    transaction_mode: console.transaction_mode,
+                    open: console.open,
+                })
+                .collect(),
+            sql: text,
+            active_tab_id: profile.active_tab,
+        }
     }
 
     fn persist_workspace_command(&self) -> Command {

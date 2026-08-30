@@ -133,10 +133,11 @@ pub struct ConnectionState {
     pub error: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ConnectionWorkspace {
     pub tabs: Vec<WorkspaceTab>,
     pub sql_editors: Vec<ConsoleRecord>,
+    pub sql: Vec<(Uuid, String)>,
     pub active_tab_id: Option<Uuid>,
 }
 
