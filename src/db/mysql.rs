@@ -1581,9 +1581,15 @@ impl MySqlAdapter {
             scope: relation_scope,
             page_size: RELATION_PREVIEW_LIMIT,
         };
-        let children_entries = self
+        let mut children_entries = self
             .load_relation_children(connection, &database, &name, relation)
             .await?;
+        let _ = paginate_in_memory(
+            &mut children_entries,
+            &request,
+            child_sort_key,
+            child_tie_breaker,
+        )?;
         let children_count = exact_count(children_entries.len())?;
         let children = CatalogPage::new(&request, children_entries, children_count, None)
             .map_err(catalog_invariant)?;
