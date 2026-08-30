@@ -218,6 +218,38 @@ pub enum CredentialPolicy {
     Keyring(String),
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "scope", rename_all = "snake_case")]
+pub enum ProfileAccess {
+    #[default]
+    Global,
+    Projects {
+        roots: Vec<PathBuf>,
+    },
+}
+
+impl ProfileAccess {
+    pub fn contains_project(&self, root: &std::path::Path) -> bool {
+        matches!(self, Self::Projects { roots } if roots.iter().any(|candidate| candidate == root))
+    }
+
+    pub fn add_project(&mut self, root: PathBuf) {
+        let Self::Projects { roots } = self else {
+            return;
+        };
+        if !roots.contains(&root) {
+            roots.push(root);
+            roots.sort();
+        }
+    }
+
+    pub fn remove_project(&mut self, root: &std::path::Path) {
+        if let Self::Projects { roots } = self {
+            roots.retain(|candidate| candidate != root);
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum PasswordStorageChoice {
     #[default]
@@ -254,6 +286,8 @@ impl CredentialPolicy {
 pub struct ConnectionProfile {
     pub id: Uuid,
     pub name: String,
+    #[serde(default)]
+    pub access: ProfileAccess,
     pub kind: DatabaseKind,
     #[serde(default)]
     pub url_format: ConnectionUrlFormat,
@@ -401,6 +435,7 @@ pub fn import_connection_url(
         profile: ConnectionProfile {
             id: Uuid::new_v4(),
             name: choose_name(preferred_name, &derived_name),
+            access: ProfileAccess::Global,
             kind: parsed.kind,
             url_format: parsed.format,
             host: parsed.host,

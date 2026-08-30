@@ -4,7 +4,7 @@ use lazydb::{
     persistence::profiles::{PersistenceError, ProfileStore},
     profile::{
         CatalogScope, CatalogSelection, ConnectionProfile, ConnectionUrlFormat, CredentialPolicy,
-        DatabaseScope, Environment, import_connection_url,
+        DatabaseScope, Environment, ProfileAccess, import_connection_url,
     },
 };
 use tempfile::TempDir;
@@ -16,7 +16,7 @@ struct ProfileFileFixture<'a> {
 }
 
 #[test]
-fn version_two_profiles_migrate_credential_policy_and_save_as_version_four() {
+fn version_two_profiles_migrate_credential_policy_and_save_as_version_five() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("connections.toml");
     let store = ProfileStore::new(path.clone());
@@ -56,6 +56,7 @@ fn version_two_profiles_migrate_credential_policy_and_save_as_version_four() {
         .unwrap()
         .remove("credential_policy");
     profiles[0].as_table_mut().unwrap().remove("url_format");
+    profiles[0].as_table_mut().unwrap().remove("access");
     profiles[0].as_table_mut().unwrap().insert(
         "secret_ref".into(),
         toml::Value::String("keyring:profile-id".into()),
@@ -65,6 +66,7 @@ fn version_two_profiles_migrate_credential_policy_and_save_as_version_four() {
         .unwrap()
         .remove("credential_policy");
     profiles[1].as_table_mut().unwrap().remove("url_format");
+    profiles[1].as_table_mut().unwrap().remove("access");
     fs::write(&path, toml::to_string_pretty(&legacy).unwrap()).unwrap();
 
     let loaded = store.load().unwrap();
@@ -80,7 +82,7 @@ fn version_two_profiles_migrate_credential_policy_and_save_as_version_four() {
 
     store.save(&loaded).unwrap();
     let serialized = fs::read_to_string(path).unwrap();
-    assert!(serialized.contains("version = 4"));
+    assert!(serialized.contains("version = 5"));
     assert!(serialized.contains("policy = \"system\""));
     assert!(!serialized.contains("secret_ref"));
     assert!(serialized.contains("catalog_scope"));
@@ -124,7 +126,7 @@ include_schemas = ["public"]
         error,
         PersistenceError::UnsupportedVersion {
             found: 1,
-            expected: 4
+            expected: 5
         }
     ));
 }
@@ -175,6 +177,68 @@ fn credential_storage_variants_serialize_without_plaintext() {
     let serialized = toml::to_string(&profile).unwrap();
     assert!(serialized.contains("policy = \"system\""));
     assert!(serialized.contains("keyring:app"));
+}
+
+#[test]
+fn version_five_round_trips_global_and_multi_project_access() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("connections.toml");
+    let store = ProfileStore::new(path.clone());
+    let mut profile = import_connection_url("sqlite:///tmp/app.db", Some("app"))
+        .unwrap()
+        .profile;
+    profile.access = ProfileAccess::Projects {
+        roots: vec!["/Users/me/code/alpha".into(), "/Users/me/code/zeta".into()],
+    };
+    store.save(&[profile.clone()]).unwrap();
+    let loaded = store.load().unwrap();
+
+    assert_eq!(loaded, vec![profile]);
+    let serialized = fs::read_to_string(path).unwrap();
+    assert!(serialized.contains("version = 5"));
+    assert!(serialized.contains("scope = \"projects\""));
+    assert!(serialized.contains("/Users/me/code/zeta"));
+    assert!(serialized.contains("/Users/me/code/alpha"));
+}
+
+#[test]
+fn project_access_allows_an_empty_unassigned_root_list() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("connections.toml");
+    let store = ProfileStore::new(path);
+    let mut profile = import_connection_url(":memory:", Some("unassigned"))
+        .unwrap()
+        .profile;
+    profile.access = ProfileAccess::Projects { roots: Vec::new() };
+
+    store.save(&[profile.clone()]).unwrap();
+
+    assert_eq!(store.load().unwrap(), vec![profile]);
+}
+
+#[test]
+fn version_five_rejects_relative_and_duplicate_project_roots() {
+    let temp = TempDir::new().unwrap();
+    let store = ProfileStore::new(temp.path().join("connections.toml"));
+    let mut profile = import_connection_url(":memory:", Some("invalid"))
+        .unwrap()
+        .profile;
+
+    profile.access = ProfileAccess::Projects {
+        roots: vec!["relative/project".into()],
+    };
+    assert!(matches!(
+        store.save(&[profile.clone()]),
+        Err(PersistenceError::InvalidProjectRoot(_))
+    ));
+
+    profile.access = ProfileAccess::Projects {
+        roots: vec!["/same/project".into(), "/same/project".into()],
+    };
+    assert!(matches!(
+        store.save(&[profile]),
+        Err(PersistenceError::DuplicateProjectRoot(_))
+    ));
 }
 
 #[test]

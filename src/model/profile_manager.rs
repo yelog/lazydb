@@ -18,7 +18,7 @@ use crate::{
     profile::{
         CatalogScope, CatalogScopeValidationError, CatalogSelection, ConnectionProfile,
         ConnectionUrlFormat, CredentialPolicy, DatabaseKind, DatabaseScope, Environment,
-        PasswordStorageChoice, SslMode, format_connection_url, parse_connection_url,
+        PasswordStorageChoice, ProfileAccess, SslMode, format_connection_url, parse_connection_url,
     },
 };
 
@@ -291,6 +291,7 @@ impl fmt::Debug for CatalogDiscoveryState {
 #[derive(Clone)]
 pub struct ProfileDraft {
     profile_id: Uuid,
+    pub access: ProfileAccess,
     pub kind: DatabaseKind,
     pub url_format: ConnectionUrlFormat,
     url: SecretString,
@@ -348,6 +349,7 @@ impl ProfileDraft {
 
         let mut draft = Self {
             profile_id: Uuid::new_v4(),
+            access: ProfileAccess::Global,
             kind,
             url_format: ConnectionUrlFormat::default_for(kind),
             url: SecretString::from(String::new()),
@@ -403,6 +405,7 @@ impl ProfileDraft {
 
         let mut draft = Self {
             profile_id: profile.id,
+            access: profile.access.clone(),
             kind: profile.kind,
             url_format: if profile.url_format.is_compatible(profile.kind) {
                 profile.url_format
@@ -881,6 +884,7 @@ impl ProfileDraft {
             ConnectionProfile {
                 id: self.profile_id,
                 name,
+                access: self.access.clone(),
                 kind: self.kind,
                 url_format: self.url_format,
                 host,
@@ -1066,6 +1070,7 @@ impl ProfileDraft {
         Ok(ConnectionProfile {
             id: self.profile_id,
             name: String::new(),
+            access: self.access.clone(),
             kind: self.kind,
             url_format: self.url_format,
             host,
