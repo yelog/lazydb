@@ -855,16 +855,29 @@ impl ExplorerState {
                     ),
                     ExplorerNodeId::Others => (
                         "OTHERS".to_owned(),
-                        Some(
-                            self.normalized
+                        Some({
+                            let count = self
+                                .normalized
                                 .profiles
                                 .values()
                                 .filter(|profile| {
                                     profile.placement == ProfilePlacement::OtherProject
                                 })
-                                .count()
-                                .to_string(),
-                        ),
+                                .count();
+                            let active = self.active_profile.is_some_and(|profile_id| {
+                                self.normalized
+                                    .profiles
+                                    .get(&profile_id)
+                                    .is_some_and(|profile| {
+                                        profile.placement == ProfilePlacement::OtherProject
+                                    })
+                            });
+                            if active {
+                                format!("{count} · 1 ACTIVE")
+                            } else {
+                                count.to_string()
+                            }
+                        }),
                         None,
                         None,
                         None,
