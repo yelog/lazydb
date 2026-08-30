@@ -1322,7 +1322,7 @@ impl MySqlAdapter {
             .await
             .map_err(sql_error)?;
         actual
-            .filter(|actual| actual == database)
+            .filter(|actual| canonical_name_matches(lower_case_table_names, actual, database))
             .ok_or_else(|| catalog_target_not_found(target))
     }
 
@@ -1374,7 +1374,7 @@ impl MySqlAdapter {
             .map_err(sql_error)?
             .ok_or_else(|| catalog_internal("owning relation was not found"))?;
         let actual_name: String = row.try_get(0).map_err(decode_error)?;
-        if actual_name != name {
+        if !canonical_name_matches(lower_case_table_names, &actual_name, name) {
             return Err(catalog_internal(
                 "MySQL owning relation name was not canonical",
             ));
@@ -1419,7 +1419,7 @@ impl MySqlAdapter {
             .map_err(sql_error)?
             .ok_or_else(|| catalog_target_not_found(target))?;
         let actual_name: String = row.try_get(0).map_err(decode_error)?;
-        if actual_name != name {
+        if !canonical_name_matches(lower_case_table_names, &actual_name, name) {
             return Err(catalog_target_not_found(target));
         }
         let native_kind: String = row.try_get(1).map_err(decode_error)?;
@@ -2483,6 +2483,14 @@ fn canonical_name_comparison(
         value => Err(catalog_internal(format!(
             "MySQL returned unsupported lower_case_table_names value {value}"
         ))),
+    }
+}
+
+fn canonical_name_matches(lower_case_table_names: i64, actual: &str, expected: &str) -> bool {
+    match lower_case_table_names {
+        0 => actual == expected,
+        1 | 2 => actual.eq_ignore_ascii_case(expected),
+        _ => false,
     }
 }
 
