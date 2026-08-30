@@ -304,12 +304,19 @@ test("health checks capabilities through the non-connecting CLI command", functi
   lazydb.setup({ executable = "fake-lazydb" })
 
   local original_executable = vim.fn.executable
+  local original_has = vim.fn.has
   local original_system = vim.system
   local original_health = vim.health
   local seen_argv
 
   vim.fn.executable = function(command)
     return command == "fake-lazydb" and 1 or 0
+  end
+  vim.fn.has = function(feature)
+    if feature == "nvim-0.10" then
+      return 1
+    end
+    return original_has(feature)
   end
   vim.system = function(argv, opts)
     seen_argv = vim.deepcopy(argv)
@@ -337,6 +344,7 @@ test("health checks capabilities through the non-connecting CLI command", functi
     require("lazydb.health").check()
   end, debug.traceback)
   vim.fn.executable = original_executable
+  vim.fn.has = original_has
   vim.system = original_system
   vim.health = original_health
 

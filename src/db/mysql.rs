@@ -1257,8 +1257,12 @@ impl MySqlAdapter {
                     .map(|value| checked_u32(value, "numeric scale"))
                     .transpose()?,
             );
-            metadata.character_maximum_length =
-                OptionalMetadata::Supported(row.try_get(10).map_err(decode_error)?);
+            metadata.character_maximum_length = OptionalMetadata::Supported(
+                row.try_get::<Option<i64>, _>(10)
+                    .map_err(decode_error)?
+                    .map(non_negative_count)
+                    .transpose()?,
+            );
             metadata.collation =
                 OptionalMetadata::Supported(row.try_get(11).map_err(decode_error)?);
             metadata.character_set =
