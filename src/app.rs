@@ -166,6 +166,14 @@ enum CatalogRequestIntent {
     Completion,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+enum WorkspaceExitCheck {
+    Ready,
+    Running,
+    ConsoleTransactions(Vec<Uuid>),
+    RelationTransaction,
+}
+
 #[derive(Clone, Copy)]
 enum CompletionAfterEdit {
     Schedule,
@@ -3563,20 +3571,25 @@ impl App {
                 );
                 Vec::new()
             }
-            Action::Quit => {
-                let ids = self
-                    .tabs
-                    .iter()
-                    .filter(|tab| self.transaction_needs_exit(tab.id()))
-                    .map(|tab| tab.id())
-                    .collect::<Vec<_>>();
-                if ids.is_empty() {
+            Action::Quit => match self.workspace_exit_check() {
+                WorkspaceExitCheck::Ready => {
                     self.should_quit = true;
                     vec![Command::Quit]
-                } else {
+                }
+                WorkspaceExitCheck::Running => {
+                    self.status_message(
+                        "Wait for running SQL or relation loads to finish before quitting",
+                    );
+                    Vec::new()
+                }
+                WorkspaceExitCheck::RelationTransaction => {
+                    self.status_message("Commit or roll back relation edits before quitting");
+                    Vec::new()
+                }
+                WorkspaceExitCheck::ConsoleTransactions(ids) => {
                     self.defer_intent(DeferredIntent::Quit, ids)
                 }
-            }
+            },
         }
     }
 
@@ -3599,6 +3612,42 @@ impl App {
             .find(|tab| tab.id() == console_id)
             .and_then(WorkspaceTab::as_console)
             .is_some_and(|tab| tab.transaction_state != TransactionState::Idle)
+    }
+
+    fn workspace_exit_check(&self) -> WorkspaceExitCheck {
+        if self.tabs.iter().any(|tab| {
+            tab.as_console()
+                .is_some_and(|tab| tab.query_status == QueryStatus::Running)
+                || matches!(tab, WorkspaceTab::Relation(relation) if matches!(
+                    relation.data,
+                    RelationLoad::Loading { .. }
+                ) || matches!(relation.ddl, RelationLoad::Loading { .. }))
+        }) {
+            return WorkspaceExitCheck::Running;
+        }
+        if self.tabs.iter().any(|tab| {
+            matches!(tab, WorkspaceTab::Relation(relation)
+            if relation.transaction_state != TransactionState::Idle
+                || relation.edit.as_ref().is_some_and(|edit| {
+                    edit.rows.iter().any(|row| !matches!(
+                        row.state,
+                        crate::model::relation_edit::EditableRowState::Clean
+                    ))
+                }))
+        }) {
+            return WorkspaceExitCheck::RelationTransaction;
+        }
+        let ids = self
+            .tabs
+            .iter()
+            .filter(|tab| self.transaction_needs_exit(tab.id()))
+            .map(WorkspaceTab::id)
+            .collect::<Vec<_>>();
+        if ids.is_empty() {
+            WorkspaceExitCheck::Ready
+        } else {
+            WorkspaceExitCheck::ConsoleTransactions(ids)
+        }
     }
 
     fn defer_intent<I>(&mut self, intent: DeferredIntent, console_ids: I) -> Vec<Command>
@@ -3780,9 +3829,7 @@ impl App {
             DeferredIntent::SetMode(TransactionMode::Auto) => {
                 self.set_transaction_mode(TransactionMode::Auto)
             }
-            DeferredIntent::SwitchConnection { profile_id, .. } => {
-                self.request_connection(profile_id)
-            }
+            DeferredIntent::SwitchConnection { profile_id } => self.request_connection(profile_id),
             DeferredIntent::DeleteProfile {
                 profile_id,
                 request_id,
@@ -3967,7 +4014,8 @@ impl App {
         if !self.profiles.iter().any(|profile| profile.id == profile_id) {
             return;
         }
-        let blocked = self.connection.profile_id == Some(profile_id) && self.has_running_query();
+        let blocked = self.connection.profile_id == Some(profile_id)
+            && matches!(self.workspace_exit_check(), WorkspaceExitCheck::Running);
         let mut manager = ProfileManagerState {
             page: ProfileManagerPage::ConfirmDelete,
             delete_profile_id: Some(profile_id),
@@ -3988,32 +4036,36 @@ impl App {
         else {
             return Vec::new();
         };
-        let blocked = self.connection.profile_id == Some(profile_id) && self.has_running_query();
-        let active_console_id = self.active_console().id;
-        let should_defer = self.connection.profile_id == Some(profile_id)
-            && self.transaction_needs_exit(active_console_id);
-        let deferred_console_ids = self
-            .tabs
-            .iter()
-            .filter(|tab| self.transaction_needs_exit(tab.id()))
-            .map(|tab| tab.id())
-            .collect::<Vec<_>>();
+        let exit_check =
+            (self.connection.profile_id == Some(profile_id)).then(|| self.workspace_exit_check());
         let Some(manager) = self.idle_profile_manager_mut(ProfileManagerPage::ConfirmDelete) else {
             return Vec::new();
         };
-        if blocked {
-            manager.message = Some("Cancel the running query before deleting this profile".into());
-            return Vec::new();
-        }
         let request_id = next_profile_request(manager);
-        if should_defer {
-            return self.defer_intent(
-                DeferredIntent::DeleteProfile {
-                    profile_id,
-                    request_id,
-                },
-                deferred_console_ids,
-            );
+        if let Some(check) = exit_check {
+            match check {
+                WorkspaceExitCheck::Running => {
+                    manager.message =
+                        Some("Cancel the running query before deleting this profile".into());
+                    return Vec::new();
+                }
+                WorkspaceExitCheck::RelationTransaction => {
+                    manager.message = Some(
+                        "Commit or roll back relation edits before deleting this profile".into(),
+                    );
+                    return Vec::new();
+                }
+                WorkspaceExitCheck::ConsoleTransactions(ids) => {
+                    return self.defer_intent(
+                        DeferredIntent::DeleteProfile {
+                            profile_id,
+                            request_id,
+                        },
+                        ids,
+                    );
+                }
+                WorkspaceExitCheck::Ready => {}
+            }
         }
         manager.operation = Some(ProfileOperation::Deleting);
         manager.message = None;
@@ -4298,9 +4350,26 @@ impl App {
     }
 
     fn request_connection(&mut self, profile_id: Uuid) -> Vec<Command> {
-        if !self.profiles.iter().any(|profile| profile.id == profile_id) || self.has_running_query()
-        {
+        if !self.profiles.iter().any(|profile| profile.id == profile_id) {
             return Vec::new();
+        }
+        if self.connection.profile_id != Some(profile_id) {
+            match self.workspace_exit_check() {
+                WorkspaceExitCheck::Ready => {}
+                WorkspaceExitCheck::Running => {
+                    self.status_message("Wait for running SQL or relation loads to finish before switching connections");
+                    return Vec::new();
+                }
+                WorkspaceExitCheck::RelationTransaction => {
+                    self.status_message(
+                        "Commit or roll back relation edits before switching connections",
+                    );
+                    return Vec::new();
+                }
+                WorkspaceExitCheck::ConsoleTransactions(ids) => {
+                    return self.defer_intent(DeferredIntent::SwitchConnection { profile_id }, ids);
+                }
+            }
         }
         let Some(profile) = self
             .profiles
@@ -5781,29 +5850,23 @@ impl App {
         else {
             return Vec::new();
         };
-        if self.tabs.iter().any(|tab| {
-            tab.as_console()
-                .is_some_and(|tab| tab.query_status == QueryStatus::Running)
-        }) {
-            return Vec::new();
+        match self.workspace_exit_check() {
+            WorkspaceExitCheck::Running => {
+                self.status_message(
+                    "Wait for running SQL or relation loads to finish before disconnecting",
+                );
+                return Vec::new();
+            }
+            WorkspaceExitCheck::RelationTransaction => {
+                self.status_message("Commit or roll back relation edits before disconnecting");
+                return Vec::new();
+            }
+            WorkspaceExitCheck::Ready => {}
+            WorkspaceExitCheck::ConsoleTransactions(ids) => {
+                return self.defer_intent(DeferredIntent::Disconnect { connection }, ids);
+            }
         }
         let mut commands = self.cancel_relation_requests_for_connection(None);
-        if self
-            .active_console_opt()
-            .is_some_and(|tab| self.transaction_needs_exit(tab.id))
-        {
-            commands.extend(
-                self.defer_intent(
-                    DeferredIntent::Disconnect { connection },
-                    self.tabs
-                        .iter()
-                        .filter(|tab| self.transaction_needs_exit(tab.id()))
-                        .map(|tab| tab.id())
-                        .collect::<Vec<_>>(),
-                ),
-            );
-            return commands;
-        }
         commands.push(Command::Disconnect { connection });
         commands
     }

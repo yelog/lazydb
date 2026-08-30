@@ -18,8 +18,11 @@ use lazydb::{
     model::{
         execution_target::ExecutionTarget,
         explorer::{ExplorerConnectionStatus, ExplorerNodeId},
-        relation::{RelationKey, RelationRequest, RelationRequestKind},
-        workspace::{ConnectionIdentity, ConnectionStatus, QueryStatus},
+        relation::{RelationKey, RelationRequest, RelationRequestKind, RelationTab},
+        relation_edit::RelationEditSession,
+        tab::WorkspaceTab,
+        transaction::{TransactionMode, TransactionState},
+        workspace::{ConnectionIdentity, ConnectionStatus, Overlay, QueryStatus},
     },
     persistence::{
         profiles::ProfileStore,
@@ -482,6 +485,120 @@ fn target_selector_requires_an_active_connection_and_blocks_manual_transactions(
     app.active_console_mut().transaction_state =
         lazydb::model::transaction::TransactionState::Active;
     assert!(app.update(Action::ConfirmTargetSelector).is_empty());
+}
+
+#[test]
+fn running_sql_blocks_connection_switch_without_changing_workspace() {
+    let first = memory_profile("first");
+    let second = memory_profile("second");
+    let first_id = first.id;
+    let second_id = second.id;
+    let mut app = App::new(vec![first, second]);
+    let generation = match app.update(Action::RequestConnect(first_id)).as_slice() {
+        [Command::Connect { generation, .. }] => *generation,
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+    app.update(Action::ConnectionSucceeded {
+        profile_id: first_id,
+        generation,
+        server: server("first"),
+    });
+    let console_id = app.active_console().id;
+    app.active_console_mut().query_status = QueryStatus::Running;
+
+    assert!(app.update(Action::RequestConnect(second_id)).is_empty());
+    assert_eq!(app.connection.profile_id, Some(first_id));
+    assert_eq!(app.active_console().id, console_id);
+    assert!(
+        app.connection
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("running SQL")
+    );
+}
+
+#[test]
+fn all_manual_console_transactions_are_deferred_and_cancel_keeps_connection() {
+    let first = memory_profile("first");
+    let second = memory_profile("second");
+    let first_id = first.id;
+    let second_id = second.id;
+    let mut app = App::new(vec![first, second]);
+    let generation = match app.update(Action::RequestConnect(first_id)).as_slice() {
+        [Command::Connect { generation, .. }] => *generation,
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+    app.update(Action::ConnectionSucceeded {
+        profile_id: first_id,
+        generation,
+        server: server("first"),
+    });
+    let first_console = app.active_console().id;
+    app.update(Action::NewConsole);
+    let second_console = app.active_console().id;
+    for id in [first_console, second_console] {
+        let tab = app
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.id() == id)
+            .and_then(WorkspaceTab::as_console_mut)
+            .unwrap();
+        tab.transaction_mode = TransactionMode::Manual;
+        tab.transaction_state = TransactionState::Active;
+    }
+
+    assert!(app.update(Action::RequestConnect(second_id)).is_empty());
+    assert!(matches!(
+        app.overlay,
+        Some(Overlay::TransactionExitConfirm { .. })
+    ));
+    app.update(Action::CancelTransactionExit);
+    assert!(matches!(
+        app.overlay,
+        Some(Overlay::TransactionExitConfirm { .. })
+    ));
+    app.update(Action::CancelTransactionExit);
+    assert_eq!(app.connection.profile_id, Some(first_id));
+    assert!(app.overlay.is_none());
+}
+
+#[test]
+fn dirty_relation_edit_blocks_switch_and_quit_with_explicit_message() {
+    let profile = memory_profile("profile");
+    let profile_id = profile.id;
+    let other = memory_profile("other");
+    let other_id = other.id;
+    let mut app = App::new(vec![profile, other]);
+    let generation = match app.update(Action::RequestConnect(profile_id)).as_slice() {
+        [Command::Connect { generation, .. }] => *generation,
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+    app.update(Action::ConnectionSucceeded {
+        profile_id,
+        generation,
+        server: server("profile"),
+    });
+    let mut relation = RelationTab::new("users");
+    let mut edit = RelationEditSession::from_rows(vec![vec![]]);
+    edit.rows[0].state = lazydb::model::relation_edit::EditableRowState::Updated {
+        changed_columns: Default::default(),
+    };
+    relation.edit = Some(edit);
+    app.tabs.push(WorkspaceTab::Relation(relation));
+    app.active_tab = app.tabs.len() - 1;
+
+    assert!(app.update(Action::RequestConnect(other_id)).is_empty());
+    assert_eq!(
+        app.connection.error.as_deref(),
+        Some("Commit or roll back relation edits before switching connections")
+    );
+    assert!(app.update(Action::Quit).is_empty());
+    assert!(!app.should_quit);
+    assert_eq!(
+        app.connection.error.as_deref(),
+        Some("Commit or roll back relation edits before quitting")
+    );
 }
 
 #[test]

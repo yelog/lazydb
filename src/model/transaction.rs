@@ -55,7 +55,7 @@ pub enum DeferredIntent {
     SetMode(TransactionMode),
     CloseConsole,
     DeleteConsole(Uuid),
-    SwitchConnection { profile_id: Uuid, generation: u64 },
+    SwitchConnection { profile_id: Uuid },
     DeleteProfile { profile_id: Uuid, request_id: u64 },
     Disconnect { connection: ConnectionIdentity },
     Quit,
