@@ -4457,7 +4457,7 @@ impl App {
         let Some(draft) = manager.draft.as_ref() else {
             return Vec::new();
         };
-        let submission = match draft.validate(profiles) {
+        let mut submission = match draft.validate(profiles) {
             Ok(submission) => submission,
             Err(error) => {
                 manager.selected_field = error.field;
@@ -4465,6 +4465,14 @@ impl App {
                 return Vec::new();
             }
         };
+        if !profiles
+            .iter()
+            .any(|profile| profile.id == submission.profile.id)
+        {
+            submission.profile.access = ProfileAccess::Projects {
+                roots: vec![self.project.root.clone()],
+            };
+        }
         let request_id = next_profile_request(manager);
         manager.operation = Some(if connect {
             ProfileOperation::SavingAndConnecting
