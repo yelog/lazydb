@@ -783,7 +783,8 @@ impl App {
                     }
                 }
                 PersistedTab::Relation(relation) => {
-                    let mut tab = RelationTab::with_descriptor(
+                    let tab = RelationTab::restored(
+                        relation.id,
                         RelationDescriptor {
                             key: RelationKey {
                                 profile_id: profile.profile_id,
@@ -795,7 +796,6 @@ impl App {
                         },
                         relation.view,
                     );
-                    tab.id = relation.id;
                     tabs.push(WorkspaceTab::Relation(tab));
                 }
             }
@@ -1366,7 +1366,7 @@ impl App {
                 }
                 self.active_tab = (self.active_tab + 1) % self.tabs.len();
                 self.normalize_focus();
-                Vec::new()
+                self.load_active_relation(false)
             }
             Action::PreviousTab => {
                 if self.tabs.is_empty() {
@@ -1377,7 +1377,7 @@ impl App {
                     .checked_sub(1)
                     .unwrap_or(self.tabs.len() - 1);
                 self.normalize_focus();
-                Vec::new()
+                self.load_active_relation(false)
             }
             Action::GotoSqlConsole => {
                 if let Some(index) = self.tabs.iter().position(|tab| tab.as_console().is_some()) {
@@ -1390,6 +1390,7 @@ impl App {
                 if index < self.tabs.len() {
                     self.active_tab = index;
                     self.normalize_focus();
+                    return self.load_active_relation(false);
                 }
                 Vec::new()
             }

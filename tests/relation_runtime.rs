@@ -198,6 +198,80 @@ fn stale_failure_also_preserves_pending_and_previous_snapshot() {
     assert_eq!(app.tabs[1], before);
 }
 
+#[test]
+fn relation_event_cannot_mutate_a_cached_inactive_workspace() {
+    let first = import_profile(Uuid::new_v4());
+    let second = import_profile(Uuid::new_v4());
+    let first_id = first.id;
+    let second_id = second.id;
+    let connection = ConnectionIdentity {
+        profile_id: first_id,
+        generation: 1,
+    };
+    let mut app = App::new(vec![first, second]);
+    app.connection.profile_id = Some(first_id);
+    app.connection.generation = connection.generation;
+    app.connection.status = lazydb::model::workspace::ConnectionStatus::Connected;
+    app.active_workspace_profile = Some(first_id);
+
+    let mut tab = RelationTab::with_descriptor(
+        RelationDescriptor {
+            key: RelationKey {
+                profile_id: first_id,
+                object_id: CatalogId::new(first_id, CatalogKind::Table, ["users"]),
+            },
+            qualified_name: lazydb::db::catalog::QualifiedName {
+                database: None,
+                schema: None,
+                object: "users".into(),
+            },
+            kind: CatalogKind::Table,
+            title: "users".into(),
+        },
+        RelationView::Data,
+    );
+    let mut request = request();
+    request.tab_id = tab.id;
+    request.tab_generation = tab.generation;
+    request.connection = connection;
+    request.relation = tab.descriptor.key.clone();
+    tab.data = RelationLoad::Loading {
+        request: request.clone(),
+        previous: None,
+    };
+    app.tabs.push(WorkspaceTab::Relation(tab));
+    app.active_tab = 0;
+    app.connection.pending_profile_id = Some(second_id);
+    app.connection.pending_generation = Some(2);
+
+    app.update(Action::ConnectionSucceeded {
+        profile_id: second_id,
+        generation: 2,
+        server: lazydb::db::ServerInfo {
+            kind: DatabaseKind::Sqlite,
+            version: "3".into(),
+            database: "second".into(),
+        },
+    });
+    let tab_id = request.tab_id;
+    app.update(Action::RelationSucceeded {
+        request,
+        snapshot: Box::new(RelationSnapshot::Preview(lazydb::db::RelationPreview {
+            sql: "stale".into(),
+            result: empty_outcome(),
+        })),
+    });
+
+    assert!(app.tabs.iter().all(|tab| tab.id() != tab_id));
+    assert!(app.workspace_snapshot().profiles.iter().any(|profile| {
+        profile.profile_id == first_id
+            && profile.tabs.iter().any(|tab| {
+                matches!(tab, lazydb::persistence::workspace::PersistedTab::Relation(relation)
+                    if relation.id == tab_id)
+            })
+    }));
+}
+
 fn stale_requests(valid: &RelationRequest) -> Vec<RelationRequest> {
     vec![
         RelationRequest {

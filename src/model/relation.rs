@@ -278,6 +278,12 @@ impl RelationTab {
         }
     }
 
+    pub fn restored(id: Uuid, descriptor: RelationDescriptor, view: RelationView) -> Self {
+        let mut tab = Self::with_descriptor(descriptor, view);
+        tab.id = id;
+        tab
+    }
+
     pub fn title(&self) -> &str {
         &self.descriptor.title
     }

@@ -123,6 +123,41 @@ fn ddl_viewport_defaults_to_zero() {
 }
 
 #[test]
+fn restored_relation_is_an_empty_transient_shell() {
+    let id = Uuid::new_v4();
+    let profile = Uuid::new_v4();
+    let tab = RelationTab::restored(
+        id,
+        RelationDescriptor {
+            key: RelationKey {
+                profile_id: profile,
+                object_id: CatalogId::new(profile, CatalogKind::Table, ["users"]),
+            },
+            qualified_name: qualified("users"),
+            kind: CatalogKind::Table,
+            title: "users".into(),
+        },
+        RelationView::Ddl,
+    );
+
+    assert_eq!(tab.id, id);
+    assert_eq!(tab.view, RelationView::Ddl);
+    assert!(matches!(
+        tab.data,
+        lazydb::model::relation::RelationLoad::Empty
+    ));
+    assert!(matches!(
+        tab.ddl,
+        lazydb::model::relation::RelationLoad::Empty
+    ));
+    assert!(tab.edit.is_none());
+    assert_eq!(
+        tab.transaction_state,
+        lazydb::model::transaction::TransactionState::Idle
+    );
+}
+
+#[test]
 fn ddl_scroll_saturates_and_clamps_to_viewport_bounds() {
     let mut app = app_with_relation(RelationView::Ddl);
     app.update(Action::SetDdlViewportMetrics {

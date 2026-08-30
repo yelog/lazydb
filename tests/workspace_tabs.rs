@@ -513,6 +513,131 @@ fn workspace_restore_rebuilds_all_profile_tabs_and_preserves_hidden_sql() {
     ));
 }
 
+#[test]
+fn restored_relation_tab_is_not_loaded_before_connection_installation() {
+    let profile = import_connection_url(":memory:", Some("first"))
+        .unwrap()
+        .profile;
+    let relation_id = Uuid::new_v4();
+    let snapshot = WorkspaceSnapshot {
+        active_profile: Some(profile.id),
+        profiles: vec![PersistedProfileWorkspace {
+            profile_id: profile.id,
+            active_tab: Some(relation_id),
+            consoles: Vec::new(),
+            tabs: vec![PersistedTab::Relation(
+                lazydb::persistence::workspace::PersistedRelationTab {
+                    id: relation_id,
+                    object_id: lazydb::db::catalog::CatalogId::new(
+                        profile.id,
+                        lazydb::db::catalog::CatalogKind::Table,
+                        ["users"],
+                    ),
+                    qualified_name: lazydb::db::catalog::QualifiedName {
+                        database: None,
+                        schema: Some("main".into()),
+                        object: "users".into(),
+                    },
+                    catalog_kind: lazydb::db::catalog::CatalogKind::Table,
+                    title: "users".into(),
+                    view: lazydb::model::relation::RelationView::Data,
+                },
+            )],
+        }],
+        active_console: Uuid::nil(),
+        consoles: Vec::new(),
+        sql: Vec::new(),
+    };
+    let mut app = App::new(vec![profile]);
+    app.restore_workspace(snapshot, None);
+
+    let restored = app.workspace_snapshot();
+    assert!(matches!(
+        &restored.profiles[0].tabs[0],
+        PersistedTab::Relation(relation) if relation.id == relation_id
+    ));
+}
+
+#[test]
+fn connection_install_loads_only_active_restored_relation() {
+    let profile = import_connection_url(":memory:", Some("first"))
+        .unwrap()
+        .profile;
+    let first_id = Uuid::new_v4();
+    let second_id = Uuid::new_v4();
+    let relation = |id: Uuid, title: &str| {
+        PersistedTab::Relation(lazydb::persistence::workspace::PersistedRelationTab {
+            id,
+            object_id: lazydb::db::catalog::CatalogId::new(
+                profile.id,
+                lazydb::db::catalog::CatalogKind::Table,
+                [title],
+            ),
+            qualified_name: lazydb::db::catalog::QualifiedName {
+                database: None,
+                schema: None,
+                object: title.into(),
+            },
+            catalog_kind: lazydb::db::catalog::CatalogKind::Table,
+            title: title.into(),
+            view: lazydb::model::relation::RelationView::Data,
+        })
+    };
+    let snapshot = WorkspaceSnapshot {
+        active_profile: Some(profile.id),
+        profiles: vec![PersistedProfileWorkspace {
+            profile_id: profile.id,
+            active_tab: Some(first_id),
+            consoles: Vec::new(),
+            tabs: vec![relation(first_id, "first"), relation(second_id, "second")],
+        }],
+        active_console: Uuid::nil(),
+        consoles: Vec::new(),
+        sql: Vec::new(),
+    };
+    let mut app = App::new(vec![profile]);
+    app.restore_workspace(snapshot, None);
+    let generation = match app
+        .update(Action::RequestConnect(profile_id(&app, 0)))
+        .as_slice()
+    {
+        [Command::Connect { generation, .. }] => *generation,
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+
+    let commands = app.update(Action::ConnectionSucceeded {
+        profile_id: profile_id(&app, 0),
+        generation,
+        server: lazydb::db::ServerInfo {
+            kind: lazydb::profile::DatabaseKind::Sqlite,
+            version: "3".into(),
+            database: ":memory:".into(),
+        },
+    });
+    assert_eq!(
+        commands
+            .iter()
+            .filter(|command| matches!(command, Command::LoadRelationPreview(_)))
+            .count(),
+        1
+    );
+    assert!(matches!(app.tabs[1], WorkspaceTab::Relation(ref tab)
+        if matches!(tab.data, lazydb::model::relation::RelationLoad::Empty)));
+
+    let commands = app.update(Action::ActivateTab(1));
+    assert_eq!(
+        commands
+            .iter()
+            .filter(|command| matches!(command, Command::LoadRelationPreview(_)))
+            .count(),
+        1
+    );
+}
+
+fn profile_id(app: &App, index: usize) -> Uuid {
+    app.profiles[index].id
+}
+
 fn persisted_console(id: Uuid, name: &str, open: bool) -> PersistedConsole {
     PersistedConsole {
         id,
