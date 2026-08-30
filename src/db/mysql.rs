@@ -1337,7 +1337,7 @@ impl MySqlAdapter {
             [database, schema] => (database.as_str(), schema.as_str()),
             _ => return Err(catalog_target_not_found(target)),
         };
-        if database != schema {
+        if !canonical_name_matches(lower_case_table_names, database, schema) {
             return Err(catalog_target_not_found(target));
         }
         self.verify_database(
@@ -1403,7 +1403,7 @@ impl MySqlAdapter {
         }
         let (database, schema, name) =
             relation_path(relation).ok_or_else(|| catalog_target_not_found(target))?;
-        if database != schema {
+        if !canonical_name_matches(lower_case_table_names, database, schema) {
             return Err(catalog_target_not_found(target));
         }
         let schema_comparison = canonical_name_comparison(lower_case_table_names, "table_schema")?;
