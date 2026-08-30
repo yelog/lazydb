@@ -492,10 +492,15 @@ impl MySqlAdapter {
             .begin_with(CATALOG_PAGE_BEGIN_SQL)
             .await
             .map_err(sql_error)?;
-        let lower_case_table_names: i64 = sqlx::query_scalar("SELECT @@lower_case_table_names")
-            .fetch_one(&mut *transaction)
-            .await
-            .map_err(sql_error)?;
+        let lower_case_table_names: i64 =
+            sqlx::query_scalar::<_, String>("SELECT CAST(@@lower_case_table_names AS CHAR)")
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(sql_error)?
+                .parse()
+                .map_err(|_| {
+                    catalog_internal("MySQL returned an invalid lower_case_table_names value")
+                })?;
         if !(0..=2).contains(&lower_case_table_names) {
             return Err(catalog_internal(format!(
                 "MySQL returned unsupported lower_case_table_names value {lower_case_table_names}"
@@ -1438,10 +1443,15 @@ impl MySqlAdapter {
         let target = CatalogTarget::RelationChildren {
             relation: relation.clone(),
         };
-        let lower_case: i64 = sqlx::query_scalar("SELECT @@lower_case_table_names")
-            .fetch_one(&mut *connection)
-            .await
-            .map_err(sql_error)?;
+        let lower_case: i64 =
+            sqlx::query_scalar::<_, String>("SELECT CAST(@@lower_case_table_names AS CHAR)")
+                .fetch_one(&mut *connection)
+                .await
+                .map_err(sql_error)?
+                .parse()
+                .map_err(|_| {
+                    catalog_internal("MySQL returned an invalid lower_case_table_names value")
+                })?;
         let (database, name, _) = self
             .verify_relation(&mut connection, relation, &target, lower_case)
             .await?;
@@ -1512,10 +1522,15 @@ impl MySqlAdapter {
         let target = CatalogTarget::RelationChildren {
             relation: relation.clone(),
         };
-        let lower_case: i64 = sqlx::query_scalar("SELECT @@lower_case_table_names")
-            .fetch_one(&mut *connection)
-            .await
-            .map_err(sql_error)?;
+        let lower_case: i64 =
+            sqlx::query_scalar::<_, String>("SELECT CAST(@@lower_case_table_names AS CHAR)")
+                .fetch_one(&mut *connection)
+                .await
+                .map_err(sql_error)?
+                .parse()
+                .map_err(|_| {
+                    catalog_internal("MySQL returned an invalid lower_case_table_names value")
+                })?;
         let (database, name, native_kind) = self
             .verify_relation(connection, relation, &target, lower_case)
             .await?;
