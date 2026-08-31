@@ -2,7 +2,7 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Add `^` and `$` navigation to the first and last column of the current row in SQL Result set and Relation DATA grids.
+**Goal:** Add `0`, `^`, and `$` navigation to the first and last column of the current row in SQL Result set and Relation DATA grids.
 
 **Architecture:** Add a semantic `GridSelectColumn` action and `GridColumnTarget` model enum. The keymap maps the keys only through the shared grid-navigation path, while `App` routes the action through `with_active_grid`. `DataGridState` performs bounded selection without changing row or viewport state.
 
@@ -44,7 +44,7 @@ Expected: PASS.
 
 **Step 1: Write the failing keymap tests**
 
-Cover `^` and `$` in a SQL Result DATA context and Relation DATA browse context. Assert that the keys map to `GridSelectColumn(First/Last)`. Cover Relation cell-edit mode to ensure the existing text-input path remains authoritative.
+Cover `0`, `^`, and `$` in a SQL Result DATA context and Relation DATA browse context. Assert that the keys map to `GridSelectColumn(First/Last)`. Cover Relation cell-edit mode to ensure the existing text-input path remains authoritative.
 
 **Step 2: Run the focused keymap tests**
 
@@ -53,7 +53,7 @@ Expected: FAIL because the actions are not mapped or handled yet.
 
 **Step 3: Implement keymap and App routing**
 
-Map `^` and `$` in the shared grid navigation mapping used by Results and Relation DATA browse mode. Add the corresponding `App::update` branch using `with_active_grid` and the active column count.
+Map `0`, `^`, and `$` in the shared grid navigation mapping used by Results and Relation DATA browse mode. Add the corresponding `App::update` branch using `with_active_grid` and the active column count.
 
 **Step 4: Run the focused keymap tests**
 

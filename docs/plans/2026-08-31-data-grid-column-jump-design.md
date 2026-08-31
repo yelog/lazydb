@@ -5,7 +5,7 @@
 Add Vim-style horizontal shortcuts to the shared data grid used by SQL Result
 set and Relation DATA:
 
-- `^` selects the first data column in the current row;
+- `0` and `^` select the first data column in the current row;
 - `$` selects the last data column in the current row.
 
 ## Behavior

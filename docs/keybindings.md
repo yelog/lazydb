@@ -171,7 +171,7 @@ connection unchanged.
 | Key | Action |
 | --- | --- |
 | `h/j/k/l`, arrows | Move selected cell |
-| `^` / `$` | Select the first/last column in the current row |
+| `0` / `^` / `$` | Select the first/last column in the current row (`0` and `^` select first) |
 | `gg`, `G` | Select the first/last row |
 | `H`, `M`, `L` | Select the top/middle/bottom visible row |
 | `Ctrl-d`, `Ctrl-u` | Move down/up half a page |
@@ -232,8 +232,8 @@ selection is visible while all editing,
 paste, undo, redo, substitution, and write-oriented commands are disabled. DDL
 status and provenance decorations are not part of selectable or copied text.
 On Data, the same movement keys select a cell and the shared grid follows the
-selected row/column only as needed. `^` and `$` select the first and last column
-of the current row.
+selected row/column only as needed. `0` and `^` select the first column, while
+`$` selects the last column of the current row.
 
 The mouse wheel scrolls the panel under the pointer: Explorer and SQL editor
 move by three rows, Data moves the grid by three rows, and DDL moves its

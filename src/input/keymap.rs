@@ -1265,7 +1265,7 @@ fn is_read_only_editor_key(event: KeyEvent) -> bool {
 
 fn map_results(code: KeyCode, app: &App) -> Option<Action> {
     match code {
-        KeyCode::Char('^') => Some(Action::GridSelectColumn(
+        KeyCode::Char('0' | '^') => Some(Action::GridSelectColumn(
             crate::model::tab::GridColumnTarget::First,
         )),
         KeyCode::Char('$') => Some(Action::GridSelectColumn(
