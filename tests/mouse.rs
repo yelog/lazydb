@@ -11,8 +11,9 @@ use lazydb::{
     },
     input::mouse::map_mouse,
     model::{
-        explorer::ExplorerNodeId,
+        explorer::{ExplorerNodeId, ExplorerScrollAmount},
         profile_manager::ProfileField,
+        tab::GridScrollAmount,
         workspace::{Focus, Overlay},
     },
     profile::{DatabaseKind, import_connection_url},
@@ -431,6 +432,97 @@ fn editor_mouse_scroll_is_a_viewport_action() {
 }
 
 #[test]
+fn grid_and_explorer_mouse_wheels_scroll_the_viewport_immediately() {
+    let app = App::new(Vec::new());
+    let mut ui = UiState::new();
+    ui.hit_regions.extend([
+        HitRegion {
+            area: Rect::new(0, 2, 20, 20),
+            target: HitTarget::Focus(Focus::Explorer),
+        },
+        HitRegion {
+            area: Rect::new(20, 2, 60, 20),
+            target: HitTarget::Focus(Focus::Results),
+        },
+    ]);
+
+    assert_eq!(
+        map_mouse(mouse(MouseEventKind::ScrollDown, 10, 10), &ui, &app),
+        Some(Action::ExplorerScrollNodes {
+            direction: 1,
+            amount: ExplorerScrollAmount::Lines(3),
+        })
+    );
+    assert_eq!(
+        map_mouse(mouse(MouseEventKind::ScrollUp, 10, 10), &ui, &app),
+        Some(Action::ExplorerScrollNodes {
+            direction: -1,
+            amount: ExplorerScrollAmount::Lines(3),
+        })
+    );
+    assert_eq!(
+        map_mouse(mouse(MouseEventKind::ScrollDown, 40, 10), &ui, &app),
+        Some(Action::GridScrollRows {
+            direction: 1,
+            amount: GridScrollAmount::Lines(3),
+        })
+    );
+    assert_eq!(
+        map_mouse(mouse(MouseEventKind::ScrollUp, 40, 10), &ui, &app),
+        Some(Action::GridScrollRows {
+            direction: -1,
+            amount: GridScrollAmount::Lines(3),
+        })
+    );
+}
+
+#[test]
+fn editor_horizontal_mouse_scroll_is_a_viewport_action() {
+    let app = App::new(Vec::new());
+    let mut state = UiState::new();
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| ui::render_with_state(frame, &app, &mut state))
+        .unwrap();
+
+    assert_eq!(
+        map_mouse(mouse(MouseEventKind::ScrollLeft, 40, 8), &state, &app),
+        Some(Action::EditorScroll {
+            rows: 0,
+            columns: -3
+        })
+    );
+    assert_eq!(
+        map_mouse(mouse(MouseEventKind::ScrollRight, 40, 8), &state, &app),
+        Some(Action::EditorScroll {
+            rows: 0,
+            columns: 3
+        })
+    );
+}
+
+#[test]
+fn result_horizontal_mouse_scroll_moves_the_grid_viewport() {
+    let mut app = App::new(Vec::new());
+    app.focus = Focus::Explorer;
+    let mut ui = UiState::new();
+    ui.hit_regions.push(HitRegion {
+        area: Rect::new(10, 2, 40, 20),
+        target: HitTarget::Focus(Focus::Results),
+    });
+
+    assert_eq!(
+        map_mouse(mouse(MouseEventKind::ScrollLeft, 20, 10), &ui, &app),
+        Some(Action::GridScrollColumns(-1))
+    );
+    assert_eq!(
+        map_mouse(mouse(MouseEventKind::ScrollRight, 20, 10), &ui, &app),
+        Some(Action::GridScrollColumns(1))
+    );
+}
+
+#[test]
 fn ddl_view_mouse_scroll_is_vertical_ddl_scroll() {
     let mut app = App::new(Vec::new());
     app.tabs.push(lazydb::model::tab::WorkspaceTab::Relation(
@@ -461,6 +553,22 @@ fn ddl_view_mouse_scroll_is_vertical_ddl_scroll() {
             session_id,
             rows: -3,
             columns: 0
+        })
+    );
+    assert_eq!(
+        map_mouse(mouse(MouseEventKind::ScrollLeft, 40, 8), &ui, &app),
+        Some(Action::ReadOnlyEditorScroll {
+            session_id,
+            rows: 0,
+            columns: -3
+        })
+    );
+    assert_eq!(
+        map_mouse(mouse(MouseEventKind::ScrollRight, 40, 8), &ui, &app),
+        Some(Action::ReadOnlyEditorScroll {
+            session_id,
+            rows: 0,
+            columns: 3
         })
     );
 }
@@ -498,6 +606,10 @@ fn help_and_message_overlays_block_background_mouse_input() {
         );
         assert_eq!(
             map_mouse(mouse(MouseEventKind::ScrollDown, 0, 1), &ui, &app),
+            None
+        );
+        assert_eq!(
+            map_mouse(mouse(MouseEventKind::ScrollRight, 0, 1), &ui, &app),
             None
         );
     }

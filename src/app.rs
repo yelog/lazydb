@@ -1349,6 +1349,7 @@ impl App {
                 && matches!(
                     action,
                     Action::GridMove { .. }
+                        | Action::GridScrollColumns(_)
                         | Action::GridSelectRow(_)
                         | Action::GridScrollRows { .. }
                         | Action::GridAlignSelectedRow(_)
@@ -1458,6 +1459,7 @@ impl App {
                     | Action::RollbackTransaction
                     | Action::ClearTransactionOutcome
                     | Action::GridMove { .. }
+                    | Action::GridScrollColumns(_)
                     | Action::GridSelectRow(_)
                     | Action::GridScrollRows { .. }
                     | Action::GridAlignSelectedRow(_)
@@ -3035,6 +3037,10 @@ impl App {
             Action::GridEndColumnResize => Vec::new(),
             Action::GridSetColumnOffset { offset } => {
                 self.set_grid_column_offset(offset);
+                Vec::new()
+            }
+            Action::GridScrollColumns(columns) => {
+                self.scroll_grid_columns(columns);
                 Vec::new()
             }
             Action::PreviewSelected => self.open_selected_relation(RelationView::Data),
@@ -7875,6 +7881,15 @@ impl App {
         });
     }
 
+    fn scroll_grid_columns(&mut self, columns: isize) {
+        self.with_active_grid(|grid, (row_count, column_count)| {
+            let offset = move_bounded(grid.column_offset, columns, column_count);
+            grid.column_offset = offset;
+            grid.selected_column = offset;
+            grid.clamp(row_count, column_count);
+        });
+    }
+
     fn resize_grid_column(&mut self, delta: i16) {
         let base = self
             .relation_result()
@@ -9087,6 +9102,39 @@ mod tests {
             (
                 app.active_console().grid.selected_row,
                 app.active_console().grid.row_offset
+            ),
+            (0, 0)
+        );
+    }
+
+    #[test]
+    fn grid_horizontal_scroll_updates_viewport_with_bounded_selection() {
+        let mut app = sql_result_app();
+
+        app.update(Action::GridScrollColumns(1));
+        assert_eq!(
+            (
+                app.active_console().grid.column_offset,
+                app.active_console().grid.selected_column
+            ),
+            (1, 1)
+        );
+
+        app.update(Action::GridScrollColumns(1));
+        assert_eq!(
+            (
+                app.active_console().grid.column_offset,
+                app.active_console().grid.selected_column
+            ),
+            (1, 1)
+        );
+
+        app.update(Action::GridScrollColumns(-1));
+        app.update(Action::GridScrollColumns(-1));
+        assert_eq!(
+            (
+                app.active_console().grid.column_offset,
+                app.active_console().grid.selected_column
             ),
             (0, 0)
         );

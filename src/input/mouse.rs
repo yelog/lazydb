@@ -5,8 +5,9 @@ use crate::{
     action::Action,
     app::App,
     model::{
+        explorer::ExplorerScrollAmount,
         relation::RelationView,
-        tab::WorkspaceTab,
+        tab::{GridScrollAmount, WorkspaceTab},
         workspace::{Focus, Overlay},
     },
     ui::{HitTarget, ProfileButton, UiState},
@@ -140,11 +141,14 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                 return None;
             }
             match focus_at(ui, event.column, event.row).unwrap_or(app.focus) {
-                Focus::Explorer => Some(Action::ExplorerMove(3)),
+                Focus::Explorer => Some(Action::ExplorerScrollNodes {
+                    direction: 1,
+                    amount: ExplorerScrollAmount::Lines(3),
+                }),
                 Focus::Results if is_relation_ddl_focus(app) => ddl_scroll_action(app, 3),
-                Focus::Results => Some(Action::GridMove {
-                    rows: 3,
-                    columns: 0,
+                Focus::Results => Some(Action::GridScrollRows {
+                    direction: 1,
+                    amount: GridScrollAmount::Lines(3),
                 }),
                 Focus::Editor => Some(Action::EditorScroll {
                     rows: 3,
@@ -157,16 +161,51 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                 return None;
             }
             match focus_at(ui, event.column, event.row).unwrap_or(app.focus) {
-                Focus::Explorer => Some(Action::ExplorerMove(-3)),
+                Focus::Explorer => Some(Action::ExplorerScrollNodes {
+                    direction: -1,
+                    amount: ExplorerScrollAmount::Lines(3),
+                }),
                 Focus::Results if is_relation_ddl_focus(app) => ddl_scroll_action(app, -3),
-                Focus::Results => Some(Action::GridMove {
-                    rows: -3,
-                    columns: 0,
+                Focus::Results => Some(Action::GridScrollRows {
+                    direction: -1,
+                    amount: GridScrollAmount::Lines(3),
                 }),
                 Focus::Editor => Some(Action::EditorScroll {
                     rows: -3,
                     columns: 0,
                 }),
+            }
+        }
+        MouseEventKind::ScrollLeft => {
+            if app.overlay.is_some() {
+                return None;
+            }
+            match focus_at(ui, event.column, event.row).unwrap_or(app.focus) {
+                Focus::Results if is_relation_ddl_focus(app) => {
+                    ddl_horizontal_scroll_action(app, -3)
+                }
+                Focus::Results => Some(Action::GridScrollColumns(-1)),
+                Focus::Editor => Some(Action::EditorScroll {
+                    rows: 0,
+                    columns: -3,
+                }),
+                Focus::Explorer => None,
+            }
+        }
+        MouseEventKind::ScrollRight => {
+            if app.overlay.is_some() {
+                return None;
+            }
+            match focus_at(ui, event.column, event.row).unwrap_or(app.focus) {
+                Focus::Results if is_relation_ddl_focus(app) => {
+                    ddl_horizontal_scroll_action(app, 3)
+                }
+                Focus::Results => Some(Action::GridScrollColumns(1)),
+                Focus::Editor => Some(Action::EditorScroll {
+                    rows: 0,
+                    columns: 3,
+                }),
+                Focus::Explorer => None,
             }
         }
         _ => None,
@@ -224,5 +263,16 @@ fn ddl_scroll_action(app: &App, rows: isize) -> Option<Action> {
         session_id: tab.ddl_editor_id,
         rows,
         columns: 0,
+    })
+}
+
+fn ddl_horizontal_scroll_action(app: &App, columns: isize) -> Option<Action> {
+    let Some(WorkspaceTab::Relation(tab)) = app.tabs.get(app.active_tab) else {
+        return None;
+    };
+    Some(Action::ReadOnlyEditorScroll {
+        session_id: tab.ddl_editor_id,
+        rows: 0,
+        columns,
     })
 }

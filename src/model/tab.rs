@@ -39,6 +39,7 @@ pub enum GridRowTarget {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GridScrollAmount {
+    Lines(usize),
     HalfPage,
     Page,
 }
@@ -312,6 +313,7 @@ impl DataGridState {
         }
 
         let step = match amount {
+            GridScrollAmount::Lines(lines) => lines,
             GridScrollAmount::HalfPage => (self.viewport_rows / 2).max(1),
             GridScrollAmount::Page => self.viewport_rows,
         };
@@ -546,6 +548,25 @@ mod tests {
         assert_eq!((state.selected_row, state.row_offset), (19, 15));
         state.scroll_rows(1, GridScrollAmount::Page, 20);
         assert_eq!((state.selected_row, state.row_offset), (19, 15));
+    }
+
+    #[test]
+    fn line_scroll_moves_selection_and_viewport_immediately_with_bounds() {
+        let mut state = DataGridState {
+            selected_row: 1,
+            row_offset: 0,
+            viewport_rows: 3,
+            ..DataGridState::default()
+        };
+
+        state.scroll_rows(1, GridScrollAmount::Lines(3), 10);
+        assert_eq!((state.selected_row, state.row_offset), (4, 3));
+
+        state.scroll_rows(1, GridScrollAmount::Lines(20), 10);
+        assert_eq!((state.selected_row, state.row_offset), (9, 7));
+
+        state.scroll_rows(-1, GridScrollAmount::Lines(20), 10);
+        assert_eq!((state.selected_row, state.row_offset), (0, 0));
     }
 
     #[test]

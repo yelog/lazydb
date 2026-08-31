@@ -820,6 +820,7 @@ pub enum ExplorerNodeTarget {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExplorerScrollAmount {
+    Lines(usize),
     HalfPage,
     Page,
 }
@@ -1360,6 +1361,7 @@ impl ExplorerTreeState {
             return;
         }
         let step = match amount {
+            ExplorerScrollAmount::Lines(lines) => lines,
             ExplorerScrollAmount::HalfPage => {
                 (self.body_height_for_scroll(&rows, self.scroll) / 2).max(1)
             }
