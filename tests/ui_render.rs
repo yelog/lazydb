@@ -1290,6 +1290,7 @@ fn editor_title_owns_target_and_transaction_context() {
 #[test]
 fn editor_help_documents_target_context_controls() {
     let mut app = fixture();
+    app.update(Action::Focus(Focus::Editor));
     app.update(Action::ShowHelp);
     let (output, _) = render_with_state(&app, 80, 28);
     for text in ["Space d", "Space f", "Space tt", "Space tc", "Space tr"] {

@@ -13,7 +13,10 @@ use crate::{
     security::sanitize_terminal_text,
 };
 
-use super::{HitRegion, HitTarget, UiState, theme::Theme};
+use super::{
+    GridHorizontalScrollTarget, GridHorizontalScrollTargets, HitRegion, HitTarget, UiState,
+    theme::Theme,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct VisibleColumn {
@@ -75,6 +78,16 @@ pub(crate) fn render(
     let overflow = total_width(&widths) > available;
     let first = viewport_start(&widths, grid.column_offset, grid.selected_column, available);
     let visible = visible_columns(&widths, first, available);
+    state.grid_horizontal_scroll = Some(GridHorizontalScrollTargets {
+        left: horizontal_scroll_target(&widths, first.saturating_sub(1), available),
+        right: horizontal_scroll_target(
+            &widths,
+            first
+                .saturating_add(1)
+                .min(last_page_start(&widths, available)),
+            available,
+        ),
+    });
     let constraints = grid_constraints(&visible, number_width);
 
     let visible_rows = area.height.saturating_sub(3 + u16::from(overflow)) as usize;
@@ -416,6 +429,26 @@ fn visible_columns(widths: &[u16], first: usize, available: u16) -> Vec<VisibleC
     visible
 }
 
+fn horizontal_scroll_target(
+    widths: &[u16],
+    offset: usize,
+    available: u16,
+) -> GridHorizontalScrollTarget {
+    let visible = visible_columns(widths, offset, available);
+    let first_visible = visible.first().map_or(0, |column| column.index);
+    let last_visible = visible
+        .iter()
+        .rev()
+        .find(|column| column.is_complete())
+        .or_else(|| visible.first())
+        .map_or(first_visible, |column| column.index);
+    GridHorizontalScrollTarget {
+        offset: first_visible,
+        first_visible,
+        last_visible,
+    }
+}
+
 fn selection_is_revealed(visible: &[VisibleColumn], selected: usize) -> bool {
     visible.iter().any(|column| {
         column.index == selected
@@ -534,8 +567,9 @@ fn render_scrollbar(
 #[cfg(test)]
 mod tests {
     use super::{
-        VisibleColumn, row_number_style, row_number_width, row_viewport_start, selected_data_cell,
-        total_width, viewport_start, visible_columns,
+        GridHorizontalScrollTarget, VisibleColumn, horizontal_scroll_target, row_number_style,
+        row_number_width, row_viewport_start, selected_data_cell, total_width, viewport_start,
+        visible_columns,
     };
     use ratatui::style::Style;
 
@@ -650,6 +684,26 @@ mod tests {
                     rendered_width: 3,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn horizontal_scroll_target_excludes_trailing_partial_columns() {
+        assert_eq!(
+            horizontal_scroll_target(&[6, 20, 8, 30, 6], 1, 30),
+            GridHorizontalScrollTarget {
+                offset: 1,
+                first_visible: 1,
+                last_visible: 2,
+            }
+        );
+        assert_eq!(
+            horizontal_scroll_target(&[6, 40, 8], 1, 20),
+            GridHorizontalScrollTarget {
+                offset: 1,
+                first_visible: 1,
+                last_visible: 1,
+            }
         );
     }
 

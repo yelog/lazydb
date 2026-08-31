@@ -482,17 +482,30 @@ fn line_scroll_moves_explorer_selection_and_viewport_immediately_with_bounds() {
         explorer.add_profile(*profile);
     }
     explorer.set_viewport_height(3);
+    explorer.move_selection(2, 3);
 
-    explorer.scroll_nodes(1, ExplorerScrollAmount::Lines(3));
+    explorer.scroll_nodes(1, ExplorerScrollAmount::Lines(1));
+    assert_eq!(explorer.selected_visible_index(), Some(2));
+    assert_eq!(explorer.scroll, 1);
+
+    explorer.scroll_nodes(1, ExplorerScrollAmount::Lines(1));
+    assert_eq!(explorer.selected_visible_index(), Some(2));
+    assert_eq!(explorer.scroll, 2);
+
+    explorer.scroll_nodes(1, ExplorerScrollAmount::Lines(1));
     assert_eq!(explorer.selected_visible_index(), Some(3));
     assert_eq!(explorer.scroll, 3);
 
     explorer.scroll_nodes(1, ExplorerScrollAmount::Lines(20));
-    assert_eq!(explorer.selected_visible_index(), Some(9));
+    assert_eq!(explorer.selected_visible_index(), Some(7));
+    assert_eq!(explorer.scroll, 7);
+
+    explorer.scroll_nodes(1, ExplorerScrollAmount::Lines(1));
+    assert_eq!(explorer.selected_visible_index(), Some(7));
     assert_eq!(explorer.scroll, 7);
 
     explorer.scroll_nodes(-1, ExplorerScrollAmount::Lines(20));
-    assert_eq!(explorer.selected_visible_index(), Some(0));
+    assert_eq!(explorer.selected_visible_index(), Some(2));
     assert_eq!(explorer.scroll, 0);
 }
 

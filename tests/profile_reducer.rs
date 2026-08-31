@@ -274,7 +274,7 @@ fn pending_scope_discovery_blocks_toggle_and_refresh_but_allows_back() {
             .as_ref()
             .unwrap()
             .catalog_scope,
-        &before
+        before
     );
     app.update(Action::ProfileScopeBack);
     assert_eq!(

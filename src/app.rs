@@ -1353,7 +1353,7 @@ impl App {
                 && matches!(
                     action,
                     Action::GridMove { .. }
-                        | Action::GridScrollColumns(_)
+                        | Action::GridScrollColumns { .. }
                         | Action::GridSelectRow(_)
                         | Action::GridScrollRows { .. }
                         | Action::GridAlignSelectedRow(_)
@@ -1463,7 +1463,7 @@ impl App {
                     | Action::RollbackTransaction
                     | Action::ClearTransactionOutcome
                     | Action::GridMove { .. }
-                    | Action::GridScrollColumns(_)
+                    | Action::GridScrollColumns { .. }
                     | Action::GridSelectRow(_)
                     | Action::GridScrollRows { .. }
                     | Action::GridAlignSelectedRow(_)
@@ -3043,8 +3043,12 @@ impl App {
                 self.set_grid_column_offset(offset);
                 Vec::new()
             }
-            Action::GridScrollColumns(columns) => {
-                self.scroll_grid_columns(columns);
+            Action::GridScrollColumns {
+                offset,
+                first_visible,
+                last_visible,
+            } => {
+                self.scroll_grid_columns(offset, first_visible, last_visible);
                 Vec::new()
             }
             Action::PreviewSelected => self.open_selected_relation(RelationView::Data),
@@ -7885,11 +7889,15 @@ impl App {
         });
     }
 
-    fn scroll_grid_columns(&mut self, columns: isize) {
+    fn scroll_grid_columns(&mut self, offset: usize, first_visible: usize, last_visible: usize) {
         self.with_active_grid(|grid, (row_count, column_count)| {
-            let offset = move_bounded(grid.column_offset, columns, column_count);
-            grid.column_offset = offset;
-            grid.selected_column = offset;
+            if column_count == 0 {
+                return;
+            }
+            grid.column_offset = offset.min(column_count - 1);
+            let first_visible = first_visible.min(column_count - 1);
+            let last_visible = last_visible.max(first_visible).min(column_count - 1);
+            grid.selected_column = grid.selected_column.clamp(first_visible, last_visible);
             grid.clamp(row_count, column_count);
         });
     }
@@ -9115,7 +9123,13 @@ mod tests {
     fn grid_horizontal_scroll_updates_viewport_with_bounded_selection() {
         let mut app = sql_result_app();
 
-        app.update(Action::GridScrollColumns(1));
+        app.update(Action::GridSelect { row: 0, column: 1 });
+
+        app.update(Action::GridScrollColumns {
+            offset: 1,
+            first_visible: 1,
+            last_visible: 1,
+        });
         assert_eq!(
             (
                 app.active_console().grid.column_offset,
@@ -9124,17 +9138,24 @@ mod tests {
             (1, 1)
         );
 
-        app.update(Action::GridScrollColumns(1));
+        app.update(Action::GridScrollColumns {
+            offset: 0,
+            first_visible: 0,
+            last_visible: 1,
+        });
         assert_eq!(
             (
                 app.active_console().grid.column_offset,
                 app.active_console().grid.selected_column
             ),
-            (1, 1)
+            (0, 1)
         );
 
-        app.update(Action::GridScrollColumns(-1));
-        app.update(Action::GridScrollColumns(-1));
+        app.update(Action::GridScrollColumns {
+            offset: 0,
+            first_visible: 0,
+            last_visible: 0,
+        });
         assert_eq!(
             (
                 app.active_console().grid.column_offset,

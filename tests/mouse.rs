@@ -511,14 +511,34 @@ fn result_horizontal_mouse_scroll_moves_the_grid_viewport() {
         area: Rect::new(10, 2, 40, 20),
         target: HitTarget::Focus(Focus::Results),
     });
+    ui.grid_horizontal_scroll = Some(lazydb::ui::GridHorizontalScrollTargets {
+        left: lazydb::ui::GridHorizontalScrollTarget {
+            offset: 0,
+            first_visible: 0,
+            last_visible: 2,
+        },
+        right: lazydb::ui::GridHorizontalScrollTarget {
+            offset: 1,
+            first_visible: 1,
+            last_visible: 3,
+        },
+    });
 
     assert_eq!(
         map_mouse(mouse(MouseEventKind::ScrollLeft, 20, 10), &ui, &app),
-        Some(Action::GridScrollColumns(-1))
+        Some(Action::GridScrollColumns {
+            offset: 0,
+            first_visible: 0,
+            last_visible: 2,
+        })
     );
     assert_eq!(
         map_mouse(mouse(MouseEventKind::ScrollRight, 20, 10), &ui, &app),
-        Some(Action::GridScrollColumns(1))
+        Some(Action::GridScrollColumns {
+            offset: 1,
+            first_visible: 1,
+            last_visible: 3,
+        })
     );
 }
 

@@ -1361,7 +1361,10 @@ impl ExplorerTreeState {
             return;
         }
         let step = match amount {
-            ExplorerScrollAmount::Lines(lines) => lines,
+            ExplorerScrollAmount::Lines(lines) => {
+                self.scroll_lines(&rows, direction, lines);
+                return;
+            }
             ExplorerScrollAmount::HalfPage => {
                 (self.body_height_for_scroll(&rows, self.scroll) / 2).max(1)
             }
@@ -1381,6 +1384,37 @@ impl ExplorerTreeState {
         self.selected = Some(rows[selected_index].id.clone());
         self.scroll = self.scroll.saturating_add_signed(delta);
         self.update_scroll(selected_index, rows.len());
+    }
+
+    fn scroll_lines(&mut self, rows: &[VisibleExplorerNode], direction: isize, lines: usize) {
+        let Some(selected_index) = self
+            .selected
+            .as_ref()
+            .and_then(|selected| rows.iter().position(|row| &row.id == selected))
+        else {
+            return;
+        };
+        let delta = if direction.is_negative() {
+            -(lines.min(isize::MAX as usize) as isize)
+        } else {
+            lines.min(isize::MAX as usize) as isize
+        };
+        let requested = self.scroll.saturating_add_signed(delta);
+
+        for _ in 0..=self.selected_ancestors().len().saturating_add(1) {
+            let body_height = self.body_height_for_scroll(rows, requested).min(rows.len());
+            let scroll = requested.min(rows.len().saturating_sub(body_height));
+            let last = scroll
+                .saturating_add(body_height.saturating_sub(1))
+                .min(rows.len() - 1);
+            let clamped = selected_index.clamp(scroll, last);
+            let stable = self.scroll == scroll && self.selected.as_ref() == Some(&rows[clamped].id);
+            self.scroll = scroll;
+            self.selected = Some(rows[clamped].id.clone());
+            if stable {
+                break;
+            }
+        }
     }
 
     pub fn align_selected(&mut self, alignment: ExplorerNodeAlignment) {

@@ -184,7 +184,7 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                 Focus::Results if is_relation_ddl_focus(app) => {
                     ddl_horizontal_scroll_action(app, -3)
                 }
-                Focus::Results => Some(Action::GridScrollColumns(-1)),
+                Focus::Results => grid_horizontal_scroll_action(ui, false),
                 Focus::Editor => Some(Action::EditorScroll {
                     rows: 0,
                     columns: -3,
@@ -200,7 +200,7 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                 Focus::Results if is_relation_ddl_focus(app) => {
                     ddl_horizontal_scroll_action(app, 3)
                 }
-                Focus::Results => Some(Action::GridScrollColumns(1)),
+                Focus::Results => grid_horizontal_scroll_action(ui, true),
                 Focus::Editor => Some(Action::EditorScroll {
                     rows: 0,
                     columns: 3,
@@ -274,5 +274,15 @@ fn ddl_horizontal_scroll_action(app: &App, columns: isize) -> Option<Action> {
         session_id: tab.ddl_editor_id,
         rows: 0,
         columns,
+    })
+}
+
+fn grid_horizontal_scroll_action(ui: &UiState, right: bool) -> Option<Action> {
+    let targets = ui.grid_horizontal_scroll?;
+    let target = if right { targets.right } else { targets.left };
+    Some(Action::GridScrollColumns {
+        offset: target.offset,
+        first_visible: target.first_visible,
+        last_visible: target.last_visible,
     })
 }

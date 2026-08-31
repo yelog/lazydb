@@ -297,7 +297,11 @@ pub enum Action {
     GridSetColumnOffset {
         offset: usize,
     },
-    GridScrollColumns(isize),
+    GridScrollColumns {
+        offset: usize,
+        first_visible: usize,
+        last_visible: usize,
+    },
     RelationEditCell,
     RelationEditInsert(char),
     RelationEditBackspace,

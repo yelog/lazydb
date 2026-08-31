@@ -313,15 +313,24 @@ impl DataGridState {
         }
 
         let step = match amount {
-            GridScrollAmount::Lines(lines) => lines,
+            GridScrollAmount::Lines(lines) => {
+                let delta = scroll_delta(direction, lines);
+                self.row_offset = move_bounded(
+                    self.row_offset,
+                    delta,
+                    self.max_row_offset(row_count).saturating_add(1),
+                );
+                let last_visible = self
+                    .row_offset
+                    .saturating_add(self.viewport_rows.saturating_sub(1))
+                    .min(row_count - 1);
+                self.selected_row = self.selected_row.clamp(self.row_offset, last_visible);
+                return;
+            }
             GridScrollAmount::HalfPage => (self.viewport_rows / 2).max(1),
             GridScrollAmount::Page => self.viewport_rows,
         };
-        let delta = if direction.is_negative() {
-            -(step.min(isize::MAX as usize) as isize)
-        } else {
-            step.min(isize::MAX as usize) as isize
-        };
+        let delta = scroll_delta(direction, step);
         self.selected_row = move_bounded(self.selected_row, delta, row_count);
         self.row_offset = move_bounded(
             self.row_offset,
@@ -355,6 +364,14 @@ impl DataGridState {
 
     fn max_row_offset(&self, row_count: usize) -> usize {
         row_count.saturating_sub(self.viewport_rows.min(row_count))
+    }
+}
+
+fn scroll_delta(direction: isize, step: usize) -> isize {
+    if direction.is_negative() {
+        -(step.min(isize::MAX as usize) as isize)
+    } else {
+        step.min(isize::MAX as usize) as isize
     }
 }
 
@@ -553,20 +570,29 @@ mod tests {
     #[test]
     fn line_scroll_moves_selection_and_viewport_immediately_with_bounds() {
         let mut state = DataGridState {
-            selected_row: 1,
+            selected_row: 2,
             row_offset: 0,
-            viewport_rows: 3,
+            viewport_rows: 5,
             ..DataGridState::default()
         };
 
-        state.scroll_rows(1, GridScrollAmount::Lines(3), 10);
-        assert_eq!((state.selected_row, state.row_offset), (4, 3));
+        state.scroll_rows(1, GridScrollAmount::Lines(1), 10);
+        assert_eq!((state.selected_row, state.row_offset), (2, 1));
+
+        state.scroll_rows(1, GridScrollAmount::Lines(1), 10);
+        assert_eq!((state.selected_row, state.row_offset), (2, 2));
+
+        state.scroll_rows(1, GridScrollAmount::Lines(1), 10);
+        assert_eq!((state.selected_row, state.row_offset), (3, 3));
 
         state.scroll_rows(1, GridScrollAmount::Lines(20), 10);
-        assert_eq!((state.selected_row, state.row_offset), (9, 7));
+        assert_eq!((state.selected_row, state.row_offset), (5, 5));
+
+        state.scroll_rows(1, GridScrollAmount::Lines(1), 10);
+        assert_eq!((state.selected_row, state.row_offset), (5, 5));
 
         state.scroll_rows(-1, GridScrollAmount::Lines(20), 10);
-        assert_eq!((state.selected_row, state.row_offset), (0, 0));
+        assert_eq!((state.selected_row, state.row_offset), (4, 0));
     }
 
     #[test]

@@ -114,6 +114,7 @@ pub struct UiState {
     pub editor_viewport: Option<EditorViewport>,
     pub completion_popup: Option<Rect>,
     pub grid_viewport: Option<DataGridViewport>,
+    pub grid_horizontal_scroll: Option<GridHorizontalScrollTargets>,
     pub record_view_fields: Option<(Uuid, usize)>,
     pub explorer_viewport_rows: Option<usize>,
     pub ddl_viewport: Option<DdlViewportMetrics>,
@@ -144,6 +145,19 @@ pub struct GridScrollbarDrag {
     pub max_offset: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GridHorizontalScrollTarget {
+    pub offset: usize,
+    pub first_visible: usize,
+    pub last_visible: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GridHorizontalScrollTargets {
+    pub left: GridHorizontalScrollTarget,
+    pub right: GridHorizontalScrollTarget,
+}
+
 impl Default for UiState {
     fn default() -> Self {
         Self::new()
@@ -161,6 +175,7 @@ impl UiState {
             editor_viewport: None,
             completion_popup: None,
             grid_viewport: None,
+            grid_horizontal_scroll: None,
             record_view_fields: None,
             explorer_viewport_rows: None,
             ddl_viewport: None,
@@ -264,6 +279,7 @@ pub fn render_with_state_using_icons(
     state.editor_viewport = None;
     state.completion_popup = None;
     state.grid_viewport = None;
+    state.grid_horizontal_scroll = None;
     state.record_view_fields = None;
     state.explorer_viewport_rows = None;
     state.ddl_viewport = None;
@@ -2028,7 +2044,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
     };
     let hints = match app.focus {
         Focus::Explorer => "j/k move   gg/G ends   Ctrl-d/u page   s access   Enter open",
-        Focus::Editor => "Esc normal   i/a/o insert   Space y copy SQL   F5 run",
+        Focus::Editor => "Esc normal   i/a/o insert   Space y copy SQL   F5 run   F1 help",
         Focus::Results if app.is_active_relation_tab() => {
             "h/j/k/l cells   y cell   Y row   Space Y headers"
         }
@@ -2047,7 +2063,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
             Style::new().fg(theme.muted).bg(theme.surface),
         ),
         Span::styled(
-            "   ? help ",
+            "   ?/F1 help ",
             Style::new()
                 .fg(theme.action)
                 .bg(theme.surface)
