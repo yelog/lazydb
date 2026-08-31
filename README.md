@@ -42,6 +42,11 @@ integration.
   native column types, and catalog icons; the statement under the cursor is
   underlined when it is the current execution scope.
 
+Coding-agent access is available through project-aware JSON CLI commands and a
+local stdio MCP server. It exposes current-project and global connections while
+excluding profiles assigned only to other projects. See
+[`docs/coding-agent-access.md`](docs/coding-agent-access.md).
+
 ## Deliberately Deferred
 
 The following items are in M1/M2 and have no fake controls in the current UI:

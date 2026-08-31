@@ -167,3 +167,12 @@ recommended for remote production connections.
 For PostgreSQL and MySQL, use a database role with read-only grants as the actual
 security boundary. Session settings can be changed by sufficiently privileged
 SQL.
+
+## Coding Agents
+
+LazyDB's coding-agent interfaces expose current-project and global profiles, but
+hide profiles assigned only to other projects. See
+[`coding-agent-access.md`](coding-agent-access.md) for JSON CLI, stdio MCP,
+Codex, OpenCode, and Claude Code configuration. The MCP server defaults to
+`--write-policy deny`; client-side MCP approval settings are an additional layer
+and cannot relax LazyDB profile or database permissions.
