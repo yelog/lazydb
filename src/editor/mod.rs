@@ -69,6 +69,12 @@ pub(crate) enum EditorEffect {
     SubstituteConfirmRequested { count: usize },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum EditorSessionCapability {
+    Editable,
+    ReadOnly,
+}
+
 impl modalkit::editing::application::ApplicationAction for ApplicationAction {
     fn is_edit_sequence(
         &self,
@@ -168,6 +174,8 @@ struct EditorSession {
     revision: u64,
     previous_text: Option<String>,
     redo_text: Option<String>,
+    capability: EditorSessionCapability,
+    interacted: bool,
 }
 
 type VimKeyManager = modalkit::editing::key::KeyManager<
@@ -249,6 +257,14 @@ impl EditorWorkspace {
     }
 
     pub(crate) fn open_console(&mut self, id: Uuid, text: &str) {
+        self.open_session(id, text, EditorSessionCapability::Editable);
+    }
+
+    pub(crate) fn open_read_only(&mut self, id: Uuid, text: &str) {
+        self.open_session(id, text, EditorSessionCapability::ReadOnly);
+    }
+
+    fn open_session(&mut self, id: Uuid, text: &str, capability: EditorSessionCapability) {
         let mut buffer = modalkit::editing::buffer::EditBuffer::from_str(
             ContentId(id),
             &encode_editor_text(text),
@@ -257,11 +273,16 @@ impl EditorWorkspace {
         buffer.set_leader(group_id, modalkit::editing::cursor::Cursor::new(0, 0));
         let buffer = std::sync::Arc::new(std::sync::RwLock::new(buffer));
         let mut keys = VimKeyManager::new(modalkit::env::vim::keybindings::default_vim_keys());
-        keys.input_key(modalkit::key::TerminalKey::from(KeyEvent::new(
-            KeyCode::Char('i'),
-            KeyModifiers::NONE,
-        )));
-        while keys.pop().is_some() {}
+        let mode = if capability == EditorSessionCapability::Editable {
+            keys.input_key(modalkit::key::TerminalKey::from(KeyEvent::new(
+                KeyCode::Char('i'),
+                KeyModifiers::NONE,
+            )));
+            while keys.pop().is_some() {}
+            EditorMode::Insert
+        } else {
+            EditorMode::Normal
+        };
         self.sessions.insert(
             id,
             EditorSession {
@@ -272,17 +293,23 @@ impl EditorWorkspace {
                 pending_binding: None,
                 current_sequence: Vec::new(),
                 last_sequence: None,
-                mode: EditorMode::Insert,
+                mode,
                 position: EditorPosition { line: 0, column: 0 },
                 revision: 0,
                 previous_text: None,
                 redo_text: None,
+                capability,
+                interacted: false,
             },
         );
     }
 
     pub(crate) fn close_console(&mut self, id: Uuid) {
         self.sessions.remove(&id);
+    }
+
+    pub(crate) fn has_session(&self, id: Uuid) -> bool {
+        self.sessions.contains_key(&id)
     }
 
     pub(crate) fn key(&mut self, id: Uuid, event: KeyEvent) -> Result<(), EditorError> {
@@ -783,6 +810,55 @@ impl EditorWorkspace {
         Ok(())
     }
 
+    pub(crate) fn set_read_only_text(
+        &mut self,
+        id: Uuid,
+        text: &str,
+        follow_tail: bool,
+    ) -> Result<(), EditorError> {
+        let session = self
+            .sessions
+            .get_mut(&id)
+            .ok_or(EditorError::MissingSession(id))?;
+        if session.capability != EditorSessionCapability::ReadOnly {
+            return Err(EditorError::Operation("session is editable".into()));
+        }
+        let position = if follow_tail && !session.interacted {
+            let line = text.rsplit('\n').next().unwrap_or_default();
+            EditorPosition {
+                line: text.matches('\n').count(),
+                column: line.chars().count(),
+            }
+        } else {
+            session.position
+        };
+        session
+            .buffer
+            .write()
+            .map_err(|_| EditorError::Operation("buffer lock poisoned".into()))?
+            .set_text(encode_editor_text(text));
+        let line_count = text.matches('\n').count();
+        let line = text.rsplit('\n').next().unwrap_or_default();
+        session.position = EditorPosition {
+            line: position.line.min(line_count),
+            column: position.column.min(line.chars().count()),
+        };
+        session
+            .buffer
+            .write()
+            .map_err(|_| EditorError::Operation("buffer lock poisoned".into()))?
+            .set_leader(
+                session.group_id,
+                modalkit::editing::cursor::Cursor::new(
+                    session.position.line,
+                    session.position.column,
+                ),
+            );
+        session.keys.reset_mode();
+        session.mode = EditorMode::Normal;
+        Ok(())
+    }
+
     pub(crate) fn move_cursor_to_end(&mut self, id: Uuid) -> Result<(), EditorError> {
         let text = self.text(id)?;
         let session = self
@@ -807,6 +883,25 @@ impl EditorWorkspace {
     }
 
     pub(crate) fn press(&mut self, id: Uuid, key: EditorKey) -> Result<(), EditorError> {
+        let read_only = self
+            .sessions
+            .get(&id)
+            .ok_or(EditorError::MissingSession(id))?
+            .capability
+            == EditorSessionCapability::ReadOnly;
+        if read_only {
+            self.sessions
+                .get_mut(&id)
+                .expect("session was checked above")
+                .interacted = true;
+            if matches!(
+                key,
+                EditorKey::Character('i' | 'a' | 'o' | 'O' | 'R' | 'Q' | ':')
+                    | EditorKey::Control('r')
+            ) {
+                return Ok(());
+            }
+        }
         if self.prompt.is_some() {
             return self.press_prompt(id, key);
         }
@@ -1104,10 +1199,6 @@ impl EditorWorkspace {
 
     fn input_vim_key(&mut self, id: Uuid, key: EditorKey) -> Result<(), EditorError> {
         let before = self.text(id)?;
-        let was_visual = matches!(
-            self.mode(id)?,
-            EditorMode::VisualChar | EditorMode::VisualLine | EditorMode::VisualBlock
-        );
         let unnamed_before = self.register('"').map(str::to_owned);
         let session = self
             .sessions
@@ -1180,9 +1271,9 @@ impl EditorWorkspace {
         }
         self.sync_session_from_buffer(id)?;
         self.sync_registers();
-        if was_visual && matches!(key, EditorKey::Character('y')) {
+        if matches!(key, EditorKey::Character('y')) {
             let copied = self.register('"').unwrap_or_default().to_owned();
-            if unnamed_before.as_deref() != Some(copied.as_str()) {
+            if !copied.is_empty() && unnamed_before.as_deref() != Some(copied.as_str()) {
                 self.effects.push(EditorEffect::Yanked(copied));
             }
         }
@@ -1214,6 +1305,11 @@ impl EditorWorkspace {
                     .sessions
                     .get(&id)
                     .ok_or(EditorError::MissingSession(id))?;
+                if session.capability == EditorSessionCapability::ReadOnly
+                    && !editor_action.is_readonly(&context)
+                {
+                    return Ok(());
+                }
                 let mut buffer = session
                     .buffer
                     .write()
@@ -1223,7 +1319,15 @@ impl EditorWorkspace {
                     .editor_command(&editor_action, &ctx, &mut self.store)
                     .map_err(|error| EditorError::Operation(error.to_string()))?;
             }
-            Action::Application(ApplicationAction::Effect(effect)) => self.effects.push(effect),
+            Action::Application(ApplicationAction::Effect(effect)) => {
+                if self
+                    .sessions
+                    .get(&id)
+                    .is_some_and(|session| session.capability == EditorSessionCapability::Editable)
+                {
+                    self.effects.push(effect);
+                }
+            }
             Action::NoOp | Action::RedrawScreen => {}
             Action::Repeat(repeat) => self.effects.push(EditorEffect::Message(format!(
                 "repeat action deferred: {repeat:?}"

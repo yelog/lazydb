@@ -134,6 +134,24 @@ fn is_data_query_identifier_character(character: char) -> bool {
     character.is_alphanumeric() || matches!(character, '_' | '-')
 }
 
+fn output_text(tab: &ConsoleTab) -> String {
+    tab.output
+        .iter()
+        .map(|entry| entry.message.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn append_console_output_to_editor(
+    editor: &mut EditorWorkspace,
+    tab: &mut ConsoleTab,
+    entry: OutputEntry,
+) {
+    tab.output.push(entry);
+    let text = output_text(tab);
+    let _ = editor.set_read_only_text(tab.output_editor_id, &text, true);
+}
+
 pub struct App {
     pub project: ProjectContext,
     pub profiles: Vec<ConnectionProfile>,
@@ -277,6 +295,7 @@ impl App {
             let tab = ConsoleTab::new("console");
             let tab_id = tab.id;
             editor.open_console(tab_id, "");
+            editor.open_read_only(tab.output_editor_id, "");
             (
                 vec![WorkspaceTab::Sql(tab)],
                 vec![ConsoleRecord {
@@ -390,6 +409,37 @@ impl App {
         self.editor = EditorWorkspace::new();
         for (id, text) in &workspace.sql {
             self.editor.open_console(*id, text);
+            if let Some(tab) = self
+                .tabs
+                .iter()
+                .find(|tab| tab.id() == *id)
+                .and_then(WorkspaceTab::as_console)
+            {
+                self.editor
+                    .open_read_only(tab.output_editor_id, &output_text(tab));
+            }
+        }
+        let relation_sessions = self
+            .tabs
+            .iter()
+            .filter_map(|tab| match tab {
+                WorkspaceTab::Relation(tab) => Some((
+                    tab.ddl_editor_id,
+                    match &tab.ddl {
+                        RelationLoad::Ready(snapshot) => snapshot.value.sql.clone(),
+                        RelationLoad::Loading { previous, .. }
+                        | RelationLoad::Failed { previous, .. }
+                        | RelationLoad::Cancelled { previous } => previous
+                            .as_ref()
+                            .map_or_else(String::new, |snapshot| snapshot.value.sql.clone()),
+                        RelationLoad::Empty => String::new(),
+                    },
+                )),
+                WorkspaceTab::Sql(_) => None,
+            })
+            .collect::<Vec<_>>();
+        for (id, text) in relation_sessions {
+            self.editor.open_read_only(id, &text);
         }
         self.active_tab = workspace
             .active_tab_id
@@ -648,6 +698,50 @@ impl App {
         )
     }
 
+    pub fn active_output_editor_snapshot(
+        &self,
+        viewport: EditorViewport,
+    ) -> Result<EditorRenderSnapshot, EditorError> {
+        let Some(tab) = self.active_console_opt() else {
+            return Err(EditorError::MissingSession(Uuid::nil()));
+        };
+        self.editor.render_snapshot_with_dialect_and_statement(
+            tab.output_editor_id,
+            viewport,
+            SqlDialect::Generic,
+            None,
+        )
+    }
+
+    pub fn active_output_editor_viewport(&self) -> Result<EditorViewport, EditorError> {
+        self.active_console_opt().map_or_else(
+            || Err(EditorError::MissingSession(Uuid::nil())),
+            |tab| self.editor.viewport(tab.output_editor_id),
+        )
+    }
+
+    pub fn active_ddl_editor_snapshot(
+        &self,
+        viewport: EditorViewport,
+    ) -> Result<EditorRenderSnapshot, EditorError> {
+        let Some(WorkspaceTab::Relation(tab)) = self.tabs.get(self.active_tab) else {
+            return Err(EditorError::MissingSession(Uuid::nil()));
+        };
+        self.editor.render_snapshot_with_dialect_and_statement(
+            tab.ddl_editor_id,
+            viewport,
+            self.sql_dialect(),
+            None,
+        )
+    }
+
+    pub fn active_ddl_editor_viewport(&self) -> Result<EditorViewport, EditorError> {
+        let Some(WorkspaceTab::Relation(tab)) = self.tabs.get(self.active_tab) else {
+            return Err(EditorError::MissingSession(Uuid::nil()));
+        };
+        self.editor.viewport(tab.ddl_editor_id)
+    }
+
     pub fn active_profile(&self) -> Option<&ConnectionProfile> {
         let profile_id = self.connection.profile_id?;
         self.profiles
@@ -861,6 +955,8 @@ impl App {
                 .map(|(_, text)| text.as_str())
                 .unwrap_or_default();
             self.editor.open_console(tab.id, text);
+            self.editor
+                .open_read_only(tab.output_editor_id, &output_text(&tab));
             self.sql_editors.push(ConsoleRecord {
                 id: tab.id,
                 name: tab.name.clone(),
@@ -2251,6 +2347,21 @@ impl App {
                 }
                 self.apply_editor_effects(CompletionAfterEdit::Schedule)
             }
+            Action::ReadOnlyEditorKey { session_id, event } => {
+                self.ensure_read_only_session(session_id);
+                if self.editor.key(session_id, event).is_err() {
+                    return Vec::new();
+                }
+                self.apply_editor_effects(CompletionAfterEdit::Suppress)
+            }
+            Action::ReadOnlyEditorScroll {
+                session_id,
+                rows,
+                columns,
+            } => {
+                let _ = self.editor.scroll(session_id, rows, columns);
+                Vec::new()
+            }
             Action::EditorPaste(text) => {
                 let Some(id) = self.active_console_opt().map(|tab| tab.id) else {
                     return Vec::new();
@@ -2282,8 +2393,20 @@ impl App {
                 Vec::new()
             }
             Action::EditorViewportChanged(viewport) => {
-                let Some(id) = self.active_console_opt().map(|tab| tab.id) else {
-                    return Vec::new();
+                let id = match self.tabs.get(self.active_tab) {
+                    Some(WorkspaceTab::Sql(tab))
+                        if self.focus == Focus::Results
+                            && matches!(tab.result_view, ResultView::Output | ResultView::Plan) =>
+                    {
+                        tab.output_editor_id
+                    }
+                    Some(WorkspaceTab::Sql(tab)) => tab.id,
+                    Some(WorkspaceTab::Relation(tab))
+                        if self.focus == Focus::Results && tab.view == RelationView::Ddl =>
+                    {
+                        tab.ddl_editor_id
+                    }
+                    _ => return Vec::new(),
                 };
                 let _ = self.editor.set_viewport(id, viewport);
                 Vec::new()
@@ -2357,7 +2480,15 @@ impl App {
             }
             Action::CancelActiveQuery => {
                 let active_connection = self.connection.active_identity();
-                let Some(tab) = self.active_console_opt_mut() else {
+                let Some(tab_id) = self.active_console_opt().map(|tab| tab.id) else {
+                    return Vec::new();
+                };
+                let Some(tab) = self
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.id() == tab_id)
+                    .and_then(WorkspaceTab::as_console)
+                else {
                     return Vec::new();
                 };
                 if tab.query_status != QueryStatus::Running {
@@ -2381,17 +2512,38 @@ impl App {
                     });
                     return Vec::new();
                 }
-                tab.query_status = QueryStatus::Cancelled;
-                tab.output.push(OutputEntry {
-                    kind: OutputKind::Cancelled,
-                    message: "Query cancellation requested".to_owned(),
-                });
-                if let Some(last) = tab.last_execution.as_mut() {
+                if let Some(tab) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|tab| tab.id() == tab_id)
+                    .and_then(WorkspaceTab::as_console_mut)
+                {
+                    tab.query_status = QueryStatus::Cancelled;
+                }
+                self.append_console_output(
+                    tab_id,
+                    OutputEntry {
+                        kind: OutputKind::Cancelled,
+                        message: "Query cancellation requested".to_owned(),
+                    },
+                );
+                if let Some(last) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|tab| tab.id() == tab_id)
+                    .and_then(WorkspaceTab::as_console_mut)
+                    .and_then(|tab| tab.last_execution.as_mut())
+                {
                     last.result = ExecutionResult::Cancelled;
                 }
                 vec![Command::CancelQuery {
-                    tab_id: tab.id,
-                    generation: tab.generation,
+                    tab_id,
+                    generation: self
+                        .tabs
+                        .iter()
+                        .find(|tab| tab.id() == tab_id)
+                        .and_then(WorkspaceTab::as_console)
+                        .map_or(0, |tab| tab.generation),
                 }]
             }
             Action::ToggleManualCancellationFocus => {
@@ -2577,11 +2729,15 @@ impl App {
                     .unwrap();
                 tab.generation = tab.generation.saturating_add(1);
                 tab.query_status = QueryStatus::Cancelled;
-                tab.output.push(OutputEntry {
-                    kind: OutputKind::Cancelled,
-                    message: "Cancelling rolls back all uncommitted work in this transaction"
-                        .to_owned(),
-                });
+                append_console_output_to_editor(
+                    &mut self.editor,
+                    tab,
+                    OutputEntry {
+                        kind: OutputKind::Cancelled,
+                        message: "Cancelling rolls back all uncommitted work in this transaction"
+                            .to_owned(),
+                    },
+                );
                 vec![Command::CancelManual {
                     connection: intent.connection,
                     tab_id: intent.console_id,
@@ -2983,7 +3139,7 @@ impl App {
                         )
                     {
                         apply_transaction_snapshot(tab, next);
-                        tab.output.push(OutputEntry {
+                        append_console_output_to_editor(&mut self.editor, tab, OutputEntry {
                                 kind: OutputKind::Info,
                                 message: "Transaction outcome cleared after reconnect; the prior operation was not retried".to_owned(),
                             });
@@ -3083,10 +3239,14 @@ impl App {
                         tab.transaction_state = TransactionState::OutcomeUnknown;
                         tab.transaction_generation = tab.transaction_generation.saturating_add(1);
                         tab.query_status = QueryStatus::Failed;
-                        tab.output.push(OutputEntry {
-                            kind: OutputKind::Error,
-                            message: message.clone(),
-                        });
+                        append_console_output_to_editor(
+                            &mut self.editor,
+                            tab,
+                            OutputEntry {
+                                kind: OutputKind::Error,
+                                message: message.clone(),
+                            },
+                        );
                     }
                 }
                 if self.active_workspace_profile == Some(invalidated_profile_id) {
@@ -3191,7 +3351,7 @@ impl App {
                     return Vec::new();
                 }
                 tab.query_status = QueryStatus::Failed;
-                append_failed_execution_output(tab, generation, message);
+                append_failed_execution_output(&mut self.editor, tab, generation, message);
                 tab.result_view = ResultView::Output;
                 if let Some(last) = tab.last_execution.as_mut()
                     && last.draft.query_generation + 1 == generation
@@ -3322,10 +3482,14 @@ impl App {
                         apply_transaction_snapshot(tab, next);
                     }
                     tab.query_status = QueryStatus::Failed;
-                    tab.output.push(OutputEntry {
-                        kind: OutputKind::Error,
-                        message,
-                    });
+                    append_console_output_to_editor(
+                        &mut self.editor,
+                        tab,
+                        OutputEntry {
+                            kind: OutputKind::Error,
+                            message,
+                        },
+                    );
                 }
                 Vec::new()
             }
@@ -3371,7 +3535,12 @@ impl App {
                         .and_then(WorkspaceTab::as_console_mut)
                         .unwrap();
                     tab.query_status = QueryStatus::Failed;
-                    append_failed_execution_output(tab, query_generation, message);
+                    append_failed_execution_output(
+                        &mut self.editor,
+                        tab,
+                        query_generation,
+                        message,
+                    );
                     if postgres
                         && let Ok(next) = transaction::transition(
                             tab_snapshot(tab),
@@ -3442,11 +3611,15 @@ impl App {
                     ) {
                         apply_transaction_snapshot(tab, next);
                     }
-                    tab.output.push(OutputEntry {
-                        kind: OutputKind::Info,
-                        message: "Transaction ended implicitly; prior work may have committed"
-                            .to_owned(),
-                    });
+                    append_console_output_to_editor(
+                        &mut self.editor,
+                        tab,
+                        OutputEntry {
+                            kind: OutputKind::Info,
+                            message: "Transaction ended implicitly; prior work may have committed"
+                                .to_owned(),
+                        },
+                    );
                 }
                 Vec::new()
             }
@@ -3508,10 +3681,14 @@ impl App {
                     if let Ok(next) = transaction::transition(tab_snapshot(tab), event) {
                         apply_transaction_snapshot(tab, next);
                     }
-                    tab.output.push(OutputEntry {
-                        kind: OutputKind::Error,
-                        message,
-                    });
+                    append_console_output_to_editor(
+                        &mut self.editor,
+                        tab,
+                        OutputEntry {
+                            kind: OutputKind::Error,
+                            message,
+                        },
+                    );
                     self.retain_failed_deferred();
                 }
                 Vec::new()
@@ -3574,10 +3751,14 @@ impl App {
                     if let Ok(next) = transaction::transition(tab_snapshot(tab), event) {
                         apply_transaction_snapshot(tab, next);
                     }
-                    tab.output.push(OutputEntry {
-                        kind: OutputKind::Error,
-                        message,
-                    });
+                    append_console_output_to_editor(
+                        &mut self.editor,
+                        tab,
+                        OutputEntry {
+                            kind: OutputKind::Error,
+                            message,
+                        },
+                    );
                     self.retain_failed_deferred();
                 }
                 Vec::new()
@@ -3700,6 +3881,7 @@ impl App {
                 self.focus = Focus::Explorer;
                 Vec::new()
             }
+            Action::CopyExplorerSelection => self.copy_explorer_selection(),
             Action::GridMove { rows, columns } => {
                 self.move_grid(rows, columns);
                 Vec::new()
@@ -4045,10 +4227,14 @@ impl App {
             {
                 tab.transaction_state = TransactionState::Idle;
                 tab.transaction_generation = tab.transaction_generation.saturating_add(1);
-                tab.output.push(OutputEntry {
-                    kind: OutputKind::Info,
-                    message: "Transaction outcome is unknown; local state abandoned".to_owned(),
-                });
+                append_console_output_to_editor(
+                    &mut self.editor,
+                    tab,
+                    OutputEntry {
+                        kind: OutputKind::Info,
+                        message: "Transaction outcome is unknown; local state abandoned".to_owned(),
+                    },
+                );
             }
             return self.replay_deferred(prompt.intent);
         }
@@ -4202,6 +4388,7 @@ impl App {
         tab.execution_target = self.active_profile().map(ExecutionTarget::from_profile);
         let id = tab.id;
         self.editor.open_console(id, "");
+        self.editor.open_read_only(tab.output_editor_id, "");
         self.sql_editors.push(ConsoleRecord {
             id,
             name: tab.name.clone(),
@@ -4226,6 +4413,8 @@ impl App {
         if self.editor_text(id).is_err() {
             self.editor.open_console(id, "");
         }
+        self.editor
+            .open_read_only(tab.output_editor_id, &output_text(&tab));
         if let Some(record) = self.sql_editors.iter_mut().find(|record| record.id == id) {
             record.open = true;
         }
@@ -4312,7 +4501,7 @@ impl App {
         if let Ok(next) = transaction::transition(tab_snapshot(tab), TransactionEvent::ClearOutcome)
         {
             apply_transaction_snapshot(tab, next);
-            tab.output.push(OutputEntry {
+            append_console_output_to_editor(&mut self.editor, tab, OutputEntry {
                 kind: OutputKind::Info,
                 message: "Transaction outcome cleared after external verification; no operation was retried".to_owned(),
             });
@@ -5976,6 +6165,72 @@ impl App {
         self.target_for_node(self.explorer.selected_id()?)
     }
 
+    fn copy_explorer_selection(&mut self) -> Vec<Command> {
+        let Some(text) = self.explorer.normalized.selected_primary_name() else {
+            return Vec::new();
+        };
+        vec![Command::WriteClipboard(ClipboardPayload {
+            description: format!("Explorer name: {text}"),
+            text,
+            sensitive: false,
+        })]
+    }
+
+    fn sync_output_editor(&mut self, console_id: Uuid, follow_tail: bool) {
+        let Some((editor_id, text)) = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id() == console_id)
+            .and_then(WorkspaceTab::as_console)
+            .map(|tab| (tab.output_editor_id, output_text(tab)))
+        else {
+            return;
+        };
+        let _ = self
+            .editor
+            .set_read_only_text(editor_id, &text, follow_tail);
+    }
+
+    fn ensure_read_only_session(&mut self, session_id: Uuid) {
+        if self.editor.has_session(session_id) {
+            return;
+        }
+        for tab in &self.tabs {
+            match tab {
+                WorkspaceTab::Sql(tab) if tab.output_editor_id == session_id => {
+                    self.editor.open_read_only(session_id, &output_text(tab));
+                    return;
+                }
+                WorkspaceTab::Relation(tab) if tab.ddl_editor_id == session_id => {
+                    let text = match &tab.ddl {
+                        RelationLoad::Ready(snapshot) => snapshot.value.sql.clone(),
+                        RelationLoad::Loading { previous, .. }
+                        | RelationLoad::Failed { previous, .. }
+                        | RelationLoad::Cancelled { previous } => previous
+                            .as_ref()
+                            .map_or_else(String::new, |snapshot| snapshot.value.sql.clone()),
+                        RelationLoad::Empty => String::new(),
+                    };
+                    self.editor.open_read_only(session_id, &text);
+                    return;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn append_console_output(&mut self, console_id: Uuid, entry: OutputEntry) {
+        if let Some(tab) = self
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.id() == console_id)
+            .and_then(WorkspaceTab::as_console_mut)
+        {
+            tab.output.push(entry);
+        }
+        self.sync_output_editor(console_id, true);
+    }
+
     fn open_profile_access(&mut self) -> Vec<Command> {
         let Some(profile_id) = self
             .explorer
@@ -6410,6 +6665,9 @@ impl App {
             .push(WorkspaceTab::Relation(RelationTab::with_descriptor(
                 descriptor, view,
             )));
+        if let Some(WorkspaceTab::Relation(tab)) = self.tabs.last() {
+            self.editor.open_read_only(tab.ddl_editor_id, "");
+        }
         self.active_tab = self.tabs.len() - 1;
         self.focus = Focus::Results;
         let mut commands = self.load_active_relation(true);
@@ -7778,6 +8036,7 @@ impl App {
             (RelationRequestKind::Ddl, Ok(RelationSnapshot::Ddl(snapshot))) => {
                 if matches!(&tab.ddl, RelationLoad::Loading { request: pending, .. } if pending == &request)
                 {
+                    let ddl_text = snapshot.sql.clone();
                     tab.ddl = RelationLoad::Ready(crate::model::relation::OwnedSnapshot {
                         value: *snapshot,
                         attribution: crate::model::relation::SnapshotAttribution {
@@ -7786,6 +8045,9 @@ impl App {
                             scope: request.scope.clone(),
                         },
                     });
+                    let _ = self
+                        .editor
+                        .set_read_only_text(tab.ddl_editor_id, &ddl_text, false);
                 }
             }
             (RelationRequestKind::Preview, Err(message)) => {
@@ -7893,19 +8155,31 @@ impl App {
             .unwrap_or((true, None));
         tab.query_status = QueryStatus::Idle;
         if let Some((context, summary)) = execution_log {
-            tab.output.push(OutputEntry {
-                kind: OutputKind::Success,
-                message: context,
-            });
-            tab.output.push(OutputEntry {
-                kind: OutputKind::Success,
-                message: summary,
-            });
+            append_console_output_to_editor(
+                &mut self.editor,
+                tab,
+                OutputEntry {
+                    kind: OutputKind::Success,
+                    message: context,
+                },
+            );
+            append_console_output_to_editor(
+                &mut self.editor,
+                tab,
+                OutputEntry {
+                    kind: OutputKind::Success,
+                    message: summary,
+                },
+            );
         } else {
-            tab.output.push(OutputEntry {
-                kind: OutputKind::Success,
-                message: format!("{rows} row(s) retrieved in {total_ms} ms"),
-            });
+            append_console_output_to_editor(
+                &mut self.editor,
+                tab,
+                OutputEntry {
+                    kind: OutputKind::Success,
+                    message: format!("{rows} row(s) retrieved in {total_ms} ms"),
+                },
+            );
         }
         tab.outcome = Some(outcome);
         tab.result_view = if is_query {
@@ -8022,7 +8296,12 @@ fn apply_transaction_snapshot(tab: &mut ConsoleTab, snapshot: transaction::Trans
     tab.transaction_generation = snapshot.generation;
 }
 
-fn append_failed_execution_output(tab: &mut ConsoleTab, generation: u64, message: String) {
+fn append_failed_execution_output(
+    editor: &mut EditorWorkspace,
+    tab: &mut ConsoleTab,
+    generation: u64,
+    message: String,
+) {
     if let Some(last) = tab
         .last_execution
         .as_ref()
@@ -8046,15 +8325,23 @@ fn append_failed_execution_output(tab: &mut ConsoleTab, generation: u64, message
             .ok()
             .map(|elapsed| format_timestamp(elapsed.as_secs(), elapsed.subsec_millis()));
         let timestamp = elapsed.unwrap_or_else(|| "unknown time".to_owned());
-        tab.output.push(OutputEntry {
-            kind: OutputKind::Info,
-            message: format!("[{timestamp}] {target}> {sql}"),
-        });
+        append_console_output_to_editor(
+            editor,
+            tab,
+            OutputEntry {
+                kind: OutputKind::Info,
+                message: format!("[{timestamp}] {target}> {sql}"),
+            },
+        );
     }
-    tab.output.push(OutputEntry {
-        kind: OutputKind::Error,
-        message,
-    });
+    append_console_output_to_editor(
+        editor,
+        tab,
+        OutputEntry {
+            kind: OutputKind::Error,
+            message,
+        },
+    );
 }
 
 fn format_execution_log(

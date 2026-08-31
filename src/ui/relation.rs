@@ -1,22 +1,25 @@
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout, Position, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Paragraph, Wrap},
+    widgets::Paragraph,
 };
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+#[cfg(test)]
+use unicode_width::UnicodeWidthChar;
 
 use super::{panel_block, render_text_input, theme::Theme};
+#[cfg(test)]
+use crate::sql::{self, HighlightKind, SqlDialect};
 use crate::{
     app::App,
     model::{
+        editor::EditorViewport,
         relation::{RelationLoad, RelationSnapshotProvenance, RelationView},
         tab::WorkspaceTab,
         workspace::Focus,
     },
     security::sanitize_terminal_text,
-    sql::{self, HighlightKind, SqlDialect},
     ui::{HitRegion, HitTarget},
 };
 
@@ -290,109 +293,81 @@ fn render_ddl(
     let Some(WorkspaceTab::Relation(tab)) = app.tabs.get(app.active_tab) else {
         return;
     };
-    let (body, status) = match &tab.ddl {
-        RelationLoad::Ready(snapshot) => (ddl_text(&snapshot.value.sql), None),
-        RelationLoad::Loading { previous, .. } => (
-            previous
-                .as_ref()
-                .map(|s| ddl_text(&s.value.sql))
-                .unwrap_or_default(),
-            Some(("Refreshing", false, true)),
-        ),
-        RelationLoad::Failed { message, previous } => (
-            previous
-                .as_ref()
-                .map(|s| ddl_text(&s.value.sql))
-                .unwrap_or_default(),
-            Some((message.as_str(), true, false)),
-        ),
-        RelationLoad::Cancelled { previous } => (
-            previous
-                .as_ref()
-                .map(|s| ddl_text(&s.value.sql))
-                .unwrap_or_default(),
-            Some(("Cancelled", true, false)),
-        ),
-        RelationLoad::Empty => (String::new(), Some(("No DDL available", false, false))),
+    let status = match &tab.ddl {
+        RelationLoad::Ready(_) => None,
+        RelationLoad::Loading { .. } => Some(("Refreshing", false, true)),
+        RelationLoad::Failed { message, .. } => Some((message.as_str(), true, false)),
+        RelationLoad::Cancelled { .. } => Some(("Cancelled", true, false)),
+        RelationLoad::Empty => Some(("No DDL available", false, false)),
     };
     let block = panel_block(" RELATION DDL ", app.focus == Focus::Results, theme);
-    let dialect = app.sql_dialect();
     if let Some((message, retry, cancel)) = status {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(2), Constraint::Min(1)])
             .split(area);
         render_status(frame, chunks[0], message, retry, cancel, theme, _state);
-        render_ddl_body(
-            frame,
-            chunks[1],
-            &body,
-            tab.ddl_viewport.row_offset,
-            tab.ddl_viewport.column_offset,
-            block,
-            theme,
-            dialect,
-        );
-        set_ddl_metrics(_state, chunks[1], &body);
+        render_ddl_editor(frame, chunks[1], app, theme, _state, block);
         return;
     }
-    render_ddl_body(
-        frame,
-        area,
-        &body,
-        tab.ddl_viewport.row_offset,
-        tab.ddl_viewport.column_offset,
-        block,
-        theme,
-        dialect,
-    );
-    set_ddl_metrics(_state, area, &body);
+    render_ddl_editor(frame, area, app, theme, _state, block);
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_ddl_body(
+fn render_ddl_editor(
     frame: &mut Frame<'_>,
     area: Rect,
-    body: &str,
-    row_offset: usize,
-    column_offset: usize,
-    block: ratatui::widgets::Block<'_>,
+    app: &App,
     theme: Theme,
-    dialect: SqlDialect,
+    state: &mut super::UiState,
+    block: ratatui::widgets::Block<'_>,
 ) {
     let inner = block.inner(area);
-    let lines = highlighted_ddl_lines(
-        body,
-        dialect,
-        row_offset,
-        column_offset,
-        inner.width as usize,
-        inner.height as usize,
-        theme,
-    );
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(block)
-            .style(Style::new().fg(theme.text).bg(theme.surface))
-            .wrap(Wrap { trim: false }),
-        area,
-    );
+    let viewport = EditorViewport {
+        width: inner.width as usize,
+        height: inner.height as usize,
+    };
+    state.editor_viewport = Some(viewport);
+    let Ok(snapshot) = app.active_ddl_editor_snapshot(viewport) else {
+        frame.render_widget(block, area);
+        return;
+    };
+    frame.render_widget(block, area);
+    for (row, line) in snapshot.lines.iter().take(viewport.height).enumerate() {
+        let y = inner.y.saturating_add(row as u16);
+        let spans = super::editor_line_spans(line, &snapshot, theme, true);
+        let selected = snapshot
+            .selection_cells
+            .iter()
+            .any(|(selected_line, _, _)| *selected_line == line.line);
+        frame.render_widget(
+            Paragraph::new(Line::from(spans))
+                .style(Style::new().bg(if selected {
+                    theme.selection
+                } else {
+                    theme.surface
+                }))
+                .scroll((0, snapshot.horizontal_offset.min(u16::MAX as usize) as u16)),
+            Rect::new(inner.x, y, inner.width, 1),
+        );
+    }
+    if app.focus == Focus::Results
+        && app.overlay.is_none()
+        && let Some((x, y)) = snapshot.cursor_screen_cell
+    {
+        frame.set_cursor_position(Position::new(
+            inner.x.saturating_add(x),
+            inner.y.saturating_add(y),
+        ));
+        state.cursor_style = Some(super::CursorStyle::Block);
+    }
 }
 
-fn set_ddl_metrics(state: &mut super::UiState, area: Rect, body: &str) {
-    let inner = panel_block("", false, Theme::default()).inner(area);
-    state.ddl_viewport = Some(super::DdlViewportMetrics {
-        visible_rows: inner.height as usize,
-        visible_columns: inner.width as usize,
-        total_rows: body.lines().count().max(1),
-        max_line_width: body.lines().map(UnicodeWidthStr::width).max().unwrap_or(0),
-    });
-}
-
+#[cfg(test)]
 fn ddl_text(sql: &str) -> String {
     sanitize_terminal_text(sql)
 }
 
+#[cfg(test)]
 fn highlighted_ddl_lines(
     body: &str,
     dialect: SqlDialect,
@@ -440,6 +415,7 @@ fn highlighted_ddl_lines(
     lines
 }
 
+#[cfg(test)]
 fn push_ddl_span(spans: &mut Vec<Span<'static>>, text: &str, kind: HighlightKind, theme: Theme) {
     if text.is_empty() {
         return;
@@ -454,6 +430,7 @@ fn push_ddl_span(spans: &mut Vec<Span<'static>>, text: &str, kind: HighlightKind
     }
 }
 
+#[cfg(test)]
 fn styled_horizontal_slice(
     spans: Vec<Span<'static>>,
     offset: usize,
@@ -482,6 +459,7 @@ fn styled_horizontal_slice(
     Line::from(result)
 }
 
+#[cfg(test)]
 fn ddl_syntax_color(kind: HighlightKind) -> super::theme::SyntaxColor {
     match kind {
         HighlightKind::Keyword => super::theme::SyntaxColor::Keyword,

@@ -2642,7 +2642,29 @@ fn sync_editor_viewport(app: &mut App, runtime: &mut Runtime, state: &UiState) {
     let Some(viewport) = state.editor_viewport else {
         return;
     };
-    if app.active_editor_viewport().ok() != Some(viewport) {
+    let current = if app.focus == crate::model::workspace::Focus::Results
+        && app.active_console_opt().is_some_and(|tab| {
+            matches!(
+                tab.result_view,
+                crate::model::tab::ResultView::Output | crate::model::tab::ResultView::Plan
+            )
+        }) {
+        app.active_output_editor_viewport().ok()
+    } else if app.focus == crate::model::workspace::Focus::Results
+        && app.is_active_relation_tab()
+        && app.tabs.get(app.active_tab).is_some_and(|tab| {
+            matches!(
+                tab,
+                crate::model::tab::WorkspaceTab::Relation(relation)
+                    if relation.view == crate::model::relation::RelationView::Ddl
+            )
+        })
+    {
+        app.active_ddl_editor_viewport().ok()
+    } else {
+        app.active_editor_viewport().ok()
+    };
+    if current != Some(viewport) {
         apply_action(app, runtime, Action::EditorViewportChanged(viewport));
     }
 }

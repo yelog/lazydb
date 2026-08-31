@@ -88,6 +88,7 @@ selected driver, and URL applies on Enter, field exit, Test, or Save.
 | `r` | Reload catalog |
 | `p` | Open a 500-row table/view preview |
 | `D` | Open available object DDL in a new SQL tab |
+| `y` | Copy the selected node's primary name |
 | `s` | Open connection access menu |
 
 Expanding a database loads schemas, expanding a schema loads object groups, and
@@ -178,6 +179,15 @@ connection unchanged.
 | `o` | Switch Data/Output |
 | `1`, `2`, `3` | Select Data, Output, or Plan directly |
 
+When `OUTPUT` is active, it is a read-only Vim text view rather than a grid:
+`h/j/k/l`, arrows, `H/M/L`, `gg/G`, `Ctrl-d/u`, `Ctrl-f/b`, `/`, `?`, `n/N`,
+`v`, `V`, and `Ctrl-v` navigate or select text. `y` copies the Visual selection
+and `yy` copies the current line. Output status markers are visual decorations;
+only the log message text is copied. Editing, paste, undo, redo, substitution,
+and other mutation commands are disabled. Output follows the newest entry until
+the user navigates or starts a selection, after which new entries do not move
+the cursor or selection.
+
 Page movement moves the selected row with the viewport. The fixed `#` column
 shows one-based absolute row numbers and remains visible during horizontal
 scrolling.
@@ -202,17 +212,23 @@ Relation tabs have `DATA` and `DDL` pages. The relation-local shortcuts are:
 | `o` | Toggle between Data and DDL |
 | `1`, `2` | Select Data or DDL directly |
 | `r` | Refresh the active relation; retry a failed request |
-| `j/k` | Move Data selection or scroll DDL vertically |
-| `h/l` | Move Data selection or scroll DDL horizontally |
-| `g` | Jump DDL viewport to the beginning |
-| `G` | Jump DDL viewport to the end |
+| `j/k/h/l`, arrows | Move Data selection or move the DDL read-only Vim cursor |
+| `gg`, `G` | Jump the DDL cursor to the beginning/end |
+| `H/M/L` | Move the DDL cursor to the top/middle/bottom of its viewport |
+| `Ctrl-d/u`, `Ctrl-f/b` | Move the DDL cursor by half/page viewport |
+| `v`, `V`, `Ctrl-v` | Select DDL text in Visual Char/Line/Block mode |
+| `y`, `yy` | Copy the selected DDL text or current line |
 
 Data is a read-only, adapter-owned preview with a hard `LIMIT 500`, including
 the SQL construction and limit. Zero-row results still retain and render column
 metadata. DDL is a complete adapter-owned result; the UI does not reconstruct it
-from catalog rows. On DDL, `j/k/h/l` scroll one row/column at a time and `g/G`
-set both axes to the beginning/end. On Data, the same movement keys select a
-cell and the shared grid follows the selected row/column only as needed.
+from catalog rows. On DDL, the content is a read-only Vim buffer. Normal/Visual
+navigation, search, and yank are available. `V` enters Visual Line mode;
+selection is visible while all editing,
+paste, undo, redo, substitution, and write-oriented commands are disabled. DDL
+status and provenance decorations are not part of selectable or copied text.
+On Data, the same movement keys select a cell and the shared grid follows the
+selected row/column only as needed.
 
 The mouse wheel scrolls the panel under the pointer: Explorer and SQL editor
 move by three rows, Data moves the grid by three rows, and DDL moves its

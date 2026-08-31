@@ -9,6 +9,19 @@ use crate::db::catalog::{
 };
 use crate::profile::DatabaseKind;
 
+fn group_label(group: ObjectGroup) -> &'static str {
+    match group {
+        ObjectGroup::Tables => "Tables",
+        ObjectGroup::Views => "Views",
+        ObjectGroup::MaterializedViews => "Materialized views",
+        ObjectGroup::Sequences => "Sequences",
+        ObjectGroup::Functions => "Functions",
+        ObjectGroup::Procedures => "Procedures",
+        ObjectGroup::Types => "Types",
+        ObjectGroup::Triggers => "Triggers",
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProfileProvenance {
     Saved,
@@ -906,6 +919,27 @@ fn append_filtered_search_rows(
 }
 
 impl ExplorerTreeState {
+    pub fn selected_primary_name(&self) -> Option<String> {
+        let selected = self.selected.as_ref()?;
+        match selected {
+            ExplorerNodeId::Profile(profile_id) => self
+                .profiles
+                .get(profile_id)
+                .map(|profile| profile.display_name.clone()),
+            ExplorerNodeId::Catalog(id) => self
+                .profiles
+                .get(&id.profile_id())
+                .and_then(|profile| profile.catalog.get(id))
+                .map(|entry| entry.qualified_name.object.clone()),
+            ExplorerNodeId::Group { group, .. } => Some(group_label(*group).to_owned()),
+            ExplorerNodeId::EmptyProfiles
+            | ExplorerNodeId::Others
+            | ExplorerNodeId::Status { .. }
+            | ExplorerNodeId::LoadMore { .. }
+            | ExplorerNodeId::Empty { .. } => None,
+        }
+    }
+
     pub fn filtered_search_rows(
         &self,
         profile_id: Option<Uuid>,

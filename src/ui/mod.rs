@@ -29,7 +29,7 @@ use crate::{
         editor::{EditorHighlightKind, EditorMode, EditorViewport},
         explorer::{ExplorerConnectionStatus, ProfileProvenance},
         profile_manager::ProfileField,
-        tab::{DataGridViewport, OutputKind, ResultView, WorkspaceTab},
+        tab::{DataGridViewport, ResultView, WorkspaceTab},
         workspace::{
             ConnectionStatus, ExplorerSearchPhase, Focus, Overlay, QueryStatus, VisibleCatalogNode,
         },
@@ -1473,7 +1473,7 @@ fn render_editor(
     completion_anchor
 }
 
-fn editor_syntax_color(kind: EditorHighlightKind) -> theme::SyntaxColor {
+pub(crate) fn editor_syntax_color(kind: EditorHighlightKind) -> theme::SyntaxColor {
     match kind {
         EditorHighlightKind::Keyword => theme::SyntaxColor::Keyword,
         EditorHighlightKind::Identifier => theme::SyntaxColor::Identifier,
@@ -1485,6 +1485,49 @@ fn editor_syntax_color(kind: EditorHighlightKind) -> theme::SyntaxColor {
         EditorHighlightKind::Parameter => theme::SyntaxColor::Parameter,
         EditorHighlightKind::Plain => theme::SyntaxColor::Plain,
     }
+}
+
+pub(crate) fn editor_line_spans(
+    line: &crate::model::editor::EditorRenderLine,
+    snapshot: &crate::model::editor::EditorRenderSnapshot,
+    theme: Theme,
+    syntax: bool,
+) -> Vec<Span<'static>> {
+    let selected = snapshot
+        .selection_cells
+        .iter()
+        .filter(|(selected_line, _, _)| *selected_line == line.line)
+        .map(|(_, start, end)| (*start, *end))
+        .collect::<Vec<_>>();
+    let mut display_cell = 0usize;
+    let mut result: Vec<Span<'static>> = Vec::new();
+    for source_span in &line.spans {
+        let foreground = if syntax {
+            theme.syntax_color(editor_syntax_color(source_span.kind))
+        } else {
+            theme.text
+        };
+        for character in source_span.text.chars() {
+            let width = character.width().unwrap_or(0);
+            let highlighted = selected.iter().any(|(start, end)| {
+                display_cell < *end && display_cell.saturating_add(width) > *start
+            });
+            let style = Style::new().fg(foreground).bg(if highlighted {
+                theme.selection
+            } else {
+                theme.surface
+            });
+            if let Some(previous) = result.last_mut()
+                && previous.style == style
+            {
+                previous.content.to_mut().push(character);
+            } else {
+                result.push(Span::styled(character.to_string(), style));
+            }
+            display_cell = display_cell.saturating_add(width);
+        }
+    }
+    result
 }
 
 fn render_result_tabs(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
@@ -1537,7 +1580,7 @@ fn render_results(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, st
         .active_console_opt()
         .map_or(ResultView::Data, |tab| tab.result_view)
     {
-        ResultView::Output | ResultView::Plan => render_output(frame, area, app, theme),
+        ResultView::Output | ResultView::Plan => render_output(frame, area, app, theme, state),
         ResultView::Data => render_data(frame, area, app, theme, state),
     }
 }
@@ -1619,7 +1662,7 @@ pub(crate) fn render_result_table(
     );
 }
 
-fn render_output(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
+fn render_output(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, state: &mut UiState) {
     let block = panel_block(" OUTPUT LOG ", app.focus == Focus::Results, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -1635,31 +1678,34 @@ fn render_output(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
         );
         return;
     }
-    let lines = entries
-        .iter()
-        .rev()
-        .take(inner.height as usize)
-        .rev()
-        .map(|entry| {
-            let (marker, color) = match entry.kind {
-                OutputKind::Info => ("·", theme.action),
-                OutputKind::Success => ("✓", theme.accent),
-                OutputKind::Error => ("!", theme.error),
-                OutputKind::Cancelled => ("×", theme.warning),
-            };
-            Line::from(vec![
-                Span::styled(
-                    format!(" {marker} "),
-                    Style::new().fg(color).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(entry.message.clone(), Style::new().fg(theme.text)),
-            ])
-        })
-        .collect::<Vec<_>>();
-    frame.render_widget(
-        Paragraph::new(lines).style(Style::new().bg(theme.surface)),
-        inner,
-    );
+    let viewport = EditorViewport {
+        width: inner.width.saturating_sub(3) as usize,
+        height: inner.height as usize,
+    };
+    state.editor_viewport = Some(viewport);
+    let Ok(snapshot) = app.active_output_editor_snapshot(viewport) else {
+        return;
+    };
+    for (row, line) in snapshot.lines.iter().take(viewport.height).enumerate() {
+        let y = inner.y.saturating_add(row as u16);
+        let content = editor_line_spans(line, &snapshot, theme, false);
+        frame.render_widget(
+            Paragraph::new(Line::from(content))
+                .style(Style::new().bg(theme.surface))
+                .scroll((0, snapshot.horizontal_offset.min(u16::MAX as usize) as u16)),
+            Rect::new(inner.x.saturating_add(3), y, viewport.width as u16, 1),
+        );
+    }
+    if app.focus == Focus::Results
+        && app.overlay.is_none()
+        && let Some((x, y)) = snapshot.cursor_screen_cell
+    {
+        frame.set_cursor_position(Position::new(
+            inner.x.saturating_add(3).saturating_add(x),
+            inner.y.saturating_add(y),
+        ));
+        state.cursor_style = Some(CursorStyle::Block);
+    }
 }
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {

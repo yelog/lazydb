@@ -164,6 +164,7 @@ pub struct RelationDescriptor {
 #[derive(Clone, Debug, PartialEq)]
 pub struct RelationTab {
     pub id: Uuid,
+    pub ddl_editor_id: Uuid,
     pub generation: u64,
     pub next_request_id: u64,
     pub descriptor: RelationDescriptor,
@@ -259,6 +260,7 @@ impl RelationTab {
     pub fn with_descriptor(descriptor: RelationDescriptor, view: RelationView) -> Self {
         Self {
             id: Uuid::new_v4(),
+            ddl_editor_id: Uuid::new_v4(),
             generation: 0,
             next_request_id: 1,
             descriptor,

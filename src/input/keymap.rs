@@ -326,6 +326,7 @@ impl Keymap {
         {
             return Some(action);
         }
+
         if app.focus == Focus::Editor && app.active_editor_mode() == EditorMode::Normal {
             match event.code {
                 KeyCode::Char('?') => return Some(Action::ShowHelp),
@@ -386,12 +387,28 @@ impl Keymap {
             }
         }
 
-        // Resolve multi-key window commands before treating `h`/`j`/`k`/`l`
-        // as DDL scrolling commands.
         if is_relation_ddl_focus(app)
-            && let Some(action) = map_relation_ddl(event)
+            && is_read_only_editor_key(event)
+            && let Some(crate::model::tab::WorkspaceTab::Relation(tab)) =
+                app.tabs.get(app.active_tab)
         {
-            return Some(action);
+            return Some(Action::ReadOnlyEditorKey {
+                session_id: tab.ddl_editor_id,
+                event,
+            });
+        }
+        if let Some(crate::model::tab::WorkspaceTab::Sql(tab)) = app.tabs.get(app.active_tab)
+            && app.focus == Focus::Results
+            && matches!(
+                tab.result_view,
+                crate::model::tab::ResultView::Output | crate::model::tab::ResultView::Plan
+            )
+            && is_read_only_editor_key(event)
+        {
+            return Some(Action::ReadOnlyEditorKey {
+                session_id: tab.output_editor_id,
+                event,
+            });
         }
 
         if event.modifiers.is_empty()
@@ -639,7 +656,29 @@ impl Keymap {
             return map_relation(event.code, app);
         }
         if relation_tab && app.focus == Focus::Results {
+            if is_relation_ddl_focus(app)
+                && is_read_only_editor_key(event)
+                && let Some(crate::model::tab::WorkspaceTab::Relation(tab)) =
+                    app.tabs.get(app.active_tab)
+            {
+                return Some(Action::ReadOnlyEditorKey {
+                    session_id: tab.ddl_editor_id,
+                    event,
+                });
+            }
             return map_relation(event.code, app);
+        }
+        if let Some(crate::model::tab::WorkspaceTab::Sql(tab)) = app.tabs.get(app.active_tab)
+            && app.focus == Focus::Results
+            && matches!(
+                tab.result_view,
+                crate::model::tab::ResultView::Output | crate::model::tab::ResultView::Plan
+            )
+        {
+            return Some(Action::ReadOnlyEditorKey {
+                session_id: tab.output_editor_id,
+                event,
+            });
         }
         match app.focus {
             Focus::Explorer => map_explorer(event.code, app),
@@ -796,35 +835,6 @@ fn is_relation_ddl_focus(app: &App) -> bool {
             Some(crate::model::tab::WorkspaceTab::Relation(tab))
                 if tab.view == crate::model::relation::RelationView::Ddl
         )
-}
-
-fn map_relation_ddl(event: KeyEvent) -> Option<Action> {
-    if !(event.modifiers.is_empty()
-        || event.modifiers == KeyModifiers::SHIFT && event.code == KeyCode::Char('G'))
-    {
-        return None;
-    }
-    match event.code {
-        KeyCode::Char('j') | KeyCode::Down => Some(Action::DdlScroll {
-            rows: 1,
-            columns: 0,
-        }),
-        KeyCode::Char('k') | KeyCode::Up => Some(Action::DdlScroll {
-            rows: -1,
-            columns: 0,
-        }),
-        KeyCode::Char('h') | KeyCode::Left => Some(Action::DdlScroll {
-            rows: 0,
-            columns: -1,
-        }),
-        KeyCode::Char('l') | KeyCode::Right => Some(Action::DdlScroll {
-            rows: 0,
-            columns: 1,
-        }),
-        KeyCode::Char('g') => Some(Action::DdlScrollToStart),
-        KeyCode::Char('G') => Some(Action::DdlScrollToEnd),
-        _ => None,
-    }
 }
 
 fn relation_grid_is_browse(app: &App) -> bool {
@@ -1131,6 +1141,7 @@ fn map_explorer(code: KeyCode, app: &App) -> Option<Action> {
         .as_ref()
         .and_then(|node| node.profile_id());
     match code {
+        KeyCode::Char('y') => return Some(Action::CopyExplorerSelection),
         KeyCode::Char('/') => return Some(Action::ExplorerFindOpen),
         KeyCode::Char('f') => return Some(Action::ExplorerSearchOpen),
         KeyCode::Char('n') => return Some(Action::ProfileStartNew),
@@ -1183,6 +1194,21 @@ fn map_explorer(code: KeyCode, app: &App) -> Option<Action> {
             crate::model::explorer::ExplorerNodeTarget::Last,
         )),
         _ => None,
+    }
+}
+
+fn is_read_only_editor_key(event: KeyEvent) -> bool {
+    let visual_line = event.code == KeyCode::Char('V')
+        && (event.modifiers.is_empty() || event.modifiers == KeyModifiers::SHIFT);
+    if visual_line {
+        return true;
+    }
+    match event.code {
+        KeyCode::Char('o' | '1' | '2' | '3' | 'p' | 'D' | 'r') => false,
+        KeyCode::Char('c') if event.modifiers == KeyModifiers::CONTROL => false,
+        KeyCode::Char('w') if event.modifiers == KeyModifiers::CONTROL => false,
+        KeyCode::F(1 | 5) | KeyCode::Tab | KeyCode::BackTab => false,
+        _ => event.modifiers.is_empty() || event.modifiers == KeyModifiers::CONTROL,
     }
 }
 

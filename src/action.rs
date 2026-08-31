@@ -161,6 +161,15 @@ pub enum Action {
     },
     ReplaceEditor(String),
     EditorKey(KeyEvent),
+    ReadOnlyEditorKey {
+        session_id: Uuid,
+        event: KeyEvent,
+    },
+    ReadOnlyEditorScroll {
+        session_id: Uuid,
+        rows: isize,
+        columns: isize,
+    },
     EditorPaste(String),
     CopyEditorYank(String),
     CopyEditorStatement,
@@ -511,6 +520,7 @@ pub enum Action {
     ExplorerSearchClose,
     ExplorerSearchRetry,
     ExplorerSelect(ExplorerNodeId),
+    CopyExplorerSelection,
     ExplorerToggle,
     ExplorerExpand,
     ExplorerCollapse,

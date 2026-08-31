@@ -2,7 +2,7 @@ use uuid::Uuid;
 
 use crate::model::editor::{EditorMode, EditorPosition, EditorPromptKind, EditorViewport};
 
-use super::{EditorKey, EditorWorkspace, decode_editor_text, encode_editor_text};
+use super::{EditorEffect, EditorKey, EditorWorkspace, decode_editor_text, encode_editor_text};
 
 #[test]
 fn text_codec_preserves_exact_text() {
@@ -158,10 +158,86 @@ fn normal_fixture(text: &str) -> (EditorWorkspace, Uuid) {
     (workspace, id)
 }
 
+fn read_only_fixture(text: &str) -> (EditorWorkspace, Uuid) {
+    let id = Uuid::new_v4();
+    let mut workspace = EditorWorkspace::new();
+    workspace.open_read_only(id, text);
+    (workspace, id)
+}
+
 fn press_keys(workspace: &mut EditorWorkspace, id: Uuid, keys: &str) {
     for key in keys.chars() {
         workspace.press(id, EditorKey::Character(key)).unwrap();
     }
+}
+
+#[test]
+fn read_only_sessions_support_visual_yank_without_mutation() {
+    let (mut workspace, id) = read_only_fixture("alpha beta\ngamma delta");
+    let revision = workspace.revision(id).unwrap();
+
+    press_keys(&mut workspace, id, "vey");
+
+    assert_eq!(workspace.text(id).unwrap(), "alpha beta\ngamma delta");
+    assert_eq!(workspace.revision(id).unwrap(), revision);
+    assert_eq!(workspace.register('"'), Some("alpha"));
+    assert_eq!(
+        workspace.drain_effects(),
+        vec![EditorEffect::Yanked("alpha".into())]
+    );
+}
+
+#[test]
+fn read_only_sessions_enter_visual_line_mode() {
+    let (mut workspace, id) = read_only_fixture("alpha\nbeta");
+
+    workspace.press(id, EditorKey::Character('V')).unwrap();
+
+    assert_eq!(workspace.mode(id).unwrap(), EditorMode::VisualLine);
+    assert_eq!(workspace.text(id).unwrap(), "alpha\nbeta");
+}
+
+#[test]
+fn normal_yank_emits_clipboard_effect() {
+    let (mut workspace, id) = read_only_fixture("alpha beta");
+    workspace.press(id, EditorKey::Character('y')).unwrap();
+    workspace.press(id, EditorKey::Character('y')).unwrap();
+
+    assert_eq!(workspace.register('"'), Some("alpha beta\n"));
+    assert_eq!(
+        workspace.drain_effects(),
+        vec![EditorEffect::Yanked("alpha beta\n".into())]
+    );
+}
+
+#[test]
+fn read_only_sessions_ignore_editing_and_application_actions() {
+    let (mut workspace, id) = read_only_fixture("alpha");
+    let revision = workspace.revision(id).unwrap();
+
+    press_keys(&mut workspace, id, "iX");
+    workspace.press(id, EditorKey::Escape).unwrap();
+    workspace.press(id, EditorKey::Character('Q')).unwrap();
+
+    assert_eq!(workspace.text(id).unwrap(), "alpha");
+    assert_eq!(workspace.revision(id).unwrap(), revision);
+    assert!(workspace.drain_effects().is_empty());
+}
+
+#[test]
+fn read_only_text_replacement_follows_tail_until_interaction() {
+    let (mut workspace, id) = read_only_fixture("one");
+    workspace.set_read_only_text(id, "one\ntwo", true).unwrap();
+    assert_eq!(
+        workspace.position(id).unwrap(),
+        EditorPosition { line: 1, column: 3 }
+    );
+
+    workspace.press(id, EditorKey::Character('g')).unwrap();
+    workspace
+        .set_read_only_text(id, "one\ntwo\nthree", true)
+        .unwrap();
+    assert_eq!(workspace.position(id).unwrap().line, 1);
 }
 
 #[test]

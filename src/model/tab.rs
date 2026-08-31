@@ -130,6 +130,7 @@ pub struct OutputEntry {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConsoleTab {
     pub id: Uuid,
+    pub output_editor_id: Uuid,
     pub name: String,
     pub generation: u64,
     pub query_status: QueryStatus,
@@ -190,6 +191,7 @@ impl ConsoleTab {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             id: Uuid::new_v4(),
+            output_editor_id: Uuid::new_v4(),
             name: name.into(),
             generation: 0,
             query_status: QueryStatus::Idle,

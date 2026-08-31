@@ -141,10 +141,7 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
             }
             match focus_at(ui, event.column, event.row).unwrap_or(app.focus) {
                 Focus::Explorer => Some(Action::ExplorerMove(3)),
-                Focus::Results if is_relation_ddl_focus(app) => Some(Action::DdlScroll {
-                    rows: 3,
-                    columns: 0,
-                }),
+                Focus::Results if is_relation_ddl_focus(app) => ddl_scroll_action(app, 3),
                 Focus::Results => Some(Action::GridMove {
                     rows: 3,
                     columns: 0,
@@ -161,10 +158,7 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
             }
             match focus_at(ui, event.column, event.row).unwrap_or(app.focus) {
                 Focus::Explorer => Some(Action::ExplorerMove(-3)),
-                Focus::Results if is_relation_ddl_focus(app) => Some(Action::DdlScroll {
-                    rows: -3,
-                    columns: 0,
-                }),
+                Focus::Results if is_relation_ddl_focus(app) => ddl_scroll_action(app, -3),
                 Focus::Results => Some(Action::GridMove {
                     rows: -3,
                     columns: 0,
@@ -220,4 +214,15 @@ fn is_relation_ddl_focus(app: &App) -> bool {
             app.tabs.get(app.active_tab),
             Some(WorkspaceTab::Relation(tab)) if tab.view == RelationView::Ddl
         )
+}
+
+fn ddl_scroll_action(app: &App, rows: isize) -> Option<Action> {
+    let Some(WorkspaceTab::Relation(tab)) = app.tabs.get(app.active_tab) else {
+        return None;
+    };
+    Some(Action::ReadOnlyEditorScroll {
+        session_id: tab.ddl_editor_id,
+        rows,
+        columns: 0,
+    })
 }

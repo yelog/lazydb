@@ -442,17 +442,23 @@ fn ddl_view_mouse_scroll_is_vertical_ddl_scroll() {
         lazydb::model::relation::RelationView::Ddl,
     ));
     let ui = UiState::new();
+    let session_id = match app.tabs.get(app.active_tab) {
+        Some(lazydb::model::tab::WorkspaceTab::Relation(tab)) => tab.ddl_editor_id,
+        _ => panic!("expected relation tab"),
+    };
 
     assert_eq!(
         map_mouse(mouse(MouseEventKind::ScrollDown, 40, 8), &ui, &app),
-        Some(Action::DdlScroll {
+        Some(Action::ReadOnlyEditorScroll {
+            session_id,
             rows: 3,
             columns: 0
         })
     );
     assert_eq!(
         map_mouse(mouse(MouseEventKind::ScrollUp, 40, 8), &ui, &app),
-        Some(Action::DdlScroll {
+        Some(Action::ReadOnlyEditorScroll {
+            session_id,
             rows: -3,
             columns: 0
         })

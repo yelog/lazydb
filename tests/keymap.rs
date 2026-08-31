@@ -948,67 +948,31 @@ fn ddl_view_maps_navigation_without_using_grid_move() {
     ));
     let mut keymap = Keymap::default();
 
-    for (code, expected) in [
-        (
-            KeyCode::Char('j'),
-            Action::DdlScroll {
-                rows: 1,
-                columns: 0,
-            },
-        ),
-        (
-            KeyCode::Down,
-            Action::DdlScroll {
-                rows: 1,
-                columns: 0,
-            },
-        ),
-        (
-            KeyCode::Char('k'),
-            Action::DdlScroll {
-                rows: -1,
-                columns: 0,
-            },
-        ),
-        (
-            KeyCode::Up,
-            Action::DdlScroll {
-                rows: -1,
-                columns: 0,
-            },
-        ),
-        (
-            KeyCode::Char('h'),
-            Action::DdlScroll {
-                rows: 0,
-                columns: -1,
-            },
-        ),
-        (
-            KeyCode::Left,
-            Action::DdlScroll {
-                rows: 0,
-                columns: -1,
-            },
-        ),
-        (
-            KeyCode::Char('l'),
-            Action::DdlScroll {
-                rows: 0,
-                columns: 1,
-            },
-        ),
-        (
-            KeyCode::Right,
-            Action::DdlScroll {
-                rows: 0,
-                columns: 1,
-            },
-        ),
-        (KeyCode::Char('g'), Action::DdlScrollToStart),
-        (KeyCode::Char('G'), Action::DdlScrollToEnd),
+    let session_id = match app.tabs.get(app.active_tab) {
+        Some(lazydb::model::tab::WorkspaceTab::Relation(tab)) => tab.ddl_editor_id,
+        _ => panic!("expected relation tab"),
+    };
+    for code in [
+        KeyCode::Char('j'),
+        KeyCode::Down,
+        KeyCode::Char('k'),
+        KeyCode::Up,
+        KeyCode::Char('h'),
+        KeyCode::Left,
+        KeyCode::Char('l'),
+        KeyCode::Right,
+        KeyCode::Char('g'),
+        KeyCode::Char('G'),
+        KeyCode::Char('V'),
     ] {
-        assert_eq!(keymap.map(key(code), &app), Some(expected), "code={code:?}");
+        assert_eq!(
+            keymap.map(key(code), &app),
+            Some(Action::ReadOnlyEditorKey {
+                session_id,
+                event: key(code),
+            }),
+            "code={code:?}"
+        );
     }
 }
 
