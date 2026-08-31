@@ -267,6 +267,13 @@ fn maps_counted_pane_resize_commands() {
             delta: 1,
         },))
     );
+    assert_eq!(
+        counted_window_action(&app, "10", '>'),
+        Some(Action::ResizePane(lazydb::model::workspace::PaneResize {
+            split: lazydb::model::workspace::PaneSplit::ExplorerWidth,
+            delta: 10,
+        }))
+    );
     app.focus = Focus::Results;
     assert_eq!(
         counted_window_action(&app, "12", '-'),

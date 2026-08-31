@@ -378,27 +378,20 @@ impl Keymap {
                 if event.modifiers.is_empty()
                     && let KeyCode::Char(character @ '0'..='9') = event.code
                 {
-                    self.pending = Some((
+                    self.continue_pending(
                         Pending::WindowCount {
                             count: count
                                 .saturating_mul(10)
                                 .saturating_add(character.to_digit(10).unwrap_or(0)),
                         },
-                        started,
                         focus,
                         editor_mode,
                         tab_id,
-                    ));
+                    );
                     return None;
                 }
                 if event.modifiers == KeyModifiers::CONTROL && event.code == KeyCode::Char('w') {
-                    self.pending = Some((
-                        Pending::Window { count },
-                        started,
-                        focus,
-                        editor_mode,
-                        tab_id,
-                    ));
+                    self.continue_pending(Pending::Window { count }, focus, editor_mode, tab_id);
                     return None;
                 }
                 return None;
@@ -731,15 +724,24 @@ impl Keymap {
     }
 
     fn set_pending(&mut self, pending: Pending, app: &App) {
-        self.pending = Some((
+        self.continue_pending(
             pending,
-            Instant::now(),
             app.focus,
             app.active_editor_mode(),
             app.tabs
                 .get(app.active_tab)
                 .map_or(Uuid::nil(), |tab| tab.id()),
-        ));
+        );
+    }
+
+    fn continue_pending(
+        &mut self,
+        pending: Pending,
+        focus: Focus,
+        editor_mode: EditorMode,
+        tab_id: Uuid,
+    ) {
+        self.pending = Some((pending, Instant::now(), focus, editor_mode, tab_id));
     }
 
     pub fn clear_pending(&mut self) {
@@ -1422,7 +1424,9 @@ fn active_data_query_has_focus(app: &App) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::Keymap;
+    use std::time::{Duration, Instant};
+
+    use super::{Keymap, Pending, SEQUENCE_TIMEOUT};
     use crate::{
         action::Action,
         app::App,
@@ -1449,6 +1453,33 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn valid_pending_continuations_refresh_sequence_timeout() {
+        let mut app = App::new(Vec::new());
+        app.focus = Focus::Results;
+        let mut keymap = Keymap::default();
+
+        assert_eq!(keymap.map(key(KeyCode::Char('1')), &app), None);
+        let stale_started = Instant::now() - SEQUENCE_TIMEOUT + Duration::from_millis(25);
+        keymap.pending.as_mut().unwrap().1 = stale_started;
+
+        assert_eq!(keymap.map(key(KeyCode::Char('0')), &app), None);
+        let count_started = keymap.pending.unwrap().1;
+        assert!(count_started > stale_started);
+        assert_eq!(
+            keymap.map(
+                KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+                &app
+            ),
+            None
+        );
+        assert!(matches!(
+            keymap.pending,
+            Some((Pending::Window { count: 10 }, started, ..))
+                if started > count_started
+        ));
     }
 
     #[test]
