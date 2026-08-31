@@ -41,6 +41,29 @@ impl IconSet {
         }
     }
 
+    pub const fn query_filter(self) -> &'static str {
+        match self.mode {
+            IconMode::NerdFont => md::MD_FILTER,
+            IconMode::Unicode => "⌕",
+            IconMode::Ascii => "F",
+        }
+    }
+
+    pub const fn query_sort(self) -> &'static str {
+        match self.mode {
+            IconMode::NerdFont => md::MD_SORT,
+            IconMode::Unicode => "↕",
+            IconMode::Ascii => "S",
+        }
+    }
+
+    pub const fn query_underline(self) -> &'static str {
+        match self.mode {
+            IconMode::Ascii => "-",
+            IconMode::NerdFont | IconMode::Unicode => "─",
+        }
+    }
+
     pub const fn database(self, kind: DatabaseKind) -> &'static str {
         match self.mode {
             IconMode::NerdFont => match kind {
@@ -252,6 +275,16 @@ mod tests {
                     assert!(!icon.chars().any(is_private_use));
                 }
             }
+            for icon in [icons.query_filter(), icons.query_sort()] {
+                assert!(!icon.is_empty());
+                assert!(icon.chars().all(|character| !character.is_control()));
+                if mode == IconMode::Ascii {
+                    assert!(icon.is_ascii());
+                }
+                if mode == IconMode::Unicode {
+                    assert!(!icon.chars().any(is_private_use));
+                }
+            }
         }
     }
 
@@ -296,5 +329,7 @@ mod tests {
         assert_eq!(icons.catalog(CatalogKind::Function), md::MD_FUNCTION);
         assert_eq!(icons.group(ObjectGroup::Tables, false), md::MD_FOLDER);
         assert_eq!(icons.group(ObjectGroup::Tables, true), md::MD_FOLDER_OPEN);
+        assert_eq!(icons.query_filter(), md::MD_FILTER);
+        assert_eq!(icons.query_sort(), md::MD_SORT);
     }
 }
