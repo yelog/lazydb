@@ -109,6 +109,24 @@ pub enum Command {
         #[command(subcommand)]
         command: McpCommand,
     },
+    /// Check or update the local LazyDB installation.
+    Update(UpdateArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct UpdateArgs {
+    /// Check for an update without applying one.
+    #[arg(long)]
+    pub check: bool,
+    /// Select the release channel.
+    #[arg(long, value_enum)]
+    pub channel: Option<crate::update::UpdateChannel>,
+    /// Permit a future updater to select an older version.
+    #[arg(long, conflicts_with = "check")]
+    pub allow_downgrade: bool,
+    /// Emit the stable machine-readable report contract.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -301,6 +319,7 @@ pub fn render_command(command: &Command) -> Result<String, serde_json::Error> {
         Command::Agent { .. } | Command::Mcp { .. } => {
             Ok("This command requires asynchronous execution".to_owned())
         }
+        Command::Update(_) => Ok("This command requires asynchronous execution".to_owned()),
     }
 }
 
@@ -308,7 +327,9 @@ pub fn render_command(command: &Command) -> Result<String, serde_json::Error> {
 mod tests {
     use clap::Parser;
 
-    use super::{CLI_API_VERSION, Cli, Command, MotionMode, capabilities, render_command};
+    use super::{
+        CLI_API_VERSION, Cli, Command, MotionMode, UpdateArgs, capabilities, render_command,
+    };
     use crate::ui::icons::IconMode;
 
     #[test]
@@ -412,5 +433,56 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&output).unwrap()["cli_api"],
             CLI_API_VERSION
         );
+    }
+
+    #[test]
+    fn parses_update_arguments_and_channels() {
+        assert!(matches!(
+            Cli::try_parse_from(["lazydb", "update"]).unwrap().command,
+            Some(Command::Update(UpdateArgs {
+                check: false,
+                channel: None,
+                allow_downgrade: false,
+                json: false,
+            }))
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["lazydb", "update", "--check", "--json"])
+                .unwrap()
+                .command,
+            Some(Command::Update(UpdateArgs {
+                check: true,
+                json: true,
+                ..
+            }))
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["lazydb", "update", "--channel", "beta"])
+                .unwrap()
+                .command,
+            Some(Command::Update(UpdateArgs {
+                channel: Some(crate::update::UpdateChannel::Beta),
+                ..
+            }))
+        ));
+        assert!(matches!(
+            Cli::try_parse_from([
+                "lazydb",
+                "update",
+                "--channel",
+                "stable",
+                "--allow-downgrade",
+                "--json"
+            ])
+            .unwrap()
+            .command,
+            Some(Command::Update(UpdateArgs {
+                allow_downgrade: true,
+                json: true,
+                ..
+            }))
+        ));
+        assert!(Cli::try_parse_from(["lazydb", "update", "--check", "--allow-downgrade"]).is_err());
+        assert!(Cli::try_parse_from(["lazydb", "update", "--channel", "nightly"]).is_err());
     }
 }

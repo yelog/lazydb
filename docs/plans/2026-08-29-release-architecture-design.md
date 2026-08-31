@@ -33,6 +33,10 @@ Use three narrowly separated layers:
 
 Use `dist` (formerly cargo-dist) for the Rust target matrix, archives, checksums, shell installer integration, GitHub Release orchestration, and stable Homebrew publishing where its generated workflow remains suitable. Use nFPM only to convert already-built Linux binaries into `.deb`, `.rpm`, and `.pkg.tar.zst` packages. Keep policy checks and Changelog extraction in repository scripts rather than embedding substantial shell programs in workflow YAML.
 
+npm distribution is intentionally out of scope for the current release
+architecture and remains future optional work. The updater may detect npm-owned
+files to prevent overwrites, but must not claim that npm installation works.
+
 This is preferred over a fully custom workflow because it delegates ordinary Rust distribution behavior to a maintained tool while preserving explicit control over release policy. It is preferred over release-plz because automated release PR and version calculation overlap with the required OpenCode skill and would create two competing release control planes.
 
 ## Trust Boundary

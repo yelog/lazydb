@@ -20,6 +20,7 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 case "$CHANNEL" in stable|beta) ;; *) die "invalid channel: $CHANNEL" ;; esac
+[ -z "${LAZYDB_CHANNEL_LOCKED:-}" ] || [ "$CHANNEL" = "$LAZYDB_CHANNEL_LOCKED" ] || die "channel is fixed to $LAZYDB_CHANNEL_LOCKED"
 [ -n "${HOME:-}" ] || die 'HOME is required'
 
 OS=$(uname -s); ARCH=$(uname -m)
@@ -61,24 +62,23 @@ import json, re, sys
 from urllib.parse import urlparse
 path, channel, target, requested, output = sys.argv[1:]
 try:
-    data = json.load(open(path, encoding="utf-8"))
-    if data.get("schema") != 1 or data.get("product") != "lazydb" or data.get("channel") != channel:
-        raise ValueError("manifest identity mismatch")
-    version = data["version"]
-    if not re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-beta\.[1-9][0-9]*)?", version): raise ValueError("invalid version")
-    if (channel == "beta") != ("-beta." in version) or data.get("tag") != "v" + version or bool(data.get("prerelease")) != (channel == "beta"): raise ValueError("manifest version mismatch")
-    if requested and requested != version: raise ValueError("requested version is not the channel version")
-    supported = {"x86_64-apple-darwin", "aarch64-apple-darwin", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"}
-    if set(data.get("assets", {})) != supported: raise ValueError("manifest target set mismatch")
-    asset = data["assets"][target]
-    url = asset["url"]; parsed = urlparse(url)
-    if parsed.scheme != "https" or parsed.netloc not in {"github.com", "lazydb.yelog.org"} or not re.fullmatch(r"[0-9a-f]{64}", asset["sha256"]): raise ValueError("invalid asset")
-    name = url.rsplit("/", 1)[-1]
-    if name != "lazydb_%s_%s.tar.xz" % (version, target): raise ValueError("invalid asset name")
-    with open(output, "w", encoding="utf-8") as stream:
-        stream.write("%s\n%s\n%s\n" % (version, url, asset["sha256"]))
+    data = json.load(open(path, encoding='utf-8'))
+    if data.get('schema') != 1 or data.get('product') != 'lazydb' or data.get('channel') != channel:
+        raise ValueError('manifest identity mismatch')
+    version = data['version']
+    if not re.fullmatch(r'(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-beta\.[1-9][0-9]*)?', version): raise ValueError('invalid version')
+    if (channel == 'beta') != ('-beta.' in version) or data.get('tag') != 'v' + version or bool(data.get('prerelease')) != (channel == 'beta'): raise ValueError('manifest version mismatch')
+    if requested and requested != version: raise ValueError('requested version is not the channel version')
+    supported = {'x86_64-apple-darwin', 'aarch64-apple-darwin', 'x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu'}
+    if set(data.get('assets', {})) != supported: raise ValueError('manifest target set mismatch')
+    asset = data['assets'][target]
+    url = asset['url']; parsed = urlparse(url)
+    if parsed.scheme != 'https' or parsed.netloc not in {'github.com', 'lazydb.yelog.org'} or not re.fullmatch(r'[0-9a-f]{64}', asset['sha256']): raise ValueError('invalid asset')
+    name = url.rsplit('/', 1)[-1]
+    if name != 'lazydb_%s_%s.tar.xz' % (version, target): raise ValueError('invalid asset name')
+    with open(output, 'w', encoding='utf-8') as stream: stream.write('%s\n%s\n%s\n' % (version, url, asset['sha256']))
 except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-    print("manifest: %s" % exc, file=sys.stderr); raise SystemExit(1)
+    print('manifest: %s' % exc, file=sys.stderr); raise SystemExit(1)
 PY
 [ -s "$TMP/metadata" ] || die 'invalid channel manifest'
 RELEASE_VERSION=$(awk 'NR == 1 { print; exit }' "$TMP/metadata")
@@ -94,38 +94,28 @@ python3 - "$TMP/archive.tar.xz" "$TMP/unpack" "$ARCHIVE_NAME" <<'PY'
 import sys, tarfile
 archive, output, expected = sys.argv[1:]
 with tarfile.open(archive, 'r:xz') as tar:
-    members = tar.getmembers()
-    root = expected[:-7]
-    names = set()
+    members = tar.getmembers(); root = expected[:-7]; names = set()
     for member in members:
         name = member.name
-        if name.startswith('/') or name in names or any(part in ('', '..') for part in name.split('/')) or (name != root and not name.startswith(root + '/')):
-            raise SystemExit('unsafe archive entry: ' + name)
-        if member.issym() or member.islnk() or not (member.isdir() or member.isreg()):
-            raise SystemExit('unsupported archive entry: ' + name)
+        if name.startswith('/') or name in names or any(part in ('', '..') for part in name.split('/')) or (name != root and not name.startswith(root + '/')): raise SystemExit('unsafe archive entry: ' + name)
+        if member.issym() or member.islnk() or not (member.isdir() or member.isreg()): raise SystemExit('unsupported archive entry: ' + name)
         names.add(name)
     binary = root + '/lazydb'
-    if binary not in names or not any(tarinfo.name == binary and tarinfo.isreg() for tarinfo in members):
-        raise SystemExit('archive does not contain the expected executable')
+    if binary not in names or not any(tarinfo.name == binary and tarinfo.isreg() for tarinfo in members): raise SystemExit('archive does not contain the expected executable')
     tar.extractall(output)
 PY
 chmod 0755 "$TMP/unpack"/*/lazydb
-STAGED="$TMP/release"
-mkdir -p "$STAGED"
-cp -R "$TMP/unpack"/*/. "$STAGED/"
+STAGED="$TMP/release"; mkdir -p "$STAGED"; cp -R "$TMP/unpack"/*/. "$STAGED/"
 "$STAGED/lazydb" version --json > "$TMP/version.json" || die 'staged binary failed version check'
 python3 - "$TMP/version.json" "$RELEASE_VERSION" <<'PY'
 import json,sys
 data=json.load(open(sys.argv[1], encoding='utf-8'))
-version = data.get('version')
-if version != sys.argv[2]: raise SystemExit('binary reported version %r' % version)
+if data.get('version') != sys.argv[2]: raise SystemExit('binary reported version %r' % data.get('version'))
 PY
 DEST="$RELEASES/$RELEASE_VERSION"
 if [ ! -e "$DEST" ]; then mkdir -p "$RELEASES"; mv "$STAGED" "$DEST"; fi
-ln -sfn "$DEST" "$TMP/current.new"
-mv -f "$TMP/current.new" "$DATA_HOME/current"
-mkdir -p "$INSTALL_DIR"
-ln -sfn "$DATA_HOME/current/lazydb" "$INSTALL_DIR/lazydb"
+ln -sfn "$DEST" "$TMP/current.new"; mv -f "$TMP/current.new" "$DATA_HOME/current"
+mkdir -p "$INSTALL_DIR"; ln -sfn "$DATA_HOME/current/lazydb" "$INSTALL_DIR/lazydb"
 STATE="$DATA_HOME/install.json"
 python3 - "$STATE" "$TMP/state" "$CHANNEL" "$RELEASE_VERSION" "$TARGET" "$INSTALL_DIR/lazydb" <<'PY'
 import json, os, sys, tempfile

@@ -393,6 +393,7 @@ Configure:
 - CI workflow generation.
 
 Do not enable Windows, npm, crates.io publishing, musl, MSI, or PKG installers.
+npm distribution is future optional work, not a current release capability.
 
 **Step 3: Generate and inspect the workflow**
 

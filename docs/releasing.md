@@ -11,6 +11,8 @@ and built by `.github/workflows/release.yml`.
   the ARM64 Linux runner used by the release matrix.
 - The `yelog/lazydb` remote is configured and tags have been fetched.
 - GitHub Actions has access to the protected `release` Environment.
+- GitHub Pages is configured to deploy with GitHub Actions from this repository.
+- DNS has a CNAME from `lazydb.yelog.org` to `yelog.github.io`.
 - Stable Homebrew publication requires the external `yelog/homebrew-tap`
   repository and a credential scoped only to that repository.
 - Local validation tools include `cargo`, `git`, `awk`, `grep`, `tar`, and a
@@ -48,6 +50,26 @@ The workflow creates a draft Release, uploads and verifies all assets, then
 publishes it. Beta Releases are prereleases. Stable Releases additionally
 produce Linux native packages, a shell installer, and a Homebrew Formula.
 
+## Pages Custom Domain
+
+In the repository's **Settings > Pages**, set the source to **GitHub Actions**
+and set the custom domain to `lazydb.yelog.org`. The repository contains
+`pages/CNAME` with that exact hostname; the Pages workflow copies it into the
+deployed artifact. At the DNS provider, create a CNAME record for
+`lazydb.yelog.org` pointing to `yelog.github.io`, then wait for GitHub to issue
+and enforce HTTPS. Verify the deployment and both channel documents:
+
+```bash
+curl --fail --proto '=https' --tlsv1.2 https://lazydb.yelog.org/CNAME
+curl --fail --proto '=https' --tlsv1.2 https://lazydb.yelog.org/channels/stable.json
+curl --fail --proto '=https' --tlsv1.2 https://lazydb.yelog.org/channels/beta.json
+```
+
+The Pages job preserves the other channel manifest while publishing the
+channel associated with the newly published Release. It intentionally deploys
+only the two manifests, `CNAME`, and the three installer scripts; release
+archives are not copied to Pages.
+
 ## Assets
 
 Binary targets are:
@@ -62,6 +84,45 @@ are direct Release assets and do not create `apt`, DNF, or Pacman repositories.
 Consequently, `apt install lazydb`, `dnf install lazydb`, and `pacman -S
 lazydb` are not supported by this first release implementation.
 
+## Channel Manifests
+
+The Pages channel documents are served from
+`https://lazydb.yelog.org/channels/stable.json` and
+`https://lazydb.yelog.org/channels/beta.json`. Each is schema `1` JSON
+containing `product: "lazydb"`,
+the channel, version, matching `vVERSION` tag, `prerelease` flag, publication
+timestamp, GitHub `release_url`, and exactly one asset entry for each supported
+target. Every asset has an HTTPS GitHub Release download URL and a 64-character
+lowercase SHA-256 digest. The manifest is generated from the published
+`SHA256SUMS`; it does not duplicate archive data or call the GitHub API.
+
+The canonical native installer stores releases below
+`${XDG_DATA_HOME:-$HOME/.local/share}/lazydb`, activates a `current` symlink, and
+links the requested executable directory to that activation. It records channel,
+target, version, and manager ownership in `install.json`. `--version` selects a
+specific version only when it matches the selected channel manifest; it does not
+permit an installer to bypass manifest validation. `LAZYDB_CHANNEL_BASE_URL` is
+reserved for local fixture tests and should not be set in production.
+
+Stable manifests use stable versions and tags; Beta manifests use
+`VERSION-beta.N` versions and prerelease tags. A publication updates only its
+own channel document, and manifests are published only after the matching
+GitHub Release assets pass the exact-name and checksum checks.
+
+## Release Order
+
+The release workflow uses this order: validate the tag and source, run the
+quality checks, build all four archives, build stable Linux packages when
+applicable, publish the GitHub Release, update the stable Homebrew tap, and
+finally deploy Pages from the published Release. Beta releases skip native
+Linux packages, Homebrew, and the stable installer while still publishing the
+beta Pages manifest. npm distribution is future optional work and is not part
+ of the current release workflow.
+
+Do not publish a channel manifest before its matching GitHub Release assets are
+public and checksum-verified. Do not treat Homebrew or Pages publication
+as a rebuild step: each consumes the already verified Release output.
+
 ## Recovery
 
 If build or validation fails, fix the source or workflow and create a new
@@ -69,6 +130,47 @@ commit. Never replace an existing tag. If Homebrew fails after a stable GitHub
 Release is public, preserve the Release, fix the Tap or credentials, and rerun
 the existing-tag workflow. Do not issue a replacement tag just to retry a
 channel publication.
+
+For a failed or interrupted publication, inspect the existing tag and Release
+before retrying:
+
+```bash
+git fetch --tags origin
+gh release view vVERSION --repo yelog/lazydb --json isDraft,isPrerelease,assets,url
+gh run list --repo yelog/lazydb --workflow release.yml --limit 10
+gh workflow run release.yml --repo yelog/lazydb -f tag=vVERSION
+```
+
+The retry input must name the existing tag. Do not create a second tag for the
+same version. A failed Pages deployment can be retried after the Release is
+published; a failed Homebrew publication can likewise be repaired and
+rerun without rebuilding or replacing verified Release assets. If a source or
+workflow defect caused the failure, fix it in a new commit and use a new
+version.
+
+## Exact Verification
+
+Run these checks against a published stable version, replacing `VERSION` and
+`ARCH` with the asset names under test:
+
+```bash
+gh release view vVERSION --repo yelog/lazydb --json url,assets
+curl --fail --proto '=https' --tlsv1.2 https://lazydb.yelog.org/install.sh -o /tmp/lazydb-installer.sh
+sh -n /tmp/lazydb-installer.sh
+curl --fail --proto '=https' --tlsv1.2 https://lazydb.yelog.org/channels/stable.json
+curl --fail --proto '=https' --tlsv1.2 https://lazydb.yelog.org/channels/beta.json
+gh release download vVERSION --repo yelog/lazydb --pattern 'lazydb_VERSION_ARCH.tar.xz' --pattern SHA256SUMS
+shasum -a 256 -c SHA256SUMS
+```
+
+For repository-side validation before tagging, run:
+
+```bash
+git diff --check
+sh scripts/release/test-channel-manifest.sh
+sh scripts/release/test-pages.sh
+sh scripts/release/test-installer.sh
+```
 
 ## First Release Checklist
 

@@ -1,0 +1,66 @@
+name: Pages
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  assemble:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          persist-credentials: false
+      - id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -eu
+          case "$TAG" in v*) ;; *) echo "invalid release tag: $TAG" >&2; exit 1 ;; esac
+          version=${TAG#v}
+          case "$version" in *-beta.*) channel=beta ;; *) channel=stable ;; esac
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          mkdir -p dist existing-pages
+          gh release download "$TAG" --dir dist --repo "$GITHUB_REPOSITORY"
+          published_at=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json publishedAt --jq .publishedAt)
+          opposite=stable
+          [ "$channel" = stable ] && opposite=beta
+          if curl --fail --location --proto '=https' --tlsv1.2 --max-time 30 -o "existing-pages/$opposite.json" "https://lazydb.yelog.org/channels/$opposite.json"; then
+            :
+          elif [ -f "pages/$opposite.json" ]; then
+            cp "pages/$opposite.json" "existing-pages/$opposite.json"
+          else
+            echo "existing $opposite Pages manifest is required" >&2
+            exit 1
+          fi
+          sh scripts/release/assemble-pages.sh "$channel" "$version" "$published_at" dist pages existing-pages _site
+      - name: Configure Pages
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
+        with:
+          path: _site
+
+  deploy:
+    needs: assemble
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4

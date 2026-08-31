@@ -17,3 +17,4 @@ pub mod security;
 pub mod sql;
 pub mod terminal;
 pub mod ui;
+pub mod update;

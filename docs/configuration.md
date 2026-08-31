@@ -1,5 +1,25 @@
 # Configuration
 
+## Installation Updates
+
+`lazydb update --check` checks the configured channel without changing the
+installation. `lazydb update` applies a newer release only when the executable
+is a native Pages installation; it verifies the channel manifest and archive
+checksum before switching the active version. `--channel stable` and
+`--channel beta` select the channel for that operation. Without the flag,
+LazyDB uses the channel recorded by the native installer, falling back to
+stable.
+
+Installations owned by Homebrew, Debian, RPM, Arch, or Cargo are not
+replaced by LazyDB. The command reports the corresponding manager action:
+`brew upgrade yelog/tap/lazydb`, `sudo apt install --only-upgrade ./lazydb_VERSION_ARCH.deb`,
+`sudo dnf upgrade ./lazydb_VERSION_ARCH.rpm`,
+`sudo pacman -U ./lazydb_VERSION_ARCH.pkg.tar.zst`, or `cargo install lazydb`.
+Use the owning manager for the actual update. These Linux packages are direct
+Release assets, not configured distribution repositories. npm-managed files are
+detected and protected from overwrite, but official npm distribution is
+currently unavailable; use the Pages installer or Homebrew instead.
+
 M0 loads connection profiles from the platform configuration directory:
 
 - macOS: `~/Library/Application Support/dev.lazydb.lazydb/connections.toml`
