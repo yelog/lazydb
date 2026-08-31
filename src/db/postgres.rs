@@ -193,9 +193,10 @@ WITH candidates AS (
         WHEN strpos(lower(object_name), lower($1)) > 0 THEN 2
         ELSE 3 END AS relevance
     FROM candidates
-    WHERE $3
-      AND (strpos(lower(object_name), lower($1)) > 0
-           OR strpos(lower(qualified_path), lower($1)) > 0)
+     WHERE $3
+       AND (strpos(lower(object_name), lower($1)) > 0
+            OR strpos(lower(qualified_path), lower($1)) > 0
+            OR strpos(lower($1), lower(qualified_path)) > 0)
 )
 SELECT kind, database_name, schema_name, object_name, object_oid,
        relation_kind, relation_name, relation_oid, comment, relation_comment,
