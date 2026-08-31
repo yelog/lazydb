@@ -43,6 +43,14 @@ pub struct AgentConnection {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct AgentContext {
+    pub project_root: String,
+    pub project_name: String,
+    pub connections: Vec<AgentConnection>,
+    pub selected_connection: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct AgentTarget {
     pub connection: AgentConnection,
     pub schema: Option<String>,

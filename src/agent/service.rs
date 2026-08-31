@@ -7,7 +7,7 @@ use crate::{
     agent::{
         context::{AgentProfileScope, AgentProjectContext, VisibleAgentProfile},
         selection::{AgentError, SelectedAgentProfile, select_profile},
-        types::{AgentConnection, AgentQueryResult, AgentTarget, QueryOutcomeJson},
+        types::{AgentConnection, AgentContext, AgentQueryResult, AgentTarget, QueryOutcomeJson},
     },
     db::DatabaseConnection,
     persistence::{
@@ -88,6 +88,16 @@ impl AgentService {
             .collect()
     }
 
+    pub fn context(&self, selector: Option<&str>) -> Result<AgentContext, AgentError> {
+        let selected = self.select(selector)?;
+        Ok(AgentContext {
+            project_root: self.project.root().display().to_string(),
+            project_name: self.project.project.display_name.clone(),
+            connections: self.connections(),
+            selected_connection: selected.profile.id.to_string(),
+        })
+    }
+
     pub async fn query(
         &self,
         selector: Option<&str>,
@@ -159,6 +169,48 @@ impl AgentService {
                 .await;
         connection.close().await;
         result
+    }
+
+    pub async fn execute(
+        &self,
+        selector: Option<&str>,
+        sql: &str,
+        policy: super::policy::WritePolicy,
+    ) -> Result<AgentQueryResult, AgentError> {
+        let selected = self.select(selector)?;
+        super::policy::authorize_write(selected.profile, policy, sql).map_err(|error| {
+            AgentError {
+                code: super::selection::AgentErrorCode::PolicyDenied,
+                message: format!("write rejected: {error:?}"),
+            }
+        })?;
+        let password = self
+            .credential_resolver
+            .resolve_headless(selected.profile)
+            .await
+            .map_err(|error| AgentError {
+                code: super::selection::AgentErrorCode::CredentialFailure,
+                message: error.to_string(),
+            })?;
+        let connection = DatabaseConnection::connect(selected.profile, password.as_ref())
+            .await
+            .map_err(|error| AgentError {
+                code: super::selection::AgentErrorCode::DatabaseFailure,
+                message: error.to_string(),
+            })?;
+        let result = connection.execute(sql).await.map_err(|error| AgentError {
+            code: super::selection::AgentErrorCode::DatabaseFailure,
+            message: error.to_string(),
+        });
+        connection.close().await;
+        let outcome = result?;
+        Ok(AgentQueryResult {
+            target: AgentTarget {
+                connection: project_connection(selected.profile, selected.scope),
+                schema: selected.profile.default_schema.clone(),
+            },
+            outcome: QueryOutcomeJson::from(outcome),
+        })
     }
 }
 
