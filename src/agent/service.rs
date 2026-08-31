@@ -128,6 +128,38 @@ impl AgentService {
             outcome: json,
         })
     }
+
+    pub async fn search_schema(
+        &self,
+        selector: Option<&str>,
+        query: String,
+        limit: usize,
+    ) -> Result<super::catalog::SchemaSearchResult, AgentError> {
+        let selected = self.select(selector)?;
+        let password = self
+            .credential_resolver
+            .resolve_headless(selected.profile)
+            .await
+            .map_err(|error| AgentError {
+                code: super::selection::AgentErrorCode::CredentialFailure,
+                message: error.to_string(),
+            })?;
+        let connection = DatabaseConnection::connect(selected.profile, password.as_ref())
+            .await
+            .map_err(|error| AgentError {
+                code: super::selection::AgentErrorCode::DatabaseFailure,
+                message: error.to_string(),
+            })?;
+        let target = AgentTarget {
+            connection: project_connection(selected.profile, selected.scope),
+            schema: selected.profile.default_schema.clone(),
+        };
+        let result =
+            super::catalog::search_schema(&connection, selected.profile, target, query, limit)
+                .await;
+        connection.close().await;
+        result
+    }
 }
 
 fn project_connection(profile: &ConnectionProfile, scope: AgentProfileScope) -> AgentConnection {
