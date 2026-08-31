@@ -81,6 +81,23 @@ brew install yelog/tap/lazydb
 The current `v0.1.0-beta.1` prerelease is distributed through GitHub Release
 assets only. It does not update the stable Homebrew Formula.
 
+### Install From a Binary Archive
+
+For stable releases, the installer above is the shortest option. For a Beta or
+a pinned version, download the matching archive from [GitHub Releases] and run
+these commands. Set `TARGET` to `x86_64-apple-darwin`, `aarch64-apple-darwin`,
+`x86_64-unknown-linux-gnu`, or `aarch64-unknown-linux-gnu`:
+
+```bash
+VERSION=0.1.0-beta.1 TARGET=x86_64-unknown-linux-gnu
+mkdir -p "$HOME/.local/bin" && curl -fsSL "https://github.com/yelog/lazydb/releases/download/v$VERSION/lazydb_${VERSION}_${TARGET}.tar.xz" | tar -xJ --strip-components=1 -O "lazydb_${VERSION}_${TARGET}/lazydb" > "$HOME/.local/bin/lazydb" && chmod 755 "$HOME/.local/bin/lazydb"
+```
+
+Verify the installation with `lazydb version --json`. Release archives include
+`SHA256SUMS` for users who need to perform a manual checksum verification.
+
+[GitHub Releases]: https://github.com/yelog/lazydb/releases
+
 On macOS and Linux, the stable release can also be installed without a package
 manager. The installer verifies the downloaded archive against the release
 SHA-256 manifest and installs to `~/.local/bin` by default:
