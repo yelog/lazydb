@@ -9,10 +9,10 @@ preferred over broad abstractions or controls for unfinished features.
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets --all-features
-
-nvim --headless -u lazydb.nvim/tests/minimal_init.lua \
-  -c "lua require('lazydb_spec').run()" -c qa
 ```
+
+The Neovim frontend and its test suite are maintained in the standalone
+[`yelog/lazydb.nvim`](https://github.com/yelog/lazydb.nvim) repository.
 
 PostgreSQL and MySQL integration tests run only when configured:
 

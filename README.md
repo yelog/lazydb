@@ -221,23 +221,25 @@ terminal selection should take priority.
 
 ## Neovim Integration
 
-The Neovim plugin lives in the `lazydb.nvim/` subdirectory of the
-[`yelog/lazydb`](https://github.com/yelog/lazydb) repository. It starts the
-`lazydb` executable in a floating terminal; it does not contain the database
-engine itself. Install the CLI first using one of the methods above, then add
-the plugin with one of the following methods.
+The standalone [`yelog/lazydb.nvim`](https://github.com/yelog/lazydb.nvim)
+plugin starts the `lazydb` executable in a floating terminal; it does not
+contain the database engine itself. Install the CLI first using one of the
+methods above, then add the plugin with one of the following methods. See the
+plugin repository for its complete configuration and command reference.
 
 ### lazy.nvim
-
-Because this repository contains both the CLI and the plugin, use a local
-checkout and point `lazy.nvim` at the plugin subdirectory:
 
 ```lua
 return {
   {
-    dir = vim.fn.expand("~/src/lazydb/lazydb.nvim"),
-    name = "lazydb.nvim",
-    cmd = { "LazyDB", "LazyDBToggle", "LazyDBRestart" },
+    "yelog/lazydb.nvim",
+    cmd = {
+      "LazyDB",
+      "LazyDBToggle",
+      "LazyDBHide",
+      "LazyDBStop",
+      "LazyDBRestart",
+    },
     keys = {
       {
         "<leader>db",
@@ -255,72 +257,30 @@ return {
 }
 ```
 
-Clone the repository once before using the local `dir` specification:
-
-```bash
-git clone https://github.com/yelog/lazydb.git ~/src/lazydb
-```
-
-If you manage the repository as a local development checkout, the same
-specification can use an absolute path in your own source tree.
-
 ### Neovim Native Packages
 
 For Neovim 0.10 and newer, install the plugin under the native package path.
 Packages in `pack/*/start/*` are loaded automatically:
 
 ```bash
-mkdir -p "${XDG_DATA_HOME:-$HOME/.local/share}/nvim/site/pack/lazydb/start"
-git clone https://github.com/yelog/lazydb.git \
-  "${XDG_DATA_HOME:-$HOME/.local/share}/nvim/site/pack/lazydb/start/lazydb-repository"
+git clone https://github.com/yelog/lazydb.nvim.git \
+  "${XDG_DATA_HOME:-$HOME/.local/share}/nvim/site/pack/lazydb/start/lazydb.nvim"
 ```
 
-Then add the plugin directory to `runtimepath` from `init.lua`:
+Then configure it from `init.lua`:
 
 ```lua
-vim.opt.runtimepath:append(
-  vim.fn.expand("~/.local/share/nvim/site/pack/lazydb/start/lazydb-repository/lazydb.nvim")
-)
 require("lazydb").setup({ executable = "lazydb" })
 ```
 
-For a package that is already checked out into the standard `start` directory,
-the recommended layout is:
-
-```text
-~/.local/share/nvim/site/pack/lazydb/start/lazydb.nvim/
-```
-
-Since the plugin is nested inside this monorepo, the explicit `runtimepath`
-line above is required when cloning the repository as a whole.
-
-Neovim 0.12 and newer also provides `vim.pack.add()`. It installs a Git
-repository into Neovim's package area, but the nested plugin directory still
-needs to be added to `runtimepath`:
+Neovim 0.12 and newer also provides `vim.pack.add()`:
 
 ```lua
-vim.pack.add({ "https://github.com/yelog/lazydb.git" }, { confirm = true })
-vim.opt.runtimepath:append(
-  vim.fn.stdpath("data") .. "/site/pack/core/opt/lazydb/lazydb.nvim"
-)
-vim.cmd("packadd! lazydb")
+vim.pack.add({ "https://github.com/yelog/lazydb.nvim.git" })
 require("lazydb").setup({ executable = "lazydb" })
 ```
 
 For Neovim 0.10 and 0.11, use the `pack/*/start/*` method instead.
-
-### Manual Local Plugin
-
-For an existing local checkout, add only the plugin directory to
-`runtimepath`:
-
-```lua
-vim.opt.runtimepath:prepend(vim.fn.expand("~/src/lazydb/lazydb.nvim"))
-require("lazydb").setup({
-  executable = "lazydb",
-  window = { width = 0.92, height = 0.90, border = "rounded" },
-})
-```
 
 The plugin registers these commands:
 

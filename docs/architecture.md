@@ -195,10 +195,12 @@ results; completion performs no database I/O while typing.
 
 ## Neovim Boundary
 
-`lazydb.nvim` owns only a scratch terminal buffer, floating window, argv/cwd,
-one process per Neovim tab handle, and lifecycle/health checks. It does not parse
-SQL, connect to databases, or store credentials. The embedded LazyDB TUI
-provides the same Profile Manager and keyring behavior when launched by Neovim.
+The standalone
+[`lazydb.nvim`](https://github.com/yelog/lazydb.nvim) frontend owns only a
+scratch terminal buffer, floating window, argv/cwd, one process per Neovim tab
+handle, and lifecycle/health checks. It does not parse SQL, connect to
+databases, or store credentials. The launched LazyDB process provides the same
+Profile Manager and keyring behavior as a direct CLI session.
 
 ## Remaining Architectural Work
 
