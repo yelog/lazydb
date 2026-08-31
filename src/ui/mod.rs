@@ -1855,11 +1855,14 @@ fn render_data(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, state
     let Some(tab) = app.active_console_opt() else {
         return;
     };
-    let query_height = query_bar::height(&tab.query, area.width, state.activity_icons);
+    let block = panel_block(" RESULT SET ", app.focus == Focus::Results, theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let query_height = query_bar::height(&tab.query, inner.width, state.activity_icons);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(query_height), Constraint::Min(1)])
-        .split(area);
+        .split(inner);
     let query_cursor = query_bar::render(
         frame,
         chunks[0],
@@ -1868,7 +1871,7 @@ fn render_data(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, state
         state,
         state.activity_icons,
     );
-    let area = chunks[1];
+    let result_area = chunks[1];
     let loading_identity = if tab.query_status == QueryStatus::Running {
         Some(animation::LoadIdentity::Query {
             tab_id: tab.id,
@@ -1894,13 +1897,12 @@ fn render_data(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, state
         .and_then(|derived| derived.outcome.as_ref())
         .or(tab.outcome.as_ref())
         .and_then(|outcome| outcome.result_sets.last());
-    let block = panel_block(" RESULT SET ", app.focus == Focus::Results, theme);
     if let Some(identity) = loading_identity {
         if let Some(result) = result {
             let body = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Length(1), Constraint::Min(1)])
-                .split(area);
+                .split(result_area);
             frame.render_widget(
                 loading::ActivityIndicator {
                     mode: state.animation_mode(),
@@ -1920,7 +1922,7 @@ fn render_data(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, state
                 result,
                 tab.grid.clone(),
                 theme,
-                block,
+                Block::default().style(Style::new().bg(theme.surface)),
                 state,
             );
         } else if animation::show_skeleton(elapsed) {
@@ -1930,13 +1932,11 @@ fn render_data(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, state
                     icons: state.activity_icons,
                     elapsed,
                     theme,
-                    block,
+                    block: Block::default().style(Style::new().bg(theme.surface)),
                 },
-                area,
+                result_area,
             );
         } else {
-            let inner = block.inner(area);
-            frame.render_widget(block, area);
             frame.render_widget(
                 loading::ActivityIndicator {
                     mode: state.animation_mode(),
@@ -1947,28 +1947,27 @@ fn render_data(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, state
                     cancellable: true,
                     style: Style::new().fg(theme.action).bg(theme.surface),
                 },
-                inner,
+                result_area,
             );
         }
         let _ = identity;
     } else if let Some(result) = result {
         render_result_table(
             frame,
-            area,
+            result_area,
             tab.id,
             result,
             tab.grid.clone(),
             theme,
-            block,
+            Block::default().style(Style::new().bg(theme.surface)),
             state,
         );
     } else {
         frame.render_widget(
             Paragraph::new("Run a query to populate the data viewport")
-                .block(block)
                 .style(Style::new().fg(theme.muted).bg(theme.surface))
                 .alignment(Alignment::Center),
-            area,
+            result_area,
         );
     }
     if let (Some(completion), Some(cursor)) = (&tab.query.completion, query_cursor) {

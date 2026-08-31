@@ -58,6 +58,7 @@ pub(crate) fn render(
         return;
     }
 
+    let table_area = block.inner(area);
     let widths = automatic_widths(result)
         .into_iter()
         .enumerate()
@@ -70,9 +71,9 @@ pub(crate) fn render(
         .collect::<Vec<_>>();
     let number_width = row_number_width(result.rows.len());
     let fixed_width = number_width.saturating_add(1);
-    let available = area
+    let available = table_area
         .width
-        .saturating_sub(4)
+        .saturating_sub(2)
         .saturating_sub(fixed_width)
         .max(1);
     let overflow = total_width(&widths) > available;
@@ -90,7 +91,7 @@ pub(crate) fn render(
     });
     let constraints = grid_constraints(&visible, number_width);
 
-    let visible_rows = area.height.saturating_sub(4 + u16::from(overflow)) as usize;
+    let visible_rows = table_area.height.saturating_sub(2 + u16::from(overflow)) as usize;
     let row_offset = row_viewport_start(
         result.rows.len(),
         visible_rows,
@@ -103,7 +104,7 @@ pub(crate) fn render(
         row_offset,
         visible_rows,
     });
-    let row_y = area.y.saturating_add(3);
+    let row_y = table_area.y.saturating_add(2);
     for (screen_row, row_index) in result
         .rows
         .iter()
@@ -112,17 +113,17 @@ pub(crate) fn render(
         .enumerate()
         .map(|(screen_row, _)| (screen_row, row_offset.saturating_add(screen_row)))
     {
-        let mut x = data_start_x(area, number_width);
+        let mut x = data_start_x(table_area, number_width);
         for column in &visible {
             let width = column.rendered_width;
-            if x >= area.right() {
+            if x >= table_area.right() {
                 break;
             }
             state.hit_regions.push(HitRegion {
                 area: Rect::new(
                     x,
                     row_y.saturating_add(screen_row as u16),
-                    width.min(area.right().saturating_sub(x)),
+                    width.min(table_area.right().saturating_sub(x)),
                     1,
                 ),
                 target: HitTarget::ResultCell {
@@ -134,10 +135,10 @@ pub(crate) fn render(
         }
     }
 
-    let mut boundary_x = data_start_x(area, number_width);
+    let mut boundary_x = data_start_x(table_area, number_width);
     for column in &visible {
         boundary_x = boundary_x.saturating_add(column.rendered_width);
-        if column.is_complete() && boundary_x < area.right().saturating_sub(1) {
+        if column.is_complete() && boundary_x < table_area.right().saturating_sub(1) {
             state.hit_regions.push(HitRegion {
                 area: Rect::new(boundary_x, row_y, 1, 1),
                 target: HitTarget::RelationColumnResize {
@@ -207,15 +208,15 @@ pub(crate) fn render(
     });
     let mut table_state = TableState::new().with_selected_cell(selected_cell);
     frame.render_stateful_widget(table, area, &mut table_state);
-    if result.rows.is_empty() && area.height >= 3 {
+    if result.rows.is_empty() && table_area.height >= 3 {
         frame.render_widget(
             Paragraph::new("No rows")
                 .style(Style::new().fg(theme.muted).bg(theme.surface))
                 .alignment(Alignment::Center),
             Rect::new(
-                area.x.saturating_add(2),
-                area.y.saturating_add(2),
-                area.width.saturating_sub(4),
+                table_area.x.saturating_add(1),
+                table_area.y.saturating_add(2),
+                table_area.width.saturating_sub(2),
                 1,
             ),
         );
@@ -228,7 +229,7 @@ pub(crate) fn render(
             .max(1);
         render_scrollbar(
             frame,
-            area,
+            table_area,
             first,
             complete_visible,
             widths.len(),
@@ -396,7 +397,7 @@ fn selected_data_cell(visible_position: usize) -> usize {
 
 fn data_start_x(area: Rect, number_width: u16) -> u16 {
     area.x
-        .saturating_add(2)
+        .saturating_add(1)
         .saturating_add(number_width)
         .saturating_add(1)
 }
@@ -507,9 +508,9 @@ fn render_scrollbar(
 ) {
     let track = Rect::new(
         data_start_x(area, number_width),
-        area.bottom().saturating_sub(2),
+        area.bottom().saturating_sub(1),
         area.width
-            .saturating_sub(4)
+            .saturating_sub(2)
             .saturating_sub(number_width.saturating_add(1)),
         1,
     );

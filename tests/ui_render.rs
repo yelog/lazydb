@@ -1603,6 +1603,25 @@ fn sql_data_renders_shared_query_bar_above_the_grid() {
     assert!(output.contains("WHERE"), "{output}");
     assert!(output.contains("ORDER BY"), "{output}");
     assert!(!output.contains("Run a read-only query first"), "{output}");
+    let lines = output.lines().collect::<Vec<_>>();
+    let panel_y = lines
+        .iter()
+        .position(|line| line.contains("RESULT SET"))
+        .unwrap();
+    let query_y = lines
+        .iter()
+        .enumerate()
+        .skip(panel_y + 1)
+        .find_map(|(index, line)| line.contains("WHERE").then_some(index))
+        .unwrap();
+    let header_y = lines
+        .iter()
+        .enumerate()
+        .skip(query_y + 1)
+        .find_map(|(index, line)| (line.contains('#') && line.contains("id")).then_some(index))
+        .unwrap();
+    assert!(panel_y < query_y, "{output}");
+    assert!(query_y < header_y, "{output}");
     let cell = state
         .hit_regions
         .iter()
