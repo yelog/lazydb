@@ -6,7 +6,7 @@ Make the footer's help hint display `?` instead of `F1`, document that shortcut 
 
 ## Design
 
-- Add a `Help` variant to `HelpShortcutId` and add a shared entry with key `?` and description `open this help panel` to every contextual shortcut list.
+- Add a `Help` variant to `HelpShortcutId` and add a shared entry with key `? (also F1)` and description `open this help panel` to every contextual shortcut list.
 - Change the footer label to `? help` so the visible hint and help documentation use the same shortcut notation.
 - Keep the existing F1 action mapping as an input compatibility path; this request changes the displayed/documented shortcut without unnecessarily removing an existing way to open help.
 - In `execute_help_shortcut`, handle `Help` before the generic overlay dismissal. Returning no commands leaves the current help overlay and selection unchanged.

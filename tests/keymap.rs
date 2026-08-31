@@ -149,7 +149,7 @@ fn help_overlay_owns_text_selection_and_execution_keys() {
     assert_eq!(
         keymap.map(key(KeyCode::Enter), &app),
         Some(Action::ExecuteHelpShortcut(
-            lazydb::help::HelpShortcutId::FocusExplorer
+            lazydb::help::HelpShortcutId::Help
         ))
     );
     assert_eq!(

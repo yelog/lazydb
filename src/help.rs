@@ -2,6 +2,7 @@ use crate::model::workspace::Focus;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HelpShortcutId {
+    Help,
     FocusExplorer,
     FocusResults,
     FocusEditorFromK,
@@ -160,6 +161,11 @@ impl HelpState {
 
 pub fn shortcuts(context: Focus, relation_data: bool) -> Vec<HelpShortcut> {
     let mut entries = vec![
+        HelpShortcut {
+            id: HelpShortcutId::Help,
+            key: "? (also F1)",
+            description: "open this help panel",
+        },
         HelpShortcut {
             id: HelpShortcutId::FocusExplorer,
             key: "Ctrl-w h",
@@ -619,6 +625,18 @@ mod tests {
         let state = HelpState::new(Focus::Explorer);
         assert_eq!(state.query, "");
         assert_eq!(state.selected, 0);
+    }
+
+    #[test]
+    fn every_context_documents_the_help_shortcut() {
+        for context in [Focus::Explorer, Focus::Editor, Focus::Results] {
+            let help = shortcuts(context, false)
+                .into_iter()
+                .find(|shortcut| shortcut.id == HelpShortcutId::Help)
+                .expect("help shortcut");
+            assert_eq!(help.key, "? (also F1)");
+            assert_eq!(help.description, "open this help panel");
+        }
     }
 
     #[test]

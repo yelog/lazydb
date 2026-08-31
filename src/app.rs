@@ -9507,3 +9507,11 @@ mod tests {
         );
     }
 }
+        if id == crate::help::HelpShortcutId::Help {
+            return Vec::new();
+        }
+            Id::Help => unreachable!("help shortcut is handled before dispatch"),
+        app.update(Action::ExecuteHelpShortcut(
+            crate::help::HelpShortcutId::Help,
+        ));
+        assert!(matches!(app.overlay, Some(Overlay::Help(_))));

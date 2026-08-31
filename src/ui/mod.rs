@@ -2032,7 +2032,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
             Style::new().fg(theme.muted).bg(theme.surface),
         ),
         Span::styled(
-            "   F1 help ",
+            "   ? help ",
             Style::new()
                 .fg(theme.action)
                 .bg(theme.surface)
