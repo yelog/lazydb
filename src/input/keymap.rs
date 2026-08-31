@@ -410,7 +410,9 @@ impl Keymap {
             return None;
         }
 
-        if is_sql_grid_focus(app) && event.modifiers.is_empty() {
+        if is_sql_grid_focus(app)
+            && (event.modifiers.is_empty() || event.modifiers == KeyModifiers::SHIFT)
+        {
             match event.code {
                 KeyCode::Char('y') => return Some(Action::CopyGridCell),
                 KeyCode::Char('Y') => {
@@ -423,7 +425,9 @@ impl Keymap {
         }
 
         if is_relation_data_focus(app) {
-            if event.modifiers.is_empty() && relation_grid_is_browse(app) {
+            if (event.modifiers.is_empty() || event.modifiers == KeyModifiers::SHIFT)
+                && relation_grid_is_browse(app)
+            {
                 match event.code {
                     KeyCode::Char('d') => {
                         self.set_pending(Pending::RelationDelete, app);
@@ -655,7 +659,7 @@ fn map_pending(pending: Pending, event: KeyEvent, app: &App) -> Option<Action> {
     let valid_modifiers = event.modifiers.is_empty()
         || (pending == Pending::Leader
             && event.modifiers == KeyModifiers::SHIFT
-            && event.code == KeyCode::Char('R'))
+            && matches!(event.code, KeyCode::Char('R' | 'Y')))
         || (pending == Pending::Goto
             && event.modifiers == KeyModifiers::SHIFT
             && event.code == KeyCode::Char('T'))

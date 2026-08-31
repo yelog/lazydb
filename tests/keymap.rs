@@ -394,6 +394,36 @@ fn space_s_takes_priority_over_sql_result_order_input() {
 }
 
 #[test]
+fn shifted_y_copies_sql_result_rows() {
+    let mut app = App::new(Vec::new());
+    app.focus = Focus::Results;
+    let shifted_y = KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT);
+
+    let mut keymap = Keymap::default();
+    assert_eq!(
+        keymap.map(shifted_y, &app),
+        Some(Action::CopyGridRow {
+            include_headers: false,
+        })
+    );
+
+    assert_eq!(keymap.map(key(KeyCode::Char(' ')), &app), None);
+    assert_eq!(
+        keymap.map(shifted_y, &app),
+        Some(Action::CopyGridRow {
+            include_headers: true,
+        })
+    );
+
+    for modifiers in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+        assert_eq!(
+            keymap.map(KeyEvent::new(KeyCode::Char('Y'), modifiers), &app),
+            None
+        );
+    }
+}
+
+#[test]
 fn maps_scope_picker_navigation_and_toggle() {
     let mut app = App::new(Vec::new());
     app.update(Action::OpenProfileManager);
