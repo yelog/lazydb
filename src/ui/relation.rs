@@ -202,6 +202,7 @@ fn render_data(
                 super::CompletionAnchor {
                     viewport: area,
                     cursor,
+                    replacement_start_x: None,
                 },
             );
         }
@@ -221,6 +222,7 @@ fn render_data(
                 super::CompletionAnchor {
                     viewport: area,
                     cursor,
+                    replacement_start_x: None,
                 },
             );
         }

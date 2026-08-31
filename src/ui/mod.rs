@@ -358,6 +358,7 @@ pub(crate) fn render_text_input(
 pub(crate) struct CompletionAnchor {
     pub(crate) viewport: Rect,
     pub(crate) cursor: Position,
+    pub(crate) replacement_start_x: Option<u16>,
 }
 
 fn render_completion_popup(
@@ -383,26 +384,41 @@ fn render_completion_popup(
     if popup.candidates.is_empty() {
         return;
     }
+    let icon_width = popup
+        .candidates
+        .iter()
+        .map(|candidate| icons.completion(candidate.kind).cell_width())
+        .max()
+        .unwrap_or(0);
+    let label_offset = icon_width.saturating_add(1);
     let desired_height = popup.candidates.len().min(10) as u16;
     let desired_width = popup
         .candidates
         .iter()
         .map(|candidate| {
             let detail = candidate.detail.as_deref().unwrap_or("");
-            format!(
-                "{} {}  {}",
-                icons.completion(candidate.kind),
-                candidate.label,
-                detail
-            )
-            .as_str()
-            .cell_width()
-            .saturating_add(1)
+            label_offset
+                .saturating_add(candidate.label.as_str().cell_width())
+                .saturating_add(if detail.is_empty() {
+                    0
+                } else {
+                    2u16.saturating_add(detail.cell_width())
+                })
+                .saturating_add(1)
         })
         .max()
         .unwrap_or(4)
         .max(4);
-    let Some(area) = completion_popup_rect(anchor, desired_width, desired_height) else {
+    let popup_x = anchor
+        .replacement_start_x
+        .map(|label_x| label_x.saturating_sub(label_offset))
+        .unwrap_or(anchor.cursor.x);
+    let layout_anchor = CompletionAnchor {
+        cursor: Position::new(popup_x, anchor.cursor.y),
+        replacement_start_x: None,
+        ..anchor
+    };
+    let Some(area) = completion_popup_rect(layout_anchor, desired_width, desired_height) else {
         return;
     };
     state.completion_popup = Some(area);
@@ -413,13 +429,16 @@ fn render_completion_popup(
         .enumerate()
         .map(|(index, candidate)| {
             let detail = candidate.detail.as_deref().unwrap_or("");
+            let icon = icons.completion(candidate.kind);
+            let icon_padding =
+                " ".repeat(usize::from(icon_width.saturating_sub(icon.cell_width())));
             let row_style = if index == popup.selected {
                 Style::new().fg(theme.background).bg(theme.accent)
             } else {
                 Style::new().fg(theme.text).bg(theme.surface_raised)
             };
             ListItem::new(Line::from(vec![
-                Span::styled(format!("{} ", icons.completion(candidate.kind)), row_style),
+                Span::styled(format!("{icon_padding}{icon} "), row_style),
                 Span::styled(candidate.label.clone(), row_style),
                 Span::styled(
                     if detail.is_empty() {
@@ -522,12 +541,11 @@ fn completion_popup_rect(
         return None;
     }
 
-    let width = desired_width.min(viewport.width).max(1);
     let x = anchor
         .cursor
         .x
-        .clamp(viewport.x, viewport.right().saturating_sub(1))
-        .min(viewport.right().saturating_sub(width));
+        .clamp(viewport.x, viewport.right().saturating_sub(1));
+    let width = desired_width.min(viewport.right().saturating_sub(x)).max(1);
     let below_y = anchor.cursor.y.saturating_add(1);
     let below = viewport.bottom().saturating_sub(below_y);
     let above = anchor.cursor.y.saturating_sub(viewport.y);
@@ -1276,6 +1294,56 @@ fn explorer_search_cursor_column(input: &str, width: u16) -> u16 {
     input.cell_width().min(width.saturating_sub(1))
 }
 
+fn source_byte_to_visible_cell(
+    source: &str,
+    source_to_display_cells: &[usize],
+    byte: usize,
+    horizontal_offset: usize,
+    viewport_width: usize,
+) -> Option<u16> {
+    if viewport_width == 0 || byte > source.len() || !source.is_char_boundary(byte) {
+        return None;
+    }
+    let column = source[..byte].chars().count();
+    let cell = *source_to_display_cells.get(column)?;
+    Some(
+        cell.saturating_sub(horizontal_offset)
+            .min(viewport_width.saturating_sub(1)) as u16,
+    )
+}
+
+fn completion_replacement_start_cell(
+    text: &str,
+    snapshot: &crate::model::editor::EditorRenderSnapshot,
+    replace: crate::sql::TextRange,
+) -> Option<u16> {
+    if replace.start > text.len() || !text.is_char_boundary(replace.start) {
+        return None;
+    }
+    let line_start = text
+        .split_inclusive('\n')
+        .take(snapshot.cursor.line)
+        .map(str::len)
+        .sum::<usize>();
+    let line_end = text[line_start..]
+        .find('\n')
+        .map_or(text.len(), |offset| line_start + offset);
+    if replace.start < line_start || replace.start > line_end {
+        return None;
+    }
+    let line = snapshot
+        .lines
+        .iter()
+        .find(|line| line.line == snapshot.cursor.line)?;
+    source_byte_to_visible_cell(
+        &text[line_start..line_end],
+        &line.source_to_display_cells,
+        replace.start - line_start,
+        snapshot.horizontal_offset,
+        snapshot.viewport.width,
+    )
+}
+
 fn render_editor(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -1307,17 +1375,27 @@ fn render_editor(
         viewport.width.min(u16::MAX as usize) as u16,
         viewport.height.min(u16::MAX as usize) as u16,
     );
+    let replacement_start_x = app
+        .active_console_opt()
+        .and_then(|tab| tab.completion.as_ref())
+        .and_then(|popup| popup.candidates.first())
+        .and_then(|candidate| {
+            let text = app.active_editor_text().ok()?;
+            completion_replacement_start_cell(&text, &snapshot, candidate.replace)
+        })
+        .map(|x| text_viewport.x.saturating_add(x));
     let completion_anchor = snapshot
         .prompt
         .is_none()
         .then_some(snapshot.cursor_screen_cell)
         .flatten()
         .map(|(x, y)| CompletionAnchor {
-            viewport: text_viewport,
+            viewport: inner,
             cursor: Position::new(
                 text_viewport.x.saturating_add(x),
                 text_viewport.y.saturating_add(y),
             ),
+            replacement_start_x,
         });
     let mode = match snapshot.mode {
         EditorMode::Normal => "NORMAL",
@@ -1640,6 +1718,7 @@ fn render_data(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, state
             CompletionAnchor {
                 viewport: area,
                 cursor,
+                replacement_start_x: None,
             },
         );
     }
@@ -2409,6 +2488,64 @@ mod completion_popup_tests {
     use super::*;
 
     #[test]
+    fn replacement_start_uses_display_cells() {
+        let ascii = crate::security::project_editor_line("SELECT * FROM sys_u");
+        assert_eq!(
+            source_byte_to_visible_cell(
+                "SELECT * FROM sys_u",
+                &ascii.source_to_display_cells,
+                14,
+                0,
+                40,
+            ),
+            Some(14)
+        );
+
+        let wide = crate::security::project_editor_line("界🙂 sys_u");
+        assert_eq!(
+            source_byte_to_visible_cell(
+                "界🙂 sys_u",
+                &wide.source_to_display_cells,
+                "界🙂 ".len(),
+                0,
+                40,
+            ),
+            Some(5)
+        );
+
+        let tab = crate::security::project_editor_line("\tsys_u");
+        assert_eq!(
+            source_byte_to_visible_cell("\tsys_u", &tab.source_to_display_cells, 1, 0, 40),
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn replacement_start_accounts_for_horizontal_scroll_and_invalid_offsets() {
+        let source = "SELECT * FROM sys_u";
+        let projection = crate::security::project_editor_line(source);
+
+        assert_eq!(
+            source_byte_to_visible_cell(source, &projection.source_to_display_cells, 14, 10, 40,),
+            Some(4)
+        );
+        assert_eq!(
+            source_byte_to_visible_cell(source, &projection.source_to_display_cells, 4, 10, 40,),
+            Some(0)
+        );
+
+        let wide = crate::security::project_editor_line("界sys_u");
+        assert_eq!(
+            source_byte_to_visible_cell("界sys_u", &wide.source_to_display_cells, 1, 0, 40),
+            None
+        );
+        assert_eq!(
+            source_byte_to_visible_cell(source, &projection.source_to_display_cells, 100, 0, 40),
+            None
+        );
+    }
+
+    #[test]
     fn explorer_search_cursor_uses_terminal_cell_width() {
         assert_eq!(explorer_search_cursor_column("/ 界", 20), 4);
         assert_eq!(explorer_search_cursor_column("/ 界", 4), 3);
@@ -2431,6 +2568,7 @@ mod completion_popup_tests {
         let anchor = CompletionAnchor {
             viewport: Rect::new(10, 5, 40, 10),
             cursor: Position::new(12, 6),
+            replacement_start_x: None,
         };
 
         assert_eq!(
@@ -2444,6 +2582,7 @@ mod completion_popup_tests {
         let anchor = CompletionAnchor {
             viewport: Rect::new(10, 5, 40, 10),
             cursor: Position::new(12, 13),
+            replacement_start_x: None,
         };
 
         assert_eq!(
@@ -2453,15 +2592,30 @@ mod completion_popup_tests {
     }
 
     #[test]
-    fn clamps_popup_to_the_text_viewport() {
+    fn keeps_popup_origin_and_shrinks_width_at_the_right_edge() {
         let anchor = CompletionAnchor {
             viewport: Rect::new(10, 5, 40, 10),
             cursor: Position::new(48, 6),
+            replacement_start_x: None,
         };
 
         assert_eq!(
             completion_popup_rect(anchor, 20, 4),
-            Some(Rect::new(30, 7, 20, 4))
+            Some(Rect::new(48, 7, 2, 4))
+        );
+    }
+
+    #[test]
+    fn clamps_popup_origin_to_the_viewport_left_edge() {
+        let anchor = CompletionAnchor {
+            viewport: Rect::new(10, 5, 40, 10),
+            cursor: Position::new(4, 6),
+            replacement_start_x: None,
+        };
+
+        assert_eq!(
+            completion_popup_rect(anchor, 20, 4),
+            Some(Rect::new(10, 7, 20, 4))
         );
     }
 }
