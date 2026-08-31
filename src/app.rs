@@ -7,7 +7,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use uuid::Uuid;
 
 use crate::{
-    action::{Action, Command},
+    action::{Action, Command, ProfileAccessChange},
     cli::ConfirmationPolicy,
     clipboard::{ClipboardPayload, copy_cell, copy_row_tsv},
     db::{
@@ -60,7 +60,8 @@ use crate::{
     persistence::workspace::{
         PersistedConsole, PersistedProfileWorkspace, PersistedTab, WorkspaceSnapshot,
     },
-    profile::{ConnectionProfile, DatabaseKind},
+    profile::{ConnectionProfile, DatabaseKind, ProfileAccess},
+    project::ProjectContext,
     sql::{self, CompletionScheduleKey, ScopeSource, SqlDialect},
 };
 
@@ -134,6 +135,7 @@ fn is_data_query_identifier_character(character: char) -> bool {
 }
 
 pub struct App {
+    pub project: ProjectContext,
     pub profiles: Vec<ConnectionProfile>,
     pub connection: ConnectionState,
     pub active_workspace_profile: Option<Uuid>,
@@ -192,14 +194,24 @@ impl App {
 
     pub fn new(profiles: Vec<ConnectionProfile>) -> Self {
         let persisted = profiles.iter().map(|profile| profile.id).collect();
-        Self::with_profiles(profiles, persisted, ConfirmationPolicy::RiskyOnly)
+        Self::with_profiles(
+            profiles,
+            persisted,
+            ConfirmationPolicy::RiskyOnly,
+            ProjectContext::resolve_current().expect("current project must be resolvable"),
+        )
     }
 
     pub fn with_startup_profiles(
         profiles: Vec<ConnectionProfile>,
         persisted: HashSet<Uuid>,
     ) -> Self {
-        Self::with_profiles(profiles, persisted, ConfirmationPolicy::RiskyOnly)
+        Self::with_profiles(
+            profiles,
+            persisted,
+            ConfirmationPolicy::RiskyOnly,
+            ProjectContext::resolve_current().expect("current project must be resolvable"),
+        )
     }
 
     pub fn with_confirmation_policy(
@@ -207,7 +219,12 @@ impl App {
         confirmation_policy: ConfirmationPolicy,
     ) -> Self {
         let persisted = profiles.iter().map(|profile| profile.id).collect();
-        Self::with_profiles(profiles, persisted, confirmation_policy)
+        Self::with_profiles(
+            profiles,
+            persisted,
+            confirmation_policy,
+            ProjectContext::resolve_current().expect("current project must be resolvable"),
+        )
     }
 
     pub fn with_startup_profiles_and_confirmation_policy(
@@ -215,13 +232,28 @@ impl App {
         persisted: HashSet<Uuid>,
         confirmation_policy: ConfirmationPolicy,
     ) -> Self {
-        Self::with_profiles(profiles, persisted, confirmation_policy)
+        Self::with_profiles(
+            profiles,
+            persisted,
+            confirmation_policy,
+            ProjectContext::resolve_current().expect("current project must be resolvable"),
+        )
+    }
+
+    pub fn with_startup_project(
+        profiles: Vec<ConnectionProfile>,
+        persisted: HashSet<Uuid>,
+        confirmation_policy: ConfirmationPolicy,
+        project: ProjectContext,
+    ) -> Self {
+        Self::with_profiles(profiles, persisted, confirmation_policy, project)
     }
 
     fn with_profiles(
         profiles: Vec<ConnectionProfile>,
         persisted: HashSet<Uuid>,
         confirmation_policy: ConfirmationPolicy,
+        project: ProjectContext,
     ) -> Self {
         let mut editor = EditorWorkspace::new();
         let mut explorer = ExplorerState::default();
@@ -233,6 +265,11 @@ impl App {
                     ProfileProvenance::Saved
                 } else {
                     ProfileProvenance::Session
+                },
+                if !persisted.contains(&profile.id) {
+                    crate::model::explorer::ProfilePlacement::CurrentProject
+                } else {
+                    profile_placement(profile, Some(&project.root))
                 },
             );
         }
@@ -255,6 +292,7 @@ impl App {
         };
 
         Self {
+            project,
             profiles,
             connection: ConnectionState::default(),
             active_workspace_profile: None,
@@ -850,6 +888,16 @@ impl App {
         self.focus = Focus::Editor;
     }
 
+    pub fn reveal_startup_profile(&mut self, profile_id: Option<Uuid>) {
+        let Some(profile_id) = profile_id else {
+            return;
+        };
+        let _ = self
+            .explorer
+            .normalized
+            .reveal_node(ExplorerNodeId::Profile(profile_id));
+    }
+
     fn restore_profile_workspace(
         &self,
         profile: &PersistedProfileWorkspace,
@@ -1043,6 +1091,7 @@ impl App {
             Id::ExplorerDdl => vec![Action::OpenSelectedRelation {
                 view: RelationView::Ddl,
             }],
+            Id::ExplorerAccess => vec![Action::OpenProfileAccess],
             Id::EditorInsert => vec![editor_key(KeyCode::Char('i'))],
             Id::EditorNormal => vec![editor_key(KeyCode::Esc)],
             Id::EditorUndo => vec![editor_key(KeyCode::Char('u'))],
@@ -2041,6 +2090,46 @@ impl App {
                     manager.operation = None;
                     manager.message = Some(message);
                 }
+                Vec::new()
+            }
+            Action::ProfileAccessUpdated {
+                profile_id, access, ..
+            } => {
+                if let Some(profile) = self
+                    .profiles
+                    .iter_mut()
+                    .find(|profile| profile.id == profile_id)
+                {
+                    profile.access = access;
+                    if let Some(state) = self.explorer.normalized.profiles.get_mut(&profile_id) {
+                        state.placement = profile_placement(profile, Some(&self.project.root));
+                    }
+                }
+                self.clipboard_notice = Some(ClipboardNotice::success(
+                    "Connection access updated",
+                    Instant::now(),
+                ));
+                Vec::new()
+            }
+            Action::ProfileAccessUpdateFailed { message, .. } => {
+                self.clipboard_notice = Some(ClipboardNotice::error(message, Instant::now()));
+                Vec::new()
+            }
+            Action::OpenProfileAccess => self.open_profile_access(),
+            Action::ProfileAccessMove(delta) => {
+                if let Some(Overlay::ProfileAccess {
+                    selected, options, ..
+                }) = self.overlay.as_mut()
+                {
+                    *selected = selected
+                        .saturating_add_signed(delta)
+                        .min(options.len().saturating_sub(1));
+                }
+                Vec::new()
+            }
+            Action::ProfileAccessConfirm => self.confirm_profile_access(),
+            Action::ProfileAccessCancel => {
+                self.overlay = None;
                 Vec::new()
             }
             Action::ProfileDeleted {
@@ -4416,7 +4505,7 @@ impl App {
         let Some(draft) = manager.draft.as_ref() else {
             return Vec::new();
         };
-        let submission = match draft.validate(profiles) {
+        let mut submission = match draft.validate(profiles) {
             Ok(submission) => submission,
             Err(error) => {
                 manager.selected_field = error.field;
@@ -4424,6 +4513,14 @@ impl App {
                 return Vec::new();
             }
         };
+        if !profiles
+            .iter()
+            .any(|profile| profile.id == submission.profile.id)
+        {
+            submission.profile.access = ProfileAccess::Projects {
+                roots: vec![self.project.root.clone()],
+            };
+        }
         let request_id = next_profile_request(manager);
         manager.operation = Some(if connect {
             ProfileOperation::SavingAndConnecting
@@ -4462,7 +4559,12 @@ impl App {
         } else {
             Vec::new()
         };
-        add_explorer_profile(&mut self.explorer, &profile, ProfileProvenance::Saved);
+        add_explorer_profile(
+            &mut self.explorer,
+            &profile,
+            ProfileProvenance::Saved,
+            profile_placement(&profile, Some(&self.project.root)),
+        );
         if scope_changed && let Some(state) = self.explorer.normalized.profiles.get_mut(&profile_id)
         {
             if state.advance_catalog_epoch().is_none() {
@@ -5874,6 +5976,97 @@ impl App {
         self.target_for_node(self.explorer.selected_id()?)
     }
 
+    fn open_profile_access(&mut self) -> Vec<Command> {
+        let Some(profile_id) = self
+            .explorer
+            .selected_id()
+            .and_then(ExplorerNodeId::profile_id)
+        else {
+            return Vec::new();
+        };
+        let Some(profile) = self
+            .profiles
+            .iter()
+            .find(|profile| profile.id == profile_id)
+        else {
+            return Vec::new();
+        };
+        if !self
+            .explorer
+            .normalized
+            .profiles
+            .get(&profile_id)
+            .is_some_and(|state| state.provenance == ProfileProvenance::Saved)
+        {
+            self.clipboard_notice = Some(ClipboardNotice::error(
+                "Session connections have no saved access scope",
+                Instant::now(),
+            ));
+            return Vec::new();
+        }
+        let root = self.project.root.clone();
+        let options = match &profile.access {
+            ProfileAccess::Global => vec![crate::model::workspace::ProfileAccessOption {
+                label: format!("Make project-only for {}", self.project.display_name),
+                change: ProfileAccessChange::MakeProjectOnly(root),
+            }],
+            ProfileAccess::Projects { roots }
+                if roots.iter().any(|candidate| candidate == &root) =>
+            {
+                vec![
+                    crate::model::workspace::ProfileAccessOption {
+                        label: "Make global".to_owned(),
+                        change: ProfileAccessChange::MakeGlobal,
+                    },
+                    crate::model::workspace::ProfileAccessOption {
+                        label: format!("Remove from {}", self.project.display_name),
+                        change: ProfileAccessChange::RemoveProject(root),
+                    },
+                ]
+            }
+            ProfileAccess::Projects { .. } => vec![
+                crate::model::workspace::ProfileAccessOption {
+                    label: "Make global".to_owned(),
+                    change: ProfileAccessChange::MakeGlobal,
+                },
+                crate::model::workspace::ProfileAccessOption {
+                    label: format!("Add to {}", self.project.display_name),
+                    change: ProfileAccessChange::AddProject(root),
+                },
+            ],
+        };
+        self.overlay = Some(Overlay::ProfileAccess {
+            profile_id,
+            selected: 0,
+            options,
+        });
+        Vec::new()
+    }
+
+    fn confirm_profile_access(&mut self) -> Vec<Command> {
+        let Some(Overlay::ProfileAccess {
+            profile_id,
+            selected,
+            options,
+        }) = self.overlay.take()
+        else {
+            return Vec::new();
+        };
+        let Some(option) = options.get(selected) else {
+            return Vec::new();
+        };
+        vec![Command::UpdateProfileAccess {
+            request_id: self.next_profile_request_id(),
+            profile_id,
+            change: option.change.clone(),
+        }]
+    }
+
+    fn next_profile_request_id(&mut self) -> u64 {
+        self.connection_request_generation = self.connection_request_generation.saturating_add(1);
+        self.connection_request_generation
+    }
+
     fn target_for_node(
         &self,
         node: &crate::model::explorer::ExplorerNodeId,
@@ -5896,6 +6089,7 @@ impl App {
             | ExplorerNodeId::Empty { owner }
             | ExplorerNodeId::LoadMore { parent: owner, .. } => self.target_for_owner(owner),
             ExplorerNodeId::EmptyProfiles => None,
+            ExplorerNodeId::Others => None,
         }
     }
 
@@ -5984,6 +6178,10 @@ impl App {
                 }
             }
             ExplorerNodeId::EmptyProfiles => self.update(Action::ProfileStartNew),
+            ExplorerNodeId::Others => {
+                self.explorer.toggle_selected();
+                Vec::new()
+            }
             ExplorerNodeId::Status { .. } | ExplorerNodeId::Empty { .. } => Vec::new(),
         }
     }
@@ -7769,6 +7967,7 @@ fn add_explorer_profile(
     explorer: &mut ExplorerState,
     profile: &ConnectionProfile,
     provenance: ProfileProvenance,
+    placement: crate::model::explorer::ProfilePlacement,
 ) {
     let endpoint = match profile.kind {
         DatabaseKind::Sqlite => profile
@@ -7784,13 +7983,29 @@ fn add_explorer_profile(
                 .map_or_else(|| host.to_owned(), |port| format!("{host}:{port}"))
         }
     };
-    explorer.normalized.add_profile_with_metadata(
+    explorer.normalized.add_profile_with_placement(
         profile.id,
         profile.name.clone(),
         profile.kind,
         endpoint,
         provenance,
+        placement,
     );
+}
+
+fn profile_placement(
+    profile: &ConnectionProfile,
+    project_root: Option<&std::path::Path>,
+) -> crate::model::explorer::ProfilePlacement {
+    if profile.access == ProfileAccess::Global {
+        return crate::model::explorer::ProfilePlacement::Global;
+    }
+    match project_root {
+        Some(root) if profile.access.contains_project(root) => {
+            crate::model::explorer::ProfilePlacement::CurrentProject
+        }
+        _ => crate::model::explorer::ProfilePlacement::OtherProject,
+    }
 }
 
 fn tab_snapshot(tab: &ConsoleTab) -> transaction::TransactionSnapshot {

@@ -19,7 +19,7 @@ use lazydb::{
     persistence::secrets::SecretStoreAvailability,
     profile::{
         CatalogScope, CatalogSelection, ConnectionProfile, DatabaseKind, DatabaseScope,
-        import_connection_url,
+        ProfileAccess, import_connection_url,
     },
 };
 
@@ -27,6 +27,34 @@ fn sqlite_profile(name: &str) -> ConnectionProfile {
     import_connection_url(":memory:", Some(name))
         .unwrap()
         .profile
+}
+
+#[test]
+fn new_saved_profiles_default_to_the_current_project() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::OpenProfileManager);
+    let draft = app
+        .profile_manager
+        .as_mut()
+        .unwrap()
+        .draft
+        .as_mut()
+        .unwrap();
+    draft.name.set("project-local");
+    draft.kind = DatabaseKind::Sqlite;
+    draft.sqlite_memory = true;
+
+    let commands = app.update(Action::ProfileSave { connect: false });
+    let [Command::SaveProfile { submission, .. }] = commands.as_slice() else {
+        panic!("expected a save command");
+    };
+
+    assert_eq!(
+        submission.profile.access,
+        ProfileAccess::Projects {
+            roots: vec![app.project.root.clone()],
+        }
+    );
 }
 
 #[test]

@@ -39,6 +39,7 @@ pub enum HelpShortcutId {
     ExplorerRefresh,
     ExplorerPreview,
     ExplorerDdl,
+    ExplorerAccess,
     EditorInsert,
     EditorNormal,
     EditorUndo,
@@ -344,6 +345,11 @@ pub fn shortcuts(context: Focus, relation_data: bool) -> Vec<HelpShortcut> {
                 id: HelpShortcutId::ExplorerDdl,
                 key: "D",
                 description: "open object DDL",
+            },
+            HelpShortcut {
+                id: HelpShortcutId::ExplorerAccess,
+                key: "s",
+                description: "connection access",
             },
         ],
         Focus::Editor => vec![

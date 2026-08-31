@@ -7,7 +7,8 @@ use lazydb::{
     model::explorer::{
         CatalogGroupState, CatalogTree, CatalogTreeError, ExplorerConnectionStatus,
         ExplorerLoadState, ExplorerNodeAlignment, ExplorerNodeId, ExplorerNodeTarget,
-        ExplorerOwnerId, ExplorerScrollAmount, ExplorerTreeState, ProfileProvenance, StatusRowKind,
+        ExplorerOwnerId, ExplorerScrollAmount, ExplorerTreeState, ProfilePlacement,
+        ProfileProvenance, StatusRowKind,
     },
 };
 use uuid::Uuid;
@@ -29,6 +30,46 @@ fn profile_order_controls_roots_independently_of_map_order() {
             ExplorerNodeId::Profile(second),
         ]
     );
+}
+
+#[test]
+fn other_profiles_are_hidden_under_a_collapsed_group() {
+    let current = profile_id(1);
+    let other = profile_id(2);
+    let mut explorer = ExplorerTreeState::default();
+    explorer.add_profile_with_placement(
+        current,
+        "current".into(),
+        lazydb::profile::DatabaseKind::Sqlite,
+        String::new(),
+        ProfileProvenance::Saved,
+        ProfilePlacement::CurrentProject,
+    );
+    explorer.add_profile_with_placement(
+        other,
+        "other".into(),
+        lazydb::profile::DatabaseKind::Sqlite,
+        String::new(),
+        ProfileProvenance::Saved,
+        ProfilePlacement::OtherProject,
+    );
+
+    assert_eq!(
+        visible_ids(&explorer),
+        vec![ExplorerNodeId::Profile(current), ExplorerNodeId::Others,]
+    );
+
+    explorer.select(ExplorerNodeId::Others);
+    explorer.expand();
+    assert_eq!(
+        visible_ids(&explorer),
+        vec![
+            ExplorerNodeId::Profile(current),
+            ExplorerNodeId::Others,
+            ExplorerNodeId::Profile(other),
+        ]
+    );
+    assert_eq!(explorer.visible().last().unwrap().depth, 1);
 }
 
 #[test]

@@ -843,6 +843,13 @@ fn explorer_list_item(
     });
     if visible.provenance == Some(ProfileProvenance::Session) {
         spans.push(Span::styled("  SESSION", secondary_style));
+    } else if let Some(placement) = visible.placement {
+        let label = match placement {
+            crate::model::explorer::ProfilePlacement::CurrentProject => "  PROJECT",
+            crate::model::explorer::ProfilePlacement::Global => "  GLOBAL",
+            crate::model::explorer::ProfilePlacement::OtherProject => "  OTHER",
+        };
+        spans.push(Span::styled(label, secondary_style));
     }
     if let Some(status) = visible.connection_status {
         spans.extend(connection_status_spans(status, theme, selected));
@@ -1669,7 +1676,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
         Focus::Results => ("DATA", theme.warning),
     };
     let hints = match app.focus {
-        Focus::Explorer => "j/k move   gg/G ends   Ctrl-d/u page   Enter open",
+        Focus::Explorer => "j/k move   gg/G ends   Ctrl-d/u page   s access   Enter open",
         Focus::Editor => "Esc normal   i/a/o insert   Space y copy SQL   F5 run",
         Focus::Results if app.is_active_relation_tab() => {
             "h/j/k/l cells   y cell   Y row   Space Y headers"
@@ -1767,6 +1774,11 @@ fn render_overlay(
         Overlay::ProfileManager => {
             profiles::render_profile_manager(frame, area, app, state, theme, icons)
         }
+        Overlay::ProfileAccess {
+            profile_id,
+            selected,
+            options,
+        } => render_profile_access(frame, area, app, *profile_id, *selected, options, theme),
         Overlay::Message { title, body } => render_message(frame, area, title, body, theme),
         Overlay::SubstituteConfirm { remaining } => {
             render_substitute_confirm(frame, area, *remaining, theme)
@@ -2185,6 +2197,61 @@ fn render_message(frame: &mut Frame<'_>, area: Rect, title: &str, body: &str, th
             .style(Style::new().fg(theme.text).bg(theme.surface_raised))
             .alignment(Alignment::Center)
             .wrap(Wrap { trim: true }),
+        popup,
+    );
+}
+
+fn render_profile_access(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    profile_id: Uuid,
+    selected: usize,
+    options: &[crate::model::workspace::ProfileAccessOption],
+    theme: Theme,
+) {
+    let name = app
+        .profiles
+        .iter()
+        .find(|profile| profile.id == profile_id)
+        .map(|profile| crate::security::sanitize_terminal_text(&profile.name))
+        .unwrap_or_else(|| "connection".to_owned());
+    let popup = centered(area, 64, (options.len() as u16).saturating_add(7));
+    frame.render_widget(Clear, popup);
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!("Connection access · {name}"),
+            theme.title(true),
+        )),
+        Line::raw(format!("Project: {}", app.project.display_name)),
+        Line::raw(""),
+    ];
+    lines.extend(options.iter().enumerate().map(|(index, option)| {
+        let marker = if index == selected { "> " } else { "  " };
+        Line::from(Span::styled(
+            format!(
+                "{marker}{}",
+                crate::security::sanitize_terminal_text(&option.label)
+            ),
+            if index == selected {
+                Style::new()
+                    .fg(theme.text)
+                    .bg(theme.selection)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::new().fg(theme.text).bg(theme.surface_raised)
+            },
+        ))
+    }));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "Enter apply   Esc close",
+        Style::new().fg(theme.muted).bg(theme.surface_raised),
+    )));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(panel_block(" ACCESS ", true, theme))
+            .style(Style::new().bg(theme.surface_raised)),
         popup,
     );
 }

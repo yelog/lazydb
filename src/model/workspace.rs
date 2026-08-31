@@ -13,7 +13,7 @@ use crate::help::HelpState;
 use crate::model::execution_target::ExecutionTarget;
 use crate::model::explorer::{
     ExplorerConnectionStatus, ExplorerNodeAlignment, ExplorerNodeId, ExplorerNodeTarget,
-    ExplorerScrollAmount, ExplorerTreeState, ProfileProvenance, StatusRowKind,
+    ExplorerScrollAmount, ExplorerTreeState, ProfilePlacement, ProfileProvenance, StatusRowKind,
 };
 use crate::model::tab::{ConsoleRecord, WorkspaceTab};
 use crate::model::transaction::{
@@ -54,6 +54,11 @@ pub enum Overlay {
     Help(HelpState),
     RecordView(crate::model::record_view::RecordViewState),
     ProfileManager,
+    ProfileAccess {
+        profile_id: Uuid,
+        selected: usize,
+        options: Vec<ProfileAccessOption>,
+    },
     Message {
         title: String,
         body: String,
@@ -86,6 +91,12 @@ pub enum Overlay {
         console_id: Uuid,
     },
     SqlEditorList(crate::model::sql_editor_list::SqlEditorListState),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProfileAccessOption {
+    pub label: String,
+    pub change: crate::action::ProfileAccessChange,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -167,6 +178,7 @@ pub struct VisibleCatalogNode {
     pub kind: Option<CatalogKind>,
     pub profile_kind: Option<DatabaseKind>,
     pub provenance: Option<ProfileProvenance>,
+    pub placement: Option<ProfilePlacement>,
     pub connection_status: Option<ExplorerConnectionStatus>,
     pub endpoint: Option<String>,
     pub expandable: bool,
@@ -709,6 +721,7 @@ impl ExplorerState {
                     kind,
                     profile_kind,
                     provenance,
+                    placement,
                     connection_status,
                     endpoint,
                     expandable,
@@ -726,6 +739,7 @@ impl ExplorerState {
                                     None,
                                     None,
                                     None,
+                                    None,
                                     false,
                                 )
                             },
@@ -735,6 +749,7 @@ impl ExplorerState {
                                     entry_detail(entry),
                                     entry_comment(entry),
                                     Some(entry.kind),
+                                    None,
                                     None,
                                     None,
                                     None,
@@ -756,12 +771,14 @@ impl ExplorerState {
                             None,
                             None,
                             None,
+                            None,
                             true,
                         )
                     }
                     ExplorerNodeId::Status { owner, kind } => (
                         status_label(*kind).to_owned(),
                         profile.and_then(|profile| profile.load_errors.get(owner).cloned()),
+                        None,
                         None,
                         None,
                         None,
@@ -779,10 +796,12 @@ impl ExplorerState {
                         None,
                         None,
                         None,
+                        None,
                         false,
                     ),
                     ExplorerNodeId::Empty { .. } => (
                         "No objects".to_owned(),
+                        None,
                         None,
                         None,
                         None,
@@ -803,6 +822,7 @@ impl ExplorerState {
                                 None,
                                 None,
                                 None,
+                                None,
                                 false,
                             )
                         },
@@ -814,6 +834,7 @@ impl ExplorerState {
                                 None,
                                 Some(profile.kind),
                                 Some(profile.provenance),
+                                Some(profile.placement),
                                 Some(profile.status),
                                 Some(profile.endpoint.clone()),
                                 true,
@@ -829,7 +850,42 @@ impl ExplorerState {
                         None,
                         None,
                         None,
+                        None,
                         false,
+                    ),
+                    ExplorerNodeId::Others => (
+                        "OTHERS".to_owned(),
+                        Some({
+                            let count = self
+                                .normalized
+                                .profiles
+                                .values()
+                                .filter(|profile| {
+                                    profile.placement == ProfilePlacement::OtherProject
+                                })
+                                .count();
+                            let active = self.active_profile.is_some_and(|profile_id| {
+                                self.normalized
+                                    .profiles
+                                    .get(&profile_id)
+                                    .is_some_and(|profile| {
+                                        profile.placement == ProfilePlacement::OtherProject
+                                    })
+                            });
+                            if active {
+                                format!("{count} · 1 ACTIVE")
+                            } else {
+                                count.to_string()
+                            }
+                        }),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        true,
                     ),
                 };
                 VisibleCatalogNode {
@@ -844,6 +900,7 @@ impl ExplorerState {
                     connection_status,
                     endpoint,
                     expandable,
+                    placement,
                 }
             })
             .collect()

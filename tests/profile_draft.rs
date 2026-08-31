@@ -8,7 +8,7 @@ use lazydb::{
     },
     profile::{
         CatalogScope, CatalogSelection, ConnectionProfile, ConnectionUrlFormat, CredentialPolicy,
-        DatabaseKind, DatabaseScope, Environment, SslMode,
+        DatabaseKind, DatabaseScope, Environment, ProfileAccess, SslMode,
     },
 };
 use secrecy::ExposeSecret;
@@ -22,6 +22,21 @@ fn valid_postgres_draft() -> ProfileDraft {
 
 fn saved_postgres_profile() -> ConnectionProfile {
     valid_postgres_draft().validate(&[]).unwrap().profile
+}
+
+#[test]
+fn editing_a_profile_preserves_project_access() {
+    let mut profile = saved_postgres_profile();
+    profile.access = ProfileAccess::Projects {
+        roots: vec!["/workspace/app".into(), "/workspace/shared".into()],
+    };
+
+    let edited = ProfileDraft::edit(&profile, false)
+        .validate(&[])
+        .unwrap()
+        .profile;
+
+    assert_eq!(edited.access, profile.access);
 }
 
 fn discovered_postgres_scope(selected_schemas: &[&str]) -> ProfileManagerState {

@@ -11,10 +11,10 @@ use uuid::Uuid;
 
 use crate::profile::{
     CatalogScope, ConnectionProfile, ConnectionUrlFormat, CredentialPolicy, DatabaseKind,
-    Environment, SslMode,
+    Environment, ProfileAccess, SslMode,
 };
 
-const PROFILE_FILE_VERSION: u16 = 4;
+const PROFILE_FILE_VERSION: u16 = 5;
 
 #[derive(Clone, Debug)]
 pub struct ProfileStore {
@@ -33,6 +33,10 @@ pub enum PersistenceError {
     UnsupportedVersion { found: u16, expected: u16 },
     #[error("profile UUID {0} appears more than once")]
     DuplicateProfileId(Uuid),
+    #[error("project root `{0}` must be absolute")]
+    InvalidProjectRoot(PathBuf),
+    #[error("project root `{0}` appears more than once")]
+    DuplicateProjectRoot(PathBuf),
     #[error("profile path has no parent directory")]
     MissingParent,
 }
@@ -79,6 +83,7 @@ impl From<ConnectionProfileV2> for ConnectionProfile {
         Self {
             id: profile.id,
             name: profile.name,
+            access: ProfileAccess::Global,
             kind: profile.kind,
             url_format: ConnectionUrlFormat::default_for(profile.kind),
             host: profile.host,
@@ -126,10 +131,10 @@ impl ProfileStore {
                 .into_iter()
                 .map(ConnectionProfile::from)
                 .collect(),
-            3 => toml::from_str::<ProfileFile>(&contents)?
+            3 | 4 => toml::from_str::<ProfileFile>(&contents)?
                 .profiles
                 .into_iter()
-                .map(normalize_v3_profile)
+                .map(normalize_legacy_profile)
                 .collect(),
             found => {
                 return Err(PersistenceError::UnsupportedVersion {
@@ -147,18 +152,26 @@ impl ProfileStore {
             }
         }
         validate_profile_ids(&profiles)?;
+        validate_profile_access(&profiles)?;
         Ok(profiles)
     }
 
     pub fn save(&self, profiles: &[ConnectionProfile]) -> Result<(), PersistenceError> {
         validate_profile_ids(profiles)?;
+        validate_profile_access(profiles)?;
+        let mut profiles = profiles.to_vec();
+        for profile in &mut profiles {
+            if let ProfileAccess::Projects { roots } = &mut profile.access {
+                roots.sort();
+            }
+        }
         let parent = self.path.parent().ok_or(PersistenceError::MissingParent)?;
         fs::create_dir_all(parent)?;
         set_private_dir_permissions(parent)?;
 
         let contents = toml::to_string_pretty(&ProfileFile {
             version: PROFILE_FILE_VERSION,
-            profiles: profiles.to_vec(),
+            profiles,
         })?;
         let file_name = self
             .path
@@ -192,11 +205,34 @@ fn normalize_v3_profile(mut profile: ConnectionProfile) -> ConnectionProfile {
     profile
 }
 
+fn normalize_legacy_profile(mut profile: ConnectionProfile) -> ConnectionProfile {
+    profile.access = ProfileAccess::Global;
+    normalize_v3_profile(profile)
+}
+
 fn validate_profile_ids(profiles: &[ConnectionProfile]) -> Result<(), PersistenceError> {
     let mut ids = HashSet::with_capacity(profiles.len());
     for profile in profiles {
         if !ids.insert(profile.id) {
             return Err(PersistenceError::DuplicateProfileId(profile.id));
+        }
+    }
+    Ok(())
+}
+
+fn validate_profile_access(profiles: &[ConnectionProfile]) -> Result<(), PersistenceError> {
+    for profile in profiles {
+        let ProfileAccess::Projects { roots } = &profile.access else {
+            continue;
+        };
+        let mut unique = HashSet::with_capacity(roots.len());
+        for root in roots {
+            if !root.is_absolute() {
+                return Err(PersistenceError::InvalidProjectRoot(root.clone()));
+            }
+            if !unique.insert(root) {
+                return Err(PersistenceError::DuplicateProjectRoot(root.clone()));
+            }
         }
     }
     Ok(())

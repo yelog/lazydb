@@ -15,6 +15,14 @@ pub enum ProfileProvenance {
     Session,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ProfilePlacement {
+    #[default]
+    CurrentProject,
+    Global,
+    OtherProject,
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum ExplorerOwnerId {
     Profile(Uuid),
@@ -48,6 +56,7 @@ impl ExplorerOwnerId {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum ExplorerNodeId {
     EmptyProfiles,
+    Others,
     Profile(Uuid),
     Catalog(CatalogId),
     Group {
@@ -76,7 +85,7 @@ impl ExplorerNodeId {
             Self::Status { owner, .. }
             | Self::LoadMore { parent: owner, .. }
             | Self::Empty { owner } => Some(owner.profile_id()),
-            Self::EmptyProfiles => None,
+            Self::EmptyProfiles | Self::Others => None,
         }
     }
 }
@@ -704,6 +713,7 @@ pub struct ExplorerProfileState {
     pub kind: DatabaseKind,
     pub endpoint: String,
     pub provenance: ProfileProvenance,
+    pub placement: ProfilePlacement,
     pub status: ExplorerConnectionStatus,
     pub catalog: CatalogTree,
     pub catalog_epoch: u64,
@@ -723,12 +733,14 @@ impl ExplorerProfileState {
         kind: DatabaseKind,
         endpoint: String,
         provenance: ProfileProvenance,
+        placement: ProfilePlacement,
     ) -> Self {
         Self {
             display_name,
             kind,
             endpoint,
             provenance,
+            placement,
             status: ExplorerConnectionStatus::Offline,
             catalog: CatalogTree::new(profile_id),
             catalog_epoch: 0,
@@ -985,11 +997,31 @@ impl ExplorerTreeState {
         endpoint: String,
         provenance: ProfileProvenance,
     ) {
+        self.add_profile_with_placement(
+            profile_id,
+            display_name,
+            kind,
+            endpoint,
+            provenance,
+            ProfilePlacement::CurrentProject,
+        );
+    }
+
+    pub fn add_profile_with_placement(
+        &mut self,
+        profile_id: Uuid,
+        display_name: String,
+        kind: DatabaseKind,
+        endpoint: String,
+        provenance: ProfileProvenance,
+        placement: ProfilePlacement,
+    ) {
         if let Some(profile) = self.profiles.get_mut(&profile_id) {
             profile.display_name = display_name;
             profile.kind = kind;
             profile.endpoint = endpoint;
             profile.provenance = provenance;
+            profile.placement = placement;
             return;
         }
         if self.profiles.contains_key(&profile_id) {
@@ -997,7 +1029,14 @@ impl ExplorerTreeState {
         }
         self.profiles.insert(
             profile_id,
-            ExplorerProfileState::new(profile_id, display_name, kind, endpoint, provenance),
+            ExplorerProfileState::new(
+                profile_id,
+                display_name,
+                kind,
+                endpoint,
+                provenance,
+                placement,
+            ),
         );
         self.profile_order.push(profile_id);
         self.expanded.insert(ExplorerNodeId::Profile(profile_id));
@@ -1108,30 +1147,65 @@ impl ExplorerTreeState {
     #[doc(hidden)]
     pub fn visible_with_visit_count(&self) -> (Vec<VisibleExplorerNode>, usize) {
         let mut projection = Projection::new(self);
-        for profile_id in &self.profile_order {
-            let Some(profile) = self.profiles.get(profile_id) else {
-                continue;
-            };
-            let profile_node = ExplorerNodeId::Profile(*profile_id);
-            projection.push(profile_node.clone(), 0);
-            if !self.expanded.contains(&profile_node) {
-                continue;
+        self.append_placement(&mut projection, ProfilePlacement::CurrentProject);
+        self.append_placement(&mut projection, ProfilePlacement::Global);
+        let other_profiles = self
+            .profile_order
+            .iter()
+            .filter(|profile_id| {
+                self.profiles
+                    .get(profile_id)
+                    .is_some_and(|profile| profile.placement == ProfilePlacement::OtherProject)
+            })
+            .copied()
+            .collect::<Vec<_>>();
+        if !other_profiles.is_empty() {
+            let others = ExplorerNodeId::Others;
+            projection.push(others.clone(), 0);
+            if self.expanded.contains(&others) {
+                for profile_id in other_profiles {
+                    self.append_profile(&mut projection, profile_id, 1);
+                }
             }
-            let roots = profile.catalog.roots();
-            for root in roots {
-                projection.append_catalog(profile, root, 1);
-            }
-            projection.append_state_rows(
-                profile,
-                &ExplorerOwnerId::Profile(*profile_id),
-                1,
-                roots.len(),
-            );
         }
         if projection.rows.is_empty() {
             projection.push(ExplorerNodeId::EmptyProfiles, 0);
         }
         (projection.rows, projection.visited_catalog_entries)
+    }
+
+    fn append_placement(&self, projection: &mut Projection<'_>, placement: ProfilePlacement) {
+        for profile_id in &self.profile_order {
+            let Some(profile) = self.profiles.get(profile_id) else {
+                continue;
+            };
+            if profile.placement != placement {
+                continue;
+            }
+            self.append_profile(projection, *profile_id, 0);
+        }
+    }
+
+    fn append_profile(&self, projection: &mut Projection<'_>, profile_id: Uuid, depth: usize) {
+        let Some(profile) = self.profiles.get(&profile_id) else {
+            return;
+        };
+        let profile_node = ExplorerNodeId::Profile(profile_id);
+        projection.push(profile_node.clone(), depth);
+        if !self.expanded.contains(&profile_node) {
+            return;
+        }
+        let child_depth = depth + 1;
+        let roots = profile.catalog.roots();
+        for root in roots {
+            projection.append_catalog(profile, root, child_depth);
+        }
+        projection.append_state_rows(
+            profile,
+            &ExplorerOwnerId::Profile(profile_id),
+            child_depth,
+            roots.len(),
+        );
     }
 
     pub fn select(&mut self, id: ExplorerNodeId) -> bool {
@@ -1170,6 +1244,7 @@ impl ExplorerTreeState {
                 .profiles
                 .get(&parent.profile_id())
                 .is_some_and(|profile| profile.catalog.group_state(parent, *group).is_some()),
+            ExplorerNodeId::Others => true,
             ExplorerNodeId::EmptyProfiles
             | ExplorerNodeId::Status { .. }
             | ExplorerNodeId::LoadMore { .. }
@@ -1391,7 +1466,12 @@ impl ExplorerTreeState {
 
     fn visible_parent(&self, node: &ExplorerNodeId) -> Option<ExplorerNodeId> {
         match node {
-            ExplorerNodeId::EmptyProfiles | ExplorerNodeId::Profile(_) => None,
+            ExplorerNodeId::EmptyProfiles | ExplorerNodeId::Others => None,
+            ExplorerNodeId::Profile(profile_id) => {
+                let profile = self.profiles.get(profile_id)?;
+                (profile.placement == ProfilePlacement::OtherProject)
+                    .then_some(ExplorerNodeId::Others)
+            }
             ExplorerNodeId::Catalog(id) => {
                 let profile = self.profiles.get(&id.profile_id())?;
                 let entry = profile.catalog.get(id)?;
@@ -1440,6 +1520,11 @@ impl ExplorerTreeState {
             ExplorerNodeId::Profile(profile_id) => {
                 self.profile_order.contains(profile_id) && self.profiles.contains_key(profile_id)
             }
+            ExplorerNodeId::Others => self.profile_order.iter().any(|profile_id| {
+                self.profiles
+                    .get(profile_id)
+                    .is_some_and(|profile| profile.placement == ProfilePlacement::OtherProject)
+            }),
             ExplorerNodeId::Catalog(id) => self
                 .profiles
                 .get(&id.profile_id())
@@ -1526,7 +1611,8 @@ impl ExplorerTreeState {
                     self.append_catalog_ancestors(parent, &mut chain)
                 }
             },
-            ExplorerNodeId::EmptyProfiles | ExplorerNodeId::Profile(_) => {}
+            ExplorerNodeId::EmptyProfiles | ExplorerNodeId::Others | ExplorerNodeId::Profile(_) => {
+            }
         }
         chain
     }

@@ -81,6 +81,16 @@ impl Keymap {
             self.pending = None;
             return map_profile_manager(event, app);
         }
+        if matches!(app.overlay, Some(Overlay::ProfileAccess { .. })) {
+            self.pending = None;
+            return match event.code {
+                KeyCode::Enter => Some(Action::ProfileAccessConfirm),
+                KeyCode::Esc | KeyCode::Char('q') => Some(Action::ProfileAccessCancel),
+                KeyCode::Up | KeyCode::Char('k') => Some(Action::ProfileAccessMove(-1)),
+                KeyCode::Down | KeyCode::Char('j') => Some(Action::ProfileAccessMove(1)),
+                _ => None,
+            };
+        }
         if matches!(app.overlay, Some(Overlay::RecordView(_))) {
             let pending = self.pending.take();
             return match event.code {
@@ -1137,6 +1147,7 @@ fn map_explorer(code: KeyCode, app: &App) -> Option<Action> {
             return selected_profile
                 .map(|profile_id| Action::RequestProfileDisconnect { profile_id });
         }
+        KeyCode::Char('s') => return Some(Action::OpenProfileAccess),
         _ => {}
     }
     match code {

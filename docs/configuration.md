@@ -24,6 +24,26 @@ the branded PostgreSQL, MySQL, and SQLite glyphs. LazyDB does not detect or
 install fonts, and the option is not stored in `connections.toml`. When using
 SSH, glyph rendering depends on the font configured by the local terminal.
 
+## Project-Scoped Connections
+
+Saved profiles are stored in the user-level `connections.toml`. Profile file
+version 5 adds connection access metadata. A profile is either global or
+project-scoped with a list of canonical project roots; old profile versions
+migrate to global. New saved profiles created from a project default to that
+project. Project association controls Explorer organization, not database
+authorization.
+
+LazyDB identifies the current project from the nearest Git root above the
+startup directory. A `.git` directory or file is accepted. Outside Git, the
+canonical startup directory is used. `--config` still overrides the complete
+profile file, including access metadata.
+
+The Explorer shows current-project, global, and session connections directly.
+Other project-scoped connections are under a collapsed `OTHERS` group and keep
+all normal connection and catalog actions. Select a saved connection and press
+`s` to open Connection access. Removing the last association leaves the
+connection project-scoped and unassigned under `OTHERS`.
+
 ## Startup Selection
 
 If the profile file is empty, LazyDB opens a new Profile Manager form instead of
@@ -88,7 +108,7 @@ Profiles are versioned TOML. Local encrypted profiles contain authenticated
 ciphertext rather than a plaintext password:
 
 ```toml
-version = 4
+version = 5
 
 [[profiles]]
 id = "1c73c7c0-f944-4adc-a73a-1265fe1260a9"
