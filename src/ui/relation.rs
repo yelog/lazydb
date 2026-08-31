@@ -18,6 +18,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::Paragraph,
 };
+use unicode_width::UnicodeWidthStr;
 
 pub(crate) fn render(
     frame: &mut Frame<'_>,
@@ -43,28 +44,43 @@ pub(crate) fn render(
     } else {
         theme.muted
     };
+    let data_label = " DATA ";
+    let ddl_label = " DDL ";
+    let data_width = data_label.width() as u16;
+    let ddl_x = chunks[0].x.saturating_add(data_width).saturating_add(1);
+    let ddl_width = ddl_label.width() as u16;
     let tabs = Line::from(vec![
         Span::styled(
-            " DATA ",
+            data_label,
             Style::new().fg(data_style).add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
         Span::styled(
-            " DDL ",
+            ddl_label,
             Style::new().fg(ddl_style).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("  {}", sanitize_terminal_text(&tab.descriptor.title)),
-            Style::new().fg(theme.text),
         ),
     ]);
     frame.render_widget(Paragraph::new(tabs).style(theme.base()), chunks[0]);
+    let active_x = if tab.view == RelationView::Data {
+        chunks[0].x
+    } else {
+        ddl_x
+    };
+    let active_width = if tab.view == RelationView::Data {
+        data_width
+    } else {
+        ddl_width
+    };
+    frame.render_widget(
+        Paragraph::new("━".repeat(usize::from(active_width))).style(Style::new().fg(theme.accent)),
+        Rect::new(active_x, chunks[0].y.saturating_add(1), active_width, 1),
+    );
     state.hit_regions.push(HitRegion {
-        area: Rect::new(chunks[0].x, chunks[0].y, 6, 1),
+        area: Rect::new(chunks[0].x, chunks[0].y, data_width, 1),
         target: HitTarget::RelationView(RelationView::Data),
     });
     state.hit_regions.push(HitRegion {
-        area: Rect::new(chunks[0].x.saturating_add(7), chunks[0].y, 11, 1),
+        area: Rect::new(ddl_x, chunks[0].y, ddl_width, 1),
         target: HitTarget::RelationView(RelationView::Ddl),
     });
     match tab.view {
@@ -129,7 +145,10 @@ fn render_data(
         if let Some(edit) = &tab.edit {
             result.rows = edit.rows.iter().map(|row| row.current.clone()).collect();
         }
-        let query_height = if tab.query.error.is_some() { 3 } else { 2 };
+        let block = panel_block(" RELATION DATA ", app.focus == Focus::Results, theme);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        let query_height = super::query_bar::height(&tab.query, inner.width, state.activity_icons);
         let body = if status.is_some() {
             Layout::default()
                 .direction(Direction::Vertical)
@@ -138,7 +157,7 @@ fn render_data(
                     Constraint::Length(2),
                     Constraint::Min(1),
                 ])
-                .split(area)
+                .split(inner)
         } else {
             Layout::default()
                 .direction(Direction::Vertical)
@@ -147,9 +166,16 @@ fn render_data(
                     Constraint::Length(0),
                     Constraint::Min(1),
                 ])
-                .split(area)
+                .split(inner)
         };
-        let query_cursor = super::query_bar::render(frame, body[0], &tab.query, theme, state);
+        let query_cursor = super::query_bar::render(
+            frame,
+            body[0],
+            &tab.query,
+            theme,
+            state,
+            state.activity_icons,
+        );
         if let Some((message, retry, cancel)) = status {
             if cancel {
                 render_loading_status(
@@ -165,7 +191,6 @@ fn render_data(
                 render_status(frame, body[1], message, retry, cancel, theme, state);
             }
         }
-        let block = panel_block(" RELATION DATA ", app.focus == Focus::Results, theme);
         render_relation_result_table(
             frame,
             body[2],
@@ -174,7 +199,7 @@ fn render_data(
             tab.grid.clone(),
             &tab.grid.column_widths,
             theme,
-            block,
+            ratatui::widgets::Block::default().style(Style::new().bg(theme.surface)),
             state,
             tab.edit.as_ref(),
         );
@@ -215,11 +240,28 @@ fn render_data(
             );
         }
     } else if let Some((message, retry, cancel)) = status {
+        let block = panel_block(" RELATION DATA ", app.focus == Focus::Results, theme);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
         let body = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(2), Constraint::Min(1)])
-            .split(area);
-        let query_cursor = super::query_bar::render(frame, body[0], &tab.query, theme, state);
+            .constraints([
+                Constraint::Length(super::query_bar::height(
+                    &tab.query,
+                    inner.width,
+                    state.activity_icons,
+                )),
+                Constraint::Min(1),
+            ])
+            .split(inner);
+        let query_cursor = super::query_bar::render(
+            frame,
+            body[0],
+            &tab.query,
+            theme,
+            state,
+            state.activity_icons,
+        );
         if cancel {
             let identity = relation_loading_identity(tab, RelationView::Data);
             let elapsed = state.animations.elapsed(&identity).unwrap_or_default();
@@ -230,7 +272,8 @@ fn render_data(
                         icons: state.activity_icons,
                         elapsed,
                         theme,
-                        block: panel_block(" RELATION DATA ", app.focus == Focus::Results, theme),
+                        block: ratatui::widgets::Block::default()
+                            .style(Style::new().bg(theme.surface)),
                     },
                     body[1],
                 );

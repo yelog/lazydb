@@ -1855,20 +1855,19 @@ fn render_data(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, state
     let Some(tab) = app.active_console_opt() else {
         return;
     };
-    let query_height = if !matches!(
-        tab.query.capability,
-        crate::model::data_query::DataQueryCapability::Relation
-            | crate::model::data_query::DataQueryCapability::Sql
-    ) {
-        3
-    } else {
-        2
-    };
+    let query_height = query_bar::height(&tab.query, area.width, state.activity_icons);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(query_height), Constraint::Min(1)])
         .split(area);
-    let query_cursor = query_bar::render(frame, chunks[0], &tab.query, theme, state);
+    let query_cursor = query_bar::render(
+        frame,
+        chunks[0],
+        &tab.query,
+        theme,
+        state,
+        state.activity_icons,
+    );
     let area = chunks[1];
     let loading_identity = if tab.query_status == QueryStatus::Running {
         Some(animation::LoadIdentity::Query {

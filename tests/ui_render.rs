@@ -749,9 +749,9 @@ fn empty_relation_preview_renders_clean_empty_state() {
         .expect("grid header line");
     let header_line = lines[header_y];
     let empty_line = lines
-        .get(header_y + 1)
+        .get(header_y + 2)
         .filter(|line| line.contains("No rows"))
-        .expect("empty state immediately below the header");
+        .expect("empty state immediately below the header divider");
     let header_chars = header_line.chars().collect::<Vec<_>>();
     let row_number_x = header_chars
         .iter()
@@ -1352,8 +1352,9 @@ fn data_grid_places_rows_immediately_below_the_header() {
         .expect("grid header line");
 
     assert!(output.contains('│'), "{output}");
-    assert!(!output.contains('┼'), "{output}");
-    assert!(lines[header_y + 1].contains("Ada"), "{output}");
+    assert!(output.contains('┼'), "{output}");
+    assert!(lines[header_y + 1].contains('┼'), "{output}");
+    assert!(lines[header_y + 2].contains("Ada"), "{output}");
 }
 
 #[test]
