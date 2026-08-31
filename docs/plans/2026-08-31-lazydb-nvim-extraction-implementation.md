@@ -4,7 +4,7 @@
 
 **Goal:** Extract the embedded Neovim integration into a tested, public `yelog/lazydb.nvim` repository and make it the single plugin source.
 
-**Architecture:** Copy the current tested plugin snapshot into a standard standalone Neovim plugin root, add independent CI and repository metadata, then remove the embedded source only after the new remote is verified. Keep the integration boundary at CLI API 1 and do not add source mirroring.
+**Architecture:** Preserve the six plugin-only commits already filtered into a standard standalone Neovim plugin root, add independent CI and repository metadata, then remove the embedded source only after the new remote is verified. Keep the integration boundary at CLI API 1 and do not add source mirroring.
 
 **Tech Stack:** Lua, Neovim 0.10+, Git, GitHub Actions, GitHub CLI, LazyDB CLI API 1.
 
@@ -61,20 +61,15 @@ Expected: eight tests pass.
 
 **Step 3:** Run YAML parsing locally and execute the plugin tests with the local Neovim.
 
-### Task 4: Initialize and Publish the Standalone Repository
+### Task 4: Commit and Publish the Standalone Repository
 
-**Files:**
-- Create: `/Users/yelog/workspace/vi/lazydb.nvim/.git/`
+**Step 1:** Confirm the six filtered commits and inspect `git status`, `git diff --check`, and all staged files.
 
-**Step 1:** Run `git init -b main` in the standalone directory.
+**Step 2:** Commit standalone metadata with `feat: publish standalone LazyDB Neovim integration`.
 
-**Step 2:** Inspect `git status`, `git diff --check`, and all staged files.
+**Step 3:** Create public `yelog/lazydb.nvim` with `gh repo create` and push `main`.
 
-**Step 3:** Commit with `feat: publish standalone LazyDB Neovim integration`.
-
-**Step 4:** Create public `yelog/lazydb.nvim` with `gh repo create` and push `main`.
-
-**Step 5:** Verify repository metadata, default branch, files, and Actions registration.
+**Step 4:** Verify repository metadata, default branch, files, and Actions registration.
 
 ### Task 5: Remove the Embedded Plugin From the Main Repository
 
@@ -82,15 +77,18 @@ Expected: eight tests pass.
 - Delete: `lazydb.nvim/**`
 - Modify: `README.md`
 - Modify: `.github/workflows/ci.yml`
-- Modify: `docs/architecture.md` only if it refers to embedded source paths
+- Modify: `CONTRIBUTING.md`
+- Modify: `docs/architecture.md`
 
 **Step 1:** Replace monorepo installation examples with standard remote plugin specifications.
 
 **Step 2:** Remove the Neovim job from the main repository CI.
 
-**Step 3:** Delete `lazydb.nvim/` only after the remote repository is verified.
+**Step 3:** Remove the embedded plugin test command from `CONTRIBUTING.md` and describe the plugin as an external frontend in `docs/architecture.md`.
 
-**Step 4:** Search for stale `lazydb.nvim/` file-path references and update only source-location references; keep product references to `lazydb.nvim`.
+**Step 4:** Delete `lazydb.nvim/` only after the remote repository is verified.
+
+**Step 5:** Search for stale `lazydb.nvim/` file-path references and update only active source-location references; keep product references and historical plans unchanged.
 
 ### Task 6: Verify and Commit the Main Repository Migration
 
@@ -107,6 +105,8 @@ Expected: eight tests pass.
 
 **Step 4:** Run `git diff --check` and inspect staged deletion boundaries.
 
-**Step 5:** Commit with `refactor(neovim): move plugin to standalone repository` and push `main`.
+**Step 5:** Stage only `README.md`, `.github/workflows/ci.yml`, `CONTRIBUTING.md`, `docs/architecture.md`, and `lazydb.nvim/**`; do not stage unrelated in-progress changes.
 
-**Step 6:** Confirm both repositories' CI workflows are registered and no embedded plugin files remain in `yelog/lazydb`.
+**Step 6:** Commit with `refactor(neovim): move plugin to standalone repository` and push `main`.
+
+**Step 7:** Confirm both repositories' CI workflows are registered and no embedded plugin files remain in `yelog/lazydb`.
