@@ -36,15 +36,11 @@ pub struct DataQueryState {
     pub completion: Option<DataQueryCompletion>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum DataQueryCapability {
     Relation,
     Sql,
+    #[default]
+    AwaitingResult,
     Unavailable(String),
-}
-
-impl Default for DataQueryCapability {
-    fn default() -> Self {
-        Self::Unavailable("SQL result filtering is not implemented yet".into())
-    }
 }

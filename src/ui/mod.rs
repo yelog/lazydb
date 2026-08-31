@@ -1833,11 +1833,11 @@ fn render_data(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, state
     let Some(tab) = app.active_console_opt() else {
         return;
     };
-    let query_height = if !matches!(
-        tab.query.capability,
-        crate::model::data_query::DataQueryCapability::Relation
-            | crate::model::data_query::DataQueryCapability::Sql
-    ) {
+    let query_height = if tab.query.error.is_some()
+        || matches!(
+            tab.query.capability,
+            crate::model::data_query::DataQueryCapability::Unavailable(_)
+        ) {
         3
     } else {
         2
