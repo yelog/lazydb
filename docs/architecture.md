@@ -65,6 +65,26 @@ failure preserves both the old console target and old active pool.
 
 ## Profile and Credential Boundary
 
+Coding-agent access uses a headless boundary above `DatabaseConnection`:
+
+```text
+JSON CLI / stdio MCP
+        |
+    AgentService
+    - project visibility
+    - deterministic selection
+    - credential resolution
+    - SQL/write policy
+    - bounded results
+        |
+ DatabaseConnection
+```
+
+Agent sessions do not reuse TUI active pools or transaction workers. Global and
+current-project profiles are visible to agents; profiles assigned only to other
+projects are not exposed. MCP client permissions control tool visibility and
+approval, while LazyDB profile policy and database grants remain authoritative.
+
 `ProfileStore` atomically persists versioned connection metadata and authenticated
 local credential ciphertext in TOML. Profiles
 use an explicit credential policy: passwordless, process-local prompt, authenticated

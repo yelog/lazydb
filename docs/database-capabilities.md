@@ -103,3 +103,14 @@ stale, the result is discarded. Explicit completion performs no database I/O,
 returns ranked context-aware candidates, and is capped at ten results.
 PostgreSQL and MySQL routine entries can contribute function and procedure
 completion; SQLite does not advertise routine completion.
+## Coding Agent Boundary
+
+LazyDB's agent interface uses the same native adapters as the TUI, but each
+operation is headless and target-attributed. Connections are resolved from the
+current project plus global profiles. Other project-scoped profiles are hidden.
+
+The first release has no shared agent transaction handles. Each operation owns
+its connection lifecycle, and schema/query results include the selected profile,
+environment, database, and effective read-only status. The database role is the
+final read/write boundary; client-side MCP approval is not a replacement for
+database grants.

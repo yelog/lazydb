@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 
 use crate::persistence::secrets::secret_store_diagnostic;
@@ -99,6 +99,73 @@ pub enum Command {
         #[arg(long)]
         profile: Option<String>,
     },
+    /// Run a machine-readable database operation for the current project.
+    Agent {
+        #[command(subcommand)]
+        command: AgentCommand,
+    },
+    /// Run an agent protocol server.
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AgentCommand {
+    Context(AgentTargetArgs),
+    Connections(ProjectArgs),
+    SchemaSearch {
+        query: String,
+        #[command(flatten)]
+        target: AgentTargetArgs,
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+    },
+    Query {
+        #[command(flatten)]
+        target: AgentTargetArgs,
+        #[arg(long, conflicts_with = "file", required_unless_present = "file")]
+        sql: Option<String>,
+        #[arg(long, conflicts_with = "sql", required_unless_present = "sql")]
+        file: Option<PathBuf>,
+    },
+    Execute {
+        #[command(flatten)]
+        target: AgentTargetArgs,
+        #[arg(long, conflicts_with = "file", required_unless_present = "file")]
+        sql: Option<String>,
+        #[arg(long, conflicts_with = "sql", required_unless_present = "sql")]
+        file: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = crate::agent::policy::WritePolicy::Deny)]
+        write_policy: crate::agent::policy::WritePolicy,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum McpCommand {
+    Serve {
+        #[arg(long)]
+        project: Option<PathBuf>,
+        #[arg(long)]
+        connection: Option<String>,
+        #[arg(long, value_enum, default_value_t = crate::agent::policy::WritePolicy::Deny)]
+        write_policy: crate::agent::policy::WritePolicy,
+    },
+}
+
+#[derive(Clone, Debug, Args)]
+pub struct ProjectArgs {
+    #[arg(long)]
+    pub project: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Args)]
+pub struct AgentTargetArgs {
+    #[arg(long)]
+    pub project: Option<PathBuf>,
+    #[arg(long)]
+    pub connection: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -230,6 +297,9 @@ pub fn render_command(command: &Command) -> Result<String, serde_json::Error> {
                 report.credential_store.status,
                 report.credential_store.detail,
             ))
+        }
+        Command::Agent { .. } | Command::Mcp { .. } => {
+            Ok("This command requires asynchronous execution".to_owned())
         }
     }
 }
