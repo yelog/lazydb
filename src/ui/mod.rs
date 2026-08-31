@@ -972,7 +972,7 @@ fn explorer_list_item(
     theme: Theme,
     icons: icons::IconSet,
 ) -> ListItem<'static> {
-    let expanded = app.explorer.normalized.expanded.contains(&visible.id);
+    let expanded = explorer_node_is_expanded(&visible.id, visible.connection_status, app);
     let marker = if visible.expandable {
         if expanded { "▾" } else { "▸" }
     } else {
@@ -1155,7 +1155,7 @@ fn explorer_find_list_item(
     let base_style = Style::new()
         .fg(if selected { theme.accent } else { theme.text })
         .bg(background);
-    let expanded = app.explorer.normalized.expanded.contains(&visible.id);
+    let expanded = explorer_node_is_expanded(&visible.id, visible.connection_status, app);
     let marker = if visible.expandable {
         if expanded { "▾" } else { "▸" }
     } else {
@@ -1318,7 +1318,7 @@ fn render_explorer_search(
             } else {
                 theme.surface
             };
-            let expanded = app.explorer.normalized.expanded.contains(&row.id);
+            let expanded = explorer_node_is_expanded(&row.id, None, app);
             let marker = if row.expandable
                 && !matches!(
                     row.kind,
@@ -1454,6 +1454,28 @@ fn render_explorer_search(
             Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
         );
     }
+}
+
+fn explorer_node_is_expanded(
+    id: &crate::model::explorer::ExplorerNodeId,
+    connection_status: Option<ExplorerConnectionStatus>,
+    app: &App,
+) -> bool {
+    if matches!(id, crate::model::explorer::ExplorerNodeId::Profile(_))
+        && !matches!(
+            connection_status.or_else(|| {
+                app.explorer
+                    .normalized
+                    .profiles
+                    .get(&id.profile_id()?)
+                    .map(|profile| profile.status)
+            }),
+            Some(ExplorerConnectionStatus::Online | ExplorerConnectionStatus::Syncing)
+        )
+    {
+        return false;
+    }
+    app.explorer.normalized.expanded.contains(id)
 }
 
 fn explorer_search_cursor_column(input: &str, width: u16) -> u16 {

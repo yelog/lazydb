@@ -106,6 +106,19 @@ fn record_view_renders_the_selected_row_as_ordered_fields() {
 }
 
 #[test]
+fn offline_profiles_render_as_collapsed_even_when_expansion_is_pending() {
+    let profile = import_connection_url(":memory:", Some("offline-profile"))
+        .unwrap()
+        .profile;
+    let app = App::new(vec![profile]);
+    let output = render(&app, 120, 36);
+
+    assert!(output.contains("offline-profile"), "{output}");
+    assert!(!output.contains("▾"), "{output}");
+    assert!(output.contains("▸"), "{output}");
+}
+
+#[test]
 fn record_view_highlight_follows_the_selected_field() {
     let mut app = fixture();
     app.focus = Focus::Results;
@@ -1595,19 +1608,6 @@ fn sql_data_renders_shared_query_bar_above_the_grid() {
         .find(|region| matches!(region.target, HitTarget::ResultCell { .. }))
         .unwrap();
     assert!(cell.area.y > 0);
-}
-
-fn sql_query_bar_is_inert_until_derived_execution_exists() {
-    let mut app = fixture();
-    app.focus = Focus::Results;
-    let before = app.active_console().query.clone();
-
-    app.update(Action::FocusDataQueryInput(
-        lazydb::model::data_query::DataQueryInput::Where,
-    ));
-    app.update(Action::DataQueryInsert('x'));
-    assert_eq!(app.active_console().query, before);
-    assert!(app.update(Action::SubmitDataQuery).is_empty());
 }
 
 #[test]
