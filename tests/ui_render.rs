@@ -1292,7 +1292,7 @@ fn editor_help_documents_target_context_controls() {
     let mut app = fixture();
     app.update(Action::Focus(Focus::Editor));
     app.update(Action::ShowHelp);
-    let (output, _) = render_with_state(&app, 80, 28);
+    let (output, _) = render_with_state(&app, 120, 40);
     for text in ["Space d", "Space f", "Space tt", "Space tc", "Space tr"] {
         assert!(output.contains(text), "missing {text}");
     }

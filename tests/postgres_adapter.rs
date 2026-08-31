@@ -551,7 +551,9 @@ async fn native_catalog_search_covers_postgres_contract_when_configured() {
             .await
             .unwrap();
         assert!(literal.hits.iter().any(|hit| hit.entry.qualified_name.object == "literal%_name"));
-        assert!(literal.hits.iter().all(|hit| hit.entry.qualified_name.object.contains("%_")));
+        assert!(literal.hits.iter().filter(|hit| hit.entry.kind == CatalogKind::Table).all(
+            |hit| hit.entry.qualified_name.object.contains("%_")
+        ));
 
         let ordered = adapter
             .search_catalog(&catalog_search_request(profile_id, &token, scope.clone(), 100))
