@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Clear, Paragraph},
+    widgets::{Clear, List, ListItem, ListState, Paragraph},
 };
 
 use crate::{app::App, db::value::CellValue, model::record_view::RecordViewState};
@@ -74,7 +74,7 @@ pub(crate) fn render(
     if let Some(tab) = app.tabs.get(app.active_tab) {
         state.record_view_fields = Some((tab.id(), chunks[1].height as usize));
     }
-    let lines = columns
+    let items = columns
         .iter()
         .enumerate()
         .skip(view.field_offset)
@@ -87,20 +87,22 @@ pub(crate) fn render(
                 CellValue::Unsupported { .. } => Style::new().fg(theme.warning),
                 _ => Style::new().fg(theme.text),
             };
-            Line::from(vec![
+            ListItem::new(Line::from(vec![
                 Span::styled(format!("{:<field_width$}  ", column.name), theme.action),
                 Span::styled(format!("{:<type_width$}  ", column.type_name), theme.muted),
                 Span::styled(
                     crate::security::sanitize_terminal_text(&preview.text),
                     value_style,
                 ),
-            ])
+            ]))
         })
         .collect::<Vec<_>>();
-    frame.render_widget(
-        Paragraph::new(lines).style(Style::new().bg(theme.surface_raised)),
-        chunks[1],
-    );
+    let list = List::new(items)
+        .style(Style::new().bg(theme.surface_raised))
+        .highlight_style(Style::new().bg(theme.selection).fg(theme.text));
+    let selected = view.selected_field.checked_sub(view.field_offset);
+    let mut list_state = ListState::default().with_selected(selected);
+    frame.render_stateful_widget(list, chunks[1], &mut list_state);
     frame.render_widget(
         Paragraph::new("j/k fields   h/l records   gg/G first/last field   Esc close")
             .style(Style::new().fg(theme.muted).bg(theme.surface_raised)),

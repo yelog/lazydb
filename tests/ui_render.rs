@@ -32,7 +32,7 @@ use lazydb::{
         icons::{IconMode, IconSet},
     },
 };
-use ratatui::{Terminal, backend::TestBackend};
+use ratatui::{Terminal, backend::TestBackend, style::Color};
 
 fn fixture() -> App {
     let profile = import_connection_url("sqlite::memory:", Some("orbital-lab"))
@@ -103,6 +103,26 @@ fn record_view_renders_the_selected_row_as_ordered_fields() {
     assert!(output.contains("Ada"));
     assert!(output.contains("active"));
     assert!(output.contains("BOOLEAN"));
+}
+
+#[test]
+fn record_view_highlight_follows_the_selected_field() {
+    let mut app = fixture();
+    app.focus = Focus::Results;
+    app.update(Action::OpenRecordView);
+
+    let selected = record_view_field_background(&app, "id");
+    let unselected = record_view_field_background(&app, "name");
+    assert_ne!(selected, unselected);
+
+    app.update(Action::RecordViewViewportChanged {
+        tab_id: app.active_console().id,
+        visible_fields: 18,
+    });
+    app.update(Action::RecordViewMoveFields(1));
+
+    assert_eq!(record_view_field_background(&app, "id"), unselected);
+    assert_eq!(record_view_field_background(&app, "name"), selected);
 }
 
 #[test]
@@ -222,6 +242,27 @@ fn sql_editor_underlines_statement_when_cursor_is_on_internal_space() {
 
 fn render(app: &App, width: u16, height: u16) -> String {
     render_with_state(app, width, height).0
+}
+
+fn record_view_field_background(app: &App, field: &str) -> Color {
+    let width = 100;
+    let height = 30;
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut state = UiState::new();
+    terminal
+        .draw(|frame| ui::render_with_state(frame, app, &mut state))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    for y in 0..height {
+        let line = (0..width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect::<String>();
+        if let Some(x) = line.find(field) {
+            return buffer[(x as u16, y)].bg;
+        }
+    }
+    panic!("field {field:?} was not rendered");
 }
 
 fn render_with_state(app: &App, width: u16, height: u16) -> (String, UiState) {
