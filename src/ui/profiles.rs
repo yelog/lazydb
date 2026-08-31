@@ -386,14 +386,12 @@ fn render_scope(
             });
         }
     }
-    if !loading {
-        if let Some(warning) = manager.scope_warning() {
-            frame.render_widget(
-                Paragraph::new(sanitize_terminal_text(warning))
-                    .style(Style::new().fg(theme.warning).bg(theme.surface)),
-                Rect::new(inner.x, inner.bottom().saturating_sub(2), inner.width, 1),
-            );
-        }
+    if !loading && let Some(warning) = manager.scope_warning() {
+        frame.render_widget(
+            Paragraph::new(sanitize_terminal_text(warning))
+                .style(Style::new().fg(theme.warning).bg(theme.surface)),
+            Rect::new(inner.x, inner.bottom().saturating_sub(2), inner.width, 1),
+        );
     }
     render_hint(
         frame,
