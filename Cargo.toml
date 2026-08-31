@@ -35,6 +35,7 @@ sqlformat = "0.5"
 sqlparser = "0.62"
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-native-roots", "postgres", "mysql", "sqlite", "uuid", "chrono"] }
 sqlx-core = "0.9.0"
+tachyonfx = { version = "0.25.1", default-features = false, features = ["std"] }
 thiserror = "2.0"
 tokio = { version = "1.47", features = ["fs", "macros", "rt-multi-thread", "signal", "sync", "time"] }
 toml = "0.9"

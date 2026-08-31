@@ -25,6 +25,15 @@ impl IconSet {
         Self { mode }
     }
 
+    pub const fn activity_frames(self) -> &'static [&'static str] {
+        match self.mode {
+            IconMode::Ascii => &["|", "/", "-", "\\"],
+            IconMode::NerdFont | IconMode::Unicode => {
+                &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+            }
+        }
+    }
+
     pub const fn database(self, kind: DatabaseKind) -> &'static str {
         match self.mode {
             IconMode::NerdFont => match kind {

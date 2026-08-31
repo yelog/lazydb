@@ -37,6 +37,9 @@ pub struct Cli {
     #[arg(long, global = true, value_enum, default_value_t = IconMode::NerdFont)]
     pub icons: IconMode,
 
+    #[arg(long, global = true, value_enum, default_value_t = MotionMode::Full)]
+    pub motion: MotionMode,
+
     #[arg(long, global = true, value_enum, default_value_t = ConfirmationPolicy::RiskyOnly)]
     pub confirm_execution: ConfirmationPolicy,
 
@@ -67,6 +70,14 @@ pub enum ColorMode {
     Auto,
     Always,
     Never,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum MotionMode {
+    #[default]
+    Full,
+    Reduced,
+    Off,
 }
 
 #[derive(Debug, Subcommand)]
@@ -227,7 +238,7 @@ pub fn render_command(command: &Command) -> Result<String, serde_json::Error> {
 mod tests {
     use clap::Parser;
 
-    use super::{CLI_API_VERSION, Cli, Command, capabilities, render_command};
+    use super::{CLI_API_VERSION, Cli, Command, MotionMode, capabilities, render_command};
     use crate::ui::icons::IconMode;
 
     #[test]
@@ -264,6 +275,31 @@ mod tests {
             IconMode::NerdFont
         );
         assert!(Cli::try_parse_from(["lazydb", "--icons", "emoji"]).is_err());
+    }
+
+    #[test]
+    fn motion_defaults_to_full() {
+        assert_eq!(
+            Cli::try_parse_from(["lazydb"]).unwrap().motion,
+            MotionMode::Full
+        );
+    }
+
+    #[test]
+    fn parses_all_motion_modes() {
+        for (value, expected) in [
+            ("full", MotionMode::Full),
+            ("reduced", MotionMode::Reduced),
+            ("off", MotionMode::Off),
+        ] {
+            assert_eq!(
+                Cli::try_parse_from(["lazydb", "--motion", value])
+                    .unwrap()
+                    .motion,
+                expected
+            );
+        }
+        assert!(Cli::try_parse_from(["lazydb", "--motion", "none"]).is_err());
     }
 
     #[test]

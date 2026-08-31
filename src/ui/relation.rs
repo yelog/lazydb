@@ -8,6 +8,7 @@ use ratatui::{
 #[cfg(test)]
 use unicode_width::UnicodeWidthChar;
 
+use super::{animation, loading};
 use super::{panel_block, render_text_input, theme::Theme};
 #[cfg(test)]
 use crate::sql::{self, HighlightKind, SqlDialect};
@@ -155,7 +156,19 @@ fn render_data(
         };
         let query_cursor = super::query_bar::render(frame, body[0], &tab.query, theme, state);
         if let Some((message, retry, cancel)) = status {
-            render_status(frame, body[1], message, retry, cancel, theme, state);
+            if cancel {
+                render_loading_status(
+                    frame,
+                    body[1],
+                    message,
+                    theme,
+                    state,
+                    tab,
+                    RelationView::Data,
+                );
+            } else {
+                render_status(frame, body[1], message, retry, cancel, theme, state);
+            }
         }
         let block = panel_block(" RELATION DATA ", app.focus == Focus::Results, theme);
         render_relation_result_table(
@@ -212,7 +225,34 @@ fn render_data(
             .constraints([Constraint::Length(2), Constraint::Min(1)])
             .split(area);
         let query_cursor = super::query_bar::render(frame, body[0], &tab.query, theme, state);
-        render_status(frame, body[1], message, retry, cancel, theme, state);
+        if cancel {
+            let identity = relation_loading_identity(tab, RelationView::Data);
+            let elapsed = state.animations.elapsed(&identity).unwrap_or_default();
+            if animation::show_skeleton(elapsed) {
+                frame.render_widget(
+                    loading::TableSkeleton {
+                        mode: state.animation_mode(),
+                        icons: state.activity_icons,
+                        elapsed,
+                        theme,
+                        block: panel_block(" RELATION DATA ", app.focus == Focus::Results, theme),
+                    },
+                    body[1],
+                );
+            } else {
+                render_loading_status(
+                    frame,
+                    body[1],
+                    message,
+                    theme,
+                    state,
+                    tab,
+                    RelationView::Data,
+                );
+            }
+        } else {
+            render_status(frame, body[1], message, retry, cancel, theme, state);
+        }
         if let (Some(completion), Some(cursor)) = (&tab.query.completion, query_cursor) {
             super::render_data_query_completion_popup(
                 frame,
@@ -227,6 +267,72 @@ fn render_data(
             );
         }
     }
+}
+
+fn relation_loading_identity(
+    tab: &crate::model::relation::RelationTab,
+    view: RelationView,
+) -> animation::LoadIdentity {
+    let request = match view {
+        RelationView::Data => match &tab.data {
+            RelationLoad::Loading { request, .. } => request.clone(),
+            _ => panic!("relation data loading identity requested while idle"),
+        },
+        RelationView::Ddl => match &tab.ddl {
+            RelationLoad::Loading { request, .. } => request.clone(),
+            _ => panic!("relation ddl loading identity requested while idle"),
+        },
+    };
+    animation::LoadIdentity::Relation(request)
+}
+
+fn render_loading_status(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    message: &str,
+    theme: Theme,
+    state: &mut super::UiState,
+    tab: &crate::model::relation::RelationTab,
+    view: RelationView,
+) {
+    let identity = relation_loading_identity(tab, view);
+    let elapsed = state.animations.elapsed(&identity).unwrap_or_default();
+    let detail = if match view {
+        RelationView::Data => matches!(
+            &tab.data,
+            RelationLoad::Loading {
+                previous: Some(_),
+                ..
+            }
+        ),
+        RelationView::Ddl => matches!(
+            &tab.ddl,
+            RelationLoad::Loading {
+                previous: Some(_),
+                ..
+            }
+        ),
+    } {
+        Some("showing previous snapshot")
+    } else {
+        None
+    };
+    frame.render_widget(
+        loading::ActivityIndicator {
+            mode: state.animation_mode(),
+            icons: state.activity_icons,
+            elapsed,
+            label: message,
+            detail,
+            cancellable: true,
+            style: Style::new().fg(theme.action).bg(theme.surface_raised),
+        },
+        area,
+    );
+    state.hit_regions.push(HitRegion {
+        area,
+        target: HitTarget::RelationCancel,
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -308,7 +414,19 @@ fn render_ddl(
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(2), Constraint::Min(1)])
             .split(area);
-        render_status(frame, chunks[0], message, retry, cancel, theme, _state);
+        if cancel {
+            render_loading_status(
+                frame,
+                chunks[0],
+                message,
+                theme,
+                _state,
+                tab,
+                RelationView::Ddl,
+            );
+        } else {
+            render_status(frame, chunks[0], message, retry, cancel, theme, _state);
+        }
         render_ddl_editor(frame, chunks[1], app, theme, _state, block);
         return;
     }

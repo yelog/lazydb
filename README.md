@@ -38,6 +38,8 @@ integration.
   contextual help, bounded TachyonFX transitions, and mouse hit regions.
 - A thin `lazydb.nvim` floating-terminal plugin with one process per Neovim tab.
 - Stable machine-readable `version`, `capabilities`, and `doctor` commands.
+- Configurable terminal motion feedback with `--motion full`, `--motion reduced`,
+  and `--motion off`.
 - SQL completion includes database/schema/relation paths, relation-aware columns,
   native column types, and catalog icons; the statement under the cursor is
   underlined when it is the current execution scope.
@@ -121,6 +123,9 @@ Run an in-memory SQLite workspace:
 ```bash
 cargo run -- --url sqlite::memory:
 ```
+
+Use `--motion reduced` for low-frequency loading animation or `--motion off` for
+static loading feedback. The default is `full`; this is a session-only option.
 
 Run against a SQLite file:
 
