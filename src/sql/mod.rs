@@ -29,7 +29,7 @@ pub use derived_result::{
 pub use dialect::SqlDialect;
 pub use execution::ExecutionDraft;
 pub use format::{FormatError, format_sql};
-pub use highlight::{HighlightKind, HighlightSpan, highlight_sql};
+pub use highlight::{HighlightKind, HighlightSpan, highlight_sql, highlight_sql_ranges};
 pub(crate) use identifier_match::identifier_match;
 pub use range::TextRange;
 pub use relation_filter::{RelationFilterError, validate_relation_preview_options};

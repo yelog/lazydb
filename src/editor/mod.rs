@@ -444,6 +444,27 @@ impl EditorWorkspace {
         dialect: SqlDialect,
         statement: Option<sql::TextRange>,
     ) -> Result<EditorRenderSnapshot, EditorError> {
+        self.render_snapshot_with_sql_ranges(id, viewport, dialect, statement, None)
+    }
+
+    pub(crate) fn render_snapshot_with_dialect_and_ranges(
+        &self,
+        id: Uuid,
+        viewport: EditorViewport,
+        dialect: SqlDialect,
+        sql_ranges: &[sql::TextRange],
+    ) -> Result<EditorRenderSnapshot, EditorError> {
+        self.render_snapshot_with_sql_ranges(id, viewport, dialect, None, Some(sql_ranges))
+    }
+
+    fn render_snapshot_with_sql_ranges(
+        &self,
+        id: Uuid,
+        viewport: EditorViewport,
+        dialect: SqlDialect,
+        statement: Option<sql::TextRange>,
+        sql_ranges: Option<&[sql::TextRange]>,
+    ) -> Result<EditorRenderSnapshot, EditorError> {
         let session = self
             .sessions
             .get(&id)
@@ -464,6 +485,7 @@ impl EditorWorkspace {
             console_id: id,
             document_revision: session.revision,
             dialect,
+            highlight_ranges: sql_ranges.map(<[sql::TextRange]>::to_vec),
         };
         let highlights = self
             .analysis_cache
@@ -475,7 +497,10 @@ impl EditorWorkspace {
                 }) {
                     Vec::new()
                 } else {
-                    sql::highlight_sql(&full_text, dialect)
+                    sql_ranges.map_or_else(
+                        || sql::highlight_sql(&full_text, dialect),
+                        |ranges| sql::highlight_sql_ranges(&full_text, ranges, dialect),
+                    )
                 }
             })
             .clone();
@@ -836,28 +861,25 @@ impl EditorWorkspace {
         } else {
             session.position
         };
-        session
+        let encoded = encode_editor_text(text);
+        let mut buffer = session
             .buffer
             .write()
-            .map_err(|_| EditorError::Operation("buffer lock poisoned".into()))?
-            .set_text(encode_editor_text(text));
+            .map_err(|_| EditorError::Operation("buffer lock poisoned".into()))?;
+        if buffer.get_text() != encoded {
+            buffer.set_text(encoded);
+            session.revision = session.revision.saturating_add(1);
+        }
         let line_count = text.matches('\n').count();
         let line = text.rsplit('\n').next().unwrap_or_default();
         session.position = EditorPosition {
             line: position.line.min(line_count),
             column: position.column.min(line.chars().count()),
         };
-        session
-            .buffer
-            .write()
-            .map_err(|_| EditorError::Operation("buffer lock poisoned".into()))?
-            .set_leader(
-                session.group_id,
-                modalkit::editing::cursor::Cursor::new(
-                    session.position.line,
-                    session.position.column,
-                ),
-            );
+        buffer.set_leader(
+            session.group_id,
+            modalkit::editing::cursor::Cursor::new(session.position.line, session.position.column),
+        );
         session.keys.reset_mode();
         session.mode = EditorMode::Normal;
         Ok(())

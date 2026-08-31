@@ -36,6 +36,28 @@ pub fn highlight_sql(text: &str, dialect: SqlDialect) -> Vec<HighlightSpan> {
         .collect()
 }
 
+pub fn highlight_sql_ranges(
+    text: &str,
+    ranges: &[TextRange],
+    dialect: SqlDialect,
+) -> Vec<HighlightSpan> {
+    ranges
+        .iter()
+        .filter_map(|range| text.get(range.start..range.end).map(|sql| (*range, sql)))
+        .flat_map(|(range, sql)| {
+            highlight_sql(sql, dialect)
+                .into_iter()
+                .map(move |span| HighlightSpan {
+                    range: TextRange::new(
+                        range.start + span.range.start,
+                        range.start + span.range.end,
+                    ),
+                    kind: span.kind,
+                })
+        })
+        .collect()
+}
+
 fn span_for(text: &str, index: &LineIndex, token: TokenWithSpan) -> Option<HighlightSpan> {
     let range = index.range(text, token.span.start, token.span.end);
     if range.is_empty() {

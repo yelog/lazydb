@@ -143,6 +143,20 @@ fn output_text(tab: &ConsoleTab) -> String {
         .join("\n")
 }
 
+fn output_sql_ranges(tab: &ConsoleTab) -> Vec<sql::TextRange> {
+    let mut offset = 0;
+    tab.output
+        .iter()
+        .filter_map(|entry| {
+            let range = entry
+                .sql_range
+                .map(|range| sql::TextRange::new(offset + range.start, offset + range.end));
+            offset += entry.message.len() + 1;
+            range
+        })
+        .collect()
+}
+
 fn append_console_output_to_editor(
     editor: &mut EditorWorkspace,
     tab: &mut ConsoleTab,
@@ -714,11 +728,12 @@ impl App {
         let Some(tab) = self.active_console_opt() else {
             return Err(EditorError::MissingSession(Uuid::nil()));
         };
-        self.editor.render_snapshot_with_dialect_and_statement(
+        let sql_ranges = output_sql_ranges(tab);
+        self.editor.render_snapshot_with_dialect_and_ranges(
             tab.output_editor_id,
             viewport,
-            SqlDialect::Generic,
-            None,
+            self.sql_dialect(),
+            &sql_ranges,
         )
     }
 
@@ -2556,10 +2571,7 @@ impl App {
                 }
                 self.append_console_output(
                     tab_id,
-                    OutputEntry {
-                        kind: OutputKind::Cancelled,
-                        message: "Query cancellation requested".to_owned(),
-                    },
+                    OutputEntry::plain(OutputKind::Cancelled, "Query cancellation requested"),
                 );
                 if let Some(last) = self
                     .tabs
@@ -2766,11 +2778,10 @@ impl App {
                 append_console_output_to_editor(
                     &mut self.editor,
                     tab,
-                    OutputEntry {
-                        kind: OutputKind::Cancelled,
-                        message: "Cancelling rolls back all uncommitted work in this transaction"
-                            .to_owned(),
-                    },
+                    OutputEntry::plain(
+                        OutputKind::Cancelled,
+                        "Cancelling rolls back all uncommitted work in this transaction",
+                    ),
                 );
                 vec![Command::CancelManual {
                     connection: intent.connection,
@@ -3173,10 +3184,14 @@ impl App {
                         )
                     {
                         apply_transaction_snapshot(tab, next);
-                        append_console_output_to_editor(&mut self.editor, tab, OutputEntry {
-                                kind: OutputKind::Info,
-                                message: "Transaction outcome cleared after reconnect; the prior operation was not retried".to_owned(),
-                            });
+                        append_console_output_to_editor(
+                            &mut self.editor,
+                            tab,
+                            OutputEntry::plain(
+                                OutputKind::Info,
+                                "Transaction outcome cleared after reconnect; the prior operation was not retried",
+                            ),
+                        );
                     }
                 }
                 if pending_matches
@@ -3276,10 +3291,7 @@ impl App {
                         append_console_output_to_editor(
                             &mut self.editor,
                             tab,
-                            OutputEntry {
-                                kind: OutputKind::Error,
-                                message: message.clone(),
-                            },
+                            OutputEntry::plain(OutputKind::Error, message.clone()),
                         );
                     }
                 }
@@ -3519,10 +3531,7 @@ impl App {
                     append_console_output_to_editor(
                         &mut self.editor,
                         tab,
-                        OutputEntry {
-                            kind: OutputKind::Error,
-                            message,
-                        },
+                        OutputEntry::plain(OutputKind::Error, message),
                     );
                 }
                 Vec::new()
@@ -3648,11 +3657,10 @@ impl App {
                     append_console_output_to_editor(
                         &mut self.editor,
                         tab,
-                        OutputEntry {
-                            kind: OutputKind::Info,
-                            message: "Transaction ended implicitly; prior work may have committed"
-                                .to_owned(),
-                        },
+                        OutputEntry::plain(
+                            OutputKind::Info,
+                            "Transaction ended implicitly; prior work may have committed",
+                        ),
                     );
                 }
                 Vec::new()
@@ -3718,10 +3726,7 @@ impl App {
                     append_console_output_to_editor(
                         &mut self.editor,
                         tab,
-                        OutputEntry {
-                            kind: OutputKind::Error,
-                            message,
-                        },
+                        OutputEntry::plain(OutputKind::Error, message),
                     );
                     self.retain_failed_deferred();
                 }
@@ -3788,10 +3793,7 @@ impl App {
                     append_console_output_to_editor(
                         &mut self.editor,
                         tab,
-                        OutputEntry {
-                            kind: OutputKind::Error,
-                            message,
-                        },
+                        OutputEntry::plain(OutputKind::Error, message),
                     );
                     self.retain_failed_deferred();
                 }
@@ -4264,10 +4266,10 @@ impl App {
                 append_console_output_to_editor(
                     &mut self.editor,
                     tab,
-                    OutputEntry {
-                        kind: OutputKind::Info,
-                        message: "Transaction outcome is unknown; local state abandoned".to_owned(),
-                    },
+                    OutputEntry::plain(
+                        OutputKind::Info,
+                        "Transaction outcome is unknown; local state abandoned",
+                    ),
                 );
             }
             return self.replay_deferred(prompt.intent);
@@ -4535,10 +4537,14 @@ impl App {
         if let Ok(next) = transaction::transition(tab_snapshot(tab), TransactionEvent::ClearOutcome)
         {
             apply_transaction_snapshot(tab, next);
-            append_console_output_to_editor(&mut self.editor, tab, OutputEntry {
-                kind: OutputKind::Info,
-                message: "Transaction outcome cleared after external verification; no operation was retried".to_owned(),
-            });
+            append_console_output_to_editor(
+                &mut self.editor,
+                tab,
+                OutputEntry::plain(
+                    OutputKind::Info,
+                    "Transaction outcome cleared after external verification; no operation was retried",
+                ),
+            );
         }
         Vec::new()
     }
@@ -8191,30 +8197,16 @@ impl App {
             .unwrap_or((true, None));
         tab.query_status = QueryStatus::Idle;
         if let Some((context, summary)) = execution_log {
-            append_console_output_to_editor(
-                &mut self.editor,
-                tab,
-                OutputEntry {
-                    kind: OutputKind::Success,
-                    message: context,
-                },
-            );
-            append_console_output_to_editor(
-                &mut self.editor,
-                tab,
-                OutputEntry {
-                    kind: OutputKind::Success,
-                    message: summary,
-                },
-            );
+            append_console_output_to_editor(&mut self.editor, tab, context);
+            append_console_output_to_editor(&mut self.editor, tab, summary);
         } else {
             append_console_output_to_editor(
                 &mut self.editor,
                 tab,
-                OutputEntry {
-                    kind: OutputKind::Success,
-                    message: format!("{rows} row(s) retrieved in {total_ms} ms"),
-                },
+                OutputEntry::plain(
+                    OutputKind::Success,
+                    format!("{rows} row(s) retrieved in {total_ms} ms"),
+                ),
             );
         }
         tab.outcome = Some(outcome);
@@ -8364,26 +8356,16 @@ fn append_failed_execution_output(
         append_console_output_to_editor(
             editor,
             tab,
-            OutputEntry {
-                kind: OutputKind::Info,
-                message: format!("[{timestamp}] {target}> {sql}"),
-            },
+            OutputEntry::sql(OutputKind::Info, format!("[{timestamp}] {target}> "), sql),
         );
     }
-    append_console_output_to_editor(
-        editor,
-        tab,
-        OutputEntry {
-            kind: OutputKind::Error,
-            message,
-        },
-    );
+    append_console_output_to_editor(editor, tab, OutputEntry::plain(OutputKind::Error, message));
 }
 
 fn format_execution_log(
     last: &LastExecution,
     outcome: &crate::db::query::QueryOutcome,
-) -> Option<(String, String)> {
+) -> Option<(OutputEntry, OutputEntry)> {
     let elapsed = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
     let timestamp = format_timestamp(elapsed.as_secs(), elapsed.subsec_millis());
     let target = crate::security::sanitize_terminal_text(&format!(
@@ -8399,7 +8381,11 @@ fn format_execution_log(
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    let context = format!("[{timestamp}] {target}> {sql}");
+    let context = OutputEntry::sql(
+        OutputKind::Success,
+        format!("[{timestamp}] {target}> "),
+        sql,
+    );
     let stats = &outcome.stats;
     let total_ms = stats.total().as_millis();
     let summary = if last.draft.statement_count == 1
@@ -8424,7 +8410,7 @@ fn format_execution_log(
             stats.fetch.as_millis(),
         )
     };
-    Some((context, summary))
+    Some((context, OutputEntry::plain(OutputKind::Success, summary)))
 }
 
 fn format_timestamp(seconds: u64, millis: u32) -> String {
@@ -8556,7 +8542,7 @@ mod tests {
 
     use uuid::Uuid;
 
-    use super::App;
+    use super::{App, output_sql_ranges, output_text};
     use crate::{
         action::{Action, Command},
         db::{
@@ -8571,7 +8557,10 @@ mod tests {
         identity::ConnectionIdentity,
         model::explorer::ExplorerConnectionStatus,
         model::relation::{RelationRequest, RelationRequestKind, RelationSnapshot, RelationTab},
-        model::tab::{GridRowAlignment, GridRowTarget, GridScrollAmount, ResultView, WorkspaceTab},
+        model::tab::{
+            ConsoleTab, GridRowAlignment, GridRowTarget, GridScrollAmount, OutputEntry, OutputKind,
+            ResultView, WorkspaceTab,
+        },
         model::transaction::{TransactionMode, TransactionState},
         model::workspace::{
             ConnectionStatus, Focus, Overlay, PaneLayoutMetrics, PaneResize, PaneSizePreferences,
@@ -8591,6 +8580,26 @@ mod tests {
             result_sets: vec![ResultSet::default()],
             stats: QueryStats::new(Duration::from_millis(2), Duration::from_millis(3), 0),
         }
+    }
+
+    #[test]
+    fn output_document_ranges_cover_only_sql_entries() {
+        let mut tab = ConsoleTab::new("SQL 1");
+        tab.output.push(OutputEntry::sql(
+            OutputKind::Success,
+            "[2026-08-31] database> ",
+            "SELECT 'Ada'",
+        ));
+        tab.output.push(OutputEntry::plain(
+            OutputKind::Success,
+            "[2026-08-31] 1 row retrieved",
+        ));
+        let text = output_text(&tab);
+        let ranges = output_sql_ranges(&tab);
+
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].get(&text), Some("SELECT 'Ada'"));
+        assert!(!ranges[0].get(&text).unwrap().contains("2026"));
     }
 
     fn connected_query_app(sql: &str) -> (App, Uuid, u64) {

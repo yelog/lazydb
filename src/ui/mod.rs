@@ -1978,7 +1978,7 @@ fn render_output(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, sta
     };
     for (row, line) in snapshot.lines.iter().take(viewport.height).enumerate() {
         let y = inner.y.saturating_add(row as u16);
-        let content = editor_line_spans(line, &snapshot, theme, false);
+        let content = editor_line_spans(line, &snapshot, theme, true);
         frame.render_widget(
             Paragraph::new(Line::from(content))
                 .style(Style::new().bg(theme.surface))

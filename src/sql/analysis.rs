@@ -3,11 +3,12 @@ use uuid::Uuid;
 use super::TextRange;
 
 /// Cache identity for lexical analysis. Cursor movement is deliberately absent.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct AnalysisKey {
     pub console_id: Uuid,
     pub document_revision: u64,
     pub dialect: super::SqlDialect,
+    pub highlight_ranges: Option<Vec<TextRange>>,
 }
 
 /// Converts sqlparser's one-based character locations to UTF-8 byte offsets.

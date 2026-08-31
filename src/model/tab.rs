@@ -1,7 +1,7 @@
 use uuid::Uuid;
 
 use crate::db::query::QueryOutcome;
-use crate::sql::CompletionCandidate;
+use crate::sql::{CompletionCandidate, TextRange};
 
 use super::execution_target::ExecutionTarget;
 use super::workspace::QueryStatus;
@@ -125,6 +125,29 @@ pub enum OutputKind {
 pub struct OutputEntry {
     pub kind: OutputKind,
     pub message: String,
+    pub sql_range: Option<TextRange>,
+}
+
+impl OutputEntry {
+    pub fn plain(kind: OutputKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+            sql_range: None,
+        }
+    }
+
+    pub fn sql(kind: OutputKind, prefix: impl Into<String>, sql: impl AsRef<str>) -> Self {
+        let mut message = prefix.into();
+        let start = message.len();
+        message.push_str(sql.as_ref());
+        let end = message.len();
+        Self {
+            kind,
+            message,
+            sql_range: Some(TextRange::new(start, end)),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -345,7 +368,21 @@ fn move_bounded(current: usize, delta: isize, count: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{DataGridState, GridRowAlignment, GridRowTarget, GridScrollAmount};
+    use super::{
+        DataGridState, GridRowAlignment, GridRowTarget, GridScrollAmount, OutputEntry, OutputKind,
+    };
+
+    #[test]
+    fn output_sql_entry_records_only_the_sql_suffix() {
+        let entry = OutputEntry::sql(
+            OutputKind::Success,
+            "[2026-08-31] database> ",
+            "SELECT 'Ada'",
+        );
+        let range = entry.sql_range.unwrap();
+
+        assert_eq!(&entry.message[range.start..range.end], "SELECT 'Ada'");
+    }
 
     #[test]
     fn clamping_keeps_selection_and_widths_inside_result_dimensions() {

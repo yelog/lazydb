@@ -1,17 +1,5 @@
-use ratatui::{
-    Frame,
-    layout::{Constraint, Direction, Layout, Position, Rect},
-    style::{Modifier, Style},
-    text::{Line, Span},
-    widgets::Paragraph,
-};
-#[cfg(test)]
-use unicode_width::UnicodeWidthChar;
-
 use super::{animation, loading};
 use super::{panel_block, render_text_input, theme::Theme};
-#[cfg(test)]
-use crate::sql::{self, HighlightKind, SqlDialect};
 use crate::{
     app::App,
     model::{
@@ -22,6 +10,13 @@ use crate::{
     },
     security::sanitize_terminal_text,
     ui::{HitRegion, HitTarget},
+};
+use ratatui::{
+    Frame,
+    layout::{Constraint, Direction, Layout, Position, Rect},
+    style::{Modifier, Style},
+    text::{Line, Span},
+    widgets::Paragraph,
 };
 
 pub(crate) fn render(
@@ -487,112 +482,6 @@ fn ddl_text(sql: &str) -> String {
     sanitize_terminal_text(sql)
 }
 
-#[cfg(test)]
-fn highlighted_ddl_lines(
-    body: &str,
-    dialect: SqlDialect,
-    row_offset: usize,
-    column_offset: usize,
-    width: usize,
-    height: usize,
-    theme: Theme,
-) -> Vec<Line<'static>> {
-    let highlights = sql::highlight_sql(body, dialect);
-    let mut lines = Vec::new();
-    let mut line_start = 0;
-
-    for (line_number, raw_line) in body.split('\n').enumerate() {
-        if line_number >= row_offset && lines.len() < height {
-            let line_end = line_start + raw_line.len();
-            let mut spans = Vec::new();
-            let mut byte = line_start;
-            for highlight in highlights
-                .iter()
-                .filter(|item| item.range.start < line_end && item.range.end > line_start)
-            {
-                let start = highlight.range.start.max(line_start).min(line_end);
-                let end = highlight.range.end.min(line_end);
-                if start > byte {
-                    push_ddl_span(&mut spans, &body[byte..start], HighlightKind::Plain, theme);
-                }
-                if end > start {
-                    push_ddl_span(&mut spans, &body[start..end], highlight.kind, theme);
-                    byte = end;
-                }
-            }
-            if byte < line_end {
-                push_ddl_span(
-                    &mut spans,
-                    &body[byte..line_end],
-                    HighlightKind::Plain,
-                    theme,
-                );
-            }
-            lines.push(styled_horizontal_slice(spans, column_offset, width));
-        }
-        line_start += raw_line.len() + 1;
-    }
-    lines
-}
-
-#[cfg(test)]
-fn push_ddl_span(spans: &mut Vec<Span<'static>>, text: &str, kind: HighlightKind, theme: Theme) {
-    if text.is_empty() {
-        return;
-    }
-    let style = Style::new().fg(theme.syntax_color(ddl_syntax_color(kind)));
-    if let Some(previous) = spans.last_mut()
-        && previous.style == style
-    {
-        previous.content.to_mut().push_str(text);
-    } else {
-        spans.push(Span::styled(text.to_owned(), style));
-    }
-}
-
-#[cfg(test)]
-fn styled_horizontal_slice(
-    spans: Vec<Span<'static>>,
-    offset: usize,
-    width: usize,
-) -> Line<'static> {
-    let end = offset.saturating_add(width);
-    let mut result: Vec<Span<'static>> = Vec::new();
-    let mut cursor: usize = 0;
-    for span in spans {
-        let style = span.style;
-        for character in span.content.chars() {
-            let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
-            let character_end = cursor.saturating_add(character_width);
-            if character_width > 0 && cursor >= offset && character_end <= end {
-                if let Some(previous) = result.last_mut()
-                    && previous.style == style
-                {
-                    previous.content.to_mut().push(character);
-                } else {
-                    result.push(Span::styled(character.to_string(), style));
-                }
-            }
-            cursor = character_end;
-        }
-    }
-    Line::from(result)
-}
-
-#[cfg(test)]
-fn ddl_syntax_color(kind: HighlightKind) -> super::theme::SyntaxColor {
-    match kind {
-        HighlightKind::Keyword => super::theme::SyntaxColor::Keyword,
-        HighlightKind::Identifier => super::theme::SyntaxColor::Identifier,
-        HighlightKind::String => super::theme::SyntaxColor::String,
-        HighlightKind::Number => super::theme::SyntaxColor::Number,
-        HighlightKind::Comment => super::theme::SyntaxColor::Comment,
-        HighlightKind::Operator => super::theme::SyntaxColor::Operator,
-        HighlightKind::Punctuation => super::theme::SyntaxColor::Punctuation,
-        HighlightKind::Parameter => super::theme::SyntaxColor::Parameter,
-        HighlightKind::Plain => super::theme::SyntaxColor::Plain,
-    }
-}
 fn clean(value: &str) -> String {
     sanitize_terminal_text(value).chars().take(240).collect()
 }
@@ -607,11 +496,8 @@ pub(crate) fn provenance_label(value: RelationSnapshotProvenance) -> &'static st
 
 #[cfg(test)]
 mod tests {
-    use super::{cell_editor_value, highlighted_ddl_lines};
-    use crate::{
-        model::{relation_edit::CellEditorState, text_input::TextInput},
-        sql::SqlDialect,
-    };
+    use super::cell_editor_value;
+    use crate::model::{relation_edit::CellEditorState, text_input::TextInput};
 
     #[test]
     fn cell_editor_value_contains_only_the_cell_content() {
@@ -633,113 +519,5 @@ mod tests {
         assert!(rendered.len() > 240);
         assert!(rendered.contains("<ESC>"));
         assert!(!rendered.contains('\u{1b}'));
-    }
-
-    #[test]
-    fn ddl_lines_apply_sql_token_styles() {
-        let theme = super::Theme::deep_space();
-        let lines = highlighted_ddl_lines(
-            "CREATE TABLE users (name TEXT DEFAULT 'Ada'); -- note",
-            SqlDialect::Postgres,
-            0,
-            0,
-            120,
-            10,
-            theme,
-        );
-
-        assert!(
-            lines[0]
-                .spans
-                .iter()
-                .any(|span| span.content == "CREATE" && span.style.fg == Some(theme.accent))
-        );
-        assert!(
-            lines[0]
-                .spans
-                .iter()
-                .any(|span| span.content == "users" && span.style.fg == Some(theme.action))
-        );
-        assert!(
-            lines[0]
-                .spans
-                .iter()
-                .any(|span| span.content == "'Ada'" && span.style.fg == Some(theme.warning))
-        );
-        assert!(
-            lines[0]
-                .spans
-                .iter()
-                .any(|span| span.content.contains("-- note") && span.style.fg == Some(theme.muted))
-        );
-    }
-
-    #[test]
-    fn ddl_highlighting_preserves_original_text_and_lines() {
-        let sql = "CREATE TABLE users (\n  id INTEGER,\n  note TEXT\n);";
-        let lines = highlighted_ddl_lines(
-            sql,
-            SqlDialect::Sqlite,
-            0,
-            0,
-            120,
-            20,
-            super::Theme::deep_space(),
-        );
-        let rendered = lines
-            .iter()
-            .map(|line| {
-                line.spans
-                    .iter()
-                    .map(|span| span.content.as_ref())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        assert_eq!(rendered, sql);
-    }
-
-    #[test]
-    fn ddl_horizontal_slice_preserves_style_and_display_width() {
-        let theme = super::Theme::deep_space();
-        let lines = highlighted_ddl_lines(
-            "SELECT 数据, '值' FROM users;",
-            SqlDialect::Postgres,
-            0,
-            7,
-            8,
-            1,
-            theme,
-        );
-
-        assert_eq!(lines.len(), 1);
-        assert!(lines[0].width() <= 8);
-        assert!(
-            lines[0]
-                .spans
-                .iter()
-                .any(|span| span.style.fg == Some(theme.action))
-        );
-    }
-
-    #[test]
-    fn ddl_horizontal_slice_never_emits_replacement_characters() {
-        let line = super::styled_horizontal_slice(
-            vec![ratatui::text::Span::styled(
-                "A数据B",
-                ratatui::style::Style::new().fg(ratatui::style::Color::Blue),
-            )],
-            2,
-            3,
-        );
-
-        assert!(line.width() <= 3);
-        assert!(
-            !line
-                .spans
-                .iter()
-                .any(|span| span.content.contains('\u{fffd}'))
-        );
     }
 }

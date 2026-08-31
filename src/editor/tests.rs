@@ -1,6 +1,8 @@
 use uuid::Uuid;
 
-use crate::model::editor::{EditorMode, EditorPosition, EditorPromptKind, EditorViewport};
+use crate::model::editor::{
+    EditorHighlightKind, EditorMode, EditorPosition, EditorPromptKind, EditorViewport,
+};
 
 use super::{EditorEffect, EditorKey, EditorWorkspace, decode_editor_text, encode_editor_text};
 
@@ -270,6 +272,45 @@ fn read_only_text_replacement_follows_tail_until_interaction() {
         .set_read_only_text(id, "one\ntwo\nthree", true)
         .unwrap();
     assert_eq!(workspace.position(id).unwrap().line, 1);
+}
+
+#[test]
+fn read_only_text_replacement_invalidates_cached_sql_highlights() {
+    let (mut workspace, id) = read_only_fixture("");
+    let viewport = EditorViewport {
+        width: 120,
+        height: 20,
+    };
+    let initial_revision = workspace.revision(id).unwrap();
+
+    workspace
+        .render_snapshot_with_dialect(id, viewport, crate::sql::SqlDialect::Postgres)
+        .unwrap();
+    workspace
+        .set_read_only_text(id, "CREATE TABLE users (name TEXT DEFAULT 'Ada');", false)
+        .unwrap();
+
+    let snapshot = workspace
+        .render_snapshot_with_dialect(id, viewport, crate::sql::SqlDialect::Postgres)
+        .unwrap();
+    assert_eq!(snapshot.revision, initial_revision + 1);
+    assert!(
+        snapshot.lines[0]
+            .spans
+            .iter()
+            .any(|span| { span.text == "CREATE" && span.kind == EditorHighlightKind::Keyword })
+    );
+    assert!(
+        snapshot.lines[0]
+            .spans
+            .iter()
+            .any(|span| { span.text == "'Ada'" && span.kind == EditorHighlightKind::String })
+    );
+
+    workspace
+        .set_read_only_text(id, "CREATE TABLE users (name TEXT DEFAULT 'Ada');", false)
+        .unwrap();
+    assert_eq!(workspace.revision(id).unwrap(), initial_revision + 1);
 }
 
 #[test]
