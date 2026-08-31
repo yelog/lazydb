@@ -129,6 +129,7 @@ WITH candidates AS (
            current_database() || '.' || n.nspname || '.' || p.proname
     FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
     WHERE p.prokind IN ('f', 'p')
+       AND (p.prokind <> 'f' OR NOT EXISTS (SELECT 1 FROM pg_trigger tr WHERE tr.tgfoid = p.oid))
       AND n.nspname <> 'information_schema'
       AND n.nspname NOT LIKE 'pg\_%' ESCAPE '\'
       AND ($2::text[] IS NULL OR n.nspname = ANY($2))
@@ -853,7 +854,7 @@ impl PostgresAdapter {
              (SELECT COUNT(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND c.relkind='v')::bigint AS views, \
              (SELECT COUNT(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND c.relkind='m')::bigint AS materialized_views, \
              (SELECT COUNT(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND c.relkind='S')::bigint AS sequences, \
-             (SELECT COUNT(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname=$1 AND p.prokind='f')::bigint AS functions, \
+              (SELECT COUNT(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname=$1 AND p.prokind='f' AND NOT EXISTS (SELECT 1 FROM pg_trigger tr WHERE tr.tgfoid=p.oid))::bigint AS functions, \
              (SELECT COUNT(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname=$1 AND p.prokind='p')::bigint AS procedures, \
              (SELECT COUNT(*) FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace WHERE n.nspname=$1 AND t.typtype IN ('e','d') AND t.typisdefined AND t.typelem=0)::bigint AS types",
         )
@@ -929,7 +930,7 @@ impl PostgresAdapter {
             ),
             ObjectGroup::Functions => (
                 "pg_proc c",
-                "c.prokind='f'",
+                "c.prokind='f' AND NOT EXISTS (SELECT 1 FROM pg_trigger tr WHERE tr.tgfoid=c.oid)",
                 CatalogKind::Function,
                 "function",
                 false,

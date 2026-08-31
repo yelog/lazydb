@@ -206,7 +206,7 @@ async fn materialized_view_structure_reports_truthful_ddl_and_native_kind_when_c
         .unwrap();
     let oid = match database
         .execute(&format!(
-            "SELECT oid::bigint FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = '{schema}' AND c.relname = '{name}'"
+            "SELECT c.oid::bigint FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = '{schema}' AND c.relname = '{name}'"
         ))
         .await
         .unwrap()
