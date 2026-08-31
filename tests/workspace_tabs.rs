@@ -6,6 +6,10 @@ use lazydb::profile::import_connection_url;
 use lazydb::{
     action::{Action, Command},
     app::App,
+    db::catalog::{
+        CatalogCount, CatalogCursor, CatalogEntry, CatalogGroupSummary, CatalogId, CatalogKind,
+        CatalogPage, CatalogRequest, CatalogTarget, ObjectGroup, OptionalMetadata, QualifiedName,
+    },
     model::relation::RelationTab,
     model::tab::{ConsoleTab, TabKind, WorkspaceTab},
     model::workspace::Focus,
@@ -559,34 +563,38 @@ fn restored_relation_tab_is_not_loaded_before_connection_installation() {
 }
 
 #[test]
-fn connection_install_loads_only_active_restored_relation() {
+fn restored_relation_waits_for_catalog_before_loading() {
     let profile = import_connection_url(":memory:", Some("first"))
         .unwrap()
         .profile;
+    let profile_id = profile.id;
     let first_id = Uuid::new_v4();
     let second_id = Uuid::new_v4();
+    let database_id = CatalogId::new(profile_id, CatalogKind::Database, [":memory:"]);
+    let schema_id = CatalogId::new(profile_id, CatalogKind::Schema, [":memory:", "main"]);
+    let first_relation_id = CatalogId::new(
+        profile_id,
+        CatalogKind::Table,
+        [":memory:", "main", "first"],
+    );
     let relation = |id: Uuid, title: &str| {
         PersistedTab::Relation(lazydb::persistence::workspace::PersistedRelationTab {
             id,
-            object_id: lazydb::db::catalog::CatalogId::new(
-                profile.id,
-                lazydb::db::catalog::CatalogKind::Table,
-                [title],
-            ),
-            qualified_name: lazydb::db::catalog::QualifiedName {
-                database: None,
-                schema: None,
+            object_id: CatalogId::new(profile_id, CatalogKind::Table, [":memory:", "main", title]),
+            qualified_name: QualifiedName {
+                database: Some(":memory:".into()),
+                schema: Some("main".into()),
                 object: title.into(),
             },
-            catalog_kind: lazydb::db::catalog::CatalogKind::Table,
+            catalog_kind: CatalogKind::Table,
             title: title.into(),
             view: lazydb::model::relation::RelationView::Data,
         })
     };
     let snapshot = WorkspaceSnapshot {
-        active_profile: Some(profile.id),
+        active_profile: Some(profile_id),
         profiles: vec![PersistedProfileWorkspace {
-            profile_id: profile.id,
+            profile_id,
             active_tab: Some(first_id),
             consoles: Vec::new(),
             tabs: vec![relation(first_id, "first"), relation(second_id, "second")],
@@ -597,16 +605,13 @@ fn connection_install_loads_only_active_restored_relation() {
     };
     let mut app = App::new(vec![profile]);
     app.restore_workspace(snapshot, None);
-    let generation = match app
-        .update(Action::RequestConnect(profile_id(&app, 0)))
-        .as_slice()
-    {
+    let generation = match app.update(Action::RequestConnect(profile_id)).as_slice() {
         [Command::Connect { generation, .. }] => *generation,
         commands => panic!("unexpected commands: {commands:?}"),
     };
 
     let commands = app.update(Action::ConnectionSucceeded {
-        profile_id: profile_id(&app, 0),
+        profile_id,
         generation,
         server: lazydb::db::ServerInfo {
             kind: lazydb::profile::DatabaseKind::Sqlite,
@@ -617,21 +622,368 @@ fn connection_install_loads_only_active_restored_relation() {
     assert_eq!(
         commands
             .iter()
-            .filter(|command| matches!(command, Command::LoadRelationPreview(_)))
+            .filter(|command| matches!(command, Command::LoadCatalogPage(_)))
             .count(),
         1
     );
+    assert!(
+        !commands
+            .iter()
+            .any(|command| matches!(command, Command::LoadRelationPreview(_)))
+    );
+    assert!(matches!(app.tabs[0], WorkspaceTab::Relation(ref tab)
+        if matches!(tab.data, lazydb::model::relation::RelationLoad::Empty)));
     assert!(matches!(app.tabs[1], WorkspaceTab::Relation(ref tab)
         if matches!(tab.data, lazydb::model::relation::RelationLoad::Empty)));
 
-    let commands = app.update(Action::ActivateTab(1));
-    assert_eq!(
-        commands
+    let database_request = commands
+        .iter()
+        .find_map(|command| match command {
+            Command::LoadCatalogPage(request) => Some(request.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let database = CatalogEntry::database(
+        database_id.clone(),
+        QualifiedName {
+            database: Some(":memory:".into()),
+            schema: None,
+            object: ":memory:".into(),
+        },
+        "database",
+        OptionalMetadata::Unsupported,
+        true,
+    )
+    .unwrap();
+    let commands = app.update(Action::CatalogPageLoaded(
+        CatalogPage::new(
+            &database_request,
+            vec![database],
+            CatalogCount::Exact(1),
+            None,
+        )
+        .unwrap(),
+    ));
+    assert!(
+        !commands
             .iter()
-            .filter(|command| matches!(command, Command::LoadRelationPreview(_)))
-            .count(),
-        1
+            .any(|command| matches!(command, Command::LoadRelationPreview(_)))
     );
+
+    let schema_target = CatalogTarget::schemas(database_id.clone()).unwrap();
+    let schema_request = pending_catalog_request(&app, profile_id, &schema_target);
+    let schema = CatalogEntry::schema(
+        schema_id.clone(),
+        database_id,
+        QualifiedName {
+            database: Some(":memory:".into()),
+            schema: Some("main".into()),
+            object: "main".into(),
+        },
+        "schema",
+        OptionalMetadata::Unsupported,
+        true,
+    )
+    .unwrap();
+    let commands = app.update(Action::CatalogPageLoaded(
+        CatalogPage::new(&schema_request, vec![schema], CatalogCount::Exact(1), None).unwrap(),
+    ));
+    assert!(
+        !commands
+            .iter()
+            .any(|command| matches!(command, Command::LoadRelationPreview(_)))
+    );
+
+    let groups_target = CatalogTarget::groups(schema_id.clone()).unwrap();
+    let groups_request = pending_catalog_request(&app, profile_id, &groups_target);
+    let commands = app.update(Action::CatalogPageLoaded(
+        CatalogPage::groups(
+            &groups_request,
+            vec![CatalogGroupSummary {
+                group: ObjectGroup::Tables,
+                object_count: CatalogCount::Exact(1),
+            }],
+            CatalogCount::Exact(1),
+            None,
+        )
+        .unwrap(),
+    ));
+    assert!(
+        !commands
+            .iter()
+            .any(|command| matches!(command, Command::LoadRelationPreview(_)))
+    );
+
+    let tables_target = CatalogTarget::objects(schema_id.clone(), ObjectGroup::Tables).unwrap();
+    let tables_request = pending_catalog_request(&app, profile_id, &tables_target);
+    let first_relation = CatalogEntry::relation(
+        first_relation_id.clone(),
+        schema_id,
+        QualifiedName {
+            database: Some(":memory:".into()),
+            schema: Some("main".into()),
+            object: "first".into(),
+        },
+        "table",
+        OptionalMetadata::Unsupported,
+        true,
+    )
+    .unwrap();
+    let commands = app.update(Action::CatalogPageLoaded(
+        CatalogPage::new(
+            &tables_request,
+            vec![first_relation],
+            CatalogCount::Exact(1),
+            None,
+        )
+        .unwrap(),
+    ));
+    assert!(matches!(
+        commands.as_slice(),
+        [Command::LoadRelationPreview(request)]
+            if request.tab_id == first_id
+                && request.relation.object_id == first_relation_id
+    ));
+    let commands = app.update(Action::ActivateTab(0));
+    assert!(!commands.iter().any(|command| matches!(
+        command,
+        Command::LoadRelationPreview(request) if request.tab_id == first_id
+    )));
+}
+
+fn pending_catalog_request(app: &App, profile_id: Uuid, target: &CatalogTarget) -> CatalogRequest {
+    let owner = lazydb::model::explorer::owner_for_target(profile_id, target);
+    app.explorer.normalized.profiles[&profile_id].pending_requests[&owner].clone()
+}
+
+#[test]
+fn restored_ddl_relation_loads_after_catalog_identity_arrives() {
+    let (mut app, profile_id, tab_id, relation_id, schema_id, tables_request) =
+        restored_relation_at_tables_request(lazydb::model::relation::RelationView::Ddl);
+    let relation = catalog_relation(relation_id.clone(), schema_id, "target");
+
+    let commands = app.update(Action::CatalogPageLoaded(
+        CatalogPage::new(
+            &tables_request,
+            vec![relation],
+            CatalogCount::Exact(1),
+            None,
+        )
+        .unwrap(),
+    ));
+
+    assert!(matches!(
+        commands.as_slice(),
+        [Command::LoadRelationDdl(request)]
+            if request.tab_id == tab_id
+                && request.connection.profile_id == profile_id
+                && request.relation.object_id == relation_id
+    ));
+}
+
+#[test]
+fn restored_relation_waits_until_later_catalog_page_contains_identity() {
+    let (mut app, profile_id, tab_id, relation_id, schema_id, mut tables_request) =
+        restored_relation_at_tables_request(lazydb::model::relation::RelationView::Data);
+    let other_id = CatalogId::new(
+        relation_id.profile_id(),
+        CatalogKind::Table,
+        [":memory:", "main", "other"],
+    );
+    let cursor = CatalogCursor::from_keyset("other", "other").unwrap();
+    tables_request.page_size = 1;
+    let owner = lazydb::model::explorer::owner_for_target(profile_id, &tables_request.key.target);
+    app.explorer
+        .normalized
+        .profiles
+        .get_mut(&profile_id)
+        .unwrap()
+        .pending_requests
+        .insert(owner, tables_request.clone());
+    let commands = app.update(Action::CatalogPageLoaded(
+        CatalogPage::new(
+            &tables_request,
+            vec![catalog_relation(other_id, schema_id.clone(), "other")],
+            CatalogCount::Exact(2),
+            Some(cursor),
+        )
+        .unwrap(),
+    ));
+    assert!(
+        !commands
+            .iter()
+            .any(|command| matches!(command, Command::LoadRelationPreview(_)))
+    );
+    let continuation = commands
+        .iter()
+        .find_map(|command| match command {
+            Command::LoadCatalogPage(request) => Some(request.clone()),
+            _ => None,
+        })
+        .expect("catalog continuation request");
+
+    let commands = app.update(Action::CatalogPageLoaded(
+        CatalogPage::new(
+            &continuation,
+            vec![catalog_relation(relation_id.clone(), schema_id, "target")],
+            CatalogCount::Exact(2),
+            None,
+        )
+        .unwrap(),
+    ));
+
+    assert!(matches!(
+        commands.as_slice(),
+        [Command::LoadRelationPreview(request)]
+            if request.tab_id == tab_id && request.relation.object_id == relation_id
+    ));
+}
+
+fn restored_relation_at_tables_request(
+    view: lazydb::model::relation::RelationView,
+) -> (App, Uuid, Uuid, CatalogId, CatalogId, CatalogRequest) {
+    let profile = import_connection_url(":memory:", Some("restored"))
+        .unwrap()
+        .profile;
+    let profile_id = profile.id;
+    let tab_id = Uuid::new_v4();
+    let database_id = CatalogId::new(profile_id, CatalogKind::Database, [":memory:"]);
+    let schema_id = CatalogId::new(profile_id, CatalogKind::Schema, [":memory:", "main"]);
+    let relation_id = CatalogId::new(
+        profile_id,
+        CatalogKind::Table,
+        [":memory:", "main", "target"],
+    );
+    let snapshot = WorkspaceSnapshot {
+        active_profile: Some(profile_id),
+        profiles: vec![PersistedProfileWorkspace {
+            profile_id,
+            active_tab: Some(tab_id),
+            consoles: Vec::new(),
+            tabs: vec![PersistedTab::Relation(
+                lazydb::persistence::workspace::PersistedRelationTab {
+                    id: tab_id,
+                    object_id: relation_id.clone(),
+                    qualified_name: QualifiedName {
+                        database: Some(":memory:".into()),
+                        schema: Some("main".into()),
+                        object: "target".into(),
+                    },
+                    catalog_kind: CatalogKind::Table,
+                    title: "target".into(),
+                    view,
+                },
+            )],
+        }],
+        active_console: Uuid::nil(),
+        consoles: Vec::new(),
+        sql: Vec::new(),
+    };
+    let mut app = App::new(vec![profile]);
+    app.restore_workspace(snapshot, None);
+    let generation = match app.update(Action::RequestConnect(profile_id)).as_slice() {
+        [Command::Connect { generation, .. }] => *generation,
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+    let commands = app.update(Action::ConnectionSucceeded {
+        profile_id,
+        generation,
+        server: lazydb::db::ServerInfo {
+            kind: lazydb::profile::DatabaseKind::Sqlite,
+            version: "3".into(),
+            database: ":memory:".into(),
+        },
+    });
+    assert!(!commands.iter().any(|command| matches!(
+        command,
+        Command::LoadRelationPreview(_) | Command::LoadRelationDdl(_)
+    )));
+    let database_request = commands
+        .iter()
+        .find_map(|command| match command {
+            Command::LoadCatalogPage(request) => Some(request.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let database = CatalogEntry::database(
+        database_id.clone(),
+        QualifiedName {
+            database: Some(":memory:".into()),
+            schema: None,
+            object: ":memory:".into(),
+        },
+        "database",
+        OptionalMetadata::Unsupported,
+        true,
+    )
+    .unwrap();
+    app.update(Action::CatalogPageLoaded(
+        CatalogPage::new(
+            &database_request,
+            vec![database],
+            CatalogCount::Exact(1),
+            None,
+        )
+        .unwrap(),
+    ));
+    let schema_target = CatalogTarget::schemas(database_id.clone()).unwrap();
+    let schema_request = pending_catalog_request(&app, profile_id, &schema_target);
+    let schema = CatalogEntry::schema(
+        schema_id.clone(),
+        database_id,
+        QualifiedName {
+            database: Some(":memory:".into()),
+            schema: Some("main".into()),
+            object: "main".into(),
+        },
+        "schema",
+        OptionalMetadata::Unsupported,
+        true,
+    )
+    .unwrap();
+    app.update(Action::CatalogPageLoaded(
+        CatalogPage::new(&schema_request, vec![schema], CatalogCount::Exact(1), None).unwrap(),
+    ));
+    let groups_target = CatalogTarget::groups(schema_id.clone()).unwrap();
+    let groups_request = pending_catalog_request(&app, profile_id, &groups_target);
+    app.update(Action::CatalogPageLoaded(
+        CatalogPage::groups(
+            &groups_request,
+            vec![CatalogGroupSummary {
+                group: ObjectGroup::Tables,
+                object_count: CatalogCount::Exact(1),
+            }],
+            CatalogCount::Exact(1),
+            None,
+        )
+        .unwrap(),
+    ));
+    let tables_target = CatalogTarget::objects(schema_id.clone(), ObjectGroup::Tables).unwrap();
+    let tables_request = pending_catalog_request(&app, profile_id, &tables_target);
+    (
+        app,
+        profile_id,
+        tab_id,
+        relation_id,
+        schema_id,
+        tables_request,
+    )
+}
+
+fn catalog_relation(id: CatalogId, schema: CatalogId, name: &str) -> CatalogEntry {
+    CatalogEntry::relation(
+        id,
+        schema,
+        QualifiedName {
+            database: Some(":memory:".into()),
+            schema: Some("main".into()),
+            object: name.into(),
+        },
+        "table",
+        OptionalMetadata::Unsupported,
+        true,
+    )
+    .unwrap()
 }
 
 #[test]
@@ -725,10 +1077,6 @@ fn console_numbering_is_collision_free_within_each_workspace() {
 
     assert_eq!(app.active_console().name, "console_2");
     assert_eq!(app.sql_editors.len(), 2);
-}
-
-fn profile_id(app: &App, index: usize) -> Uuid {
-    app.profiles[index].id
 }
 
 fn persisted_console(id: Uuid, name: &str, open: bool) -> PersistedConsole {
