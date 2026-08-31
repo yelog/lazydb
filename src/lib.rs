@@ -1,4 +1,5 @@
 pub mod action;
+pub mod agent;
 pub mod app;
 pub mod cli;
 pub mod clipboard;
