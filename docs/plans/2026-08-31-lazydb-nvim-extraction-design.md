@@ -30,10 +30,10 @@ Neovim, terminal jobs, locale, clipboard, executable availability, and CLI API
 `yelog/lazydb` repository removes its `lazydb.nvim/` directory after the
 standalone repository has been created, tested, and pushed.
 
-The extraction uses the current tested plugin snapshot as the standalone
-repository's initial commit. The standalone README records that the plugin was
-extracted from `yelog/lazydb`, and the main repository's existing Git history
-continues to preserve all earlier plugin changes.
+The extraction preserves the six plugin-only commits already filtered from the
+main repository, then adds standalone metadata in a new migration commit. The
+standalone README records that the plugin was extracted from `yelog/lazydb`,
+while the main repository retains the original commits in their full context.
 
 No bidirectional sync or generated mirror is introduced. This avoids duplicate
 sources of truth and synchronization credentials.
@@ -120,7 +120,7 @@ to `yelog/lazydb` for the CLI.
    snapshot.
 2. Add standalone metadata, CI, README, and licenses.
 3. Run the headless plugin suite from the standalone root.
-4. Initialize Git and create the initial commit.
+4. Commit the standalone metadata on top of the filtered plugin history.
 5. Create the public GitHub repository `yelog/lazydb.nvim` and push `main`.
 6. Verify the remote repository and Actions workflow.
 7. Update the main repository README and CI references.
