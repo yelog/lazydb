@@ -62,6 +62,8 @@ pub enum HelpShortcutId {
     ResultsMoveDown,
     ResultsMoveUp,
     ResultsMoveRight,
+    ResultsFirstColumn,
+    ResultsLastColumn,
     ResultsFirstRow,
     ResultsLastRow,
     ResultsViewTop,
@@ -443,6 +445,16 @@ pub fn shortcuts(context: Focus, relation_data: bool) -> Vec<HelpShortcut> {
                     id: HelpShortcutId::ResultsMoveRight,
                     key: "l",
                     description: "move through cells right",
+                },
+                HelpShortcut {
+                    id: HelpShortcutId::ResultsFirstColumn,
+                    key: "^",
+                    description: "select first column in the current row",
+                },
+                HelpShortcut {
+                    id: HelpShortcutId::ResultsLastColumn,
+                    key: "$",
+                    description: "select last column in the current row",
                 },
                 HelpShortcut {
                     id: HelpShortcutId::ResultsFirstRow,

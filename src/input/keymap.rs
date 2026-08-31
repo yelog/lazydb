@@ -1265,6 +1265,12 @@ fn is_read_only_editor_key(event: KeyEvent) -> bool {
 
 fn map_results(code: KeyCode, app: &App) -> Option<Action> {
     match code {
+        KeyCode::Char('^') => Some(Action::GridSelectColumn(
+            crate::model::tab::GridColumnTarget::First,
+        )),
+        KeyCode::Char('$') => Some(Action::GridSelectColumn(
+            crate::model::tab::GridColumnTarget::Last,
+        )),
         KeyCode::Char('[') => Some(Action::GridResizeColumn(-1)),
         KeyCode::Char(']') => Some(Action::GridResizeColumn(1)),
         KeyCode::Char('=') => Some(Action::GridResetColumnWidth),
@@ -1435,7 +1441,9 @@ mod tests {
         model::{
             relation::RelationTab,
             relation_edit::{RelationEditSession, RelationGridMode},
-            tab::{GridRowAlignment, GridRowTarget, GridScrollAmount, WorkspaceTab},
+            tab::{
+                GridColumnTarget, GridRowAlignment, GridRowTarget, GridScrollAmount, WorkspaceTab,
+            },
             workspace::Focus,
         },
     };
@@ -1651,6 +1659,42 @@ mod tests {
         assert_eq!(
             keymap.map(key(KeyCode::Char('g')), &app),
             Some(Action::GridSelectRow(GridRowTarget::First))
+        );
+    }
+
+    #[test]
+    fn grid_maps_current_row_column_targets() {
+        let app = relation_app(RelationGridMode::Browse);
+        let mut keymap = Keymap::default();
+
+        assert_eq!(
+            keymap.map(key(KeyCode::Char('^')), &app),
+            Some(Action::GridSelectColumn(GridColumnTarget::First))
+        );
+        assert_eq!(
+            keymap.map(key(KeyCode::Char('$')), &app),
+            Some(Action::GridSelectColumn(GridColumnTarget::Last))
+        );
+    }
+
+    #[test]
+    fn grid_column_targets_do_not_steal_relation_cell_input() {
+        let app = relation_app(RelationGridMode::EditCell(
+            crate::model::relation_edit::CellEditorState {
+                row: 0,
+                column: 0,
+                input: Default::default(),
+            },
+        ));
+        let mut keymap = Keymap::default();
+
+        assert_eq!(
+            keymap.map(key(KeyCode::Char('^')), &app),
+            Some(Action::RelationEditInsert('^'))
+        );
+        assert_eq!(
+            keymap.map(key(KeyCode::Char('$')), &app),
+            Some(Action::RelationEditInsert('$'))
         );
     }
 

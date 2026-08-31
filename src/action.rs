@@ -539,6 +539,7 @@ pub enum Action {
         columns: isize,
     },
     GridSelectRow(crate::model::tab::GridRowTarget),
+    GridSelectColumn(crate::model::tab::GridColumnTarget),
     GridScrollRows {
         direction: isize,
         amount: crate::model::tab::GridScrollAmount,

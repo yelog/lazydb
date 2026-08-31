@@ -1272,6 +1272,12 @@ impl App {
                 rows: 0,
                 columns: 1,
             }],
+            Id::ResultsFirstColumn => vec![Action::GridSelectColumn(
+                crate::model::tab::GridColumnTarget::First,
+            )],
+            Id::ResultsLastColumn => vec![Action::GridSelectColumn(
+                crate::model::tab::GridColumnTarget::Last,
+            )],
             Id::ResultsFirstRow => vec![Action::GridSelectRow(
                 crate::model::tab::GridRowTarget::First,
             )],
@@ -3955,6 +3961,12 @@ impl App {
             Action::GridSelectRow(target) => {
                 self.with_active_grid(|grid, (row_count, _)| {
                     grid.select_row_target(target, row_count);
+                });
+                Vec::new()
+            }
+            Action::GridSelectColumn(target) => {
+                self.with_active_grid(|grid, (_, column_count)| {
+                    grid.select_column_target(target, column_count);
                 });
                 Vec::new()
             }

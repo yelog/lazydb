@@ -38,6 +38,12 @@ pub enum GridRowTarget {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GridColumnTarget {
+    First,
+    Last,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GridScrollAmount {
     Lines(usize),
     HalfPage,
@@ -236,6 +242,18 @@ impl ConsoleTab {
 }
 
 impl DataGridState {
+    pub fn select_column_target(&mut self, target: GridColumnTarget, column_count: usize) {
+        if column_count == 0 {
+            self.selected_column = 0;
+            return;
+        }
+
+        self.selected_column = match target {
+            GridColumnTarget::First => 0,
+            GridColumnTarget::Last => column_count - 1,
+        };
+    }
+
     pub fn clamp(&mut self, row_count: usize, column_count: usize) {
         self.selected_row = self.selected_row.min(row_count.saturating_sub(1));
         self.selected_column = self.selected_column.min(column_count.saturating_sub(1));
@@ -388,7 +406,8 @@ fn move_bounded(current: usize, delta: isize, count: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        DataGridState, GridRowAlignment, GridRowTarget, GridScrollAmount, OutputEntry, OutputKind,
+        DataGridState, GridColumnTarget, GridRowAlignment, GridRowTarget, GridScrollAmount,
+        OutputEntry, OutputKind,
     };
 
     #[test]
@@ -421,6 +440,44 @@ mod tests {
         assert_eq!(state.column_offset, 2);
         assert_eq!(state.row_offset, 1);
         assert_eq!(state.column_widths, vec![Some(10), Some(11), Some(12)]);
+    }
+
+    #[test]
+    fn column_targets_preserve_row_and_viewport_state() {
+        let mut state = DataGridState {
+            selected_row: 4,
+            selected_column: 2,
+            column_offset: 1,
+            row_offset: 3,
+            viewport_rows: 5,
+            column_widths: vec![Some(10), None, Some(20)],
+        };
+
+        state.select_column_target(GridColumnTarget::First, 5);
+        assert_eq!(state.selected_column, 0);
+        assert_eq!(
+            (state.selected_row, state.column_offset, state.row_offset),
+            (4, 1, 3)
+        );
+
+        state.select_column_target(GridColumnTarget::Last, 5);
+        assert_eq!(state.selected_column, 4);
+        assert_eq!(
+            (state.selected_row, state.column_offset, state.row_offset),
+            (4, 1, 3)
+        );
+    }
+
+    #[test]
+    fn column_targets_are_safe_without_columns() {
+        let mut state = DataGridState {
+            selected_column: 3,
+            ..DataGridState::default()
+        };
+
+        state.select_column_target(GridColumnTarget::Last, 0);
+
+        assert_eq!(state.selected_column, 0);
     }
 
     #[test]
