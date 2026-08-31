@@ -71,12 +71,15 @@ cargo build --release
 
 ## Install
 
-Stable releases are available from the project Homebrew tap on supported macOS
-systems:
+Stable releases are intended to be available from the project Homebrew tap on
+supported macOS systems:
 
 ```bash
 brew install yelog/tap/lazydb
 ```
+
+The current `v0.1.0-beta.1` prerelease is distributed through GitHub Release
+assets only. It does not update the stable Homebrew Formula.
 
 On macOS and Linux, the stable release can also be installed without a package
 manager. The installer verifies the downloaded archive against the release
@@ -216,13 +219,129 @@ When application mouse capture is enabled, terminal-native text selection is
 terminal-specific and commonly uses Shift-drag. Run with `--mouse off` when
 terminal selection should take priority.
 
-## Neovim
+## Neovim Integration
 
-Add `lazydb.nvim` as a local plugin and point it at the built executable:
+The Neovim plugin lives in the `lazydb.nvim/` subdirectory of the
+[`yelog/lazydb`](https://github.com/yelog/lazydb) repository. It starts the
+`lazydb` executable in a floating terminal; it does not contain the database
+engine itself. Install the CLI first using one of the methods above, then add
+the plugin with one of the following methods.
+
+### lazy.nvim
+
+Because this repository contains both the CLI and the plugin, use a local
+checkout and point `lazy.nvim` at the plugin subdirectory:
+
+```lua
+return {
+  {
+    dir = vim.fn.expand("~/src/lazydb/lazydb.nvim"),
+    name = "lazydb.nvim",
+    cmd = { "LazyDB", "LazyDBToggle", "LazyDBRestart" },
+    keys = {
+      {
+        "<leader>db",
+        function()
+          require("lazydb").toggle()
+        end,
+        desc = "Toggle LazyDB",
+      },
+    },
+    opts = {
+      executable = "lazydb",
+      window = { width = 0.92, height = 0.90, border = "rounded" },
+    },
+  },
+}
+```
+
+Clone the repository once before using the local `dir` specification:
+
+```bash
+git clone https://github.com/yelog/lazydb.git ~/src/lazydb
+```
+
+If you manage the repository as a local development checkout, the same
+specification can use an absolute path in your own source tree.
+
+### Neovim Native Packages
+
+For Neovim 0.10 and newer, install the plugin under the native package path.
+Packages in `pack/*/start/*` are loaded automatically:
+
+```bash
+mkdir -p "${XDG_DATA_HOME:-$HOME/.local/share}/nvim/site/pack/lazydb/start"
+git clone https://github.com/yelog/lazydb.git \
+  "${XDG_DATA_HOME:-$HOME/.local/share}/nvim/site/pack/lazydb/start/lazydb-repository"
+```
+
+Then add the plugin directory to `runtimepath` from `init.lua`:
+
+```lua
+vim.opt.runtimepath:append(
+  vim.fn.expand("~/.local/share/nvim/site/pack/lazydb/start/lazydb-repository/lazydb.nvim")
+)
+require("lazydb").setup({ executable = "lazydb" })
+```
+
+For a package that is already checked out into the standard `start` directory,
+the recommended layout is:
+
+```text
+~/.local/share/nvim/site/pack/lazydb/start/lazydb.nvim/
+```
+
+Since the plugin is nested inside this monorepo, the explicit `runtimepath`
+line above is required when cloning the repository as a whole.
+
+Neovim 0.12 and newer also provides `vim.pack.add()`. It installs a Git
+repository into Neovim's package area, but the nested plugin directory still
+needs to be added to `runtimepath`:
+
+```lua
+vim.pack.add({ "https://github.com/yelog/lazydb.git" }, { confirm = true })
+vim.opt.runtimepath:append(
+  vim.fn.stdpath("data") .. "/site/pack/core/opt/lazydb/lazydb.nvim"
+)
+vim.cmd("packadd! lazydb")
+require("lazydb").setup({ executable = "lazydb" })
+```
+
+For Neovim 0.10 and 0.11, use the `pack/*/start/*` method instead.
+
+### Manual Local Plugin
+
+For an existing local checkout, add only the plugin directory to
+`runtimepath`:
+
+```lua
+vim.opt.runtimepath:prepend(vim.fn.expand("~/src/lazydb/lazydb.nvim"))
+require("lazydb").setup({
+  executable = "lazydb",
+  window = { width = 0.92, height = 0.90, border = "rounded" },
+})
+```
+
+The plugin registers these commands:
+
+```text
+:LazyDB
+:LazyDBToggle
+:LazyDBHide
+:LazyDBStop
+:LazyDBRestart
+```
+
+Use `:checkhealth lazydb` to verify the executable and CLI API.
+
+### Plugin Configuration
+
+All supported plugin options are shown below. `executable` may be an absolute
+path or a command available on `PATH`:
 
 ```lua
 require("lazydb").setup({
-  executable = vim.fn.expand("~/path/to/lazydb/target/release/lazydb"),
+  executable = "lazydb",
   window = { width = 0.92, height = 0.9, border = "rounded" },
 })
 
