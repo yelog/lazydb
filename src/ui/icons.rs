@@ -20,6 +20,13 @@ pub struct IconSet {
     mode: IconMode,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SelectionIcon {
+    Unchecked,
+    Checked,
+    Partial,
+}
+
 impl IconSet {
     pub const fn new(mode: IconMode) -> Self {
         Self { mode }
@@ -51,6 +58,20 @@ impl IconSet {
                 DatabaseKind::MySql => "MY",
                 DatabaseKind::Sqlite => "SQ",
             },
+        }
+    }
+
+    pub(crate) const fn selection(self, state: SelectionIcon) -> &'static str {
+        match (self.mode, state) {
+            (IconMode::NerdFont, SelectionIcon::Unchecked) => md::MD_CHECKBOX_BLANK_OUTLINE,
+            (IconMode::NerdFont, SelectionIcon::Checked) => md::MD_CHECKBOX_MARKED,
+            (IconMode::NerdFont, SelectionIcon::Partial) => md::MD_CHECKBOX_INTERMEDIATE,
+            (IconMode::Unicode, SelectionIcon::Unchecked) => "☐",
+            (IconMode::Unicode, SelectionIcon::Checked) => "☑",
+            (IconMode::Unicode, SelectionIcon::Partial) => "▣",
+            (IconMode::Ascii, SelectionIcon::Unchecked) => "[ ]",
+            (IconMode::Ascii, SelectionIcon::Checked) => "[x]",
+            (IconMode::Ascii, SelectionIcon::Partial) => "[-]",
         }
     }
 
@@ -197,6 +218,21 @@ mod tests {
     fn every_mode_has_safe_mappings() {
         for mode in [IconMode::NerdFont, IconMode::Unicode, IconMode::Ascii] {
             let icons = IconSet::new(mode);
+            for state in [
+                SelectionIcon::Unchecked,
+                SelectionIcon::Checked,
+                SelectionIcon::Partial,
+            ] {
+                let icon = icons.selection(state);
+                assert!(!icon.is_empty());
+                assert!(icon.chars().all(|character| !character.is_control()));
+                if mode == IconMode::Ascii {
+                    assert!(icon.is_ascii());
+                }
+                if mode == IconMode::Unicode {
+                    assert!(!icon.chars().any(is_private_use));
+                }
+            }
             for kind in DATABASE_KINDS {
                 let icon = icons.database(kind);
                 assert!(!icon.is_empty());
@@ -217,6 +253,33 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn scope_selection_icons_match_each_mode() {
+        let nerd = IconSet::new(IconMode::NerdFont);
+        assert_eq!(
+            nerd.selection(SelectionIcon::Unchecked),
+            md::MD_CHECKBOX_BLANK_OUTLINE
+        );
+        assert_eq!(
+            nerd.selection(SelectionIcon::Checked),
+            md::MD_CHECKBOX_MARKED
+        );
+        assert_eq!(
+            nerd.selection(SelectionIcon::Partial),
+            md::MD_CHECKBOX_INTERMEDIATE
+        );
+
+        let unicode = IconSet::new(IconMode::Unicode);
+        assert_eq!(unicode.selection(SelectionIcon::Unchecked), "☐");
+        assert_eq!(unicode.selection(SelectionIcon::Checked), "☑");
+        assert_eq!(unicode.selection(SelectionIcon::Partial), "▣");
+
+        let ascii = IconSet::new(IconMode::Ascii);
+        assert_eq!(ascii.selection(SelectionIcon::Unchecked), "[ ]");
+        assert_eq!(ascii.selection(SelectionIcon::Checked), "[x]");
+        assert_eq!(ascii.selection(SelectionIcon::Partial), "[-]");
     }
 
     #[test]

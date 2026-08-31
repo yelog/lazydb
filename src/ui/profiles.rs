@@ -20,7 +20,11 @@ use crate::{
     security::sanitize_terminal_text,
 };
 
-use super::{HitRegion, HitTarget, ProfileButton, Theme, UiState, icons::IconSet};
+use super::{
+    HitRegion, HitTarget, ProfileButton, Theme, UiState,
+    icons::{IconSet, SelectionIcon},
+    loading::ActivityIndicator,
+};
 
 pub fn render_profile_manager(
     frame: &mut Frame<'_>,
@@ -35,7 +39,7 @@ pub fn render_profile_manager(
     };
     match manager.page {
         ProfileManagerPage::Form => render_form(frame, area, app, manager, state, theme, icons),
-        ProfileManagerPage::Scope => render_scope(frame, area, manager, state, theme),
+        ProfileManagerPage::Scope => render_scope(frame, area, manager, state, theme, icons),
         ProfileManagerPage::ConfirmDelete => {
             render_confirmation(frame, area, app, manager, state, theme);
         }
@@ -285,6 +289,7 @@ fn render_scope(
     manager: &ProfileManagerState,
     state: &mut UiState,
     theme: Theme,
+    icons: IconSet,
 ) {
     let inner = render_panel(
         frame,
@@ -293,59 +298,111 @@ fn render_scope(
         theme,
     );
     let rows = manager.scope_rows_for_render();
+    let loading = manager.scope_discovery_loading();
+    let loading_offset = usize::from(loading);
+    if loading {
+        let elapsed = manager
+            .scope_discovery_request
+            .map(|(request_id, _)| state.profile_scope_loading_elapsed(request_id))
+            .unwrap_or_default();
+        frame.render_widget(
+            ActivityIndicator {
+                mode: state.animation_mode(),
+                icons,
+                elapsed,
+                label: "Loading visible objects",
+                detail: Some("discovering databases and schemas"),
+                cancellable: false,
+                style: Style::new().fg(theme.action).bg(theme.surface),
+            },
+            Rect::new(inner.x, inner.y, inner.width, 1),
+        );
+        if rows.is_empty() {
+            frame.render_widget(
+                Paragraph::new("Waiting for catalog discovery...")
+                    .style(Style::new().fg(theme.muted).bg(theme.surface)),
+                Rect::new(inner.x, inner.y.saturating_add(1), inner.width, 1),
+            );
+        }
+    }
+    let row_capacity = inner
+        .height
+        .saturating_sub(3)
+        .saturating_sub(loading_offset as u16);
     for (offset, row) in rows
         .iter()
         .enumerate()
         .skip(manager.scope_viewport)
-        .take(inner.height.saturating_sub(3) as usize)
+        .take(row_capacity as usize)
     {
         let y = inner
             .y
+            .saturating_add(loading_offset as u16)
             .saturating_add(offset.saturating_sub(manager.scope_viewport) as u16);
         let active = manager.scope_selected_row.as_deref() == Some(row.id.as_str());
-        let marker = match row.selection {
-            crate::model::profile_manager::ScopeSelectionState::Unchecked => "[ ]",
-            crate::model::profile_manager::ScopeSelectionState::Partial => "[-]",
-            crate::model::profile_manager::ScopeSelectionState::Checked => "[x]",
+        let (selection_icon, icon_color) = match row.selection {
+            crate::model::profile_manager::ScopeSelectionState::Unchecked => {
+                (SelectionIcon::Unchecked, theme.muted)
+            }
+            crate::model::profile_manager::ScopeSelectionState::Partial => {
+                (SelectionIcon::Partial, theme.warning)
+            }
+            crate::model::profile_manager::ScopeSelectionState::Checked => {
+                (SelectionIcon::Checked, theme.accent)
+            }
         };
         let prefix = if row.database { "" } else { "  " };
-        let text = format!(
-            "{prefix}{marker} {}{}",
-            row.name,
-            if row.read_only { " (mirrored)" } else { "" }
-        );
-        frame.render_widget(
-            Paragraph::new(text).style(
-                Style::new()
-                    .fg(if row.unavailable {
-                        theme.warning
-                    } else {
-                        theme.text
-                    })
-                    .bg(if active {
-                        theme.selection
-                    } else {
-                        theme.surface
-                    }),
+        let background = if active {
+            theme.selection
+        } else {
+            theme.surface
+        };
+        let name_color = if loading {
+            theme.muted
+        } else if row.unavailable {
+            theme.warning
+        } else {
+            theme.text
+        };
+        let suffix = if row.read_only { " (mirrored)" } else { "" };
+        let line = Line::from(vec![
+            Span::styled(prefix, Style::new().fg(name_color).bg(background)),
+            Span::styled(
+                icons.selection(selection_icon),
+                Style::new().fg(icon_color).bg(background),
             ),
+            Span::styled(" ", Style::new().fg(name_color).bg(background)),
+            Span::styled(row.name.clone(), Style::new().fg(name_color).bg(background)),
+            Span::styled(suffix, Style::new().fg(name_color).bg(background)),
+        ]);
+        frame.render_widget(
+            Paragraph::new(line).style(Style::new().fg(name_color).bg(background)),
             Rect::new(inner.x, y, inner.width, 1),
         );
-        state.hit_regions.push(HitRegion {
-            area: Rect::new(inner.x, y, inner.width, 1),
-            target: HitTarget::ProfileScopeRow(row.id.clone()),
-        });
+        if !loading {
+            state.hit_regions.push(HitRegion {
+                area: Rect::new(inner.x, y, inner.width, 1),
+                target: HitTarget::ProfileScopeRow(row.id.clone()),
+            });
+        }
     }
-    if let Some(warning) = manager.scope_warning() {
-        frame.render_widget(
-            Paragraph::new(sanitize_terminal_text(warning))
-                .style(Style::new().fg(theme.warning).bg(theme.surface)),
-            Rect::new(inner.x, inner.bottom().saturating_sub(2), inner.width, 1),
-        );
+    if !loading {
+        if let Some(warning) = manager.scope_warning() {
+            frame.render_widget(
+                Paragraph::new(sanitize_terminal_text(warning))
+                    .style(Style::new().fg(theme.warning).bg(theme.surface)),
+                Rect::new(inner.x, inner.bottom().saturating_sub(2), inner.width, 1),
+            );
+        }
     }
     render_hint(
         frame,
         Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
-        "Space toggle   r refresh   Enter back   Esc back",
+        if loading {
+            "Loading...   Enter back   Esc back"
+        } else {
+            "Space toggle   r refresh   Enter back   Esc back"
+        },
         theme,
     );
 }

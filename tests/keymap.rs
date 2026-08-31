@@ -525,14 +525,8 @@ fn maps_scope_picker_navigation_and_toggle() {
         keymap.map(key(KeyCode::Char('k')), &app),
         Some(Action::ProfileScopeMove(-1))
     );
-    assert_eq!(
-        keymap.map(key(KeyCode::Char(' ')), &app),
-        Some(Action::ProfileToggleScopeRow("database:lazydb".into()))
-    );
-    assert_eq!(
-        keymap.map(key(KeyCode::Char('r')), &app),
-        Some(Action::ProfileRefreshScope)
-    );
+    assert_eq!(keymap.map(key(KeyCode::Char(' ')), &app), None);
+    assert_eq!(keymap.map(key(KeyCode::Char('r')), &app), None);
 }
 
 #[test]

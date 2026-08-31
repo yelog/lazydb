@@ -1053,10 +1053,12 @@ fn map_profile_manager(event: KeyEvent, app: &App) -> Option<Action> {
         ProfileManagerPage::Form => map_profile_form(event, manager.selected_field),
         ProfileManagerPage::Scope => match event.code {
             KeyCode::Esc | KeyCode::Enter => Some(Action::ProfileScopeBack),
-            KeyCode::Char('r') => Some(Action::ProfileRefreshScope),
+            KeyCode::Char('r') if !manager.scope_discovery_loading() => {
+                Some(Action::ProfileRefreshScope)
+            }
             KeyCode::Up | KeyCode::Char('k') => Some(Action::ProfileScopeMove(-1)),
             KeyCode::Down | KeyCode::Char('j') => Some(Action::ProfileScopeMove(1)),
-            KeyCode::Char(' ') => manager
+            KeyCode::Char(' ') if !manager.scope_discovery_loading() => manager
                 .scope_selected_row
                 .clone()
                 .map(Action::ProfileToggleScopeRow),

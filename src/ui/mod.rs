@@ -184,6 +184,12 @@ impl UiState {
         self.animations.observe(animation_observation(app));
     }
 
+    pub(crate) fn profile_scope_loading_elapsed(&self, request_id: u64) -> Duration {
+        self.animations
+            .elapsed(&animation::LoadIdentity::ProfileScope { request_id })
+            .unwrap_or_default()
+    }
+
     pub(crate) fn advance_animations(&mut self, now: Instant) -> bool {
         self.animations.advance(now)
     }
@@ -384,6 +390,15 @@ fn dim_background(frame: &mut Frame<'_>, area: Rect, theme: Theme) {
 
 fn animation_observation(app: &App) -> animation::AnimationObservation {
     let mut observation = animation::AnimationObservation::default();
+    if let Some((request_id, _)) = app
+        .profile_manager
+        .as_ref()
+        .and_then(|manager| manager.scope_discovery_request)
+    {
+        observation
+            .active_loads
+            .insert(animation::LoadIdentity::ProfileScope { request_id });
+    }
     let Some(tab) = app.tabs.get(app.active_tab) else {
         return observation;
     };

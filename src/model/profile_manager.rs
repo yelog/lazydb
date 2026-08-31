@@ -1285,6 +1285,9 @@ impl ProfileManagerState {
     }
 
     pub fn toggle_scope_row(&mut self, id: &str) -> bool {
+        if self.scope_discovery_loading() {
+            return false;
+        }
         let Some(row) = self.scope_row(id) else {
             return false;
         };

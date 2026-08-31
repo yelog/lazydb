@@ -230,6 +230,60 @@ fn opening_visible_objects_starts_discovery_and_preserves_saved_scope() {
 }
 
 #[test]
+fn pending_scope_discovery_blocks_toggle_and_refresh_but_allows_back() {
+    let profile = sqlite_profile("scope");
+    let mut app = App::new(vec![profile.clone()]);
+    app.update(Action::ProfileStartEdit {
+        profile_id: profile.id,
+    });
+    let request = app.update(Action::ProfileOpenScope);
+    let Command::DiscoverProfileCatalog {
+        request_id,
+        submission,
+    } = request.into_iter().next().unwrap()
+    else {
+        panic!("expected discovery command");
+    };
+    let before = app
+        .profile_manager
+        .as_ref()
+        .unwrap()
+        .draft
+        .as_ref()
+        .unwrap()
+        .catalog_scope
+        .clone();
+
+    assert!(
+        app.update(Action::ProfileToggleScopeRow("database::memory:".into()))
+            .is_empty()
+    );
+    assert!(app.update(Action::ProfileRefreshScope).is_empty());
+    assert_eq!(
+        app.profile_manager
+            .as_ref()
+            .unwrap()
+            .scope_discovery_request,
+        Some((request_id, submission.discovery_fingerprint))
+    );
+    assert_eq!(
+        app.profile_manager
+            .as_ref()
+            .unwrap()
+            .draft
+            .as_ref()
+            .unwrap()
+            .catalog_scope,
+        &before
+    );
+    app.update(Action::ProfileScopeBack);
+    assert_eq!(
+        app.profile_manager.as_ref().unwrap().page,
+        ProfileManagerPage::Form
+    );
+}
+
+#[test]
 fn scope_discovery_response_preserves_scope_and_refresh_starts_new_request() {
     let profile = sqlite_profile("scope");
     let saved_scope = profile.catalog_scope.clone();
