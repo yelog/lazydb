@@ -8,7 +8,7 @@ version=$2
 dir=$3
 case "$channel" in beta|stable) ;; *) release_die "invalid channel: $channel" ;; esac
 for suffix in x86_64-apple-darwin aarch64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
-    found=$(find "$dir" -maxdepth 1 -type f -name "lazydb_${version}_${suffix}.*" -print -quit)
+    found=$(find "$dir" -maxdepth 1 -type f -name "lazydb_${version}_${suffix}.tar.xz" -print -quit)
     [ -n "$found" ] || release_die "missing archive for $suffix"
 done
 if [ "$channel" = stable ]; then

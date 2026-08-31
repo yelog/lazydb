@@ -53,39 +53,86 @@ paging, relation DDL, and version details.
 
 ### Homebrew
 
-On supported macOS systems:
+On supported macOS systems, install the latest stable release from the external
+tap:
 
 ```bash
 brew install yelog/tap/lazydb
 ```
 
-### Installer
+Homebrew owns this installation. Upgrade it with `brew update` followed by
+`brew upgrade yelog/tap/lazydb`, not with `lazydb update`.
 
-On macOS and Linux, the stable installer verifies the release archive against
-its SHA-256 manifest and installs to `~/.local/bin` by default:
+### Pages installer
+
+The stable Pages installer is the canonical macOS and Linux installation path.
+It verifies a channel manifest and the matching archive SHA-256 digest, then
+installs to `~/.local/bin` by default. It never uses `sudo`:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/yelog/lazydb/releases/latest/download/lazydb-installer.sh | sh
+  https://lazydb.yelog.org/install.sh | sh
 ```
 
-To inspect the installer before running it, download it first:
+The beta installer is clearly separate and never changes the stable channel:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://lazydb.yelog.org/install-beta.sh | sh
+```
+
+Beta is for testing prereleases. It does not update Homebrew, the stable
+installer, or the `latest` release path. To inspect either installer before
+running it, download it first:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -fL \
-  https://github.com/yelog/lazydb/releases/latest/download/lazydb-installer.sh \
+  https://lazydb.yelog.org/install.sh \
   -o lazydb-installer.sh
 less lazydb-installer.sh
 sh lazydb-installer.sh --install-dir "$HOME/.local/bin"
 ```
 
+The installer supports `--channel stable|beta`, `--version VERSION`, and
+`--install-dir PATH`. The stable and beta Pages entrypoints lock their own
+channel, so use the matching entrypoint when selecting a channel explicitly.
+
 ### Release binaries and packages
 
-Download stable or beta archives, checksums, and native Linux packages from
-[GitHub Releases](https://github.com/yelog/lazydb/releases). Beta releases are
-published as prereleases and do not update Homebrew or the stable
-`releases/latest` installer. Verify an archive with its accompanying
-`SHA256SUMS` file before extracting it.
+Download stable or beta archives and checksums from
+[GitHub Releases](https://github.com/yelog/lazydb/releases). Stable releases
+also include `.deb`, `.rpm`, and `.pkg.tar.zst` Linux package assets. These are
+direct Release downloads, not `apt`, DNF, or Pacman repositories.
+
+```bash
+sudo apt install ./lazydb_VERSION_ARCH.deb
+sudo dnf install ./lazydb_VERSION_ARCH.rpm
+sudo pacman -U ./lazydb_VERSION_ARCH.pkg.tar.zst
+```
+
+The package manager owns these installations. Use that manager to upgrade;
+`lazydb update` reports the required manager action instead of replacing the
+package:
+
+```bash
+sudo apt install --only-upgrade ./lazydb_VERSION_ARCH.deb
+sudo dnf upgrade ./lazydb_VERSION_ARCH.rpm
+sudo pacman -U ./lazydb_VERSION_ARCH.pkg.tar.zst
+```
+
+Direct `apt install lazydb`, `dnf install lazydb`, and `pacman -S lazydb` are
+not supported.
+
+### Cargo package
+
+For a source-based Cargo installation:
+
+```bash
+cargo install lazydb
+```
+
+Cargo owns this installation. Upgrade it with `cargo install lazydb`; the
+application reports that manager action rather than replacing the Cargo binary.
 
 ### Build from source
 
@@ -111,6 +158,28 @@ Verify a binary installation:
 lazydb version --json
 lazydb doctor --json
 ```
+
+Check for an available update without changing files:
+
+```bash
+lazydb update --check
+```
+
+Apply an update for a native Pages installation:
+
+```bash
+lazydb update
+```
+
+`lazydb update` checks the installed manager and selected channel. Native Pages
+installations download and verify the channel manifest and apply a newer
+release atomically. `lazydb update --check` performs the same check but never
+applies it. Use `--channel beta` or `--channel stable` to select a channel for
+the operation; a successful native update records that channel. Homebrew,
+Debian, RPM, Arch, and Cargo installations remain owned by their managers and
+receive an explicit manager command instead. npm-managed installations are
+detected and protected, but official npm distribution is currently unavailable;
+use the Pages installer or Homebrew instead.
 
 Start an in-memory SQLite workspace:
 

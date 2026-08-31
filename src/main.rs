@@ -21,6 +21,7 @@ async fn main() -> Result<()> {
                     lazydb::agent::mcp::run(project, connection, write_policy, cli.config).await?;
                 }
             },
+            Command::Update(args) => println!("{}", lazydb::update::run(args, cli.config).await?),
             command => println!("{}", render_command(&command)?),
         }
         return Ok(());
