@@ -1109,12 +1109,16 @@ impl App {
         if selected != id {
             return Vec::new();
         }
+        if id == crate::help::HelpShortcutId::Help {
+            return Vec::new();
+        }
         self.overlay = None;
         use crate::help::HelpShortcutId as Id;
         let editor_key = |code| Action::EditorKey(KeyEvent::new(code, KeyModifiers::NONE));
         let editor_control_key =
             |code| Action::EditorKey(KeyEvent::new(code, KeyModifiers::CONTROL));
         let actions = match id {
+            Id::Help => unreachable!("help shortcut is handled before dispatch"),
             Id::FocusExplorer => vec![Action::Focus(Focus::Explorer)],
             Id::FocusResults => vec![Action::Focus(Focus::Results)],
             Id::FocusEditorFromK | Id::FocusEditorFromL => vec![Action::Focus(Focus::Editor)],
@@ -9281,6 +9285,10 @@ mod tests {
             app.overlay,
             Some(Overlay::Help(crate::help::HelpState::new(Focus::Explorer)))
         );
+        app.update(Action::ExecuteHelpShortcut(
+            crate::help::HelpShortcutId::Help,
+        ));
+        assert!(matches!(app.overlay, Some(Overlay::Help(_))));
         app.update(Action::DismissOverlay);
         assert_eq!(app.overlay, None);
     }
@@ -9555,11 +9563,3 @@ mod tests {
         );
     }
 }
-        if id == crate::help::HelpShortcutId::Help {
-            return Vec::new();
-        }
-            Id::Help => unreachable!("help shortcut is handled before dispatch"),
-        app.update(Action::ExecuteHelpShortcut(
-            crate::help::HelpShortcutId::Help,
-        ));
-        assert!(matches!(app.overlay, Some(Overlay::Help(_))));
