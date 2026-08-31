@@ -190,18 +190,18 @@ WITH candidates AS (
     SELECT *, CASE
         WHEN lower(object_name) = lower($1)
              OR lower(qualified_path) = lower($1)
-             OR strpos(lower(qualified_path), '.' || lower($1)) > 0 THEN 0
+             OR right(lower(qualified_path), length(lower($1))) = lower($1) THEN 0
         WHEN strpos(lower(object_name), lower($1)) = 1
              OR strpos(lower(qualified_path), lower($1)) = 1 THEN 1
         WHEN strpos(lower(object_name), lower($1)) > 0
              OR strpos(lower(qualified_path), lower($1)) > 0
-             OR strpos(lower(qualified_path), '.' || lower($1)) > 0 THEN 2
+             OR right(lower(qualified_path), length(lower($1))) = lower($1) THEN 2
         ELSE 3 END AS relevance
     FROM candidates
     WHERE $3
       AND (strpos(lower(object_name), lower($1)) > 0
            OR strpos(lower(qualified_path), lower($1)) > 0
-           OR strpos(lower(qualified_path), '.' || lower($1)) > 0)
+           OR right(lower(qualified_path), length(lower($1))) = lower($1))
 )
 SELECT kind, database_name, schema_name, object_name, object_oid,
        relation_kind, relation_name, relation_oid, comment, relation_comment,
