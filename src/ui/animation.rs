@@ -16,6 +16,7 @@ pub(crate) enum LoadIdentity {
     Query { tab_id: Uuid, generation: u64 },
     Derived { tab_id: Uuid, generation: u64 },
     Relation(RelationRequest),
+    ProfileScope { request_id: u64 },
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]

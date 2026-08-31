@@ -108,6 +108,17 @@ fn moving_from_database_keeps_schemas_visible_and_selectable() {
 }
 
 #[test]
+fn loading_discovery_blocks_scope_mutation() {
+    let mut state = discovered_postgres_scope(&["public"]);
+    let before = state.draft.as_ref().unwrap().catalog_scope.clone();
+    let fingerprint = state.draft.as_ref().unwrap().discovery_fingerprint.unwrap();
+    state.begin_scope_discovery(7, fingerprint);
+
+    assert!(!state.toggle_scope_row("database:moss_biz"));
+    assert_eq!(state.draft.as_ref().unwrap().catalog_scope, before);
+}
+
+#[test]
 fn database_toggle_uses_tri_state_select_all_and_remove() {
     let mut state = discovered_postgres_scope(&["public"]);
     assert_eq!(

@@ -1831,10 +1831,18 @@ fn visible_objects_scope_shows_discovery_loading_and_refresh_hint() {
         [lazydb::action::Command::DiscoverProfileCatalog { .. }]
     ));
 
-    let output = render(&app, 120, 36);
-    assert!(output.contains("Discovering databases and schemas..."));
-    assert!(output.contains("r refresh"));
+    let (output, state) = render_with_state(&app, 120, 36);
+    assert!(output.contains("Loading visible objects"));
+    assert!(output.contains("discovering databases and schemas"));
+    assert!(output.contains("Loading..."));
+    assert!(!output.contains("r refresh"));
     assert!(output.contains("warehouse"));
+    assert!(
+        !state
+            .hit_regions
+            .iter()
+            .any(|region| matches!(region.target, HitTarget::ProfileScopeRow(_)))
+    );
 }
 
 #[test]
@@ -1884,7 +1892,7 @@ fn visible_objects_scope_renders_partial_database_without_all_schemas_row() {
         },
     });
 
-    let output = render(&app, 120, 36);
+    let output = render_with_icons(&app, 120, 36, IconSet::new(IconMode::Ascii)).0;
     assert!(output.contains("[-] warehouse"), "{output}");
     assert!(output.contains("[x] public"), "{output}");
     assert!(output.contains("[ ] analytics"), "{output}");
