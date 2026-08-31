@@ -1,6 +1,8 @@
+pub mod animation;
 pub mod data_grid;
 pub mod icons;
 pub mod layout;
+pub mod loading;
 pub mod profiles;
 pub mod query_bar;
 pub mod record_view;
@@ -24,11 +26,13 @@ use uuid::Uuid;
 
 use crate::{
     app::App,
+    cli::MotionMode,
     db::{catalog::CatalogKind, query::ResultSet},
     model::{
         editor::{EditorHighlightKind, EditorMode, EditorViewport},
         explorer::{ExplorerConnectionStatus, ProfileProvenance},
         profile_manager::ProfileField,
+        relation::RelationLoad,
         tab::{DataGridViewport, ResultView, WorkspaceTab},
         workspace::{
             ConnectionStatus, ExplorerSearchPhase, Focus, Overlay, PaneLayoutMetrics, QueryStatus,
@@ -118,6 +122,9 @@ pub struct UiState {
     pub click_tracker: RefCell<Option<(crate::model::explorer::ExplorerNodeId, Instant)>>,
     pub relation_resize: RefCell<Option<(usize, u16, u16)>>,
     pub grid_scrollbar_drag: RefCell<Option<GridScrollbarDrag>>,
+    pub(crate) animations: animation::AnimationState,
+    pub(crate) result_area: Option<Rect>,
+    pub(crate) activity_icons: icons::IconSet,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -145,6 +152,10 @@ impl Default for UiState {
 
 impl UiState {
     pub fn new() -> Self {
+        Self::with_motion(MotionMode::Full)
+    }
+
+    pub fn with_motion(mode: MotionMode) -> Self {
         Self {
             hit_regions: Vec::new(),
             editor_viewport: None,
@@ -158,7 +169,23 @@ impl UiState {
             click_tracker: RefCell::new(None),
             relation_resize: RefCell::new(None),
             grid_scrollbar_drag: RefCell::new(None),
+            animations: animation::AnimationState::new(mode, Instant::now()),
+            result_area: None,
+            activity_icons: icons::IconSet::default(),
         }
+    }
+
+    pub(crate) fn animation_mode(&self) -> MotionMode {
+        self.animations.mode()
+    }
+
+    pub(crate) fn observe_animations(&mut self, app: &App, now: Instant) {
+        self.animations.set_now(now);
+        self.animations.observe(animation_observation(app));
+    }
+
+    pub(crate) fn advance_animations(&mut self, now: Instant) -> bool {
+        self.animations.advance(now)
     }
 
     pub fn target_at(&self, column: u16, row: u16) -> Option<&HitTarget> {
@@ -218,6 +245,8 @@ pub fn render_with_state_using_icons(
 ) {
     let theme = Theme::default();
     let area = frame.area();
+    state.activity_icons = icons;
+    state.observe_animations(app, Instant::now());
     frame.render_widget(Block::new().style(theme.base()), area);
     let is_relation = matches!(
         app.tabs.get(app.active_tab),
@@ -233,6 +262,7 @@ pub fn render_with_state_using_icons(
     state.explorer_viewport_rows = None;
     state.ddl_viewport = None;
     state.cursor_style = None;
+    state.result_area = None;
 
     if layout.mode == LayoutMode::TooSmall {
         render_too_small(frame, area, theme);
@@ -301,8 +331,109 @@ pub fn render_with_state_using_icons(
     }
 
     if let Some(overlay) = &app.overlay {
+        state
+            .animations
+            .prepare_overlay(overlay_key(overlay), centered(area, 80, 20));
+        dim_background(frame, area, theme);
         render_overlay(frame, area, overlay, app, state, theme, icons);
+        state.animations.render_effect(frame, Instant::now());
+    } else {
+        state.animations.clear_overlay();
+        if state.animations.take_result_ready().is_some()
+            && let Some(result_area) = state.result_area
+        {
+            state
+                .animations
+                .start_effect(animation::EffectKind::Result, result_area);
+        }
+        state.animations.render_effect(frame, Instant::now());
     }
+}
+
+fn overlay_key(overlay: &Overlay) -> u8 {
+    match overlay {
+        Overlay::Help(_) => 1,
+        Overlay::RecordView(_) => 2,
+        Overlay::ProfileManager => 3,
+        Overlay::ProfileAccess { .. } => 4,
+        Overlay::Message { .. } => 5,
+        Overlay::SubstituteConfirm { .. } => 6,
+        Overlay::ExecutionConfirm { .. } => 7,
+        Overlay::ManualCancelConfirm { .. } => 8,
+        Overlay::TransactionExitConfirm { .. } => 9,
+        Overlay::ClearTransactionOutcome { .. } => 10,
+        Overlay::TargetSelector { .. } => 11,
+        Overlay::DeleteConsole { .. } => 12,
+        Overlay::SqlEditorList(_) => 13,
+    }
+}
+
+fn dim_background(frame: &mut Frame<'_>, area: Rect, theme: Theme) {
+    let buffer = frame.buffer_mut();
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            let cell = &mut buffer[(x, y)];
+            if cell.fg == theme.accent || cell.bg == theme.surface_raised {
+                continue;
+            }
+            cell.set_fg(theme.muted);
+            cell.set_bg(theme.background);
+        }
+    }
+}
+
+fn animation_observation(app: &App) -> animation::AnimationObservation {
+    let mut observation = animation::AnimationObservation::default();
+    let Some(tab) = app.tabs.get(app.active_tab) else {
+        return observation;
+    };
+
+    match tab {
+        WorkspaceTab::Sql(tab) => {
+            if tab.query_status == QueryStatus::Running {
+                observation
+                    .active_loads
+                    .insert(animation::LoadIdentity::Query {
+                        tab_id: tab.id,
+                        generation: tab.generation,
+                    });
+            }
+            if let Some(derived) = &tab.derived {
+                if derived.running {
+                    observation
+                        .active_loads
+                        .insert(animation::LoadIdentity::Derived {
+                            tab_id: tab.id,
+                            generation: derived.generation,
+                        });
+                } else if derived.outcome.is_some() {
+                    observation.result = Some(animation::ResultIdentity::Derived {
+                        tab_id: tab.id,
+                        generation: derived.generation,
+                    });
+                }
+            }
+            if observation.result.is_none() && tab.outcome.is_some() {
+                observation.result = Some(animation::ResultIdentity::Query {
+                    tab_id: tab.id,
+                    generation: tab.generation,
+                });
+            }
+        }
+        WorkspaceTab::Relation(tab) => {
+            if let RelationLoad::Loading { request, .. } = &tab.data {
+                observation
+                    .active_loads
+                    .insert(animation::LoadIdentity::Relation(request.clone()));
+            }
+            if let RelationLoad::Loading { request, .. } = &tab.ddl {
+                observation
+                    .active_loads
+                    .insert(animation::LoadIdentity::Relation(request.clone()));
+            }
+        }
+    }
+    observation
 }
 
 pub(crate) fn render_text_input(
@@ -1686,14 +1817,100 @@ fn render_data(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, state
         .split(area);
     let query_cursor = query_bar::render(frame, chunks[0], &tab.query, theme, state);
     let area = chunks[1];
-    let block = panel_block(" RESULT SET ", app.focus == Focus::Results, theme);
-    let Some(result) = tab
+    let loading_identity = if tab.query_status == QueryStatus::Running {
+        Some(animation::LoadIdentity::Query {
+            tab_id: tab.id,
+            generation: tab.generation,
+        })
+    } else if tab.derived.as_ref().is_some_and(|derived| derived.running) {
+        tab.derived
+            .as_ref()
+            .map(|derived| animation::LoadIdentity::Derived {
+                tab_id: tab.id,
+                generation: derived.generation,
+            })
+    } else {
+        None
+    };
+    let elapsed = loading_identity
+        .as_ref()
+        .and_then(|identity| state.animations.elapsed(identity))
+        .unwrap_or_default();
+    let result = tab
         .derived
         .as_ref()
         .and_then(|derived| derived.outcome.as_ref())
         .or(tab.outcome.as_ref())
-        .and_then(|outcome| outcome.result_sets.last())
-    else {
+        .and_then(|outcome| outcome.result_sets.last());
+    let block = panel_block(" RESULT SET ", app.focus == Focus::Results, theme);
+    if let Some(identity) = loading_identity {
+        if let Some(result) = result {
+            let body = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(1), Constraint::Min(1)])
+                .split(area);
+            frame.render_widget(
+                loading::ActivityIndicator {
+                    mode: state.animation_mode(),
+                    icons: state.activity_icons,
+                    elapsed,
+                    label: "Executing query",
+                    detail: Some("showing previous result"),
+                    cancellable: true,
+                    style: Style::new().fg(theme.action).bg(theme.surface_raised),
+                },
+                body[0],
+            );
+            render_result_table(
+                frame,
+                body[1],
+                tab.id,
+                result,
+                tab.grid.clone(),
+                theme,
+                block,
+                state,
+            );
+        } else if animation::show_skeleton(elapsed) {
+            frame.render_widget(
+                loading::TableSkeleton {
+                    mode: state.animation_mode(),
+                    icons: state.activity_icons,
+                    elapsed,
+                    theme,
+                    block,
+                },
+                area,
+            );
+        } else {
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+            frame.render_widget(
+                loading::ActivityIndicator {
+                    mode: state.animation_mode(),
+                    icons: state.activity_icons,
+                    elapsed,
+                    label: "Executing query",
+                    detail: None,
+                    cancellable: true,
+                    style: Style::new().fg(theme.action).bg(theme.surface),
+                },
+                inner,
+            );
+        }
+        let _ = identity;
+    } else if let Some(result) = result {
+        render_result_table(
+            frame,
+            area,
+            tab.id,
+            result,
+            tab.grid.clone(),
+            theme,
+            block,
+            state,
+        );
+    } else {
         frame.render_widget(
             Paragraph::new("Run a query to populate the data viewport")
                 .block(block)
@@ -1701,18 +1918,7 @@ fn render_data(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, state
                 .alignment(Alignment::Center),
             area,
         );
-        return;
-    };
-    render_result_table(
-        frame,
-        area,
-        tab.id,
-        result,
-        tab.grid.clone(),
-        theme,
-        block,
-        state,
-    );
+    }
     if let (Some(completion), Some(cursor)) = (&tab.query.completion, query_cursor) {
         render_data_query_completion_popup(
             frame,
@@ -1739,6 +1945,7 @@ pub(crate) fn render_result_table(
     block: Block<'_>,
     state: &mut UiState,
 ) {
+    state.result_area = Some(area);
     let overrides = grid.column_widths.clone();
     data_grid::render(
         frame, area, tab_id, result, grid, &overrides, theme, block, state, None,

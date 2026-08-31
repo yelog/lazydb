@@ -23,7 +23,7 @@ use crate::{
     model::{
         execution_target::ExecutionTarget,
         profile_manager::{CredentialUpdate, ProfileChange, ProfileSubmission},
-        workspace::{ConnectionIdentity, QueryStatus},
+        workspace::ConnectionIdentity,
     },
     persistence::{
         local_credentials::LocalCredentialStore,
@@ -2531,7 +2531,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
     let icons = crate::ui::icons::IconSet::new(cli.icons);
     let mut terminal_events = EventStream::new();
     let mut keymap = Keymap::default();
-    let mut ui_state = UiState::default();
+    let mut ui_state = UiState::with_motion(cli.motion);
     let mut ticker = interval(Duration::from_millis(33));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -2590,11 +2590,9 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                     redraw = true;
                 }
                 _ = ticker.tick() => {
-                    redraw = app.expire_clipboard_notice(std::time::Instant::now())
-                        || app.tabs.iter().any(|tab| {
-                        tab.as_console()
-                            .is_some_and(|tab| tab.query_status == QueryStatus::Running)
-                    });
+                    let now = std::time::Instant::now();
+                    redraw = app.expire_clipboard_notice(now)
+                        || ui_state.advance_animations(now);
                 }
             }
 
