@@ -188,9 +188,11 @@ WITH candidates AS (
       AND ($2::text[] IS NULL OR n.nspname = ANY($2))
 ), ranked AS (
     SELECT *, CASE
-        WHEN lower(object_name) = lower($1) THEN 0
-        WHEN strpos(lower(object_name), lower($1)) = 1 THEN 1
-        WHEN strpos(lower(object_name), lower($1)) > 0 THEN 2
+        WHEN lower(object_name) = lower($1) OR lower(qualified_path) = lower($1) THEN 0
+        WHEN strpos(lower(object_name), lower($1)) = 1
+             OR strpos(lower(qualified_path), lower($1)) = 1 THEN 1
+        WHEN strpos(lower(object_name), lower($1)) > 0
+             OR strpos(lower(qualified_path), lower($1)) > 0 THEN 2
         ELSE 3 END AS relevance
     FROM candidates
      WHERE $3
