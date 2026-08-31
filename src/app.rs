@@ -54,7 +54,8 @@ use crate::{
         },
         workspace::{
             ConnectionIdentity, ConnectionState, ConnectionStatus, ConnectionWorkspace,
-            ExecutionConfirmFocus, ExplorerState, Focus, ManualCancelFocus, Overlay, QueryStatus,
+            ExecutionConfirmFocus, ExplorerState, Focus, ManualCancelFocus, Overlay,
+            PaneLayoutMetrics, PaneSizePreferences, QueryStatus,
         },
     },
     persistence::workspace::{
@@ -162,6 +163,8 @@ pub struct App {
     pub sql_editors: Vec<ConsoleRecord>,
     pub active_tab: usize,
     pub focus: Focus,
+    pub pane_sizes: PaneSizePreferences,
+    pane_layout: PaneLayoutMetrics,
     pub overlay: Option<Overlay>,
     pub profile_manager: Option<ProfileManagerState>,
     pub system_credential_availability: crate::persistence::secrets::SecretStoreAvailability,
@@ -320,6 +323,8 @@ impl App {
             sql_editors,
             active_tab: 0,
             focus: Focus::Editor,
+            pane_sizes: PaneSizePreferences::default(),
+            pane_layout: PaneLayoutMetrics::default(),
             overlay: None,
             profile_manager: None,
             system_credential_availability:
@@ -648,6 +653,10 @@ impl App {
         self.active_console_opt()
             .and_then(|tab| self.editor.mode(tab.id).ok())
             .unwrap_or(EditorMode::Normal)
+    }
+
+    pub(crate) fn pane_layout_metrics(&self) -> PaneLayoutMetrics {
+        self.pane_layout
     }
 
     pub fn expire_clipboard_notice(&mut self, now: Instant) -> bool {
@@ -1280,17 +1289,15 @@ impl App {
                 include_headers: true,
             }],
             Id::ResultsToggleView => vec![Action::ToggleResultView],
-            Id::ResultsData => match self.tabs.get(self.active_tab) {
-                Some(WorkspaceTab::Relation(_)) => {
-                    vec![Action::SetRelationView(RelationView::Data)]
-                }
-                _ => vec![Action::SetResultView(ResultView::Data)],
-            },
-            Id::ResultsSecondaryView => match self.tabs.get(self.active_tab) {
-                Some(WorkspaceTab::Relation(_)) => vec![Action::SetRelationView(RelationView::Ddl)],
-                _ => vec![Action::SetResultView(ResultView::Output)],
-            },
-            Id::ResultsPlan => vec![Action::SetResultView(ResultView::Plan)],
+            Id::ResizeHeightIncrease => crate::model::workspace::pane_resize(self.focus, '+', 1)
+                .map_or_else(Vec::new, |resize| vec![Action::ResizePane(resize)]),
+            Id::ResizeHeightDecrease => crate::model::workspace::pane_resize(self.focus, '-', 1)
+                .map_or_else(Vec::new, |resize| vec![Action::ResizePane(resize)]),
+            Id::ResizeWidthIncrease => crate::model::workspace::pane_resize(self.focus, '>', 1)
+                .map_or_else(Vec::new, |resize| vec![Action::ResizePane(resize)]),
+            Id::ResizeWidthDecrease => crate::model::workspace::pane_resize(self.focus, '<', 1)
+                .map_or_else(Vec::new, |resize| vec![Action::ResizePane(resize)]),
+            Id::ResetPaneSizes => vec![Action::ResetPaneSizes],
             Id::RelationWhere => vec![Action::FocusRelationQueryInput(
                 crate::model::relation::RelationQueryInput::Where,
             )],
@@ -1720,6 +1727,33 @@ impl App {
             Action::Focus(focus) => {
                 self.focus = focus;
                 self.normalize_focus();
+                Vec::new()
+            }
+            Action::ResizePane(resize) => {
+                match resize.split {
+                    crate::model::workspace::PaneSplit::ExplorerWidth => {
+                        if let Some(width) = self.pane_layout.explorer_width {
+                            self.pane_sizes.explorer_width = Some(width.saturating_add_signed(
+                                resize.delta.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+                            ));
+                        }
+                    }
+                    crate::model::workspace::PaneSplit::EditorHeight => {
+                        if let Some(height) = self.pane_layout.editor_height {
+                            self.pane_sizes.editor_height = Some(height.saturating_add_signed(
+                                resize.delta.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+                            ));
+                        }
+                    }
+                }
+                Vec::new()
+            }
+            Action::ResetPaneSizes => {
+                self.pane_sizes = PaneSizePreferences::default();
+                Vec::new()
+            }
+            Action::PaneLayoutChanged(metrics) => {
+                self.pane_layout = metrics;
                 Vec::new()
             }
             Action::ShowHelp => {
@@ -5227,6 +5261,8 @@ impl App {
                     continue;
                 }
                 EditorEffect::Yanked(text) => Action::CopyEditorYank(text),
+                EditorEffect::ResizePane(resize) => Action::ResizePane(resize),
+                EditorEffect::ResetPaneSizes => Action::ResetPaneSizes,
                 EditorEffect::CopyStatement => Action::CopyEditorStatement,
                 EditorEffect::CopyBuffer => Action::CopyEditorBuffer,
                 EditorEffect::Message(_)
@@ -8537,7 +8573,10 @@ mod tests {
         model::relation::{RelationRequest, RelationRequestKind, RelationSnapshot, RelationTab},
         model::tab::{GridRowAlignment, GridRowTarget, GridScrollAmount, ResultView, WorkspaceTab},
         model::transaction::{TransactionMode, TransactionState},
-        model::workspace::{ConnectionStatus, Focus, Overlay, QueryStatus},
+        model::workspace::{
+            ConnectionStatus, Focus, Overlay, PaneLayoutMetrics, PaneResize, PaneSizePreferences,
+            PaneSplit, QueryStatus,
+        },
         model::{
             execution_target::ExecutionTarget,
             relation::RelationKey,
@@ -9149,6 +9188,30 @@ mod tests {
         assert_eq!(app.focus, Focus::Explorer);
         app.update(Action::FocusPrevious);
         assert_eq!(app.focus, Focus::Results);
+    }
+
+    #[test]
+    fn pane_resize_uses_effective_metrics_and_reset_clears_preferences() {
+        let mut app = App::new(Vec::new());
+        app.update(Action::PaneLayoutChanged(PaneLayoutMetrics {
+            explorer_width: Some(40),
+            editor_height: Some(10),
+        }));
+
+        app.update(Action::ResizePane(PaneResize {
+            split: PaneSplit::ExplorerWidth,
+            delta: 5,
+        }));
+        assert_eq!(app.pane_sizes.explorer_width, Some(45));
+
+        app.update(Action::ResizePane(PaneResize {
+            split: PaneSplit::EditorHeight,
+            delta: -3,
+        }));
+        assert_eq!(app.pane_sizes.editor_height, Some(7));
+
+        app.update(Action::ResetPaneSizes);
+        assert_eq!(app.pane_sizes, PaneSizePreferences::default());
     }
 
     #[test]

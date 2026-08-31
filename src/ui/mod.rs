@@ -31,7 +31,8 @@ use crate::{
         profile_manager::ProfileField,
         tab::{DataGridViewport, ResultView, WorkspaceTab},
         workspace::{
-            ConnectionStatus, ExplorerSearchPhase, Focus, Overlay, QueryStatus, VisibleCatalogNode,
+            ConnectionStatus, ExplorerSearchPhase, Focus, Overlay, PaneLayoutMetrics, QueryStatus,
+            VisibleCatalogNode,
         },
     },
     security::sanitize_terminal_text,
@@ -113,6 +114,7 @@ pub struct UiState {
     pub explorer_viewport_rows: Option<usize>,
     pub ddl_viewport: Option<DdlViewportMetrics>,
     pub cursor_style: Option<CursorStyle>,
+    pub pane_layout: PaneLayoutMetrics,
     pub click_tracker: RefCell<Option<(crate::model::explorer::ExplorerNodeId, Instant)>>,
     pub relation_resize: RefCell<Option<(usize, u16, u16)>>,
     pub grid_scrollbar_drag: RefCell<Option<GridScrollbarDrag>>,
@@ -152,6 +154,7 @@ impl UiState {
             explorer_viewport_rows: None,
             ddl_viewport: None,
             cursor_style: None,
+            pane_layout: PaneLayoutMetrics::default(),
             click_tracker: RefCell::new(None),
             relation_resize: RefCell::new(None),
             grid_scrollbar_drag: RefCell::new(None),
@@ -220,7 +223,8 @@ pub fn render_with_state_using_icons(
         app.tabs.get(app.active_tab),
         Some(WorkspaceTab::Relation(_))
     );
-    let layout = AppLayout::calculate(area, app.focus, is_relation);
+    let layout = AppLayout::calculate(area, app.focus, is_relation, app.pane_sizes);
+    state.pane_layout = layout.pane_metrics;
     state.hit_regions.clear();
     state.editor_viewport = None;
     state.completion_popup = None;

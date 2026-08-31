@@ -18,6 +18,10 @@ selectable.
 | `F1` | Contextual help |
 | `?` | Contextual help outside Insert mode |
 | `Ctrl-w h/j/k/l` | Move focus left/down/up/right |
+| `Ctrl-w +` / `Ctrl-w -` | Increase/decrease focused pane height |
+| `Ctrl-w >` / `Ctrl-w <` | Increase/decrease focused pane width |
+| `Ctrl-w =` | Restore responsive default pane sizes, not equalize |
+| `N Ctrl-w +|-|>|<` | Apply a counted pane resize; unsupported dimensions are no-ops |
 | `Tab`, `Shift-Tab` | Next/previous panel outside Insert mode |
 | `gT`, `gt` | Previous/next LazyDB tab |
 | `Ctrl-PageUp`, `Ctrl-PageDown` | Previous/next LazyDB tab |
@@ -177,7 +181,6 @@ connection unchanged.
 | `Y` | Copy the selected row as TSV |
 | `Space Y` | Copy the selected row with column headers as TSV |
 | `o` | Switch Data/Output |
-| `1`, `2`, `3` | Select Data, Output, or Plan directly |
 
 When `OUTPUT` is active, it is a read-only Vim text view rather than a grid:
 `h/j/k/l`, arrows, `H/M/L`, `gg/G`, `Ctrl-d/u`, `Ctrl-f/b`, `/`, `?`, `n/N`,

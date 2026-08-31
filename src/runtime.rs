@@ -2544,6 +2544,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
             terminal.set_cursor_style(style)?;
         }
         sync_editor_viewport(&mut app, &mut runtime, &ui_state);
+        sync_pane_layout(&mut app, &mut runtime, &ui_state);
         sync_grid_viewport(&mut app, &mut runtime, &ui_state);
         sync_record_view_fields(&mut app, &mut runtime, &ui_state);
         sync_explorer_viewport(&mut app, &mut runtime, &ui_state);
@@ -2605,6 +2606,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                     terminal.set_cursor_style(style)?;
                 }
                 sync_editor_viewport(&mut app, &mut runtime, &ui_state);
+                sync_pane_layout(&mut app, &mut runtime, &ui_state);
                 sync_grid_viewport(&mut app, &mut runtime, &ui_state);
                 sync_record_view_fields(&mut app, &mut runtime, &ui_state);
                 sync_explorer_viewport(&mut app, &mut runtime, &ui_state);
@@ -2666,6 +2668,12 @@ fn sync_editor_viewport(app: &mut App, runtime: &mut Runtime, state: &UiState) {
     };
     if current != Some(viewport) {
         apply_action(app, runtime, Action::EditorViewportChanged(viewport));
+    }
+}
+
+fn sync_pane_layout(app: &mut App, runtime: &mut Runtime, state: &UiState) {
+    if app.pane_layout_metrics() != state.pane_layout {
+        apply_action(app, runtime, Action::PaneLayoutChanged(state.pane_layout));
     }
 }
 

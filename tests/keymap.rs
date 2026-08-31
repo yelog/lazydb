@@ -206,6 +206,15 @@ fn window_action(app: &App, direction: char) -> Option<Action> {
     keymap.map(key(KeyCode::Char(direction)), app)
 }
 
+fn counted_window_action(app: &App, count: &str, operator: char) -> Option<Action> {
+    let mut keymap = Keymap::default();
+    for character in count.chars() {
+        assert_eq!(keymap.map(key(KeyCode::Char(character)), app), None);
+    }
+    assert_eq!(keymap.map(ctrl('w'), app), None);
+    keymap.map(key(KeyCode::Char(operator)), app)
+}
+
 #[test]
 fn relation_window_directions_target_existing_panes() {
     let mut app = App::new(Vec::new());
@@ -243,6 +252,30 @@ fn sql_window_directions_keep_three_pane_mapping() {
 
     app.focus = Focus::Results;
     assert_eq!(window_action(&app, 'k'), Some(Action::Focus(Focus::Editor)));
+}
+
+#[test]
+fn maps_counted_pane_resize_commands() {
+    let mut app = App::new(Vec::new());
+    app.focus = Focus::Explorer;
+
+    assert_eq!(window_action(&app, '+'), None);
+    assert_eq!(
+        window_action(&app, '>'),
+        Some(Action::ResizePane(lazydb::model::workspace::PaneResize {
+            split: lazydb::model::workspace::PaneSplit::ExplorerWidth,
+            delta: 1,
+        },))
+    );
+    app.focus = Focus::Results;
+    assert_eq!(
+        counted_window_action(&app, "12", '-'),
+        Some(Action::ResizePane(lazydb::model::workspace::PaneResize {
+            split: lazydb::model::workspace::PaneSplit::EditorHeight,
+            delta: 12,
+        }))
+    );
+    assert_eq!(window_action(&app, '='), Some(Action::ResetPaneSizes));
 }
 
 #[test]
@@ -335,24 +368,19 @@ fn maps_tab_sequences_from_editor_normal_mode() {
 }
 
 #[test]
-fn maps_direct_result_view_selection_without_stealing_query_input() {
+fn numeric_result_keys_start_window_counts_without_stealing_query_input() {
     let mut app = App::new(Vec::new());
     app.focus = Focus::Results;
     let mut keymap = Keymap::default();
 
+    assert_eq!(keymap.map(key(KeyCode::Char('1')), &app), None);
+    assert_eq!(keymap.map(ctrl('w'), &app), None);
     assert_eq!(
-        keymap.map(key(KeyCode::Char('1')), &app),
-        Some(Action::SetResultView(lazydb::model::tab::ResultView::Data))
-    );
-    assert_eq!(
-        keymap.map(key(KeyCode::Char('2')), &app),
-        Some(Action::SetResultView(
-            lazydb::model::tab::ResultView::Output
-        ))
-    );
-    assert_eq!(
-        keymap.map(key(KeyCode::Char('3')), &app),
-        Some(Action::SetResultView(lazydb::model::tab::ResultView::Plan))
+        keymap.map(key(KeyCode::Char('>')), &app),
+        Some(Action::ResizePane(lazydb::model::workspace::PaneResize {
+            split: lazydb::model::workspace::PaneSplit::ExplorerWidth,
+            delta: -1,
+        }))
     );
 
     let mut relation = RelationTab::new("users");
@@ -365,17 +393,14 @@ fn maps_direct_result_view_selection_without_stealing_query_input() {
     );
 
     app.tabs[1] = WorkspaceTab::Relation(RelationTab::new("users"));
+    assert_eq!(keymap.map(key(KeyCode::Char('1')), &app), None);
+    assert_eq!(keymap.map(ctrl('w'), &app), None);
     assert_eq!(
-        keymap.map(key(KeyCode::Char('1')), &app),
-        Some(Action::SetRelationView(
-            lazydb::model::relation::RelationView::Data
-        ))
-    );
-    assert_eq!(
-        keymap.map(key(KeyCode::Char('2')), &app),
-        Some(Action::SetRelationView(
-            lazydb::model::relation::RelationView::Ddl
-        ))
+        keymap.map(key(KeyCode::Char('<')), &app),
+        Some(Action::ResizePane(lazydb::model::workspace::PaneResize {
+            split: lazydb::model::workspace::PaneSplit::ExplorerWidth,
+            delta: 1,
+        }))
     );
 }
 
