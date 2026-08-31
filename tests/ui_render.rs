@@ -1597,7 +1597,6 @@ fn sql_data_renders_shared_query_bar_above_the_grid() {
     assert!(cell.area.y > 0);
 }
 
-#[test]
 fn sql_query_bar_is_inert_until_derived_execution_exists() {
     let mut app = fixture();
     app.focus = Focus::Results;
