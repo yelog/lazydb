@@ -26,6 +26,7 @@ use crate::{
         workspace::{ConnectionIdentity, QueryStatus},
     },
     persistence::{
+        credentials::CredentialResolver,
         local_credentials::LocalCredentialStore,
         paths::AppPaths,
         profiles::ProfileStore,
@@ -2276,45 +2277,30 @@ async fn resolve_profile_password(
     if startup_password.is_some() {
         return Ok(startup_password);
     }
-    match &profile.credential_policy {
-        CredentialPolicy::None => Ok(None),
-        CredentialPolicy::Prompt => Err("Enter a password to continue".to_owned()),
-        CredentialPolicy::LocalEncrypted(credential) => {
-            let password = local_credential_store
-                .decrypt(profile.id, credential)
-                .map_err(|error| {
-                    sanitize_terminal_text(&format!(
-                        "Unable to decrypt the local password: {error}"
-                    ))
-                })?;
-            registry
-                .lock()
-                .await
-                .session_secrets
-                .insert(profile.id, password.clone());
-            Ok(Some(password))
-        }
-        CredentialPolicy::System(_) | CredentialPolicy::Keyring(_) => {
-            validate_secret_reference(profile)?;
-            match read_secret(secret_store, profile.id).await {
-                Ok(Some(password)) => {
-                    registry
-                        .lock()
-                        .await
-                        .session_secrets
-                        .insert(profile.id, password.clone());
-                    Ok(Some(password))
-                }
-                Ok(None) => {
-                    Err("Stored password is missing; enter a password to continue".to_owned())
-                }
-                Err(SecretStoreError::Locked | SecretStoreError::Unavailable) => {
-                    Err("Stored password is unavailable; enter a password to continue".to_owned())
-                }
-                Err(error) => Err(secret_error("Unable to read the stored password", error)),
+    let resolver = CredentialResolver::new(secret_store.clone(), local_credential_store.clone());
+    let password = resolver
+        .resolve_headless(profile)
+        .await
+        .map_err(|error| match error {
+            crate::persistence::credentials::CredentialResolutionError::InteractionRequired => {
+                "Enter a password to continue".to_owned()
             }
-        }
+            crate::persistence::credentials::CredentialResolutionError::Missing => {
+                "Stored password is missing; enter a password to continue".to_owned()
+            }
+            crate::persistence::credentials::CredentialResolutionError::Unavailable => {
+                "Stored password is unavailable; enter a password to continue".to_owned()
+            }
+            other => sanitize_terminal_text(&other.to_string()),
+        })?;
+    if let Some(password) = &password {
+        registry
+            .lock()
+            .await
+            .session_secrets
+            .insert(profile.id, password.clone());
     }
+    Ok(password)
 }
 
 fn validate_secret_reference(profile: &ConnectionProfile) -> Result<(), String> {
