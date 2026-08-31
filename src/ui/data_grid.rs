@@ -91,7 +91,7 @@ pub(crate) fn render(
     });
     let constraints = grid_constraints(&visible, number_width);
 
-    let visible_rows = table_area.height.saturating_sub(2 + u16::from(overflow)) as usize;
+    let visible_rows = table_area.height.saturating_sub(1 + u16::from(overflow)) as usize;
     let row_offset = row_viewport_start(
         result.rows.len(),
         visible_rows,
@@ -104,7 +104,7 @@ pub(crate) fn render(
         row_offset,
         visible_rows,
     });
-    let row_y = table_area.y.saturating_add(2);
+    let row_y = table_area.y.saturating_add(1);
     for (screen_row, row_index) in result
         .rows
         .iter()
@@ -150,7 +150,7 @@ pub(crate) fn render(
         boundary_x = boundary_x.saturating_add(1);
     }
 
-    let header = Row::new(header_cells(&visible, result, number_width, theme)).height(2);
+    let header = Row::new(header_cells(&visible, result, number_width, theme));
     let rows = result
         .rows
         .iter()
@@ -208,14 +208,14 @@ pub(crate) fn render(
     });
     let mut table_state = TableState::new().with_selected_cell(selected_cell);
     frame.render_stateful_widget(table, area, &mut table_state);
-    if result.rows.is_empty() && table_area.height >= 3 {
+    if result.rows.is_empty() && table_area.height >= 2 {
         frame.render_widget(
             Paragraph::new("No rows")
                 .style(Style::new().fg(theme.muted).bg(theme.surface))
                 .alignment(Alignment::Center),
             Rect::new(
                 table_area.x.saturating_add(1),
-                table_area.y.saturating_add(2),
+                table_area.y.saturating_add(1),
                 table_area.width.saturating_sub(2),
                 1,
             ),
@@ -300,29 +300,21 @@ fn header_cells(
     theme: Theme,
 ) -> Vec<Cell<'static>> {
     let header_style = Style::new()
-        .fg(theme.text)
-        .bg(theme.surface)
+        .fg(theme.grid_header_text)
+        .bg(theme.grid_header)
         .add_modifier(Modifier::BOLD);
-    let separator_style = Style::new().fg(theme.grid_border).bg(theme.surface);
+    let separator_style = Style::new().fg(theme.grid_border).bg(theme.grid_header);
     let mut cells = Vec::with_capacity(visible.len().saturating_mul(2).saturating_add(2));
-    let divider = "─";
     cells.push(
-        Cell::from(format!(
-            "{:>width$}\n{:─^width$}",
-            "#",
-            "",
-            width = number_width as usize
-        ))
-        .style(header_style),
+        Cell::from(format!("{:>width$}", "#", width = number_width as usize)).style(header_style),
     );
-    cells.push(Cell::from("│\n┼").style(separator_style));
+    cells.push(Cell::from("│").style(separator_style));
     for (position, column) in visible.iter().enumerate() {
         if position > 0 {
-            cells.push(Cell::from("│\n┼").style(separator_style));
+            cells.push(Cell::from("│").style(separator_style));
         }
         let name = sanitize_terminal_text(&result.columns[column.index].name);
-        let width = usize::from(column.rendered_width);
-        cells.push(Cell::from(format!("{name}\n{}", divider.repeat(width))).style(header_style));
+        cells.push(Cell::from(name).style(header_style));
     }
     cells
 }
