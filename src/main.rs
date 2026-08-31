@@ -12,9 +12,15 @@ async fn main() -> Result<()> {
             Command::Agent { command } => {
                 println!("{}", lazydb::agent::cli::run(command, cli.config).await?);
             }
-            Command::Mcp { .. } => {
-                println!("MCP server is not implemented yet");
-            }
+            Command::Mcp { command } => match command {
+                lazydb::cli::McpCommand::Serve {
+                    project,
+                    connection,
+                    write_policy,
+                } => {
+                    lazydb::agent::mcp::run(project, connection, write_policy, cli.config).await?;
+                }
+            },
             command => println!("{}", render_command(&command)?),
         }
         return Ok(());

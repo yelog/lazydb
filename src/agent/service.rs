@@ -76,6 +76,10 @@ impl AgentService {
         self.project.visible_profiles(&self.profiles)
     }
 
+    pub fn project_root(&self) -> &Path {
+        self.project.root()
+    }
+
     pub fn select(&self, selector: Option<&str>) -> Result<SelectedAgentProfile<'_>, AgentError> {
         let visible = self.visible_profiles();
         select_profile(&visible, selector)
