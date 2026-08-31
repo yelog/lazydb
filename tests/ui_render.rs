@@ -1602,7 +1602,7 @@ fn sql_data_renders_shared_query_bar_above_the_grid() {
 
     assert!(output.contains("WHERE"), "{output}");
     assert!(output.contains("ORDER BY"), "{output}");
-    assert!(output.contains("Run a read-only query first"), "{output}");
+    assert!(!output.contains("Run a read-only query first"), "{output}");
     let cell = state
         .hit_regions
         .iter()
@@ -1612,6 +1612,40 @@ fn sql_data_renders_shared_query_bar_above_the_grid() {
 }
 
 #[test]
+fn sql_query_bar_is_inert_until_derived_execution_exists() {
+    let mut app = fixture();
+    app.focus = Focus::Results;
+    let before = app.active_console().query.clone();
+
+    app.update(Action::FocusDataQueryInput(
+        lazydb::model::data_query::DataQueryInput::Where,
+    ));
+    app.update(Action::DataQueryInsert('x'));
+    assert_eq!(app.active_console().query, before);
+    assert!(app.update(Action::SubmitDataQuery).is_empty());
+}
+
+#[test]
+fn sql_data_before_first_execution_has_a_quiet_disabled_query_bar() {
+    let app = App::new(Vec::new());
+    let (output, state) = render_with_state(&app, 120, 36);
+
+    assert!(output.contains("WHERE"), "{output}");
+    assert!(output.contains("ORDER BY"), "{output}");
+    assert!(
+        output.contains("Run a query to populate the data viewport"),
+        "{output}"
+    );
+    assert!(!output.contains("not implemented yet"), "{output}");
+    assert!(!output.contains("Run a read-only query first"), "{output}");
+    assert!(
+        !state
+            .hit_regions
+            .iter()
+            .any(|region| matches!(region.target, HitTarget::DataQueryInput(_)))
+    );
+}
+
 fn sql_result_query_completion_is_rendered_above_the_grid() {
     let mut app = fixture();
     app.active_console_mut().query.capability = lazydb::model::data_query::DataQueryCapability::Sql;

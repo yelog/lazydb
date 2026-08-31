@@ -101,7 +101,9 @@ pub(crate) fn render(
     }
     let message = query.error.as_ref().or(match &query.capability {
         DataQueryCapability::Unavailable(reason) => Some(reason),
-        DataQueryCapability::Relation | DataQueryCapability::Sql => None,
+        DataQueryCapability::Relation
+        | DataQueryCapability::Sql
+        | DataQueryCapability::AwaitingResult => None,
     });
     if let Some(error) = message {
         let error_y = area.y.saturating_add(if horizontal { 2 } else { 4 });

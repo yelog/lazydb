@@ -73,6 +73,12 @@ fn pending_relation_request<T>(load: &RelationLoad<T>) -> Option<RelationRequest
     }
 }
 
+fn unavailable_sql_filter_after_unsuccessful_execution() -> DataQueryCapability {
+    DataQueryCapability::Unavailable(
+        "Run a successful read-only SELECT query to enable filtering".into(),
+    )
+}
+
 fn cancel_relation_load<T: Clone>(load: &RelationLoad<T>) -> RelationLoad<T> {
     match load {
         RelationLoad::Loading { previous, .. } => RelationLoad::Cancelled {
@@ -2581,6 +2587,7 @@ impl App {
                     .and_then(WorkspaceTab::as_console_mut)
                 {
                     tab.query_status = QueryStatus::Cancelled;
+                    tab.query.capability = unavailable_sql_filter_after_unsuccessful_execution();
                 }
                 self.append_console_output(
                     tab_id,
@@ -2788,6 +2795,7 @@ impl App {
                     .unwrap();
                 tab.generation = tab.generation.saturating_add(1);
                 tab.query_status = QueryStatus::Cancelled;
+                tab.query.capability = unavailable_sql_filter_after_unsuccessful_execution();
                 append_console_output_to_editor(
                     &mut self.editor,
                     tab,
@@ -3425,6 +3433,7 @@ impl App {
                 {
                     last.result = ExecutionResult::Failed;
                 }
+                tab.query.capability = unavailable_sql_filter_after_unsuccessful_execution();
                 Vec::new()
             }
             Action::DerivedQueryFinished {
@@ -5821,6 +5830,7 @@ impl App {
                 tab.generation += 1;
                 let query_generation = tab.generation;
                 apply_transaction_snapshot(tab, snapshot);
+                Self::reset_sql_filter_for_base_execution(tab);
                 tab.query_status = QueryStatus::Running;
                 tab.last_execution = Some(LastExecution {
                     draft,
@@ -5839,6 +5849,7 @@ impl App {
         }
         tab.generation += 1;
         let generation = tab.generation;
+        Self::reset_sql_filter_for_base_execution(tab);
         tab.query_status = QueryStatus::Running;
         tab.last_execution = Some(LastExecution {
             draft: draft.clone(),
@@ -5851,6 +5862,17 @@ impl App {
             generation,
             sql: sql::bounded_query(&draft.sql, draft.dialect).unwrap_or(draft.sql),
         }]
+    }
+
+    fn reset_sql_filter_for_base_execution(tab: &mut ConsoleTab) {
+        tab.query.where_input.set("");
+        tab.query.order_by_input.set("");
+        tab.query.submitted = DataQueryOptions::default();
+        tab.query.focus = None;
+        tab.query.error = None;
+        tab.query.capability = DataQueryCapability::AwaitingResult;
+        tab.query.completion = None;
+        tab.derived = None;
     }
 
     fn retain_execution(&mut self, draft: sql::ExecutionDraft, result: ExecutionResult) {
@@ -6971,7 +6993,15 @@ impl App {
 
     fn submit_sql_query(&mut self) -> Vec<Command> {
         let tab = self.active_console();
-        let Some(last) = tab.last_execution.clone() else {
+        if !matches!(tab.query.capability, DataQueryCapability::Sql) {
+            return Vec::new();
+        }
+        let Some(last) = tab
+            .last_execution
+            .as_ref()
+            .filter(|last| last.result == ExecutionResult::Succeeded)
+            .cloned()
+        else {
             return Vec::new();
         };
         let where_clause = tab.query.where_input.value().to_owned();
@@ -8262,6 +8292,11 @@ impl App {
                 )
             })
             .unwrap_or((true, None));
+        if let Some(last) = tab.last_execution.as_mut()
+            && last.draft.query_generation + 1 == generation
+        {
+            last.result = ExecutionResult::Succeeded;
+        }
         tab.query_status = QueryStatus::Idle;
         if let Some((context, summary)) = execution_log {
             append_console_output_to_editor(&mut self.editor, tab, context);
@@ -8282,23 +8317,20 @@ impl App {
         } else {
             ResultView::Output
         };
-        tab.query.capability = tab.last_execution.as_ref().map_or(
-            DataQueryCapability::Unavailable("Run a read-only query first".into()),
-            |last| {
-                if sql::derived_query_capable(&last.draft.sql, last.draft.dialect) {
-                    DataQueryCapability::Sql
-                } else {
-                    DataQueryCapability::Unavailable(
-                        "SQL result filtering requires one read-only SELECT query".into(),
-                    )
-                }
-            },
-        );
-        if let Some(last) = tab.last_execution.as_mut()
-            && last.draft.query_generation + 1 == generation
-        {
-            last.result = ExecutionResult::Succeeded;
-        }
+        tab.query.capability = match tab.last_execution.as_ref() {
+            Some(last)
+                if last.result == ExecutionResult::Succeeded
+                    && sql::derived_query_capable(&last.draft.sql, last.draft.dialect) =>
+            {
+                DataQueryCapability::Sql
+            }
+            Some(last) if last.result == ExecutionResult::Succeeded => {
+                DataQueryCapability::Unavailable(
+                    "Filtering requires one read-only SELECT query".into(),
+                )
+            }
+            _ => unavailable_sql_filter_after_unsuccessful_execution(),
+        };
     }
 
     fn pending_connection_matches(&self, profile_id: Uuid, generation: u64) -> bool {
@@ -8625,8 +8657,8 @@ mod tests {
         model::explorer::ExplorerConnectionStatus,
         model::relation::{RelationRequest, RelationRequestKind, RelationSnapshot, RelationTab},
         model::tab::{
-            ConsoleTab, GridRowAlignment, GridRowTarget, GridScrollAmount, OutputEntry, OutputKind,
-            ResultView, WorkspaceTab,
+            ConsoleTab, DerivedResultState, ExecutionResult, GridRowAlignment, GridRowTarget,
+            GridScrollAmount, OutputEntry, OutputKind, ResultView, WorkspaceTab,
         },
         model::transaction::{TransactionMode, TransactionState},
         model::workspace::{
@@ -8634,6 +8666,7 @@ mod tests {
             PaneSplit, QueryStatus,
         },
         model::{
+            data_query::{DataQueryCapability, DataQueryInput, DataQueryOptions},
             execution_target::ExecutionTarget,
             relation::RelationKey,
             relation_edit::{EditableRowState, RelationEditSession},
@@ -8693,6 +8726,137 @@ mod tests {
             command => panic!("unexpected command: {command:?}"),
         };
         (app, tab_id, generation)
+    }
+
+    #[test]
+    fn dispatching_a_new_base_query_invalidates_sql_filter_state() {
+        let (mut app, tab_id, generation) = connected_query_app("SELECT id FROM users");
+        let connection = app.connection.active_identity().unwrap();
+        app.update(Action::QueryFinished {
+            tab_id,
+            generation,
+            connection,
+            outcome: empty_outcome(),
+        });
+        {
+            let tab = app.active_console_mut();
+            tab.query.where_input.set("id > 10");
+            tab.query.order_by_input.set("id DESC");
+            tab.query.submitted = DataQueryOptions {
+                where_clause: Some("id > 10".into()),
+                order_by_clause: Some("id DESC".into()),
+            };
+            tab.query.focus = Some(DataQueryInput::Where);
+            tab.query.error = Some("old error".into());
+            let source = tab.last_execution.clone().unwrap();
+            tab.derived = Some(DerivedResultState {
+                source,
+                query: tab.query.submitted.clone(),
+                generation: 1,
+                outcome: Some(empty_outcome()),
+                error: None,
+                running: false,
+            });
+        }
+
+        app.update(Action::ReplaceEditor("SELECT name FROM users".into()));
+        let commands = app.update(Action::RunActiveSql);
+
+        assert!(matches!(commands.as_slice(), [Command::RunQuery { .. }]));
+        let tab = app.active_console();
+        assert_eq!(tab.query.capability, DataQueryCapability::AwaitingResult);
+        assert_eq!(tab.query.where_input.value(), "");
+        assert_eq!(tab.query.order_by_input.value(), "");
+        assert_eq!(tab.query.submitted, DataQueryOptions::default());
+        assert_eq!(tab.query.focus, None);
+        assert_eq!(tab.query.error, None);
+        assert_eq!(tab.query.completion, None);
+        assert_eq!(tab.derived, None);
+    }
+
+    #[test]
+    fn failed_base_query_keeps_sql_filtering_unavailable() {
+        let (mut app, tab_id, generation) = connected_query_app("SELECT * FROM missing_table");
+        let connection = app.connection.active_identity().unwrap();
+
+        app.update(Action::QueryFailed {
+            tab_id,
+            generation,
+            connection,
+            message: "missing table".into(),
+        });
+
+        let tab = app.active_console();
+        assert!(matches!(
+            tab.query.capability,
+            DataQueryCapability::Unavailable(ref reason)
+                if reason == "Run a successful read-only SELECT query to enable filtering"
+        ));
+        assert_eq!(
+            tab.last_execution.as_ref().map(|last| &last.result),
+            Some(&ExecutionResult::Failed)
+        );
+        assert!(app.update(Action::SubmitDataQuery).is_empty());
+    }
+
+    #[test]
+    fn cancelled_base_query_keeps_sql_filtering_unavailable() {
+        let (mut app, _, _) = connected_query_app("SELECT * FROM users");
+
+        let commands = app.update(Action::CancelActiveQuery);
+
+        assert!(matches!(commands.as_slice(), [Command::CancelQuery { .. }]));
+        let tab = app.active_console();
+        assert!(matches!(
+            tab.query.capability,
+            DataQueryCapability::Unavailable(ref reason)
+                if reason == "Run a successful read-only SELECT query to enable filtering"
+        ));
+        assert_eq!(
+            tab.last_execution.as_ref().map(|last| &last.result),
+            Some(&ExecutionResult::Cancelled)
+        );
+    }
+
+    #[test]
+    fn derived_submission_requires_a_successful_sql_capability() {
+        let (mut app, _, _) = connected_query_app("SELECT id FROM users");
+        {
+            let tab = app.active_console_mut();
+            tab.query.capability = DataQueryCapability::Sql;
+            tab.query.where_input.set("id > 10");
+            assert_eq!(
+                tab.last_execution.as_ref().map(|last| &last.result),
+                Some(&ExecutionResult::Dispatched)
+            );
+        }
+
+        assert!(app.update(Action::SubmitDataQuery).is_empty());
+        assert_eq!(app.active_console().derived, None);
+    }
+
+    #[test]
+    fn successful_read_only_result_submits_a_derived_query() {
+        let (mut app, tab_id, generation) = connected_query_app("SELECT id FROM users");
+        let connection = app.connection.active_identity().unwrap();
+        app.update(Action::QueryFinished {
+            tab_id,
+            generation,
+            connection,
+            outcome: empty_outcome(),
+        });
+        app.update(Action::FocusDataQueryInput(DataQueryInput::Where));
+        for character in "id > 10".chars() {
+            app.update(Action::DataQueryInsert(character));
+        }
+
+        let commands = app.update(Action::SubmitDataQuery);
+
+        assert!(matches!(
+            commands.as_slice(),
+            [Command::RunDerivedQuery { sql, .. }]
+                if sql.contains("WHERE id > 10") && sql.ends_with("LIMIT 500")
+        ));
     }
 
     #[test]
