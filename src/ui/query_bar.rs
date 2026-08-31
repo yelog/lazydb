@@ -8,10 +8,19 @@ use ratatui::{
 
 use super::{HitRegion, HitTarget, UiState, icons::IconSet, render_text_input, theme::Theme};
 
+const FIELD_HEIGHT: u16 = 2;
+const HORIZONTAL_MIN_WIDTH: u16 = 56;
+
+fn fields_height(width: u16) -> u16 {
+    if width >= HORIZONTAL_MIN_WIDTH {
+        FIELD_HEIGHT
+    } else {
+        FIELD_HEIGHT * 2
+    }
+}
+
 pub(crate) fn height(query: &DataQueryState, width: u16, _icons: IconSet) -> u16 {
-    let fields = if width >= 80 { 1 } else { 2 };
-    let field_rows = fields * 2;
-    field_rows
+    fields_height(width)
         + u16::from(
             query.error.is_some()
                 || matches!(query.capability, DataQueryCapability::Unavailable(_)),
@@ -29,9 +38,9 @@ pub(crate) fn render(
     if area.height == 0 {
         return None;
     }
-    let horizontal = area.width >= 80;
-    let field_height = 2;
-    let fields_area = Rect::new(area.x, area.y, area.width, area.height.min(field_height));
+    let horizontal = area.width >= HORIZONTAL_MIN_WIDTH;
+    let fields_height = fields_height(area.width);
+    let fields_area = Rect::new(area.x, area.y, area.width, area.height.min(fields_height));
     let chunks = if horizontal {
         Layout::default()
             .direction(Direction::Horizontal)
@@ -41,8 +50,8 @@ pub(crate) fn render(
         Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(field_height),
-                Constraint::Length(field_height),
+                Constraint::Length(FIELD_HEIGHT),
+                Constraint::Length(FIELD_HEIGHT),
             ])
             .split(fields_area)
     };
@@ -106,7 +115,7 @@ pub(crate) fn render(
         | DataQueryCapability::AwaitingResult => None,
     });
     if let Some(error) = message {
-        let error_y = area.y.saturating_add(if horizontal { 2 } else { 4 });
+        let error_y = area.y.saturating_add(fields_height);
         if error_y >= area.bottom() {
             return cursor;
         }
@@ -117,4 +126,15 @@ pub(crate) fn render(
         );
     }
     cursor
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FIELD_HEIGHT, fields_height};
+
+    #[test]
+    fn switches_to_horizontal_layout_at_the_minimum_usable_width() {
+        assert_eq!(fields_height(55), FIELD_HEIGHT * 2);
+        assert_eq!(fields_height(56), FIELD_HEIGHT);
+    }
 }

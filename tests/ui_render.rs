@@ -1631,6 +1631,25 @@ fn sql_data_renders_shared_query_bar_above_the_grid() {
 }
 
 #[test]
+fn compact_query_bar_places_fields_side_by_side_when_the_inputs_remain_usable() {
+    let mut app = fixture();
+    app.focus = Focus::Results;
+    let output = render(&app, 80, 36);
+    let lines = output.lines().collect::<Vec<_>>();
+    let where_y = lines
+        .iter()
+        .position(|line| line.contains("WHERE"))
+        .unwrap_or_else(|| panic!("{output}"));
+    let order_by_y = lines
+        .iter()
+        .position(|line| line.contains("ORDER BY"))
+        .unwrap_or_else(|| panic!("{output}"));
+
+    assert_eq!(order_by_y, where_y, "{output}");
+    assert!(lines[where_y + 1].contains('─'), "{output}");
+}
+
+#[test]
 fn sql_query_bar_is_inert_until_derived_execution_exists() {
     let mut app = fixture();
     app.focus = Focus::Results;
