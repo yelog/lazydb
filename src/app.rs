@@ -82,6 +82,13 @@ fn cancel_relation_load<T: Clone>(load: &RelationLoad<T>) -> RelationLoad<T> {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RelationCatalogReadiness {
+    Present,
+    Loading,
+    Missing,
+}
+
 fn cancel_pending_relation<T: Clone>(load: &mut RelationLoad<T>) -> Option<RelationRequest> {
     let pending = pending_relation_request(load);
     if let RelationLoad::Loading { previous, .. } = load {
@@ -6144,6 +6151,7 @@ impl App {
         {
             commands.extend(self.complete_now());
         }
+        commands.extend(self.load_active_relation(false));
         commands
     }
 
@@ -7960,7 +7968,7 @@ impl App {
         let Some(connection) = self.database_command_identity() else {
             return Vec::new();
         };
-        let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab) else {
+        let Some(WorkspaceTab::Relation(tab)) = self.tabs.get(self.active_tab) else {
             return Vec::new();
         };
         if tab.descriptor.key.profile_id != connection.profile_id {
@@ -7976,6 +7984,14 @@ impl App {
         if !relation_is_in_scope(tab, &profile.catalog_scope) {
             return Vec::new();
         }
+        if self.relation_catalog_readiness(connection, &tab.descriptor.key.object_id)
+            == RelationCatalogReadiness::Loading
+        {
+            return Vec::new();
+        }
+        let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab) else {
+            return Vec::new();
+        };
         let kind = match tab.view {
             RelationView::Data => RelationRequestKind::Preview,
             RelationView::Ddl => RelationRequestKind::Ddl,
@@ -8055,6 +8071,30 @@ impl App {
                     .chain([Command::LoadRelationDdl(request)])
                     .collect()
             }
+        }
+    }
+
+    fn relation_catalog_readiness(
+        &self,
+        connection: ConnectionIdentity,
+        relation: &crate::db::catalog::CatalogId,
+    ) -> RelationCatalogReadiness {
+        let Some(state) = self
+            .explorer
+            .normalized
+            .profiles
+            .get(&connection.profile_id)
+        else {
+            return RelationCatalogReadiness::Missing;
+        };
+        if state.catalog.get(relation).is_some() {
+            RelationCatalogReadiness::Present
+        } else if state.status == ExplorerConnectionStatus::Syncing
+            || !state.pending_requests.is_empty()
+        {
+            RelationCatalogReadiness::Loading
+        } else {
+            RelationCatalogReadiness::Missing
         }
     }
 
