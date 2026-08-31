@@ -60,6 +60,7 @@ pub struct QueryOutcomeJson {
     pub execution_ms: u128,
     pub fetch_ms: u128,
     pub row_count: usize,
+    pub truncated: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -84,6 +85,7 @@ impl From<QueryOutcome> for QueryOutcomeJson {
             execution_ms: outcome.stats.execution.as_millis(),
             fetch_ms: outcome.stats.fetch.as_millis(),
             row_count: outcome.stats.row_count,
+            truncated: false,
         }
     }
 }

@@ -9,6 +9,10 @@ pub enum AgentErrorCode {
     ConnectionNotFound,
     ConnectionAmbiguous,
     NoVisibleConnections,
+    PolicyDenied,
+    CredentialFailure,
+    DatabaseFailure,
+    ResultTooLarge,
 }
 
 impl AgentErrorCode {
@@ -17,6 +21,10 @@ impl AgentErrorCode {
             Self::ConnectionNotFound => "connection_not_found",
             Self::ConnectionAmbiguous => "connection_ambiguous",
             Self::NoVisibleConnections => "no_visible_connections",
+            Self::PolicyDenied => "policy_denied",
+            Self::CredentialFailure => "credential_failure",
+            Self::DatabaseFailure => "database_failure",
+            Self::ResultTooLarge => "result_too_large",
         }
     }
 }
@@ -45,14 +53,15 @@ pub enum SelectionReason {
 
 #[derive(Debug)]
 pub struct SelectedAgentProfile<'a> {
-    pub profile: &'a VisibleAgentProfile<'a>,
+    pub profile: &'a crate::profile::ConnectionProfile,
+    pub scope: AgentProfileScope,
     pub reason: SelectionReason,
 }
 
-pub fn select_profile<'a>(
-    visible: &'a [VisibleAgentProfile<'a>],
+pub fn select_profile<'profiles>(
+    visible: &[VisibleAgentProfile<'profiles>],
     selector: Option<&str>,
-) -> Result<SelectedAgentProfile<'a>, AgentError> {
+) -> Result<SelectedAgentProfile<'profiles>, AgentError> {
     if visible.is_empty() {
         return Err(error(
             AgentErrorCode::NoVisibleConnections,
@@ -66,7 +75,8 @@ pub fn select_profile<'a>(
                 .iter()
                 .find(|entry| entry.profile.id == id)
                 .map(|profile| SelectedAgentProfile {
-                    profile,
+                    profile: profile.profile,
+                    scope: profile.scope,
                     reason: SelectionReason::ExplicitUuid,
                 })
                 .ok_or_else(|| error(AgentErrorCode::ConnectionNotFound, "connection not found"));
@@ -78,7 +88,8 @@ pub fn select_profile<'a>(
             .collect::<Vec<_>>();
         return match matches.as_slice() {
             [profile] => Ok(SelectedAgentProfile {
-                profile,
+                profile: profile.profile,
+                scope: profile.scope,
                 reason: SelectionReason::ExplicitName,
             }),
             [] => Err(error(
@@ -98,7 +109,8 @@ pub fn select_profile<'a>(
         .collect::<Vec<_>>();
     if project.len() == 1 {
         return Ok(SelectedAgentProfile {
-            profile: project[0],
+            profile: project[0].profile,
+            scope: project[0].scope,
             reason: SelectionReason::SoleProject,
         });
     }
@@ -115,7 +127,8 @@ pub fn select_profile<'a>(
         .collect::<Vec<_>>();
     if global.len() == 1 {
         return Ok(SelectedAgentProfile {
-            profile: global[0],
+            profile: global[0].profile,
+            scope: global[0].scope,
             reason: SelectionReason::SoleGlobal,
         });
     }

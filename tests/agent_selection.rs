@@ -40,11 +40,11 @@ fn selects_explicit_uuid_and_name_only_from_visible_profiles() {
     let visible = context.visible_profiles(&profiles);
 
     let selected = select_profile(&visible, Some(&visible[0].profile.id.to_string())).unwrap();
-    assert_eq!(selected.profile.profile.name, "current");
+    assert_eq!(selected.profile.name, "current");
     assert_eq!(selected.reason, SelectionReason::ExplicitUuid);
 
     let selected = select_profile(&visible, Some("global")).unwrap();
-    assert_eq!(selected.profile.profile.name, "global");
+    assert_eq!(selected.profile.name, "global");
     assert_eq!(selected.reason, SelectionReason::ExplicitName);
 
     let error = select_profile(&visible, Some(&other_id.to_string())).unwrap_err();
@@ -63,13 +63,13 @@ fn implicit_selection_is_project_first_then_sole_global() {
     let visible = context.visible_profiles(&profiles);
 
     let selected = select_profile(&visible, None).unwrap();
-    assert_eq!(selected.profile.profile.name, "current");
+    assert_eq!(selected.profile.name, "current");
     assert_eq!(selected.reason, SelectionReason::SoleProject);
 
     let globals = [global];
     let visible = context.visible_profiles(&globals);
     let selected = select_profile(&visible, None).unwrap();
-    assert_eq!(selected.profile.profile.name, "global");
+    assert_eq!(selected.profile.name, "global");
     assert_eq!(selected.reason, SelectionReason::SoleGlobal);
 }
 
