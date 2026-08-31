@@ -97,6 +97,458 @@ fn compact_match_fixture() -> Vec<CatalogEntry> {
     entries
 }
 
+fn contextual_fixture() -> Vec<CatalogEntry> {
+    let connection = Uuid::new_v4();
+    let schema = CatalogId::new(connection, CatalogKind::Schema, ["app", "public"]);
+    let mut entries = Vec::new();
+    for (table_name, columns) in [
+        (
+            "sys_user",
+            &[
+                "update_time",
+                "update_user",
+                "update_user_phone",
+                "user_type",
+                "username",
+            ][..],
+        ),
+        ("user_agreement_accept", &["agreement_id"][..]),
+        ("unit_mtmm_capacity", &["capacity_id"][..]),
+    ] {
+        let table = CatalogId::new(
+            connection,
+            CatalogKind::Table,
+            ["app", "public", table_name],
+        );
+        entries.push(
+            CatalogEntry::relation(
+                table.clone(),
+                schema.clone(),
+                qualified("app", Some("public"), table_name),
+                "table",
+                OptionalMetadata::Supported(None),
+                true,
+            )
+            .unwrap(),
+        );
+        entries.extend(columns.iter().enumerate().map(|(position, column)| {
+            CatalogEntry::relation_child(
+                CatalogId::new(
+                    connection,
+                    CatalogKind::Column,
+                    ["app", "public", table_name, column],
+                ),
+                table.clone(),
+                qualified("app", Some("public"), column),
+                "column",
+                OptionalMetadata::Unsupported,
+                CatalogMetadata::Column(ColumnMetadata::new(position as u32 + 1, "text", true)),
+            )
+            .unwrap()
+        }));
+    }
+    entries
+}
+
+fn multi_relation_fixture() -> Vec<CatalogEntry> {
+    let connection = Uuid::new_v4();
+    let schema = CatalogId::new(connection, CatalogKind::Schema, ["app", "public"]);
+    let mut entries = Vec::new();
+    for (table_name, columns) in [
+        ("users", &["id", "user_name"][..]),
+        ("roles", &["id", "role_name"][..]),
+        ("audit_log", &["audit_message"][..]),
+    ] {
+        let table = CatalogId::new(
+            connection,
+            CatalogKind::Table,
+            ["app", "public", table_name],
+        );
+        entries.push(
+            CatalogEntry::relation(
+                table.clone(),
+                schema.clone(),
+                qualified("app", Some("public"), table_name),
+                "table",
+                OptionalMetadata::Supported(None),
+                true,
+            )
+            .unwrap(),
+        );
+        entries.extend(columns.iter().enumerate().map(|(position, column)| {
+            CatalogEntry::relation_child(
+                CatalogId::new(
+                    connection,
+                    CatalogKind::Column,
+                    ["app", "public", table_name, column],
+                ),
+                table.clone(),
+                qualified("app", Some("public"), column),
+                "column",
+                OptionalMetadata::Unsupported,
+                CatalogMetadata::Column(ColumnMetadata::new(position as u32 + 1, "text", true)),
+            )
+            .unwrap()
+        }));
+    }
+    entries
+}
+
+#[test]
+fn select_expression_excludes_relation_candidates() {
+    let index = CompletionIndex::new(&contextual_fixture());
+    let sql = "select u from sys_user";
+    let candidates = complete(
+        sql,
+        "select u".len(),
+        SqlDialect::Postgres,
+        &index,
+        CompletionContext::default(),
+    );
+
+    assert!(candidates.iter().any(|candidate| {
+        candidate.kind == CompletionKind::Column && candidate.label == "username"
+    }));
+    assert!(candidates.iter().all(|candidate| !matches!(
+        candidate.kind,
+        CompletionKind::Database
+            | CompletionKind::Schema
+            | CompletionKind::Table
+            | CompletionKind::View
+    )));
+}
+
+#[test]
+fn where_expression_excludes_relation_candidates() {
+    let index = CompletionIndex::new(&contextual_fixture());
+    let sql = "select * from sys_user\nwhere ";
+    let candidates = complete(
+        sql,
+        sql.len(),
+        SqlDialect::Postgres,
+        &index,
+        CompletionContext::default(),
+    );
+
+    assert!(candidates.iter().any(|candidate| {
+        candidate.kind == CompletionKind::Column && candidate.label == "update_time"
+    }));
+    assert!(candidates.iter().all(|candidate| !matches!(
+        candidate.kind,
+        CompletionKind::Database
+            | CompletionKind::Schema
+            | CompletionKind::Table
+            | CompletionKind::View
+    )));
+}
+
+#[test]
+fn missing_columns_do_not_fall_back_to_global_relations() {
+    let mut entries = contextual_fixture();
+    entries.retain(|entry| entry.kind != CatalogKind::Column);
+    let index = CompletionIndex::new(&entries);
+    let sql = "select * from sys_user where ";
+    let candidates = complete(
+        sql,
+        sql.len(),
+        SqlDialect::Postgres,
+        &index,
+        CompletionContext::default(),
+    );
+
+    assert!(candidates.iter().all(|candidate| !matches!(
+        candidate.kind,
+        CompletionKind::Database
+            | CompletionKind::Schema
+            | CompletionKind::Table
+            | CompletionKind::View
+    )));
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate.kind == CompletionKind::Keyword)
+    );
+}
+
+#[test]
+fn statement_and_expression_keywords_are_contextual() {
+    let index = CompletionIndex::new(&contextual_fixture());
+    let statement = complete(
+        "u",
+        1,
+        SqlDialect::Postgres,
+        &index,
+        CompletionContext::default(),
+    );
+    assert!(
+        statement
+            .iter()
+            .any(|candidate| candidate.label == "UPDATE")
+    );
+
+    let projection_sql = "select u from sys_user";
+    let projection = complete(
+        projection_sql,
+        "select u".len(),
+        SqlDialect::Postgres,
+        &index,
+        CompletionContext::default(),
+    );
+    assert!(
+        !projection
+            .iter()
+            .any(|candidate| candidate.label == "UPDATE")
+    );
+}
+
+#[test]
+fn predicate_completion_offers_predicate_keywords() {
+    let index = CompletionIndex::new(&contextual_fixture());
+    let sql = "select * from sys_user where n";
+    let candidates = complete(
+        sql,
+        sql.len(),
+        SqlDialect::Postgres,
+        &index,
+        CompletionContext::default(),
+    );
+
+    assert!(candidates.iter().any(|candidate| {
+        candidate.kind == CompletionKind::Keyword && candidate.label == "NOT"
+    }));
+}
+
+#[test]
+fn strings_and_comments_do_not_create_relation_bindings() {
+    let index = CompletionIndex::new(&contextual_fixture());
+    for sql in [
+        "select 'from user_agreement_accept' as note from sys_user where a",
+        "select 1 /* join user_agreement_accept */ from sys_user where a",
+        "select 1 -- join user_agreement_accept\nfrom sys_user where a",
+    ] {
+        let candidates = complete(
+            sql,
+            sql.len(),
+            SqlDialect::Postgres,
+            &index,
+            CompletionContext::default(),
+        );
+        assert!(!candidates.iter().any(|candidate| {
+            candidate.kind == CompletionKind::Column && candidate.label == "agreement_id"
+        }));
+    }
+}
+
+#[test]
+fn quoted_relation_identifiers_are_tokenized_as_single_words() {
+    let index = CompletionIndex::new(&contextual_fixture());
+    for (sql, dialect) in [
+        (
+            "select update_ from \"sys_user\" where update_",
+            SqlDialect::Postgres,
+        ),
+        (
+            "select update_ from `sys_user` where update_",
+            SqlDialect::MySql,
+        ),
+    ] {
+        let candidates = complete(
+            sql,
+            sql.len(),
+            dialect,
+            &index,
+            CompletionContext::default(),
+        );
+        assert!(candidates.iter().any(|candidate| {
+            candidate.kind == CompletionKind::Column && candidate.label == "update_time"
+        }));
+    }
+}
+
+#[test]
+fn join_predicate_sees_both_relation_bindings() {
+    let index = CompletionIndex::new(&multi_relation_fixture());
+    let sql = "select * from users u join roles r on ";
+    let candidates = complete(
+        sql,
+        sql.len(),
+        SqlDialect::Postgres,
+        &index,
+        CompletionContext::default(),
+    );
+    let labels = candidates
+        .iter()
+        .map(|candidate| candidate.label.as_str())
+        .collect::<Vec<_>>();
+
+    assert!(labels.contains(&"user_name"));
+    assert!(labels.contains(&"role_name"));
+    assert!(!labels.contains(&"audit_message"));
+}
+
+#[test]
+fn comma_from_list_sees_each_relation_binding() {
+    let index = CompletionIndex::new(&multi_relation_fixture());
+    let sql = "select  from users u, roles r";
+    let candidates = complete(
+        sql,
+        "select ".len(),
+        SqlDialect::Postgres,
+        &index,
+        CompletionContext::default(),
+    );
+    let labels = candidates
+        .iter()
+        .map(|candidate| candidate.label.as_str())
+        .collect::<Vec<_>>();
+
+    assert!(labels.contains(&"user_name"));
+    assert!(labels.contains(&"role_name"));
+    assert!(!labels.contains(&"audit_message"));
+}
+
+#[test]
+fn alias_qualified_completion_only_uses_that_binding() {
+    let index = CompletionIndex::new(&multi_relation_fixture());
+    let sql = "select r. from users u join roles r on u.id = r.id";
+    let candidates = complete(
+        sql,
+        "select r.".len(),
+        SqlDialect::Postgres,
+        &index,
+        CompletionContext::default(),
+    );
+    let labels = candidates
+        .iter()
+        .map(|candidate| candidate.label.as_str())
+        .collect::<Vec<_>>();
+
+    assert!(labels.contains(&"role_name"));
+    assert!(!labels.contains(&"user_name"));
+}
+
+#[test]
+fn active_schema_resolves_duplicate_unqualified_relations() {
+    let connection = Uuid::new_v4();
+    let mut entries = Vec::new();
+    for (schema_name, column) in [("public", "public_value"), ("audit", "audit_value")] {
+        let schema = CatalogId::new(connection, CatalogKind::Schema, ["app", schema_name]);
+        let table = CatalogId::new(
+            connection,
+            CatalogKind::Table,
+            ["app", schema_name, "events"],
+        );
+        entries.push(
+            CatalogEntry::relation(
+                table.clone(),
+                schema,
+                qualified("app", Some(schema_name), "events"),
+                "table",
+                OptionalMetadata::Supported(None),
+                true,
+            )
+            .unwrap(),
+        );
+        entries.push(
+            CatalogEntry::relation_child(
+                CatalogId::new(
+                    connection,
+                    CatalogKind::Column,
+                    ["app", schema_name, "events", column],
+                ),
+                table,
+                qualified("app", Some(schema_name), column),
+                "column",
+                OptionalMetadata::Unsupported,
+                CatalogMetadata::Column(ColumnMetadata::new(1, "text", true)),
+            )
+            .unwrap(),
+        );
+    }
+    let index = CompletionIndex::new(&entries);
+    let sql = "select  from events";
+    let candidates = complete(
+        sql,
+        "select ".len(),
+        SqlDialect::Postgres,
+        &index,
+        CompletionContext {
+            database: Some("app"),
+            schema: Some("audit"),
+        },
+    );
+    let labels = candidates
+        .iter()
+        .map(|candidate| candidate.label.as_str())
+        .collect::<Vec<_>>();
+
+    assert!(labels.contains(&"audit_value"));
+    assert!(!labels.contains(&"public_value"));
+}
+
+#[test]
+fn subquery_does_not_leak_its_relations_to_the_outer_query() {
+    let index = CompletionIndex::new(&multi_relation_fixture());
+    let sql = "select * from users u where exists (select 1 from roles r) and ";
+    let candidates = complete(
+        sql,
+        sql.len(),
+        SqlDialect::Postgres,
+        &index,
+        CompletionContext::default(),
+    );
+    let labels = candidates
+        .iter()
+        .map(|candidate| candidate.label.as_str())
+        .collect::<Vec<_>>();
+
+    assert!(labels.contains(&"user_name"));
+    assert!(!labels.contains(&"role_name"));
+}
+
+#[test]
+fn correlated_subquery_can_see_enclosing_relations() {
+    let index = CompletionIndex::new(&multi_relation_fixture());
+    let sql = "select * from users u where exists (select 1 from roles r where )";
+    let cursor = sql.len() - 1;
+    let candidates = complete(
+        sql,
+        cursor,
+        SqlDialect::Postgres,
+        &index,
+        CompletionContext::default(),
+    );
+    let labels = candidates
+        .iter()
+        .map(|candidate| candidate.label.as_str())
+        .collect::<Vec<_>>();
+
+    assert!(labels.contains(&"user_name"));
+    assert!(labels.contains(&"role_name"));
+}
+
+#[test]
+fn sibling_subquery_relations_are_not_visible() {
+    let index = CompletionIndex::new(&multi_relation_fixture());
+    let sql = "select * from users u where exists (select 1 from roles r) and exists (select 1 from audit_log a where )";
+    let cursor = sql.len() - 1;
+    let candidates = complete(
+        sql,
+        cursor,
+        SqlDialect::Postgres,
+        &index,
+        CompletionContext::default(),
+    );
+    let labels = candidates
+        .iter()
+        .map(|candidate| candidate.label.as_str())
+        .collect::<Vec<_>>();
+
+    assert!(labels.contains(&"user_name"));
+    assert!(labels.contains(&"audit_message"));
+    assert!(!labels.contains(&"role_name"));
+}
+
 #[test]
 fn relation_completion_ignores_identifier_separators() {
     let index = CompletionIndex::new(&compact_match_fixture());
@@ -337,7 +789,7 @@ fn hostile_display_text_does_not_change_insertion() {
 }
 
 #[test]
-fn general_sql_keywords_rank_before_matching_catalog_names() {
+fn statement_keywords_rank_before_matching_catalog_names() {
     let connection = Uuid::new_v4();
     let nodes = [("sales", "s"), ("data", "d"), ("facts", "f")]
         .into_iter()
@@ -355,7 +807,7 @@ fn general_sql_keywords_rank_before_matching_catalog_names() {
         .collect::<Vec<_>>();
     let index = CompletionIndex::new(&nodes);
 
-    for (prefix, keyword) in [("s", "SELECT"), ("d", "DELETE"), ("f", "FROM")] {
+    for (prefix, keyword) in [("s", "SELECT"), ("d", "DELETE"), ("u", "UPDATE")] {
         let candidates = complete(
             prefix,
             prefix.len(),
@@ -492,7 +944,7 @@ fn app_completion_prefers_the_active_console_target_schema() {
     app.explorer.completion_index = CompletionIndex::new(&entries);
     app.update(Action::ReplaceEditor("select * from or".into()));
     app.update(Action::EditorKey(crossterm::event::KeyEvent::new(
-        crossterm::event::KeyCode::Char('i'),
+        crossterm::event::KeyCode::Char('A'),
         crossterm::event::KeyModifiers::NONE,
     )));
 

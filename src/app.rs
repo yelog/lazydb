@@ -5393,11 +5393,24 @@ impl App {
             .as_ref()
             .map(|snapshot| cursor_byte(&text, snapshot.cursor.line, snapshot.cursor.column))
             .unwrap_or(text.len());
+        let completion_target = self
+            .active_console_opt()
+            .and_then(|tab| tab.execution_target.as_ref())
+            .map(|target| (target.database.clone(), target.schema.clone()));
+        let completion_context = sql::CompletionContext {
+            database: completion_target
+                .as_ref()
+                .map(|(database, _)| database.as_str()),
+            schema: completion_target
+                .as_ref()
+                .and_then(|(_, schema)| schema.as_deref()),
+        };
         let relation_ids = sql::relation_ids_for_completion(
             &text,
             cursor,
             self.sql_dialect(),
             &self.explorer.completion_index,
+            completion_context,
         );
         let mut commands = Vec::new();
         for relation in relation_ids {
@@ -5423,14 +5436,6 @@ impl App {
                 ));
             }
         }
-        let completion_context = self
-            .active_console_opt()
-            .and_then(|tab| tab.execution_target.as_ref())
-            .map(|target| sql::CompletionContext {
-                database: Some(target.database.as_str()),
-                schema: target.schema.as_deref(),
-            })
-            .unwrap_or_default();
         let candidates = sql::complete(
             &text,
             cursor,
