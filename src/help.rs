@@ -6,6 +6,11 @@ pub enum HelpShortcutId {
     FocusResults,
     FocusEditorFromK,
     FocusEditorFromL,
+    ResizeHeightIncrease,
+    ResizeHeightDecrease,
+    ResizeWidthIncrease,
+    ResizeWidthDecrease,
+    ResetPaneSizes,
     PreviousTab,
     NextTab,
     NewConsole,
@@ -73,9 +78,6 @@ pub enum HelpShortcutId {
     ResultsCopyRow,
     ResultsCopyRowWithHeaders,
     ResultsToggleView,
-    ResultsData,
-    ResultsSecondaryView,
-    ResultsPlan,
     RelationWhere,
     RelationOrderBy,
     RelationApplyInputs,
@@ -502,16 +504,6 @@ pub fn shortcuts(context: Focus, relation_data: bool) -> Vec<HelpShortcut> {
                     description: "switch Data / Output",
                 },
                 HelpShortcut {
-                    id: HelpShortcutId::ResultsData,
-                    key: "1",
-                    description: "select Data view",
-                },
-                HelpShortcut {
-                    id: HelpShortcutId::ResultsSecondaryView,
-                    key: "2",
-                    description: "select Output / DDL view",
-                },
-                HelpShortcut {
                     id: HelpShortcutId::ResultsOpenRecordView,
                     key: "v",
                     description: "open Record View",
@@ -570,16 +562,37 @@ pub fn shortcuts(context: Focus, relation_data: bool) -> Vec<HelpShortcut> {
                         description: "refresh relation preview",
                     },
                 ]);
-            } else {
-                results.push(HelpShortcut {
-                    id: HelpShortcutId::ResultsPlan,
-                    key: "3",
-                    description: "select Plan view",
-                });
             }
             results
         }
     });
+    entries.extend([
+        HelpShortcut {
+            id: HelpShortcutId::ResizeHeightIncrease,
+            key: "Ctrl-w +",
+            description: "increase focused pane height",
+        },
+        HelpShortcut {
+            id: HelpShortcutId::ResizeHeightDecrease,
+            key: "Ctrl-w -",
+            description: "decrease focused pane height",
+        },
+        HelpShortcut {
+            id: HelpShortcutId::ResizeWidthIncrease,
+            key: "Ctrl-w >",
+            description: "increase focused pane width",
+        },
+        HelpShortcut {
+            id: HelpShortcutId::ResizeWidthDecrease,
+            key: "Ctrl-w <",
+            description: "decrease focused pane width",
+        },
+        HelpShortcut {
+            id: HelpShortcutId::ResetPaneSizes,
+            key: "Ctrl-w =",
+            description: "restore default pane sizes",
+        },
+    ]);
     entries
 }
 
@@ -615,8 +628,8 @@ mod tests {
             .iter()
             .filter(|row| row.key.starts_with("Ctrl-w"))
             .collect::<Vec<_>>();
-        assert_eq!(rows.len(), 4);
-        assert_eq!(rows.iter().map(|row| row.id).collect::<Vec<_>>().len(), 4);
+        assert_eq!(rows.len(), 9);
+        assert_eq!(rows.iter().map(|row| row.id).collect::<Vec<_>>().len(), 9);
     }
 
     #[test]

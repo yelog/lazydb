@@ -1,6 +1,14 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
-use crate::model::workspace::Focus;
+use crate::model::workspace::{Focus, PaneLayoutMetrics, PaneSizePreferences};
+
+const MIN_EXPLORER_WIDTH: u16 = 34;
+const MAX_DEFAULT_EXPLORER_WIDTH: u16 = 56;
+const MIN_RIGHT_WIDTH: u16 = 60;
+const WORKSPACE_TABS_HEIGHT: u16 = 2;
+const RESULT_TABS_HEIGHT: u16 = 2;
+const MIN_EDITOR_HEIGHT: u16 = 1;
+const MIN_RESULTS_HEIGHT: u16 = 7;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LayoutMode {
@@ -22,10 +30,16 @@ pub struct AppLayout {
     pub results: Option<Rect>,
     pub relation: Option<Rect>,
     pub footer: Rect,
+    pub pane_metrics: PaneLayoutMetrics,
 }
 
 impl AppLayout {
-    pub fn calculate(area: Rect, focus: Focus, is_relation: bool) -> Self {
+    pub fn calculate(
+        area: Rect,
+        focus: Focus,
+        is_relation: bool,
+        preferences: PaneSizePreferences,
+    ) -> Self {
         if area.width < 56 || area.height < 16 {
             return Self {
                 mode: LayoutMode::TooSmall,
@@ -38,6 +52,7 @@ impl AppLayout {
                 results: None,
                 relation: None,
                 footer: Rect::default(),
+                pane_metrics: PaneLayoutMetrics::default(),
             };
         }
 
@@ -66,6 +81,7 @@ impl AppLayout {
                     results: None,
                     relation: None,
                     footer,
+                    pane_metrics: PaneLayoutMetrics::default(),
                 },
                 Focus::Editor => {
                     let (tabs, content) = split_main_content(body);
@@ -80,6 +96,7 @@ impl AppLayout {
                         results: None,
                         relation: is_relation.then_some(content),
                         footer,
+                        pane_metrics: PaneLayoutMetrics::default(),
                     }
                 }
                 Focus::Results => {
@@ -96,6 +113,7 @@ impl AppLayout {
                             results: None,
                             relation: Some(content),
                             footer,
+                            pane_metrics: PaneLayoutMetrics::default(),
                         };
                     }
                     let (tabs, content) = split_main_content(body);
@@ -111,6 +129,7 @@ impl AppLayout {
                         results: Some(result.1),
                         relation: None,
                         footer,
+                        pane_metrics: PaneLayoutMetrics::default(),
                     }
                 }
             };
@@ -121,23 +140,33 @@ impl AppLayout {
         } else {
             LayoutMode::Standard
         };
-        let explorer_width = (area.width / 3).clamp(34, 56);
+        let explorer_width = explorer_width(area.width, preferences.explorer_width);
         let horizontal = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(explorer_width), Constraint::Min(60)])
+            .constraints([
+                Constraint::Length(explorer_width),
+                Constraint::Min(MIN_RIGHT_WIDTH),
+            ])
             .split(body);
         let main = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(2), Constraint::Min(7)])
+            .constraints([
+                Constraint::Length(WORKSPACE_TABS_HEIGHT),
+                Constraint::Min(MIN_EDITOR_HEIGHT + RESULT_TABS_HEIGHT + MIN_RESULTS_HEIGHT),
+            ])
             .split(horizontal[1]);
+        let content_area = main[1];
         let content = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Percentage(46),
-                Constraint::Length(2),
-                Constraint::Min(7),
+                Constraint::Length(editor_height(
+                    content_area.height,
+                    preferences.editor_height,
+                )),
+                Constraint::Length(RESULT_TABS_HEIGHT),
+                Constraint::Min(MIN_RESULTS_HEIGHT),
             ])
-            .split(main[1]);
+            .split(content_area);
         Self {
             mode,
             header,
@@ -149,8 +178,26 @@ impl AppLayout {
             results: (!is_relation).then_some(content[2]),
             relation: is_relation.then_some(main[1]),
             footer,
+            pane_metrics: PaneLayoutMetrics {
+                explorer_width: Some(horizontal[0].width),
+                editor_height: (!is_relation).then_some(content[0].height),
+            },
         }
     }
+}
+
+fn explorer_width(area_width: u16, preference: Option<u16>) -> u16 {
+    let maximum = area_width.saturating_sub(MIN_RIGHT_WIDTH);
+    preference
+        .unwrap_or((area_width / 3).clamp(MIN_EXPLORER_WIDTH, MAX_DEFAULT_EXPLORER_WIDTH))
+        .clamp(MIN_EXPLORER_WIDTH.min(maximum), maximum)
+}
+
+fn editor_height(content_height: u16, preference: Option<u16>) -> u16 {
+    let maximum = content_height.saturating_sub(RESULT_TABS_HEIGHT + MIN_RESULTS_HEIGHT);
+    preference
+        .unwrap_or((content_height * 46 / 100).max(MIN_EDITOR_HEIGHT))
+        .clamp(MIN_EDITOR_HEIGHT.min(maximum), maximum)
 }
 
 fn split_results(area: Rect) -> (Rect, Rect) {
@@ -175,7 +222,12 @@ mod tests {
 
     #[test]
     fn places_workspace_tabs_above_main_content() {
-        let layout = AppLayout::calculate(Rect::new(0, 0, 180, 50), Focus::Editor, false);
+        let layout = AppLayout::calculate(
+            Rect::new(0, 0, 180, 50),
+            Focus::Editor,
+            false,
+            PaneSizePreferences::default(),
+        );
         let explorer = layout.explorer.unwrap();
         let tabs = layout.tabs.unwrap();
         let editor = layout.editor.unwrap();
@@ -189,7 +241,12 @@ mod tests {
 
     #[test]
     fn relation_content_starts_below_workspace_tabs() {
-        let layout = AppLayout::calculate(Rect::new(0, 0, 180, 50), Focus::Results, true);
+        let layout = AppLayout::calculate(
+            Rect::new(0, 0, 180, 50),
+            Focus::Results,
+            true,
+            PaneSizePreferences::default(),
+        );
 
         assert_eq!(layout.relation.unwrap().y, layout.tabs.unwrap().bottom());
         assert_eq!(layout.relation.unwrap().x, layout.tabs.unwrap().x);
@@ -197,7 +254,12 @@ mod tests {
 
     #[test]
     fn narrow_explorer_hides_workspace_tabs() {
-        let layout = AppLayout::calculate(Rect::new(0, 0, 90, 40), Focus::Explorer, false);
+        let layout = AppLayout::calculate(
+            Rect::new(0, 0, 90, 40),
+            Focus::Explorer,
+            false,
+            PaneSizePreferences::default(),
+        );
 
         assert_eq!(layout.tabs, None);
         assert_eq!(layout.explorer, Some(layout.body));
@@ -205,13 +267,75 @@ mod tests {
 
     #[test]
     fn narrow_main_focus_keeps_workspace_tabs_visible() {
-        let editor = AppLayout::calculate(Rect::new(0, 0, 90, 40), Focus::Editor, false);
-        let results = AppLayout::calculate(Rect::new(0, 0, 90, 40), Focus::Results, false);
+        let editor = AppLayout::calculate(
+            Rect::new(0, 0, 90, 40),
+            Focus::Editor,
+            false,
+            PaneSizePreferences::default(),
+        );
+        let results = AppLayout::calculate(
+            Rect::new(0, 0, 90, 40),
+            Focus::Results,
+            false,
+            PaneSizePreferences::default(),
+        );
 
         assert_eq!(editor.editor.unwrap().y, editor.tabs.unwrap().bottom());
         assert_eq!(
             results.result_tabs.unwrap().y,
             results.tabs.unwrap().bottom()
         );
+    }
+
+    #[test]
+    fn explicit_preferences_control_split_sizes() {
+        let layout = AppLayout::calculate(
+            Rect::new(0, 0, 180, 50),
+            Focus::Editor,
+            false,
+            PaneSizePreferences {
+                explorer_width: Some(70),
+                editor_height: Some(20),
+            },
+        );
+
+        assert_eq!(layout.explorer.unwrap().width, 70);
+        assert_eq!(layout.editor.unwrap().height, 20);
+        assert_eq!(layout.pane_metrics.explorer_width, Some(70));
+        assert_eq!(layout.pane_metrics.editor_height, Some(20));
+    }
+
+    #[test]
+    fn explicit_preferences_are_clamped_to_available_space() {
+        let layout = AppLayout::calculate(
+            Rect::new(0, 0, 120, 30),
+            Focus::Editor,
+            false,
+            PaneSizePreferences {
+                explorer_width: Some(u16::MAX),
+                editor_height: Some(u16::MAX),
+            },
+        );
+
+        assert_eq!(layout.explorer.unwrap().width, 60);
+        assert_eq!(layout.editor.unwrap().height, 15);
+        assert_eq!(layout.results.unwrap().height, 7);
+    }
+
+    #[test]
+    fn relation_layout_has_no_editor_height_metric() {
+        let layout = AppLayout::calculate(
+            Rect::new(0, 0, 180, 50),
+            Focus::Results,
+            true,
+            PaneSizePreferences {
+                explorer_width: Some(70),
+                editor_height: Some(20),
+            },
+        );
+
+        assert_eq!(layout.pane_metrics.explorer_width, Some(70));
+        assert_eq!(layout.pane_metrics.editor_height, None);
+        assert_eq!(layout.relation.unwrap().height, layout.body.height - 2);
     }
 }

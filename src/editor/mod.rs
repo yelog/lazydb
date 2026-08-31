@@ -11,7 +11,7 @@ use crate::model::{
         EditorRenderLine, EditorRenderSnapshot, EditorRenderSpan, EditorSelection,
         EditorSelectionShape, EditorViewport,
     },
-    workspace::Focus,
+    workspace::{Focus, PaneResize, pane_resize},
 };
 use crate::security::project_editor_line;
 use crate::sql::{self, ScopeKind, ScopeSelection, SqlDialect, TextRange};
@@ -51,6 +51,8 @@ pub(crate) enum EditorEffect {
     DeleteConsole,
     OpenSqlEditorList,
     FocusPane(Focus),
+    ResizePane(PaneResize),
+    ResetPaneSizes,
     NextTab,
     PreviousTab,
     ShowHelp,
@@ -167,6 +169,7 @@ struct EditorSession {
     viewport: modalkit::prelude::ViewportContext<modalkit::editing::cursor::Cursor>,
     keys: VimKeyManager,
     pending_binding: Option<PendingBinding>,
+    pending_count: Option<u32>,
     current_sequence: Vec<EditorKey>,
     last_sequence: Option<Vec<EditorKey>>,
     mode: EditorMode,
@@ -225,7 +228,7 @@ struct PendingSubstitute {
 enum PendingBinding {
     Leader,
     LeaderTransaction,
-    Window,
+    Window(u32),
     Goto,
 }
 
@@ -291,6 +294,7 @@ impl EditorWorkspace {
                 viewport: Default::default(),
                 keys,
                 pending_binding: None,
+                pending_count: None,
                 current_sequence: Vec::new(),
                 last_sequence: None,
                 mode,
@@ -906,6 +910,57 @@ impl EditorWorkspace {
             return self.press_prompt(id, key);
         }
         let mode = self.mode(id)?;
+        if mode == EditorMode::Normal {
+            if self
+                .sessions
+                .get(&id)
+                .is_some_and(|session| session.pending_count.is_none())
+                && let EditorKey::Character(character @ '1'..='9') = key
+            {
+                let session = self
+                    .sessions
+                    .get_mut(&id)
+                    .ok_or(EditorError::MissingSession(id))?;
+                session.pending_count = Some(character.to_digit(10).unwrap_or(1));
+                return Ok(());
+            }
+            if let Some(count) = self
+                .sessions
+                .get(&id)
+                .and_then(|session| session.pending_count)
+            {
+                if let EditorKey::Character(character @ '0'..='9') = key {
+                    let session = self
+                        .sessions
+                        .get_mut(&id)
+                        .ok_or(EditorError::MissingSession(id))?;
+                    session.pending_count = Some(
+                        count
+                            .saturating_mul(10)
+                            .saturating_add(character.to_digit(10).unwrap_or(0)),
+                    );
+                    return Ok(());
+                }
+                if key == EditorKey::Control('w') {
+                    self.sessions
+                        .get_mut(&id)
+                        .ok_or(EditorError::MissingSession(id))?
+                        .pending_binding = Some(PendingBinding::Window(count));
+                    self.sessions
+                        .get_mut(&id)
+                        .ok_or(EditorError::MissingSession(id))?
+                        .pending_count = None;
+                    return Ok(());
+                }
+                self.sessions
+                    .get_mut(&id)
+                    .ok_or(EditorError::MissingSession(id))?
+                    .pending_count = None;
+                for digit in count.to_string().chars() {
+                    self.input_vim_key(id, EditorKey::Character(digit))?;
+                }
+            }
+        }
         match (mode, key) {
             (EditorMode::Normal, EditorKey::Character('Q')) => {
                 self.effects.push(EditorEffect::Quit);
@@ -947,7 +1002,7 @@ impl EditorWorkspace {
                 self.sessions
                     .get_mut(&id)
                     .ok_or(EditorError::MissingSession(id))?
-                    .pending_binding = Some(PendingBinding::Window);
+                    .pending_binding = Some(PendingBinding::Window(1));
                 Ok(())
             }
             (EditorMode::Normal, EditorKey::Character('g')) => {
@@ -1239,13 +1294,19 @@ impl EditorWorkspace {
                 (PendingBinding::LeaderTransaction, 'r') => {
                     self.effects.push(EditorEffect::Rollback)
                 }
-                (PendingBinding::Window, 'h') => {
+                (PendingBinding::Window(_), 'h') => {
                     self.effects.push(EditorEffect::FocusPane(Focus::Explorer))
                 }
-                (PendingBinding::Window, 'j') => {
+                (PendingBinding::Window(_), 'j') => {
                     self.effects.push(EditorEffect::FocusPane(Focus::Results))
                 }
-                (PendingBinding::Window, 'k' | 'l') => {}
+                (PendingBinding::Window(count), operator @ ('+' | '-' | '>' | '<')) => {
+                    if let Some(resize) = pane_resize(Focus::Editor, operator, count) {
+                        self.effects.push(EditorEffect::ResizePane(resize));
+                    }
+                }
+                (PendingBinding::Window(_), '=') => self.effects.push(EditorEffect::ResetPaneSizes),
+                (PendingBinding::Window(_), 'k' | 'l') => {}
                 (PendingBinding::Goto, 'g') => self.input_vim_key(id, EditorKey::Character('g'))?,
                 (PendingBinding::Goto, 't') => self.effects.push(EditorEffect::NextTab),
                 (PendingBinding::Goto, 'T') => self.effects.push(EditorEffect::PreviousTab),

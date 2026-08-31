@@ -18,7 +18,8 @@ const SEQUENCE_TIMEOUT: Duration = Duration::from_millis(750);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Pending {
     Leader,
-    Window,
+    Window { count: u32 },
+    WindowCount { count: u32 },
     Previous,
     Next,
     RelationYank,
@@ -373,18 +374,60 @@ impl Keymap {
                 .get(app.active_tab)
                 .is_some_and(|tab| tab_id == tab.id())
         {
+            if let Pending::WindowCount { count } = pending {
+                if event.modifiers.is_empty()
+                    && let KeyCode::Char(character @ '0'..='9') = event.code
+                {
+                    self.pending = Some((
+                        Pending::WindowCount {
+                            count: count
+                                .saturating_mul(10)
+                                .saturating_add(character.to_digit(10).unwrap_or(0)),
+                        },
+                        started,
+                        focus,
+                        editor_mode,
+                        tab_id,
+                    ));
+                    return None;
+                }
+                if event.modifiers == KeyModifiers::CONTROL && event.code == KeyCode::Char('w') {
+                    self.pending = Some((
+                        Pending::Window { count },
+                        started,
+                        focus,
+                        editor_mode,
+                        tab_id,
+                    ));
+                    return None;
+                }
+                return None;
+            }
             if let Some(action) = map_pending(pending, event, app) {
                 return Some(action);
             }
             if matches!(
                 pending,
-                Pending::Window
+                Pending::Window { .. }
                     | Pending::RecordViewGoto
                     | Pending::GridAlign
                     | Pending::ExplorerAlign
             ) {
                 return None;
             }
+        }
+
+        if app.focus != Focus::Editor
+            && event.modifiers.is_empty()
+            && let KeyCode::Char(character @ '1'..='9') = event.code
+        {
+            self.set_pending(
+                Pending::WindowCount {
+                    count: character.to_digit(10).unwrap_or(1),
+                },
+                app,
+            );
+            return None;
         }
 
         if is_relation_ddl_focus(app)
@@ -568,7 +611,7 @@ impl Keymap {
                 }
                 KeyCode::Char('w') if app.focus == Focus::Editor => Some(Action::EditorKey(event)),
                 KeyCode::Char('w') => {
-                    self.set_pending(Pending::Window, app);
+                    self.set_pending(Pending::Window { count: 1 }, app);
                     None
                 }
                 KeyCode::Char('c') => {
@@ -712,7 +755,7 @@ fn map_pending(pending: Pending, event: KeyEvent, app: &App) -> Option<Action> {
         || (pending == Pending::Goto
             && event.modifiers == KeyModifiers::SHIFT
             && event.code == KeyCode::Char('T'))
-        || pending == Pending::Window;
+        || matches!(pending, Pending::Window { .. });
     if !valid_modifiers {
         return None;
     }
@@ -732,28 +775,32 @@ fn map_pending(pending: Pending, event: KeyEvent, app: &App) -> Option<Action> {
             })
         }
         (Pending::RelationYank, KeyCode::Char('y')) => Some(Action::RelationYank),
-        (Pending::Window, KeyCode::Char('j')) if app.focus == Focus::Editor => {
+        (Pending::Window { .. }, KeyCode::Char('j')) if app.focus == Focus::Editor => {
             Some(Action::Focus(Focus::Results))
         }
-        (Pending::Window, KeyCode::Char('k'))
+        (Pending::Window { .. }, KeyCode::Char('k'))
             if app.focus == Focus::Results && !app.is_active_relation_tab() =>
         {
             Some(Action::Focus(Focus::Editor))
         }
-        (Pending::Window, KeyCode::Char('l')) if app.focus == Focus::Explorer => {
+        (Pending::Window { .. }, KeyCode::Char('l')) if app.focus == Focus::Explorer => {
             Some(Action::Focus(if app.is_active_relation_tab() {
                 Focus::Results
             } else {
                 Focus::Editor
             }))
         }
-        (Pending::Window, KeyCode::Char('h')) if app.focus == Focus::Editor => {
+        (Pending::Window { .. }, KeyCode::Char('h')) if app.focus == Focus::Editor => {
             Some(Action::Focus(Focus::Explorer))
         }
-        (Pending::Window, KeyCode::Char('h')) if app.focus == Focus::Results => {
+        (Pending::Window { .. }, KeyCode::Char('h')) if app.focus == Focus::Results => {
             Some(Action::Focus(Focus::Explorer))
         }
-        (Pending::Window, KeyCode::Char('j')) if app.focus == Focus::Explorer => None,
+        (Pending::Window { .. }, KeyCode::Char('j')) if app.focus == Focus::Explorer => None,
+        (Pending::Window { count }, KeyCode::Char(operator @ ('+' | '-' | '>' | '<'))) => {
+            crate::model::workspace::pane_resize(app.focus, operator, count).map(Action::ResizePane)
+        }
+        (Pending::Window { .. }, KeyCode::Char('=')) => Some(Action::ResetPaneSizes),
         (Pending::Goto, KeyCode::Char('g')) if app.focus == Focus::Explorer => Some(
             Action::ExplorerSelectTarget(crate::model::explorer::ExplorerNodeTarget::First),
         ),
@@ -1263,30 +1310,6 @@ fn map_results(code: KeyCode, app: &App) -> Option<Action> {
                 }))
             }
             _ => Some(Action::ToggleResultView),
-        },
-        KeyCode::Char('1') => match app.tabs.get(app.active_tab) {
-            Some(crate::model::tab::WorkspaceTab::Relation(_)) => Some(Action::SetRelationView(
-                crate::model::relation::RelationView::Data,
-            )),
-            Some(crate::model::tab::WorkspaceTab::Sql(_)) => {
-                Some(Action::SetResultView(crate::model::tab::ResultView::Data))
-            }
-            _ => None,
-        },
-        KeyCode::Char('2') => match app.tabs.get(app.active_tab) {
-            Some(crate::model::tab::WorkspaceTab::Relation(_)) => Some(Action::SetRelationView(
-                crate::model::relation::RelationView::Ddl,
-            )),
-            Some(crate::model::tab::WorkspaceTab::Sql(_)) => {
-                Some(Action::SetResultView(crate::model::tab::ResultView::Output))
-            }
-            _ => None,
-        },
-        KeyCode::Char('3') => match app.tabs.get(app.active_tab) {
-            Some(crate::model::tab::WorkspaceTab::Sql(_)) => {
-                Some(Action::SetResultView(crate::model::tab::ResultView::Plan))
-            }
-            _ => None,
         },
         _ => None,
     }

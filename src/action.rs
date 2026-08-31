@@ -19,7 +19,7 @@ use crate::{
         profile_manager::{
             DiscoveryFingerprint, ProfileChange, ProfileField, ProfileInput, ProfileSubmission,
         },
-        workspace::{ConnectionIdentity, Focus},
+        workspace::{ConnectionIdentity, Focus, PaneLayoutMetrics, PaneResize},
     },
     persistence::secrets::SecretStoreAvailability,
     profile::{ConnectionProfile, DatabaseKind},
@@ -44,6 +44,9 @@ pub enum Action {
     FocusNext,
     FocusPrevious,
     Focus(Focus),
+    ResizePane(PaneResize),
+    ResetPaneSizes,
+    PaneLayoutChanged(PaneLayoutMetrics),
     ShowHelp,
     DismissOverlay,
     HelpInsert(char),

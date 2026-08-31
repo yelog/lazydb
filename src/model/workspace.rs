@@ -49,6 +49,56 @@ impl Focus {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PaneSizePreferences {
+    pub explorer_width: Option<u16>,
+    pub editor_height: Option<u16>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PaneLayoutMetrics {
+    pub explorer_width: Option<u16>,
+    pub editor_height: Option<u16>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PaneSplit {
+    ExplorerWidth,
+    EditorHeight,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PaneResize {
+    pub split: PaneSplit,
+    pub delta: i32,
+}
+
+pub fn pane_resize(focus: Focus, operator: char, count: u32) -> Option<PaneResize> {
+    let step = i32::try_from(count).ok()?;
+    if step == 0 {
+        return None;
+    }
+
+    let (split, direction) = match (focus, operator) {
+        (Focus::Explorer, '>') => (PaneSplit::ExplorerWidth, 1),
+        (Focus::Explorer, '<') => (PaneSplit::ExplorerWidth, -1),
+        (Focus::Editor, '+') => (PaneSplit::EditorHeight, 1),
+        (Focus::Editor, '-') => (PaneSplit::EditorHeight, -1),
+        (Focus::Editor, '>') => (PaneSplit::ExplorerWidth, -1),
+        (Focus::Editor, '<') => (PaneSplit::ExplorerWidth, 1),
+        (Focus::Results, '+') => (PaneSplit::EditorHeight, -1),
+        (Focus::Results, '-') => (PaneSplit::EditorHeight, 1),
+        (Focus::Results, '>') => (PaneSplit::ExplorerWidth, -1),
+        (Focus::Results, '<') => (PaneSplit::ExplorerWidth, 1),
+        _ => return None,
+    };
+
+    Some(PaneResize {
+        split,
+        delta: step * direction,
+    })
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Overlay {
     Help(HelpState),
@@ -1197,11 +1247,49 @@ fn catalog_count_label(count: crate::db::catalog::CatalogCount) -> Option<String
 
 #[cfg(test)]
 mod tests {
-    use super::entry_detail;
+    use super::{Focus, PaneResize, PaneSplit, entry_detail, pane_resize};
     use crate::db::catalog::{
         CatalogEntry, CatalogId, CatalogKind, CatalogMetadata, ColumnMetadata, OptionalMetadata,
     };
     use uuid::Uuid;
+
+    #[test]
+    fn pane_resize_maps_focused_operations_to_split_deltas() {
+        assert_eq!(
+            pane_resize(Focus::Explorer, '>', 3),
+            Some(PaneResize {
+                split: PaneSplit::ExplorerWidth,
+                delta: 3,
+            })
+        );
+        assert_eq!(
+            pane_resize(Focus::Editor, '+', 2),
+            Some(PaneResize {
+                split: PaneSplit::EditorHeight,
+                delta: 2,
+            })
+        );
+        assert_eq!(
+            pane_resize(Focus::Results, '+', 2),
+            Some(PaneResize {
+                split: PaneSplit::EditorHeight,
+                delta: -2,
+            })
+        );
+        assert_eq!(
+            pane_resize(Focus::Editor, '>', 2),
+            Some(PaneResize {
+                split: PaneSplit::ExplorerWidth,
+                delta: -2,
+            })
+        );
+    }
+
+    #[test]
+    fn pane_resize_rejects_unsupported_or_zero_operations() {
+        assert_eq!(pane_resize(Focus::Explorer, '+', 1), None);
+        assert_eq!(pane_resize(Focus::Editor, '+', 0), None);
+    }
 
     fn column_detail(
         native_type: &str,
