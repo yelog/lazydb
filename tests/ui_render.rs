@@ -287,6 +287,58 @@ fn render_with_icons(app: &App, width: u16, height: u16, icons: IconSet) -> (Str
     (output, state)
 }
 
+fn render_buffer_with_icons(
+    app: &App,
+    width: u16,
+    height: u16,
+    icons: IconSet,
+) -> (ratatui::buffer::Buffer, UiState) {
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut state = UiState::new();
+    terminal
+        .draw(|frame| ui::render_with_state_using_icons(frame, app, &mut state, icons))
+        .unwrap();
+    (terminal.backend().buffer().clone(), state)
+}
+
+fn find_ascii_cells(buffer: &ratatui::buffer::Buffer, y: u16, text: &str) -> Option<u16> {
+    let width = buffer.area.width;
+    (0..width).find(|start| {
+        text.chars().enumerate().all(|(offset, character)| {
+            let x = start.saturating_add(offset as u16);
+            x < width && buffer[(x, y)].symbol() == character.to_string()
+        })
+    })
+}
+
+fn completion_app(sql: &str, replace: TextRange, label: &str) -> App {
+    let mut app = fixture();
+    app.focus = Focus::Editor;
+    app.update(Action::ReplaceEditor(String::new()));
+    app.update(Action::EditorKey(KeyEvent::new(
+        KeyCode::Char('i'),
+        KeyModifiers::NONE,
+    )));
+    app.update(Action::EditorPaste(sql.into()));
+    app.active_console_mut().completion = Some(CompletionPopup {
+        candidates: vec![CompletionCandidate {
+            label: label.into(),
+            insert_text: label.into(),
+            kind: CompletionKind::Table,
+            detail: Some("(main)".into()),
+            replace,
+            score: CompletionScore {
+                context: 3,
+                name_match: 2,
+                schema: 1,
+            },
+        }],
+        selected: 0,
+    });
+    app
+}
+
 #[test]
 fn workspace_tabs_use_content_icons_instead_of_sequence_numbers() {
     let mut app = fixture();
@@ -916,7 +968,7 @@ fn execution_confirmation_preview_is_sanitized_and_shows_scope() {
 }
 
 #[test]
-fn completion_popup_is_anchored_below_the_editor_cursor() {
+fn completion_candidate_label_aligns_with_identifier_start() {
     let mut app = fixture();
     app.focus = Focus::Editor;
     app.update(Action::ReplaceEditor(String::new()));
@@ -924,27 +976,24 @@ fn completion_popup_is_anchored_below_the_editor_cursor() {
         KeyCode::Char('i'),
         KeyModifiers::NONE,
     )));
-    app.update(Action::EditorKey(KeyEvent::new(
-        KeyCode::Char('s'),
-        KeyModifiers::NONE,
-    )));
+    app.update(Action::EditorPaste("SELECT * FROM sys_u".into()));
     app.active_console_mut().completion = Some(CompletionPopup {
         candidates: vec![CompletionCandidate {
-            label: "SELECT".into(),
-            insert_text: "SELECT".into(),
-            kind: CompletionKind::Keyword,
-            detail: Some("keyword".into()),
-            replace: TextRange::new(0, 1),
+            label: "sys_user".into(),
+            insert_text: "sys_user".into(),
+            kind: CompletionKind::Table,
+            detail: Some("(main)".into()),
+            replace: TextRange::new(14, 19),
             score: CompletionScore {
-                context: 4,
+                context: 3,
                 name_match: 2,
-                schema: 0,
+                schema: 1,
             },
         }],
         selected: 0,
     });
 
-    let (_, state) = render_with_state(&app, 120, 36);
+    let (buffer, state) = render_buffer_with_icons(&app, 120, 36, IconSet::new(IconMode::Ascii));
     let editor = state
         .hit_regions
         .iter()
@@ -953,11 +1002,187 @@ fn completion_popup_is_anchored_below_the_editor_cursor() {
         })
         .unwrap();
     let popup = state.completion_popup.unwrap();
+    let identifier_x = (editor.y..popup.y)
+        .find_map(|y| find_ascii_cells(&buffer, y, "sys_u"))
+        .expect("SQL identifier");
+    let candidate_x = find_ascii_cells(&buffer, popup.y, "sys_user").expect("completion candidate");
 
     assert_eq!(popup.y, editor.y + 2);
-    assert!(popup.x < editor.x + editor.width / 2);
+    assert_eq!(candidate_x, identifier_x);
     assert!(popup.right() <= editor.right());
     assert!(popup.bottom() <= editor.bottom());
+}
+
+#[test]
+fn completion_candidate_labels_share_a_fixed_icon_column() {
+    let mut app = fixture();
+    app.focus = Focus::Editor;
+    app.update(Action::ReplaceEditor(String::new()));
+    app.update(Action::EditorKey(KeyEvent::new(
+        KeyCode::Char('i'),
+        KeyModifiers::NONE,
+    )));
+    app.update(Action::EditorPaste("SELECT * FROM sy".into()));
+    app.active_console_mut().completion = Some(CompletionPopup {
+        candidates: vec![
+            CompletionCandidate {
+                label: "sys_user".into(),
+                insert_text: "sys_user".into(),
+                kind: CompletionKind::Table,
+                detail: None,
+                replace: TextRange::new(14, 16),
+                score: CompletionScore {
+                    context: 3,
+                    name_match: 2,
+                    schema: 1,
+                },
+            },
+            CompletionCandidate {
+                label: "RETURNING".into(),
+                insert_text: "RETURNING".into(),
+                kind: CompletionKind::Keyword,
+                detail: None,
+                replace: TextRange::new(14, 16),
+                score: CompletionScore {
+                    context: 1,
+                    name_match: 2,
+                    schema: 0,
+                },
+            },
+        ],
+        selected: 0,
+    });
+
+    let (buffer, state) = render_buffer_with_icons(&app, 120, 36, IconSet::new(IconMode::Ascii));
+    let popup = state.completion_popup.unwrap();
+
+    assert_eq!(
+        find_ascii_cells(&buffer, popup.y, "sys_user"),
+        find_ascii_cells(&buffer, popup.y + 1, "RETURNING")
+    );
+}
+
+#[test]
+fn completion_popup_stays_fixed_while_typing() {
+    let cases = [
+        ("SELECT * FROM s", TextRange::new(14, 15)),
+        ("SELECT * FROM sy", TextRange::new(14, 16)),
+        ("SELECT * FROM sys", TextRange::new(14, 17)),
+        ("SELECT * FROM sys_", TextRange::new(14, 18)),
+        ("SELECT * FROM sys_u", TextRange::new(14, 19)),
+    ];
+    let mut popup_xs = Vec::new();
+    let mut label_xs = Vec::new();
+    let mut identifier_xs = Vec::new();
+
+    for (sql, replace) in cases {
+        let app = completion_app(sql, replace, "sys_user");
+        let (buffer, state) =
+            render_buffer_with_icons(&app, 120, 36, IconSet::new(IconMode::Ascii));
+        let popup = state.completion_popup.unwrap();
+        let identifier = &sql[replace.start..replace.end];
+        let source_needle = format!("FROM {identifier}");
+        popup_xs.push(popup.x);
+        label_xs.push(find_ascii_cells(&buffer, popup.y, "sys_user").unwrap());
+        identifier_xs.push(
+            (0..popup.y)
+                .find_map(|y| find_ascii_cells(&buffer, y, &source_needle))
+                .map(|x| x + "FROM ".len() as u16)
+                .unwrap(),
+        );
+    }
+
+    assert!(popup_xs.windows(2).all(|pair| pair[0] == pair[1]));
+    assert!(label_xs.windows(2).all(|pair| pair[0] == pair[1]));
+    assert_eq!(label_xs, identifier_xs);
+}
+
+#[test]
+fn completion_popup_keeps_origin_when_candidate_width_changes() {
+    let sql = "SELECT * FROM                         sys_u";
+    let start = sql.find("sys_u").unwrap();
+    let replace = TextRange::new(start, start + "sys_u".len());
+    let short = completion_app(sql, replace, "sys_user");
+    let long = completion_app(
+        sql,
+        replace,
+        "sys_user_with_a_candidate_name_that_exceeds_the_viewport",
+    );
+
+    let (_, short_state) = render_with_state(&short, 80, 24);
+    let (_, long_state) = render_with_state(&long, 80, 24);
+    let short_popup = short_state.completion_popup.unwrap();
+    let long_popup = long_state.completion_popup.unwrap();
+
+    assert_eq!(short_popup.x, long_popup.x);
+    assert!(short_popup.right() <= 80);
+    assert!(long_popup.right() <= 80);
+    assert!(long_popup.width >= short_popup.width);
+}
+
+#[test]
+fn completion_label_alignment_handles_multiline_tabs_and_wide_characters() {
+    let sql = "SELECT '界🙂';\n\tFROM sys_u";
+    let start = sql.find("sys_u").unwrap();
+    let app = completion_app(
+        sql,
+        TextRange::new(start, start + "sys_u".len()),
+        "sys_user",
+    );
+    let (buffer, state) = render_buffer_with_icons(&app, 120, 36, IconSet::new(IconMode::Ascii));
+    let popup = state.completion_popup.unwrap();
+    let identifier_x = (0..popup.y)
+        .find_map(|y| find_ascii_cells(&buffer, y, "FROM sys_u"))
+        .map(|x| x + "FROM ".len() as u16)
+        .unwrap();
+    let candidate_x = find_ascii_cells(&buffer, popup.y, "sys_user").unwrap();
+
+    assert_eq!(candidate_x, identifier_x);
+}
+
+#[test]
+fn completion_popup_stays_in_editor_when_identifier_starts_at_column_zero() {
+    let app = completion_app("sys_u", TextRange::new(0, 5), "sys_user");
+    let (buffer, state) = render_buffer_with_icons(&app, 80, 24, IconSet::new(IconMode::Ascii));
+    let editor = state
+        .hit_regions
+        .iter()
+        .find_map(|region| {
+            (region.target == HitTarget::Focus(Focus::Editor)).then_some(region.area)
+        })
+        .unwrap();
+    let popup = state.completion_popup.unwrap();
+    let identifier_x = (editor.y..popup.y)
+        .find_map(|y| find_ascii_cells(&buffer, y, "sys_u"))
+        .unwrap();
+    let candidate_x = find_ascii_cells(&buffer, popup.y, "sys_user").unwrap();
+
+    assert_eq!(candidate_x, identifier_x);
+    assert!(popup.x >= editor.x);
+    assert!(popup.right() <= editor.right());
+}
+
+#[test]
+fn completion_label_alignment_supports_every_icon_mode() {
+    let sql = "SELECT * FROM sys_u";
+    let start = sql.find("sys_u").unwrap();
+    let app = completion_app(
+        sql,
+        TextRange::new(start, start + "sys_u".len()),
+        "sys_user",
+    );
+
+    for mode in [IconMode::NerdFont, IconMode::Unicode, IconMode::Ascii] {
+        let (buffer, state) = render_buffer_with_icons(&app, 120, 36, IconSet::new(mode));
+        let popup = state.completion_popup.unwrap();
+        let identifier_x = (0..popup.y)
+            .find_map(|y| find_ascii_cells(&buffer, y, "FROM sys_u"))
+            .map(|x| x + "FROM ".len() as u16)
+            .unwrap();
+        let candidate_x = find_ascii_cells(&buffer, popup.y, "sys_user").unwrap();
+
+        assert_eq!(candidate_x, identifier_x, "icon mode: {mode:?}");
+    }
 }
 
 #[test]
