@@ -1646,6 +1646,7 @@ fn sql_data_before_first_execution_has_a_quiet_disabled_query_bar() {
     );
 }
 
+#[test]
 fn sql_result_query_completion_is_rendered_above_the_grid() {
     let mut app = fixture();
     app.active_console_mut().query.capability = lazydb::model::data_query::DataQueryCapability::Sql;
