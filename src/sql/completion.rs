@@ -156,10 +156,46 @@ fn entry_in_scope(entry: &CatalogEntry, scope: &CatalogScope) -> bool {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Context {
+    Statement,
     Relation,
+    Expression(ExpressionContext),
     Qualifier,
     Routine,
-    General,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExpressionContext {
+    Projection,
+    Predicate,
+    Grouping,
+    Ordering,
+    Returning,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum CompletionTokenKind {
+    Word(String),
+    Dot,
+    Comma,
+    LeftParen,
+    RightParen,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CompletionToken {
+    kind: CompletionTokenKind,
+    start: usize,
+    end: usize,
+    depth: usize,
+    scope_start: Option<usize>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RelationBinding {
+    name: Vec<String>,
+    alias: Option<String>,
+    depth: usize,
+    scope_start: Option<usize>,
 }
 
 pub fn complete(
@@ -171,22 +207,43 @@ pub fn complete(
 ) -> Vec<CompletionCandidate> {
     let cursor = cursor.min(text.len());
     let (replace, prefix, qualifiers) = identifier_at(text, cursor, dialect);
-    let context = context_at(text, replace.start, dialect);
-    let statement = current_statement_text(text, replace.start, dialect);
-    let bindings = relation_bindings(statement, dialect);
+    let (statement, statement_cursor) = current_statement(text, replace.start, dialect);
+    let tokens = completion_tokens(statement, dialect);
+    let active_scopes = active_scope_starts(&tokens, statement_cursor);
+    let context = context_at(
+        &tokens,
+        statement_cursor,
+        active_scopes.last().copied().flatten(),
+    );
+    let bindings = visible_relation_bindings(&tokens, &active_scopes);
+    let visible_relations = bindings
+        .iter()
+        .flat_map(|binding| relation_ids(index, binding, completion_context))
+        .collect::<HashSet<_>>();
     let mut candidates = Vec::new();
     let folded_prefix = fold_identifier(&prefix);
-    let candidate_indexes =
-        qualified_candidate_indices(index, &qualifiers, &folded_prefix, &bindings);
+    let candidate_indexes = qualified_candidate_indices(
+        index,
+        &qualifiers,
+        &folded_prefix,
+        &bindings,
+        completion_context,
+    );
     for node_index in candidate_indexes {
         let entry = &index.entries[node_index];
         let Some(kind) = completion_kind(entry.kind) else {
             continue;
         };
+        if !catalog_kind_allowed(context, kind) {
+            continue;
+        }
         if kind == CompletionKind::Column
             && qualifiers.is_empty()
             && !bindings.is_empty()
-            && !entry_belongs_to_binding(entry, index, &bindings)
+            && !entry
+                .parent_id
+                .as_ref()
+                .is_some_and(|parent| visible_relations.contains(parent))
         {
             continue;
         }
@@ -199,33 +256,10 @@ pub fn complete(
         let Some(name_match) = identifier_match(name, &prefix) else {
             continue;
         };
-        if context == Context::Relation
-            && !matches!(
-                kind,
-                CompletionKind::Database
-                    | CompletionKind::Schema
-                    | CompletionKind::Table
-                    | CompletionKind::View
-            )
-        {
-            continue;
-        }
-        if context == Context::Qualifier
-            && !matches!(
-                kind,
-                CompletionKind::Column | CompletionKind::Table | CompletionKind::View
-            )
-        {
-            continue;
-        }
-        if context == Context::Routine
-            && !matches!(kind, CompletionKind::Function | CompletionKind::Procedure)
-        {
-            continue;
-        }
         let context_score = match (context, kind) {
             (Context::Relation, CompletionKind::Table | CompletionKind::View)
             | (Context::Qualifier, CompletionKind::Column)
+            | (Context::Expression(_), CompletionKind::Column)
             | (Context::Routine, CompletionKind::Function | CompletionKind::Procedure) => 3,
             (_, CompletionKind::Keyword) => 1,
             _ => 2,
@@ -263,7 +297,7 @@ pub fn complete(
         });
     }
     if qualifiers.is_empty() {
-        for keyword in keywords(dialect) {
+        for keyword in keywords(context, dialect) {
             if keyword.to_lowercase().starts_with(&folded_prefix) {
                 candidates.push(CompletionCandidate {
                     label: (*keyword).to_owned(),
@@ -273,7 +307,8 @@ pub fn complete(
                     replace,
                     score: CompletionScore {
                         context: match context {
-                            Context::General => 4,
+                            Context::Statement => 4,
+                            Context::Expression(_) => 2,
                             Context::Relation | Context::Routine => 1,
                             Context::Qualifier => 0,
                         },
@@ -299,12 +334,17 @@ pub fn relation_ids_for_completion(
     cursor: usize,
     dialect: SqlDialect,
     index: &CompletionIndex,
+    completion_context: CompletionContext<'_>,
 ) -> Vec<CatalogId> {
     let cursor = cursor.min(text.len());
-    let statement = current_statement_text(text, cursor, dialect);
-    relation_bindings(statement, dialect)
+    let (statement, statement_cursor) = current_statement(text, cursor, dialect);
+    let tokens = completion_tokens(statement, dialect);
+    let active_scopes = active_scope_starts(&tokens, statement_cursor);
+    visible_relation_bindings(&tokens, &active_scopes)
         .into_iter()
-        .flat_map(|(relation, _)| relation_parents(index, &relation))
+        .flat_map(|binding| relation_ids(index, &binding, completion_context))
+        .collect::<HashSet<_>>()
+        .into_iter()
         .collect()
 }
 
@@ -461,31 +501,68 @@ fn completion_kind(kind: CatalogKind) -> Option<CompletionKind> {
     })
 }
 
-fn context_at(text: &str, start: usize, dialect: SqlDialect) -> Context {
-    let before = text[..start].to_ascii_lowercase();
-    let word = before.split_whitespace().last().unwrap_or_default();
-    let relation = [" from ", " join ", " update ", " into "]
+fn catalog_kind_allowed(context: Context, kind: CompletionKind) -> bool {
+    match context {
+        Context::Statement => false,
+        Context::Relation => matches!(
+            kind,
+            CompletionKind::Database
+                | CompletionKind::Schema
+                | CompletionKind::Table
+                | CompletionKind::View
+        ),
+        Context::Expression(_) => {
+            matches!(kind, CompletionKind::Column | CompletionKind::Function)
+        }
+        Context::Qualifier => matches!(
+            kind,
+            CompletionKind::Column | CompletionKind::Table | CompletionKind::View
+        ),
+        Context::Routine => {
+            matches!(kind, CompletionKind::Function | CompletionKind::Procedure)
+        }
+    }
+}
+
+fn context_at(tokens: &[CompletionToken], cursor: usize, current_scope: Option<usize>) -> Context {
+    let tokens = tokens
         .iter()
-        .filter_map(|keyword| before.rfind(keyword))
-        .max();
-    let clause = [" where ", " select ", " returning "]
-        .iter()
-        .filter_map(|keyword| before.rfind(keyword))
-        .max();
-    if matches!(word, "from" | "join" | "update" | "into") || relation > clause {
-        return Context::Relation;
+        .filter(|token| token.end <= cursor && token.scope_start == current_scope)
+        .collect::<Vec<_>>();
+    let mut context = Context::Statement;
+    for (index, token) in tokens.iter().enumerate() {
+        let CompletionTokenKind::Word(word) = &token.kind else {
+            continue;
+        };
+        context = match word.to_ascii_lowercase().as_str() {
+            "from" | "join" | "update" | "into" => Context::Relation,
+            "select" => Context::Expression(ExpressionContext::Projection),
+            "where" | "on" | "having" => Context::Expression(ExpressionContext::Predicate),
+            "returning" => Context::Expression(ExpressionContext::Returning),
+            "group"
+                if token_word(tokens.get(index + 1).copied())
+                    .is_some_and(|word| word.eq_ignore_ascii_case("by")) =>
+            {
+                Context::Expression(ExpressionContext::Grouping)
+            }
+            "order"
+                if token_word(tokens.get(index + 1).copied())
+                    .is_some_and(|word| word.eq_ignore_ascii_case("by")) =>
+            {
+                Context::Expression(ExpressionContext::Ordering)
+            }
+            "call" | "execute" => Context::Routine,
+            _ => context,
+        };
     }
-    if before.ends_with('.') {
-        return Context::Qualifier;
-    }
-    if before.ends_with("select ") || before.ends_with("select") {
-        return Context::General;
-    }
-    let _ = dialect;
-    if before.ends_with("call ") || before.ends_with("execute ") {
-        Context::Routine
+    if matches!(
+        tokens.last().map(|token| &token.kind),
+        Some(CompletionTokenKind::Dot)
+    ) && context != Context::Relation
+    {
+        Context::Qualifier
     } else {
-        Context::General
+        context
     }
 }
 
@@ -526,7 +603,8 @@ fn qualified_candidate_indices(
     index: &CompletionIndex,
     qualifiers: &[String],
     prefix: &str,
-    bindings: &[(String, Option<String>)],
+    bindings: &[RelationBinding],
+    completion_context: CompletionContext<'_>,
 ) -> Vec<usize> {
     if qualifiers.is_empty() {
         return candidate_indices(index, None, prefix);
@@ -534,12 +612,13 @@ fn qualified_candidate_indices(
     let qualifier = &qualifiers[0];
     let alias_parents = bindings
         .iter()
-        .filter(|(_, alias)| {
-            alias
+        .filter(|binding| {
+            binding
+                .alias
                 .as_deref()
                 .is_some_and(|alias| alias.eq_ignore_ascii_case(qualifier))
         })
-        .flat_map(|(relation, _)| relation_parents(index, relation))
+        .flat_map(|binding| relation_ids(index, binding, completion_context))
         .collect::<Vec<_>>();
     if !alias_parents.is_empty() {
         return alias_parents
@@ -582,82 +661,358 @@ fn qualified_candidate_indices(
         .collect()
 }
 
-fn relation_parents(index: &CompletionIndex, relation: &str) -> Vec<CatalogId> {
-    index
+fn relation_ids(
+    index: &CompletionIndex,
+    binding: &RelationBinding,
+    completion_context: CompletionContext<'_>,
+) -> Vec<CatalogId> {
+    let Some(object) = binding.name.last() else {
+        return Vec::new();
+    };
+    let mut matches = index
         .entries
         .iter()
         .filter(|entry| {
-            entry.qualified_name.object.eq_ignore_ascii_case(relation) && entry.kind.is_relation()
+            if !entry.kind.is_relation()
+                || !entry.qualified_name.object.eq_ignore_ascii_case(object)
+            {
+                return false;
+            }
+            match binding.name.as_slice() {
+                [database, schema, _] => {
+                    entry
+                        .qualified_name
+                        .database
+                        .as_deref()
+                        .is_some_and(|value| value.eq_ignore_ascii_case(database))
+                        && entry
+                            .qualified_name
+                            .schema
+                            .as_deref()
+                            .is_some_and(|value| value.eq_ignore_ascii_case(schema))
+                }
+                [qualifier, _] => {
+                    entry
+                        .qualified_name
+                        .schema
+                        .as_deref()
+                        .is_some_and(|value| value.eq_ignore_ascii_case(qualifier))
+                        || entry
+                            .qualified_name
+                            .database
+                            .as_deref()
+                            .is_some_and(|value| value.eq_ignore_ascii_case(qualifier))
+                }
+                [_] => true,
+                _ => false,
+            }
         })
-        .map(|entry| entry.id.clone())
-        .collect()
-}
-
-fn entry_belongs_to_binding(
-    entry: &CatalogEntry,
-    index: &CompletionIndex,
-    bindings: &[(String, Option<String>)],
-) -> bool {
-    let Some(parent) = entry.parent_id.as_ref() else {
-        return false;
-    };
-    index.entries.iter().any(|candidate| {
-        candidate.id == *parent
-            && candidate.kind.is_relation()
-            && bindings.iter().any(|(relation, alias)| {
-                candidate
-                    .qualified_name
-                    .object
-                    .eq_ignore_ascii_case(relation)
-                    || alias.as_deref().is_some_and(|alias| {
-                        candidate.qualified_name.object.eq_ignore_ascii_case(alias)
-                    })
+        .collect::<Vec<_>>();
+    if binding.name.len() == 1 {
+        let preferred = matches
+            .iter()
+            .copied()
+            .filter(|entry| {
+                completion_context.database.is_none_or(|database| {
+                    entry
+                        .qualified_name
+                        .database
+                        .as_deref()
+                        .is_some_and(|value| value.eq_ignore_ascii_case(database))
+                }) && completion_context.schema.is_none_or(|schema| {
+                    entry
+                        .qualified_name
+                        .schema
+                        .as_deref()
+                        .is_some_and(|value| value.eq_ignore_ascii_case(schema))
+                })
             })
-    })
+            .collect::<Vec<_>>();
+        if !preferred.is_empty() {
+            matches = preferred;
+        }
+    }
+    matches.into_iter().map(|entry| entry.id.clone()).collect()
 }
 
-fn current_statement_text(text: &str, cursor: usize, dialect: SqlDialect) -> &str {
-    scan_statements(text, dialect)
+fn current_statement(text: &str, cursor: usize, dialect: SqlDialect) -> (&str, usize) {
+    let range = scan_statements(text, dialect)
         .into_iter()
         .find(|range| range.start <= cursor && cursor <= range.end)
-        .and_then(|range| text.get(range.start..range.end))
-        .unwrap_or(text)
+        .unwrap_or_else(|| TextRange::new(0, text.len()));
+    (
+        text.get(range.start..range.end).unwrap_or(text),
+        cursor.saturating_sub(range.start),
+    )
 }
 
-fn relation_bindings(text: &str, dialect: SqlDialect) -> Vec<(String, Option<String>)> {
-    let words = text
-        .split(|character: char| !is_identifier_byte(character as u8, dialect) && character != '.')
-        .filter(|word| !word.is_empty())
-        .collect::<Vec<_>>();
+fn relation_bindings(tokens: &[CompletionToken]) -> Vec<RelationBinding> {
     let mut bindings = Vec::new();
-    for (index, word) in words.iter().enumerate() {
+    let mut index = 0;
+    while index < tokens.len() {
+        let token = &tokens[index];
+        let Some(word) = token_word(Some(token)) else {
+            index += 1;
+            continue;
+        };
         if !matches!(
             word.to_ascii_lowercase().as_str(),
             "from" | "join" | "update" | "into"
         ) {
+            index += 1;
             continue;
         }
-        let Some(relation) = words.get(index + 1) else {
-            continue;
-        };
-        let relation = relation
-            .trim_matches(['"', '`'])
-            .split('.')
-            .next_back()
-            .unwrap_or(relation)
-            .to_owned();
-        let alias = words
-            .get(index + 2)
-            .filter(|candidate| {
-                !matches!(
-                    candidate.to_ascii_lowercase().as_str(),
-                    "where" | "join" | "on" | "group" | "order" | "limit" | "having" | "returning"
+        let comma_list = word.eq_ignore_ascii_case("from");
+        index += 1;
+        loop {
+            let Some((binding, next)) = relation_binding_at(tokens, index) else {
+                break;
+            };
+            bindings.push(binding);
+            index = next;
+            if comma_list
+                && matches!(
+                    tokens.get(index).map(|token| &token.kind),
+                    Some(CompletionTokenKind::Comma)
                 )
-            })
-            .map(|alias| alias.trim_matches(['"', '`']).to_owned());
-        bindings.push((relation, alias));
+            {
+                index += 1;
+                continue;
+            }
+            break;
+        }
     }
     bindings
+}
+
+fn relation_binding_at(
+    tokens: &[CompletionToken],
+    start: usize,
+) -> Option<(RelationBinding, usize)> {
+    let first = tokens.get(start)?;
+    let depth = first.depth;
+    let mut name = vec![token_word(Some(first))?.to_owned()];
+    let mut index = start + 1;
+    while matches!(
+        tokens.get(index).map(|token| &token.kind),
+        Some(CompletionTokenKind::Dot)
+    ) && tokens.get(index).is_some_and(|token| token.depth == depth)
+    {
+        let component = tokens.get(index + 1)?;
+        if component.depth != depth {
+            break;
+        }
+        name.push(token_word(Some(component))?.to_owned());
+        index += 2;
+    }
+    let mut alias = None;
+    if token_word(tokens.get(index)).is_some_and(|word| word.eq_ignore_ascii_case("as")) {
+        alias = token_word(tokens.get(index + 1)).map(str::to_owned);
+        if alias.is_some() {
+            index += 2;
+        }
+    } else if let Some(candidate) = token_word(tokens.get(index))
+        && !is_relation_boundary(candidate)
+        && tokens.get(index).is_some_and(|token| token.depth == depth)
+    {
+        alias = Some(candidate.to_owned());
+        index += 1;
+    }
+    Some((
+        RelationBinding {
+            name,
+            alias,
+            depth,
+            scope_start: first.scope_start,
+        },
+        index,
+    ))
+}
+
+fn active_scope_starts(tokens: &[CompletionToken], cursor: usize) -> Vec<Option<usize>> {
+    let mut scopes = vec![None];
+    for token in tokens.iter().filter(|token| token.start < cursor) {
+        match token.kind {
+            CompletionTokenKind::LeftParen => scopes.push(Some(token.start)),
+            CompletionTokenKind::RightParen => {
+                if scopes.len() > 1 {
+                    scopes.pop();
+                }
+            }
+            _ => {}
+        }
+    }
+    scopes
+}
+
+fn visible_relation_bindings(
+    tokens: &[CompletionToken],
+    active_scopes: &[Option<usize>],
+) -> Vec<RelationBinding> {
+    relation_bindings(tokens)
+        .into_iter()
+        .filter(|binding| active_scopes.contains(&binding.scope_start))
+        .collect()
+}
+
+fn is_relation_boundary(word: &str) -> bool {
+    matches!(
+        word.to_ascii_lowercase().as_str(),
+        "where"
+            | "join"
+            | "left"
+            | "right"
+            | "full"
+            | "inner"
+            | "cross"
+            | "on"
+            | "group"
+            | "order"
+            | "limit"
+            | "having"
+            | "returning"
+            | "union"
+            | "intersect"
+            | "except"
+    )
+}
+
+fn token_word(token: Option<&CompletionToken>) -> Option<&str> {
+    match &token?.kind {
+        CompletionTokenKind::Word(word) => Some(word),
+        _ => None,
+    }
+}
+
+fn completion_tokens(text: &str, dialect: SqlDialect) -> Vec<CompletionToken> {
+    let bytes = text.as_bytes();
+    let mut tokens = Vec::new();
+    let mut index = 0;
+    let mut depth = 0;
+    let mut scope_starts = Vec::new();
+    while index < bytes.len() {
+        if bytes[index].is_ascii_whitespace() {
+            index += 1;
+            continue;
+        }
+        if bytes[index] == b'-' && bytes.get(index + 1) == Some(&b'-') {
+            index += 2;
+            while index < bytes.len() && bytes[index] != b'\n' {
+                index += 1;
+            }
+            continue;
+        }
+        if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'*') {
+            index += 2;
+            while index < bytes.len() {
+                if bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/') {
+                    index += 2;
+                    break;
+                }
+                index += 1;
+            }
+            continue;
+        }
+        if bytes[index] == b'\'' {
+            index += 1;
+            while index < bytes.len() {
+                if bytes[index] == b'\'' {
+                    if bytes.get(index + 1) == Some(&b'\'') {
+                        index += 2;
+                    } else {
+                        index += 1;
+                        break;
+                    }
+                } else {
+                    index += 1;
+                }
+            }
+            continue;
+        }
+        let quote = match bytes[index] {
+            b'"' if dialect != SqlDialect::MySql => Some(b'"'),
+            b'`' if dialect == SqlDialect::MySql => Some(b'`'),
+            _ => None,
+        };
+        if let Some(quote) = quote {
+            let start = index;
+            index += 1;
+            let content_start = index;
+            let mut value = String::new();
+            while index < bytes.len() {
+                if bytes[index] == quote {
+                    value.push_str(&text[content_start..index]);
+                    if bytes.get(index + 1) == Some(&quote) {
+                        value.push(quote as char);
+                        index += 2;
+                        let escaped_start = index;
+                        while index < bytes.len() && bytes[index] != quote {
+                            index += 1;
+                        }
+                        value.push_str(&text[escaped_start..index]);
+                        continue;
+                    }
+                    index += 1;
+                    break;
+                }
+                index += 1;
+            }
+            if value.is_empty() && content_start < index.saturating_sub(1) {
+                value.push_str(&text[content_start..index.saturating_sub(1)]);
+            }
+            tokens.push(CompletionToken {
+                kind: CompletionTokenKind::Word(value),
+                start,
+                end: index,
+                depth,
+                scope_start: scope_starts.last().copied(),
+            });
+            continue;
+        }
+        let punctuation = match bytes[index] {
+            b'.' => Some(CompletionTokenKind::Dot),
+            b',' => Some(CompletionTokenKind::Comma),
+            b'(' => Some(CompletionTokenKind::LeftParen),
+            b')' => Some(CompletionTokenKind::RightParen),
+            _ => None,
+        };
+        if let Some(kind) = punctuation {
+            let start = index;
+            if kind == CompletionTokenKind::RightParen {
+                depth = depth.saturating_sub(1);
+                scope_starts.pop();
+            }
+            index += 1;
+            tokens.push(CompletionToken {
+                kind: kind.clone(),
+                start,
+                end: index,
+                depth,
+                scope_start: scope_starts.last().copied(),
+            });
+            if kind == CompletionTokenKind::LeftParen {
+                depth += 1;
+                scope_starts.push(start);
+            }
+            continue;
+        }
+        if is_identifier_byte(bytes[index], dialect) {
+            let start = index;
+            while index < bytes.len() && is_identifier_byte(bytes[index], dialect) {
+                index += 1;
+            }
+            tokens.push(CompletionToken {
+                kind: CompletionTokenKind::Word(text[start..index].to_owned()),
+                start,
+                end: index,
+                depth,
+                scope_start: scope_starts.last().copied(),
+            });
+            continue;
+        }
+        index += 1;
+    }
+    tokens
 }
 
 fn is_identifier_byte(byte: u8, dialect: SqlDialect) -> bool {
@@ -674,22 +1029,27 @@ pub fn quote_identifier(value: &str, dialect: SqlDialect) -> String {
     format!("{quote}{escaped}{quote}")
 }
 
-fn keywords(dialect: SqlDialect) -> &'static [&'static str] {
-    match dialect {
-        SqlDialect::MySql => &[
-            "SELECT", "FROM", "WHERE", "JOIN", "CALL", "INSERT", "UPDATE", "DELETE",
+fn keywords(context: Context, dialect: SqlDialect) -> &'static [&'static str] {
+    match context {
+        Context::Statement => match dialect {
+            SqlDialect::MySql => &["SELECT", "INSERT", "UPDATE", "DELETE"],
+            _ => &["SELECT", "WITH", "INSERT", "UPDATE", "DELETE"],
+        },
+        Context::Expression(ExpressionContext::Projection) => {
+            &["DISTINCT", "CASE", "NULL", "TRUE", "FALSE"]
+        }
+        Context::Expression(ExpressionContext::Predicate) => &[
+            "AND", "OR", "NOT", "EXISTS", "IN", "IS", "NULL", "LIKE", "BETWEEN", "CASE", "TRUE",
+            "FALSE",
         ],
-        _ => &[
-            "SELECT",
-            "FROM",
-            "WHERE",
-            "JOIN",
-            "RETURNING",
-            "WITH",
-            "INSERT",
-            "UPDATE",
-            "DELETE",
-        ],
+        Context::Expression(ExpressionContext::Grouping) => &["HAVING", "CASE", "NULL"],
+        Context::Expression(ExpressionContext::Ordering) => match dialect {
+            SqlDialect::MySql => &["ASC", "DESC"],
+            _ => &["ASC", "DESC", "NULLS FIRST", "NULLS LAST"],
+        },
+        Context::Expression(ExpressionContext::Returning) => &["CASE", "NULL", "TRUE", "FALSE"],
+        Context::Relation => &["LATERAL"],
+        Context::Qualifier | Context::Routine => &[],
     }
 }
 
