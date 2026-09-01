@@ -33,6 +33,7 @@ use super::{
         NamespaceModel, ObjectGroup, OptionalMetadata, QualifiedName, RelationDdl,
         finalize_keyset_page,
     },
+    catalog_drop::{CatalogDropError, CatalogDropPlan, CatalogDropRequest},
     ddl::{DdlSection, assemble_ddl},
     mutation::{InputValue, MutationResult, RelationMutation, RelationMutationRequest},
     query::{ColumnMeta, QueryOutcome, QueryOutcomeAccumulator, RELATION_PREVIEW_LIMIT, ResultSet},
@@ -290,6 +291,61 @@ struct PgSearchCandidate {
 }
 
 impl PostgresAdapter {
+    pub fn plan_catalog_drop(
+        request: CatalogDropRequest,
+        entry: &CatalogEntry,
+    ) -> Result<CatalogDropPlan, CatalogDropError> {
+        let sql = match entry.kind {
+            CatalogKind::Table => {
+                format!("DROP TABLE {}", postgres_qualified_name(entry, entry.kind)?)
+            }
+            CatalogKind::View => {
+                format!("DROP VIEW {}", postgres_qualified_name(entry, entry.kind)?)
+            }
+            CatalogKind::MaterializedView => format!(
+                "DROP MATERIALIZED VIEW {}",
+                postgres_qualified_name(entry, entry.kind)?
+            ),
+            CatalogKind::Sequence => format!(
+                "DROP SEQUENCE {}",
+                postgres_qualified_name(entry, entry.kind)?
+            ),
+            CatalogKind::Type => {
+                format!("DROP TYPE {}", postgres_qualified_name(entry, entry.kind)?)
+            }
+            CatalogKind::Column => format!(
+                "ALTER TABLE {} DROP COLUMN {}",
+                relation_name_for_drop(entry)?,
+                quote_identifier(&entry.qualified_name.object)
+            ),
+            CatalogKind::Index => {
+                format!("DROP INDEX {}", postgres_qualified_name(entry, entry.kind)?)
+            }
+            CatalogKind::PrimaryKey
+            | CatalogKind::UniqueConstraint
+            | CatalogKind::ForeignKey
+            | CatalogKind::CheckConstraint => format!(
+                "ALTER TABLE {} DROP CONSTRAINT {}",
+                relation_name_for_drop(entry)?,
+                quote_identifier(&entry.qualified_name.object)
+            ),
+            CatalogKind::Trigger => format!(
+                "DROP TRIGGER {} ON {}",
+                quote_identifier(&entry.qualified_name.object),
+                relation_name_for_drop(entry)?
+            ),
+            kind => {
+                return Err(CatalogDropError::Unsupported {
+                    kind,
+                    reason:
+                        "catalog metadata does not provide an unambiguous PostgreSQL drop target"
+                            .to_owned(),
+                });
+            }
+        };
+        CatalogDropPlan::new(request, entry, sql)
+    }
+
     pub fn catalog_capabilities() -> CatalogCapabilities {
         CatalogCapabilities {
             namespace_model: NamespaceModel::DatabaseAndSchema,
@@ -2591,6 +2647,71 @@ pub const fn supports_server_version(server_version_num: i32) -> bool {
 
 pub fn quote_identifier(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
+}
+
+fn postgres_qualified_name(
+    entry: &CatalogEntry,
+    kind: CatalogKind,
+) -> Result<String, CatalogDropError> {
+    let name = &entry.qualified_name;
+    if name.object.is_empty() {
+        return Err(CatalogDropError::EmptyObjectName);
+    }
+    let schema = name
+        .schema
+        .as_deref()
+        .ok_or_else(|| CatalogDropError::Unsupported {
+            kind,
+            reason: "catalog entry has no schema-qualified name".to_owned(),
+        })?;
+    if schema.is_empty() {
+        return Err(CatalogDropError::Unsupported {
+            kind,
+            reason: "catalog entry has an empty schema name".to_owned(),
+        });
+    }
+    Ok(format!(
+        "{}.{}",
+        quote_identifier(schema),
+        quote_identifier(&name.object)
+    ))
+}
+
+fn relation_name_for_drop(entry: &CatalogEntry) -> Result<String, CatalogDropError> {
+    let relation = entry
+        .relation_id
+        .as_ref()
+        .ok_or_else(|| CatalogDropError::Unsupported {
+            kind: entry.kind,
+            reason: "catalog entry has no owning relation identity".to_owned(),
+        })?;
+    if !relation.kind.is_relation() || relation.native_path.len() < 3 {
+        return Err(CatalogDropError::Unsupported {
+            kind: entry.kind,
+            reason: "catalog entry has an invalid owning relation identity".to_owned(),
+        });
+    }
+    let schema =
+        entry
+            .qualified_name
+            .schema
+            .as_deref()
+            .ok_or_else(|| CatalogDropError::Unsupported {
+                kind: entry.kind,
+                reason: "catalog entry has no owning relation schema".to_owned(),
+            })?;
+    let relation_name = relation.native_path[2].as_str();
+    if schema.is_empty() || relation_name.is_empty() {
+        return Err(CatalogDropError::Unsupported {
+            kind: entry.kind,
+            reason: "catalog entry has an incomplete owning relation identity".to_owned(),
+        });
+    }
+    Ok(format!(
+        "{}.{}",
+        quote_identifier(schema),
+        quote_identifier(relation_name)
+    ))
 }
 
 pub fn quote_literal(value: &str) -> String {

@@ -36,6 +36,7 @@ use super::{
         NamespaceModel, ObjectGroup, OptionalMetadata, QualifiedName, RelationDdl,
         finalize_keyset_page,
     },
+    catalog_drop::{CatalogDropError, CatalogDropPlan, CatalogDropRequest},
     ddl::{DdlSection, assemble_ddl},
     mutation::{InputValue, MutationResult, RelationMutation, RelationMutationRequest},
     query::{ColumnMeta, QueryOutcome, QueryOutcomeAccumulator, RELATION_PREVIEW_LIMIT, ResultSet},
@@ -91,6 +92,34 @@ struct SqliteForeignKeyBuilder {
 }
 
 impl SqliteAdapter {
+    pub fn plan_catalog_drop(
+        request: CatalogDropRequest,
+        entry: &CatalogEntry,
+    ) -> Result<CatalogDropPlan, CatalogDropError> {
+        let sql = match entry.kind {
+            CatalogKind::Table => {
+                format!("DROP TABLE {}", sqlite_qualified_name(entry, entry.kind)?)
+            }
+            CatalogKind::View => {
+                format!("DROP VIEW {}", sqlite_qualified_name(entry, entry.kind)?)
+            }
+            CatalogKind::Index => {
+                format!("DROP INDEX {}", sqlite_qualified_name(entry, entry.kind)?)
+            }
+            CatalogKind::Trigger => {
+                format!("DROP TRIGGER {}", sqlite_qualified_name(entry, entry.kind)?)
+            }
+            kind => {
+                return Err(CatalogDropError::Unsupported {
+                    kind,
+                    reason: "SQLite catalog drop is only supported for tables, views, indexes, and triggers"
+                        .to_owned(),
+                });
+            }
+        };
+        CatalogDropPlan::new(request, entry, sql)
+    }
+
     pub fn catalog_capabilities() -> CatalogCapabilities {
         CatalogCapabilities {
             namespace_model: NamespaceModel::DatabaseAndSchema,
@@ -1773,6 +1802,34 @@ impl SqliteAdapter {
     pub async fn close(self) {
         self.pool.close().await;
     }
+}
+
+fn sqlite_qualified_name(
+    entry: &CatalogEntry,
+    kind: CatalogKind,
+) -> Result<String, CatalogDropError> {
+    let name = &entry.qualified_name;
+    if name.object.is_empty() {
+        return Err(CatalogDropError::EmptyObjectName);
+    }
+    let schema = name
+        .schema
+        .as_deref()
+        .ok_or_else(|| CatalogDropError::Unsupported {
+            kind,
+            reason: "catalog entry has no attached schema-qualified name".to_owned(),
+        })?;
+    if schema.is_empty() {
+        return Err(CatalogDropError::Unsupported {
+            kind,
+            reason: "catalog entry has an empty attached schema name".to_owned(),
+        });
+    }
+    Ok(format!(
+        "\"{}\".\"{}\"",
+        schema.replace('"', "\"\""),
+        name.object.replace('"', "\"\"")
+    ))
 }
 
 fn append_preview_options(

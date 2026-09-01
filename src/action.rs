@@ -8,6 +8,7 @@ use crate::db::{
         CatalogCapabilities, CatalogDiscovery, CatalogPage, CatalogRequest, CatalogRequestKey,
         CatalogSearchPage, CatalogSearchRequest, CatalogTarget,
     },
+    catalog_drop::{CatalogDropError, CatalogDropPlan, CatalogDropRequest},
     query::QueryOutcome,
 };
 use crate::{
@@ -70,6 +71,27 @@ pub enum Action {
     ProfileRequestDelete {
         profile_id: Uuid,
     },
+    RequestDropCatalogObject {
+        id: crate::db::catalog::CatalogId,
+    },
+    CatalogDropPlanReady(CatalogDropPlan),
+    CatalogDropPlanFailed {
+        request: CatalogDropRequest,
+        error: CatalogDropError,
+    },
+    CatalogDropSucceeded {
+        plan: CatalogDropPlan,
+        outcome: QueryOutcome,
+    },
+    CatalogDropFailed {
+        plan: CatalogDropPlan,
+        message: String,
+    },
+    CatalogDropInsert(char),
+    CatalogDropBackspace,
+    CatalogDropClear,
+    CatalogDropConfirm,
+    CatalogDropCancel,
     ProfileConfirmDelete,
     ProfileCancelDelete,
     ProfileFieldNext,
@@ -660,6 +682,8 @@ pub enum Command {
     LoadCatalogPage(CatalogRequest),
     SearchCatalog(CatalogSearchRequest),
     CancelCatalogSearch,
+    PlanCatalogDrop(CatalogDropRequest),
+    ExecuteCatalogDrop(CatalogDropPlan),
     LoadRelationPreview(crate::model::relation::RelationRequest),
     LoadRelationDdl(crate::model::relation::RelationRequest),
     CancelRelationRequest(crate::model::relation::RelationRequest),

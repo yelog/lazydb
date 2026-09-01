@@ -1500,6 +1500,11 @@ impl App {
                         | Action::SqlEditorListBackspace
                         | Action::SqlEditorListMove(_)
                         | Action::ActivateSqlEditor(_)
+                        | Action::CatalogDropInsert(_)
+                        | Action::CatalogDropBackspace
+                        | Action::CatalogDropClear
+                        | Action::CatalogDropConfirm
+                        | Action::CatalogDropCancel
                 ))
             && matches!(
                 action,
@@ -2049,6 +2054,174 @@ impl App {
             }
             Action::ProfileRequestDelete { profile_id } => {
                 self.request_profile_delete(profile_id);
+                Vec::new()
+            }
+            Action::RequestDropCatalogObject { id } => {
+                let Some(connection) = self.database_command_identity() else {
+                    self.status_message(
+                        "Connect to an online database before dropping catalog objects",
+                    );
+                    return Vec::new();
+                };
+                let Some(profile) = self.active_profile() else {
+                    self.status_message("No active profile for the selected catalog object");
+                    return Vec::new();
+                };
+                if profile.read_only {
+                    self.status_message("Catalog drops are unavailable on a read-only profile");
+                    return Vec::new();
+                }
+                if self.has_running_query() {
+                    self.status_message(
+                        "Wait for running SQL or catalog loads to finish before dropping",
+                    );
+                    return Vec::new();
+                }
+                if id.profile_id() != connection.profile_id {
+                    self.status_message("Selected catalog object belongs to another profile");
+                    return Vec::new();
+                }
+                let Some(state) = self
+                    .explorer
+                    .normalized
+                    .profiles
+                    .get(&connection.profile_id)
+                else {
+                    self.status_message("Catalog is unavailable for the active profile");
+                    return Vec::new();
+                };
+                let Some(entry) = state.catalog.get(&id).cloned() else {
+                    self.status_message("Selected catalog object is no longer available");
+                    return Vec::new();
+                };
+                let catalog_epoch = state.catalog_epoch;
+                let request = crate::db::catalog_drop::CatalogDropRequest::new(
+                    connection,
+                    id,
+                    self.next_profile_request_id(),
+                )
+                .with_entry(entry);
+                let mut request = request;
+                request.catalog_epoch = catalog_epoch;
+                vec![Command::PlanCatalogDrop(request)]
+            }
+            Action::CatalogDropPlanReady(plan) => {
+                self.overlay = Some(Overlay::CatalogDropConfirm {
+                    plan: Box::new(plan),
+                    input: Default::default(),
+                    busy: false,
+                    error: None,
+                });
+                Vec::new()
+            }
+            Action::CatalogDropPlanFailed { error, .. } => {
+                self.status_message(&error.to_string());
+                Vec::new()
+            }
+            Action::CatalogDropInsert(character) => {
+                if let Some(Overlay::CatalogDropConfirm { input, busy, .. }) = self.overlay.as_mut()
+                    && !*busy
+                {
+                    input.insert(character);
+                }
+                Vec::new()
+            }
+            Action::CatalogDropBackspace => {
+                if let Some(Overlay::CatalogDropConfirm { input, busy, .. }) = self.overlay.as_mut()
+                    && !*busy
+                {
+                    input.backspace();
+                }
+                Vec::new()
+            }
+            Action::CatalogDropClear => {
+                if let Some(Overlay::CatalogDropConfirm { input, busy, .. }) = self.overlay.as_mut()
+                    && !*busy
+                {
+                    input.set("");
+                }
+                Vec::new()
+            }
+            Action::CatalogDropConfirm => {
+                let Some(Overlay::CatalogDropConfirm {
+                    plan, input, busy, ..
+                }) = self.overlay.as_mut()
+                else {
+                    return Vec::new();
+                };
+                if *busy {
+                    return Vec::new();
+                }
+                if input.value() != "y" {
+                    self.status_message("Type exactly lowercase y, then press Enter to confirm");
+                    return Vec::new();
+                }
+                let current_epoch = self
+                    .explorer
+                    .normalized
+                    .profiles
+                    .get(&plan.request.connection.profile_id)
+                    .map(|state| state.catalog_epoch);
+                if self.connection.active_identity() != Some(plan.request.connection)
+                    || current_epoch != Some(plan.request.catalog_epoch)
+                {
+                    self.status_message("Catalog drop plan is stale; reload and try again");
+                    return Vec::new();
+                }
+                *busy = true;
+                vec![Command::ExecuteCatalogDrop((**plan).clone())]
+            }
+            Action::CatalogDropCancel => {
+                if matches!(self.overlay, Some(Overlay::CatalogDropConfirm { .. })) {
+                    self.overlay = None;
+                }
+                Vec::new()
+            }
+            Action::CatalogDropSucceeded { plan, .. } => {
+                let Some(Overlay::CatalogDropConfirm { plan: expected, .. }) =
+                    self.overlay.as_ref()
+                else {
+                    self.status_message("Stale catalog drop result discarded");
+                    return Vec::new();
+                };
+                let identity_matches =
+                    self.connection.active_identity() == Some(plan.request.connection);
+                let epoch_matches = self
+                    .explorer
+                    .normalized
+                    .profiles
+                    .get(&plan.request.connection.profile_id)
+                    .is_some_and(|state| state.catalog_epoch == plan.request.catalog_epoch);
+                if **expected != plan || !identity_matches || !epoch_matches {
+                    self.status_message("Stale catalog drop result discarded");
+                    return Vec::new();
+                }
+                let removed = match self.explorer.remove_dropped_subtree(&plan.object) {
+                    Ok(removed) => removed,
+                    Err(error) => {
+                        self.status_message(&format!("Catalog drop state update failed: {error}"));
+                        return Vec::new();
+                    }
+                };
+                let removed_set = removed.into_iter().collect();
+                self.explorer.completion_index.remove_ids(&removed_set);
+                self.explorer.catalog_generation =
+                    self.explorer.catalog_generation.saturating_add(1);
+                self.explorer
+                    .rebuild_projection(plan.request.connection.profile_id);
+                self.explorer.refresh_frontend_search();
+                self.overlay = None;
+                self.status_message("Catalog object dropped");
+                Vec::new()
+            }
+            Action::CatalogDropFailed { plan, message } => {
+                self.overlay = Some(Overlay::CatalogDropConfirm {
+                    plan: Box::new(plan),
+                    input: Default::default(),
+                    busy: false,
+                    error: Some(message.clone()),
+                });
+                self.status_message(&message);
                 Vec::new()
             }
             Action::ProfileConfirmDelete => self.confirm_profile_delete(),

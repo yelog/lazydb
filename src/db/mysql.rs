@@ -35,6 +35,7 @@ use super::{
         ConstraintMetadata, DdlProvenance, DiscoveredDatabase, IndexMetadata, NamespaceModel,
         ObjectGroup, OptionalMetadata, QualifiedName, RelationDdl, finalize_keyset_page,
     },
+    catalog_drop::{CatalogDropError, CatalogDropPlan, CatalogDropRequest},
     ddl::{DdlSection, assemble_ddl},
     mutation::{InputValue, MutationResult, RelationMutation, RelationMutationRequest},
     query::{ColumnMeta, QueryOutcome, QueryOutcomeAccumulator, RELATION_PREVIEW_LIMIT, ResultSet},
@@ -201,6 +202,44 @@ impl MySqlSearchCandidate {
 }
 
 impl MySqlAdapter {
+    pub fn plan_catalog_drop(
+        request: CatalogDropRequest,
+        entry: &CatalogEntry,
+    ) -> Result<CatalogDropPlan, CatalogDropError> {
+        let sql = match entry.kind {
+            CatalogKind::Database | CatalogKind::Schema => {
+                format!("DROP DATABASE {}", mysql_namespace_name(entry)?)
+            }
+            CatalogKind::Table => format!("DROP TABLE {}", mysql_relation_name(entry)?),
+            CatalogKind::View => format!("DROP VIEW {}", mysql_relation_name(entry)?),
+            CatalogKind::Index | CatalogKind::UniqueConstraint => format!(
+                "ALTER TABLE {} DROP INDEX {}",
+                mysql_relation_owner(entry)?,
+                quote_identifier(&entry.qualified_name.object)
+            ),
+            CatalogKind::PrimaryKey => format!(
+                "ALTER TABLE {} DROP PRIMARY KEY",
+                mysql_relation_owner(entry)?
+            ),
+            CatalogKind::ForeignKey => format!(
+                "ALTER TABLE {} DROP FOREIGN KEY {}",
+                mysql_relation_owner(entry)?,
+                quote_identifier(&entry.qualified_name.object)
+            ),
+            CatalogKind::Trigger => format!("DROP TRIGGER {}", mysql_trigger_name(entry)?),
+            CatalogKind::Function => format!("DROP FUNCTION {}", mysql_routine_name(entry)?),
+            CatalogKind::Procedure => format!("DROP PROCEDURE {}", mysql_routine_name(entry)?),
+            kind => {
+                return Err(CatalogDropError::Unsupported {
+                    kind,
+                    reason: "MySQL catalog metadata does not provide an unambiguous drop target"
+                        .to_owned(),
+                });
+            }
+        };
+        CatalogDropPlan::new(request, entry, sql)
+    }
+
     pub fn catalog_capabilities() -> CatalogCapabilities {
         CatalogCapabilities {
             namespace_model: NamespaceModel::DatabaseIsSchema,
@@ -2622,6 +2661,150 @@ fn qualified_object(database: &str, object: &str) -> QualifiedName {
         schema: Some(database.to_owned()),
         object: object.to_owned(),
     }
+}
+
+fn mysql_namespace_name(entry: &CatalogEntry) -> Result<String, CatalogDropError> {
+    let expected_path_len = match entry.kind {
+        CatalogKind::Database => 1,
+        CatalogKind::Schema => 2,
+        _ => 0,
+    };
+    if expected_path_len == 0 || entry.id.native_path.len() != expected_path_len {
+        return Err(CatalogDropError::Unsupported {
+            kind: entry.kind,
+            reason: "catalog entry has an invalid MySQL namespace identity".to_owned(),
+        });
+    }
+    let database = entry
+        .qualified_name
+        .database
+        .as_deref()
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| CatalogDropError::Unsupported {
+            kind: entry.kind,
+            reason: "catalog entry has no MySQL database name".to_owned(),
+        })?;
+    if entry.id.native_path[0] != database
+        || (entry.kind == CatalogKind::Schema
+            && (entry.id.native_path[1] != database
+                || entry.qualified_name.schema.as_deref() != Some(database)))
+    {
+        return Err(CatalogDropError::Unsupported {
+            kind: entry.kind,
+            reason: "catalog entry has an inconsistent MySQL namespace identity".to_owned(),
+        });
+    }
+    Ok(quote_identifier(database))
+}
+
+fn mysql_schema_object_name(entry: &CatalogEntry) -> Result<String, CatalogDropError> {
+    let database = entry
+        .qualified_name
+        .database
+        .as_deref()
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| CatalogDropError::Unsupported {
+            kind: entry.kind,
+            reason: "catalog entry has no MySQL database name".to_owned(),
+        })?;
+    let object = entry.qualified_name.object.as_str();
+    if object.is_empty()
+        || entry.id.native_path.len() < 3
+        || entry.id.native_path[0] != database
+        || entry.id.native_path[1] != database
+        || entry.id.native_path[2] != object
+    {
+        return Err(CatalogDropError::Unsupported {
+            kind: entry.kind,
+            reason: "catalog entry has an inconsistent MySQL object identity".to_owned(),
+        });
+    }
+    Ok(format!(
+        "{}.{}",
+        quote_identifier(database),
+        quote_identifier(object)
+    ))
+}
+
+fn mysql_relation_name(entry: &CatalogEntry) -> Result<String, CatalogDropError> {
+    if !entry.kind.is_relation() || entry.id.native_path.len() != 3 {
+        return Err(CatalogDropError::Unsupported {
+            kind: entry.kind,
+            reason: "catalog entry has an invalid MySQL relation identity".to_owned(),
+        });
+    }
+    mysql_schema_object_name(entry)
+}
+
+fn mysql_relation_owner(entry: &CatalogEntry) -> Result<String, CatalogDropError> {
+    let relation = entry
+        .relation_id
+        .as_ref()
+        .filter(|relation| relation.kind.is_relation())
+        .ok_or_else(|| CatalogDropError::Unsupported {
+            kind: entry.kind,
+            reason: "catalog entry has no owning MySQL relation identity".to_owned(),
+        })?;
+    if relation.native_path.len() != 3 {
+        return Err(CatalogDropError::Unsupported {
+            kind: entry.kind,
+            reason: "catalog entry has an invalid owning MySQL relation identity".to_owned(),
+        });
+    }
+    let database = relation.native_path[0].as_str();
+    let relation_name = relation.native_path[2].as_str();
+    if database.is_empty()
+        || relation.native_path[1] != relation.native_path[0]
+        || relation_name.is_empty()
+    {
+        return Err(CatalogDropError::Unsupported {
+            kind: entry.kind,
+            reason: "catalog entry has an incomplete owning MySQL relation identity".to_owned(),
+        });
+    }
+    Ok(format!(
+        "{}.{}",
+        quote_identifier(database),
+        quote_identifier(relation_name)
+    ))
+}
+
+fn mysql_trigger_name(entry: &CatalogEntry) -> Result<String, CatalogDropError> {
+    mysql_relation_owner(entry)?;
+    let database = entry
+        .qualified_name
+        .database
+        .as_deref()
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| CatalogDropError::Unsupported {
+            kind: entry.kind,
+            reason: "catalog entry has no MySQL trigger database name".to_owned(),
+        })?;
+    if entry.id.native_path.len() != 3
+        || entry.id.native_path[0] != database
+        || entry.id.native_path[1] != database
+        || entry.id.native_path[2] != entry.qualified_name.object
+    {
+        return Err(CatalogDropError::Unsupported {
+            kind: entry.kind,
+            reason: "catalog entry has an inconsistent MySQL trigger identity".to_owned(),
+        });
+    }
+    Ok(format!(
+        "{}.{}",
+        quote_identifier(database),
+        quote_identifier(&entry.qualified_name.object)
+    ))
+}
+
+fn mysql_routine_name(entry: &CatalogEntry) -> Result<String, CatalogDropError> {
+    if entry.id.native_path.len() != 4 || entry.id.native_path[3].is_empty() {
+        return Err(CatalogDropError::Unsupported {
+            kind: entry.kind,
+            reason: "catalog entry has no unambiguous MySQL routine identity".to_owned(),
+        });
+    }
+    mysql_schema_object_name(entry)
 }
 
 fn relation_child_id(relation: &CatalogId, kind: CatalogKind, identity: &str) -> CatalogId {

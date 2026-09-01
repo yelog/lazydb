@@ -145,6 +145,12 @@ pub enum Overlay {
         console_id: Uuid,
     },
     SqlEditorList(crate::model::sql_editor_list::SqlEditorListState),
+    CatalogDropConfirm {
+        plan: Box<crate::db::catalog_drop::CatalogDropPlan>,
+        input: crate::model::text_input::TextInput,
+        busy: bool,
+        error: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1017,6 +1023,15 @@ impl ExplorerState {
         self.normalized.ensure_selected_visible();
         self.scroll = self.normalized.scroll;
         true
+    }
+
+    pub fn remove_dropped_subtree(
+        &mut self,
+        root: &CatalogId,
+    ) -> Result<Vec<CatalogId>, crate::model::explorer::ExplorerTreeError> {
+        let removed = self.normalized.remove_dropped_subtree(root)?;
+        self.sync_selected_index();
+        Ok(removed)
     }
 
     pub fn toggle_selected(&mut self) -> bool {

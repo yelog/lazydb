@@ -1,10 +1,11 @@
 pub mod catalog;
+pub mod catalog_drop;
 pub(crate) mod ddl;
 pub mod mutation;
 pub mod mysql;
 pub mod postgres;
 pub mod query;
-mod sqlite;
+pub mod sqlite;
 pub mod transaction;
 pub mod value;
 
@@ -190,6 +191,18 @@ impl DatabaseConnection {
             Self::Postgres(_) => PostgresAdapter::catalog_capabilities(),
             Self::MySql(_) => MySqlAdapter::catalog_capabilities(),
             Self::Sqlite(_) => SqliteAdapter::catalog_capabilities(),
+        }
+    }
+
+    pub fn plan_catalog_drop(
+        &self,
+        request: catalog_drop::CatalogDropRequest,
+        entry: &catalog::CatalogEntry,
+    ) -> Result<catalog_drop::CatalogDropPlan, catalog_drop::CatalogDropError> {
+        match self {
+            Self::Postgres(_) => PostgresAdapter::plan_catalog_drop(request, entry),
+            Self::MySql(_) => MySqlAdapter::plan_catalog_drop(request, entry),
+            Self::Sqlite(_) => SqliteAdapter::plan_catalog_drop(request, entry),
         }
     }
 

@@ -91,6 +91,11 @@ impl CompletionIndex {
         self.rebuild();
     }
 
+    pub fn remove_ids(&mut self, ids: &HashSet<CatalogId>) {
+        self.entries.retain(|entry| !ids.contains(&entry.id));
+        self.rebuild();
+    }
+
     pub fn entries(&self) -> &[CatalogEntry] {
         &self.entries
     }
