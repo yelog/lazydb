@@ -2112,6 +2112,9 @@ pub(crate) fn prefix_shortcuts(
         .filter(|(_, shortcut)| {
             shortcut.contexts.contains(&context)
                 && (shortcut.prefix == Some(prefix)
+                    || context == ShortcutContext::RelationDataBrowse
+                        && prefix == ShortcutPrefix::EditorLeader
+                        && shortcut.prefix == Some(ShortcutPrefix::Leader)
                     || matches!(prefix, ShortcutPrefix::WindowCount(_))
                         && shortcut.prefix == Some(ShortcutPrefix::Window))
                 && available(shortcut, capabilities)
@@ -2153,6 +2156,12 @@ fn prefix_rank(prefix: ShortcutPrefix, id: HelpShortcutId) -> Option<u8> {
             Id::EditorCopyStatement => 2,
             Id::EditorCopyBuffer => 3,
             Id::OpenTargetSelector => 4,
+            Id::NewConsole => 5,
+            Id::GotoSqlConsole => 6,
+            Id::CloseTab => 7,
+            Id::OpenSqlEditors => 8,
+            Id::FocusExplorerLeader => 9,
+            Id::OpenNotificationHistoryLeader => 10,
             _ => return None,
         },
         ShortcutPrefix::Window | ShortcutPrefix::WindowCount(_) => match id {

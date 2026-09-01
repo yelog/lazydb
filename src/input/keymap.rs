@@ -1100,6 +1100,12 @@ fn map_pending(pending: Pending, event: KeyEvent, app: &App) -> Option<Action> {
                 include_headers: true,
             })
         }
+        (Pending::RelationTransaction, KeyCode::Char('c')) => Some(Action::Focus(Focus::Explorer)),
+        (Pending::RelationTransaction, KeyCode::Char('n')) => Some(Action::NewConsole),
+        (Pending::RelationTransaction, KeyCode::Char('s')) => Some(Action::GotoSqlConsole),
+        (Pending::RelationTransaction, KeyCode::Char('q')) => Some(Action::CloseActiveTab),
+        (Pending::RelationTransaction, KeyCode::Char('e')) => Some(Action::OpenSqlEditorList),
+        (Pending::RelationTransaction, KeyCode::Char('m')) => Some(Action::OpenNotificationHistory),
         (Pending::RelationYank, KeyCode::Char('y')) => Some(Action::RelationYank),
         (Pending::Window { .. }, KeyCode::Char('j')) if app.focus == Focus::Editor => {
             Some(Action::Focus(Focus::Results))
@@ -1828,6 +1834,48 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn assert_leader_shortcut(app: &App, code: char, expected: Action) {
+        let mut keymap = Keymap::default();
+        keymap.map(key(KeyCode::Char(' ')), app);
+        assert_eq!(keymap.map(key(KeyCode::Char(code)), app), Some(expected));
+    }
+
+    #[test]
+    fn global_leader_shortcuts_work_outside_explorer() {
+        let mut editor = App::new(Vec::new());
+        editor.focus = Focus::Editor;
+        editor.update(Action::EditorKey(key(KeyCode::Esc)));
+        assert_eq!(
+            editor.active_editor_mode(),
+            crate::model::editor::EditorMode::Normal
+        );
+
+        let mut keymap = Keymap::default();
+        assert!(matches!(
+            keymap.map(key(KeyCode::Char(' ')), &editor),
+            Some(Action::EditorKey(_))
+        ));
+        assert!(matches!(
+            keymap.map(key(KeyCode::Char('n')), &editor),
+            Some(Action::EditorKey(_))
+        ));
+
+        let mut results = App::new(Vec::new());
+        results.focus = Focus::Results;
+        for (code, action) in [
+            ('n', Action::NewConsole),
+            ('q', Action::CloseActiveTab),
+            ('x', Action::RequestDeleteActiveConsole),
+        ] {
+            assert_leader_shortcut(&results, code, action);
+        }
+
+        let relation = relation_app(RelationGridMode::Browse);
+        for (code, action) in [('n', Action::NewConsole), ('q', Action::CloseActiveTab)] {
+            assert_leader_shortcut(&relation, code, action);
+        }
     }
 
     #[test]
