@@ -1122,7 +1122,10 @@ impl App {
         if selected != id {
             return Vec::new();
         }
-        if id == crate::help::HelpShortcutId::Help {
+        if !crate::help::shortcut_is_executable(id) {
+            return Vec::new();
+        }
+        if !crate::help::shortcut_is_available_in_app(self, id) {
             return Vec::new();
         }
         self.overlay = None;
@@ -1133,12 +1136,17 @@ impl App {
         let actions = match id {
             Id::Help => unreachable!("help shortcut is handled before dispatch"),
             Id::FocusExplorer => vec![Action::Focus(Focus::Explorer)],
-            Id::FocusResults => vec![Action::Focus(Focus::Results)],
+            Id::FocusExplorerLeader => vec![Action::Focus(Focus::Explorer)],
+            Id::FocusResults | Id::FocusResultsFromL => vec![Action::Focus(Focus::Results)],
             Id::FocusEditorFromK | Id::FocusEditorFromL => vec![Action::Focus(Focus::Editor)],
             Id::PreviousTab => vec![Action::PreviousTab],
             Id::NextTab => vec![Action::NextTab],
+            Id::PreviousTabAlias => vec![Action::PreviousTab],
+            Id::NextTabAlias => vec![Action::NextTab],
             Id::NewConsole => vec![Action::NewConsole],
             Id::GotoSqlConsole => vec![Action::GotoSqlConsole],
+            Id::RunSql => vec![Action::RunActiveSql],
+            Id::RunAllSql => vec![Action::RunAllSql],
             Id::CloseTab => vec![Action::CloseActiveTab],
             Id::DeleteConsole => vec![Action::RequestDeleteActiveConsole],
             Id::OpenSqlEditors => vec![Action::OpenSqlEditorList],
@@ -1339,8 +1347,12 @@ impl App {
             Id::RelationApplyInputs => vec![Action::SubmitRelationQuery],
             Id::RelationResizeLeft => vec![Action::ResizeRelationColumn(-1)],
             Id::RelationResizeRight => vec![Action::ResizeRelationColumn(1)],
-            Id::RelationResetWidth => vec![Action::ResetRelationColumnWidth],
+            Id::RelationResetWidth => vec![Action::GridResetColumnWidth],
             Id::RelationRefresh => vec![Action::RefreshActiveRelation],
+            Id::RelationYankRow => vec![Action::RelationYank],
+            Id::RelationDeleteRow => vec![Action::RelationDeleteCurrent],
+            Id::RecordFirstField => vec![Action::RecordViewJumpFirstField],
+            _ => unreachable!("display-only shortcut passed execution guard"),
         };
         actions
             .into_iter()
@@ -1349,13 +1361,8 @@ impl App {
     }
 
     pub fn help_selected_id(&self) -> Option<crate::help::HelpShortcutId> {
-        let relation_data = matches!(
-            self.tabs.get(self.active_tab),
-            Some(WorkspaceTab::Relation(tab))
-                if tab.view == RelationView::Data
-        );
         match &self.overlay {
-            Some(Overlay::Help(help)) => help.selected_id(relation_data),
+            Some(Overlay::Help(help)) => help.selected_id(),
             _ => None,
         }
     }
@@ -1791,7 +1798,12 @@ impl App {
                 Vec::new()
             }
             Action::ShowHelp => {
-                self.overlay = Some(Overlay::Help(crate::help::HelpState::new(self.focus)));
+                let context = crate::help::shortcut_context(self);
+                let capabilities = crate::help::shortcut_capabilities(self);
+                self.overlay = Some(Overlay::Help(crate::help::HelpState::new(
+                    context,
+                    capabilities,
+                )));
                 Vec::new()
             }
             Action::OpenRecordView => {
@@ -1876,15 +1888,13 @@ impl App {
                 Vec::new()
             }
             Action::HelpMove(delta) => {
-                let relation_data = matches!(
-                    self.tabs.get(self.active_tab),
-                    Some(WorkspaceTab::Relation(tab))
-                        if tab.view == RelationView::Data
-                );
                 if let Some(Overlay::Help(help)) = self.overlay.as_mut() {
-                    let count =
-                        crate::help::filtered_shortcuts(help.context, relation_data, &help.query)
-                            .len();
+                    let count = crate::help::filtered_shortcuts(
+                        help.context,
+                        help.capabilities,
+                        &help.query,
+                    )
+                    .len();
                     help.move_selection(delta, count);
                 }
                 Vec::new()
@@ -9504,11 +9514,15 @@ mod tests {
     fn help_is_scoped_and_escape_dismisses_it() {
         let mut app = App::new(Vec::new());
         app.focus = Focus::Explorer;
+        let capabilities = crate::help::shortcut_capabilities(&app);
 
         app.update(Action::ShowHelp);
         assert_eq!(
             app.overlay,
-            Some(Overlay::Help(crate::help::HelpState::new(Focus::Explorer)))
+            Some(Overlay::Help(crate::help::HelpState::new(
+                crate::help::ShortcutContext::Explorer,
+                capabilities,
+            )))
         );
         app.update(Action::ExecuteHelpShortcut(
             crate::help::HelpShortcutId::Help,
@@ -9516,6 +9530,119 @@ mod tests {
         assert!(matches!(app.overlay, Some(Overlay::Help(_))));
         app.update(Action::DismissOverlay);
         assert_eq!(app.overlay, None);
+    }
+
+    #[test]
+    fn help_keeps_the_context_captured_when_opened() {
+        let mut app = App::new(Vec::new());
+        app.focus = Focus::Explorer;
+        app.update(Action::ShowHelp);
+
+        app.focus = Focus::Editor;
+        app.update(Action::HelpPaste("new SQL console".into()));
+        let help = match app.overlay.as_ref() {
+            Some(Overlay::Help(help)) => help,
+            _ => panic!("help overlay"),
+        };
+        assert_eq!(help.context, crate::help::ShortcutContext::Explorer);
+        assert_eq!(
+            help.selected_id(),
+            Some(crate::help::HelpShortcutId::NewConsole)
+        );
+    }
+
+    #[test]
+    fn help_rejects_an_id_that_is_not_the_captured_selection() {
+        let mut app = App::new(Vec::new());
+        app.focus = Focus::Explorer;
+        app.update(Action::ShowHelp);
+        app.update(Action::HelpPaste("move focus".into()));
+
+        app.update(Action::ExecuteHelpShortcut(
+            crate::help::HelpShortcutId::FocusResults,
+        ));
+
+        assert_eq!(app.focus, Focus::Explorer);
+        assert!(matches!(app.overlay, Some(Overlay::Help(_))));
+    }
+
+    #[test]
+    fn help_does_not_execute_a_display_only_id() {
+        let mut app = App::new(Vec::new());
+        app.overlay = Some(Overlay::Help(crate::help::HelpState::new(
+            crate::help::ShortcutContext::ExplorerFindEditing,
+            crate::help::ShortcutCapabilities::default(),
+        )));
+
+        app.update(Action::ExecuteHelpShortcut(
+            crate::help::HelpShortcutId::ExplorerFindEdit,
+        ));
+
+        assert!(matches!(app.overlay, Some(Overlay::Help(_))));
+    }
+
+    #[test]
+    fn help_keeps_captured_capabilities_when_underlying_view_changes() {
+        let mut app = App::new(Vec::new());
+        app.tabs
+            .push(WorkspaceTab::Relation(RelationTab::new("users")));
+        app.active_tab = 1;
+        app.focus = Focus::Results;
+        let capabilities = crate::help::shortcut_capabilities(&app);
+        app.update(Action::ShowHelp);
+
+        let WorkspaceTab::Relation(tab) = &mut app.tabs[app.active_tab] else {
+            unreachable!()
+        };
+        tab.view = crate::model::relation::RelationView::Ddl;
+        app.update(Action::HelpPaste("WHERE filter".into()));
+
+        let help = match app.overlay.as_ref() {
+            Some(Overlay::Help(help)) => help,
+            _ => panic!("help overlay"),
+        };
+        assert_eq!(
+            help.context,
+            crate::help::ShortcutContext::RelationDataBrowse
+        );
+        assert_eq!(help.capabilities, capabilities);
+        assert_eq!(
+            help.selected_id(),
+            Some(crate::help::HelpShortcutId::RelationWhere)
+        );
+
+        app.update(Action::ExecuteHelpShortcut(
+            crate::help::HelpShortcutId::RelationWhere,
+        ));
+        assert!(matches!(app.overlay, Some(Overlay::Help(_))));
+        let WorkspaceTab::Relation(tab) = &app.tabs[app.active_tab] else {
+            unreachable!()
+        };
+        assert_eq!(tab.query.focus, None);
+    }
+
+    #[test]
+    fn help_executes_relation_shortcut_while_it_is_still_available() {
+        let mut app = App::new(Vec::new());
+        app.tabs
+            .push(WorkspaceTab::Relation(RelationTab::new("users")));
+        app.active_tab = 1;
+        app.focus = Focus::Results;
+        app.update(Action::ShowHelp);
+        app.update(Action::HelpPaste("WHERE filter".into()));
+
+        app.update(Action::ExecuteHelpShortcut(
+            crate::help::HelpShortcutId::RelationWhere,
+        ));
+
+        assert_eq!(app.overlay, None);
+        let WorkspaceTab::Relation(tab) = &app.tabs[app.active_tab] else {
+            unreachable!()
+        };
+        assert_eq!(
+            tab.query.focus,
+            Some(crate::model::data_query::DataQueryInput::Where)
+        );
     }
 
     #[test]

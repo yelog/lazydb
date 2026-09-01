@@ -300,6 +300,84 @@ fn render_with_icons(app: &App, width: u16, height: u16, icons: IconSet) -> (Str
     (output, state)
 }
 
+#[test]
+fn pending_prefix_replaces_default_footer_hints() {
+    let mut app = fixture();
+    app.focus = Focus::Explorer;
+    let mut keymap = lazydb::input::keymap::Keymap::default();
+    assert_eq!(
+        keymap.map(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE), &app),
+        None
+    );
+    let now = std::time::Instant::now();
+    let sequence = keymap.sequence_state(&app, now).unwrap();
+    let backend = TestBackend::new(120, 36);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut state = UiState::new();
+    terminal
+        .draw(|frame| {
+            ui::render_with_state_using_icons_and_sequence(
+                frame,
+                &app,
+                &mut state,
+                IconSet::default(),
+                Some(&sequence),
+            )
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let output = (0..36)
+        .flat_map(|y| (0..120).map(move |x| buffer[(x, y)].symbol()))
+        .collect::<String>();
+    assert!(output.contains("Space n"));
+    assert!(!output.contains("select first node"));
+}
+
+#[test]
+fn counted_pending_prefix_keeps_count_in_footer_label() {
+    let mut app = fixture();
+    app.focus = Focus::Results;
+    let mut keymap = lazydb::input::keymap::Keymap::default();
+    assert_eq!(
+        keymap.map(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE), &app),
+        None
+    );
+    assert_eq!(
+        keymap.map(KeyEvent::new(KeyCode::Char('0'), KeyModifiers::NONE), &app),
+        None
+    );
+    assert_eq!(
+        keymap.map(
+            KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+            &app
+        ),
+        None
+    );
+    let sequence = keymap
+        .sequence_state(&app, std::time::Instant::now())
+        .unwrap();
+    let backend = TestBackend::new(120, 36);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut state = UiState::new();
+    terminal
+        .draw(|frame| {
+            ui::render_with_state_using_icons_and_sequence(
+                frame,
+                &app,
+                &mut state,
+                IconSet::default(),
+                Some(&sequence),
+            )
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let output = (0..36)
+        .flat_map(|y| (0..120).map(move |x| buffer[(x, y)].symbol()))
+        .collect::<String>();
+    assert!(output.contains("10 Ctrl-w"));
+    assert!(!output.contains("10 h"));
+}
+
 fn render_buffer_with_icons(
     app: &App,
     width: u16,
@@ -881,7 +959,10 @@ fn relation_page_renders_contextual_help_overlay() {
         .push(WorkspaceTab::Relation(RelationTab::new("users")));
     app.active_tab = 1;
     app.focus = Focus::Results;
-    app.overlay = Some(Overlay::Help(lazydb::help::HelpState::new(Focus::Results)));
+    app.overlay = Some(Overlay::Help(lazydb::help::HelpState::new(
+        lazydb::help::ShortcutContext::RelationDataBrowse,
+        lazydb::help::ShortcutCapabilities::relation_data(),
+    )));
 
     let (output, state) = render_with_state(&app, 120, 36);
 
@@ -1339,7 +1420,7 @@ fn standard_layout_shows_stable_workspace_regions() {
     assert!(output.contains("DATA"));
     assert!(output.contains("OUTPUT"));
     assert!(output.contains("Ada"));
-    assert!(output.contains("F1 help"));
+    assert!(output.contains("Ready"));
 }
 
 #[test]

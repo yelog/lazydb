@@ -1,266 +1,381 @@
-# Keybindings
+# Keyboard Reference
 
-This document lists the operational keyboard contract. The in-app footer shows
-the shortest relevant subset; `F1` works everywhere and `?` is backward search in
-Editor Normal mode but contextual help outside the editor.
+This document is the keyboard contract for the current TUI. The footer is a
+width-aware summary, not a separate binding system. Help rows and footer rows
+come from the same shortcut catalog, while executable behavior remains in the
+input mapper and editor.
+
+## Conventions
+
+`Ctrl-x` means hold Control while pressing `x`; `Shift-F5` means hold Shift
+while pressing F5. Adjacent-key sequences have a 750 ms timeout. A prefix that
+expires is discarded. A numeric count is displayed while it is being entered;
+after `Ctrl-w`, it applies to pane resize operations.
+
+The application Leader is used by Explorer and Results. Editor Normal and Visual
+Space bindings are handled by the editor's modalkit `EditorLeader` binding and
+are forwarded through `EditorKey`; they are not application Leader commands.
+Editor Insert Space remains completion input. A footer item can be display-only
+when the underlying mapper has no direct action for that presentation.
 
 ## Global
 
-When contextual help is open, its search field has focus. Printable text is
-searched case-insensitively, Up/Down selects a result, Enter executes it after
-closing the overlay, Esc closes the overlay, Backspace deletes the last query
-character, and Ctrl-U clears the query. The help list has one row per
-executable shortcut, so shortcuts with different actions are independently
-selectable.
-
-| Key | Action |
+| Keys | Behavior |
 | --- | --- |
-| `F1` | Contextual help |
-| `?` | Contextual help outside Insert mode |
-| `Ctrl-w h/j/k/l` | Move focus left/down/up/right |
-| `Ctrl-w +` / `Ctrl-w -` | Increase/decrease focused pane height |
-| `Ctrl-w >` / `Ctrl-w <` | Increase/decrease focused pane width |
-| `Ctrl-w =` | Restore responsive default pane sizes, not equalize |
-| `N Ctrl-w +|-|>|<` | Apply a counted pane resize; unsupported dimensions are no-ops |
-| `Tab`, `Shift-Tab` | Next/previous panel outside Insert mode |
-| `gT`, `gt` | Previous/next LazyDB tab |
-| `Ctrl-PageUp`, `Ctrl-PageDown` | Previous/next LazyDB tab |
-| `[` then `t`, `]` then `t` | Compatibility aliases for previous/next LazyDB tab |
-| `Space n` | New SQL console |
-| `Space s` | Go to the first available SQL console and focus its editor |
-| `Ctrl-c` | Cancel active query; otherwise leave Insert mode |
-| `Q` | Quit LazyDB in Normal mode |
-| `Space c` | Focus the connection Explorer |
+| `F1` | Open contextual Help |
+| `?` | Open Help outside Editor search/input states |
+| `Ctrl-c` | Quit globally; context-specific cancellation may also be offered by its modal |
+| `Tab` / `Shift-Tab` | Move focus between workspace panes where applicable |
+| `Ctrl-PageUp` / `Ctrl-PageDown` | Previous/next workspace tab |
+| `Q` | Quit from Editor Normal mode |
 
-## Profile Manager
+## Pane Navigation and Resize
 
-| Key | Action |
+`Ctrl-w` is an application pane prefix outside Editor Insert/Replace and outside
+editor-owned binding states. Candidates depend on the current layout.
+
+| Context | Valid directions |
 | --- | --- |
-| `j/k`, Up/Down | Previous/next non-text form field; Up/Down also leave text fields |
-| `Tab`, `Shift-Tab` | Next/previous form field |
-| `h/l`, Left/Right | Previous/next driver, URL format, SSL mode, or environment |
-| `Enter` | Apply the URL field or activate the selected form action |
-| `n` | Create a new profile |
-| `t` | Test Connection without saving |
-| `s` | Save the profile without connecting |
-| `c` | Save & Connect |
-| `d` | Delete after confirmation |
-| `Space` | Toggle checkboxes and SQLite memory mode |
-| `Esc` | Close, cancel, or leave the manager |
+| SQL Explorer | `l` to Editor |
+| SQL Editor | `h` to Explorer, `j` to Results |
+| SQL Results | `h` to Explorer, `k` to Editor |
+| Relation Explorer | `l` to Results |
+| Relation Data, DDL, or Busy | `h` to Explorer |
 
-The manager edits one draft at a time; it does not open a profile-list popup.
-The Explorer is the profile navigation surface. Its roots are keyed by profile
-UUID; temporary roots show `SESSION` while saved roots have no provenance label.
-Connection state is shown with a status marker, and process/error states may also
-show text. With no roots, select `No profiles` to start a new draft. Root
-refresh/connect/retry actions apply only to the selected UUID. Catalog status
-rows include loading, stale/retry, and permission-denied/retry states.
+`Ctrl-w +`, `Ctrl-w -`, `Ctrl-w >`, and `Ctrl-w <` resize the corresponding
+focused split. `Ctrl-w =` restores default pane sizes. Unsupported directions
+are not advertised. Counts are accepted before `Ctrl-w`, for example
+`10 Ctrl-w +`.
 
-`Test Connection` is non-persistent and leaves the active connection alone. On
-success it discovers databases and schemas used by the hierarchical scope
-picker. The picker supports `All` and `Selected`; MySQL displays a read-only
-database-as-schema mirror rather than independently selectable schemas.
+## Prefixes
 
-DRIVER displays PostgreSQL, MySQL, and SQLite horizontally, with the current
-choice highlighted. In text fields, `h/j/k/l` remain literal input; Left/Right
-move the text cursor and Up/Down change fields. PostgreSQL exposes an optional
-default schema. URL FORMAT cycles only through formats compatible with the
-selected driver, and URL applies on Enter, field exit, Test, or Save.
+The catalog records prefixes explicitly; this reference does not infer them
+from display strings.
+
+| Prefix | Continuations |
+| --- | --- |
+| Application `Space` | `c`, `n`, `s`, `r`, `R`, `d`, `q`, `x`, `e`; run actions require an active SQL console |
+| Editor `Space` (`EditorLeader`) | `f`, `y`, `Y`, `d`, plus editor-owned `r`, `R`, `n`, `s`, `q`, `x`, `e`, and `t` transaction sequences |
+| `g` | `g` first item, `t`/`T` next/previous tab |
+| `z` in Explorer | `z`/`t`/`b` middle/top/bottom alignment |
+| `z` in grid | `z`/`t`/`b` middle/top/bottom row alignment |
+| `[` / `]` | `t` previous/next tab aliases |
+| Relation `d` | `d` delete current row |
+| Relation `y` | `y` yank current row |
+| Record View `g` | `g` first field |
 
 ## Explorer
 
-| Key | Action |
+| Keys | Behavior |
 | --- | --- |
-| `j/k`, arrows | Move selection |
-| `gg`, `Home` | First visible object |
-| `G`, `End` | Last visible object |
-| `H/M/L` | Top/middle/bottom object in the current viewport |
-| `Ctrl-f/Ctrl-b` | Move down/up one page |
-| `Ctrl-d/Ctrl-u` | Move down/up half a page |
-| `zz/zt/zb` | Align current selection to middle/top/bottom |
-| `Home/End` | First/last visible object |
-| `/` | Find within the currently visible Explorer tree |
-| `f` | Search all objects in the active catalog scope |
-| `n/N` | Next/previous confirmed `/` or `f` result |
-| `h/l`, left/right | Collapse or expand |
-| `o` | Toggle expansion only |
-| `Enter` | Activate; open the owning table/view preview for relations and descendants |
-| `n` | Create a connection profile |
-| `e` | Edit the selected connection profile |
-| `c`, `x` | Connect/disconnect the selected profile |
-| `d` | Delete the selected connection profile |
-| `r` | Reload catalog |
-| `p` | Open a 500-row table/view preview |
-| `D` | Open available object DDL in a new SQL tab |
-| `y` | Copy the selected node's primary name |
-| `s` | Open connection access menu |
+| `j/k`, Up/Down | Move selection |
+| `gg`, `Home` | First visible node |
+| `G`, `End` | Last visible node |
+| `H/M/L` | Top/middle/bottom visible node |
+| `Ctrl-f/Ctrl-b` | Page down/up |
+| `Ctrl-d/Ctrl-u` | Half-page down/up |
+| `zz/zt/zb` | Align selection |
+| `h/l`, Left/Right | Collapse/expand |
+| `o` | Toggle expansion |
+| `Enter` | Open/activate selected node |
+| `/` | Open visible-node find |
+| `f` | Open catalog search |
+| `n/N` | Next/previous confirmed find/search match |
+| `n` | New profile |
+| `e` | Edit selected profile |
+| `c/x` | Connect/disconnect selected profile |
+| `d` | Request profile deletion |
+| `r` | Refresh catalog |
+| `p` | Open relation Data preview |
+| `D` | Open relation DDL |
+| `s` | Open Profile Access |
+| `y` | Copy selected node name |
 
-Expanding a database loads schemas, expanding a schema loads object groups, and
-expanding a group loads objects. Catalog pages are lazy and may show `Load
-more...`; `r` refreshes the selected UUID-owned target. A refresh can retain the
-previous page as stale data until the replacement arrives. Late pages whose
-connection identity, catalog epoch, request id, target, or cursor no longer
-matches are ignored.
-
-`/` finds primary node labels in the visible expanded-tree snapshot only. It does
-not load or search descendants hidden by collapsed nodes or missing from loaded
-pages. Matching is case-insensitive and highlights matching text in the normal
-tree. Type to edit, press `Enter` to confirm, then use `n/N` to cycle results;
-`Esc` clears the find state. `Backspace` deletes and `Ctrl-U` clears while editing.
-
-`f` searches every actual object in the active connection's configured catalog
-scope, including objects and relation children not loaded in the lazy tree.
-Matching is case-insensitive over names and qualified paths. Results preserve the
-ancestor and presentation-group tree structure and highlight matching labels.
-Type to edit, use `j/k`, arrows, `Home/End` to select, `Enter` to locate and retain
-a hit in the normal tree, `n/N` to cycle matching objects after confirmation, and
-`Esc` to close. `Backspace` deletes and `Ctrl-U` clears. Failed searches use `r` to
-retry. Results are limited to 100; refine a truncated search.
+Visible-node find is Editing until Enter. While Editing, printable keys,
+Backspace, Ctrl-U, Enter, and Esc belong to find input. After confirmation,
+`n`, `N`, and Esc cycle or close it. Catalog search Editing accepts text,
+Backspace, Ctrl-U, navigation, Enter to locate, and Esc; after confirmation,
+`n`, `N`, and Esc are the active controls.
 
 ## SQL Editor
 
-Normal mode:
+### Normal
 
-| Key | Action |
+| Keys | Behavior |
 | --- | --- |
 | `h/j/k/l`, arrows | Move cursor |
 | `i` | Insert at cursor |
 | `a` | Insert after cursor |
 | `o` | Open line below |
-| `x`, `Delete` | Delete character |
-| `0`, `$`, `Home`, `End` | Start/end of line |
-| `F5`, `Space r` | Execute the selected/current statement |
-| `Shift-F5`, `Space R` | Preview and execute the complete buffer |
-| `Space f` | Format the selected/current statement |
-| `Space y` | Copy the current SQL statement |
-| `Space Y` | Copy the complete SQL buffer |
-| `Ctrl-Space` | Trigger completion |
-| `Space d` | Select the active console's database/schema execution target |
-| `Ctrl-N/P` | Move through an open completion popup |
-| `?`, `n`, `N` | Backward search and repeat |
-| `F1`, `Space ?` | Editor help |
-| `Space tt` | Toggle AUTO/MANUAL transactions |
-| `Space tc` | Commit the active MANUAL transaction |
-| `Space tr` | Roll back the active MANUAL transaction |
+| `x`, Delete | Delete character |
+| `u` / `Ctrl-r` | Undo/redo |
+| `F5` | Run current statement |
+| `Shift-F5` | Run complete buffer |
+| `Space f` | Format current/selected SQL |
+| `Space y` | Copy current statement |
+| `Space Y` | Copy complete buffer |
+| `Space d` | Choose execution target |
+| `Space r` / `Space R` | Run current/all SQL through EditorLeader |
+| `Space tt/tc/tr` | Toggle, commit, or roll back transaction through EditorLeader |
+| `g` then `g/t/T` | First item or next/previous tab |
+| `[` then `t`, `]` then `t` | Tab aliases |
+| `?` | Backward editor search |
 
-Insert mode:
+### Insert and Replace
 
-| Key | Action |
+| Keys | Behavior |
 | --- | --- |
-| `Esc`, idle `Ctrl-c` | Return to Normal mode |
-| `Tab` | Insert a tab character |
+| Printable text, Enter, Tab | Insert/edit text |
 | arrows, Home, End | Move cursor |
-| Backspace, Delete, Enter | Edit text |
-| `Ctrl-W/U/H` | Delete word/to line start/backspace |
+| Backspace, Delete | Delete text |
+| `Ctrl-w/U/H` | Delete previous word, to line start, or backspace |
+| `Ctrl-Space` | Trigger completion |
+| `Esc` | Return to Normal |
+| `F5` | Run SQL |
 
-Visual selection takes precedence over the cursor statement. Empty selections do
-not fall back to the whole buffer. Full-buffer execution is explicit and always
-requires confirmation. `:run`, `:runall`, `:format`, `:s`, `:tx auto`, `:tx manual`,
-`:tx clear`, `:commit`, and `:rollback` provide command-line equivalents.
+`Ctrl-w` in Insert/Replace is an editor text command, never the pane prefix.
 
-MANUAL transactions use one pinned physical connection per console. Cancelling a
-MANUAL query rolls back the complete transaction; MySQL DDL may implicitly commit.
-`Space d` lists only targets discovered for the active profile and permitted by
-its catalog scope. Use `j/k` or Up/Down to wrap through targets, Enter to confirm,
-and Esc to cancel. Target changes are blocked while any query or MANUAL
-transaction is active; a failed target connection leaves the previous target and
-connection unchanged.
+### Visual
 
-## Results
+| Keys | Behavior |
+| --- | --- |
+| `y` | Copy selection |
+| `Esc` | Return to Normal |
+| `F5` | Run selection |
+| `Space f` | Format selection |
+| `Space y/Y` | Copy selection/buffer through EditorLeader |
 
-| Key | Action |
+Visual Char, Visual Line, and Visual Block are presented as the Editor Visual
+context. Empty selections do not fall back to the whole buffer.
+
+## SQL Results Data
+
+| Keys | Behavior |
 | --- | --- |
 | `h/j/k/l`, arrows | Move selected cell |
-| `gg`, `G` | Select the first/last row |
-| `H`, `M`, `L` | Select the top/middle/bottom visible row |
-| `Ctrl-d`, `Ctrl-u` | Move down/up half a page |
-| `Ctrl-f`, `Ctrl-b` | Move down/up one page |
-| `zz`, `zt`, `zb` | Align the selected row to the middle/top/bottom |
-| `v` | Open read-only Record View for the selected row |
-| `y` | Copy the complete selected cell value |
-| `Y` | Copy the selected row as TSV |
-| `Space Y` | Copy the selected row with column headers as TSV |
-| `o` | Switch Data/Output |
+| `gg`, `G` | First/last row |
+| `H/M/L` | Top/middle/bottom visible row |
+| `Ctrl-d/u`, `Ctrl-f/b` | Half-page/page movement |
+| `zz/zt/zb` | Align selected row |
+| `v` | Open Record View when data exists |
+| `y` | Copy selected cell |
+| `Y` | Copy selected row as TSV |
+| Application `Space Y` | Copy row with headers when grid navigation is active |
+| `o` | Switch to Output |
+| `/` / `s` | Focus WHERE/ORDER BY when Data Query is available |
 
-When `OUTPUT` is active, it is a read-only Vim text view rather than a grid:
-`h/j/k/l`, arrows, `H/M/L`, `gg/G`, `Ctrl-d/u`, `Ctrl-f/b`, `/`, `?`, `n/N`,
-`v`, `V`, and `Ctrl-v` navigate or select text. `y` copies the Visual selection
-and `yy` copies the current line. Output status markers are visual decorations;
-only the log message text is copied. Editing, paste, undo, redo, substitution,
-and other mutation commands are disabled. Output follows the newest entry until
-the user navigates or starts a selection, after which new entries do not move
-the cursor or selection.
+## SQL Output and Plan
 
-Page movement moves the selected row with the viewport. The fixed `#` column
-shows one-based absolute row numbers and remains visible during horizontal
-scrolling.
+Output and Plan are read-only Vim text views, not grids.
 
-Record View shows fields in result-column order with their database types and
-bounded value previews. Inside it, `j/k` scroll fields, `h/l` browse records,
-`gg/G` jump to the first/last field, and `Esc`, `q`, or `v` closes the view.
-It is read-only and does not load complete LOB values or execute database I/O.
-
-Relation Data previews additionally support `/` to focus the `WHERE` input and
-`s` to focus `ORDER BY`. Press `Enter` to apply both clauses, or `Esc` to leave
-the inputs without applying drafts. `[` and `]` resize the selected column and
-`=` restores its automatic width. Preview queries retain the hard 500-row limit.
-
-Selecting a relation or one of its supported descendants opens a relation tab.
-Relation tabs have `DATA` and `DDL` pages. The relation-local shortcuts are:
-
-| Key | Action |
+| Keys | Behavior |
 | --- | --- |
-| `D` | Switch to the adapter-owned relation DDL page |
-| `p` | Switch to the adapter-owned relation Data preview |
-| `o` | Toggle between Data and DDL |
-| `1`, `2` | Select Data or DDL directly |
-| `r` | Refresh the active relation; retry a failed request |
-| `j/k/h/l`, arrows | Move Data selection or move the DDL read-only Vim cursor |
-| `gg`, `G` | Jump the DDL cursor to the beginning/end |
-| `H/M/L` | Move the DDL cursor to the top/middle/bottom of its viewport |
-| `Ctrl-d/u`, `Ctrl-f/b` | Move the DDL cursor by half/page viewport |
-| `v`, `V`, `Ctrl-v` | Select DDL text in Visual Char/Line/Block mode |
-| `y`, `yy` | Copy the selected DDL text or current line |
+| `j/k`, arrows | Move through text |
+| `gg/G` | First/last text position |
+| `H/M/L` | Viewport alignment |
+| `Ctrl-d/u`, `Ctrl-f/b` | Half-page/page movement |
+| `/` | Search text |
+| `v/V`, `Ctrl-v` | Visual Char/Line/Block selection |
+| `y` | Copy selected text |
+| `o` | Return to Data |
 
-Data is a read-only, adapter-owned preview with a hard `LIMIT 500`, including
-the SQL construction and limit. Zero-row results still retain and render column
-metadata. DDL is a complete adapter-owned result; the UI does not reconstruct it
-from catalog rows. On DDL, the content is a read-only Vim buffer. Normal/Visual
-navigation, search, and yank are available. `V` enters Visual Line mode;
-selection is visible while all editing,
-paste, undo, redo, substitution, and write-oriented commands are disabled. DDL
-status and provenance decorations are not part of selectable or copied text.
-On Data, the same movement keys select a cell and the shared grid follows the
-selected row/column only as needed.
+Output `o` is the `Output o` view toggle and is handled before the read-only editor mapper. Other read-only Vim
+editing commands remain disabled. Output hints describe text, never cells.
 
-The mouse wheel scrolls the panel under the pointer: Explorer and SQL editor
-move by three rows, Data moves the grid by three rows, and DDL moves its
-vertical viewport by three rows. Left/right DDL movement remains keyboard-only.
-`Ctrl-C` cancels an in-flight relation request. Relation snapshots identify
-whether they are `LIVE`, `OFFLINE SNAPSHOT`, `PROFILE DELETED SNAPSHOT`, or `OUT
-OF SCOPE SNAPSHOT`; this is snapshot provenance and is separate from DDL's
-`NativeCatalog` or `AdapterGenerated` provenance.
+## Relation Data
+
+The catalog contexts are `RelationDataBrowse`, `RelationDataEdit`,
+`RelationDataVisual`, and `RelationDataBusy`.
+
+### Browse
+
+| Keys | Behavior |
+| --- | --- |
+| `h/j/k/l`, arrows | Move through cells |
+| `gg/G`, `H/M/L`, page controls | Move rows and viewport |
+| `yy` | Yank current row |
+| `Y` | Copy current row as TSV |
+| `dd` | Delete current row after the real pending sequence |
+| `i` | Edit selected cell when editing is available |
+| `a` | Insert row when editing is available |
+| `V` | Enter Visual Line when editing is available |
+| `p` | Paste row when editing is available |
+| `u` | Undo row changes when editing is available |
+| `Ctrl-s` | Commit changes when editing is available |
+| `/` / `s` | Focus WHERE/ORDER BY when query capability is available |
+| `r` | Refresh relation |
+
+The Relation Browse context uses `yy`/`yank row`, not SQL Results `y`/copy cell.
+`Enter`, `[` and `]` are not executable Relation Data bindings in the current
+mapper and are not documented as actions.
+
+### EditCell
+
+| Keys | Behavior |
+| --- | --- |
+| `Enter` | Apply cell edit |
+| `Esc` | Cancel cell edit |
+| Printable text, Backspace, Delete | Edit the cell value |
+| `Ctrl-w`, `Ctrl-u`, `Ctrl-h` | Delete word, to start, or backspace |
+
+### Visual Line
+
+| Keys | Behavior |
+| --- | --- |
+| `j/k` | Extend selected rows |
+| `y` | Yank selected rows |
+| `d` | Delete selected rows |
+| `V` | Cancel Visual Line |
+
+### Busy
+
+Busy relation requests do not advertise browse, edit, paste, yank, or delete
+controls. `p` returns to Data, `r` refreshes the relation, and `Ctrl-c` remains
+
+## Relation DDL
+
+Relation DDL is a read-only Vim text view.
+
+| Keys | Behavior |
+| --- | --- |
+| `j/k`, arrows | Move through DDL |
+| `gg/G`, `H/M/L` | Move to ends or align viewport |
+| `Ctrl-d/u`, `Ctrl-f/b` | Scroll viewport |
+| `/` | Search DDL |
+| `v/V`, `Ctrl-v` | Select DDL text |
+| `y` | Copy selected text |
+| `p` | Return to Data |
+| `r` | Refresh relation |
+
+## Record View
+
+| Keys | Behavior |
+| --- | --- |
+| `j/k`, Up/Down | Move through fields |
+| `h/l`, Left/Right | Move through records |
+| `gg`, `Home` | First field |
+| `G`, `End` | Last field |
+| `Esc`, `q`, `v` | Close Record View |
+
+Record View is read-only and is only available when the active result has at
+least one row and one column.
+
+## Data Query Inputs and Completion
+
+Data Query input is available only in a Data view with a valid SQL or Relation
+query capability. It replaces the underlying grid hints.
+
+| Keys | Behavior |
+| --- | --- |
+| Printable text, Backspace, Delete | Edit WHERE/ORDER BY text |
+| `Ctrl-w/U/H` | Text editing controls |
+| `Tab`, `Shift-Tab` | Switch WHERE and ORDER BY |
+| `Enter` | Submit query |
+| `Esc` | Cancel input |
+| `Ctrl-n`, `Ctrl-p` | Next/previous completion when completion is open |
+| `Tab` or `Enter` | Accept completion when completion is open |
+| `Esc` | Dismiss completion when completion is open |
+
+## Profile Manager
+
+### Form
+
+| Keys | Behavior |
+| --- | --- |
+| `Tab`, `Shift-Tab`, BackTab | Move fields |
+| `j/k`, Up/Down | Move fields; literal in text fields where applicable |
+| Left/Right, `h/l` | Cycle compatible driver/options |
+| Enter/Space | Activate option or action |
+| `F5` | Test connection |
+| `Ctrl-s` | Save |
+| `Ctrl-Enter` | Save and connect |
+| `Esc` | Close manager |
+
+### Scope
+
+| Keys | Behavior |
+| --- | --- |
+| `j/k`, Up/Down | Move scope rows |
+| `Space` | Toggle selected scope row when not loading |
+| `r` | Refresh discovery when not loading |
+| `Esc`, Enter | Return to Form |
+
+### Delete and Loading
+
+Profile delete confirmation uses `Enter`/`y` to confirm and `Esc`/`n`/`q` to
+cancel. During scope discovery loading, `Space` and `r` are unavailable; return
+and navigation remain available.
+
+## SQL Editor List
+
+| Keys | Behavior |
+| --- | --- |
+| Printable text, Backspace | Filter editors |
+| `j/k`, Up/Down | Move selection |
+| `Enter` | Activate selected editor |
+| `Esc` | Close list |
+
+## Help Search
+
+Help captures its display context and capabilities when opened. Later pane/tab
+changes do not change the list. Printable text and paste edit the search query;
+Backspace removes a character; Ctrl-U clears; Up/Down moves selection; Enter
+executes the selected executable shortcut; Esc closes Help.
+
+Display-only catalog rows are informational and cannot execute an action.
+
+## Profile Access
+
+| Keys | Behavior |
+| --- | --- |
+| `j/k`, Up/Down | Move access choice |
+| `Enter` | Apply choice |
+| `Esc`, `q` | Cancel |
+
+## Message
+
+| Keys | Behavior |
+| --- | --- |
+| `Esc`, `q` | Close message |
+
+## Confirmations and Selectors
+
+### Substitute Confirmation
+
+`y` accepts one replacement, `n` rejects one, `a` accepts all, `l` accepts the
+last and stops, and `Esc`/`q` quits substitution.
+
+### Execution Confirmation
+
+`Enter`/`e`/`y` executes; `Esc`/`n`/`q` cancels; Tab/Left/Right changes the
+focused choice.
+
+### Manual Cancellation
+
+`Enter`/`c` confirms cancellation and rollback; `Esc`/`k` keeps the query
+running; Tab/Left/Right changes the choice.
+
+### Transaction Exit
+
+`a` abandons, `r` rolls back, `c` commits, and Enter confirms the selected
+choice. Esc/n cancels; Tab/Left/Right changes the choice.
+
+### Clear Transaction Outcome
+
+Enter/y clears the unknown outcome. Esc/n/q cancels.
+
+### Target Selector
+
+`j/k` or Up/Down moves between targets; Enter confirms; Esc cancels.
+
+### Delete SQL Editor
+
+Enter confirms permanent deletion; Esc cancels.
 
 ## Mouse
 
-- Left click switches panels, activates tabs, selects catalog rows, selects result
-  cells, and toggles Data/Output.
-- Application copy uses the semantic target under the cursor. It copies complete
-  values even when the Grid preview is truncated. Terminal-native text selection
-  commonly uses Shift-drag while mouse capture is enabled; the exact modifier is
-  terminal-specific. Use `--mouse off` to prefer terminal-native selection.
-- Wheel scroll moves the panel under the pointer; relation DDL scrolls vertically
-  by three rows and relation Data scrolls the grid by three rows.
-- Closing the Neovim floating window hides it without stopping LazyDB.
-# Workspace Lifecycle
-
-- `Space q`: close the current tab; SQL editors are hidden and retained.
-- `Space x`: request confirmed permanent deletion of the current SQL editor.
-- `Space e`: search and activate any persisted SQL editor, including hidden editors.
-
-Workspaces are per connection profile. Switching profiles changes the visible
-workspace only after the connection succeeds; a failed switch leaves the current
-connection and workspace unchanged. Disconnecting hides the profile's workspace
-without deleting it. Relation tabs restore as lazy shells, and their result data
-is not persisted across an application restart. Deleting a profile removes its
-workspace.
+Left click focuses panels, activates tabs, selects Explorer rows and grid cells,
+and toggles view selectors. Wheel scrolling affects the panel under the pointer.
+Relation DDL scrolls vertically; Relation Data scrolls the grid. Mouse/paste/
+resize/focus events clear pending key sequences. Use `--mouse off` for terminal
+native selection behavior.
