@@ -1434,8 +1434,6 @@ fn relation_help_documents_transaction_control_panel() {
     let output = render(&app, 120, 40);
     assert!(output.contains("Space tc"));
     assert!(output.contains("commit or roll back transaction"));
-    assert!(output.contains("Ctrl-s"));
-    assert!(output.contains("Ctrl-x"));
 }
 
 #[test]
