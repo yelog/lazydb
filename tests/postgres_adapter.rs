@@ -420,9 +420,7 @@ async fn native_catalog_search_covers_postgres_contract_when_configured() {
         ];
         for (name, kind) in expected_kinds {
             let query = if kind == CatalogKind::Column {
-                // Search by the relation suffix; PostgreSQL catalog search
-                // already matches qualified paths by containment.
-                format!("{exact}.code")
+                "code".to_owned()
             } else {
                 name.clone()
             };
