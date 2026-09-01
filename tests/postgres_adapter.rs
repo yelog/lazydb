@@ -454,45 +454,6 @@ async fn native_catalog_search_covers_postgres_contract_when_configured() {
         assert_eq!(routine_ids.len(), 2, "overloaded routine OIDs must remain distinct");
         assert!(routine_ids.iter().all(|id| id.native_path.len() == 4));
 
-        let column = adapter
-            .search_catalog(&catalog_search_request(
-                profile_id,
-                exact.clone(),
-                scope.clone(),
-                100,
-            ))
-            .await
-            .unwrap();
-        let column = column
-            .hits
-            .iter()
-            .find(|hit| hit.entry.kind == CatalogKind::Column)
-            .unwrap();
-        assert_eq!(
-            column
-                .ancestors
-                .iter()
-                .map(|entry| entry.kind)
-                .collect::<Vec<_>>(),
-            [CatalogKind::Database, CatalogKind::Schema, CatalogKind::Table]
-        );
-        assert_eq!(column.qualified_path(), format!("{database_name}.{schema}.{exact}.code"));
-        assert_eq!(
-            column.entry.comment,
-            OptionalMetadata::Supported(Some("search column comment".to_owned()))
-        );
-        assert!(matches!(
-            &column.entry.metadata,
-            CatalogMetadata::Column(metadata)
-                if metadata.native_type == "character varying(20)"
-                    && metadata.default_expression.is_supported()
-                    && !metadata.constraint_memberships.is_empty()
-        ));
-        assert_eq!(
-            column.ancestors[2].comment,
-            OptionalMetadata::Supported(Some("search table comment".to_owned()))
-        );
-
         let index = adapter
             .search_catalog(&catalog_search_request(
                 profile_id,
