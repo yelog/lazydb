@@ -350,9 +350,11 @@ impl Keymap {
             tab.completion.is_some() && app.active_editor_mode() == EditorMode::Insert
         }) {
             let completion_action = match event.code {
+                KeyCode::Down if event.modifiers.is_empty() => Some(Action::CompletionNext),
                 KeyCode::Char('n') if event.modifiers.contains(KeyModifiers::CONTROL) => {
                     Some(Action::CompletionNext)
                 }
+                KeyCode::Up if event.modifiers.is_empty() => Some(Action::CompletionPrevious),
                 KeyCode::Char('p') if event.modifiers.contains(KeyModifiers::CONTROL) => {
                     Some(Action::CompletionPrevious)
                 }
@@ -1367,8 +1369,14 @@ fn map_data_query(event: KeyEvent, app: &App) -> Option<Action> {
         use crate::model::data_query::DataQueryInput;
         if query.completion.is_some() {
             match event.code {
+                KeyCode::Down if event.modifiers.is_empty() => {
+                    return Some(Action::DataQueryCompletionNext);
+                }
                 KeyCode::Char('n') if event.modifiers.contains(KeyModifiers::CONTROL) => {
                     return Some(Action::DataQueryCompletionNext);
+                }
+                KeyCode::Up if event.modifiers.is_empty() => {
+                    return Some(Action::DataQueryCompletionPrevious);
                 }
                 KeyCode::Char('p') if event.modifiers.contains(KeyModifiers::CONTROL) => {
                     return Some(Action::DataQueryCompletionPrevious);
