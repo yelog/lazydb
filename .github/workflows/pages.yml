@@ -41,9 +41,6 @@ jobs:
             :
           elif [ -f "pages/$opposite.json" ]; then
             cp "pages/$opposite.json" "existing-pages/$opposite.json"
-          else
-            echo "existing $opposite Pages manifest is required" >&2
-            exit 1
           fi
           sh scripts/release/assemble-pages.sh "$channel" "$version" "$published_at" dist pages existing-pages _site
       - name: Configure Pages

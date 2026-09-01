@@ -32,6 +32,9 @@ cmp "$TMP/output/channels/stable.json" "$TMP/output-again/channels/stable.json"
 [ "$(cat "$TMP/output/channels/beta.json")" = preserved ]
 [ "$(cat "$TMP/output/CNAME")" = lazydb.yelog.org ]
 [ -x "$TMP/output/install.sh" ] && [ -x "$TMP/output/install-beta.sh" ] && [ -x "$TMP/output/install-core.sh" ]
+[ "$(grep -c 'set -eu' "$TMP/output/install.sh")" -eq 1 ]
+[ "$(grep -c 'LAZYDB_CHANNEL_LOCKED=stable' "$TMP/output/install.sh")" -eq 1 ]
+[ "$(grep -c 'LAZYDB_CHANNEL_LOCKED=beta' "$TMP/output/install-beta.sh")" -eq 1 ]
 [ "$(find "$TMP/output" -type f | sort | sed "s#^$TMP/output/##")" = "channels/beta.json
 channels/stable.json
 CNAME
@@ -47,4 +50,10 @@ sh "$ROOT/scripts/release/assemble-pages.sh" beta 1.2.3-beta.1 2026-08-31T12:00:
 [ "$(cat "$TMP/output-beta/channels/stable.json")" = "$(cat "$TMP/existing/stable.json")" ]
 [ "$(cat "$TMP/output-beta/CNAME")" = lazydb.yelog.org ]
 if find "$TMP/output-beta" -type f \( -name '*.tar.xz' -o -name '*.deb' -o -name '*.rpm' \) | grep . >/dev/null 2>&1; then exit 1; fi
+
+# A first deployment may have only one channel; the next release completes it.
+rm -f "$TMP/existing/beta.json"
+sh "$ROOT/scripts/release/assemble-pages.sh" stable 1.2.3 2026-08-31T12:00:00Z "$TMP/stable-assets" "$TMP/source" "$TMP/existing" "$TMP/output-first"
+[ -f "$TMP/output-first/channels/stable.json" ]
+[ ! -e "$TMP/output-first/channels/beta.json" ]
 printf '%s\n' 'Pages tests: ok'
