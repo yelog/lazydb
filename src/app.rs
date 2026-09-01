@@ -8073,7 +8073,20 @@ impl App {
                 let pk_columns = metadata
                     .primary_key
                     .iter()
-                    .map(|name| columns.iter().position(|column| column.name == *name))
+                    .map(|name| {
+                        metadata
+                            .columns
+                            .iter()
+                            .position(|(column, _, _)| column == name)
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                if columns.is_empty() || pk_columns.is_empty() {
+                    return None;
+                }
+                let result_indexes = metadata
+                    .columns
+                    .iter()
+                    .map(|(name, _, _)| columns.iter().position(|column| column.name == *name))
                     .collect::<Option<Vec<_>>>()?;
                 let request = |row_id, operation| RelationMutationRequest {
                     tab_id: tab.id,
@@ -8099,6 +8112,9 @@ impl App {
                                 changed_columns.iter().copied().collect::<Vec<_>>();
                             changed_columns.sort_by_key(|column| pk_columns.contains(column));
                             for column in changed_columns {
+                                let metadata_column = result_indexes
+                                    .iter()
+                                    .position(|result_column| *result_column == column)?;
                                 requests.push(request(
                                     row.id,
                                     RelationMutation::UpdateCell(UpdateCellMutation {
@@ -8107,11 +8123,13 @@ impl App {
                                             values: pk_columns
                                                 .iter()
                                                 .filter_map(|index| {
-                                                    row.original.get(*index).cloned()
+                                                    row.original
+                                                        .get(result_indexes[*index])
+                                                        .cloned()
                                                 })
                                                 .collect(),
                                         },
-                                        column,
+                                        column: metadata_column,
                                         original: row.original.get(column)?.clone(),
                                         value: input_value(row.current.get(column)?),
                                     }),
@@ -8119,10 +8137,20 @@ impl App {
                             }
                         }
                         crate::model::relation_edit::EditableRowState::InsertDraft => {
-                            let supplied = row.supplied_columns.iter().copied().collect::<Vec<_>>();
+                            let supplied = row
+                                .supplied_columns
+                                .iter()
+                                .map(|result_column| {
+                                    result_indexes
+                                        .iter()
+                                        .position(|index| index == result_column)
+                                })
+                                .collect::<Option<Vec<_>>>()?;
                             let values = supplied
                                 .iter()
-                                .filter_map(|column| row.current.get(*column).map(input_value))
+                                .filter_map(|column| {
+                                    row.current.get(result_indexes[*column]).map(input_value)
+                                })
                                 .collect();
                             requests.push(request(
                                 row.id,
@@ -8141,7 +8169,10 @@ impl App {
                                         .filter_map(|index| row.original.get(*index).cloned())
                                         .collect(),
                                 },
-                                original: row.original.clone(),
+                                original: result_indexes
+                                    .iter()
+                                    .filter_map(|index| row.original.get(*index).cloned())
+                                    .collect(),
                             });
                         }
                         _ => {}

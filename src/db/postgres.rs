@@ -2064,6 +2064,11 @@ impl TransactionBackend for PostgresTransactionBackend {
         );
         match request.operation {
             RelationMutation::DeleteRows(rows) => {
+                if columns.is_empty() {
+                    return Err(TransactionError(
+                        "PostgreSQL delete mutation has no relation columns".into(),
+                    ));
+                }
                 for mutation in &rows {
                     if mutation.row.columns.len() != mutation.row.values.len()
                         || mutation.original.len() != columns.len()
@@ -2072,28 +2077,12 @@ impl TransactionBackend for PostgresTransactionBackend {
                             "PostgreSQL delete mutation is malformed".into(),
                         ));
                     }
-                    let mut sql = format!("DELETE FROM {quoted_table} WHERE ");
-                    let mut predicates = Vec::new();
-                    for index in &mutation.row.columns {
-                        if *index >= columns.len() {
-                            return Err(TransactionError(
-                                "PostgreSQL row locator column is out of range".into(),
-                            ));
-                        }
-                        let name = quote_identifier(&columns[*index].0);
-                        predicates.push(format!("{name} IS NOT DISTINCT FROM $PLACEHOLDER"));
-                    }
-                    for column in columns {
-                        predicates.push(format!(
-                            "{} IS NOT DISTINCT FROM $PLACEHOLDER",
-                            quote_identifier(&column.0)
+                    if mutation.row.columns.is_empty() {
+                        return Err(TransactionError(
+                            "PostgreSQL delete mutation has no row locator".into(),
                         ));
                     }
-                    for (bind, _) in (1..).zip(&predicates) {
-                        let replacement = format!("${bind}");
-                        sql = sql.replacen("$PLACEHOLDER", &replacement, 1);
-                    }
-                    sql.push_str(" RETURNING 1");
+                    let sql = postgres_delete_sql(&quoted_table, columns, &mutation.row.columns)?;
                     let mut query = sqlx::query(AssertSqlSafe(sql));
                     for value in &mutation.row.values {
                         query = bind_cell(query, value)?;
@@ -2102,10 +2091,11 @@ impl TransactionBackend for PostgresTransactionBackend {
                         query = bind_cell(query, value)?;
                     }
                     if query
-                        .fetch_optional(&mut *self.connection)
+                        .execute(&mut *self.connection)
                         .await
                         .map_err(|e| TransactionError(e.to_string()))?
-                        .is_none()
+                        .rows_affected()
+                        != 1
                     {
                         return Err(TransactionError(
                             "PostgreSQL relation mutation conflict".into(),
@@ -2216,14 +2206,18 @@ impl TransactionBackend for PostgresTransactionBackend {
                         sql.push_str(" AND ");
                     }
                     let name = quote_identifier(&columns[*column_index].0);
-                    sql.push_str(&format!("{name} IS NOT DISTINCT FROM ${bind_count}"));
+                    sql.push_str(&format!(
+                        "{name} IS NOT DISTINCT FROM {}",
+                        postgres_placeholder(bind_count, &columns[*column_index].1)
+                    ));
                     bind_count += 1;
                 }
                 if !update.row.columns.is_empty() {
                     sql.push_str(" AND ");
                 }
                 sql.push_str(&format!(
-                    "{quoted_column} IS NOT DISTINCT FROM ${bind_count} RETURNING *"
+                    "{quoted_column} IS NOT DISTINCT FROM {}",
+                    postgres_placeholder(bind_count, &columns[update.column].1)
                 ));
 
                 let mut query = sqlx::query(AssertSqlSafe(sql));
@@ -2236,7 +2230,47 @@ impl TransactionBackend for PostgresTransactionBackend {
                     query = bind_cell(query, value)?;
                 }
                 query = bind_cell(query, &update.original)?;
-                let row = query
+                let affected = query
+                    .execute(&mut *self.connection)
+                    .await
+                    .map_err(|error| TransactionError(error.to_string()))?
+                    .rows_affected();
+                if affected != 1 {
+                    return Err(TransactionError(
+                        "PostgreSQL relation mutation conflict".into(),
+                    ));
+                }
+
+                let mut select = format!("SELECT * FROM {quoted_table} WHERE ");
+                for (position, column_index) in update.row.columns.iter().enumerate() {
+                    if position > 0 {
+                        select.push_str(" AND ");
+                    }
+                    select.push_str(&format!(
+                        "{} IS NOT DISTINCT FROM {}",
+                        quote_identifier(&columns[*column_index].0),
+                        postgres_placeholder(position + 1, &columns[*column_index].1)
+                    ));
+                }
+                let mut select_query = sqlx::query(AssertSqlSafe(select));
+                for (column_index, value) in update.row.columns.iter().zip(&update.row.values) {
+                    let value = if *column_index == update.column {
+                        match &update.value {
+                            InputValue::Value(value) => value,
+                            InputValue::Null => &CellValue::Null,
+                            InputValue::Default => {
+                                return Err(TransactionError(
+                                    "PostgreSQL cannot fetch an update that resets a primary key to DEFAULT"
+                                        .into(),
+                                ));
+                            }
+                        }
+                    } else {
+                        value
+                    };
+                    select_query = bind_cell(select_query, value)?;
+                }
+                let row = select_query
                     .fetch_optional(&mut *self.connection)
                     .await
                     .map_err(|error| TransactionError(error.to_string()))?
@@ -2249,6 +2283,7 @@ impl TransactionBackend for PostgresTransactionBackend {
             }
         }
     }
+
     async fn commit(&mut self) -> Result<(), TransactionError> {
         <Postgres as sqlx::Database>::TransactionManager::commit(&mut self.connection)
             .await
@@ -2287,6 +2322,83 @@ impl TransactionBackend for PostgresTransactionBackend {
                 .map_err(|error| TransactionError(error.to_string()))
         })
     }
+}
+
+fn postgres_delete_sql(
+    quoted_table: &str,
+    columns: &[(String, String, bool)],
+    locator_columns: &[usize],
+) -> Result<String, TransactionError> {
+    if columns.is_empty() {
+        return Err(TransactionError(
+            "PostgreSQL delete mutation has no relation columns".into(),
+        ));
+    }
+    if locator_columns.is_empty() {
+        return Err(TransactionError(
+            "PostgreSQL delete mutation has no row locator".into(),
+        ));
+    }
+    let mut predicates = Vec::with_capacity(locator_columns.len() + columns.len());
+    for (position, index) in locator_columns.iter().enumerate() {
+        if *index >= columns.len() {
+            return Err(TransactionError(
+                "PostgreSQL row locator column is out of range".into(),
+            ));
+        }
+        let name = quote_identifier(&columns[*index].0);
+        predicates.push(format!(
+            "{name} IS NOT DISTINCT FROM {}",
+            postgres_placeholder(position + 1, &columns[*index].1)
+        ));
+    }
+    let original_offset = locator_columns.len();
+    for (position, column) in columns.iter().enumerate() {
+        predicates.push(format!(
+            "{} IS NOT DISTINCT FROM {}",
+            quote_identifier(&column.0),
+            postgres_placeholder(original_offset + position + 1, &column.1)
+        ));
+    }
+    Ok(format!(
+        "DELETE FROM {quoted_table} WHERE {}",
+        predicates.join(" AND ")
+    ))
+}
+
+fn postgres_placeholder(index: usize, type_name: &str) -> String {
+    let normalized = type_name.trim().to_ascii_lowercase();
+    let base_type = normalized
+        .split_once('(')
+        .map_or(normalized.as_str(), |(base, _)| base.trim());
+    let cast = match normalized.as_str() {
+        "bool" | "boolean" => Some("boolean"),
+        "int2" | "smallint" => Some("smallint"),
+        "int4" | "integer" | "serial" => Some("integer"),
+        "int8" | "bigint" | "bigserial" => Some("bigint"),
+        "float4" | "real" => Some("real"),
+        "float8" | "double precision" => Some("double precision"),
+        "numeric" | "decimal" => Some("numeric"),
+        "text" => Some("text"),
+        "varchar" | "character varying" => Some("varchar"),
+        "char" | "character" => Some("char"),
+        "date" => Some("date"),
+        "time" | "time without time zone" => Some("time"),
+        "timetz" | "time with time zone" => Some("timetz"),
+        "timestamp" | "timestamp without time zone" => Some("timestamp"),
+        "timestamptz" | "timestamp with time zone" => Some("timestamptz"),
+        "uuid" => Some("uuid"),
+        "json" => Some("json"),
+        "jsonb" => Some("jsonb"),
+        "bytea" => Some("bytea"),
+        _ => None,
+    };
+    let cast = cast.or(match base_type {
+        "varchar" | "character varying" => Some("varchar"),
+        "char" | "character" => Some("char"),
+        _ => None,
+    });
+    cast.map_or_else(|| format!("${index}"), |cast| format!("${index}::{cast}"))
 }
 
 fn selected_schemas<'a>(request: &'a CatalogRequest, database: &str) -> Option<&'a Vec<String>> {
@@ -2806,14 +2918,47 @@ fn decode_error(error: sqlx::Error) -> DatabaseError {
 #[cfg(test)]
 mod tests {
     use super::{
-        PgDdlColumn, PgDdlRelation, assemble_relation_ddl, column_definition, quote_identifier,
-        quote_literal,
+        PgDdlColumn, PgDdlRelation, assemble_relation_ddl, column_definition, postgres_delete_sql,
+        quote_identifier, quote_literal,
     };
 
     #[test]
     fn ddl_quoting_escapes_postgres_identifiers_and_literals() {
         assert_eq!(quote_identifier("odd\"name"), "\"odd\"\"name\"");
         assert_eq!(quote_literal("owner's note"), "'owner''s note'");
+    }
+
+    #[test]
+    fn delete_sql_has_a_complete_where_clause_for_row_locators() {
+        let columns = vec![
+            ("id".to_owned(), "integer".to_owned(), false),
+            ("name".to_owned(), "text".to_owned(), true),
+        ];
+        let sql = postgres_delete_sql("\"public\".\"users\"", &columns, &[0]).unwrap();
+
+        assert_eq!(
+            sql,
+            "DELETE FROM \"public\".\"users\" WHERE \"id\" IS NOT DISTINCT FROM $1::integer AND \"id\" IS NOT DISTINCT FROM $2::integer AND \"name\" IS NOT DISTINCT FROM $3::text"
+        );
+        assert!(postgres_delete_sql("\"public\".\"users\"", &columns, &[]).is_err());
+    }
+
+    #[test]
+    fn delete_sql_casts_nullable_bigint_parameters() {
+        let columns = vec![
+            ("id".to_owned(), "bigint".to_owned(), false),
+            ("dept_id".to_owned(), "bigint".to_owned(), true),
+            (
+                "manager".to_owned(),
+                "character varying(30)".to_owned(),
+                true,
+            ),
+        ];
+        let sql = postgres_delete_sql("\"tools\".\"sys_user\"", &columns, &[0]).unwrap();
+
+        assert!(sql.contains("\"id\" IS NOT DISTINCT FROM $1::bigint"));
+        assert!(sql.contains("\"dept_id\" IS NOT DISTINCT FROM $3::bigint"));
+        assert!(sql.contains("\"manager\" IS NOT DISTINCT FROM $4"));
     }
 
     #[test]
