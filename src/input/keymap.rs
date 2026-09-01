@@ -82,6 +82,10 @@ impl Keymap {
             self.pending = None;
             return map_profile_manager(event, app);
         }
+        if is_relation_cell_editor(app) {
+            self.pending = None;
+            return map_relation_data(event, app);
+        }
         if matches!(app.overlay, Some(Overlay::ProfileAccess { .. })) {
             self.pending = None;
             return match event.code {
@@ -910,6 +914,21 @@ fn relation_grid_is_browse(app: &App) -> bool {
         .is_none_or(|edit| matches!(edit.mode, RelationGridMode::Browse))
 }
 
+fn is_relation_cell_editor(app: &App) -> bool {
+    app.tabs
+        .get(app.active_tab)
+        .and_then(|tab| match tab {
+            crate::model::tab::WorkspaceTab::Relation(tab) => tab.edit.as_ref(),
+            _ => None,
+        })
+        .is_some_and(|edit| {
+            matches!(
+                edit.mode,
+                crate::model::relation_edit::RelationGridMode::EditCell(_)
+            )
+        })
+}
+
 fn is_grid_navigation_focus(app: &App) -> bool {
     if app.focus != Focus::Results {
         return false;
@@ -1612,6 +1631,30 @@ mod tests {
             ),
             Some(Action::RelationEditCancel)
         );
+    }
+
+    #[test]
+    fn cell_editor_maps_digits_and_enter_before_global_count_prefixes() {
+        let app = relation_app(RelationGridMode::EditCell(
+            crate::model::relation_edit::CellEditorState {
+                row: 0,
+                column: 0,
+                input: Default::default(),
+            },
+        ));
+        let mut keymap = Keymap::default();
+
+        for digit in ['0', '1', '9'] {
+            assert_eq!(
+                keymap.map(key(KeyCode::Char(digit)), &app),
+                Some(Action::RelationEditInsert(digit))
+            );
+        }
+        assert_eq!(
+            keymap.map(key(KeyCode::Enter), &app),
+            Some(Action::RelationEditConfirm)
+        );
+        assert!(keymap.pending.is_none());
     }
 
     #[test]

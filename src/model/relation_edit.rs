@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 
 use crate::db::mutation::RelationMutationRequest;
 use crate::db::value::CellValue;
@@ -41,6 +41,7 @@ pub struct EditableRow {
     pub original: Vec<CellValue>,
     pub current: Vec<CellValue>,
     pub state: EditableRowState,
+    pub supplied_columns: BTreeSet<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -62,6 +63,7 @@ impl EditableRow {
             original: values.clone(),
             current: values,
             state: EditableRowState::Clean,
+            supplied_columns: BTreeSet::new(),
         }
     }
 
@@ -77,6 +79,7 @@ impl EditableRow {
             self.state,
             EditableRowState::InsertDraft | EditableRowState::Inserted
         ) {
+            self.supplied_columns.insert(column);
             return true;
         }
         let changed_columns = self
@@ -105,6 +108,7 @@ impl EditableRow {
         self.current = values.clone();
         self.original = values;
         self.state = EditableRowState::Inserted;
+        self.supplied_columns.clear();
     }
 
     pub fn mark_conflict(&mut self, message: impl Into<String>) {
@@ -127,6 +131,8 @@ pub struct RelationEditSession {
     pub mutation_undo: Vec<RelationMutationHistory>,
     pub mutation_redo: Vec<RelationMutationHistory>,
     pub pending_mutation_history: Option<PendingMutationHistory>,
+    pub pending_save: VecDeque<RelationMutationRequest>,
+    pub save_after_metadata_load: bool,
 }
 
 impl RelationEditSession {
@@ -183,9 +189,14 @@ impl RelationEditSession {
     pub fn delete_rows(&mut self, range: std::ops::RangeInclusive<usize>) -> bool {
         let mut changed = false;
         self.record_change();
-        for index in range {
+        for index in range.rev() {
             if let Some(row) = self.rows.get_mut(index) {
-                changed |= row.mark_deleted();
+                if matches!(row.state, EditableRowState::InsertDraft) {
+                    self.rows.remove(index);
+                    changed = true;
+                } else {
+                    changed |= row.mark_deleted();
+                }
             }
         }
         if !changed {
@@ -198,7 +209,10 @@ impl RelationEditSession {
         let Some(values) = self.yank.clone() else {
             return false;
         };
-        self.insert_row(position, values);
+        let id = self.insert_row(position, values);
+        if let Some(row) = self.rows.iter_mut().find(|row| row.id == id) {
+            row.supplied_columns = (0..row.current.len()).collect();
+        }
         true
     }
 
@@ -220,6 +234,37 @@ impl RelationEditSession {
         self.rows = next;
         self.sync_history_depth();
         true
+    }
+
+    pub fn discard_changes(&mut self) {
+        self.rows
+            .retain(|row| !matches!(row.state, EditableRowState::InsertDraft));
+        for row in &mut self.rows {
+            row.current = row.original.clone();
+            row.state = EditableRowState::Clean;
+            row.supplied_columns.clear();
+        }
+        self.mode = RelationGridMode::Browse;
+        self.undo.clear();
+        self.redo.clear();
+        self.pending_save.clear();
+        self.save_after_metadata_load = false;
+        self.sync_history_depth();
+    }
+
+    pub fn commit_changes(&mut self) {
+        self.rows
+            .retain(|row| !matches!(row.state, EditableRowState::Deleted));
+        for row in &mut self.rows {
+            row.original = row.current.clone();
+            row.state = EditableRowState::Clean;
+            row.supplied_columns.clear();
+        }
+        self.pending_save.clear();
+        self.save_after_metadata_load = false;
+        self.undo.clear();
+        self.redo.clear();
+        self.sync_history_depth();
     }
 
     pub fn sync_history_depth(&mut self) {
@@ -326,6 +371,26 @@ mod tests {
         assert!(row.mark_deleted());
         assert!(!row.mark_deleted());
         assert!(!row.update_cell(1, CellValue::Text("no".into())));
+    }
+
+    #[test]
+    fn delete_marks_existing_rows_but_removes_uncommitted_inserts() {
+        let mut session = RelationEditSession::from_rows(vec![vec![CellValue::Integer(1)]]);
+        session.insert_row(1, vec![CellValue::Null]);
+
+        assert!(session.delete_rows(0..=0));
+        assert_eq!(session.rows[0].state, EditableRowState::Deleted);
+        assert!(session.delete_rows(1..=1));
+        assert_eq!(session.rows.len(), 1);
+    }
+
+    #[test]
+    fn insert_draft_tracks_only_explicitly_edited_columns() {
+        let mut session = RelationEditSession::default();
+        session.insert_row(0, vec![CellValue::Null, CellValue::Null]);
+
+        assert!(session.update_cell(0, 1, CellValue::Integer(7)));
+        assert_eq!(session.rows[0].supplied_columns, [1].into_iter().collect());
     }
 
     #[test]

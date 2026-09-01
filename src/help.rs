@@ -88,6 +88,13 @@ pub enum HelpShortcutId {
     RelationResizeRight,
     RelationResetWidth,
     RelationRefresh,
+    RelationEditCell,
+    RelationDeleteRow,
+    RelationInsertRow,
+    RelationUndo,
+    RelationRedo,
+    RelationCommit,
+    RelationRollback,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -579,6 +586,41 @@ pub fn shortcuts(context: Focus, relation_data: bool) -> Vec<HelpShortcut> {
                         key: "r",
                         description: "refresh relation preview",
                     },
+                    HelpShortcut {
+                        id: HelpShortcutId::RelationEditCell,
+                        key: "i",
+                        description: "edit selected cell",
+                    },
+                    HelpShortcut {
+                        id: HelpShortcutId::RelationDeleteRow,
+                        key: "dd",
+                        description: "mark current row for deletion",
+                    },
+                    HelpShortcut {
+                        id: HelpShortcutId::RelationInsertRow,
+                        key: "a",
+                        description: "add a draft row",
+                    },
+                    HelpShortcut {
+                        id: HelpShortcutId::RelationUndo,
+                        key: "u",
+                        description: "undo relation edit",
+                    },
+                    HelpShortcut {
+                        id: HelpShortcutId::RelationRedo,
+                        key: "Ctrl-r",
+                        description: "redo relation edit",
+                    },
+                    HelpShortcut {
+                        id: HelpShortcutId::RelationCommit,
+                        key: "Ctrl-s",
+                        description: "commit relation edits",
+                    },
+                    HelpShortcut {
+                        id: HelpShortcutId::RelationRollback,
+                        key: "Ctrl-x",
+                        description: "roll back relation edits",
+                    },
                 ]);
             }
             results
@@ -704,6 +746,16 @@ mod tests {
             "gg", "G", "H", "M", "L", "Ctrl-d", "Ctrl-u", "Ctrl-f", "Ctrl-b", "zz", "zt", "zb",
         ] {
             assert!(keys.contains(&key), "missing Results help key {key}");
+        }
+    }
+
+    #[test]
+    fn relation_help_documents_draft_editing_shortcuts() {
+        let rows = shortcuts(Focus::Results, true);
+        let keys = rows.iter().map(|row| row.key).collect::<Vec<_>>();
+
+        for key in ["i", "dd", "a", "u", "Ctrl-r", "Ctrl-s", "Ctrl-x"] {
+            assert!(keys.contains(&key), "missing relation help key {key}");
         }
     }
 }

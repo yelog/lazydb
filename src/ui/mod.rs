@@ -2022,8 +2022,9 @@ pub(crate) fn render_result_table(
 ) {
     state.result_area = Some(area);
     let overrides = grid.column_widths.clone();
+    let icons = state.activity_icons;
     data_grid::render(
-        frame, area, tab_id, result, grid, &overrides, theme, block, state, None,
+        frame, area, tab_id, result, grid, &overrides, theme, block, state, None, icons,
     );
 }
 

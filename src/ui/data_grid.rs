@@ -9,13 +9,14 @@ use unicode_width::UnicodeWidthStr;
 use uuid::Uuid;
 
 use crate::{
+    db::catalog::CatalogKind,
     db::{query::ResultSet, value::CellValue},
     security::sanitize_terminal_text,
 };
 
 use super::{
     GridHorizontalScrollTarget, GridHorizontalScrollTargets, HitRegion, HitTarget, UiState,
-    theme::Theme,
+    icons::IconSet, theme::Theme,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -43,6 +44,7 @@ pub(crate) fn render(
     block: Block<'_>,
     state: &mut UiState,
     edit: Option<&crate::model::relation_edit::RelationEditSession>,
+    icons: IconSet,
 ) {
     if result.columns.is_empty() {
         frame.render_widget(
@@ -59,7 +61,16 @@ pub(crate) fn render(
     }
 
     let table_area = block.inner(area);
-    let widths = automatic_widths(result)
+    let displayed_rows = edit
+        .map(|session| {
+            session
+                .rows
+                .iter()
+                .map(|row| row.current.as_slice())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| result.rows.iter().map(Vec::as_slice).collect());
+    let widths = automatic_widths(result, icons)
         .into_iter()
         .enumerate()
         .map(|(index, width)| {
@@ -69,7 +80,7 @@ pub(crate) fn render(
                 .unwrap_or(width)
         })
         .collect::<Vec<_>>();
-    let number_width = row_number_width(result.rows.len());
+    let number_width = row_number_width(displayed_rows.len());
     let fixed_width = number_width.saturating_add(1);
     let available = table_area
         .width
@@ -93,7 +104,7 @@ pub(crate) fn render(
 
     let visible_rows = table_area.height.saturating_sub(1 + u16::from(overflow)) as usize;
     let row_offset = row_viewport_start(
-        result.rows.len(),
+        displayed_rows.len(),
         visible_rows,
         grid.row_offset,
         grid.selected_row,
@@ -105,8 +116,7 @@ pub(crate) fn render(
         visible_rows,
     });
     let row_y = table_area.y.saturating_add(1);
-    for (screen_row, row_index) in result
-        .rows
+    for (screen_row, row_index) in displayed_rows
         .iter()
         .skip(row_offset)
         .take(visible_rows)
@@ -150,9 +160,8 @@ pub(crate) fn render(
         boundary_x = boundary_x.saturating_add(1);
     }
 
-    let header = Row::new(header_cells(&visible, result, number_width, theme));
-    let rows = result
-        .rows
+    let header = Row::new(header_cells(&visible, result, number_width, theme, icons));
+    let rows = displayed_rows
         .iter()
         .skip(row_offset)
         .take(visible_rows)
@@ -161,9 +170,10 @@ pub(crate) fn render(
             let row_index = row_offset.saturating_add(screen_row);
             let editable = edit.and_then(|session| session.rows.get(row_index));
             let row_style = editable.map(|row| match row.state {
-                crate::model::relation_edit::EditableRowState::Deleted => {
-                    Style::new().fg(theme.row_deleted)
-                }
+                crate::model::relation_edit::EditableRowState::Deleted => Style::new()
+                    .fg(theme.muted)
+                    .bg(theme.row_deleted_background)
+                    .add_modifier(Modifier::DIM),
                 crate::model::relation_edit::EditableRowState::Updated { .. } => {
                     Style::new().fg(theme.row_updated)
                 }
@@ -176,7 +186,6 @@ pub(crate) fn render(
                 }
                 crate::model::relation_edit::EditableRowState::Clean => Style::new().fg(theme.text),
             });
-            let row = editable.map(|row| row.current.as_slice()).unwrap_or(row);
             Row::new(body_cells(
                 &visible,
                 row_index,
@@ -186,11 +195,27 @@ pub(crate) fn render(
                 theme,
             ))
         });
+    let selected_row_deleted = edit
+        .and_then(|session| session.rows.get(grid.selected_row))
+        .is_some_and(|row| {
+            matches!(
+                row.state,
+                crate::model::relation_edit::EditableRowState::Deleted
+            )
+        });
+    let row_highlight_style = if selected_row_deleted {
+        Style::new()
+            .fg(theme.muted)
+            .bg(theme.row_deleted_background)
+            .add_modifier(Modifier::DIM)
+    } else {
+        Style::new().bg(theme.selection).fg(theme.text)
+    };
     let table = Table::new(rows, constraints)
         .header(header)
         .block(block)
         .column_spacing(0)
-        .row_highlight_style(Style::new().bg(theme.selection).fg(theme.text))
+        .row_highlight_style(row_highlight_style)
         .cell_highlight_style(
             Style::new()
                 .bg(theme.accent)
@@ -198,7 +223,7 @@ pub(crate) fn render(
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("▌");
-    let selected_cell = (!result.rows.is_empty()).then(|| {
+    let selected_cell = (!displayed_rows.is_empty()).then(|| {
         let selected_column = visible
             .iter()
             .position(|column| column.index == grid.selected_column)
@@ -241,13 +266,13 @@ pub(crate) fn render(
     }
 }
 
-fn automatic_widths(result: &ResultSet) -> Vec<u16> {
+fn automatic_widths(result: &ResultSet, icons: IconSet) -> Vec<u16> {
     result
         .columns
         .iter()
         .enumerate()
         .map(|(column_index, column)| {
-            let header = sanitize_terminal_text(&column.name);
+            let header = column_header_text(column, icons);
             let content = result
                 .rows
                 .iter()
@@ -298,6 +323,7 @@ fn header_cells(
     result: &ResultSet,
     number_width: u16,
     theme: Theme,
+    icons: IconSet,
 ) -> Vec<Cell<'static>> {
     let header_style = Style::new()
         .fg(theme.grid_header_text)
@@ -313,10 +339,18 @@ fn header_cells(
         if position > 0 {
             cells.push(Cell::from("│").style(separator_style));
         }
-        let name = sanitize_terminal_text(&result.columns[column.index].name);
+        let name = column_header_text(&result.columns[column.index], icons);
         cells.push(Cell::from(name).style(header_style));
     }
     cells
+}
+
+fn column_header_text(column: &crate::db::query::ColumnMeta, icons: IconSet) -> String {
+    format!(
+        "{} {}",
+        icons.catalog(CatalogKind::Column),
+        sanitize_terminal_text(&column.name)
+    )
 }
 
 fn body_cells(
@@ -566,13 +600,29 @@ fn render_scrollbar(
 #[cfg(test)]
 mod tests {
     use super::{
-        GridHorizontalScrollTarget, VisibleColumn, horizontal_scroll_target, row_number_style,
-        row_number_width, row_viewport_start, selected_data_cell, total_width, viewport_start,
-        visible_columns,
+        GridHorizontalScrollTarget, VisibleColumn, column_header_text, horizontal_scroll_target,
+        row_number_style, row_number_width, row_viewport_start, selected_data_cell, total_width,
+        viewport_start, visible_columns,
     };
     use ratatui::style::Style;
 
-    use crate::ui::theme::Theme;
+    use crate::{
+        db::query::ColumnMeta,
+        ui::{icons::IconMode, icons::IconSet, theme::Theme},
+    };
+
+    #[test]
+    fn column_header_includes_explorer_column_icon() {
+        let column = ColumnMeta {
+            name: "user_id".to_owned(),
+            type_name: "integer".to_owned(),
+        };
+
+        assert_eq!(
+            column_header_text(&column, IconSet::new(IconMode::Unicode)),
+            "│ user_id"
+        );
+    }
 
     #[test]
     fn row_number_width_tracks_absolute_result_size() {

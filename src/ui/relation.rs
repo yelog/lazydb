@@ -405,8 +405,9 @@ fn render_relation_result_table(
     state: &mut super::UiState,
     edit: Option<&crate::model::relation_edit::RelationEditSession>,
 ) {
+    let icons = state.activity_icons;
     super::data_grid::render(
-        frame, area, tab_id, result, grid, overrides, theme, block, state, edit,
+        frame, area, tab_id, result, grid, overrides, theme, block, state, edit, icons,
     );
 }
 
