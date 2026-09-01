@@ -123,17 +123,24 @@ WITH candidates AS (
       ON BINARY t.table_schema=BINARY tc.table_schema AND BINARY t.table_name=BINARY tc.table_name
      AND t.table_type IN ('BASE TABLE','VIEW')
     WHERE tc.constraint_type IN ('PRIMARY KEY','UNIQUE','FOREIGN KEY')
+), normalized AS (
+    SELECT *, REGEXP_REPLACE(LOWER(object_name), '[^[:alnum:]]', '') AS normalized_name,
+              REGEXP_REPLACE(LOWER(qualified_path), '[^[:alnum:]]', '') AS normalized_path
+    FROM candidates
+), searchable AS (
+    SELECT *, IF(?, normalized_name, LOWER(object_name)) AS search_name,
+              IF(?, normalized_path, LOWER(qualified_path)) AS search_path
+    FROM normalized
 )
 SELECT kind, database_name, object_name, relation_name, relation_type, native_identity, comment
-FROM candidates
+FROM searchable
 WHERE {scope_predicate}
   AND database_name NOT IN ('information_schema','mysql','performance_schema','sys')
-  AND (LOCATE(LOWER(?), LOWER(object_name)) > 0
-       OR LOCATE(LOWER(?), LOWER(qualified_path)) > 0)
+  AND (LOCATE(?, search_name) > 0 OR LOCATE(?, search_path) > 0)
 ORDER BY CASE
-    WHEN LOWER(object_name)=LOWER(?) THEN 0
-    WHEN LOCATE(LOWER(?), LOWER(object_name))=1 THEN 1
-    WHEN LOCATE(LOWER(?), LOWER(object_name))>0 THEN 2
+    WHEN search_name=? THEN 0
+    WHEN LOCATE(?, search_name)=1 THEN 1
+    WHEN LOCATE(?, search_name)>0 THEN 2
     ELSE 3 END,
     LOWER(qualified_path), kind, BINARY native_identity
 LIMIT 101
@@ -583,13 +590,15 @@ impl MySqlAdapter {
             .unwrap_or_else(|| "TRUE".to_owned());
         let sql = CATALOG_SEARCH_CANDIDATES_SQL.replace("{scope_predicate}", &scope_predicate);
         let mut query = sqlx::query(AssertSqlSafe(sql));
+        let (search_query, ignore_separators) = crate::db::catalog::search_query(&request.query);
+        query = query.bind(ignore_separators).bind(ignore_separators);
         if let Some(databases) = selected.as_ref() {
             for database in databases {
                 query = query.bind(database);
             }
         }
         for _ in 0..5 {
-            query = query.bind(&request.query);
+            query = query.bind(&search_query);
         }
         let rows = query.fetch_all(&mut *connection).await.map_err(sql_error)?;
         let candidates = rows

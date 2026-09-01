@@ -222,6 +222,88 @@ fn frontend_search_shows_no_match_state_without_server_loading() {
 }
 
 #[test]
+fn explorer_search_highlights_matches_across_identifier_separators() {
+    let profile = import_connection_url(":memory:", Some("search-highlight"))
+        .unwrap()
+        .profile;
+    let mut app = App::new(vec![profile.clone()]);
+    app.focus = Focus::Explorer;
+    app.connection.profile_id = Some(profile.id);
+    app.connection.generation = 1;
+    app.connection.status = ConnectionStatus::Connected;
+
+    let database = CatalogEntry::database(
+        CatalogId::new(profile.id, CatalogKind::Database, ["app"]),
+        QualifiedName {
+            database: Some("app".into()),
+            schema: None,
+            object: "app".into(),
+        },
+        "database",
+        OptionalMetadata::Supported(None),
+        true,
+    )
+    .unwrap();
+    let schema = CatalogEntry::schema(
+        CatalogId::new(profile.id, CatalogKind::Schema, ["app", "main"]),
+        database.id.clone(),
+        QualifiedName {
+            database: Some("app".into()),
+            schema: Some("main".into()),
+            object: "main".into(),
+        },
+        "schema",
+        OptionalMetadata::Supported(None),
+        true,
+    )
+    .unwrap();
+    let table = CatalogEntry::relation(
+        CatalogId::new(profile.id, CatalogKind::Table, ["app", "main", "sys_user"]),
+        schema.id.clone(),
+        QualifiedName {
+            database: Some("app".into()),
+            schema: Some("main".into()),
+            object: "sys_user".into(),
+        },
+        "table",
+        OptionalMetadata::Supported(None),
+        false,
+    )
+    .unwrap();
+    let profile_state = app
+        .explorer
+        .normalized
+        .profiles
+        .get_mut(&profile.id)
+        .unwrap();
+    profile_state
+        .catalog
+        .insert_subtree(vec![database, schema.clone(), table])
+        .unwrap();
+    profile_state
+        .catalog
+        .set_group_state(
+            &schema.id,
+            ObjectGroup::Tables,
+            CatalogGroupState {
+                count: CatalogCount::Exact(1),
+                completeness: CatalogCompleteness::Complete,
+            },
+        )
+        .unwrap();
+
+    app.update(Action::ExplorerSearchOpen);
+    for character in "sysuser".chars() {
+        app.update(Action::ExplorerSearchInsert(character));
+    }
+    let (buffer, _) = render_buffer_with_icons(&app, 100, 24, IconSet::new(IconMode::Ascii));
+    let (x, y) = find_text_cell(&buffer, "sys_user").expect("search result");
+
+    assert_eq!(buffer[(x, y)].fg, buffer[(x + 4, y)].fg);
+    assert_ne!(buffer[(x, y)].fg, buffer[(x + 3, y)].fg);
+}
+
+#[test]
 fn sql_editor_underlines_statement_when_cursor_is_on_internal_space() {
     let mut app = fixture();
     app.update(Action::ReplaceEditor("SELECT 1;\nSELECT 2;".into()));

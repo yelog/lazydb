@@ -659,6 +659,26 @@ fn visible_find_snapshots_only_currently_visible_primary_labels() {
 }
 
 #[test]
+fn visible_find_ignores_identifier_separators() {
+    let profile = profile_id(1);
+    let mut fixture = fixture(profile);
+    fixture.table.qualified_name.object = "sys_user".to_owned();
+    let mut state = lazydb::model::workspace::ExplorerState {
+        normalized: explorer_with_fixture(&fixture),
+        ..Default::default()
+    };
+    state.normalized.expanded.extend(expanded_path(&fixture));
+
+    state.open_find();
+    state.edit_find(|query| query.push_str("sysuser"));
+
+    assert_eq!(
+        state.find.as_ref().unwrap().matches,
+        vec![ExplorerNodeId::Catalog(fixture.table.id.clone())]
+    );
+}
+
+#[test]
 fn visible_find_matches_primary_labels_not_metadata_and_empty_queries_are_idle() {
     let profile = profile_id(1);
     let fixture = fixture(profile);
@@ -837,6 +857,33 @@ fn frontend_search_locates_the_current_match_instead_of_the_first() {
     assert_eq!(state.locate_search_hit(), Ok(true));
     assert!(state.search.is_none());
     assert_eq!(state.selected_id(), Some(&selected));
+}
+
+#[test]
+fn frontend_search_ignores_identifier_separators() {
+    let profile = profile_id(1);
+    let mut fixture = fixture(profile);
+    fixture.table.qualified_name.object = "sys_user".to_owned();
+    let mut state = lazydb::model::workspace::ExplorerState {
+        normalized: explorer_with_fixture(&fixture),
+        ..Default::default()
+    };
+    state.open_search(
+        Some(lazydb::identity::ConnectionIdentity {
+            profile_id: profile,
+            generation: 1,
+        }),
+        1,
+    );
+    state.edit_search(|query| query.push_str("sysuser"));
+    state.refresh_frontend_search();
+
+    let search = state.search.as_ref().unwrap();
+    assert_eq!(search.frontend_match_rows.len(), 1);
+    assert_eq!(
+        search.frontend_rows[search.frontend_match_rows[0]].id,
+        ExplorerNodeId::Catalog(fixture.table.id.clone())
+    );
 }
 
 #[test]

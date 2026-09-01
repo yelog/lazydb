@@ -1447,46 +1447,7 @@ fn explorer_find_list_item(
 }
 
 fn match_spans(text: String, query: &str, base: Style, matched: Style) -> Vec<Span<'static>> {
-    if query.trim().is_empty() {
-        return vec![Span::styled(text, base)];
-    }
-    let query = query.to_lowercase();
-    let mut lowered = String::new();
-    let mut lowered_ranges = Vec::new();
-    for (start, character) in text.char_indices() {
-        let end = start + character.len_utf8();
-        let lowered_start = lowered.len();
-        lowered.extend(character.to_lowercase());
-        lowered_ranges.push((lowered_start, lowered.len(), start, end));
-    }
-    let mut matches = Vec::new();
-    let mut offset = 0;
-    while let Some(start) = lowered[offset..].find(&query) {
-        let lowered_start = offset + start;
-        let lowered_end = lowered_start + query.len();
-        let Some((_, _, start, _)) =
-            lowered_ranges
-                .iter()
-                .find(|(range_start, range_end, _, _)| {
-                    *range_start <= lowered_start && lowered_start < *range_end
-                })
-        else {
-            break;
-        };
-        let Some((_, _, _, end)) = lowered_ranges
-            .iter()
-            .find(|(range_start, range_end, _, _)| {
-                *range_start < lowered_end && lowered_end <= *range_end
-            })
-        else {
-            break;
-        };
-        matches.push((*start, *end));
-        offset = lowered_end;
-        if offset >= lowered.len() {
-            break;
-        }
-    }
+    let matches = crate::db::catalog::search_text_match_ranges(&text, query);
     if matches.is_empty() {
         return vec![Span::styled(text, base)];
     }

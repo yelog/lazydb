@@ -86,9 +86,10 @@ fn mysql_catalog_search_sql_pushes_literal_matching_ranking_scope_and_bound() {
     assert!(sql.contains("information_schema.statistics"));
     assert!(sql.contains("information_schema.table_constraints"));
     assert!(sql.contains("{scope_predicate}"));
-    assert!(sql.contains("LOCATE(LOWER(?), LOWER(object_name))"));
-    assert!(sql.contains("LOCATE(LOWER(?), LOWER(qualified_path))"));
-    assert!(sql.contains("WHEN LOWER(object_name)=LOWER(?) THEN 0"));
+    assert!(sql.contains("REGEXP_REPLACE(LOWER(object_name), '[^[:alnum:]]', '')"));
+    assert!(sql.contains("REGEXP_REPLACE(LOWER(qualified_path), '[^[:alnum:]]', '')"));
+    assert!(sql.contains("IF(?, normalized_name, LOWER(object_name)) AS search_name"));
+    assert!(sql.contains("WHEN search_name=? THEN 0"));
     assert!(sql.contains("LIMIT 101"));
     assert!(!sql.to_ascii_lowercase().contains(" like "));
     for unsupported in ["materialized", "sequence", "check_constraint", "type'"] {

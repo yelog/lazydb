@@ -187,28 +187,21 @@ WITH candidates AS (
       AND n.nspname <> 'information_schema'
       AND n.nspname NOT LIKE 'pg\_%' ESCAPE '\'
       AND ($2::text[] IS NULL OR n.nspname = ANY($2))
+), normalized AS (
+    SELECT *, CASE WHEN $5 THEN regexp_replace(lower(object_name), '[^[:alnum:]]', '', 'g')
+                   ELSE lower(object_name) END AS search_name,
+              CASE WHEN $5 THEN regexp_replace(lower(qualified_path), '[^[:alnum:]]', '', 'g')
+                   ELSE lower(qualified_path) END AS search_path
+    FROM candidates
 ), ranked AS (
     SELECT *, CASE
-        WHEN lower(object_name) = lower($1)
-             OR lower(qualified_path) = lower($1)
-             OR lower(concat_ws('.', schema_name, relation_name, object_name)) = lower($1)
-             OR right(lower(qualified_path), length(lower($1))) = lower($1)
-             OR lower(concat_ws('.', database_name, schema_name, relation_name, object_name)) = lower($1) THEN 0
-        WHEN strpos(lower(object_name), lower($1)) = 1
-             OR strpos(lower(qualified_path), lower($1)) = 1 THEN 1
-        WHEN strpos(lower(object_name), lower($1)) > 0
-             OR strpos(lower(qualified_path), lower($1)) > 0
-             OR strpos(lower(concat_ws('.', schema_name, relation_name, object_name)), lower($1)) > 0
-             OR right(lower(qualified_path), length(lower($1))) = lower($1)
-             OR lower(concat_ws('.', database_name, schema_name, relation_name, object_name)) = lower($1) THEN 2
+        WHEN search_name = $1 OR search_path = $1 OR right(search_path, length($1)) = $1 THEN 0
+        WHEN strpos(search_name, $1) = 1 OR strpos(search_path, $1) = 1 THEN 1
+        WHEN strpos(search_name, $1) > 0 OR strpos(search_path, $1) > 0 THEN 2
         ELSE 3 END AS relevance
-    FROM candidates
+    FROM normalized
     WHERE $3
-      AND (strpos(lower(object_name), lower($1)) > 0
-           OR strpos(lower(qualified_path), lower($1)) > 0
-           OR strpos(lower(concat_ws('.', schema_name, relation_name, object_name)), lower($1)) > 0
-           OR right(lower(qualified_path), length(lower($1))) = lower($1)
-           OR lower(concat_ws('.', database_name, schema_name, relation_name, object_name)) = lower($1))
+      AND (strpos(search_name, $1) > 0 OR strpos(search_path, $1) > 0)
 )
 SELECT kind, database_name, schema_name, object_name, object_oid,
        relation_kind, relation_name, relation_oid, comment, relation_comment,
@@ -656,11 +649,13 @@ impl PostgresAdapter {
         let schemas = search_schemas(&request.scope, &database);
         let sql_limit = i64::try_from(request.limit.saturating_add(1))
             .map_err(|_| catalog_internal("PostgreSQL catalog search limit overflowed"))?;
+        let (search_query, ignore_separators) = crate::db::catalog::search_query(&request.query);
         let rows = sqlx::query(SEARCH_CATALOG_SQL)
-            .bind(&request.query)
+            .bind(search_query)
             .bind(schemas)
             .bind(database_allowed)
             .bind(sql_limit)
+            .bind(ignore_separators)
             .fetch_all(&mut *connection)
             .await
             .map_err(sql_error)?;

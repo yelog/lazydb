@@ -9,6 +9,88 @@ use crate::{
     profile::{CatalogScope, CatalogScopeValidationError},
 };
 
+pub(crate) fn normalize_search_text(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(char::to_lowercase)
+        .filter(|character| character.is_alphanumeric())
+        .collect()
+}
+
+pub(crate) fn search_query(value: &str) -> (String, bool) {
+    let normalized = normalize_search_text(value);
+    if normalized.is_empty() {
+        (value.to_lowercase(), false)
+    } else {
+        (normalized, true)
+    }
+}
+
+pub(crate) fn searchable_text(value: &str, ignore_separators: bool) -> String {
+    if ignore_separators {
+        normalize_search_text(value)
+    } else {
+        value.to_lowercase()
+    }
+}
+
+pub(crate) fn search_text_matches(value: &str, query: &str) -> bool {
+    let (query, ignore_separators) = search_query(query);
+    !query.is_empty() && searchable_text(value, ignore_separators).contains(&query)
+}
+
+pub(crate) fn search_text_match_ranges(value: &str, query: &str) -> Vec<(usize, usize)> {
+    let (query, ignore_separators) = search_query(query);
+    if query.is_empty() {
+        return Vec::new();
+    }
+
+    let mut searchable = String::new();
+    let mut source_ranges = Vec::new();
+    for (source_start, character) in value.char_indices() {
+        let source_end = source_start + character.len_utf8();
+        for lowered in character.to_lowercase() {
+            if ignore_separators && !lowered.is_alphanumeric() {
+                continue;
+            }
+            let searchable_start = searchable.len();
+            searchable.push(lowered);
+            source_ranges.push((searchable_start, searchable.len(), source_start, source_end));
+        }
+    }
+
+    let mut ranges = Vec::new();
+    let mut offset = 0;
+    while let Some(relative_start) = searchable[offset..].find(&query) {
+        let match_start = offset + relative_start;
+        let match_end = match_start + query.len();
+        for &(_, _, source_start, source_end) in
+            source_ranges
+                .iter()
+                .filter(|(searchable_start, searchable_end, _, _)| {
+                    *searchable_start < match_end && match_start < *searchable_end
+                })
+        {
+            if ranges
+                .last_mut()
+                .is_some_and(|(_, end)| *end == source_start)
+            {
+                ranges.last_mut().unwrap().1 = source_end;
+            } else if ranges
+                .last()
+                .is_none_or(|range| *range != (source_start, source_end))
+            {
+                ranges.push((source_start, source_end));
+            }
+        }
+        offset = match_end;
+        if offset >= searchable.len() {
+            break;
+        }
+    }
+    ranges
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CatalogKind {
@@ -1713,7 +1795,19 @@ impl CatalogNode {
 mod tests {
     use uuid::Uuid;
 
-    use super::{CatalogId, CatalogKind};
+    use super::{CatalogId, CatalogKind, search_text_match_ranges};
+
+    #[test]
+    fn search_match_ranges_map_ignored_separators_back_to_source_text() {
+        assert_eq!(
+            search_text_match_ranges("sys_user", "sysuser"),
+            vec![(0, 3), (4, 8)]
+        );
+        assert_eq!(
+            search_text_match_ranges("sys_user_sysuser", "sysuser"),
+            vec![(0, 3), (4, 8), (9, 16)]
+        );
+    }
 
     #[test]
     fn object_identity_includes_connection_kind_and_native_path() {

@@ -597,9 +597,10 @@ impl SqliteAdapter {
         connection: &mut SqliteConnection,
         request: &CatalogSearchRequest,
     ) -> Result<CatalogSearchPage, DatabaseError> {
-        let query = request.query.to_lowercase();
+        let (query, ignore_separators) = super::catalog::search_query(&request.query);
         let database = self.database_entry()?;
-        let database_path = database.qualified_name.object.to_lowercase();
+        let database_path =
+            super::catalog::searchable_text(&database.qualified_name.object, ignore_separators);
         let mut hits = Vec::new();
         if request.scope.allows_database(&self.database)
             && (database_path == query
@@ -618,21 +619,33 @@ impl SqliteAdapter {
                     continue;
                 }
                 let schema = self.schema_entry(&database, &schema_name)?;
-                let schema_path = format!("{}.{}", self.database, schema_name).to_lowercase();
-                if schema_name.to_lowercase().contains(&query) || schema_path.contains(&query) {
+                let schema_path = super::catalog::searchable_text(
+                    &format!("{}.{}", self.database, schema_name),
+                    ignore_separators,
+                );
+                if super::catalog::searchable_text(&schema_name, ignore_separators).contains(&query)
+                    || schema_path.contains(&query)
+                {
                     hits.push(CatalogSearchHit {
                         entry: schema.clone(),
                         ancestors: vec![database.clone()],
                     });
                 }
-                self.search_schema(connection, &query, &database, &schema, &mut hits)
-                    .await?;
+                self.search_schema(
+                    connection,
+                    &query,
+                    ignore_separators,
+                    &database,
+                    &schema,
+                    &mut hits,
+                )
+                .await?;
             }
         }
 
         let mut ranked = hits
             .into_iter()
-            .filter_map(|hit| search_rank(&hit, &query).map(|rank| (rank, hit)))
+            .filter_map(|hit| search_rank(&hit, &query, ignore_separators).map(|rank| (rank, hit)))
             .collect::<Vec<_>>();
         ranked.sort_by(|(left_rank, left), (right_rank, right)| {
             left_rank
@@ -660,6 +673,7 @@ impl SqliteAdapter {
         &self,
         connection: &mut SqliteConnection,
         query: &str,
+        ignore_separators: bool,
         database: &CatalogEntry,
         schema: &CatalogEntry,
         hits: &mut Vec<CatalogSearchHit>,
@@ -667,6 +681,25 @@ impl SqliteAdapter {
         let schema_name = &schema.qualified_name.object;
         let quoted_schema = self.quote_identifier(schema_name);
         let path_prefix = format!("{}.{}.", self.database, schema_name);
+        let candidate = if ignore_separators {
+            query
+                .chars()
+                .map(|character| character.to_string())
+                .collect::<Vec<_>>()
+                .join("*")
+        } else {
+            query
+                .chars()
+                .map(|character| match character {
+                    '*' => "[*]".to_owned(),
+                    '?' => "[?]".to_owned(),
+                    '[' => "[[]".to_owned(),
+                    ']' => "[]]".to_owned(),
+                    _ => character.to_string(),
+                })
+                .collect()
+        };
+        let candidate_pattern = format!("*{candidate}*");
         let objects_sql = format!(
             "SELECT object.type, object.name, \
              (SELECT owner.type FROM {quoted_schema}.sqlite_schema AS owner \
@@ -686,21 +719,21 @@ impl SqliteAdapter {
                    SELECT 1 FROM {quoted_schema}.sqlite_schema AS owner \
                    WHERE owner.type IN ('table', 'view') \
                      AND owner.name = object.tbl_name COLLATE NOCASE)) \
-               AND (instr(lower(object.name), ?) > 0 \
-                 OR instr(lower(CASE WHEN object.type = 'trigger' \
+               AND (lower(object.name) GLOB ? \
+                 OR lower(CASE WHEN object.type = 'trigger' \
                     THEN ? || (SELECT owner.name FROM {quoted_schema}.sqlite_schema AS owner \
                          WHERE owner.type IN ('table', 'view') \
                            AND owner.name = object.tbl_name COLLATE NOCASE \
                          ORDER BY (owner.type = 'table') DESC, owner.name COLLATE BINARY LIMIT 1) \
                          || '.' || object.name \
-                    ELSE ? || object.name END), ?) > 0) \
+                    ELSE ? || object.name END) GLOB ?) \
              ORDER BY object.name COLLATE BINARY"
         );
         let rows = sqlx::query(AssertSqlSafe(objects_sql))
-            .bind(query)
+            .bind(&candidate_pattern)
             .bind(&path_prefix)
             .bind(&path_prefix)
-            .bind(query)
+            .bind(&candidate_pattern)
             .fetch_all(&mut *connection)
             .await
             .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Sql))?;
@@ -722,47 +755,47 @@ impl SqliteAdapter {
              FROM {quoted_schema}.sqlite_schema AS relation \
              WHERE relation.type IN ('table', 'view') \
                AND relation.name NOT GLOB 'sqlite_*' \
-               AND (instr(lower(? || relation.name), ?) > 0 \
+               AND (lower(? || relation.name) GLOB ? \
                  OR EXISTS (SELECT 1 FROM pragma_table_xinfo(relation.name, ?) AS column \
-                    WHERE instr(lower(column.name), ?) > 0 \
-                       OR instr(lower(? || relation.name || '.' || column.name), ?) > 0) \
+                    WHERE lower(column.name) GLOB ? \
+                       OR lower(? || relation.name || '.' || column.name) GLOB ?) \
                  OR (relation.type = 'table' AND EXISTS (\
                     SELECT 1 FROM pragma_index_list(relation.name, ?) AS idx \
-                    WHERE instr(lower(idx.name), ?) > 0 \
-                       OR instr(lower(? || relation.name || '.' || idx.name), ?) > 0)) \
+                    WHERE lower(idx.name) GLOB ? \
+                       OR lower(? || relation.name || '.' || idx.name) GLOB ?)) \
                  OR (relation.type = 'table' AND EXISTS (\
                     SELECT 1 FROM pragma_table_xinfo(relation.name, ?) AS pk_column \
                     WHERE pk_column.pk > 0 \
                       AND NOT EXISTS (SELECT 1 FROM pragma_index_list(relation.name, ?) AS pk_index \
                                       WHERE pk_index.origin = 'pk') \
-                      AND (instr('primary_key', ?) > 0 \
-                        OR instr(lower(? || relation.name || '.primary_key'), ?) > 0))) \
+                      AND ('primary_key' GLOB ? \
+                        OR lower(? || relation.name || '.primary_key') GLOB ?))) \
                  OR (relation.type = 'table' AND EXISTS (\
                     SELECT 1 FROM pragma_foreign_key_list(relation.name, ?) AS fk \
-                    WHERE instr(lower(printf('fk_%s_%d', relation.name, fk.id)), ?) > 0 \
-                       OR instr(lower(? || relation.name || '.' || printf('fk_%s_%d', relation.name, fk.id)), ?) > 0))) \
+                    WHERE lower(printf('fk_%s_%d', relation.name, fk.id)) GLOB ? \
+                       OR lower(? || relation.name || '.' || printf('fk_%s_%d', relation.name, fk.id)) GLOB ?))) \
              ORDER BY relation.name COLLATE BINARY"
         );
         let owner_rows = sqlx::query(AssertSqlSafe(owners_sql))
             .bind(&path_prefix)
-            .bind(query)
+            .bind(&candidate_pattern)
             .bind(schema_name)
-            .bind(query)
+            .bind(&candidate_pattern)
             .bind(&path_prefix)
-            .bind(query)
+            .bind(&candidate_pattern)
             .bind(schema_name)
-            .bind(query)
+            .bind(&candidate_pattern)
             .bind(&path_prefix)
-            .bind(query)
+            .bind(&candidate_pattern)
             .bind(schema_name)
             .bind(schema_name)
-            .bind(query)
+            .bind(&candidate_pattern)
             .bind(&path_prefix)
-            .bind(query)
+            .bind(&candidate_pattern)
             .bind(schema_name)
-            .bind(query)
+            .bind(&candidate_pattern)
             .bind(&path_prefix)
-            .bind(query)
+            .bind(&candidate_pattern)
             .fetch_all(&mut *connection)
             .await
             .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Sql))?;
@@ -1870,9 +1903,9 @@ fn relation_kind(native_type: &str) -> Result<CatalogKind, DatabaseError> {
     }
 }
 
-fn search_rank(hit: &CatalogSearchHit, query: &str) -> Option<u8> {
-    let name = hit.entry.qualified_name.object.to_lowercase();
-    let path = hit.qualified_path().to_lowercase();
+fn search_rank(hit: &CatalogSearchHit, query: &str, ignore_separators: bool) -> Option<u8> {
+    let name = super::catalog::searchable_text(&hit.entry.qualified_name.object, ignore_separators);
+    let path = super::catalog::searchable_text(&hit.qualified_path(), ignore_separators);
     if name == query {
         Some(0)
     } else if name.starts_with(query) {

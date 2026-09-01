@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::db::catalog::{
     CatalogCompleteness, CatalogCount, CatalogCursor, CatalogEntry, CatalogId, CatalogKind,
-    CatalogRequest, CatalogSearchHit, CatalogTarget, ObjectGroup,
+    CatalogRequest, CatalogSearchHit, CatalogTarget, ObjectGroup, search_text_matches,
 };
 use crate::profile::DatabaseKind;
 
@@ -952,7 +952,6 @@ impl ExplorerTreeState {
         let Some(profile) = self.profiles.get(&profile_id) else {
             return (Vec::new(), Vec::new());
         };
-        let query = query.to_lowercase();
         let mut included = HashSet::new();
         let mut matches = HashSet::new();
         for entry in profile.catalog.entries().values() {
@@ -972,10 +971,9 @@ impl ExplorerTreeState {
                 .chain(std::iter::once(&entry.qualified_name.object))
                 .cloned()
                 .collect::<Vec<_>>()
-                .join(".")
-                .to_lowercase();
-            if !entry.qualified_name.object.to_lowercase().contains(&query)
-                && !path.contains(&query)
+                .join(".");
+            if !search_text_matches(&entry.qualified_name.object, query)
+                && !search_text_matches(&path, query)
             {
                 continue;
             }

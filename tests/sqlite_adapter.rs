@@ -440,6 +440,18 @@ async fn catalog_search_finds_unloaded_objects_children_paths_scope_and_limit() 
 }
 
 #[tokio::test]
+async fn catalog_search_ignores_identifier_separators() {
+    let fixture = CatalogFixture::new().await;
+
+    let page = fixture.search("childview", &["main"], 100).await;
+
+    assert!(page.hits.iter().any(|hit| {
+        hit.entry.kind == CatalogKind::View && hit.entry.qualified_name.object == "child_view"
+    }));
+    fixture.close().await;
+}
+
+#[tokio::test]
 async fn catalog_search_preserves_all_sqlite_kinds_metadata_and_ancestors() {
     let fixture = CatalogFixture::new().await;
 

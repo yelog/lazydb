@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 pub use crate::identity::ConnectionIdentity;
 
-use crate::db::catalog::{CatalogSearchHit, CatalogSearchPage};
+use crate::db::catalog::{CatalogSearchHit, CatalogSearchPage, search_text_matches};
 use crate::db::{
     ServerInfo,
     catalog::{CatalogEntry, CatalogId, CatalogKind, CatalogNode, OptionalMetadata},
@@ -398,10 +398,9 @@ impl ExplorerState {
         find.matches = if find.query.trim().is_empty() {
             Vec::new()
         } else {
-            let query = find.query.to_lowercase();
             find.rows
                 .iter()
-                .filter(|row| row.label.to_lowercase().contains(&query))
+                .filter(|row| search_text_matches(&row.label, &find.query))
                 .map(|row| row.id.clone())
                 .collect()
         };

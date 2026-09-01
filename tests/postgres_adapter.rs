@@ -74,8 +74,9 @@ fn postgres_catalog_search_sql_pushes_literal_matching_scope_order_and_limit() {
     let sql = postgres::SEARCH_CATALOG_SQL;
     assert!(sql.contains("current_database()"));
     assert!(sql.contains("$2::text[] IS NULL OR n.nspname = ANY($2)"));
-    assert!(sql.contains("strpos(lower(object_name), lower($1))"));
-    assert!(sql.contains("strpos(lower(qualified_path), lower($1))"));
+    assert!(sql.contains("regexp_replace(lower(object_name), '[^[:alnum:]]', '', 'g')"));
+    assert!(sql.contains("regexp_replace(lower(qualified_path), '[^[:alnum:]]', '', 'g')"));
+    assert!(sql.contains("strpos(search_name, $1)"));
     assert!(!sql.contains("ILIKE"));
     assert!(sql.contains("ORDER BY relevance, lower(qualified_path) COLLATE \"C\""));
     assert!(sql.contains("LIMIT $4"));
