@@ -1338,6 +1338,7 @@ fn map_relation_data(event: KeyEvent, app: &App) -> Option<Action> {
             KeyCode::Char('p') => Some(Action::RelationPaste),
             KeyCode::Char('a') => Some(Action::RelationInsertRow),
             KeyCode::Char('u') => Some(Action::RelationUndo),
+            KeyCode::Char('=') => Some(Action::GridResetColumnWidth),
             _ => None,
         },
     }

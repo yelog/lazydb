@@ -3314,7 +3314,6 @@ mod tests {
         let capabilities = shortcut_capabilities(&app);
         let rows = shortcuts(ShortcutContext::RelationDataBrowse, capabilities);
 
-        let mut keymap = Keymap::default();
         for (code, id) in [
             (KeyCode::Enter, HelpShortcutId::RelationApplyInputs),
             (KeyCode::Char('['), HelpShortcutId::RelationResizeLeft),
@@ -3323,7 +3322,7 @@ mod tests {
             let row = rows.iter().find(|row| row.id == id).expect("catalog row");
             assert!(!row.executable, "unexpected executable {id:?}");
             assert_eq!(
-                keymap.map(KeyEvent::new(code, KeyModifiers::NONE), &app),
+                Keymap::default().map(KeyEvent::new(code, KeyModifiers::NONE), &app),
                 None
             );
         }
@@ -3334,7 +3333,7 @@ mod tests {
             .expect("reset width row");
         assert!(reset.executable);
         assert_eq!(
-            keymap.map(KeyEvent::new(KeyCode::Char('='), KeyModifiers::NONE), &app),
+            Keymap::default().map(KeyEvent::new(KeyCode::Char('='), KeyModifiers::NONE), &app),
             Some(Action::GridResetColumnWidth)
         );
     }
@@ -3451,6 +3450,7 @@ mod tests {
                 HelpShortcutId::EditorCopyStatement,
                 HelpShortcutId::EditorCopyBuffer,
                 HelpShortcutId::OpenTargetSelector,
+                HelpShortcutId::TransactionControl,
             ]
         );
 
