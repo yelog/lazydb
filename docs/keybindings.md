@@ -12,11 +12,15 @@ while pressing F5. Adjacent-key sequences have a 750 ms timeout. A prefix that
 expires is discarded. A numeric count is displayed while it is being entered;
 after `Ctrl-w`, it applies to pane resize operations.
 
-The application Leader is used by Explorer and Results. Editor Normal and Visual
-Space bindings are handled by the editor's modalkit `EditorLeader` binding and
-are forwarded through `EditorKey`; they are not application Leader commands.
-Editor Insert Space remains completion input. A footer item can be display-only
-when the underlying mapper has no direct action for that presentation.
+The application Leader is used by Explorer and Results, but not by the SQL
+Editor. In the SQL Editor, Normal and Visual Space bindings are handled by the
+editor's modalkit `EditorLeader` binding and are forwarded through `EditorKey`;
+they are not application Leader commands. Consequently, `Space c` is valid in
+Explorer/Results, but it is not a way to focus Explorer from the SQL Editor;
+use `Ctrl-w h` there instead. The editor also accepts `\` as an EditorLeader
+prefix. Editor Insert Space remains text/completion input. A footer item can be
+display-only when the underlying mapper has no direct action for that
+presentation.
 
 ## Global
 
@@ -54,8 +58,8 @@ from display strings.
 
 | Prefix | Continuations |
 | --- | --- |
-| Application `Space` | `c`, `n`, `s`, `r`, `R`, `d`, `q`, `x`, `e`; run actions require an active SQL console |
-| Editor `Space` (`EditorLeader`) | `f`, `y`, `Y`, `d`, plus editor-owned `r`, `R`, `n`, `s`, `q`, `x`, `e`, and `t` transaction sequences |
+| Application `Space` (Explorer/Results) | `c`, `n`, `s`, `r`, `R`, `d`, `q`, `x`, `e`, and `Y` when grid navigation is active; run actions require an active SQL console |
+| Editor `Space` or `\` (`EditorLeader`) | `f`, `y`, `Y`, `d`, `?`, plus editor-owned `r`, `R`, `n`, `s`, `q`, `x`, `e`, and `t` transaction sequences |
 | `g` | `g` first item, `t`/`T` next/previous tab |
 | `z` in Explorer | `z`/`t`/`b` middle/top/bottom alignment |
 | `z` in grid | `z`/`t`/`b` middle/top/bottom row alignment |
@@ -119,7 +123,8 @@ Backspace, Ctrl-U, navigation, Enter to locate, and Esc; after confirmation,
 | `Space tt/tc/tr` | Toggle, commit, or roll back transaction through EditorLeader |
 | `g` then `g/t/T` | First item or next/previous tab |
 | `[` then `t`, `]` then `t` | Tab aliases |
-| `?` | Backward editor search |
+| `?` | Open contextual Help |
+| `Space ?` | Open editor Help through EditorLeader |
 
 ### Insert and Replace
 
@@ -134,6 +139,7 @@ Backspace, Ctrl-U, navigation, Enter to locate, and Esc; after confirmation,
 | `F5` | Run SQL |
 
 `Ctrl-w` in Insert/Replace is an editor text command, never the pane prefix.
+`Space` remains text input in Insert/Replace; it does not start either Leader.
 
 ### Visual
 
@@ -146,7 +152,9 @@ Backspace, Ctrl-U, navigation, Enter to locate, and Esc; after confirmation,
 | `Space y/Y` | Copy selection/buffer through EditorLeader |
 
 Visual Char, Visual Line, and Visual Block are presented as the Editor Visual
-context. Empty selections do not fall back to the whole buffer.
+context. Empty selections do not fall back to the whole buffer. `Space ?` is
+handled by EditorLeader in this context as editor Help; plain `?` is handled by
+the application mapper as contextual Help.
 
 ## SQL Results Data
 

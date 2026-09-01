@@ -265,7 +265,9 @@ repository for native package installation and the complete command reference.
 
 The footer and help view show contextual controls for the active context and mode. See the
 complete [keyboard reference](docs/keybindings.md) for the operational contract,
-including profile, relation, result-grid, search, and confirmation controls.
+including the distinction between application `Space` commands in Explorer/Results
+and editor `Space`/`\\` commands in SQL Editor Normal/Visual mode, as well as profile,
+relation, result-grid, search, and confirmation controls.
 
 ## Configuration
 
