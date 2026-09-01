@@ -2160,10 +2160,10 @@ impl TransactionBackend for SqliteTransactionBackend {
                     .collect::<Vec<_>>();
                 let expressions = supplied.iter().map(|_| "?").collect::<Vec<_>>();
                 let sql = if names.is_empty() {
-                    format!("INSERT INTO {quoted_table} DEFAULT VALUES RETURNING *")
+                    format!("INSERT INTO {quoted_table} DEFAULT VALUES")
                 } else {
                     format!(
-                        "INSERT INTO {quoted_table} ({}) VALUES ({}) RETURNING *",
+                        "INSERT INTO {quoted_table} ({}) VALUES ({})",
                         names.join(", "),
                         expressions.join(", ")
                     )
@@ -2176,10 +2176,18 @@ impl TransactionBackend for SqliteTransactionBackend {
                         InputValue::Value(value) => query = bind_cell(query, value)?,
                     }
                 }
-                let row = query
-                    .fetch_one(&mut *self.connection)
+                query
+                    .execute(&mut *self.connection)
                     .await
                     .map_err(|e| TransactionError(e.to_string()))?;
+                // Avoid SQLite 3.35+'s RETURNING syntax so older system SQLite
+                // versions can still complete an insert and return its values.
+                let row = sqlx::query(AssertSqlSafe(format!(
+                    "SELECT * FROM {quoted_table} WHERE rowid = last_insert_rowid()"
+                )))
+                .fetch_one(&mut *self.connection)
+                .await
+                .map_err(|e| TransactionError(e.to_string()))?;
                 return Ok(MutationResult::Inserted {
                     row: decode_row(&row),
                 });
