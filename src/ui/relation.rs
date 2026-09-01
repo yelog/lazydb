@@ -14,11 +14,10 @@ use crate::{
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Position, Rect},
-    style::{Modifier, Style},
-    text::{Line, Span},
+    style::Style,
+    text::Line,
     widgets::Paragraph,
 };
-use unicode_width::UnicodeWidthStr;
 
 pub(crate) fn render(
     frame: &mut Frame<'_>,
@@ -34,55 +33,22 @@ pub(crate) fn render(
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(2), Constraint::Min(1)])
         .split(area);
-    let data_style = if tab.view == RelationView::Data {
-        theme.accent
-    } else {
-        theme.muted
-    };
-    let ddl_style = if tab.view == RelationView::Ddl {
-        theme.accent
-    } else {
-        theme.muted
-    };
-    let data_label = " DATA ";
-    let ddl_label = " DDL ";
-    let data_width = data_label.width() as u16;
-    let ddl_x = chunks[0].x.saturating_add(data_width).saturating_add(1);
-    let ddl_width = ddl_label.width() as u16;
-    let tabs = Line::from(vec![
-        Span::styled(
-            data_label,
-            Style::new().fg(data_style).add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            ddl_label,
-            Style::new().fg(ddl_style).add_modifier(Modifier::BOLD),
-        ),
-    ]);
-    frame.render_widget(Paragraph::new(tabs).style(theme.base()), chunks[0]);
-    let active_x = if tab.view == RelationView::Data {
-        chunks[0].x
-    } else {
-        ddl_x
-    };
-    let active_width = if tab.view == RelationView::Data {
-        data_width
-    } else {
-        ddl_width
-    };
-    frame.render_widget(
-        Paragraph::new("━".repeat(usize::from(active_width))).style(Style::new().fg(theme.accent)),
-        Rect::new(active_x, chunks[0].y.saturating_add(1), active_width, 1),
+    let regions = super::render_tab_selectors(
+        frame,
+        chunks[0],
+        &["DATA", "DDL"],
+        usize::from(tab.view == RelationView::Ddl),
+        theme,
     );
-    state.hit_regions.push(HitRegion {
-        area: Rect::new(chunks[0].x, chunks[0].y, data_width, 1),
-        target: HitTarget::RelationView(RelationView::Data),
-    });
-    state.hit_regions.push(HitRegion {
-        area: Rect::new(ddl_x, chunks[0].y, ddl_width, 1),
-        target: HitTarget::RelationView(RelationView::Ddl),
-    });
+    for (region, view) in regions
+        .into_iter()
+        .zip([RelationView::Data, RelationView::Ddl])
+    {
+        state.hit_regions.push(HitRegion {
+            area: region,
+            target: HitTarget::RelationView(view),
+        });
+    }
     match tab.view {
         RelationView::Data => render_data(frame, chunks[1], app, theme, state),
         RelationView::Ddl => render_ddl(frame, chunks[1], app, theme, state),

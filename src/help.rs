@@ -240,8 +240,7 @@ pub enum HelpShortcutId {
     EditorCopyStatement,
     EditorCopyBuffer,
     ToggleTransaction,
-    CommitTransaction,
-    RollbackTransaction,
+    TransactionControl,
     OpenTargetSelector,
     ResultsMoveLeft,
     ResultsMoveDown,
@@ -942,17 +941,10 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
         display
     ),
     row!(
-        CommitTransaction,
+        TransactionControl,
         [EditorNormal],
         "Space tc",
-        "commit transaction",
-        display
-    ),
-    row!(
-        RollbackTransaction,
-        [EditorNormal],
-        "Space tr",
-        "roll back transaction",
+        "commit or roll back transaction",
         display
     ),
     row!(
@@ -2115,10 +2107,9 @@ fn prefix_rank(prefix: ShortcutPrefix, id: HelpShortcutId) -> Option<u8> {
             Id::EditorCopyStatement => 9,
             Id::EditorCopyBuffer => 10,
             Id::ToggleTransaction => 11,
-            Id::CommitTransaction => 12,
-            Id::RollbackTransaction => 13,
-            Id::OpenTargetSelector => 14,
-            Id::ResultsCopyRowWithHeaders => 15,
+            Id::TransactionControl => 12,
+            Id::OpenTargetSelector => 13,
+            Id::ResultsCopyRowWithHeaders => 14,
             _ => return None,
         },
         ShortcutPrefix::EditorLeader => match id {
@@ -3397,8 +3388,7 @@ mod tests {
             ]
         );
         assert!(!leader.contains(&HelpShortcutId::ToggleTransaction));
-        assert!(!leader.contains(&HelpShortcutId::CommitTransaction));
-        assert!(!leader.contains(&HelpShortcutId::RollbackTransaction));
+        assert!(!leader.contains(&HelpShortcutId::TransactionControl));
         assert!(leader.contains(&HelpShortcutId::FocusExplorerLeader));
         assert!(
             prefix_shortcuts(

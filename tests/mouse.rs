@@ -158,6 +158,41 @@ fn relation_view_and_retry_hit_targets_emit_semantic_actions() {
 }
 
 #[test]
+fn result_view_tabs_emit_explicit_view_actions() {
+    let app = App::new(Vec::new());
+    let mut ui = UiState::new();
+    ui.hit_regions.extend([
+        HitRegion {
+            area: Rect::new(1, 1, 6, 1),
+            target: HitTarget::ResultView(lazydb::model::tab::ResultView::Data),
+        },
+        HitRegion {
+            area: Rect::new(8, 1, 8, 1),
+            target: HitTarget::ResultView(lazydb::model::tab::ResultView::Output),
+        },
+    ]);
+
+    assert_eq!(
+        map_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 1, 1),
+            &ui,
+            &app
+        ),
+        Some(Action::SetResultView(lazydb::model::tab::ResultView::Data))
+    );
+    assert_eq!(
+        map_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 8, 1),
+            &ui,
+            &app
+        ),
+        Some(Action::SetResultView(
+            lazydb::model::tab::ResultView::Output
+        ))
+    );
+}
+
+#[test]
 fn relation_result_cell_mouse_action_updates_relation_grid() {
     let mut app = App::new(Vec::new());
     app.tabs.push(lazydb::model::tab::WorkspaceTab::Relation(

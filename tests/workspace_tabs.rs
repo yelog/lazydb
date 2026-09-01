@@ -152,10 +152,12 @@ fn activating_relation_normalizes_editor_focus() {
 #[test]
 fn closing_final_sql_console_creates_a_replacement_editor() {
     let mut app = App::new(Vec::new());
+    app.update(Action::NewConsole);
     let commands = app.update(Action::CloseActiveTab);
 
     assert_eq!(app.tabs.len(), 1);
     assert!(app.tabs.iter().any(|tab| tab.kind() == TabKind::Sql));
+    assert_eq!(app.active_console().name, "console");
     assert!(
         commands
             .iter()
@@ -164,8 +166,21 @@ fn closing_final_sql_console_creates_a_replacement_editor() {
 }
 
 #[test]
+fn default_console_cannot_be_closed_or_deleted() {
+    let mut app = App::new(Vec::new());
+    let id = app.active_console().id;
+
+    assert!(app.update(Action::CloseActiveTab).is_empty());
+    assert!(app.tabs.iter().any(|tab| tab.id() == id));
+    assert!(app.update(Action::RequestDeleteActiveConsole).is_empty());
+    assert!(app.overlay.is_none());
+    assert!(app.sql_editors.iter().any(|record| record.id == id));
+}
+
+#[test]
 fn closing_and_reopening_sql_editor_preserves_persisted_text_and_target() {
     let mut app = App::new(Vec::new());
+    app.update(Action::NewConsole);
     let editor_id = app.active_console().id;
     app.update(Action::ReplaceEditor("select 42".into()));
     app.update(Action::CloseActiveTab);
@@ -190,6 +205,7 @@ fn closing_and_reopening_sql_editor_preserves_persisted_text_and_target() {
 #[test]
 fn deleting_sql_editor_requires_confirmation_and_removes_record() {
     let mut app = App::new(Vec::new());
+    app.update(Action::NewConsole);
     let editor_id = app.active_console().id;
 
     assert!(app.update(Action::RequestDeleteActiveConsole).is_empty());
@@ -212,6 +228,7 @@ fn deleting_sql_editor_requires_confirmation_and_removes_record() {
 #[test]
 fn sql_editor_list_reopens_a_hidden_editor() {
     let mut app = App::new(Vec::new());
+    app.update(Action::NewConsole);
     let editor_id = app.active_console().id;
     app.update(Action::ReplaceEditor("select 7".into()));
     app.update(Action::CloseActiveTab);

@@ -235,6 +235,12 @@ enum CompletionAfterEdit {
 }
 
 impl App {
+    pub(crate) fn deferred_transaction_prompts(
+        &self,
+    ) -> impl Iterator<Item = &DeferredTransactionPrompt> {
+        self.deferred.prompts.iter()
+    }
+
     pub(crate) fn is_active_relation_tab(&self) -> bool {
         matches!(
             self.tabs.get(self.active_tab),
@@ -1255,15 +1261,10 @@ impl App {
                 editor_key(KeyCode::Char('t')),
                 editor_key(KeyCode::Char('t')),
             ],
-            Id::CommitTransaction => vec![
+            Id::TransactionControl => vec![
                 editor_key(KeyCode::Char(' ')),
                 editor_key(KeyCode::Char('t')),
                 editor_key(KeyCode::Char('c')),
-            ],
-            Id::RollbackTransaction => vec![
-                editor_key(KeyCode::Char(' ')),
-                editor_key(KeyCode::Char('t')),
-                editor_key(KeyCode::Char('r')),
             ],
             Id::OpenTargetSelector => vec![Action::OpenTargetSelector],
             Id::ResultsMoveLeft => vec![Action::GridMove {
@@ -1500,6 +1501,7 @@ impl App {
                         | Action::ExplorerSearchClose
                         | Action::ExplorerSearchRetry
                         | Action::CloseActiveTab
+                        | Action::CloseTab(_)
                         | Action::RequestDeleteActiveConsole
                         | Action::ConfirmDeleteConsole
                         | Action::CancelDeleteConsole
@@ -1527,6 +1529,7 @@ impl App {
                     | Action::CancelActiveQuery
                     | Action::ConfirmManualCancellation
                     | Action::SetTransactionMode(_)
+                    | Action::OpenTransactionControl
                     | Action::CommitTransaction
                     | Action::RollbackTransaction
                     | Action::ClearTransactionOutcome
@@ -1628,69 +1631,12 @@ impl App {
             }
             Action::CloseActiveTab => {
                 if self.has_active_workspace() && !self.tabs.is_empty() {
-                    let was_console = self.tabs[self.active_tab].as_console().is_some();
                     let id = self.tabs[self.active_tab].id();
-                    if self.active_console_opt().is_some() && self.transaction_needs_exit(id) {
-                        return self.defer_intent(DeferredIntent::CloseConsole, [id]);
-                    }
-                    if let Some(tab) = self.tabs[self.active_tab].as_console()
-                        && let Some(record) =
-                            self.sql_editors.iter_mut().find(|record| record.id == id)
-                    {
-                        record.name = tab.name.clone();
-                        record.execution_target = tab.execution_target.clone();
-                        record.transaction_mode = tab.transaction_mode;
-                    }
-                    let cancel = match self.tabs.get_mut(self.active_tab) {
-                        Some(WorkspaceTab::Relation(tab)) => {
-                            let requests = [
-                                pending_relation_request(&tab.data),
-                                pending_relation_request(&tab.ddl),
-                            ];
-                            tab.data = cancel_relation_load(&tab.data);
-                            tab.ddl = cancel_relation_load(&tab.ddl);
-                            requests
-                                .into_iter()
-                                .flatten()
-                                .map(Command::CancelRelationRequest)
-                                .collect()
-                        }
-                        _ => Vec::new(),
-                    };
-                    self.tabs.remove(self.active_tab);
-                    if was_console
-                        && let Some(record) =
-                            self.sql_editors.iter_mut().find(|record| record.id == id)
-                    {
-                        record.open = false;
-                    }
-                    self.active_tab = if self.active_tab > 0 {
-                        self.active_tab - 1
-                    } else {
-                        0
-                    };
-                    self.normalize_focus();
-                    let mut commands = cancel;
-                    if self.tabs.is_empty() {
-                        if let Some(replacement_id) = self
-                            .sql_editors
-                            .iter()
-                            .find(|record| record.id != id && !record.open)
-                            .map(|record| record.id)
-                        {
-                            self.open_sql_editor(replacement_id);
-                        } else {
-                            self.create_sql_editor_named("console".to_owned());
-                        }
-                        self.active_tab = 0;
-                        self.focus = Focus::Editor;
-                    }
-                    commands.push(self.persist_workspace_command());
-                    commands
-                } else {
-                    Vec::new()
+                    return self.request_close_tab(id);
                 }
+                Vec::new()
             }
+            Action::CloseTab(id) => self.request_close_tab(id),
             Action::RequestDeleteActiveConsole => {
                 if !self.has_active_workspace() {
                     return Vec::new();
@@ -1699,6 +1645,9 @@ impl App {
                     return Vec::new();
                 };
                 let id = tab.id;
+                if tab.is_default() {
+                    return Vec::new();
+                }
                 if self.transaction_needs_exit(id) {
                     return self.defer_intent(DeferredIntent::DeleteConsole(id), [id]);
                 }
@@ -2858,19 +2807,8 @@ impl App {
             }
             Action::ConfirmTransactionExit => {
                 let choice = match self.overlay {
-                    Some(Overlay::TransactionExitConfirm { prompt, .. })
-                        if self
-                            .tabs
-                            .iter()
-                            .find(|tab| tab.id() == prompt.console_id)
-                            .and_then(WorkspaceTab::as_console)
-                            .is_some_and(|tab| {
-                                tab.transaction_state == TransactionState::OutcomeUnknown
-                            }) =>
-                    {
-                        TransactionExitChoice::Abandon
-                    }
-                    _ => TransactionExitChoice::Commit,
+                    Some(Overlay::TransactionExitConfirm { choice, .. }) => choice,
+                    _ => return Vec::new(),
                 };
                 self.resolve_transaction_exit(choice)
             }
@@ -3098,6 +3036,7 @@ impl App {
                 }
                 self.set_transaction_mode(mode)
             }
+            Action::OpenTransactionControl => self.open_transaction_control(),
             Action::CommitTransaction => self.transaction_control(true),
             Action::RollbackTransaction => self.transaction_control(false),
             Action::RefreshCatalog => {
@@ -4712,6 +4651,24 @@ impl App {
         Vec::new()
     }
 
+    fn open_transaction_control(&mut self) -> Vec<Command> {
+        let Some(tab) = self.active_console_opt() else {
+            return Vec::new();
+        };
+        if tab.transaction_mode != TransactionMode::Manual
+            || tab.transaction_state == TransactionState::Idle
+        {
+            self.status_message("No active manual transaction");
+            return Vec::new();
+        }
+        if tab.query_status == QueryStatus::Running {
+            self.status_message("Wait for the query to finish or cancel it before resolving");
+            return Vec::new();
+        }
+        let id = tab.id;
+        self.defer_intent(DeferredIntent::Stay, [id])
+    }
+
     fn show_next_deferred(&mut self) {
         if self.overlay.is_some() {
             return;
@@ -4758,7 +4715,10 @@ impl App {
             return Vec::new();
         }
         if choice == TransactionExitChoice::Cancel {
-            self.show_next_deferred();
+            let intent = prompt.intent;
+            self.deferred
+                .prompts
+                .retain(|queued| queued.intent != intent);
             return Vec::new();
         }
         if tab.transaction_state == TransactionState::OutcomeUnknown {
@@ -4859,6 +4819,7 @@ impl App {
 
     fn replay_deferred(&mut self, intent: DeferredIntent) -> Vec<Command> {
         match intent {
+            DeferredIntent::Stay => Vec::new(),
             DeferredIntent::DeleteConsole(id) => {
                 self.overlay = Some(Overlay::DeleteConsole { console_id: id });
                 Vec::new()
@@ -4869,6 +4830,7 @@ impl App {
                 };
                 self.close_console(id)
             }
+            DeferredIntent::CloseTab(id) => self.close_console(id),
             DeferredIntent::SetMode(TransactionMode::Auto) => {
                 self.set_transaction_mode(TransactionMode::Auto)
             }
@@ -4892,16 +4854,84 @@ impl App {
     }
 
     fn close_console(&mut self, id: Uuid) -> Vec<Command> {
-        if let Some(index) = self.tabs.iter().position(|tab| tab.id() == id) {
-            self.tabs.remove(index);
-            if let Some(record) = self.sql_editors.iter_mut().find(|record| record.id == id) {
-                record.open = false;
-            }
-            self.active_tab = self.active_tab.min(self.tabs.len().saturating_sub(1));
-            self.normalize_focus();
+        self.close_tab(id)
+    }
+
+    fn request_close_tab(&mut self, id: Uuid) -> Vec<Command> {
+        if !self.has_active_workspace() || !self.tabs.iter().any(|tab| tab.id() == id) {
+            return Vec::new();
         }
-        self.ensure_open_sql_editor();
-        vec![self.persist_workspace_command()]
+        if self
+            .tabs
+            .iter()
+            .find(|tab| tab.id() == id)
+            .and_then(WorkspaceTab::as_console)
+            .is_some_and(ConsoleTab::is_default)
+        {
+            return Vec::new();
+        }
+        if self.transaction_needs_exit(id) {
+            return self.defer_intent(DeferredIntent::CloseTab(id), [id]);
+        }
+        self.close_tab(id)
+    }
+
+    fn close_tab(&mut self, id: Uuid) -> Vec<Command> {
+        let Some(index) = self.tabs.iter().position(|tab| tab.id() == id) else {
+            return Vec::new();
+        };
+        let was_console = self.tabs[index].as_console().is_some();
+        if let Some(tab) = self.tabs[index].as_console()
+            && let Some(record) = self.sql_editors.iter_mut().find(|record| record.id == id)
+        {
+            record.name = tab.name.clone();
+            record.execution_target = tab.execution_target.clone();
+            record.transaction_mode = tab.transaction_mode;
+        }
+        let cancel = match self.tabs.get_mut(index) {
+            Some(WorkspaceTab::Relation(tab)) => {
+                let requests = [
+                    pending_relation_request(&tab.data),
+                    pending_relation_request(&tab.ddl),
+                ];
+                tab.data = cancel_relation_load(&tab.data);
+                tab.ddl = cancel_relation_load(&tab.ddl);
+                requests
+                    .into_iter()
+                    .flatten()
+                    .map(Command::CancelRelationRequest)
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+        self.tabs.remove(index);
+        if was_console
+            && let Some(record) = self.sql_editors.iter_mut().find(|record| record.id == id)
+        {
+            record.open = false;
+        }
+        if index < self.active_tab || (index == self.active_tab && self.active_tab > 0) {
+            self.active_tab = self.active_tab.saturating_sub(1);
+        }
+        self.active_tab = self.active_tab.min(self.tabs.len().saturating_sub(1));
+        self.normalize_focus();
+        let mut commands = cancel;
+        if self.tabs.is_empty() {
+            if let Some(replacement_id) = self
+                .sql_editors
+                .iter()
+                .find(|record| record.id != id && !record.open)
+                .map(|record| record.id)
+            {
+                self.open_sql_editor(replacement_id);
+            } else {
+                self.create_sql_editor_named("console".to_owned());
+            }
+            self.active_tab = 0;
+            self.focus = Focus::Editor;
+        }
+        commands.push(self.persist_workspace_command());
+        commands
     }
 
     fn ensure_open_sql_editor(&mut self) {
@@ -4967,6 +4997,15 @@ impl App {
 
     fn delete_console(&mut self, id: Uuid) -> Vec<Command> {
         if !self.has_active_workspace() || !self.sql_editors.iter().any(|record| record.id == id) {
+            return Vec::new();
+        }
+        if self
+            .tabs
+            .iter()
+            .find(|tab| tab.id() == id)
+            .and_then(WorkspaceTab::as_console)
+            .is_some_and(ConsoleTab::is_default)
+        {
             return Vec::new();
         }
         self.tabs.retain(|tab| tab.id() != id);
@@ -5799,6 +5838,7 @@ impl App {
                         TransactionMode::Auto
                     })
                 }
+                EditorEffect::TransactionControl => Action::OpenTransactionControl,
                 EditorEffect::Commit => Action::CommitTransaction,
                 EditorEffect::Rollback => Action::RollbackTransaction,
                 EditorEffect::SubstituteConfirmRequested { count } => {

@@ -72,6 +72,7 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
             match target {
                 HitTarget::Focus(focus) => Some(Action::Focus(focus)),
                 HitTarget::Tab(index) => Some(Action::ActivateTab(index)),
+                HitTarget::CloseTab(id) => Some(Action::CloseTab(id)),
                 HitTarget::ExplorerRow(id) => {
                     if ui.track_explorer_click(&id, Instant::now()) {
                         Some(Action::ExplorerPrimary)
@@ -82,6 +83,7 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                 HitTarget::ResultCell { row, column } => Some(Action::GridSelect { row, column }),
                 HitTarget::Help => Some(Action::ShowHelp),
                 HitTarget::ToggleResultView => Some(Action::ToggleResultView),
+                HitTarget::ResultView(view) => Some(Action::SetResultView(view)),
                 HitTarget::RelationView(view) => Some(Action::SetRelationView(view)),
                 HitTarget::RelationRetry => Some(Action::RefreshActiveRelation),
                 HitTarget::RelationCancel => Some(Action::CancelActiveRelationRequest),
@@ -241,6 +243,7 @@ fn focus_at(ui: &UiState, column: u16, row: u16) -> Option<Focus> {
         HitTarget::ExplorerRow(_) => Some(Focus::Explorer),
         HitTarget::ResultCell { .. }
         | HitTarget::ToggleResultView
+        | HitTarget::ResultView(_)
         | HitTarget::RelationView(_)
         | HitTarget::RelationRetry
         | HitTarget::DataQueryInput(_)
@@ -249,6 +252,7 @@ fn focus_at(ui: &UiState, column: u16, row: u16) -> Option<Focus> {
         | HitTarget::GridScrollbarPage { .. } => Some(Focus::Results),
         HitTarget::RelationCancel => Some(Focus::Results),
         HitTarget::Tab(_)
+        | HitTarget::CloseTab(_)
         | HitTarget::Help
         | HitTarget::HeaderProfile
         | HitTarget::ProfileField(_)

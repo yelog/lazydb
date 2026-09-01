@@ -52,8 +52,10 @@ pub enum TransactionExitChoice {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DeferredIntent {
+    Stay,
     SetMode(TransactionMode),
     CloseConsole,
+    CloseTab(Uuid),
     DeleteConsole(Uuid),
     SwitchConnection { profile_id: Uuid },
     DeleteProfile { profile_id: Uuid, request_id: u64 },

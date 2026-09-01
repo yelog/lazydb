@@ -1409,13 +1409,35 @@ fn editor_help_documents_target_context_controls() {
     app.update(Action::Focus(Focus::Editor));
     app.update(Action::ShowHelp);
     let (output, _) = render_with_state(&app, 120, 40);
-    for text in ["Space d", "Space f", "Space tt", "Space tc", "Space tr"] {
+    for text in ["Space d", "Space f", "Space tt", "Space tc"] {
         assert!(output.contains(text), "missing {text}");
     }
+    assert!(!output.contains("Space tr"));
     assert!(output.contains("Search"));
     assert!(!output.contains(":connection"));
     assert!(!output.contains(":database"));
     assert!(!output.contains(":schema"));
+}
+
+#[test]
+fn quit_panel_lists_all_pending_transactions() {
+    let mut app = fixture();
+    app.active_console_mut().transaction_mode = lazydb::model::transaction::TransactionMode::Manual;
+    app.active_console_mut().transaction_state =
+        lazydb::model::transaction::TransactionState::Active;
+    app.update(Action::NewConsole);
+    app.active_console_mut().transaction_mode = lazydb::model::transaction::TransactionMode::Manual;
+    app.active_console_mut().transaction_state =
+        lazydb::model::transaction::TransactionState::Aborted;
+
+    assert!(app.update(Action::Quit).is_empty());
+    let output = render(&app, 100, 30);
+
+    assert!(output.contains("PENDING TRANSACTIONS"));
+    assert!(output.contains("Active"));
+    assert!(output.contains("Aborted"));
+    assert!(output.contains("Commit"));
+    assert!(output.contains("Rollback"));
 }
 
 #[test]
@@ -1443,6 +1465,56 @@ fn standard_layout_shows_stable_workspace_regions() {
     assert!(output.contains("OUTPUT"));
     assert!(output.contains("Ada"));
     assert!(output.contains("Ready"));
+}
+
+#[test]
+fn workspace_tabs_publish_close_targets_for_each_tab() {
+    let mut app = fixture();
+    app.update(Action::NewConsole);
+    let ids = app.tabs.iter().map(|tab| tab.id()).collect::<Vec<_>>();
+    let (_, state) = render_with_state(&app, 120, 36);
+
+    let visible_tab_ids = state
+        .hit_regions
+        .iter()
+        .filter_map(|region| match region.target {
+            HitTarget::Tab(index) => app.tabs.get(index).map(|tab| tab.id()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(!visible_tab_ids.is_empty());
+    assert!(visible_tab_ids.iter().all(|id| ids.contains(id)));
+    assert!(
+        visible_tab_ids
+            .iter()
+            .filter(|id| {
+                app.tabs
+                    .iter()
+                    .find(|tab| tab.id() == **id)
+                    .and_then(|tab| tab.as_console())
+                    .is_none_or(|console| !console.is_default())
+            })
+            .all(|id| {
+                state
+                    .hit_regions
+                    .iter()
+                    .any(|region| region.target == HitTarget::CloseTab(*id))
+            })
+    );
+}
+
+#[test]
+fn default_console_tab_has_no_close_target() {
+    let app = App::new(Vec::new());
+    let id = app.active_console().id;
+    let (_, state) = render_with_state(&app, 120, 36);
+
+    assert!(
+        !state
+            .hit_regions
+            .iter()
+            .any(|region| region.target == HitTarget::CloseTab(id))
+    );
 }
 
 #[test]

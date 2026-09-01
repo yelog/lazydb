@@ -58,6 +58,7 @@ pub(crate) enum EditorEffect {
     ShowHelp,
     ToggleTransaction,
     SetTransactionModeRequested { manual: bool },
+    TransactionControl,
     Commit,
     Rollback,
     ClearTransactionOutcome,
@@ -1312,9 +1313,8 @@ impl EditorWorkspace {
                 (PendingBinding::LeaderTransaction, 't') => {
                     self.effects.push(EditorEffect::ToggleTransaction)
                 }
-                (PendingBinding::LeaderTransaction, 'c') => self.effects.push(EditorEffect::Commit),
-                (PendingBinding::LeaderTransaction, 'r') => {
-                    self.effects.push(EditorEffect::Rollback)
+                (PendingBinding::LeaderTransaction, 'c') => {
+                    self.effects.push(EditorEffect::TransactionControl)
                 }
                 (PendingBinding::Window(_), 'h') => {
                     self.effects.push(EditorEffect::FocusPane(Focus::Explorer))

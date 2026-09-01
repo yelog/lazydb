@@ -135,6 +135,7 @@ pub enum ProfileButton {
 pub enum HitTarget {
     Focus(Focus),
     Tab(usize),
+    CloseTab(Uuid),
     ExplorerRow(crate::model::explorer::ExplorerNodeId),
     ResultCell {
         row: usize,
@@ -142,6 +143,7 @@ pub enum HitTarget {
     },
     Help,
     ToggleResultView,
+    ResultView(ResultView),
     RelationView(crate::model::relation::RelationView),
     RelationRetry,
     RelationCancel,
@@ -426,11 +428,7 @@ pub fn render_with_state_using_icons_and_sequence(
             });
         }
         if let Some(area) = layout.result_tabs {
-            render_result_tabs(frame, area, app, theme);
-            state.hit_regions.push(HitRegion {
-                area,
-                target: HitTarget::ToggleResultView,
-            });
+            render_result_tabs(frame, area, app, theme, state);
         }
         if let Some(area) = layout.results {
             state.hit_regions.push(HitRegion {
@@ -942,7 +940,11 @@ fn render_tabs(
                 .unwrap_or_else(|| icons.catalog(CatalogKind::Database)),
         };
         let label = format!(" {icon} {title} ");
-        let width = label.cell_width();
+        let close = format!("{} ", icons.close());
+        let can_close = tab.as_console().is_none_or(|console| !console.is_default());
+        let label_width = label.cell_width();
+        let close_width = can_close.then(|| close.cell_width()).unwrap_or(0);
+        let width = label_width + close_width;
         let active = index == app.active_tab;
         spans.push(Span::styled(
             label,
@@ -955,10 +957,40 @@ fn render_tabs(
                 Style::new().fg(theme.muted).bg(theme.surface)
             },
         ));
+        if can_close {
+            spans.push(Span::styled(
+                close,
+                if active {
+                    Style::new()
+                        .fg(theme.background)
+                        .bg(theme.accent)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::new().fg(theme.muted).bg(theme.surface)
+                },
+            ));
+        }
         state.hit_regions.push(HitRegion {
-            area: Rect::new(x, area.y, width.min(area.right().saturating_sub(x)), 1),
+            area: Rect::new(
+                x,
+                area.y,
+                label_width.min(area.right().saturating_sub(x)),
+                1,
+            ),
             target: HitTarget::Tab(index),
         });
+        let close_x = x.saturating_add(label_width);
+        if can_close && close_x < area.right() {
+            state.hit_regions.push(HitRegion {
+                area: Rect::new(
+                    close_x,
+                    area.y,
+                    close_width.min(area.right().saturating_sub(close_x)),
+                    1,
+                ),
+                target: HitTarget::CloseTab(tab.id()),
+            });
+        }
         x = x.saturating_add(width);
     }
     frame.render_widget(
@@ -1892,26 +1924,62 @@ pub(crate) fn editor_line_spans(
     result
 }
 
-fn render_result_tabs(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
+pub(crate) fn render_tab_selectors(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    labels: &[&str],
+    active: usize,
+    theme: Theme,
+) -> Vec<Rect> {
+    let mut spans = Vec::new();
+    let mut regions = Vec::new();
+    let mut x = area.x;
+    for (index, label) in labels.iter().enumerate() {
+        let text = format!(" {label} ");
+        let width = text.cell_width() as u16;
+        spans.push(Span::styled(
+            text,
+            Style::new()
+                .fg(if index == active {
+                    theme.accent
+                } else {
+                    theme.muted
+                })
+                .add_modifier(Modifier::BOLD),
+        ));
+        regions.push(Rect::new(
+            x,
+            area.y,
+            width.min(area.right().saturating_sub(x)),
+            1,
+        ));
+        x = x.saturating_add(width);
+        if index + 1 < labels.len() {
+            spans.push(Span::raw(" "));
+            x = x.saturating_add(1);
+        }
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)).style(theme.base()), area);
+    if let Some(region) = regions.get(active).copied() {
+        frame.render_widget(
+            Paragraph::new("━".repeat(usize::from(region.width)))
+                .style(Style::new().fg(theme.accent)),
+            Rect::new(region.x, area.y.saturating_add(1), region.width, 1),
+        );
+    }
+    regions
+}
+
+fn render_result_tabs(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    theme: Theme,
+    state: &mut UiState,
+) {
     let active = app
         .active_console_opt()
         .map_or(ResultView::Data, |tab| tab.result_view);
-    let data_style = if active == ResultView::Data {
-        Style::new()
-            .fg(theme.background)
-            .bg(theme.accent)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::new().fg(theme.muted).bg(theme.surface)
-    };
-    let output_style = if active == ResultView::Output {
-        Style::new()
-            .fg(theme.background)
-            .bg(theme.action)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::new().fg(theme.muted).bg(theme.surface)
-    };
     let stats = app
         .active_console_opt()
         .and_then(|tab| tab.outcome.as_ref())
@@ -1925,16 +1993,27 @@ fn render_result_tabs(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme
                 )
             },
         );
-    let line = Line::from(vec![
-        Span::styled(" DATA ", data_style),
-        Span::raw(" "),
-        Span::styled(" OUTPUT ", output_style),
-        Span::styled(
-            format!("    {stats}"),
-            Style::new().fg(theme.muted).bg(theme.background),
-        ),
-    ]);
-    frame.render_widget(Paragraph::new(line).style(theme.base()), area);
+    let regions = render_tab_selectors(
+        frame,
+        area,
+        &["DATA", "OUTPUT"],
+        usize::from(matches!(active, ResultView::Output | ResultView::Plan)),
+        theme,
+    );
+    for (region, view) in regions
+        .into_iter()
+        .zip([ResultView::Data, ResultView::Output])
+    {
+        state.hit_regions.push(HitRegion {
+            area: region,
+            target: HitTarget::ResultView(view),
+        });
+    }
+    let stats_x = area.x.saturating_add(18).min(area.right());
+    frame.render_widget(
+        Paragraph::new(format!("{stats}")).style(Style::new().fg(theme.muted).bg(theme.background)),
+        Rect::new(stats_x, area.y, area.right().saturating_sub(stats_x), 1),
+    );
 }
 
 fn render_results(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, state: &mut UiState) {
@@ -2332,7 +2411,14 @@ fn render_overlay(
         }
         Overlay::TransactionExitConfirm { prompt, choice } => {
             use crate::model::transaction::TransactionExitChoice;
-            let popup = centered(area, 78, 12);
+            let pending = std::iter::once(prompt.console_id)
+                .chain(
+                    app.deferred_transaction_prompts()
+                        .filter(|queued| queued.intent == prompt.intent)
+                        .map(|queued| queued.console_id),
+                )
+                .collect::<Vec<_>>();
+            let popup = centered(area, 78, (pending.len() as u16).saturating_add(7));
             frame.render_widget(Clear, popup);
             let tab = app.tabs.iter().find(|tab| tab.id() == prompt.console_id);
             let state = tab
@@ -2374,22 +2460,40 @@ fn render_overlay(
                     " Cancel "
                 )
             };
-            let lines = vec![
-                Line::from(Span::styled(" TRANSACTION EXIT ", theme.title(true))),
-                Line::raw(format!(
+            let title = if prompt.intent == crate::model::transaction::DeferredIntent::Quit {
+                " PENDING TRANSACTIONS "
+            } else {
+                " TRANSACTION "
+            };
+            let mut lines = vec![Line::from(Span::styled(title, theme.title(true)))];
+            if pending.len() > 1 {
+                for (index, id) in pending.iter().enumerate() {
+                    let pending_tab = app.tabs.iter().find(|tab| tab.id() == *id);
+                    let marker = if index == 0 { ">" } else { " " };
+                    let pending_state = pending_tab
+                        .and_then(|tab| tab.as_console())
+                        .map(|tab| format!("{:?}", tab.transaction_state))
+                        .unwrap_or_else(|| "gone".into());
+                    lines.push(Line::raw(format!(
+                        "{marker} {}   {pending_state}",
+                        pending_tab.map(|tab| tab.title()).unwrap_or("unknown")
+                    )));
+                }
+            } else {
+                lines.push(Line::raw(format!(
                     "console: {}   state: {state}",
                     tab.map(|tab| tab.title()).unwrap_or("unknown")
-                )),
-                Line::raw(buttons),
-                Line::raw(if outcome_unknown {
-                    "Enter or 'a' abandons local state; Esc cancels"
-                } else {
-                    "Rollback is the default. Tab/Left/Right choose; Enter confirms; Esc cancels"
-                }),
-            ];
+                )));
+            }
+            lines.push(Line::raw(buttons));
+            lines.push(Line::raw(if outcome_unknown {
+                "Enter or 'a' abandons local state; Esc cancels"
+            } else {
+                "Rollback is the default. Tab/Left/Right choose; Enter confirms; Esc cancels"
+            }));
             frame.render_widget(
                 Paragraph::new(lines)
-                    .block(panel_block(" TRANSACTION EXIT CONFIRMATION ", true, theme))
+                    .block(panel_block(title, true, theme))
                     .style(Style::new().fg(theme.text).bg(theme.surface_raised)),
                 popup,
             );

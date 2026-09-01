@@ -557,11 +557,6 @@ fn all_manual_console_transactions_are_deferred_and_cancel_keeps_connection() {
         Some(Overlay::TransactionExitConfirm { .. })
     ));
     app.update(Action::CancelTransactionExit);
-    assert!(matches!(
-        app.overlay,
-        Some(Overlay::TransactionExitConfirm { .. })
-    ));
-    app.update(Action::CancelTransactionExit);
     assert_eq!(app.connection.profile_id, Some(first_id));
     assert!(app.overlay.is_none());
 }

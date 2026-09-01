@@ -64,6 +64,13 @@ impl IconSet {
         }
     }
 
+    pub const fn close(self) -> &'static str {
+        match self.mode {
+            IconMode::NerdFont | IconMode::Unicode => "×",
+            IconMode::Ascii => "x",
+        }
+    }
+
     pub const fn database(self, kind: DatabaseKind) -> &'static str {
         match self.mode {
             IconMode::NerdFont => match kind {

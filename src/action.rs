@@ -30,6 +30,7 @@ use crate::{
 pub enum Action {
     NewConsole,
     CloseActiveTab,
+    CloseTab(Uuid),
     RequestDeleteActiveConsole,
     ConfirmDeleteConsole,
     CancelDeleteConsole,
@@ -240,6 +241,7 @@ pub enum Action {
     ConfirmTargetSelector,
     CancelTargetSelector,
     SetTransactionMode(crate::model::transaction::TransactionMode),
+    OpenTransactionControl,
     CommitTransaction,
     RollbackTransaction,
     ClearTransactionOutcome,

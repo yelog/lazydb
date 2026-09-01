@@ -221,6 +221,10 @@ pub struct CompletionPopup {
 }
 
 impl ConsoleTab {
+    pub fn is_default(&self) -> bool {
+        self.name == "console"
+    }
+
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             id: Uuid::new_v4(),

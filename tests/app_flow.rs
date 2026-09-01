@@ -135,6 +135,50 @@ fn space_tt_requires_exit_confirmation_for_active_manual_transaction() {
 }
 
 #[test]
+fn space_tc_opens_transaction_panel_and_space_tr_is_unused() {
+    let mut app = App::new(Vec::new());
+    app.active_console_mut().transaction_mode = TransactionMode::Manual;
+    app.active_console_mut().transaction_state = TransactionState::Active;
+    editor_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+
+    for code in [KeyCode::Char(' '), KeyCode::Char('t'), KeyCode::Char('c')] {
+        editor_key(&mut app, code, KeyModifiers::NONE);
+    }
+    assert!(matches!(
+        app.overlay,
+        Some(Overlay::TransactionExitConfirm { .. })
+    ));
+
+    app.update(Action::CancelTransactionExit);
+    for code in [KeyCode::Char(' '), KeyCode::Char('t'), KeyCode::Char('r')] {
+        editor_key(&mut app, code, KeyModifiers::NONE);
+    }
+    assert!(app.overlay.is_none());
+    assert_eq!(
+        app.active_console().transaction_state,
+        TransactionState::Active
+    );
+}
+
+#[test]
+fn transaction_panel_enter_confirms_the_selected_choice() {
+    let mut app = App::new(Vec::new());
+    app.active_console_mut().transaction_mode = TransactionMode::Manual;
+    app.active_console_mut().transaction_state = TransactionState::Active;
+
+    app.update(Action::OpenTransactionControl);
+    app.update(Action::ConfirmTransactionExit);
+
+    assert!(matches!(
+        app.overlay,
+        Some(Overlay::TransactionExitConfirm {
+            choice: lazydb::model::transaction::TransactionExitChoice::Rollback,
+            ..
+        })
+    ));
+}
+
+#[test]
 fn vim_operator_text_object_visual_and_undo_sequences_use_app_pipeline() {
     let mut app = App::new(Vec::new());
     app.update(Action::ReplaceEditor("one two three".into()));
