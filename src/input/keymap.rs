@@ -1277,6 +1277,7 @@ fn is_read_only_editor_key(event: KeyEvent) -> bool {
 
 fn map_results(code: KeyCode, app: &App) -> Option<Action> {
     match code {
+        KeyCode::Char('P') => Some(Action::OpenPageSizeSelector { relation: false }),
         KeyCode::Char('0' | '^') => Some(Action::GridSelectColumn(
             crate::model::tab::GridColumnTarget::First,
         )),
@@ -1339,6 +1340,7 @@ fn map_results(code: KeyCode, app: &App) -> Option<Action> {
 
 fn map_relation(code: KeyCode, app: &App) -> Option<Action> {
     match code {
+        KeyCode::Char('P') => Some(Action::OpenPageSizeSelector { relation: true }),
         KeyCode::Char('[') => Some(Action::GridResizeColumn(-1)),
         KeyCode::Char(']') => Some(Action::GridResizeColumn(1)),
         KeyCode::Char('=') => Some(Action::GridResetColumnWidth),
