@@ -596,6 +596,180 @@ b5de0034e04af05e67b247fb9c1314da2e776a08) docs: design SQL editor and transactio
 - [`074322d`](https://github.com/yelog/lazydb/commit/
 074322d4bfe3b126a98471ee89347b7453dd622a) feat: implement LazyDB M0 foundation
 
+## [0.1.0-beta.2] - 2026-09-01
+
+### Added
+
+- Added project-scoped connection access and per-connection workspace persistence.
+- Added paginated database results, contextual SQL completion, data-grid navigation, contextual key hints, and persistent shortcut help.
+- Added a notification center, motion-aware loading feedback, and improved relation editing and data hierarchy controls.
+- Added headless coding-agent database access through CLI and project-scoped MCP tools, with explicit read/write policy boundaries.
+- Added native installation and update channels with standalone installer pages and release manifests.
+
+### Changed
+
+- Improved keyboard navigation, pane resizing, workspace tab controls, explorer interaction, and visible-object loading feedback.
+- Refined PostgreSQL catalog search and qualified completion behavior across schemas, relations, and columns.
+- Extracted the Neovim integration into its standalone repository and clarified installation and onboarding documentation.
+
+### Fixed
+
+- Fixed relation mutation stability, catalog readiness during tab restoration, SQLite mutation compatibility, SQL execution error focus, null rendering, key sequence handling, and result-filter layout behavior.
+- Fixed grid scrolling, selection visibility, edited-cell highlighting, relation shortcuts, explorer search separators, installer portability, and CI integration-test stability.
+
+### Security
+
+- Added project-scoped database access controls and explicit coding-agent database write policy enforcement.
+
+### Internal
+
+- Updated CI dependencies and runner configuration, expanded database and UI integration coverage, and serialized database integration tests where required.
+
+### Commits
+- [`d34fd20`](https://github.com/yelog/lazydb/commit/d34fd20ae31feb2fb27357022d9d34a33bae38f2) test(postgres): avoid assuming search returns relation children
+- [`93b6970`](https://github.com/yelog/lazydb/commit/93b6970a54f7bed17ff43dd6efdb576267fd6d21) test(postgres): assert column metadata separately
+- [`4de41a0`](https://github.com/yelog/lazydb/commit/4de41a0ea3c41299ed28a885c34bd606908b53e8) test(postgres): use valid bounded column search
+- [`e220f26`](https://github.com/yelog/lazydb/commit/e220f265ece56613e543aaf125b0ff15a40e54ac) test(postgres): avoid truncating column search results
+- [`aa755f1`](https://github.com/yelog/lazydb/commit/aa755f1d1abdcb906e2740e98670393591152488) test(postgres): allow room for relation search children
+- [`4e284ec`](https://github.com/yelog/lazydb/commit/4e284ec6333bd67a0c4afb8d99c713ce2d1bd6a0) test(postgres): search table columns through relation match
+- [`1b485e9`](https://github.com/yelog/lazydb/commit/1b485e9c5c8d308b617208a448b0c2a537c637e3) test(postgres): search columns by scoped name
+- [`2f957d9`](https://github.com/yelog/lazydb/commit/2f957d9ea5f3312feeb43a76c43e722f65f1bcb0) test(postgres): match columns by relation suffix
+- [`02b3411`](https://github.com/yelog/lazydb/commit/02b34114230dcc59ced0c30f229b74bd59743924) test(postgres): search columns by full catalog path
+- [`8962c3e`](https://github.com/yelog/lazydb/commit/8962c3e7891062fe90096dad496bbe124d47f64b) ci: serialize database integration tests
+- [`fa11787`](https://github.com/yelog/lazydb/commit/fa117871acb55e268c0f37386a57654409d4060e) fix(ci): resolve clippy and mysql test failures
+- [`73e5417`](https://github.com/yelog/lazydb/commit/73e54179947ba759bb9143ae4f2f2b2f68af029b) fix(explorer): ignore separators in search
+- [`d8100e6`](https://github.com/yelog/lazydb/commit/d8100e6a29f59f81a17c063658f24097dd7432ca) fix(keymap): enable leader shortcuts outside explorer
+- [`5d8d557`](https://github.com/yelog/lazydb/commit/5d8d55785f95dadd74a75cf88423b0343cc8669a) fix(ui): distinguish null values in data views
+- [`d34a03a`](https://github.com/yelog/lazydb/commit/d34a03a9715fedbad2d89fd8a4967a76f030b848) fix(sql): focus output when execution fails
+- [`385638c`](https://github.com/yelog/lazydb/commit/385638cbf1521436023cc583f88882bd81b53e57) fix(keymap): preserve relation shortcuts
+- [`0db886c`](https://github.com/yelog/lazydb/commit/0db886ce4cc64e5de70ed0fa62293a53305c71fb) merge: add notification center
+- [`0bb2a1a`](https://github.com/yelog/lazydb/commit/0bb2a1a8b98e2b9f3fc4f14e77cd277e280e1b63) docs: add notification center design
+- [`a3d027b`](https://github.com/yelog/lazydb/commit/a3d027b2ce392c970a67711d22569ca4c5909ff4) feat(ui): add notification center
+- [`bf73ab8`](https://github.com/yelog/lazydb/commit/bf73ab84631fb1385f712e820741d5d4dce374cb) test(ui): focus transaction help assertion
+- [`8b7fc54`](https://github.com/yelog/lazydb/commit/8b7fc548c76a7f07a3260aac6ec157981eb731d6) feat(ui): add persistent shortcut popup
+- [`b289109`](https://github.com/yelog/lazydb/commit/b289109815cd0d9470f25e2333673a44172a1811) feat(ui): improve workspace tab controls
+- [`cb69915`](https://github.com/yelog/lazydb/commit/cb69915ed1e35e2559249a193d3cf73bc835e206) fix(ui): show relation commit success
+- [`2e35ebd`](https://github.com/yelog/lazydb/commit/2e35ebd1f5397252fb38c702612809164b6de138) fix(postgres): stabilize relation mutations
+- [`163f754`](https://github.com/yelog/lazydb/commit/163f7547fd8ca740b71d1a30cc4b7996663f040d) fix(ui): highlight only edited relation cells
+- [`41ab957`](https://github.com/yelog/lazydb/commit/41ab9573c49e86be151af58fa942db88f8163f9e) fix(pages): make installers standalone
+- [`9adb3ef`](https://github.com/yelog/lazydb/commit/9adb3ef4b50f80b6b0a466aaf2c77346cf7406ca) docs: correct keyboard shortcut reference
+- [`55ba036`](https://github.com/yelog/lazydb/commit/55ba036f013e5df05f03e58083cec42618c79af3) merge: add contextual keyboard hints
+- [`575d98e`](https://github.com/yelog/lazydb/commit/575d98ef97eb9f2a26e055401e72c2d7f0a66a02) feat(ui): add contextual keyboard hints
+- [`f0fccd3`](https://github.com/yelog/lazydb/commit/f0fccd38b41957126c7f9d9fc1414a2a4acc9e96) fix(sqlite): avoid unsupported returning syntax
+- [`f465259`](https://github.com/yelog/lazydb/commit/f46525946c7b98103f73bec50267fbe1db7861fc) merge: add safe Explorer catalog drops
+- [`41b3330`](https://github.com/yelog/lazydb/commit/41b3330ad626f038969de2fcb5e123a0b80c2212) feat(explorer): safely drop catalog objects
+- [`caf95a6`](https://github.com/yelog/lazydb/commit/caf95a6d30b3ea9274cb0e120363c95bc76904cc) fix: stabilize relation table editing
+- [`afb78a4`](https://github.com/yelog/lazydb/commit/afb78a45954f2506efb63d0a1982850f8c8c8ffc) fix: preserve pagination key bindings after merge
+- [`d047495`](https://github.com/yelog/lazydb/commit/d0474952d2428b24b81d962a2750b63f2c66bdc7) merge: add paginated database results
+- [`a60e7c7`](https://github.com/yelog/lazydb/commit/a60e7c7948bf08aeaad4debeece0b857413b24d4) feat: add paginated database results
+- [`86d06cc`](https://github.com/yelog/lazydb/commit/86d06cc3c774155bc1d7f4bffc6ccb6d42fc7899) docs: add implementation plans
+- [`18afd88`](https://github.com/yelog/lazydb/commit/18afd88460c8a3a559e135a737767eb52e29b60e) feat(ui): navigate completion candidates with arrows
+- [`be519ef`](https://github.com/yelog/lazydb/commit/be519efa8edb42e375ee13163ef7065bf85da4be) merge: add context-aware SQL completion
+- [`1f797e4`](https://github.com/yelog/lazydb/commit/1f797e47014518c6cab508c0c7a41d933b1b779a) feat(sql): make completion context-aware
+- [`1d13745`](https://github.com/yelog/lazydb/commit/1d13745ee9cc96937aa2d67f9559faa231ec6643) fix(ui): distinguish data grid header from selection
+- [`556809c`](https://github.com/yelog/lazydb/commit/556809c106de607e83d1693005274282898079c1) feat(ui): alias zero to first data grid column
+- [`c135f54`](https://github.com/yelog/lazydb/commit/c135f54636a7383f329cf8cff9380577fdf28586) feat(ui): add data grid column jump shortcuts
+- [`9489da3`](https://github.com/yelog/lazydb/commit/9489da361153f40b66a1aafc0b8daa63cc009089) fix(ui): lower result filter layout breakpoint
+- [`40a278b`](https://github.com/yelog/lazydb/commit/40a278bd984d4cee833e2ebe971619102b06354c) fix(ui): place result filters inside panel
+- [`76dc6fb`](https://github.com/yelog/lazydb/commit/76dc6fb3a29d03b09027ce454fe7cda4475567ae) test(ui): restore result completion coverage
+- [`e984996`](https://github.com/yelog/lazydb/commit/e984996218dc2869916438d8eb6579c052fd7dec) merge: clarify SQL result filter lifecycle
+- [`fb54bb6`](https://github.com/yelog/lazydb/commit/fb54bb654830576330563618b6c192246914dfce) fix(sql): clarify result filter lifecycle
+- [`5d360e6`](https://github.com/yelog/lazydb/commit/5d360e66481a3a8805718f4041fca420a0dcf93a) merge: refine relation data hierarchy
+- [`54b199e`](https://github.com/yelog/lazydb/commit/54b199e4db91732bf35b9f08b569cc68014a09df) feat(ui): refine relation data hierarchy
+- [`3f41f6d`](https://github.com/yelog/lazydb/commit/3f41f6d2edbce4cbb7da4c44072edb745e830305) fix(ui): stabilize explorer expansion rendering
+- [`a7fcfd7`](https://github.com/yelog/lazydb/commit/a7fcfd7eb55b520432762e9a192cc8cbd215c2b9) docs: add relation data visual hierarchy plans
+- [`18596be`](https://github.com/yelog/lazydb/commit/18596be305894692917cd90ed2aa5ffb0d382dca) merge: add native install and update channels
+- [`5d1a374`](https://github.com/yelog/lazydb/commit/5d1a37488dabdde5c3343a554e3a1cf9bdfcd526) feat(release): add native install and update channels
+- [`dee9eb5`](https://github.com/yelog/lazydb/commit/dee9eb5e29d4d5326a4d8173dee17334f6752e9e) Merge branch 'task/restored-relation-catalog-readiness'
+- [`7b0a804`](https://github.com/yelog/lazydb/commit/7b0a804115c36c585df427ad9b1ee8e5262c7964) fix(relation): wait for catalog before restoring tabs
+- [`f049aad`](https://github.com/yelog/lazydb/commit/f049aad7845c30703bda88dd5dfea0005a4aed3e) fix(ci): align UI and catalog test contracts
+- [`3271696`](https://github.com/yelog/lazydb/commit/3271696621ef68117673aff44f90d9a4c8571dd2) fix(ci): stabilize full codebase integration
+- [`10a314c`](https://github.com/yelog/lazydb/commit/10a314c517d832c4a70af44640a3b6e4ebeb838b) feat(ui): complete interaction and help updates
+- [`dbd607e`](https://github.com/yelog/lazydb/commit/dbd607ec9ac1a750fd25e1beac62ad785bb94507) merge: improve visible object picker feedback
+- [`0d90811`](https://github.com/yelog/lazydb/commit/0d9081145d21ad7c88c7e15e076bf72c7b8f14b8) feat(ui): improve visible object picker feedback
+- [`406a167`](https://github.com/yelog/lazydb/commit/406a167bf14f763d63ad4b2dde275e02eb814f2a) feat(ui): add help and viewport interaction updates
+- [`3c47b2e`](https://github.com/yelog/lazydb/commit/3c47b2e9714a9e9939247c1e7d8341ade8575dbe) fix(mouse): scroll grid and explorer viewports immediately
+- [`ec8abad`](https://github.com/yelog/lazydb/commit/ec8abadf31ecc56e930e4849e20c0297562adb05) fix(postgres): match structured catalog child paths
+- [`c62a472`](https://github.com/yelog/lazydb/commit/c62a47280d7708b2f01d3f2b471c9ae7ac9823b1) fix: document alternate help shortcut
+- [`88ba8c3`](https://github.com/yelog/lazydb/commit/88ba8c325cc2f4efb673621b7ee9c48569ace52a) fix(postgres): match full catalog search paths
+- [`0af4738`](https://github.com/yelog/lazydb/commit/0af47384ae1472fb3962cd718e9ead0756329f3e) fix(postgres): prioritize qualified object suffixes
+- [`b5deee1`](https://github.com/yelog/lazydb/commit/b5deee1c25ff13e6f64473eb7686f863162d89c7) docs: design contextual help shortcut
+- [`e86925c`](https://github.com/yelog/lazydb/commit/e86925c6abb0207b30389d0b1a9e753b21589582) fix(postgres): prioritize qualified catalog matches
+- [`c55daff`](https://github.com/yelog/lazydb/commit/c55daffabe7f254a9b4a33542628b4ced195cda3) fix(postgres): keep catalog search path scoped
+- [`e4b7752`](https://github.com/yelog/lazydb/commit/e4b7752be138ed7202b4fe4ef27c6c11b37e24c6) fix(postgres): match qualified catalog searches
+- [`8cdb6b6`](https://github.com/yelog/lazydb/commit/8cdb6b6f700fdfede7d93d61362225d514d104fd) fix(postgres): tolerate catalog output variations
+- [`a8614d2`](https://github.com/yelog/lazydb/commit/a8614d26edab79134582fa5362c0ee768027936f) docs: restructure README for user onboarding
+- [`39bc211`](https://github.com/yelog/lazydb/commit/39bc211ed5bd923379b219f49024c069c94e99b5) fix(postgres): exclude trigger functions from catalog
+- [`065d69f`](https://github.com/yelog/lazydb/commit/065d69fd3edb6853db29bc31ca3941180c5aeac5) docs: add coding agent database access plan
+- [`250298e`](https://github.com/yelog/lazydb/commit/250298e638f29b6a19760843e49bd5d8c0fe1fd5) merge: add coding agent database access
+- [`58633ee`](https://github.com/yelog/lazydb/commit/58633ee20b2f4ccd77d724cdaea76a3ee0138f4f) fix(ui): highlight SQL in DDL and output logs
+- [`9e79cd7`](https://github.com/yelog/lazydb/commit/9e79cd73c08e1d3c13a1f29312e179487fc296f0) fix(input): refresh pending key sequence timeout
+- [`85fd406`](https://github.com/yelog/lazydb/commit/85fd406c11199cd40802aaca9befcbbc3ee14809) test(agent): harden database access boundaries
+- [`4978187`](https://github.com/yelog/lazydb/commit/4978187002b6961dae31a15c84dd7478879dd94e) docs: explain coding agent database access
+- [`204cd55`](https://github.com/yelog/lazydb/commit/204cd55e138fd8dd297e698254fa1ea08ee76b3d) feat(mcp): serve project-scoped database tools
+- [`d824f6e`](https://github.com/yelog/lazydb/commit/d824f6ef927b2d46d9f21d07002006ac90a10375) feat(cli): add coding agent database commands
+- [`1b01284`](https://github.com/yelog/lazydb/commit/1b01284b012f0732e33e68d7daa3edd8128ef73d) feat(agent): expose progressive schema inspection
+- [`48c03f8`](https://github.com/yelog/lazydb/commit/48c03f81731e4f07075e649e41e8975cf9a8ee51) feat(agent): add headless database service
+- [`f80e684`](https://github.com/yelog/lazydb/commit/f80e684ed3d4620eefd8ef4a8be4a59c2cbf683f) feat(agent): define API and write policy
+- [`3f97180`](https://github.com/yelog/lazydb/commit/3f971801433782f2ad8131c4fc4dd69fd12f2259) merge: add motion-aware UI feedback
+- [`d51c406`](https://github.com/yelog/lazydb/commit/d51c406bb2e0e6691274892ca0b7c542a81f8633) feat(ui): add motion-aware loading feedback
+- [`a1599a6`](https://github.com/yelog/lazydb/commit/a1599a66818b8d2b81f4fc4604b2707d3b0a46d8) refactor(credentials): share headless profile resolution
+- [`5842036`](https://github.com/yelog/lazydb/commit/5842036c9a6a55d79d1fdbfe06255a22adfc9b29) feat(agent): select connections deterministically
+- [`396c0d9`](https://github.com/yelog/lazydb/commit/396c0d9e46179b2db926dc801b603a790483cb60) feat(agent): resolve project-visible connections
+- [`5678d27`](https://github.com/yelog/lazydb/commit/5678d279a534b63e9540cdb28713186afe4e8f05) merge: add vim-style pane resizing
+- [`f9bb215`](https://github.com/yelog/lazydb/commit/f9bb2152b2b712b62764f06f28cbd157ecacfee5) feat(layout): add vim-style pane resizing
+- [`f69118c`](https://github.com/yelog/lazydb/commit/f69118c25604d6ef557aa7d84243fe67cb327e49) docs: simplify binary installation instructions
+- [`de110f9`](https://github.com/yelog/lazydb/commit/de110f975883ae57ea1563d8435127c327d15904) merge: stabilize SQL completion popup position
+- [`de3d7a7`](https://github.com/yelog/lazydb/commit/de3d7a79d821d37734a68600973e84069534c316) fix(ui): stabilize SQL completion popup position
+- [`5273250`](https://github.com/yelog/lazydb/commit/527325035170c82c926e09501dc14d7c76620e79) docs: add implementation plans
+- [`56c78c9`](https://github.com/yelog/lazydb/commit/56c78c9d63b0bd42689ab584c8de53245cb2d83e) feat: add read-only vim copy views
+- [`34f8271`](https://github.com/yelog/lazydb/commit/34f8271cbf6bb06306aec4b3bfa28689b355f9a0) refactor(neovim): move plugin to standalone repository
+- [`be20242`](https://github.com/yelog/lazydb/commit/be20242c77a4b48897af98d45f60fe848fbb417e) docs(neovim): update extraction execution plan
+- [`87fb8b5`](https://github.com/yelog/lazydb/commit/87fb8b5a98b72d280c01e4317d42e4098c0e9e17) docs(neovim): preserve filtered extraction history
+- [`6cf7b18`](https://github.com/yelog/lazydb/commit/6cf7b183777fa7f3eceab371830dddee25589197) docs(neovim): design standalone plugin extraction
+- [`e790999`](https://github.com/yelog/lazydb/commit/e790999d18515042f3e0ca187419372b1c82c87b) fix(record-view): highlight selected field
+- [`1a3f37f`](https://github.com/yelog/lazydb/commit/1a3f37f4b94fc3f9bacc78da11a1fc4b9d79c725) merge: integrate project-scoped connections
+- [`b84fba9`](https://github.com/yelog/lazydb/commit/b84fba96f3deebea9d27debf8fcefa42457842ea) docs(neovim): document current repository installation
+- [`c91da18`](https://github.com/yelog/lazydb/commit/c91da182b4f4a4d2b0eb14fae509250cdcabdb47) fix(clipboard): handle shifted row copy keys
+- [`555a2fa`](https://github.com/yelog/lazydb/commit/555a2fa0ebc8f36bb256ce84f684c4709916951c) feat: show active connection in others group
+- [`7384eb9`](https://github.com/yelog/lazydb/commit/7384eb9202bf894795d472bd75fac1d3f06039dd) docs: explain project-scoped connections
+- [`a56ca2d`](https://github.com/yelog/lazydb/commit/a56ca2d95a73974de2749fdf3a8a8b3e72ce2e37) feat: reveal scoped startup connections
+- [`5c4f9b3`](https://github.com/yelog/lazydb/commit/5c4f9b3aa50e890ac46bc39122a205f61252290d) feat: render project-aware connections
+- [`6146471`](https://github.com/yelog/lazydb/commit/6146471f3679e0c2e381469e8f2e8a0f8c76a9e2) feat: add connection access menu
+- [`466ae3d`](https://github.com/yelog/lazydb/commit/466ae3d661aa2d92a256069c72052cdfbeac4ba9) feat: update connection access transactionally
+- [`ef08634`](https://github.com/yelog/lazydb/commit/ef08634bfa6ce4e9ffe9ccb52b6e6170664cb277) feat: scope new connections to current project
+- [`6dd733e`](https://github.com/yelog/lazydb/commit/6dd733e16c1e3eced12695500280805d26fbe68b) feat: group unrelated connections in explorer
+- [`5b926e1`](https://github.com/yelog/lazydb/commit/5b926e17decc85e1dd3887b1e0a17453447d9971) feat: pass project context into app
+- [`8e582a9`](https://github.com/yelog/lazydb/commit/8e582a95b2ddf2d2af076dfee2a548d4e7cd0d9e) feat: persist connection access scope
+- [`1d8b1b5`](https://github.com/yelog/lazydb/commit/1d8b1b5c7dc5b3c2f0ae119cf4a4d1242e3e4208) feat: resolve current project context
+- [`6b31778`](https://github.com/yelog/lazydb/commit/6b3177886c8e6bc46f6b1d0db4e49b717d4f3d2e) merge: integrate trailing partial grid column
+- [`0f93d2b`](https://github.com/yelog/lazydb/commit/0f93d2b59c8afde095e5590780c0b0274c15f0c1) merge: integrate context-aware copy
+- [`49742a8`](https://github.com/yelog/lazydb/commit/49742a890ffba22f5614cd5a091ab017cca52ddf) feat: add per-connection workspaces
+- [`52be7a2`](https://github.com/yelog/lazydb/commit/52be7a2e49b9d6aa2e49e72ea86760f680418d80) feat(clipboard): add context-aware copy actions
+- [`778337e`](https://github.com/yelog/lazydb/commit/778337eebf89d15ee7f4384d79e209854689ee5c) Merge branch 'task/keyboard-navigation'
+- [`29bd791`](https://github.com/yelog/lazydb/commit/29bd79107de5660fd5a4505f70cda36682463b5d) fix(ui): render trailing partial grid column
+- [`a870c51`](https://github.com/yelog/lazydb/commit/a870c5106194ead0deed49c80cce54d8bea5194d) Merge branch 'main' of github.com:yelog/lazydb
+- [`1d56695`](https://github.com/yelog/lazydb/commit/1d56695f890e5719a91d3691b7de27e509abe692) chore(deps): bump actions/checkout to v7.0.1
+- [`6c3d4d0`](https://github.com/yelog/lazydb/commit/6c3d4d02334bce22109cf2c0b6f457a0a30116fa) chore(deps): bump actions/upload-artifact to v7.0.1
+- [`cd44e2c`](https://github.com/yelog/lazydb/commit/cd44e2c2111922c83dc59d7d302f12b19c5994d7) chore(deps): bump actions/download-artifact to v8.0.1
+- [`39a550b`](https://github.com/yelog/lazydb/commit/39a550b9e2a79fe68229b7e3ae870439026a6eca) chore(deps): bump actions/attest-build-provenance to v4.2.2
+- [`970410e`](https://github.com/yelog/lazydb/commit/970410eb3066ebcb16d5750457039466b54c071e) chore(deps): bump actions/cache to v6.1.0
+- [`fcdd45d`](https://github.com/yelog/lazydb/commit/fcdd45d41f6b7b87cc2180e949a4d820d6c1886a) ci(release): use current Intel macOS runner
+- [`0407625`](https://github.com/yelog/lazydb/commit/0407625714ab1696039552bdd4cfcfb9260b5291) fix(workspace): address per-connection regressions
+- [`c470a4e`](https://github.com/yelog/lazydb/commit/c470a4ed1063d405abb1f71f423d74e98cd18614) docs(workspace): explain per-connection tab restoration
+- [`ff2592d`](https://github.com/yelog/lazydb/commit/ff2592d61f0be48bfefab5c3c26b349933268d5e) feat(workspace): delete workspace with its profile
+- [`49fcb9b`](https://github.com/yelog/lazydb/commit/49fcb9b22d0030d4e6bd9b6fd90aeca74f154349) fix(workspace): scope console lifecycle by profile
+- [`ed79fdd`](https://github.com/yelog/lazydb/commit/ed79fdd3f78a4be050077e41db12c4b3d18137df) feat(workspace): restore relation tabs lazily
+- [`c16b76c`](https://github.com/yelog/lazydb/commit/c16b76c6eb595330f701c86428b28b33549958ff) feat(workspace): hide tabs when a profile disconnects
+- [`0fe15e0`](https://github.com/yelog/lazydb/commit/0fe15e05494e5682825cafb3435eddbe6c09c600) fix(workspace): guard connection switches against live work
+- [`3a143cc`](https://github.com/yelog/lazydb/commit/3a143cc8c6d79340a0183c6a12771846a1117059) feat(workspace): swap tabs after successful connection
+- [`db8f7c3`](https://github.com/yelog/lazydb/commit/db8f7c3cac2d0e8f67e25d18de96684a20cfd6cd) feat(workspace): snapshot and restore every profile workspace
+- [`040540f`](https://github.com/yelog/lazydb/commit/040540fedf561a55a6ec65d1bbf18b6127379015) feat(workspace): migrate flat workspaces by profile
+- [`81cf7bc`](https://github.com/yelog/lazydb/commit/81cf7bcda8fa42ff806b2328f20a20f555d00759) feat(workspace): define profile-scoped persistence format
+- [`718648d`](https://github.com/yelog/lazydb/commit/718648d866ee392c4299d11bdfbf318555354daf) feat: improve keyboard navigation
+- [`7c5df07`](https://github.com/yelog/lazydb/commit/7c5df07f54ec6b559df52ed1d71ccf6bb3463eff) refactor(workspace): add profile-scoped workspace state
+- [`bd699b4`](https://github.com/yelog/lazydb/commit/bd699b409054139cf75f04bc5e9d375acea8be1e) docs: design keyboard navigation
+
 ## Unreleased
 
 Changes that are not part of a tagged release go here.
