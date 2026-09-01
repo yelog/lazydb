@@ -66,6 +66,8 @@ use crate::{
     sql::{self, CompletionScheduleKey, ScopeSource, SqlDialect},
 };
 
+const RELATION_METADATA_SAVE_MESSAGE: &str = "Loading relation metadata before saving";
+
 fn pending_relation_request<T>(load: &RelationLoad<T>) -> Option<RelationRequest> {
     match load {
         RelationLoad::Loading { request, .. } => Some(request.clone()),
@@ -8233,7 +8235,7 @@ impl App {
         };
         edit.save_after_metadata_load = true;
         if matches!(tab.ddl, RelationLoad::Loading { .. }) {
-            self.connection.error = Some("Loading relation metadata before saving".into());
+            self.connection.error = Some(RELATION_METADATA_SAVE_MESSAGE.into());
             return Vec::new();
         }
         let request = RelationRequest {
@@ -8262,7 +8264,7 @@ impl App {
             request: request.clone(),
             previous,
         };
-        self.connection.error = Some("Loading relation metadata before saving".into());
+        self.connection.error = Some(RELATION_METADATA_SAVE_MESSAGE.into());
         vec![Command::LoadRelationDdl(request)]
     }
 
@@ -8440,6 +8442,7 @@ impl App {
         success: bool,
         error: Option<(String, bool)>,
     ) {
+        let mut committed = false;
         if let Some(WorkspaceTab::Relation(tab)) = self.tabs.iter_mut().find(|t| t.id() == tab_id) {
             if tab.transaction_generation != generation {
                 return;
@@ -8451,6 +8454,7 @@ impl App {
                     && let Some(edit) = tab.edit.as_mut()
                 {
                     edit.commit_changes();
+                    committed = true;
                 }
                 tab.transaction_snapshot = None;
                 tab.transaction_state = TransactionState::Idle;
@@ -8464,6 +8468,14 @@ impl App {
         }
         if let Some((message, _)) = error {
             self.status_message(&message);
+        } else if committed {
+            if self.connection.error.as_deref() == Some(RELATION_METADATA_SAVE_MESSAGE) {
+                self.connection.error = None;
+            }
+            self.clipboard_notice = Some(ClipboardNotice::success(
+                "Relation changes committed",
+                Instant::now(),
+            ));
         }
     }
 
@@ -9562,6 +9574,68 @@ mod tests {
             result_sets: vec![ResultSet::default()],
             stats: QueryStats::new(Duration::from_millis(2), Duration::from_millis(3), 0),
         }
+    }
+
+    #[test]
+    fn successful_relation_commit_replaces_metadata_loading_message() {
+        let mut app = App::new(Vec::new());
+        let mut tab = RelationTab::new("items");
+        tab.transaction_generation = 3;
+        tab.transaction_state = TransactionState::Committing;
+        tab.edit = Some(RelationEditSession::from_rows(vec![vec![
+            CellValue::Integer(1),
+        ]]));
+        let tab_id = tab.id;
+        app.tabs.push(WorkspaceTab::Relation(tab));
+        app.connection.error = Some(super::RELATION_METADATA_SAVE_MESSAGE.into());
+
+        app.relation_transaction_finished(
+            tab_id,
+            3,
+            ConnectionIdentity {
+                profile_id: Uuid::new_v4(),
+                generation: 1,
+            },
+            true,
+            None,
+        );
+
+        assert!(app.connection.error.is_none());
+        assert!(app.clipboard_notice.as_ref().is_some_and(|notice| {
+            notice.kind == crate::model::clipboard::ClipboardNoticeKind::Success
+                && notice.message == "Relation changes committed"
+        }));
+    }
+
+    #[test]
+    fn stale_relation_commit_does_not_publish_success() {
+        let mut app = App::new(Vec::new());
+        let mut tab = RelationTab::new("items");
+        tab.transaction_generation = 4;
+        tab.transaction_state = TransactionState::Committing;
+        tab.edit = Some(RelationEditSession::from_rows(vec![vec![
+            CellValue::Integer(1),
+        ]]));
+        let tab_id = tab.id;
+        app.tabs.push(WorkspaceTab::Relation(tab));
+        app.connection.error = Some(super::RELATION_METADATA_SAVE_MESSAGE.into());
+
+        app.relation_transaction_finished(
+            tab_id,
+            3,
+            ConnectionIdentity {
+                profile_id: Uuid::new_v4(),
+                generation: 1,
+            },
+            true,
+            None,
+        );
+
+        assert_eq!(
+            app.connection.error.as_deref(),
+            Some(super::RELATION_METADATA_SAVE_MESSAGE)
+        );
+        assert!(app.clipboard_notice.is_none());
     }
 
     #[test]
