@@ -419,17 +419,17 @@ async fn native_catalog_search_covers_postgres_contract_when_configured() {
             (&format!("{token}_check"), CatalogKind::CheckConstraint),
         ];
         for (name, kind) in expected_kinds {
-            let query = if kind == CatalogKind::Column {
-                exact.clone()
+            let (query, limit) = if kind == CatalogKind::Column {
+                (exact.clone(), 100)
             } else {
-                name.clone()
+                (name.clone(), 20)
             };
             let page = adapter
                 .search_catalog(&catalog_search_request(
                     profile_id,
                     query,
                     scope.clone(),
-                    20,
+                    limit,
                 ))
                 .await
                 .unwrap();
