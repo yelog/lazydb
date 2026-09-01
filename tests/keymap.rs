@@ -568,8 +568,10 @@ fn maps_global_sequences_and_function_keys() {
     assert_eq!(keymap.map(key(KeyCode::F(1)), &app), Some(Action::ShowHelp));
     assert_eq!(keymap.map(ctrl('w'), &app), None);
     assert_eq!(keymap.map(key(KeyCode::Char('h')), &app), None);
+    assert_eq!(keymap.map(key(KeyCode::Esc), &app), None);
     assert_eq!(keymap.map(ctrl('w'), &app), None);
     assert_eq!(keymap.map(ctrl('h'), &app), None);
+    assert_eq!(keymap.map(key(KeyCode::Esc), &app), None);
     assert_eq!(keymap.map(key(KeyCode::Char(']')), &app), None);
     assert_eq!(
         keymap.map(key(KeyCode::Char('t')), &app),
@@ -1002,6 +1004,57 @@ fn transaction_exit_keys_carry_their_explicit_choice() {
 }
 
 #[test]
+fn relation_transaction_control_uses_space_tc_but_keeps_ctrl_commit_rollback() {
+    let mut keymap = Keymap::default();
+    let mut app = App::new(Vec::new());
+    app.tabs.push(lazydb::model::tab::WorkspaceTab::Relation(
+        lazydb::model::relation::RelationTab::new("users"),
+    ));
+    app.active_tab = 1;
+    app.focus = lazydb::model::workspace::Focus::Results;
+
+    assert_eq!(
+        keymap.map(
+            crossterm::event::KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL,),
+            &app,
+        ),
+        Some(Action::RelationCommit)
+    );
+    assert_eq!(keymap.map(key(KeyCode::Char(' ')), &app), None);
+    assert_eq!(keymap.map(key(KeyCode::Char('t')), &app), None);
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('c')), &app),
+        Some(Action::OpenTransactionControl)
+    );
+}
+
+#[test]
+fn relation_help_executes_space_tc_transaction_control() {
+    let mut app = App::new(Vec::new());
+    let mut relation = lazydb::model::relation::RelationTab::new("users");
+    relation.transaction_state = lazydb::model::transaction::TransactionState::Active;
+    app.tabs
+        .push(lazydb::model::tab::WorkspaceTab::Relation(relation));
+    app.active_tab = app.tabs.len() - 1;
+    app.focus = Focus::Results;
+
+    app.update(Action::ShowHelp);
+    app.update(Action::HelpPaste("commit or roll back transaction".into()));
+    assert_eq!(
+        app.help_selected_id(),
+        Some(lazydb::help::HelpShortcutId::TransactionControl)
+    );
+
+    app.update(Action::ExecuteHelpShortcut(
+        lazydb::help::HelpShortcutId::TransactionControl,
+    ));
+    assert!(matches!(
+        app.overlay,
+        Some(lazydb::model::workspace::Overlay::RelationTransactionConfirm { .. })
+    ));
+}
+
+#[test]
 fn editor_leader_opens_connection_target_selector() {
     let mut keymap = Keymap::default();
     let profile = profile("target");
@@ -1376,7 +1429,7 @@ fn space_c_focuses_explorer_from_every_normal_mode_focus() {
     app.update(Action::EditorKey(key(KeyCode::Esc)));
     app.active_console_mut().query_status = QueryStatus::Running;
     assert_eq!(keymap.map(key(KeyCode::Char(' ')), &app), None);
-    assert_eq!(keymap.map(ctrl('c'), &app), Some(Action::Quit));
+    assert_eq!(keymap.map(ctrl('c'), &app), None);
 
     app.active_console_mut().query_status = QueryStatus::Idle;
     app.focus = Focus::Editor;

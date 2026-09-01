@@ -301,7 +301,7 @@ fn render_with_icons(app: &App, width: u16, height: u16, icons: IconSet) -> (Str
 }
 
 #[test]
-fn pending_prefix_replaces_default_footer_hints() {
+fn pending_prefix_opens_floating_shortcut_window() {
     let mut app = fixture();
     app.focus = Focus::Explorer;
     let mut keymap = lazydb::input::keymap::Keymap::default();
@@ -329,8 +329,9 @@ fn pending_prefix_replaces_default_footer_hints() {
     let output = (0..36)
         .flat_map(|y| (0..120).map(move |x| buffer[(x, y)].symbol()))
         .collect::<String>();
-    assert!(output.contains("Space n"));
-    assert!(!output.contains("select first node"));
+    assert!(output.contains("Space  Up/Down select  Enter run  Esc/Ctrl-C cancel"));
+    assert!(output.contains("new SQL console"));
+    assert!(output.contains("focus Explorer"));
 }
 
 #[test]
@@ -374,8 +375,8 @@ fn counted_pending_prefix_keeps_count_in_footer_label() {
     let output = (0..36)
         .flat_map(|y| (0..120).map(move |x| buffer[(x, y)].symbol()))
         .collect::<String>();
-    assert!(output.contains("10 Ctrl-w"));
-    assert!(!output.contains("10 h"));
+    assert!(output.contains("10 Ctrl-w  Up/Down select  Enter run  Esc/Ctrl-C cancel"));
+    assert!(output.contains("restore default pane sizes"));
 }
 
 fn render_buffer_with_icons(
@@ -1417,6 +1418,24 @@ fn editor_help_documents_target_context_controls() {
     assert!(!output.contains(":connection"));
     assert!(!output.contains(":database"));
     assert!(!output.contains(":schema"));
+}
+
+#[test]
+fn relation_help_documents_transaction_control_panel() {
+    let mut app = fixture();
+    let mut relation = RelationTab::new("users");
+    relation.edit =
+        Some(lazydb::model::relation_edit::RelationEditSession::from_rows(vec![vec![]]));
+    app.tabs.push(WorkspaceTab::Relation(relation));
+    app.active_tab = app.tabs.len() - 1;
+    app.focus = Focus::Results;
+    app.update(Action::ShowHelp);
+
+    let output = render(&app, 120, 40);
+    assert!(output.contains("Space tc"));
+    assert!(output.contains("commit or roll back transaction"));
+    assert!(output.contains("Ctrl-s"));
+    assert!(output.contains("Ctrl-x"));
 }
 
 #[test]

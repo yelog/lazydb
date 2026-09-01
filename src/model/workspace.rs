@@ -128,6 +128,10 @@ pub enum Overlay {
         prompt: DeferredTransactionPrompt,
         choice: TransactionExitChoice,
     },
+    RelationTransactionConfirm {
+        tab_id: Uuid,
+        choice: TransactionExitChoice,
+    },
     ClearTransactionOutcome {
         console_id: Uuid,
         connection: ConnectionIdentity,

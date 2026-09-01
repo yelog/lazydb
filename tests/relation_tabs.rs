@@ -458,7 +458,7 @@ fn relation_query_suggests_only_current_relation_columns() {
     );
     assert_eq!(completion.replace, lazydb::sql::TextRange::new(0, 6));
     app.update(Action::DataQueryCompletionAccept);
-    assert_eq!(relation_query(&app).where_input.value(), "\"user_id\"");
+    assert_eq!(relation_query(&app).where_input.value(), "\"user_id\" ");
     assert!(relation_query(&app).completion.is_none());
 
     app.update(Action::FocusDataQueryInput(
@@ -471,6 +471,8 @@ fn relation_query_suggests_only_current_relation_columns() {
         relation_query(&app).completion.as_ref().unwrap().candidates[0].name,
         "user_id"
     );
+    app.update(Action::DataQueryCompletionAccept);
+    assert_eq!(relation_query(&app).order_by_input.value(), "\"user_id\" ");
 }
 
 #[test]
@@ -523,7 +525,7 @@ fn sql_result_query_suggests_output_columns_in_both_inputs() {
     let WorkspaceTab::Sql(tab) = &app.tabs[1] else {
         panic!("expected SQL tab")
     };
-    assert_eq!(tab.query.where_input.value(), "\"display_name\"");
+    assert_eq!(tab.query.where_input.value(), "\"display_name\" ");
 
     app.update(Action::FocusDataQueryInput(
         lazydb::model::data_query::DataQueryInput::OrderBy,

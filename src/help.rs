@@ -116,6 +116,9 @@ fn shortcut_context_with_overlay(app: &App, include_help: bool) -> ShortcutConte
                 Overlay::TransactionExitConfirm { .. } => {
                     ShortcutContext::TransactionExitConfirmation
                 }
+                Overlay::RelationTransactionConfirm { .. } => {
+                    ShortcutContext::TransactionExitConfirmation
+                }
                 Overlay::ClearTransactionOutcome { .. } => {
                     ShortcutContext::ClearTransactionOutcomeConfirmation
                 }
@@ -942,10 +945,11 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
     ),
     row!(
         TransactionControl,
-        [EditorNormal],
+        [EditorNormal, SqlResultsData, RelationDataBrowse],
         "Space tc",
         "commit or roll back transaction",
-        display
+        EditorLeader,
+        "tc"
     ),
     row!(
         OpenTargetSelector,

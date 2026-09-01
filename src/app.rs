@@ -1261,11 +1261,7 @@ impl App {
                 editor_key(KeyCode::Char('t')),
                 editor_key(KeyCode::Char('t')),
             ],
-            Id::TransactionControl => vec![
-                editor_key(KeyCode::Char(' ')),
-                editor_key(KeyCode::Char('t')),
-                editor_key(KeyCode::Char('c')),
-            ],
+            Id::TransactionControl => vec![Action::OpenTransactionControl],
             Id::OpenTargetSelector => vec![Action::OpenTargetSelector],
             Id::ResultsMoveLeft => vec![Action::GridMove {
                 rows: 0,
@@ -1472,6 +1468,7 @@ impl App {
                         | Action::RelationInsertRow
                         | Action::RelationUndo
                         | Action::RelationRedo
+                        | Action::OpenTransactionControl
                         | Action::RelationCommit
                         | Action::RelationRollback
                         | Action::RelationTransactionStarted { .. }
@@ -2808,16 +2805,44 @@ impl App {
             Action::ConfirmTransactionExit => {
                 let choice = match self.overlay {
                     Some(Overlay::TransactionExitConfirm { choice, .. }) => choice,
+                    Some(Overlay::RelationTransactionConfirm { choice, .. }) => choice,
                     _ => return Vec::new(),
                 };
+                if matches!(
+                    self.overlay,
+                    Some(Overlay::RelationTransactionConfirm { .. })
+                ) {
+                    self.overlay = None;
+                    return self.relation_commit(choice == TransactionExitChoice::Commit);
+                }
                 self.resolve_transaction_exit(choice)
             }
-            Action::ConfirmTransactionExitChoice(choice) => self.resolve_transaction_exit(choice),
+            Action::ConfirmTransactionExitChoice(choice) => {
+                if matches!(
+                    self.overlay,
+                    Some(Overlay::RelationTransactionConfirm { .. })
+                ) {
+                    self.overlay = None;
+                    self.relation_commit(choice == TransactionExitChoice::Commit)
+                } else {
+                    self.resolve_transaction_exit(choice)
+                }
+            }
             Action::CancelTransactionExit => {
+                if matches!(
+                    self.overlay,
+                    Some(Overlay::RelationTransactionConfirm { .. })
+                ) {
+                    self.overlay = None;
+                    return Vec::new();
+                }
                 self.resolve_transaction_exit(TransactionExitChoice::Cancel)
             }
             Action::ToggleTransactionExitChoice => {
-                if let Some(Overlay::TransactionExitConfirm { choice, .. }) = self.overlay.as_mut()
+                if let Some(
+                    Overlay::TransactionExitConfirm { choice, .. }
+                    | Overlay::RelationTransactionConfirm { choice, .. },
+                ) = self.overlay.as_mut()
                 {
                     *choice = match choice {
                         TransactionExitChoice::Commit => TransactionExitChoice::Rollback,
@@ -4652,6 +4677,25 @@ impl App {
     }
 
     fn open_transaction_control(&mut self) -> Vec<Command> {
+        if let Some(WorkspaceTab::Relation(tab)) = self.tabs.get(self.active_tab) {
+            let has_dirty_rows = tab.edit.as_ref().is_some_and(|edit| {
+                edit.rows.iter().any(|row| {
+                    !matches!(
+                        row.state,
+                        crate::model::relation_edit::EditableRowState::Clean
+                    )
+                })
+            });
+            if tab.transaction_state == TransactionState::Idle && !has_dirty_rows {
+                self.status_message("No active relation transaction");
+                return Vec::new();
+            }
+            self.overlay = Some(Overlay::RelationTransactionConfirm {
+                tab_id: tab.id,
+                choice: TransactionExitChoice::Rollback,
+            });
+            return Vec::new();
+        }
         let Some(tab) = self.active_console_opt() else {
             return Vec::new();
         };
@@ -5973,10 +6017,19 @@ impl App {
         let Some(candidate) = popup.candidates.get(popup.selected).cloned() else {
             return Vec::new();
         };
+        let mut insert_text = candidate.insert_text;
+        let has_separator = self.editor.text(id).ok().is_some_and(|text| {
+            text.get(candidate.replace.end..)
+                .and_then(|suffix| suffix.chars().next())
+                .is_some_and(char::is_whitespace)
+        });
+        if !has_separator {
+            insert_text.push(' ');
+        }
         let _ = self.editor.replace_range(
             id,
             candidate.replace,
-            &candidate.insert_text,
+            &insert_text,
             crate::editor::ReplacementCursor::EndOfInsertion,
         );
         self.apply_editor_effects(CompletionAfterEdit::Suppress)
@@ -7609,11 +7662,20 @@ impl App {
         let accepted = self.active_data_query_mut().and_then(|query| {
             let completion = query.completion.take()?;
             let candidate = completion.candidates.get(completion.selected)?;
-            Some((
-                query.focus?,
-                completion.replace,
-                sql::quote_identifier(&candidate.name, dialect),
-            ))
+            let input = match query.focus? {
+                DataQueryInput::Where => &query.where_input,
+                DataQueryInput::OrderBy => &query.order_by_input,
+            };
+            let mut insert_text = sql::quote_identifier(&candidate.name, dialect);
+            let has_separator = input
+                .value()
+                .chars()
+                .nth(completion.replace.end)
+                .is_some_and(char::is_whitespace);
+            if !has_separator {
+                insert_text.push(' ');
+            }
+            Some((query.focus?, completion.replace, insert_text))
         });
         let Some((focus, replace, insert_text)) = accepted else {
             return;

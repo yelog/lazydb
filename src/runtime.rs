@@ -3271,7 +3271,7 @@ mod key_sequence_redraw_tests {
         crate::input::keymap::KeySequenceState {
             prefix: crate::help::ShortcutPrefix::Leader,
             display: display.to_owned(),
-            remaining: Duration::from_millis(100),
+            selected: 0,
         }
     }
 
@@ -3284,9 +3284,6 @@ mod key_sequence_redraw_tests {
             &Some(state("Space")),
             &Some(state("Space"))
         ));
-        let mut later = state("Space");
-        later.remaining = Duration::from_millis(99);
-        assert!(sequence_redraw_needed(&Some(state("Space")), &Some(later)));
     }
 
     #[test]

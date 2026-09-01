@@ -462,6 +462,109 @@ pub fn render_with_state_using_icons_and_sequence(
         }
         state.animations.render_effect(frame, Instant::now());
     }
+    if let Some(sequence) = sequence {
+        render_key_sequence_popup(frame, area, app, theme, sequence);
+    }
+}
+
+fn render_key_sequence_popup(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    theme: Theme,
+    sequence: &crate::input::keymap::KeySequenceState,
+) {
+    let shortcuts = crate::help::prefix_shortcuts(
+        crate::help::shortcut_context(app),
+        crate::help::shortcut_capabilities(app),
+        sequence.prefix,
+    );
+    if shortcuts.is_empty() || area.width < 16 || area.height < 5 {
+        return;
+    }
+
+    let columns = if area.width >= 100 {
+        3
+    } else if area.width >= 60 {
+        2
+    } else {
+        1
+    };
+    let rows = shortcuts.len().div_ceil(columns);
+    let height = (rows as u16)
+        .saturating_add(2)
+        .min(area.height.saturating_sub(2));
+    let popup = Rect::new(
+        area.x.saturating_add(1),
+        area.bottom().saturating_sub(2).saturating_sub(height),
+        area.width.saturating_sub(2),
+        height,
+    );
+    let inner_width = popup.width.saturating_sub(2);
+    let column_width = usize::from(inner_width) / columns;
+    let mut lines = Vec::with_capacity(rows);
+    for row in 0..rows {
+        let mut spans = Vec::new();
+        for column in 0..columns {
+            let index = column * rows + row;
+            let Some(shortcut) = shortcuts.get(index) else {
+                continue;
+            };
+            let suffix = shortcut.suffix.unwrap_or("");
+            let key_width = shortcuts
+                .iter()
+                .filter_map(|shortcut| shortcut.suffix)
+                .map(UnicodeWidthStr::width)
+                .max()
+                .unwrap_or(1);
+            let label = format!(
+                " {:key_width$}  {}",
+                suffix,
+                shortcut.description,
+                key_width = key_width
+            );
+            let label = truncate_to_cells(&label, column_width.saturating_sub(1));
+            let padding = column_width.saturating_sub(usize::from(label.cell_width()));
+            let key_end = 1 + key_width.min(label.len().saturating_sub(1));
+            let (key, description) = label.split_at(key_end.min(label.len()));
+            let background = (index == sequence.selected).then_some(theme.selection);
+            spans.push(Span::styled(
+                key.to_owned(),
+                Style::new()
+                    .fg(theme.accent)
+                    .bg(background.unwrap_or(theme.surface_raised))
+                    .add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::styled(
+                description.to_owned(),
+                Style::new()
+                    .fg(theme.text)
+                    .bg(background.unwrap_or(theme.surface_raised)),
+            ));
+            spans.push(Span::styled(
+                " ".repeat(padding),
+                Style::new().bg(background.unwrap_or(theme.surface_raised)),
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
+
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .style(Style::new().fg(theme.text).bg(theme.surface_raised))
+            .block(
+                Block::new()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::new().fg(theme.accent))
+                    .title(format!(
+                        " {}  Up/Down select  Enter run  Esc/Ctrl-C cancel ",
+                        sequence.display
+                    )),
+            ),
+        popup,
+    );
 }
 
 fn overlay_key(overlay: &Overlay) -> u8 {
@@ -475,12 +578,13 @@ fn overlay_key(overlay: &Overlay) -> u8 {
         Overlay::ExecutionConfirm { .. } => 7,
         Overlay::ManualCancelConfirm { .. } => 8,
         Overlay::TransactionExitConfirm { .. } => 9,
-        Overlay::ClearTransactionOutcome { .. } => 10,
-        Overlay::TargetSelector { .. } => 11,
-        Overlay::DeleteConsole { .. } => 12,
-        Overlay::SqlEditorList(_) => 13,
-        Overlay::PageSizeSelector { .. } => 14,
-        Overlay::CatalogDropConfirm { .. } => 15,
+        Overlay::RelationTransactionConfirm { .. } => 10,
+        Overlay::ClearTransactionOutcome { .. } => 11,
+        Overlay::TargetSelector { .. } => 12,
+        Overlay::DeleteConsole { .. } => 13,
+        Overlay::SqlEditorList(_) => 14,
+        Overlay::PageSizeSelector { .. } => 15,
+        Overlay::CatalogDropConfirm { .. } => 16,
     }
 }
 
@@ -2242,7 +2346,7 @@ fn render_footer(
     area: Rect,
     app: &App,
     theme: Theme,
-    sequence: Option<&crate::input::keymap::KeySequenceState>,
+    _sequence: Option<&crate::input::keymap::KeySequenceState>,
 ) {
     let (mode, mode_color) = match app.focus {
         Focus::Editor => match app.active_editor_mode() {
@@ -2258,27 +2362,10 @@ fn render_footer(
     };
     let context = crate::help::shortcut_context(app);
     let capabilities = crate::help::shortcut_capabilities(app);
-    let hint_values = sequence.map_or_else(
-        || {
-            crate::help::footer_shortcuts(context, capabilities)
-                .into_iter()
-                .map(|shortcut| format!("{} {}", shortcut.sequence, shortcut.description))
-                .collect::<Vec<_>>()
-        },
-        |sequence| {
-            crate::help::prefix_shortcuts(context, capabilities, sequence.prefix)
-                .into_iter()
-                .map(|shortcut| {
-                    format!(
-                        "{} {} {}",
-                        sequence.display,
-                        shortcut.suffix.unwrap_or(""),
-                        shortcut.description
-                    )
-                })
-                .collect::<Vec<_>>()
-        },
-    );
+    let hint_values = crate::help::footer_shortcuts(context, capabilities)
+        .into_iter()
+        .map(|shortcut| format!("{} {}", shortcut.sequence, shortcut.description))
+        .collect::<Vec<_>>();
     let mode_badge = format!(" {mode} ");
     let hints = pack_hints(&hint_values, footer_hint_width(&mode_badge, area.width));
     let line = Line::from(vec![
@@ -2494,6 +2581,34 @@ fn render_overlay(
             frame.render_widget(
                 Paragraph::new(lines)
                     .block(panel_block(title, true, theme))
+                    .style(Style::new().fg(theme.text).bg(theme.surface_raised)),
+                popup,
+            );
+        }
+        Overlay::RelationTransactionConfirm { tab_id, choice } => {
+            use crate::model::transaction::TransactionExitChoice;
+            let popup = centered(area, 78, 10);
+            frame.render_widget(Clear, popup);
+            let title = app
+                .tabs
+                .iter()
+                .find(|tab| tab.id() == *tab_id)
+                .map(|tab| tab.title())
+                .unwrap_or("unknown");
+            let commit = *choice == TransactionExitChoice::Commit;
+            let lines = vec![
+                Line::from(Span::styled(" TRANSACTION ", theme.title(true))),
+                Line::raw(format!("console: {title}")),
+                Line::raw(format!(
+                    "{}   {}   Cancel",
+                    if commit { "[Commit]" } else { " Commit " },
+                    if !commit { "[Rollback]" } else { " Rollback " }
+                )),
+                Line::raw("Tab/Left/Right choose; Enter confirms; Esc cancels"),
+            ];
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .block(panel_block(" TRANSACTION CONTROL ", true, theme))
                     .style(Style::new().fg(theme.text).bg(theme.surface_raised)),
                 popup,
             );

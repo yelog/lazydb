@@ -179,6 +179,29 @@ fn transaction_panel_enter_confirms_the_selected_choice() {
 }
 
 #[test]
+fn relation_space_tc_reaches_the_transaction_panel() {
+    let mut app = App::new(Vec::new());
+    let mut relation = lazydb::model::relation::RelationTab::new("users");
+    relation.transaction_state = TransactionState::Active;
+    app.tabs
+        .push(lazydb::model::tab::WorkspaceTab::Relation(relation));
+    app.active_tab = app.tabs.len() - 1;
+    app.focus = lazydb::model::workspace::Focus::Results;
+
+    let mut keymap = lazydb::input::keymap::Keymap::default();
+    for code in [KeyCode::Char(' '), KeyCode::Char('t'), KeyCode::Char('c')] {
+        if let Some(action) = keymap.map(KeyEvent::new(code, KeyModifiers::NONE), &app) {
+            app.update(action);
+        }
+    }
+
+    assert!(matches!(
+        app.overlay,
+        Some(Overlay::RelationTransactionConfirm { .. })
+    ));
+}
+
+#[test]
 fn vim_operator_text_object_visual_and_undo_sequences_use_app_pipeline() {
     let mut app = App::new(Vec::new());
     app.update(Action::ReplaceEditor("one two three".into()));
@@ -215,7 +238,7 @@ fn accepting_completion_places_cursor_after_inserted_text() {
     assert!(app.active_console().completion.is_some());
 
     let commands = app.update(Action::CompletionAccept);
-    assert_eq!(app.active_editor_text().unwrap(), "SELECT");
+    assert_eq!(app.active_editor_text().unwrap(), "SELECT ");
     assert!(app.active_console().completion.is_none());
     assert!(
         !commands
@@ -230,11 +253,9 @@ fn accepting_completion_places_cursor_after_inserted_text() {
         .unwrap();
     assert_eq!(
         snapshot.cursor,
-        lazydb::model::editor::EditorPosition { line: 0, column: 6 }
+        lazydb::model::editor::EditorPosition { line: 0, column: 7 }
     );
 
-    editor_key(&mut app, KeyCode::Char(' '), KeyModifiers::NONE);
-    assert_eq!(app.active_editor_text().unwrap(), "SELECT ");
     editor_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
     editor_key(&mut app, KeyCode::Char('u'), KeyModifiers::NONE);
     assert_eq!(app.active_editor_text().unwrap(), "sel");
