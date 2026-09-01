@@ -1499,6 +1499,23 @@ impl ExplorerTreeState {
         Ok(removed)
     }
 
+    /// Remove a dropped object and prefer its former parent for selection.
+    pub fn remove_dropped_subtree(
+        &mut self,
+        root: &CatalogId,
+    ) -> Result<Vec<CatalogId>, ExplorerTreeError> {
+        let parent = self
+            .profiles
+            .get(&root.profile_id())
+            .and_then(|profile| profile.catalog.parent(root).cloned());
+        let removed = self.remove_subtree(root)?;
+        if let Some(parent) = parent {
+            let _ = self.select(ExplorerNodeId::Catalog(parent));
+        }
+        self.ensure_selected_visible();
+        Ok(removed)
+    }
+
     fn update_scroll(&mut self, selected_index: usize, row_count: usize) {
         if self.viewport_height == 0 {
             self.scroll = selected_index;

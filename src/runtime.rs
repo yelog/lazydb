@@ -103,6 +103,8 @@ pub struct Runtime {
     connection: Arc<Mutex<Option<ActiveConnection>>>,
     connection_attempts: Arc<StdMutex<ConnectionAttemptTracker>>,
     query_tasks: HashMap<(Uuid, u64), JoinHandle<()>>,
+    catalog_drop_plan_tasks: HashMap<(ConnectionIdentity, u64), JoinHandle<()>>,
+    catalog_drop_execute_tasks: HashMap<(ConnectionIdentity, u64), JoinHandle<()>>,
     relation_tasks: HashMap<crate::model::relation::RelationRequest, JoinHandle<()>>,
     known_relations: Arc<StdMutex<HashSet<(ConnectionIdentity, crate::db::catalog::CatalogId)>>>,
     background_tasks: Vec<JoinHandle<()>>,
@@ -162,6 +164,8 @@ impl Runtime {
             connection: Arc::new(Mutex::new(None)),
             connection_attempts: Arc::new(StdMutex::new(ConnectionAttemptTracker::default())),
             query_tasks: HashMap::new(),
+            catalog_drop_plan_tasks: HashMap::new(),
+            catalog_drop_execute_tasks: HashMap::new(),
             relation_tasks: HashMap::new(),
             known_relations: Arc::new(StdMutex::new(HashSet::new())),
             background_tasks: Vec::new(),
@@ -180,6 +184,10 @@ impl Runtime {
 
     pub fn dispatch(&mut self, command: Command) {
         self.query_tasks.retain(|_, task| !task.is_finished());
+        self.catalog_drop_plan_tasks
+            .retain(|_, task| !task.is_finished());
+        self.catalog_drop_execute_tasks
+            .retain(|_, task| !task.is_finished());
         self.relation_tasks.retain(|_, task| !task.is_finished());
         self.background_tasks.retain(|task| !task.is_finished());
         self.profile_tasks.retain(|task| !task.is_finished());
@@ -225,6 +233,8 @@ impl Runtime {
                     task.abort();
                 }
             }
+            Command::PlanCatalogDrop(request) => self.plan_catalog_drop(request),
+            Command::ExecuteCatalogDrop(plan) => self.execute_catalog_drop(plan),
             Command::LoadRelationPreview(request) | Command::LoadRelationDdl(request) => {
                 self.load_relation(request)
             }
@@ -901,6 +911,136 @@ impl Runtime {
                 }
             }
         }));
+    }
+
+    fn plan_catalog_drop(&mut self, request: crate::db::catalog_drop::CatalogDropRequest) {
+        let key = (request.connection, request.request_id);
+        if self.catalog_drop_plan_tasks.contains_key(&key) {
+            return;
+        }
+        let sender = self.event_sender.clone();
+        let connection = Arc::clone(&self.connection);
+        let registry = Arc::clone(&self.registry);
+        let task_request = request.clone();
+        let task = tokio::spawn(async move {
+            let fail = |error| {
+                let _ = sender.send(Action::CatalogDropPlanFailed {
+                    request: task_request.clone(),
+                    error,
+                });
+            };
+            if let Err(error) = task_request.validate() {
+                fail(error);
+                return;
+            }
+            let Some(database) =
+                active_database(Arc::clone(&connection), task_request.connection).await
+            else {
+                fail(crate::db::catalog_drop::CatalogDropError::Unsupported {
+                    kind: task_request.object.kind,
+                    reason: "catalog drop connection is no longer active".to_owned(),
+                });
+                return;
+            };
+            let profile = registry
+                .lock()
+                .await
+                .profiles
+                .get(&task_request.connection.profile_id)
+                .cloned();
+            let Some(profile) = profile else {
+                fail(crate::db::catalog_drop::CatalogDropError::Unsupported {
+                    kind: task_request.object.kind,
+                    reason: "catalog drop profile is no longer active".to_owned(),
+                });
+                return;
+            };
+            if profile.read_only {
+                fail(crate::db::catalog_drop::CatalogDropError::Unsupported {
+                    kind: task_request.object.kind,
+                    reason: "catalog drop is unavailable on a read-only profile".to_owned(),
+                });
+                return;
+            }
+            let Some(entry) = task_request.entry.as_ref() else {
+                fail(crate::db::catalog_drop::CatalogDropError::Unsupported {
+                    kind: task_request.object.kind,
+                    reason: "catalog drop request has no catalog entry".to_owned(),
+                });
+                return;
+            };
+            match database.plan_catalog_drop(task_request.clone(), entry) {
+                Ok(plan) => {
+                    let _ = sender.send(Action::CatalogDropPlanReady(plan));
+                }
+                Err(error) => fail(error),
+            }
+        });
+        self.catalog_drop_plan_tasks.insert(key, task);
+    }
+
+    fn execute_catalog_drop(&mut self, plan: crate::db::catalog_drop::CatalogDropPlan) {
+        let key = (plan.request.connection, plan.request.request_id);
+        if self.catalog_drop_execute_tasks.contains_key(&key) {
+            return;
+        }
+        let sender = self.event_sender.clone();
+        let connection = Arc::clone(&self.connection);
+        let registry = Arc::clone(&self.registry);
+        let task_plan = plan.clone();
+        let task = tokio::spawn(async move {
+            if let Err(error) = task_plan.validate() {
+                let _ = sender.send(Action::CatalogDropFailed {
+                    plan: task_plan,
+                    message: error.to_string(),
+                });
+                return;
+            }
+            let Some(database) =
+                active_database(Arc::clone(&connection), task_plan.request.connection).await
+            else {
+                let _ = sender.send(Action::CatalogDropFailed {
+                    plan: task_plan,
+                    message: "catalog drop connection is no longer active".to_owned(),
+                });
+                return;
+            };
+            let profile = registry
+                .lock()
+                .await
+                .profiles
+                .get(&task_plan.request.connection.profile_id)
+                .cloned();
+            if profile.is_none() {
+                let _ = sender.send(Action::CatalogDropFailed {
+                    plan: task_plan,
+                    message: "catalog drop profile is no longer active".to_owned(),
+                });
+                return;
+            }
+            if profile.is_some_and(|profile| profile.read_only) {
+                let _ = sender.send(Action::CatalogDropFailed {
+                    plan: task_plan,
+                    message: "catalog drop is unavailable on a read-only profile".to_owned(),
+                });
+                return;
+            }
+            match database.execute(task_plan.sql()).await {
+                Ok(outcome) => {
+                    let _ = sender.send(Action::CatalogDropSucceeded {
+                        plan: task_plan,
+                        outcome,
+                    });
+                }
+                Err(error) => {
+                    let _ = sender.send(Action::CatalogDropFailed {
+                        plan: task_plan,
+                        message: sanitize_terminal_text(&error.to_string()),
+                    });
+                }
+            }
+        });
+        self.catalog_drop_execute_tasks.insert(key, task);
     }
 
     fn search_catalog(&mut self, request: crate::db::catalog::CatalogSearchRequest) {

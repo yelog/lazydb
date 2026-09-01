@@ -88,7 +88,7 @@ selected driver, and URL applies on Enter, field exit, Test, or Save.
 | `n` | Create a connection profile |
 | `e` | Edit the selected connection profile |
 | `c`, `x` | Connect/disconnect the selected profile |
-| `d` | Delete the selected connection profile |
+| `d` | Delete the selected connection profile when its root is selected; otherwise drop the directly selected database object after strict confirmation |
 | `r` | Reload catalog |
 | `p` | Open a 500-row table/view preview |
 | `D` | Open available object DDL in a new SQL tab |

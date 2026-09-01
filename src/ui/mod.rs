@@ -387,6 +387,7 @@ fn overlay_key(overlay: &Overlay) -> u8 {
         Overlay::TargetSelector { .. } => 11,
         Overlay::DeleteConsole { .. } => 12,
         Overlay::SqlEditorList(_) => 13,
+        Overlay::CatalogDropConfirm { .. } => 14,
     }
 }
 
@@ -2389,7 +2390,63 @@ fn render_overlay(
                 popup,
             );
         }
+        Overlay::CatalogDropConfirm {
+            plan,
+            input,
+            busy,
+            error,
+        } => {
+            render_catalog_drop_confirm(frame, area, plan, input, *busy, error.as_deref(), theme);
+        }
     }
+}
+
+fn render_catalog_drop_confirm(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    plan: &crate::db::catalog_drop::CatalogDropPlan,
+    input: &crate::model::text_input::TextInput,
+    busy: bool,
+    error: Option<&str>,
+    theme: Theme,
+) {
+    let popup = centered(area, 82, 16);
+    frame.render_widget(Clear, popup);
+    let state = if busy { "DROPPING..." } else { "" };
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!(" DROP {:?} {state}", plan.kind).to_uppercase(),
+            theme.title(true),
+        )),
+        Line::raw("This operation will execute:"),
+        Line::raw(""),
+        Line::raw(plan.sql()),
+        Line::raw(""),
+        Line::raw("This action cannot be undone."),
+        Line::raw("Type exactly lowercase y and press Enter to execute:"),
+        Line::from(Span::styled(
+            format!("> {}", input.value()),
+            Style::new().fg(theme.accent),
+        )),
+        Line::raw(if busy {
+            "Execution in progress"
+        } else {
+            "Esc cancel"
+        }),
+    ];
+    if let Some(error) = error {
+        lines.push(Line::from(Span::styled(
+            crate::security::sanitize_terminal_text(error),
+            Style::new().fg(theme.error),
+        )));
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(panel_block(" CATALOG DROP CONFIRMATION ", true, theme))
+            .style(Style::new().fg(theme.text).bg(theme.surface_raised))
+            .wrap(Wrap { trim: true }),
+        popup,
+    );
 }
 
 fn render_execution_confirm(

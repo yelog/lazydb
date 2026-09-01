@@ -8,6 +8,7 @@ use crate::{
     app::App,
     model::{
         editor::EditorMode,
+        explorer::ExplorerNodeId,
         profile_manager::{ProfileField, ProfileInput, ProfileManagerPage},
         workspace::{Focus, Overlay},
     },
@@ -197,6 +198,21 @@ impl Keymap {
                 KeyCode::Enter | KeyCode::Char('y') => Some(Action::ConfirmClearTransactionOutcome),
                 KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('q') => {
                     Some(Action::CancelClearTransactionOutcome)
+                }
+                _ => None,
+            };
+        }
+        if matches!(app.overlay, Some(Overlay::CatalogDropConfirm { .. })) {
+            self.pending = None;
+            return match event.code {
+                KeyCode::Enter => Some(Action::CatalogDropConfirm),
+                KeyCode::Esc => Some(Action::CatalogDropCancel),
+                KeyCode::Backspace => Some(Action::CatalogDropBackspace),
+                KeyCode::Char('u') if event.modifiers == KeyModifiers::CONTROL => {
+                    Some(Action::CatalogDropClear)
+                }
+                KeyCode::Char(character) if event.modifiers.is_empty() => {
+                    Some(Action::CatalogDropInsert(character))
                 }
                 _ => None,
             };
@@ -1200,7 +1216,15 @@ fn map_explorer(code: KeyCode, app: &App) -> Option<Action> {
             return selected_profile.map(|profile_id| Action::ProfileStartEdit { profile_id });
         }
         KeyCode::Char('d') => {
-            return selected_profile.map(|profile_id| Action::ProfileRequestDelete { profile_id });
+            return match app.explorer.normalized.selected.as_ref() {
+                Some(ExplorerNodeId::Profile(profile_id)) => Some(Action::ProfileRequestDelete {
+                    profile_id: *profile_id,
+                }),
+                Some(ExplorerNodeId::Catalog(id)) => {
+                    Some(Action::RequestDropCatalogObject { id: id.clone() })
+                }
+                _ => None,
+            };
         }
         KeyCode::Char('c') => {
             return selected_profile.map(|profile_id| Action::RequestProfileConnect { profile_id });

@@ -194,6 +194,73 @@ fn help_overlay_accepts_pasted_search_text() {
     );
 }
 
+#[test]
+fn catalog_drop_overlay_maps_only_confirmation_keys_without_bypassing_text_entry() {
+    let mut app = App::new(Vec::new());
+    app.overlay = Some(Overlay::CatalogDropConfirm {
+        plan: Box::new(
+            lazydb::db::catalog_drop::CatalogDropPlan::new(
+                lazydb::db::catalog_drop::CatalogDropRequest::new(
+                    lazydb::identity::ConnectionIdentity {
+                        profile_id: uuid::Uuid::nil(),
+                        generation: 1,
+                    },
+                    lazydb::db::catalog::CatalogId::new(
+                        uuid::Uuid::nil(),
+                        lazydb::db::catalog::CatalogKind::Table,
+                        ["app", "public", "users"],
+                    ),
+                    1,
+                ),
+                &lazydb::db::catalog::CatalogEntry::relation(
+                    lazydb::db::catalog::CatalogId::new(
+                        uuid::Uuid::nil(),
+                        lazydb::db::catalog::CatalogKind::Table,
+                        ["app", "public", "users"],
+                    ),
+                    lazydb::db::catalog::CatalogId::new(
+                        uuid::Uuid::nil(),
+                        lazydb::db::catalog::CatalogKind::Schema,
+                        ["app", "public"],
+                    ),
+                    lazydb::db::catalog::QualifiedName {
+                        database: Some("app".into()),
+                        schema: Some("public".into()),
+                        object: "users".into(),
+                    },
+                    "table",
+                    lazydb::db::catalog::OptionalMetadata::Unsupported,
+                    true,
+                )
+                .unwrap(),
+                "DROP TABLE users",
+            )
+            .unwrap(),
+        ),
+        input: Default::default(),
+        busy: false,
+        error: None,
+    });
+    let mut keymap = Keymap::default();
+
+    assert_eq!(
+        keymap.map(key(KeyCode::Enter), &app),
+        Some(Action::CatalogDropConfirm)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('y')), &app),
+        Some(Action::CatalogDropInsert('y'))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('Y')), &app),
+        Some(Action::CatalogDropInsert('Y'))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Esc), &app),
+        Some(Action::CatalogDropCancel)
+    );
+}
+
 fn profile(name: &str) -> ConnectionProfile {
     import_connection_url(":memory:", Some(name))
         .unwrap()
@@ -584,17 +651,17 @@ fn maps_selected_profile_root_actions_by_stable_id() {
 }
 
 #[test]
-fn maps_profile_actions_from_a_catalog_node_to_its_owner() {
+fn maps_profile_actions_from_a_catalog_node_to_its_owner_except_delete() {
     let profile = profile("owner");
     let profile_id = profile.id;
     let mut app = App::new(vec![profile]);
     app.focus = Focus::Explorer;
-    let node = ExplorerNodeId::Catalog(lazydb::db::catalog::CatalogId::new(
+    let node_id = lazydb::db::catalog::CatalogId::new(
         profile_id,
         lazydb::db::catalog::CatalogKind::Database,
         ["app"],
-    ));
-    app.explorer.normalized.selected = Some(node);
+    );
+    app.explorer.normalized.selected = Some(ExplorerNodeId::Catalog(node_id.clone()));
     let mut keymap = Keymap::default();
 
     assert_eq!(
@@ -603,7 +670,9 @@ fn maps_profile_actions_from_a_catalog_node_to_its_owner() {
     );
     assert_eq!(
         keymap.map(key(KeyCode::Char('d')), &app),
-        Some(Action::ProfileRequestDelete { profile_id })
+        Some(Action::RequestDropCatalogObject {
+            id: node_id.clone()
+        })
     );
     assert_eq!(
         keymap.map(key(KeyCode::Char('c')), &app),

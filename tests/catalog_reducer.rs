@@ -8,8 +8,13 @@ use lazydb::{
             CatalogId, CatalogKind, CatalogPage, CatalogRequest, CatalogRequestKey, CatalogTarget,
             ObjectGroup, OptionalMetadata, QualifiedName,
         },
+        catalog_drop::{CatalogDropPlan, CatalogDropRequest},
+        query::{QueryOutcome, QueryStats},
     },
-    model::explorer::{ExplorerLoadState, ExplorerNodeId, ExplorerOwnerId},
+    model::{
+        explorer::{ExplorerLoadState, ExplorerNodeId, ExplorerOwnerId},
+        workspace::Overlay,
+    },
     profile::{ConnectionProfile, DatabaseKind, import_connection_url},
 };
 use uuid::Uuid;
@@ -475,6 +480,136 @@ fn page_validation_uses_exact_pending_request_before_tree_or_completion_mutation
         load_state(&app, ExplorerOwnerId::Profile(profile.id)),
         ExplorerLoadState::Failed { .. }
     ));
+}
+
+#[test]
+fn catalog_drop_success_removes_subtree_reselects_parent_and_clears_completion() {
+    let (mut app, profile) = connected_app();
+    let database = install_database(&mut app, &profile);
+    let schema = install_schema(&mut app, &profile, &database);
+    let table = install_table(&mut app, &profile, &schema, "users");
+    let connection = app.connection.active_identity().unwrap();
+    let mut request =
+        CatalogDropRequest::new(connection, table.id.clone(), 42).with_entry(table.clone());
+    request.catalog_epoch = app.explorer.normalized.profiles[&profile.id].catalog_epoch;
+    let plan = CatalogDropPlan::new(request, &table, "DROP TABLE users").unwrap();
+    app.explorer.completion_index = lazydb::sql::CompletionIndex::new(std::slice::from_ref(&table));
+    app.explorer.normalized.selected = Some(ExplorerNodeId::Catalog(table.id.clone()));
+    app.overlay = Some(Overlay::CatalogDropConfirm {
+        plan: Box::new(plan.clone()),
+        input: Default::default(),
+        busy: true,
+        error: None,
+    });
+
+    app.update(Action::CatalogDropSucceeded {
+        plan,
+        outcome: QueryOutcome {
+            result_sets: Vec::new(),
+            stats: QueryStats::new(std::time::Duration::ZERO, std::time::Duration::ZERO, 0),
+        },
+    });
+
+    assert!(catalog(&app, profile.id).get(&table.id).is_none());
+    assert_eq!(
+        app.explorer.normalized.selected,
+        Some(ExplorerNodeId::Catalog(schema.id))
+    );
+    assert!(app.explorer.completion_index.entries().is_empty());
+    assert!(app.overlay.is_none());
+}
+
+#[test]
+fn catalog_drop_failure_keeps_confirmation_and_clears_input() {
+    let (mut app, profile) = connected_app();
+    let database = install_database(&mut app, &profile);
+    let schema = install_schema(&mut app, &profile, &database);
+    let table = install_table(&mut app, &profile, &schema, "users");
+    let mut request = CatalogDropRequest::new(
+        app.connection.active_identity().unwrap(),
+        table.id.clone(),
+        43,
+    )
+    .with_entry(table.clone());
+    request.catalog_epoch = app.explorer.normalized.profiles[&profile.id].catalog_epoch;
+    let plan = CatalogDropPlan::new(request, &table, "DROP TABLE users").unwrap();
+    app.overlay = Some(Overlay::CatalogDropConfirm {
+        plan: Box::new(plan.clone()),
+        input: {
+            let mut input = lazydb::model::text_input::TextInput::default();
+            input.set("y");
+            input
+        },
+        busy: true,
+        error: None,
+    });
+
+    app.update(Action::CatalogDropFailed {
+        plan,
+        message: "drop failed".into(),
+    });
+
+    assert!(matches!(
+        app.overlay,
+        Some(Overlay::CatalogDropConfirm {
+            ref input,
+            busy: false,
+            ref error,
+            ..
+        }) if input.value().is_empty() && error.as_deref() == Some("drop failed")
+    ));
+    assert_eq!(app.connection.error.as_deref(), Some("drop failed"));
+    assert!(catalog(&app, profile.id).get(&table.id).is_some());
+}
+
+#[test]
+fn catalog_drop_confirmation_requires_exact_lowercase_y_and_is_single_shot() {
+    let (mut app, profile) = connected_app();
+    let database = install_database(&mut app, &profile);
+    let schema = install_schema(&mut app, &profile, &database);
+    let table = install_table(&mut app, &profile, &schema, "users");
+    let mut request = CatalogDropRequest::new(
+        app.connection.active_identity().unwrap(),
+        table.id.clone(),
+        44,
+    )
+    .with_entry(table.clone());
+    request.catalog_epoch = app.explorer.normalized.profiles[&profile.id].catalog_epoch;
+    let plan = CatalogDropPlan::new(request, &table, "DROP TABLE users").unwrap();
+
+    app.update(Action::CatalogDropPlanReady(plan.clone()));
+    assert!(app.update(Action::CatalogDropConfirm).is_empty());
+    assert!(matches!(
+        app.overlay,
+        Some(Overlay::CatalogDropConfirm { busy: false, .. })
+    ));
+
+    assert!(app.update(Action::CatalogDropInsert('y')).is_empty());
+    let commands = app.update(Action::CatalogDropConfirm);
+    assert!(matches!(
+        commands.as_slice(),
+        [Command::ExecuteCatalogDrop(found)] if found == &plan
+    ));
+    assert!(matches!(
+        app.overlay,
+        Some(Overlay::CatalogDropConfirm { busy: true, .. })
+    ));
+    assert!(app.update(Action::CatalogDropConfirm).is_empty());
+
+    for input in ["Y", "yes"] {
+        app.update(Action::CatalogDropPlanReady(plan.clone()));
+        for character in input.chars() {
+            app.update(Action::CatalogDropInsert(character));
+        }
+        assert!(app.update(Action::CatalogDropConfirm).is_empty());
+        assert!(matches!(
+            app.overlay,
+            Some(Overlay::CatalogDropConfirm { busy: false, .. })
+        ));
+    }
+
+    app.update(Action::CatalogDropCancel);
+    assert!(app.overlay.is_none());
 }
 
 #[test]
