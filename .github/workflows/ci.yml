@@ -71,4 +71,4 @@ jobs:
         with: { persist-credentials: false }
       - run: rustup toolchain install 1.94.0 --profile minimal --no-self-update
       - run: rustup default 1.94.0
-      - run: cargo test --locked --test postgres_adapter --test mysql_adapter -- --nocapture
+      - run: cargo test --locked --test postgres_adapter --test mysql_adapter -- --nocapture --test-threads=1
