@@ -169,22 +169,30 @@ pub(crate) fn render(
         .map(|(screen_row, row)| {
             let row_index = row_offset.saturating_add(screen_row);
             let editable = edit.and_then(|session| session.rows.get(row_index));
-            let row_style = editable.map(|row| match row.state {
-                crate::model::relation_edit::EditableRowState::Deleted => Style::new()
-                    .fg(theme.muted)
-                    .bg(theme.row_deleted_background)
-                    .add_modifier(Modifier::DIM),
-                crate::model::relation_edit::EditableRowState::Updated { .. } => {
-                    Style::new().fg(theme.row_updated)
-                }
+            let row_style = editable.and_then(|row| match row.state {
+                crate::model::relation_edit::EditableRowState::Deleted => Some(
+                    Style::new()
+                        .fg(theme.muted)
+                        .bg(theme.row_deleted_background)
+                        .add_modifier(Modifier::DIM),
+                ),
+                crate::model::relation_edit::EditableRowState::Updated { .. } => None,
                 crate::model::relation_edit::EditableRowState::InsertDraft
                 | crate::model::relation_edit::EditableRowState::Inserted => {
-                    Style::new().fg(theme.row_inserted)
+                    Some(Style::new().fg(theme.row_inserted))
                 }
                 crate::model::relation_edit::EditableRowState::Conflict { .. } => {
-                    Style::new().fg(theme.row_deleted)
+                    Some(Style::new().fg(theme.row_deleted))
                 }
-                crate::model::relation_edit::EditableRowState::Clean => Style::new().fg(theme.text),
+                crate::model::relation_edit::EditableRowState::Clean => {
+                    Some(Style::new().fg(theme.text))
+                }
+            });
+            let changed_columns = editable.and_then(|row| match &row.state {
+                crate::model::relation_edit::EditableRowState::Updated { changed_columns } => {
+                    Some(changed_columns)
+                }
+                _ => None,
             });
             Row::new(body_cells(
                 &visible,
@@ -192,6 +200,7 @@ pub(crate) fn render(
                 number_width,
                 row,
                 row_style,
+                changed_columns,
                 theme,
             ))
         });
@@ -359,10 +368,11 @@ fn body_cells(
     number_width: u16,
     row: &[CellValue],
     row_style: Option<Style>,
+    changed_columns: Option<&std::collections::BTreeSet<usize>>,
     theme: Theme,
 ) -> Vec<Cell<'static>> {
     let separator_style = Style::new().fg(theme.grid_border).bg(theme.surface);
-    let row_number_style = row_number_style(row_style, theme);
+    let row_number_style = row_number_style(row_style, changed_columns.is_some(), theme);
     let mut cells = Vec::with_capacity(visible.len().saturating_mul(2).saturating_add(2));
     cells.push(
         Cell::from(format!(
@@ -384,17 +394,35 @@ fn body_cells(
             CellValue::Unsupported { .. } => Style::new().fg(theme.warning),
             _ => Style::new().fg(theme.text),
         };
-        cells.push(
-            Cell::from(sanitize_terminal_text(&preview.text)).style(row_style.unwrap_or(style)),
+        let style = data_cell_style(
+            style,
+            row_style,
+            changed_columns.is_some_and(|columns| columns.contains(&column.index)),
+            theme,
         );
+        cells.push(Cell::from(sanitize_terminal_text(&preview.text)).style(style));
     }
     cells
 }
 
-fn row_number_style(row_style: Option<Style>, theme: Theme) -> Style {
-    row_style
+fn data_cell_style(base: Style, row_style: Option<Style>, updated: bool, theme: Theme) -> Style {
+    let style = row_style.unwrap_or(base);
+    if updated {
+        style.bg(theme.row_updated)
+    } else {
+        style
+    }
+}
+
+fn row_number_style(row_style: Option<Style>, updated: bool, theme: Theme) -> Style {
+    let style = row_style
         .map(|style| style.fg(theme.muted))
-        .unwrap_or_else(|| Style::new().fg(theme.muted))
+        .unwrap_or_else(|| Style::new().fg(theme.muted));
+    if updated {
+        style.bg(theme.row_updated)
+    } else {
+        style
+    }
 }
 
 fn total_width(widths: &[u16]) -> u16 {
@@ -600,9 +628,9 @@ fn render_scrollbar(
 #[cfg(test)]
 mod tests {
     use super::{
-        GridHorizontalScrollTarget, VisibleColumn, column_header_text, horizontal_scroll_target,
-        row_number_style, row_number_width, row_viewport_start, selected_data_cell, total_width,
-        viewport_start, visible_columns,
+        GridHorizontalScrollTarget, VisibleColumn, column_header_text, data_cell_style,
+        horizontal_scroll_target, row_number_style, row_number_width, row_viewport_start,
+        selected_data_cell, total_width, viewport_start, visible_columns,
     };
     use ratatui::style::Style;
 
@@ -642,10 +670,33 @@ mod tests {
     fn row_number_stays_muted_when_row_is_selected() {
         let theme = Theme::deep_space();
         let selected_style = Style::new().fg(theme.text).bg(theme.selection);
-        let style = row_number_style(Some(selected_style), theme);
+        let style = row_number_style(Some(selected_style), false, theme);
 
         assert_eq!(style.fg, Some(theme.muted));
         assert_eq!(style.bg, Some(theme.selection));
+    }
+
+    #[test]
+    fn updated_row_number_uses_update_background() {
+        let theme = Theme::deep_space();
+        let style = row_number_style(Some(Style::new().fg(theme.text)), true, theme);
+
+        assert_eq!(style.fg, Some(theme.muted));
+        assert_eq!(style.bg, Some(theme.row_updated));
+    }
+
+    #[test]
+    fn only_updated_data_cells_use_update_background() {
+        let theme = Theme::deep_space();
+        let base = Style::new().fg(theme.text);
+
+        let unchanged = data_cell_style(base, None, false, theme);
+        let updated = data_cell_style(base, None, true, theme);
+
+        assert_eq!(unchanged.fg, Some(theme.text));
+        assert_eq!(unchanged.bg, None);
+        assert_eq!(updated.fg, Some(theme.text));
+        assert_eq!(updated.bg, Some(theme.row_updated));
     }
 
     #[test]
