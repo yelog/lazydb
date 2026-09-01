@@ -88,6 +88,10 @@ impl Keymap {
         if event.modifiers == KeyModifiers::CONTROL && event.code == KeyCode::Char('c') {
             return Some(Action::Quit);
         }
+        if event.modifiers.is_empty() && event.code == KeyCode::F(8) && app.overlay.is_none() {
+            self.pending = None;
+            return Some(Action::OpenNotificationHistory);
+        }
         if app
             .overlay
             .as_ref()
@@ -252,6 +256,42 @@ impl Keymap {
                 KeyCode::Char(character) if event.modifiers.is_empty() => {
                     Some(Action::CatalogDropInsert(character))
                 }
+                _ => None,
+            };
+        }
+        if let Some(Overlay::NotificationHistory(history)) = app.overlay.as_ref() {
+            self.pending = None;
+            if history.clear_confirm {
+                return match event.code {
+                    KeyCode::Char('y') => Some(Action::NotificationHistoryClearConfirm),
+                    KeyCode::Char('n') | KeyCode::Esc => {
+                        Some(Action::NotificationHistoryClearCancel)
+                    }
+                    _ => None,
+                };
+            }
+            if history.phase == crate::model::notification::HistorySearchPhase::Editing {
+                return match event.code {
+                    KeyCode::Esc | KeyCode::Char('q') => Some(Action::DismissOverlay),
+                    KeyCode::Enter => Some(Action::NotificationHistorySearchConfirm),
+                    KeyCode::Backspace => Some(Action::NotificationHistorySearchBackspace),
+                    KeyCode::Char('u') if event.modifiers == KeyModifiers::CONTROL => {
+                        Some(Action::NotificationHistorySearchClear)
+                    }
+                    KeyCode::Char(character) if event.modifiers.is_empty() => {
+                        Some(Action::NotificationHistorySearchInsert(character))
+                    }
+                    _ => None,
+                };
+            }
+            return match event.code {
+                KeyCode::Esc | KeyCode::Char('q') => Some(Action::DismissOverlay),
+                KeyCode::Char('/') => Some(Action::NotificationHistorySearchOpen),
+                KeyCode::Char('n') => Some(Action::NotificationHistoryNext),
+                KeyCode::Char('N') => Some(Action::NotificationHistoryPrevious),
+                KeyCode::Char('c') => Some(Action::NotificationHistoryClear),
+                KeyCode::Up | KeyCode::Char('k') => Some(Action::NotificationHistoryMove(-1)),
+                KeyCode::Down | KeyCode::Char('j') => Some(Action::NotificationHistoryMove(1)),
                 _ => None,
             };
         }
@@ -1054,6 +1094,7 @@ fn map_pending(pending: Pending, event: KeyEvent, app: &App) -> Option<Action> {
         (Pending::Leader, KeyCode::Char('q')) => Some(Action::CloseActiveTab),
         (Pending::Leader, KeyCode::Char('x')) => Some(Action::RequestDeleteActiveConsole),
         (Pending::Leader, KeyCode::Char('e')) => Some(Action::OpenSqlEditorList),
+        (Pending::Leader, KeyCode::Char('m')) => Some(Action::OpenNotificationHistory),
         (Pending::Leader, KeyCode::Char('Y')) if is_grid_navigation_focus(app) => {
             Some(Action::CopyGridRow {
                 include_headers: true,
@@ -2410,6 +2451,25 @@ mod tests {
                 &app,
             ),
             Some(Action::RelationRollback)
+        );
+    }
+
+    #[test]
+    fn notification_history_uses_f8_and_leader_m_without_stealing_plain_m() {
+        let mut app = App::new(Vec::new());
+        app.focus = Focus::Explorer;
+        let mut keymap = Keymap::default();
+        assert_eq!(
+            keymap.map(key(KeyCode::F(8)), &app),
+            Some(Action::OpenNotificationHistory)
+        );
+
+        let mut app = App::new(Vec::new());
+        app.focus = Focus::Explorer;
+        assert_eq!(keymap.map(key(KeyCode::Char(' ')), &app), None);
+        assert_eq!(
+            keymap.map(key(KeyCode::Char('m')), &app),
+            Some(Action::OpenNotificationHistory)
         );
     }
 

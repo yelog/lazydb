@@ -3,6 +3,7 @@ use nerd_font_symbols::{dev, md};
 
 use crate::{
     db::catalog::{CatalogKind, ObjectGroup},
+    model::notification::NotificationLevel,
     profile::DatabaseKind,
     sql::CompletionKind,
 };
@@ -68,6 +69,29 @@ impl IconSet {
         match self.mode {
             IconMode::NerdFont | IconMode::Unicode => "×",
             IconMode::Ascii => "x",
+        }
+    }
+
+    pub const fn notification(self, level: NotificationLevel) -> &'static str {
+        match self.mode {
+            IconMode::NerdFont => match level {
+                NotificationLevel::Info => "",
+                NotificationLevel::Success => "",
+                NotificationLevel::Warning => "",
+                NotificationLevel::Error => "",
+            },
+            IconMode::Unicode => match level {
+                NotificationLevel::Info => "i",
+                NotificationLevel::Success => "✓",
+                NotificationLevel::Warning => "!",
+                NotificationLevel::Error => "×",
+            },
+            IconMode::Ascii => match level {
+                NotificationLevel::Info => "i",
+                NotificationLevel::Success => "+",
+                NotificationLevel::Warning => "!",
+                NotificationLevel::Error => "x",
+            },
         }
     }
 

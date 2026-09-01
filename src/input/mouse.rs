@@ -73,6 +73,7 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                 HitTarget::Focus(focus) => Some(Action::Focus(focus)),
                 HitTarget::Tab(index) => Some(Action::ActivateTab(index)),
                 HitTarget::CloseTab(id) => Some(Action::CloseTab(id)),
+                HitTarget::DismissNotification(id) => Some(Action::DismissNotification(id)),
                 HitTarget::ExplorerRow(id) => {
                     if ui.track_explorer_click(&id, Instant::now()) {
                         Some(Action::ExplorerPrimary)
@@ -253,6 +254,7 @@ fn focus_at(ui: &UiState, column: u16, row: u16) -> Option<Focus> {
         HitTarget::RelationCancel => Some(Focus::Results),
         HitTarget::Tab(_)
         | HitTarget::CloseTab(_)
+        | HitTarget::DismissNotification(_)
         | HitTarget::Help
         | HitTarget::HeaderProfile
         | HitTarget::ProfileField(_)

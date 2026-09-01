@@ -467,13 +467,10 @@ fn target_selector_requires_an_active_connection_and_blocks_manual_transactions(
     app.connection.profile_id = None;
     app.update(Action::OpenTargetSelector);
     assert!(app.overlay.is_none());
-    assert!(
-        app.connection
-            .error
-            .as_deref()
-            .unwrap()
-            .contains("No active connection")
-    );
+    assert!(app.notifications.history().any(|notification| {
+        notification.level == lazydb::model::notification::NotificationLevel::Warning
+            && notification.body.contains("No active connection")
+    }));
 
     app.connection.profile_id = Some(profile_id);
     app.connection.generation = 1;
@@ -512,13 +509,10 @@ fn running_sql_blocks_connection_switch_without_changing_workspace() {
     assert!(app.update(Action::RequestConnect(second_id)).is_empty());
     assert_eq!(app.connection.profile_id, Some(first_id));
     assert_eq!(app.active_console().id, console_id);
-    assert!(
-        app.connection
-            .error
-            .as_deref()
-            .unwrap()
-            .contains("running SQL")
-    );
+    assert!(app.notifications.history().any(|notification| {
+        notification.level == lazydb::model::notification::NotificationLevel::Warning
+            && notification.body.contains("running SQL")
+    }));
 }
 
 #[test]
@@ -587,16 +581,17 @@ fn dirty_relation_edit_blocks_switch_and_quit_with_explicit_message() {
     app.active_tab = app.tabs.len() - 1;
 
     assert!(app.update(Action::RequestConnect(other_id)).is_empty());
-    assert_eq!(
-        app.connection.error.as_deref(),
-        Some("Commit or roll back relation edits before switching connections")
-    );
+    assert!(app.notifications.history().any(|notification| {
+        notification.level == lazydb::model::notification::NotificationLevel::Warning
+            && notification.body
+                == "Commit or roll back relation edits before switching connections"
+    }));
     assert!(app.update(Action::Quit).is_empty());
     assert!(!app.should_quit);
-    assert_eq!(
-        app.connection.error.as_deref(),
-        Some("Commit or roll back relation edits before quitting")
-    );
+    assert!(app.notifications.history().any(|notification| {
+        notification.level == lazydb::model::notification::NotificationLevel::Warning
+            && notification.body == "Commit or roll back relation edits before quitting"
+    }));
 }
 
 #[test]

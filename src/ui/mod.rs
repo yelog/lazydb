@@ -3,6 +3,7 @@ pub mod data_grid;
 pub mod icons;
 pub mod layout;
 pub mod loading;
+pub mod notifications;
 pub mod pagination;
 pub mod profiles;
 pub mod query_bar;
@@ -169,6 +170,7 @@ pub enum HitTarget {
     ProfileToggle(ProfileField),
     ProfileScopeRow(String),
     ProfileButton(ProfileButton),
+    DismissNotification(u64),
     RelationFirstPage,
     RelationPreviousPage,
     RelationPageSize,
@@ -465,6 +467,9 @@ pub fn render_with_state_using_icons_and_sequence(
     if let Some(sequence) = sequence {
         render_key_sequence_popup(frame, area, app, theme, sequence);
     }
+    if app.overlay.is_none() {
+        notifications::render(frame, area, app, theme, state, icons);
+    }
 }
 
 fn render_key_sequence_popup(
@@ -570,6 +575,7 @@ fn render_key_sequence_popup(
 fn overlay_key(overlay: &Overlay) -> u8 {
     match overlay {
         Overlay::Help(_) => 1,
+        Overlay::NotificationHistory(_) => 17,
         Overlay::RecordView(_) => 2,
         Overlay::ProfileManager => 3,
         Overlay::ProfileAccess { .. } => 4,
@@ -1047,7 +1053,7 @@ fn render_tabs(
         let close = format!("{} ", icons.close());
         let can_close = tab.as_console().is_none_or(|console| !console.is_default());
         let label_width = label.cell_width();
-        let close_width = can_close.then(|| close.cell_width()).unwrap_or(0);
+        let close_width = if can_close { close.cell_width() } else { 0 };
         let width = label_width + close_width;
         let active = index == app.active_tab;
         spans.push(Span::styled(
@@ -2115,7 +2121,7 @@ fn render_result_tabs(
     }
     let stats_x = area.x.saturating_add(18).min(area.right());
     frame.render_widget(
-        Paragraph::new(format!("{stats}")).style(Style::new().fg(theme.muted).bg(theme.background)),
+        Paragraph::new(stats.to_string()).style(Style::new().fg(theme.muted).bg(theme.background)),
         Rect::new(stats_x, area.y, area.right().saturating_sub(stats_x), 1),
     );
 }
@@ -2415,16 +2421,8 @@ fn render_footer(
         }
         _ => None,
     });
-    let (second_text, second_color) = if let Some(notice) = &app.clipboard_notice {
-        let color = match notice.kind {
-            crate::model::clipboard::ClipboardNoticeKind::Success => theme.accent,
-            crate::model::clipboard::ClipboardNoticeKind::Error => theme.error,
-        };
-        (notice.message.as_str(), color)
-    } else if let Some(context) = relation_context.as_deref() {
+    let (second_text, second_color) = if let Some(context) = relation_context.as_deref() {
         (context, theme.muted)
-    } else if let Some(error) = app.connection.error.as_deref() {
-        (error, theme.error)
     } else {
         ("Ready", theme.muted)
     };
@@ -2449,6 +2447,9 @@ fn render_overlay(
 ) {
     match overlay {
         Overlay::Help(help) => render_help(frame, area, help, state, theme),
+        Overlay::NotificationHistory(history) => {
+            notifications::render_history(frame, area, app, history, theme, state)
+        }
         Overlay::RecordView(view) => record_view::render(frame, area, app, view, theme, state),
         Overlay::ProfileManager => {
             profiles::render_profile_manager(frame, area, app, state, theme, icons)

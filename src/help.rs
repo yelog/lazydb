@@ -45,6 +45,7 @@ pub enum ShortcutContext {
     DeleteConsoleConfirmation,
     PageSizeSelector,
     CatalogDropConfirmation,
+    NotificationHistory,
 }
 
 #[cfg(test)]
@@ -82,6 +83,7 @@ const ALL_SHORTCUT_CONTEXTS: &[ShortcutContext] = &[
     ShortcutContext::DeleteConsoleConfirmation,
     ShortcutContext::PageSizeSelector,
     ShortcutContext::CatalogDropConfirmation,
+    ShortcutContext::NotificationHistory,
 ];
 
 pub(crate) fn shortcut_context(app: &App) -> ShortcutContext {
@@ -126,6 +128,7 @@ fn shortcut_context_with_overlay(app: &App, include_help: bool) -> ShortcutConte
                 Overlay::DeleteConsole { .. } => ShortcutContext::DeleteConsoleConfirmation,
                 Overlay::PageSizeSelector { .. } => ShortcutContext::PageSizeSelector,
                 Overlay::CatalogDropConfirm { .. } => ShortcutContext::CatalogDropConfirmation,
+                Overlay::NotificationHistory(_) => ShortcutContext::NotificationHistory,
             };
         }
     }
@@ -207,6 +210,8 @@ pub enum HelpShortcutId {
     CloseTab,
     DeleteConsole,
     OpenSqlEditors,
+    OpenNotificationHistory,
+    OpenNotificationHistoryLeader,
     ExplorerMoveDown,
     ExplorerMoveUp,
     ExplorerFirst,
@@ -797,6 +802,33 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
         "search SQL editors",
         Leader,
         "e"
+    ),
+    row!(
+        OpenNotificationHistory,
+        [
+            Explorer,
+            SqlResultsData,
+            SqlOutput,
+            RelationDataBrowse,
+            RelationDdl,
+            NotificationHistory
+        ],
+        "F8",
+        "open notification history"
+    ),
+    row!(
+        OpenNotificationHistoryLeader,
+        [
+            Explorer,
+            SqlResultsData,
+            SqlOutput,
+            RelationDataBrowse,
+            RelationDdl
+        ],
+        "Space m",
+        "open notification history",
+        Leader,
+        "m"
     ),
     row!(ExplorerMoveDown, [Explorer], "j", "move selection down"),
     row!(ExplorerMoveUp, [Explorer], "k", "move selection up"),
@@ -2348,6 +2380,7 @@ pub(crate) fn context_name(context: ShortcutContext) -> &'static str {
         ShortcutContext::DeleteConsoleConfirmation => "DELETE SQL EDITOR",
         ShortcutContext::PageSizeSelector => "PAGE SIZE",
         ShortcutContext::CatalogDropConfirmation => "CATALOG DROP",
+        ShortcutContext::NotificationHistory => "NOTIFICATIONS",
     }
 }
 
@@ -3389,6 +3422,7 @@ mod tests {
                 HelpShortcutId::DeleteConsole,
                 HelpShortcutId::OpenSqlEditors,
                 HelpShortcutId::ResultsCopyRowWithHeaders,
+                HelpShortcutId::OpenNotificationHistoryLeader,
             ]
         );
         assert!(!leader.contains(&HelpShortcutId::ToggleTransaction));

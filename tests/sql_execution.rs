@@ -169,13 +169,10 @@ fn execution_fails_closed_when_console_target_is_missing_or_stale() {
     app.update(Action::ReplaceEditor("SELECT 1".into()));
     app.active_console_mut().execution_target = None;
     assert!(app.update(Action::RunActiveSql).is_empty());
-    assert!(
-        app.connection
-            .error
-            .as_deref()
-            .unwrap()
-            .contains("Select an execution target")
-    );
+    assert!(app.notifications.history().any(|notification| {
+        notification.level == lazydb::model::notification::NotificationLevel::Warning
+            && notification.body.contains("Select an execution target")
+    }));
 
     let profile_id = app.connection.profile_id.unwrap();
     app.active_console_mut().execution_target =
@@ -185,7 +182,10 @@ fn execution_fails_closed_when_console_target_is_missing_or_stale() {
             schema: Some("other".into()),
         });
     assert!(app.update(Action::RunActiveSql).is_empty());
-    assert!(app.connection.error.as_deref().unwrap().contains("target"));
+    assert!(app.notifications.history().any(|notification| {
+        notification.level == lazydb::model::notification::NotificationLevel::Warning
+            && notification.body.contains("target")
+    }));
 }
 
 #[test]

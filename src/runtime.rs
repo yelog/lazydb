@@ -3206,7 +3206,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                     let now = std::time::Instant::now();
                     let expired = keymap.expire_pending(&app, now);
                     let after = keymap.sequence_state(&app, now);
-                    redraw = app.expire_clipboard_notice(now)
+                    redraw = app.notifications.expire(now)
                         || ui_state.advance_animations(now)
                         || expired
                         || sequence_redraw_needed(&rendered_sequence, &after);
