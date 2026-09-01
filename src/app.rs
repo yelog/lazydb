@@ -3764,7 +3764,6 @@ impl App {
                 }
                 tab.query_status = QueryStatus::Failed;
                 append_failed_execution_output(&mut self.editor, tab, generation, message);
-                tab.result_view = ResultView::Output;
                 if let Some(last) = tab.last_execution.as_mut()
                     && last.draft.query_generation + 1 == generation
                 {
@@ -9558,6 +9557,7 @@ fn append_failed_execution_output(
     generation: u64,
     message: String,
 ) {
+    tab.result_view = ResultView::Output;
     if let Some(last) = tab
         .last_execution
         .as_ref()
@@ -10122,6 +10122,7 @@ mod tests {
     #[test]
     fn query_failure_records_sql_before_database_error() {
         let (mut app, tab_id, generation) = connected_query_app("SELECT * FROM sys_user1;");
+        app.active_console_mut().result_view = ResultView::Data;
         app.update(Action::QueryFailed {
             tab_id,
             generation,
@@ -10129,7 +10130,9 @@ mod tests {
             message: "relation \"sys_user1\" does not exist".into(),
         });
 
-        let entries = &app.active_console().output;
+        let tab = app.active_console();
+        assert_eq!(tab.result_view, ResultView::Output);
+        let entries = &tab.output;
         assert_eq!(entries.len(), 2);
         assert!(entries[0].message.contains("> SELECT * FROM sys_user1;"));
         assert_eq!(entries[1].message, "relation \"sys_user1\" does not exist");
