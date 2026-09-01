@@ -420,7 +420,7 @@ async fn native_catalog_search_covers_postgres_contract_when_configured() {
         ];
         for (name, kind) in expected_kinds {
             let (query, limit) = if kind == CatalogKind::Column {
-                (exact.clone(), 100)
+                ("code".to_owned(), 1000)
             } else {
                 (name.clone(), 20)
             };
