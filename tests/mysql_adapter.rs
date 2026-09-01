@@ -708,7 +708,13 @@ async fn catalog_page_exposes_scoped_mysql_objects_and_rich_metadata_when_config
         assert!(literal.hits.iter().all(|hit| hit.qualified_path().to_lowercase().contains("%second")));
         assert!(literal.hits.iter().any(|hit| hit.entry.qualified_name.object == second));
 
-        let limited_request = CatalogSearchRequest { limit: 1, ..search_request.clone() };
+        // Use an exact table name so the limited result has a stable top match
+        // even when the configured database name also matches the prefix.
+        let limited_request = CatalogSearchRequest {
+            query: parent.clone(),
+            limit: 1,
+            ..search_request.clone()
+        };
         let limited = adapter.search_catalog(&limited_request).await.unwrap();
         assert_eq!(limited.hits.len(), 1);
         assert!(limited.truncated);

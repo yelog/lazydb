@@ -769,10 +769,7 @@ fn relation_bindings(tokens: &[CompletionToken]) -> Vec<RelationBinding> {
         }
         let comma_list = word.eq_ignore_ascii_case("from");
         index += 1;
-        loop {
-            let Some((binding, next)) = relation_binding_at(tokens, index) else {
-                break;
-            };
+        while let Some((binding, next)) = relation_binding_at(tokens, index) {
             bindings.push(binding);
             index = next;
             if comma_list
@@ -782,9 +779,9 @@ fn relation_bindings(tokens: &[CompletionToken]) -> Vec<RelationBinding> {
                 )
             {
                 index += 1;
-                continue;
+            } else {
+                break;
             }
-            break;
         }
     }
     bindings
@@ -839,10 +836,8 @@ fn active_scope_starts(tokens: &[CompletionToken], cursor: usize) -> Vec<Option<
     for token in tokens.iter().filter(|token| token.start < cursor) {
         match token.kind {
             CompletionTokenKind::LeftParen => scopes.push(Some(token.start)),
-            CompletionTokenKind::RightParen => {
-                if scopes.len() > 1 {
-                    scopes.pop();
-                }
+            CompletionTokenKind::RightParen if scopes.len() > 1 => {
+                scopes.pop();
             }
             _ => {}
         }
