@@ -263,23 +263,9 @@ return {
 Use `:checkhealth lazydb` to verify the executable and CLI API. See the plugin
 repository for native package installation and the complete command reference.
 
-## Essential Keys
-
-| Action | Key |
-| --- | --- |
-| Help | `F1` or `Space ?` |
-| Focus Explorer | `Space c` |
-| New SQL console | `Space n` |
-| Catalog search | `/` |
-| Move through a Vim-style workspace | `h/j/k/l` |
-| Run current statement | `F5` |
-| Run full console buffer | `Shift-F5` |
-| Refresh Explorer | `r` |
-| Quit | `Q` |
-
-The footer and help view show the active context. See the complete
-[keybindings reference](docs/keybindings.md), including profile, relation, and
-result-grid actions.
+The footer and help view show contextual controls for the active context and mode. See the
+complete [keyboard reference](docs/keybindings.md) for the operational contract,
+including profile, relation, result-grid, search, and confirmation controls.
 
 ## Configuration
 

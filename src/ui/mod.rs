@@ -23,6 +23,79 @@ use std::{
     time::{Duration, Instant},
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+fn pack_hints<S: AsRef<str>>(hints: &[S], width: u16) -> String {
+    let width = usize::from(width);
+    if width == 0 || hints.is_empty() {
+        return String::new();
+    }
+
+    // Select against the final omission count, not the provisional count for
+    // each item. This keeps the marker width accurate as items are added.
+    let mut selected = 0;
+    for count in (0..=hints.len()).rev() {
+        let visible = hints[..count]
+            .iter()
+            .map(|hint| hint.as_ref().to_owned())
+            .collect::<Vec<_>>();
+        let omitted = hints.len() - count;
+        let marker = (omitted > 0).then(|| format!("... (+{omitted})"));
+        let mut candidate = visible.join("   ");
+        if let Some(marker) = marker {
+            if !candidate.is_empty() {
+                candidate.push_str("   ");
+            }
+            candidate.push_str(&marker);
+        }
+        if usize::from(candidate.cell_width()) <= width {
+            selected = count;
+            break;
+        }
+    }
+
+    let visible = hints[..selected]
+        .iter()
+        .map(|hint| hint.as_ref().to_owned())
+        .collect::<Vec<_>>();
+    let omitted = hints.len() - selected;
+    let mut result = visible.join("   ");
+    if omitted > 0 {
+        let marker = format!("... (+{omitted})");
+        if !result.is_empty() {
+            result.push_str("   ");
+        }
+        let remaining = width.saturating_sub(usize::from(result.cell_width()));
+        if remaining >= 3 {
+            result.push_str(&truncate_to_cells(&marker, remaining));
+            if usize::from(result.cell_width()) > width {
+                result = truncate_to_cells(&result, width);
+            }
+        } else if result.is_empty() {
+            result = truncate_to_cells(&marker, width);
+        }
+    }
+    result
+}
+
+fn truncate_to_cells(value: &str, width: usize) -> String {
+    let mut used = 0;
+    value
+        .chars()
+        .take_while(|character| {
+            let character_width = character.width().unwrap_or(0);
+            if used + character_width > width {
+                false
+            } else {
+                used += character_width;
+                true
+            }
+        })
+        .collect()
+}
+
+fn footer_hint_width(mode_badge: &str, area_width: u16) -> u16 {
+    area_width.saturating_sub(mode_badge.cell_width().saturating_add(2))
+}
 use uuid::Uuid;
 
 use crate::{
@@ -275,6 +348,16 @@ pub fn render_with_state_using_icons(
     state: &mut UiState,
     icons: icons::IconSet,
 ) {
+    render_with_state_using_icons_and_sequence(frame, app, state, icons, None);
+}
+
+pub fn render_with_state_using_icons_and_sequence(
+    frame: &mut Frame<'_>,
+    app: &App,
+    state: &mut UiState,
+    icons: icons::IconSet,
+    sequence: Option<&crate::input::keymap::KeySequenceState>,
+) {
     let theme = Theme::default();
     let area = frame.area();
     state.activity_icons = icons;
@@ -321,7 +404,7 @@ pub fn render_with_state_using_icons(
             });
             relation::render(frame, area, app, theme, state);
         }
-        render_footer(frame, layout.footer, app, theme);
+        render_footer(frame, layout.footer, app, theme, sequence);
         state.hit_regions.push(HitRegion {
             area: layout.footer,
             target: HitTarget::Help,
@@ -356,7 +439,7 @@ pub fn render_with_state_using_icons(
             });
             render_results(frame, area, app, theme, state);
         }
-        render_footer(frame, layout.footer, app, theme);
+        render_footer(frame, layout.footer, app, theme, sequence);
         state.hit_regions.push(HitRegion {
             area: layout.footer,
             target: HitTarget::Help,
@@ -2075,7 +2158,13 @@ fn render_output(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, sta
     }
 }
 
-fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
+fn render_footer(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    theme: Theme,
+    sequence: Option<&crate::input::keymap::KeySequenceState>,
+) {
     let (mode, mode_color) = match app.focus {
         Focus::Editor => match app.active_editor_mode() {
             EditorMode::Normal => ("NORMAL", theme.accent),
@@ -2088,17 +2177,34 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
         Focus::Explorer => ("EXPLORE", theme.accent),
         Focus::Results => ("DATA", theme.warning),
     };
-    let hints = match app.focus {
-        Focus::Explorer => "j/k move   gg/G ends   Ctrl-d/u page   s access   Enter open",
-        Focus::Editor => "Esc normal   i/a/o insert   Space y copy SQL   F5 run   F1 help",
-        Focus::Results if app.is_active_relation_tab() => {
-            "h/j/k/l cells   y cell   Y row   Space Y headers"
-        }
-        Focus::Results => "h/j/k/l cells   y cell   Y row   Space Y headers",
-    };
+    let context = crate::help::shortcut_context(app);
+    let capabilities = crate::help::shortcut_capabilities(app);
+    let hint_values = sequence.map_or_else(
+        || {
+            crate::help::footer_shortcuts(context, capabilities)
+                .into_iter()
+                .map(|shortcut| format!("{} {}", shortcut.sequence, shortcut.description))
+                .collect::<Vec<_>>()
+        },
+        |sequence| {
+            crate::help::prefix_shortcuts(context, capabilities, sequence.prefix)
+                .into_iter()
+                .map(|shortcut| {
+                    format!(
+                        "{} {} {}",
+                        sequence.display,
+                        shortcut.suffix.unwrap_or(""),
+                        shortcut.description
+                    )
+                })
+                .collect::<Vec<_>>()
+        },
+    );
+    let mode_badge = format!(" {mode} ");
+    let hints = pack_hints(&hint_values, footer_hint_width(&mode_badge, area.width));
     let line = Line::from(vec![
         Span::styled(
-            format!(" {mode} "),
+            mode_badge,
             Style::new()
                 .fg(theme.background)
                 .bg(mode_color)
@@ -2108,13 +2214,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
             format!("  {hints}"),
             Style::new().fg(theme.muted).bg(theme.surface),
         ),
-        Span::styled(
-            "   ?/F1 help ",
-            Style::new()
-                .fg(theme.action)
-                .bg(theme.surface)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Span::styled("", Style::new().bg(theme.surface)),
     ]);
     let relation_context = app.tabs.get(app.active_tab).and_then(|tab| match tab {
         WorkspaceTab::Relation(tab) if tab.view == crate::model::relation::RelationView::Ddl => {
@@ -2182,7 +2282,7 @@ fn render_overlay(
     icons: icons::IconSet,
 ) {
     match overlay {
-        Overlay::Help(help) => render_help(frame, area, help, app, state, theme),
+        Overlay::Help(help) => render_help(frame, area, help, state, theme),
         Overlay::RecordView(view) => record_view::render(frame, area, app, view, theme, state),
         Overlay::ProfileManager => {
             profiles::render_profile_manager(frame, area, app, state, theme, icons)
@@ -2602,14 +2702,12 @@ fn render_help(
     frame: &mut Frame<'_>,
     area: Rect,
     help: &crate::help::HelpState,
-    app: &App,
     state: &mut UiState,
     theme: Theme,
 ) {
-    let focus = help.context;
     let popup = centered(area, 74, area.height.saturating_sub(2).clamp(12, 28));
     frame.render_widget(Clear, popup);
-    let title = format!(" KEYMAP // {} ", focus_name(focus));
+    let title = format!(" KEYMAP // {} ", crate::help::context_name(help.context));
     let block = Block::default()
         .title(title)
         .title_style(theme.title(true))
@@ -2618,12 +2716,7 @@ fn render_help(
         .border_style(Style::new().fg(theme.accent))
         .style(Style::new().bg(theme.surface_raised));
     frame.render_widget(block, popup);
-    let relation_data = matches!(
-        app.tabs.get(app.active_tab),
-        Some(WorkspaceTab::Relation(tab))
-            if tab.view == crate::model::relation::RelationView::Data
-    );
-    let entries = crate::help::filtered_shortcuts(focus, relation_data, &help.query);
+    let entries = crate::help::filtered_shortcuts(help.context, help.capabilities, &help.query);
     let inner = Block::default().borders(Borders::ALL).inner(popup);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -2655,7 +2748,7 @@ fn render_help(
             let marker = if index == help.selected { ">" } else { " " };
             Line::from(vec![
                 Span::styled(
-                    format!("{marker} {:<18}", shortcut.key),
+                    format!("{marker} {:<18}", shortcut.sequence),
                     Style::new().fg(theme.action).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(shortcut.description, Style::new().fg(theme.text)),
@@ -2826,14 +2919,6 @@ fn kind_color(kind: CatalogKind, theme: Theme) -> Color {
     }
 }
 
-fn focus_name(focus: Focus) -> &'static str {
-    match focus {
-        Focus::Explorer => "EXPLORER",
-        Focus::Editor => "EDITOR",
-        Focus::Results => "RESULTS",
-    }
-}
-
 fn centered(area: Rect, max_width: u16, max_height: u16) -> Rect {
     let width = area.width.saturating_sub(4).min(max_width);
     let height = area.height.saturating_sub(2).min(max_height);
@@ -2858,6 +2943,49 @@ fn centered(area: Rect, max_width: u16, max_height: u16) -> Rect {
 
 fn contains(area: Rect, column: u16, row: u16) -> bool {
     column >= area.x && column < area.right() && row >= area.y && row < area.bottom()
+}
+
+#[cfg(test)]
+mod footer_tests {
+    use super::*;
+
+    #[test]
+    fn footer_hint_width_uses_the_rendered_badge_width() {
+        assert_eq!(footer_hint_width(" NORMAL ", 40), 30);
+        assert_eq!(footer_hint_width(" VISUAL LINE ", 40), 25);
+        assert_eq!(footer_hint_width(" NORMAL ", 4), 0);
+    }
+
+    #[test]
+    fn pack_hints_keeps_complete_units_and_reports_omissions() {
+        assert_eq!(
+            pack_hints(&["j/k move", "Enter open", "/ find"], 19),
+            "j/k move   ... (+2)"
+        );
+        assert_eq!(
+            pack_hints(&["j/k move", "Enter open", "/ find"], 40),
+            "j/k move   Enter open   / find"
+        );
+    }
+
+    #[test]
+    fn pack_hints_measures_terminal_cells_and_handles_no_fit() {
+        assert_eq!(
+            pack_hints(&["界 move", "Enter open"], 18),
+            "界 move   ... (+1)"
+        );
+        assert_eq!(pack_hints(&["long hint"], 3), "...");
+        assert_eq!(pack_hints::<&str>(&[], 20), "");
+        assert!(pack_hints(&["a", "b"], 0).is_empty());
+        assert!(pack_hints(&["a", "b"], 2).cell_width() <= 2);
+    }
+
+    #[test]
+    fn pack_hints_uses_the_final_omitted_count_before_selecting_units() {
+        let packed = pack_hints(&["aaaa", "bb", "cc"], 15);
+        assert_eq!(packed, "aaaa   bb   cc");
+        assert!(packed.cell_width() <= 15);
+    }
 }
 
 #[cfg(test)]

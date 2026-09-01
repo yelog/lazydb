@@ -185,6 +185,23 @@ fn record_view_owns_navigation_keys_and_goto_sequence() {
 }
 
 #[test]
+fn record_view_pending_is_invalid_after_overlay_closes_outside_keymap() {
+    let mut app = App::new(Vec::new());
+    app.focus = Focus::Results;
+    let mut keymap = Keymap::default();
+    app.overlay = Some(Overlay::RecordView(Default::default()));
+
+    assert_eq!(keymap.map(key(KeyCode::Char('g')), &app), None);
+    app.update(Action::CloseRecordView);
+    assert!(
+        keymap
+            .sequence_state(&app, std::time::Instant::now())
+            .is_none()
+    );
+    assert_eq!(keymap.map(key(KeyCode::Char('t')), &app), None);
+}
+
+#[test]
 fn help_overlay_accepts_pasted_search_text() {
     let mut app = App::new(Vec::new());
     app.update(Action::ShowHelp);
@@ -261,6 +278,29 @@ fn catalog_drop_overlay_maps_only_confirmation_keys_without_bypassing_text_entry
     );
 }
 
+#[test]
+fn filtered_help_moves_to_non_first_id_and_executes_it() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::EditorKey(key(KeyCode::Esc)));
+    app.focus = Focus::Editor;
+    app.update(Action::ShowHelp);
+    app.update(Action::HelpPaste("move focus".into()));
+    app.update(Action::HelpMove(1));
+
+    let mut keymap = Keymap::default();
+    let action = keymap.map(key(KeyCode::Enter), &app);
+    assert_eq!(
+        action,
+        Some(Action::ExecuteHelpShortcut(
+            lazydb::help::HelpShortcutId::FocusResults
+        ))
+    );
+    app.update(action.unwrap());
+
+    assert_eq!(app.focus, Focus::Results);
+    assert_eq!(app.overlay, None);
+}
+
 fn profile(name: &str) -> ConnectionProfile {
     import_connection_url(":memory:", Some(name))
         .unwrap()
@@ -319,6 +359,165 @@ fn sql_window_directions_keep_three_pane_mapping() {
 
     app.focus = Focus::Results;
     assert_eq!(window_action(&app, 'k'), Some(Action::Focus(Focus::Editor)));
+}
+
+#[test]
+fn output_o_toggles_back_to_data_instead_of_entering_read_only_vim_open_line() {
+    let mut app = App::new(Vec::new());
+    app.focus = Focus::Results;
+    app.active_console_mut().result_view = lazydb::model::tab::ResultView::Output;
+
+    assert_eq!(
+        Keymap::default().map(key(KeyCode::Char('o')), &app),
+        Some(Action::ToggleResultView)
+    );
+}
+
+#[test]
+fn editor_space_uses_editor_binding_path_not_application_leader_pending() {
+    let mut app = App::new(Vec::new());
+    app.focus = Focus::Editor;
+    app.update(Action::EditorKey(key(KeyCode::Esc)));
+    let mut keymap = Keymap::default();
+
+    assert!(matches!(
+        keymap.map(key(KeyCode::Char(' ')), &app),
+        Some(Action::EditorKey(_))
+    ));
+}
+
+#[test]
+fn editor_normal_space_exposes_editor_leader_candidates_without_consuming_next_key() {
+    let mut app = App::new(Vec::new());
+    app.focus = Focus::Editor;
+    app.update(Action::EditorKey(key(KeyCode::Esc)));
+    let mut keymap = Keymap::default();
+
+    assert!(matches!(
+        keymap.map(key(KeyCode::Char(' ')), &app),
+        Some(Action::EditorKey(_))
+    ));
+    let state = keymap
+        .sequence_state(&app, std::time::Instant::now())
+        .expect("editor leader state");
+    assert_eq!(state.prefix, lazydb::help::ShortcutPrefix::EditorLeader);
+    assert!(matches!(
+        keymap.map(key(KeyCode::Char('f')), &app),
+        Some(Action::EditorKey(_))
+    ));
+    assert!(
+        keymap
+            .sequence_state(&app, std::time::Instant::now())
+            .is_none()
+    );
+}
+
+#[test]
+fn editor_leader_followups_stay_on_the_editor_modalkit_path() {
+    let mut app = App::new(Vec::new());
+    app.focus = Focus::Editor;
+    app.update(Action::EditorKey(key(KeyCode::Esc)));
+
+    for character in ['f', 'y', 'Y', 'd'] {
+        let mut keymap = Keymap::default();
+        assert!(matches!(
+            keymap.map(key(KeyCode::Char(' ')), &app),
+            Some(Action::EditorKey(_))
+        ));
+        assert!(matches!(
+            keymap.map(key(KeyCode::Char(character)), &app),
+            Some(Action::EditorKey(_))
+        ));
+        assert!(
+            keymap
+                .sequence_state(&app, std::time::Instant::now())
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn data_query_completion_controls_match_catalog_context() {
+    let mut app = App::new(Vec::new());
+    app.active_console_mut().query.focus = Some(DataQueryInput::Where);
+    app.active_console_mut().query.capability = lazydb::model::data_query::DataQueryCapability::Sql;
+    app.active_console_mut().query.completion = Some(DataQueryCompletion {
+        candidates: vec![DataQueryCandidate {
+            name: "active".into(),
+            type_name: Some("BOOLEAN".into()),
+        }],
+        selected: 0,
+        replace: lazydb::sql::TextRange::new(0, 0),
+    });
+    let mut keymap = Keymap::default();
+    assert_eq!(
+        keymap.map(ctrl('n'), &app),
+        Some(Action::DataQueryCompletionNext)
+    );
+    assert_eq!(
+        keymap.map(ctrl('p'), &app),
+        Some(Action::DataQueryCompletionPrevious)
+    );
+}
+
+#[test]
+fn relation_browse_yy_maps_the_catalog_yank_row_binding() {
+    let mut app = App::new(Vec::new());
+    app.tabs
+        .push(WorkspaceTab::Relation(RelationTab::new("users")));
+    app.active_tab = 1;
+    app.focus = Focus::Results;
+    let mut keymap = Keymap::default();
+
+    assert_eq!(keymap.map(key(KeyCode::Char('y')), &app), None);
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('y')), &app),
+        Some(Action::RelationYank)
+    );
+}
+
+#[test]
+fn sql_help_window_directions_match_three_pane_mapping() {
+    let mut app = App::new(Vec::new());
+    app.focus = Focus::Explorer;
+    app.update(Action::ShowHelp);
+    app.update(Action::HelpPaste("move focus".into()));
+    assert_eq!(
+        app.help_selected_id(),
+        Some(lazydb::help::HelpShortcutId::FocusEditorFromL)
+    );
+    app.update(Action::ExecuteHelpShortcut(
+        lazydb::help::HelpShortcutId::FocusEditorFromL,
+    ));
+    assert_eq!(app.focus, Focus::Editor);
+
+    app.update(Action::EditorKey(key(KeyCode::Esc)));
+    app.update(Action::ShowHelp);
+    app.update(Action::HelpPaste("move focus".into()));
+    let rows = [app.help_selected_id()];
+    assert_eq!(rows, [Some(lazydb::help::HelpShortcutId::FocusExplorer)]);
+}
+
+#[test]
+fn relation_help_window_directions_match_two_pane_mapping() {
+    let mut app = App::new(Vec::new());
+    app.tabs.push(lazydb::model::tab::WorkspaceTab::Relation(
+        lazydb::model::relation::RelationTab::new("users"),
+    ));
+    app.active_tab = 1;
+    app.focus = Focus::Explorer;
+    app.update(Action::ShowHelp);
+    app.update(Action::HelpPaste("move focus".into()));
+
+    assert_eq!(
+        app.help_selected_id(),
+        Some(lazydb::help::HelpShortcutId::FocusResultsFromL)
+    );
+    app.update(Action::ExecuteHelpShortcut(
+        lazydb::help::HelpShortcutId::FocusResultsFromL,
+    ));
+    assert_eq!(app.focus, Focus::Results);
+    assert_eq!(app.overlay, None);
 }
 
 #[test]
@@ -1224,7 +1423,10 @@ fn profile_form_overlay_routes_before_generic_dismissal() {
     assert_eq!(keymap.map(ctrl('d'), &app), None);
     assert_eq!(keymap.map(key(KeyCode::Char('?')), &app), None);
 
-    app.overlay = Some(Overlay::Help(lazydb::help::HelpState::new(Focus::Editor)));
+    app.overlay = Some(Overlay::Help(lazydb::help::HelpState::new(
+        lazydb::help::ShortcutContext::EditorNormal,
+        lazydb::help::ShortcutCapabilities::default(),
+    )));
     assert_eq!(
         keymap.map(key(KeyCode::Char('?')), &app),
         Some(Action::HelpInsert('?'))
@@ -1433,7 +1635,10 @@ fn profile_confirmation_and_paste_are_contextual_and_redacted() {
     app.update(Action::CloseProfileManager);
     app.focus = Focus::Editor;
     app.update(Action::EditorKey(key(KeyCode::Char('i'))));
-    app.overlay = Some(Overlay::Help(lazydb::help::HelpState::new(Focus::Editor)));
+    app.overlay = Some(Overlay::Help(lazydb::help::HelpState::new(
+        lazydb::help::ShortcutContext::EditorNormal,
+        lazydb::help::ShortcutCapabilities::default(),
+    )));
     assert_eq!(
         map_paste("hidden".into(), &app),
         [Action::HelpPaste("hidden".into())]

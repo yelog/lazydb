@@ -3115,14 +3115,24 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
     let mut terminal_events = EventStream::new();
     let mut keymap = Keymap::default();
     let mut ui_state = UiState::with_motion(cli.motion);
+    let mut rendered_sequence: Option<crate::input::keymap::KeySequenceState> = None;
     let mut ticker = interval(Duration::from_millis(33));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     let result: Result<()> = async {
         apply_startup_action_with_runtime(&mut app, &mut runtime, startup.selected);
         runtime.dispatch(Command::CheckSecretStoreAvailability);
-        terminal
-            .draw(|frame| ui::render_with_state_using_icons(frame, &app, &mut ui_state, icons))?;
+        let initial_sequence = keymap.sequence_state(&app, std::time::Instant::now());
+        rendered_sequence = initial_sequence.clone();
+        terminal.draw(|frame| {
+            ui::render_with_state_using_icons_and_sequence(
+                frame,
+                &app,
+                &mut ui_state,
+                icons,
+                initial_sequence.as_ref(),
+            )
+        })?;
         if let Some(style) = ui_state.cursor_style {
             terminal.set_cursor_style(style)?;
         }
@@ -3137,22 +3147,32 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
             let mut redraw = false;
             tokio::select! {
                 terminal_event = terminal_events.next() => {
-                    let Some(terminal_event) = terminal_event else { break; };
-                    match terminal_event.context("terminal input failed")? {
+                        let Some(terminal_event) = terminal_event else { break; };
+                        match terminal_event.context("terminal input failed")? {
                         Event::Key(key) => {
+                            let now = std::time::Instant::now();
+                            let before = keymap.sequence_state(&app, now);
                             if let Some(action) = keymap.map(key, &app) {
                                 apply_action(&mut app, &mut runtime, action);
                                 redraw = true;
                             }
+                            let after = keymap.sequence_state(&app, now);
+                            redraw |= sequence_redraw_needed(&before, &after);
                         }
                         Event::Mouse(mouse) => {
+                            let now = std::time::Instant::now();
+                            let before = keymap.sequence_state(&app, now);
                             keymap.clear_pending();
                             if let Some(action) = map_mouse(mouse, &ui_state, &app) {
                                 apply_action(&mut app, &mut runtime, action);
                                 redraw = true;
                             }
+                            let after = keymap.sequence_state(&app, now);
+                            redraw |= sequence_redraw_needed(&before, &after);
                         }
                         Event::Paste(value) => {
+                            let now = std::time::Instant::now();
+                            let before = keymap.sequence_state(&app, now);
                             keymap.clear_pending();
                             let actions = map_paste(value, &app);
                             if !actions.is_empty() {
@@ -3161,27 +3181,49 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                                 }
                                 redraw = true;
                             }
+                            let after = keymap.sequence_state(&app, now);
+                            redraw |= sequence_redraw_needed(&before, &after);
                         }
                         Event::Resize(_, _) | Event::FocusGained | Event::FocusLost => {
+                            let now = std::time::Instant::now();
+                            let before = keymap.sequence_state(&app, now);
                             keymap.clear_pending();
                             redraw = true;
+                            let after = keymap.sequence_state(&app, now);
+                            redraw |= sequence_redraw_needed(&before, &after);
                         }
                     }
                 }
                 Some(action) = event_receiver.recv() => {
+                    let now = std::time::Instant::now();
+                    let before = keymap.sequence_state(&app, now);
                     apply_action(&mut app, &mut runtime, action);
                     redraw = true;
+                    let after = keymap.sequence_state(&app, now);
+                    redraw |= sequence_redraw_needed(&before, &after);
                 }
                 _ = ticker.tick() => {
                     let now = std::time::Instant::now();
+                    let expired = keymap.expire_pending(&app, now);
+                    let after = keymap.sequence_state(&app, now);
                     redraw = app.expire_clipboard_notice(now)
-                        || ui_state.advance_animations(now);
+                        || ui_state.advance_animations(now)
+                        || expired
+                        || sequence_redraw_needed(&rendered_sequence, &after);
                 }
             }
 
             if redraw && !app.should_quit {
+                let sequence = keymap.sequence_state(&app, std::time::Instant::now());
+                rendered_sequence = sequence.clone();
                 terminal.draw(|frame| {
-                    ui::render_with_state_using_icons(frame, &app, &mut ui_state, icons)
+                    ui::render_with_state_using_icons_and_sequence(
+                        frame,
+                        &app,
+                        &mut ui_state,
+                        icons,
+                        sequence.as_ref(),
+                    )
                 })?;
                 if let Some(style) = ui_state.cursor_style {
                     terminal.set_cursor_style(style)?;
@@ -3219,6 +3261,47 @@ fn apply_action(app: &mut App, runtime: &mut Runtime, action: Action) {
     for command in app.update(action) {
         runtime.dispatch(command);
     }
+}
+
+#[cfg(test)]
+mod key_sequence_redraw_tests {
+    use super::*;
+
+    fn state(display: &str) -> crate::input::keymap::KeySequenceState {
+        crate::input::keymap::KeySequenceState {
+            prefix: crate::help::ShortcutPrefix::Leader,
+            display: display.to_owned(),
+            remaining: Duration::from_millis(100),
+        }
+    }
+
+    #[test]
+    fn sequence_redraw_needed_for_visible_state_transitions_only() {
+        assert!(sequence_redraw_needed(&None, &Some(state("Space"))));
+        assert!(sequence_redraw_needed(&Some(state("Space")), &None));
+        assert!(!sequence_redraw_needed(&None, &None));
+        assert!(!sequence_redraw_needed(
+            &Some(state("Space")),
+            &Some(state("Space"))
+        ));
+        let mut later = state("Space");
+        later.remaining = Duration::from_millis(99);
+        assert!(sequence_redraw_needed(&Some(state("Space")), &Some(later)));
+    }
+
+    #[test]
+    fn sequence_redraw_needed_is_used_for_completion_and_timeout_clear() {
+        let prefix = Some(state("Space"));
+        assert!(sequence_redraw_needed(&prefix, &None));
+        assert!(!sequence_redraw_needed(&None, &None));
+    }
+}
+
+fn sequence_redraw_needed(
+    previous: &Option<crate::input::keymap::KeySequenceState>,
+    current: &Option<crate::input::keymap::KeySequenceState>,
+) -> bool {
+    previous != current
 }
 
 fn sync_editor_viewport(app: &mut App, runtime: &mut Runtime, state: &UiState) {
