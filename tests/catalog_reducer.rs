@@ -558,7 +558,11 @@ fn catalog_drop_failure_keeps_confirmation_and_clears_input() {
             ..
         }) if input.value().is_empty() && error.as_deref() == Some("drop failed")
     ));
-    assert_eq!(app.connection.error.as_deref(), Some("drop failed"));
+    assert!(app.notifications.history().any(|notification| {
+        notification.level == lazydb::model::notification::NotificationLevel::Error
+            && notification.title == "Catalog"
+            && notification.body == "drop failed"
+    }));
     assert!(catalog(&app, profile.id).get(&table.id).is_some());
 }
 

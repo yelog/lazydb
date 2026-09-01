@@ -21,7 +21,6 @@ use crate::{
     },
     editor::{EditorEffect, EditorError, EditorWorkspace},
     model::{
-        clipboard::ClipboardNotice,
         data_query::{
             DataQueryCandidate, DataQueryCapability, DataQueryCompletion, DataQueryInput,
             DataQueryOptions,
@@ -32,6 +31,7 @@ use crate::{
             CatalogGroupState, ExplorerConnectionStatus, ExplorerLoadState, ExplorerNodeId,
             ExplorerOwnerId, ProfileProvenance, owner_for_target,
         },
+        notification::{NotificationCenter, NotificationLevel, NotificationSource},
         profile_manager::{
             ProfileCatalogDiscovery, ProfileField, ProfileManagerPage, ProfileManagerState,
             ProfileOperation,
@@ -208,7 +208,7 @@ pub struct App {
     pending_target_console: Option<Uuid>,
     pub sql_editor_list: crate::model::sql_editor_list::SqlEditorListState,
     workspaces: HashMap<Uuid, ConnectionWorkspace>,
-    pub clipboard_notice: Option<ClipboardNotice>,
+    pub notifications: NotificationCenter,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -375,7 +375,7 @@ impl App {
             pending_target_console: None,
             sql_editor_list: Default::default(),
             workspaces: HashMap::new(),
-            clipboard_notice: None,
+            notifications: NotificationCenter::default(),
         }
     }
 
@@ -607,10 +607,7 @@ impl App {
             return Vec::new();
         };
         let Ok(Some(scope)) = self.editor.current_scope(tab.id, self.sql_dialect()) else {
-            self.clipboard_notice = Some(ClipboardNotice::error(
-                "Nothing to copy at the cursor",
-                Instant::now(),
-            ));
+            self.notify_warning("Clipboard", "Nothing to copy at the cursor");
             return Vec::new();
         };
         vec![Command::WriteClipboard(ClipboardPayload {
@@ -625,10 +622,7 @@ impl App {
             return Vec::new();
         };
         if text.is_empty() {
-            self.clipboard_notice = Some(ClipboardNotice::error(
-                "Nothing to copy in the editor",
-                Instant::now(),
-            ));
+            self.notify_warning("Clipboard", "Nothing to copy in the editor");
             return Vec::new();
         }
         vec![Command::WriteClipboard(ClipboardPayload {
@@ -640,10 +634,7 @@ impl App {
 
     fn copy_grid_cell(&mut self) -> Vec<Command> {
         let Some((columns, row, _, _)) = self.active_record_snapshot() else {
-            self.clipboard_notice = Some(ClipboardNotice::error(
-                "Nothing to copy in the current Data view",
-                Instant::now(),
-            ));
+            self.notify_warning("Clipboard", "Nothing to copy in the current Data view");
             return Vec::new();
         };
         let column = self.active_grid_column();
@@ -658,10 +649,7 @@ impl App {
 
     fn copy_grid_row(&mut self, include_headers: bool) -> Vec<Command> {
         let Some((columns, row, _, _)) = self.active_record_snapshot() else {
-            self.clipboard_notice = Some(ClipboardNotice::error(
-                "Nothing to copy in the current Data view",
-                Instant::now(),
-            ));
+            self.notify_warning("Clipboard", "Nothing to copy in the current Data view");
             return Vec::new();
         };
         copy_row_tsv(&columns, &row, include_headers)
@@ -692,19 +680,6 @@ impl App {
 
     pub(crate) fn pane_layout_metrics(&self) -> PaneLayoutMetrics {
         self.pane_layout
-    }
-
-    pub fn expire_clipboard_notice(&mut self, now: Instant) -> bool {
-        if self
-            .clipboard_notice
-            .as_ref()
-            .is_some_and(|notice| notice.is_expired(now))
-        {
-            self.clipboard_notice = None;
-            true
-        } else {
-            false
-        }
     }
 
     pub fn active_editor_viewport(&self) -> Result<EditorViewport, EditorError> {
@@ -1158,6 +1133,8 @@ impl App {
             Id::CloseTab => vec![Action::CloseActiveTab],
             Id::DeleteConsole => vec![Action::RequestDeleteActiveConsole],
             Id::OpenSqlEditors => vec![Action::OpenSqlEditorList],
+            Id::OpenNotificationHistory => vec![Action::OpenNotificationHistory],
+            Id::OpenNotificationHistoryLeader => vec![Action::OpenNotificationHistory],
             Id::ExplorerMoveDown => vec![Action::ExplorerMove(1)],
             Id::ExplorerMoveUp => vec![Action::ExplorerMove(-1)],
             Id::ExplorerFirst => vec![Action::ExplorerSelectTarget(
@@ -1363,7 +1340,7 @@ impl App {
             Id::RelationInsertRow => vec![Action::RelationInsertRow],
             Id::RelationUndo => vec![Action::RelationUndo],
             Id::RelationRedo => vec![Action::RelationRedo],
-            Id::RelationCommit => vec![Action::RelationCommit],
+            Id::RelationCommit => vec![Action::OpenTransactionControl],
             Id::RelationRollback => vec![Action::RelationRollback],
             Id::RelationYankRow => vec![Action::RelationYank],
             Id::RecordFirstField => vec![Action::RecordViewJumpFirstField],
@@ -1505,6 +1482,7 @@ impl App {
                         | Action::RequestDeleteActiveConsole
                         | Action::ConfirmDeleteConsole
                         | Action::CancelDeleteConsole
+                        | Action::OpenNotificationHistory
                         | Action::OpenSqlEditorList
                         | Action::SqlEditorListInsert(_)
                         | Action::SqlEditorListBackspace
@@ -1574,6 +1552,7 @@ impl App {
                     | Action::RequestDeleteActiveConsole
                     | Action::ConfirmDeleteConsole
                     | Action::CancelDeleteConsole
+                    | Action::OpenNotificationHistory
             )
         {
             return Vec::new();
@@ -1923,6 +1902,86 @@ impl App {
                 }
                 Vec::new()
             }
+            Action::OpenNotificationHistory => {
+                self.overlay = Some(Overlay::NotificationHistory(
+                    crate::model::notification::NotificationHistoryState::new(),
+                ));
+                Vec::new()
+            }
+            Action::NotificationHistorySearchOpen => {
+                if let Some(Overlay::NotificationHistory(state)) = self.overlay.as_mut() {
+                    state.begin_search();
+                }
+                Vec::new()
+            }
+            Action::NotificationHistorySearchInsert(character) => {
+                if let Some(Overlay::NotificationHistory(state)) = self.overlay.as_mut() {
+                    state.push_search_char(character);
+                }
+                Vec::new()
+            }
+            Action::NotificationHistorySearchBackspace => {
+                if let Some(Overlay::NotificationHistory(state)) = self.overlay.as_mut() {
+                    state.backspace_search();
+                }
+                Vec::new()
+            }
+            Action::NotificationHistorySearchClear => {
+                if let Some(Overlay::NotificationHistory(state)) = self.overlay.as_mut() {
+                    state.clear_search();
+                }
+                Vec::new()
+            }
+            Action::NotificationHistorySearchConfirm => {
+                let history = self.notifications.history().cloned().collect::<Vec<_>>();
+                if let Some(Overlay::NotificationHistory(state)) = self.overlay.as_mut() {
+                    state.confirm_search(&history);
+                }
+                Vec::new()
+            }
+            Action::NotificationHistoryNext | Action::NotificationHistoryPrevious => {
+                let history = self.notifications.history().cloned().collect::<Vec<_>>();
+                if let Some(Overlay::NotificationHistory(state)) = self.overlay.as_mut() {
+                    if matches!(action, Action::NotificationHistoryNext) {
+                        state.next_match(&history);
+                    } else {
+                        state.previous_match(&history);
+                    }
+                }
+                Vec::new()
+            }
+            Action::NotificationHistoryMove(delta) => {
+                let count = self.notifications.history().count();
+                if let Some(Overlay::NotificationHistory(state)) = self.overlay.as_mut() {
+                    state.move_selection(delta, count);
+                }
+                Vec::new()
+            }
+            Action::NotificationHistoryClear => {
+                if let Some(Overlay::NotificationHistory(state)) = self.overlay.as_mut() {
+                    state.request_clear();
+                }
+                Vec::new()
+            }
+            Action::NotificationHistoryClearConfirm => {
+                self.notifications.clear_all();
+                if let Some(Overlay::NotificationHistory(state)) = self.overlay.as_mut() {
+                    state.clear_confirm = false;
+                    state.selected = 0;
+                    state.active_match = 0;
+                }
+                Vec::new()
+            }
+            Action::NotificationHistoryClearCancel => {
+                if let Some(Overlay::NotificationHistory(state)) = self.overlay.as_mut() {
+                    state.cancel_clear();
+                }
+                Vec::new()
+            }
+            Action::DismissNotification(id) => {
+                self.notifications.dismiss_live(id);
+                Vec::new()
+            }
             Action::SubstituteYes
             | Action::SubstituteNo
             | Action::SubstituteAll
@@ -1977,7 +2036,7 @@ impl App {
                     .as_ref()
                     .is_some_and(|manager| manager.operation.is_some())
                 {
-                    self.status_message("Profile operation already in progress");
+                    self.notify_warning("LazyDB", "Profile operation already in progress");
                     return Vec::new();
                 }
                 let mut manager = ProfileManagerState::default();
@@ -1993,7 +2052,7 @@ impl App {
                     .as_ref()
                     .is_some_and(|manager| manager.operation.is_some())
                 {
-                    self.status_message("Profile operation already in progress");
+                    self.notify_warning("LazyDB", "Profile operation already in progress");
                     return Vec::new();
                 }
                 if let Some(profile) = self
@@ -2018,27 +2077,38 @@ impl App {
             }
             Action::RequestDropCatalogObject { id } => {
                 let Some(connection) = self.database_command_identity() else {
-                    self.status_message(
+                    self.notify_warning(
+                        "LazyDB",
                         "Connect to an online database before dropping catalog objects",
                     );
                     return Vec::new();
                 };
                 let Some(profile) = self.active_profile() else {
-                    self.status_message("No active profile for the selected catalog object");
+                    self.notify_warning(
+                        "Catalog",
+                        "No active profile for the selected catalog object",
+                    );
                     return Vec::new();
                 };
                 if profile.read_only {
-                    self.status_message("Catalog drops are unavailable on a read-only profile");
+                    self.notify_warning(
+                        "Catalog",
+                        "Catalog drops are unavailable on a read-only profile",
+                    );
                     return Vec::new();
                 }
                 if self.has_running_query() {
-                    self.status_message(
+                    self.notify_warning(
+                        "Catalog",
                         "Wait for running SQL or catalog loads to finish before dropping",
                     );
                     return Vec::new();
                 }
                 if id.profile_id() != connection.profile_id {
-                    self.status_message("Selected catalog object belongs to another profile");
+                    self.notify_warning(
+                        "Catalog",
+                        "Selected catalog object belongs to another profile",
+                    );
                     return Vec::new();
                 }
                 let Some(state) = self
@@ -2047,11 +2117,14 @@ impl App {
                     .profiles
                     .get(&connection.profile_id)
                 else {
-                    self.status_message("Catalog is unavailable for the active profile");
+                    self.notify_warning("Catalog", "Catalog is unavailable for the active profile");
                     return Vec::new();
                 };
                 let Some(entry) = state.catalog.get(&id).cloned() else {
-                    self.status_message("Selected catalog object is no longer available");
+                    self.notify_warning(
+                        "Catalog",
+                        "Selected catalog object is no longer available",
+                    );
                     return Vec::new();
                 };
                 let catalog_epoch = state.catalog_epoch;
@@ -2075,7 +2148,7 @@ impl App {
                 Vec::new()
             }
             Action::CatalogDropPlanFailed { error, .. } => {
-                self.status_message(&error.to_string());
+                self.notify_error("Catalog", error.to_string());
                 Vec::new()
             }
             Action::CatalogDropInsert(character) => {
@@ -2113,7 +2186,10 @@ impl App {
                     return Vec::new();
                 }
                 if input.value() != "y" {
-                    self.status_message("Type exactly lowercase y, then press Enter to confirm");
+                    self.notify_warning(
+                        "Catalog",
+                        "Type exactly lowercase y, then press Enter to confirm",
+                    );
                     return Vec::new();
                 }
                 let current_epoch = self
@@ -2125,7 +2201,10 @@ impl App {
                 if self.connection.active_identity() != Some(plan.request.connection)
                     || current_epoch != Some(plan.request.catalog_epoch)
                 {
-                    self.status_message("Catalog drop plan is stale; reload and try again");
+                    self.notify_warning(
+                        "Catalog",
+                        "Catalog drop plan is stale; reload and try again",
+                    );
                     return Vec::new();
                 }
                 *busy = true;
@@ -2141,7 +2220,7 @@ impl App {
                 let Some(Overlay::CatalogDropConfirm { plan: expected, .. }) =
                     self.overlay.as_ref()
                 else {
-                    self.status_message("Stale catalog drop result discarded");
+                    self.notify_info("Catalog", "Stale catalog drop result discarded");
                     return Vec::new();
                 };
                 let identity_matches =
@@ -2153,13 +2232,16 @@ impl App {
                     .get(&plan.request.connection.profile_id)
                     .is_some_and(|state| state.catalog_epoch == plan.request.catalog_epoch);
                 if **expected != plan || !identity_matches || !epoch_matches {
-                    self.status_message("Stale catalog drop result discarded");
+                    self.notify_info("Catalog", "Stale catalog drop result discarded");
                     return Vec::new();
                 }
                 let removed = match self.explorer.remove_dropped_subtree(&plan.object) {
                     Ok(removed) => removed,
                     Err(error) => {
-                        self.status_message(&format!("Catalog drop state update failed: {error}"));
+                        self.notify_error(
+                            "Catalog",
+                            format!("Catalog drop state update failed: {error}"),
+                        );
                         return Vec::new();
                     }
                 };
@@ -2171,7 +2253,7 @@ impl App {
                     .rebuild_projection(plan.request.connection.profile_id);
                 self.explorer.refresh_frontend_search();
                 self.overlay = None;
-                self.status_message("Catalog object dropped");
+                self.notify_success("Catalog", "Catalog object dropped");
                 Vec::new()
             }
             Action::CatalogDropFailed { plan, message } => {
@@ -2181,7 +2263,7 @@ impl App {
                     busy: false,
                     error: Some(message.clone()),
                 });
-                self.status_message(&message);
+                self.notify_error("Catalog", &message);
                 Vec::new()
             }
             Action::ProfileConfirmDelete => self.confirm_profile_delete(),
@@ -2444,14 +2526,11 @@ impl App {
                         state.placement = profile_placement(profile, Some(&self.project.root));
                     }
                 }
-                self.clipboard_notice = Some(ClipboardNotice::success(
-                    "Connection access updated",
-                    Instant::now(),
-                ));
+                self.notify_success("Profile", "Connection access updated");
                 Vec::new()
             }
             Action::ProfileAccessUpdateFailed { message, .. } => {
-                self.clipboard_notice = Some(ClipboardNotice::error(message, Instant::now()));
+                self.notify_error("Profile", &message);
                 Vec::new()
             }
             Action::OpenProfileAccess => self.open_profile_access(),
@@ -2516,6 +2595,7 @@ impl App {
                     ConnectionStatus::Failed
                 };
                 self.connection.error = Some(message.clone());
+                self.notify_error("Connection", message.clone());
                 if let Some(state) = self.explorer.normalized.profiles.get_mut(&profile_id) {
                     state.status = ExplorerConnectionStatus::Failed;
                     state.last_error = Some(message.clone());
@@ -2616,10 +2696,7 @@ impl App {
                 self.apply_editor_effects(CompletionAfterEdit::Schedule)
             }
             Action::ClipboardWritten { description } => {
-                self.clipboard_notice = Some(ClipboardNotice::success(
-                    format!("Copied {description}"),
-                    Instant::now(),
-                ));
+                self.notify_success("Clipboard", format!("Copied {description}"));
                 Vec::new()
             }
             Action::CopyEditorYank(text) => vec![Command::WriteClipboard(ClipboardPayload {
@@ -2632,7 +2709,7 @@ impl App {
             Action::CopyGridCell => self.copy_grid_cell(),
             Action::CopyGridRow { include_headers } => self.copy_grid_row(include_headers),
             Action::ClipboardWriteFailed { message } => {
-                self.clipboard_notice = Some(ClipboardNotice::error(message, Instant::now()));
+                self.notify_error("Clipboard", &message);
                 Vec::new()
             }
             Action::EditorViewportChanged(viewport) => {
@@ -2837,7 +2914,10 @@ impl App {
             }
             Action::OpenTargetSelector => {
                 let Some(profile) = self.active_profile().cloned() else {
-                    self.status_message("No active connection; connect before selecting a target");
+                    self.notify_warning(
+                        "LazyDB",
+                        "No active connection; connect before selecting a target",
+                    );
                     return Vec::new();
                 };
                 if self.active_workspace_profile != Some(profile.id) || self.tabs.is_empty() {
@@ -2857,7 +2937,10 @@ impl App {
                     .active_console_opt()
                     .and_then(|tab| tab.execution_target.as_ref())
                 else {
-                    self.status_message("No active console; connect before selecting a target");
+                    self.notify_warning(
+                        "LazyDB",
+                        "No active console; connect before selecting a target",
+                    );
                     return Vec::new();
                 };
                 let selected = candidates
@@ -2946,19 +3029,23 @@ impl App {
                     return Vec::new();
                 }
                 if tab.query_status == QueryStatus::Running {
-                    self.status_message("Cannot change target while a query is running");
+                    self.notify_warning("LazyDB", "Cannot change target while a query is running");
                     return Vec::new();
                 }
                 if tab.transaction_mode == TransactionMode::Manual
                     && tab.transaction_state != TransactionState::Idle
                 {
-                    self.status_message(
+                    self.notify_warning(
+                        "LazyDB",
                         "Cannot change target while a manual transaction is active",
                     );
                     return Vec::new();
                 }
                 if self.has_running_query() {
-                    self.status_message("Cannot change target while another query is running");
+                    self.notify_warning(
+                        "LazyDB",
+                        "Cannot change target while another query is running",
+                    );
                     return Vec::new();
                 }
                 if self.tabs.iter().any(|workspace_tab| {
@@ -2967,7 +3054,8 @@ impl App {
                             && console.transaction_state != TransactionState::Idle
                     })
                 }) {
-                    self.status_message(
+                    self.notify_warning(
+                        "LazyDB",
                         "Cannot change target while another manual transaction is active",
                     );
                     return Vec::new();
@@ -3000,7 +3088,7 @@ impl App {
                             || tab.query_status != QueryStatus::Running
                     })
                 {
-                    self.status_message("Stale cancellation request discarded");
+                    self.notify_info("LazyDB", "Stale cancellation request discarded");
                     return Vec::new();
                 }
                 let tab = self
@@ -3491,6 +3579,7 @@ impl App {
                         ConnectionStatus::Failed
                     };
                     self.connection.error = Some(message.clone());
+                    self.notify_error("Connection", message.clone());
                     if let Some(state) = self.explorer.normalized.profiles.get_mut(&profile_id) {
                         state.status = ExplorerConnectionStatus::Failed;
                         state.last_error = Some(message.clone());
@@ -3522,6 +3611,7 @@ impl App {
                 self.connection.server = None;
                 self.connection.target = None;
                 self.connection.error = Some(message.clone());
+                self.notify_error("Connection", message.clone());
                 self.connection.status = if pending_profile_id.is_some() {
                     self.connection.pending_profile_id = None;
                     self.connection.pending_generation = None;
@@ -4555,13 +4645,17 @@ impl App {
                     vec![Command::Quit]
                 }
                 WorkspaceExitCheck::Running => {
-                    self.status_message(
+                    self.notify_warning(
+                        "LazyDB",
                         "Wait for running SQL or relation loads to finish before quitting",
                     );
                     Vec::new()
                 }
                 WorkspaceExitCheck::RelationTransaction => {
-                    self.status_message("Commit or roll back relation edits before quitting");
+                    self.notify_warning(
+                        "LazyDB",
+                        "Commit or roll back relation edits before quitting",
+                    );
                     Vec::new()
                 }
                 WorkspaceExitCheck::ConsoleTransactions(ids) => {
@@ -4658,11 +4752,14 @@ impl App {
         if tab.transaction_mode != TransactionMode::Manual
             || tab.transaction_state == TransactionState::Idle
         {
-            self.status_message("No active manual transaction");
+            self.notify_warning("Transaction", "No active manual transaction");
             return Vec::new();
         }
         if tab.query_status == QueryStatus::Running {
-            self.status_message("Wait for the query to finish or cancel it before resolving");
+            self.notify_warning(
+                "Transaction",
+                "Wait for the query to finish or cancel it before resolving",
+            );
             return Vec::new();
         }
         let id = tab.id;
@@ -4702,7 +4799,7 @@ impl App {
             return self.replay_deferred(prompt.intent);
         };
         if tab.transaction_generation != prompt.transaction_generation {
-            self.status_message("Stale transaction exit prompt discarded");
+            self.notify_info("Transaction", "Stale transaction exit prompt discarded");
             self.show_next_deferred();
             return Vec::new();
         }
@@ -4711,7 +4808,10 @@ impl App {
                 prompt,
                 choice: TransactionExitChoice::Rollback,
             });
-            self.status_message("Wait for the query to finish or cancel it before resolving");
+            self.notify_warning(
+                "Transaction",
+                "Wait for the query to finish or cancel it before resolving",
+            );
             return Vec::new();
         }
         if choice == TransactionExitChoice::Cancel {
@@ -4749,7 +4849,10 @@ impl App {
                 prompt,
                 choice: TransactionExitChoice::Rollback,
             });
-            self.status_message("COMMIT is unavailable for an aborted transaction");
+            self.notify_warning(
+                "Transaction",
+                "COMMIT is unavailable for an aborted transaction",
+            );
             return Vec::new();
         }
         let commit = choice == TransactionExitChoice::Commit;
@@ -5072,7 +5175,10 @@ impl App {
                         && tab.transaction_state == TransactionState::OutcomeUnknown
                 });
         if !valid {
-            self.status_message("Stale transaction outcome verification discarded");
+            self.notify_info(
+                "Transaction",
+                "Stale transaction outcome verification discarded",
+            );
             return Vec::new();
         }
         let tab = self
@@ -5503,11 +5609,12 @@ impl App {
             match self.workspace_exit_check() {
                 WorkspaceExitCheck::Ready => {}
                 WorkspaceExitCheck::Running => {
-                    self.status_message("Wait for running SQL or relation loads to finish before switching connections");
+                    self.notify_warning("Connection", "Wait for running SQL or relation loads to finish before switching connections");
                     return Vec::new();
                 }
                 WorkspaceExitCheck::RelationTransaction => {
-                    self.status_message(
+                    self.notify_warning(
+                        "Connection",
                         "Commit or roll back relation edits before switching connections",
                     );
                     return Vec::new();
@@ -5999,29 +6106,23 @@ impl App {
         let scope = match self.editor.current_scope(id, dialect) {
             Ok(Some(scope)) => scope,
             _ => {
-                self.overlay = Some(Overlay::Message {
-                    title: "FORMAT".into(),
-                    body: "No SQL scope at cursor".into(),
-                });
+                self.notify_warning("Format", "No SQL scope at cursor");
                 return;
             }
         };
         if scope.kind == sql::ScopeKind::VisualBlock
             || matches!(scope.source, ScopeSource::Block(_))
         {
-            self.overlay = Some(Overlay::Message {
-                title: "FORMAT".into(),
-                body: "Visual Block formatting is unsupported; select a contiguous range".into(),
-            });
+            self.notify_warning(
+                "Format",
+                "Visual Block formatting is unsupported; select a contiguous range",
+            );
             return;
         }
         let formatted = match sql::format_sql(&scope.sql, dialect) {
             Ok(formatted) => formatted,
             Err(error) => {
-                self.overlay = Some(Overlay::Message {
-                    title: "FORMAT".into(),
-                    body: error.to_string(),
-                });
+                self.notify_error("Format", error.to_string());
                 return;
             }
         };
@@ -6034,10 +6135,9 @@ impl App {
             &formatted,
             crate::editor::ReplacementCursor::Start,
         ) {
-            self.overlay = Some(Overlay::Message {
-                title: "FORMAT".into(),
-                body: error.to_string(),
-            });
+            self.notify_error("Format", error.to_string());
+        } else {
+            self.notify_success("Format", "SQL formatted");
         }
     }
 
@@ -6097,11 +6197,11 @@ impl App {
 
     fn run_active_sql(&mut self, full_buffer: bool) -> Vec<Command> {
         let Some(connection) = self.database_command_identity() else {
-            self.status_message("No active database connection");
+            self.notify_warning("Query", "No active database connection");
             return Vec::new();
         };
         let Some(tab_id) = self.active_console_opt().map(|tab| tab.id) else {
-            self.status_message("No active SQL console");
+            self.notify_warning("Query", "No active SQL console");
             return Vec::new();
         };
         let sql = self.editor_text(tab_id).unwrap_or_default();
@@ -6116,7 +6216,7 @@ impl App {
             self.editor.current_scope(tab_id, dialect).ok().flatten()
         };
         let Some(scope) = scope else {
-            self.status_message("No SQL scope at cursor");
+            self.notify_warning("Query", "No SQL scope at cursor");
             return Vec::new();
         };
         match sql::classify_transaction_sql(&scope.sql, dialect) {
@@ -6131,7 +6231,7 @@ impl App {
             return Vec::new();
         }
         let Some(target) = tab.execution_target.clone() else {
-            self.status_message("Select an execution target before running SQL");
+            self.notify_warning("Query", "Select an execution target before running SQL");
             return Vec::new();
         };
         let draft = sql::ExecutionDraft::new(
@@ -6149,7 +6249,10 @@ impl App {
             tab.transaction_state,
         );
         if draft.has_mixed_transaction_control() {
-            self.status_message("Mixed transaction-control and data SQL is rejected");
+            self.notify_warning(
+                "Query",
+                "Mixed transaction-control and data SQL is rejected",
+            );
             return Vec::new();
         }
         if draft.requires_confirmation(self.confirmation_policy == ConfirmationPolicy::Always) {
@@ -6171,7 +6274,7 @@ impl App {
         use sql::TransactionControl;
         let tab = self.active_console();
         let Some(target) = tab.execution_target.clone() else {
-            self.status_message("Select an execution target before running SQL");
+            self.notify_warning("Query", "Select an execution target before running SQL");
             return Vec::new();
         };
         match control {
@@ -6211,7 +6314,8 @@ impl App {
                 )
             }
             _ => {
-                self.status_message(
+                self.notify_warning(
+                    "Query",
                     "Transaction control is unavailable in the current transaction state",
                 );
                 Vec::new()
@@ -6227,7 +6331,7 @@ impl App {
     ) -> Vec<Command> {
         let tab = self.active_console();
         let Some(target) = tab.execution_target.clone() else {
-            self.status_message("Select an execution target before running SQL");
+            self.notify_warning("Query", "Select an execution target before running SQL");
             return Vec::new();
         };
         if tab.transaction_state != TransactionState::Idle
@@ -6267,12 +6371,15 @@ impl App {
             return Vec::new();
         }
         if let Err(message) = self.validate_draft(&draft) {
-            self.status_message(&message);
+            self.notify_error("Query", &message);
             self.retain_execution(draft, ExecutionResult::Cancelled);
             return Vec::new();
         }
         if draft.has_transaction_control() {
-            self.status_message("Transaction-control execution is unavailable until Task 16");
+            self.notify_warning(
+                "Query",
+                "Transaction-control execution is unavailable until Task 16",
+            );
             self.retain_execution(draft, ExecutionResult::Cancelled);
             return Vec::new();
         }
@@ -6325,7 +6432,7 @@ impl App {
 
     fn dispatch_draft(&mut self, draft: sql::ExecutionDraft) -> Vec<Command> {
         if let Err(message) = self.validate_draft(&draft) {
-            self.status_message(&message);
+            self.notify_error("Query", &message);
             return Vec::new();
         }
         let tab = self
@@ -6588,8 +6695,34 @@ impl App {
         self.editor.revision(id).unwrap_or_default()
     }
 
-    fn status_message(&mut self, message: &str) {
-        self.connection.error = Some(message.to_owned());
+    fn notify(&mut self, level: NotificationLevel, title: &str, body: impl Into<String>) {
+        let source = match title {
+            "Connection" => NotificationSource::Connection,
+            "Query" => NotificationSource::Query,
+            "Catalog" => NotificationSource::Catalog,
+            "Clipboard" => NotificationSource::Clipboard,
+            "Profile" => NotificationSource::Profile,
+            "Relation" | "Format" => NotificationSource::Editor,
+            _ => NotificationSource::Editor,
+        };
+        self.notifications
+            .push_source(level, title, body, source, Instant::now());
+    }
+
+    fn notify_info(&mut self, title: &str, body: impl Into<String>) {
+        self.notify(NotificationLevel::Info, title, body);
+    }
+
+    fn notify_success(&mut self, title: &str, body: impl Into<String>) {
+        self.notify(NotificationLevel::Success, title, body);
+    }
+
+    fn notify_warning(&mut self, title: &str, body: impl Into<String>) {
+        self.notify(NotificationLevel::Warning, title, body);
+    }
+
+    fn notify_error(&mut self, title: &str, body: impl Into<String>) {
+        self.notify(NotificationLevel::Error, title, body);
     }
 
     fn start_catalog_request(
@@ -7037,10 +7170,7 @@ impl App {
             .get(&profile_id)
             .is_some_and(|state| state.provenance == ProfileProvenance::Saved)
         {
-            self.clipboard_notice = Some(ClipboardNotice::error(
-                "Session connections have no saved access scope",
-                Instant::now(),
-            ));
+            self.notify_warning("Profile", "Session connections have no saved access scope");
             return Vec::new();
         }
         let root = self.project.root.clone();
@@ -7370,13 +7500,17 @@ impl App {
         };
         match self.workspace_exit_check() {
             WorkspaceExitCheck::Running => {
-                self.status_message(
+                self.notify_warning(
+                    "Connection",
                     "Wait for running SQL or relation loads to finish before disconnecting",
                 );
                 return Vec::new();
             }
             WorkspaceExitCheck::RelationTransaction => {
-                self.status_message("Commit or roll back relation edits before disconnecting");
+                self.notify_warning(
+                    "Connection",
+                    "Commit or roll back relation edits before disconnecting",
+                );
                 return Vec::new();
             }
             WorkspaceExitCheck::Ready => {}
@@ -8073,7 +8207,10 @@ impl App {
             return Vec::new();
         }
         if commit && tab.transaction_state == TransactionState::Aborted {
-            self.status_message("Roll back the aborted relation transaction before committing");
+            self.notify_warning(
+                "Relation",
+                "Roll back the aborted relation transaction before committing",
+            );
             return Vec::new();
         }
         tab.transaction_state = if commit {
@@ -8231,7 +8368,7 @@ impl App {
                 Some((requests, edit.clone()))
             })
         else {
-            self.status_message("Relation metadata is not ready for saving");
+            self.notify_warning("Relation", "Relation metadata is not ready for saving");
             return Vec::new();
         };
         if requests.is_empty() {
@@ -8263,11 +8400,11 @@ impl App {
             return Vec::new();
         };
         if tab.descriptor.key.profile_id != connection.profile_id {
-            self.connection.error = Some("Relation belongs to a different connection".into());
+            self.notify_warning("Relation", "Relation belongs to a different connection");
             return Vec::new();
         }
         if !relation_is_in_scope(tab, &profile.catalog_scope) {
-            self.connection.error = Some("Relation is outside the active catalog scope".into());
+            self.notify_warning("Relation", "Relation is outside the active catalog scope");
             return Vec::new();
         }
         let Some(edit) = tab.edit.as_mut() else {
@@ -8275,7 +8412,7 @@ impl App {
         };
         edit.save_after_metadata_load = true;
         if matches!(tab.ddl, RelationLoad::Loading { .. }) {
-            self.connection.error = Some(RELATION_METADATA_SAVE_MESSAGE.into());
+            self.notify_info("Relation", RELATION_METADATA_SAVE_MESSAGE);
             return Vec::new();
         }
         let request = RelationRequest {
@@ -8304,7 +8441,7 @@ impl App {
             request: request.clone(),
             previous,
         };
-        self.connection.error = Some(RELATION_METADATA_SAVE_MESSAGE.into());
+        self.notify_info("Relation", RELATION_METADATA_SAVE_MESSAGE);
         vec![Command::LoadRelationDdl(request)]
     }
 
@@ -8334,7 +8471,7 @@ impl App {
             tab.transaction_state = TransactionState::Idle;
             tab.transaction_snapshot = None;
         }
-        self.status_message(&message);
+        self.notify_error("Relation", &message);
     }
 
     fn relation_mutation_result(
@@ -8451,11 +8588,14 @@ impl App {
                     }
                 }
                 tab.transaction_state = TransactionState::Aborted;
-                self.connection.error = Some(message);
                 tab.transaction_state = TransactionState::RollingBack;
+                let tab_id = tab.id;
+                let generation = tab.transaction_generation;
+                let _ = tab;
+                self.notify_error("Relation", message);
                 return vec![Command::RelationRollback {
-                    tab_id: tab.id,
-                    generation: tab.transaction_generation,
+                    tab_id,
+                    generation,
                     connection: request.connection,
                 }];
             }
@@ -8507,15 +8647,12 @@ impl App {
             }
         }
         if let Some((message, _)) = error {
-            self.status_message(&message);
+            self.notify_error("Relation", &message);
         } else if committed {
             if self.connection.error.as_deref() == Some(RELATION_METADATA_SAVE_MESSAGE) {
                 self.connection.error = None;
             }
-            self.clipboard_notice = Some(ClipboardNotice::success(
-                "Relation changes committed",
-                Instant::now(),
-            ));
+            self.notify_success("Relation", "Relation changes committed");
         }
     }
 
@@ -8612,14 +8749,20 @@ impl App {
             tab.transaction_state,
             TransactionState::Aborted | TransactionState::OutcomeUnknown
         ) {
-            self.status_message("Transaction outcome must be resolved before mutating");
+            self.notify_warning(
+                "Relation",
+                "Transaction outcome must be resolved before mutating",
+            );
             return None;
         }
         if !matches!(
             tab.transaction_state,
             TransactionState::Idle | TransactionState::Active
         ) {
-            self.status_message("Wait for the relation transaction to finish before mutating");
+            self.notify_warning(
+                "Relation",
+                "Wait for the relation transaction to finish before mutating",
+            );
             return None;
         }
         if tab.transaction_state == TransactionState::Idle {
@@ -8706,11 +8849,14 @@ impl App {
             tab.transaction_state,
             TransactionState::Aborted | TransactionState::OutcomeUnknown
         ) {
-            self.status_message("Transaction outcome must be resolved before mutating");
+            self.notify_warning(
+                "Relation",
+                "Transaction outcome must be resolved before mutating",
+            );
             return Vec::new();
         }
         if tab.transaction_state != TransactionState::Active {
-            self.status_message("Relation transaction is not active");
+            self.notify_warning("Relation", "Relation transaction is not active");
             return Vec::new();
         }
         let Some(edit) = tab.edit.as_mut() else {
@@ -8816,7 +8962,10 @@ impl App {
         if let Some(WorkspaceTab::Relation(tab)) = self.tabs.get(self.active_tab)
             && (tab.transaction_state != TransactionState::Idle || relation_has_pending_edits(tab))
         {
-            self.status_message("Commit or discard relation edits before refreshing");
+            self.notify_warning(
+                "Relation",
+                "Commit or discard relation edits before refreshing",
+            );
             return Vec::new();
         }
         let Some(connection) = self.database_command_identity() else {
@@ -8953,7 +9102,10 @@ impl App {
                 || tab.transaction_state != TransactionState::Idle
                 || tab.transaction_snapshot.is_some()
             {
-                self.status_message("Commit or discard relation edits before changing pages");
+                self.notify_warning(
+                    "Relation",
+                    "Commit or discard relation edits before changing pages",
+                );
                 return Vec::new();
             }
             match action {
@@ -9029,6 +9181,7 @@ impl App {
             return Vec::new();
         };
         let mut continue_save = false;
+        let mut metadata_error = None;
         match (request.kind, result) {
             (RelationRequestKind::Preview, Ok(RelationSnapshot::Preview(snapshot))) => {
                 if matches!(&tab.data, RelationLoad::Loading { request: pending, .. } if pending == &request)
@@ -9097,7 +9250,7 @@ impl App {
                     if let Some(edit) = tab.edit.as_mut() {
                         edit.save_after_metadata_load = false;
                     }
-                    self.connection.error = Some(format!(
+                    metadata_error = Some(format!(
                         "Could not load relation metadata for saving: {message}"
                     ));
                     tab.ddl = RelationLoad::Failed {
@@ -9108,7 +9261,12 @@ impl App {
             }
             _ => {}
         }
-        if continue_save && tab_index == self.active_tab {
+        let should_continue = continue_save && tab_index == self.active_tab;
+        let _ = tab;
+        if let Some(message) = metadata_error {
+            self.notify_error("Relation", message);
+        }
+        if should_continue {
             self.relation_save()
         } else {
             Vec::new()
@@ -9641,10 +9799,10 @@ mod tests {
         );
 
         assert!(app.connection.error.is_none());
-        assert!(app.clipboard_notice.as_ref().is_some_and(|notice| {
-            notice.kind == crate::model::clipboard::ClipboardNoticeKind::Success
-                && notice.message == "Relation changes committed"
-        }));
+        assert_eq!(
+            app.notifications.history().next().unwrap().body,
+            "Relation changes committed"
+        );
     }
 
     #[test]
@@ -9675,7 +9833,7 @@ mod tests {
             app.connection.error.as_deref(),
             Some(super::RELATION_METADATA_SAVE_MESSAGE)
         );
-        assert!(app.clipboard_notice.is_none());
+        assert!(app.notifications.history().next().is_none());
     }
 
     #[test]
