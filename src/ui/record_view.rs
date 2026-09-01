@@ -99,7 +99,7 @@ pub(crate) fn render(
         .collect::<Vec<_>>();
     let list = List::new(items)
         .style(Style::new().bg(theme.surface_raised))
-        .highlight_style(Style::new().bg(theme.selection).fg(theme.text));
+        .highlight_style(Style::new().bg(theme.selection));
     let selected = view.selected_field.checked_sub(view.field_offset);
     let mut list_state = ListState::default().with_selected(selected);
     frame.render_stateful_widget(list, chunks[1], &mut list_state);

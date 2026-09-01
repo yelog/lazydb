@@ -184,9 +184,7 @@ pub(crate) fn render(
                 crate::model::relation_edit::EditableRowState::Conflict { .. } => {
                     Some(Style::new().fg(theme.row_deleted))
                 }
-                crate::model::relation_edit::EditableRowState::Clean => {
-                    Some(Style::new().fg(theme.text))
-                }
+                crate::model::relation_edit::EditableRowState::Clean => None,
             });
             let changed_columns = editable.and_then(|row| match &row.state {
                 crate::model::relation_edit::EditableRowState::Updated { changed_columns } => {
@@ -218,7 +216,7 @@ pub(crate) fn render(
             .bg(theme.row_deleted_background)
             .add_modifier(Modifier::DIM)
     } else {
-        Style::new().bg(theme.selection).fg(theme.text)
+        Style::new().bg(theme.selection)
     };
     let table = Table::new(rows, constraints)
         .header(header)

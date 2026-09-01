@@ -52,7 +52,7 @@ impl CellValue {
 
     pub fn preview(&self, max_len: usize) -> CellPreview {
         match self {
-            Self::Null => CellPreview::complete("NULL", 0),
+            Self::Null => CellPreview::complete("<null>", 0),
             Self::Boolean(value) => CellPreview::complete(if *value { "true" } else { "false" }, 1),
             Self::Integer(value) => CellPreview::complete(value.to_string(), 1),
             Self::Unsigned(value) => CellPreview::complete(value.to_string(), 1),
@@ -146,6 +146,12 @@ mod tests {
     fn null_is_distinct_from_empty_values() {
         assert_ne!(CellValue::Null, CellValue::Text(String::new()));
         assert_ne!(CellValue::Null, CellValue::Bytes(Vec::new()));
+    }
+
+    #[test]
+    fn null_preview_is_distinct_from_null_text() {
+        assert_eq!(CellValue::Null.preview(40).text, "<null>");
+        assert_eq!(CellValue::Text("NULL".into()).preview(40).text, "NULL");
     }
 
     #[test]

@@ -404,6 +404,10 @@ fn find_ascii_cells(buffer: &ratatui::buffer::Buffer, y: u16, text: &str) -> Opt
     })
 }
 
+fn find_text_cell(buffer: &ratatui::buffer::Buffer, text: &str) -> Option<(u16, u16)> {
+    (0..buffer.area.height).find_map(|y| find_ascii_cells(buffer, y, text).map(|x| (x, y)))
+}
+
 fn completion_app(sql: &str, replace: TextRange, label: &str) -> App {
     let mut app = fixture();
     app.focus = Focus::Editor;
@@ -1801,6 +1805,27 @@ fn data_grid_renders_temporal_values_without_confusing_them_with_bytes() {
     assert!(output.contains("2026-08-28"), "{output}");
     assert!(output.contains("2026-08-28 18:20:31+08:00"), "{output}");
     assert!(output.contains("0x000102FF"), "{output}");
+}
+
+#[test]
+fn data_grid_keeps_null_muted_on_the_selected_row() {
+    let mut app = fixture();
+    let result = app
+        .active_console_mut()
+        .outcome
+        .as_mut()
+        .unwrap()
+        .result_sets
+        .last_mut()
+        .unwrap();
+    result.rows[0][1] = CellValue::Null;
+    result.rows[0][2] = CellValue::Text("NULL".into());
+
+    let (buffer, _) = render_buffer_with_icons(&app, 120, 36, IconSet::new(IconMode::Ascii));
+    let null = find_text_cell(&buffer, "<null>").expect("null preview");
+    let null_text = find_text_cell(&buffer, "NULL").expect("NULL text value");
+
+    assert_ne!(buffer[null].fg, buffer[null_text].fg);
 }
 
 #[test]
