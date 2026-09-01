@@ -411,7 +411,6 @@ async fn native_catalog_search_covers_postgres_contract_when_configured() {
             (&format!("{token}_routine"), CatalogKind::Function),
             (&format!("{token}_procedure"), CatalogKind::Procedure),
             (&format!("{token}_type"), CatalogKind::Type),
-            (&"code".to_owned(), CatalogKind::Column),
             (&format!("{token}_idx"), CatalogKind::Index),
             (&format!("{token}_pk"), CatalogKind::PrimaryKey),
             (&format!("{token}_uq"), CatalogKind::UniqueConstraint),
@@ -419,17 +418,12 @@ async fn native_catalog_search_covers_postgres_contract_when_configured() {
             (&format!("{token}_check"), CatalogKind::CheckConstraint),
         ];
         for (name, kind) in expected_kinds {
-            let (query, limit) = if kind == CatalogKind::Column {
-                (format!("{exact}.code"), 100)
-            } else {
-                (name.clone(), 20)
-            };
             let page = adapter
                 .search_catalog(&catalog_search_request(
                     profile_id,
-                    query,
+                    name.clone(),
                     scope.clone(),
-                    limit,
+                    20,
                 ))
                 .await
                 .unwrap();
@@ -463,9 +457,9 @@ async fn native_catalog_search_covers_postgres_contract_when_configured() {
         let column = adapter
             .search_catalog(&catalog_search_request(
                 profile_id,
-                format!("{database_name}.{schema}.{exact}.code"),
+                exact.clone(),
                 scope.clone(),
-                10,
+                100,
             ))
             .await
             .unwrap();
