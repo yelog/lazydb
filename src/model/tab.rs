@@ -10,6 +10,7 @@ use crate::sql::ExecutionDraft;
 
 use super::data_query::DataQueryOptions;
 use super::data_query::DataQueryState;
+use super::pagination::{PageRequest, PageSize, ResultPagination};
 use super::relation::RelationTab;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -162,6 +163,7 @@ pub struct ConsoleTab {
     pub output: Vec<OutputEntry>,
     pub result_view: ResultView,
     pub grid: DataGridState,
+    pub pagination: ResultPagination,
     pub completion: Option<CompletionPopup>,
     pub transaction_generation: u64,
     pub transaction_mode: TransactionMode,
@@ -189,6 +191,7 @@ pub struct DerivedResultState {
     pub outcome: Option<QueryOutcome>,
     pub error: Option<String>,
     pub running: bool,
+    pub pagination: ResultPagination,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -223,6 +226,7 @@ impl ConsoleTab {
             output: Vec::new(),
             result_view: ResultView::Data,
             grid: DataGridState::default(),
+            pagination: default_pagination(),
             completion: None,
             transaction_generation: 0,
             transaction_mode: TransactionMode::Auto,
@@ -233,6 +237,10 @@ impl ConsoleTab {
             derived: None,
         }
     }
+}
+
+fn default_pagination() -> ResultPagination {
+    ResultPagination::from_page(PageRequest::first(PageSize::default()), 0)
 }
 
 impl DataGridState {

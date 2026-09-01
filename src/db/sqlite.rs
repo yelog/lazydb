@@ -226,6 +226,7 @@ impl SqliteAdapter {
         &self,
         relation: &CatalogId,
         options: &crate::model::relation::RelationPreviewOptions,
+        mut page: crate::model::pagination::PageRequest,
     ) -> Result<crate::db::RelationPreview, DatabaseError> {
         let _permit = self.acquire_operation().await?;
         let target = CatalogTarget::RelationChildren {
@@ -242,13 +243,31 @@ impl SqliteAdapter {
         if !self.catalog_scope.allows_schema(&self.database, &schema) {
             return Err(catalog_target_not_found(&target));
         }
-        let mut sql = format!(
+        let mut base_sql = format!(
             "SELECT * FROM {}.{}",
             self.quote_identifier(&schema),
             self.quote_identifier(&name)
         );
-        append_preview_options(&mut sql, options);
-        sql.push_str(&format!(" LIMIT {RELATION_PREVIEW_LIMIT}"));
+        append_preview_options(&mut base_sql, options);
+        let total = if page.resolve_total {
+            let count_sql = relation_count_sql(&base_sql);
+            let count = sqlx::query_scalar::<_, i64>(AssertSqlSafe(count_sql))
+                .fetch_one(&mut *connection)
+                .await
+                .map_err(|e| DatabaseError::from_sqlx(e, ErrorCategory::Sql))?;
+            let total = u64::try_from(count).map_err(|_| {
+                DatabaseError::configuration("SQLite returned an invalid relation row count")
+            })?;
+            page.offset = crate::model::pagination::ResultPagination::last_offset(page.size, total);
+            Some(total)
+        } else {
+            None
+        };
+        let sql = format!(
+            "{base_sql} LIMIT {} OFFSET {}",
+            page.size.lookahead_limit(),
+            page.offset
+        );
         let started = Instant::now();
         let statement = connection
             .prepare(AssertSqlSafe(sql.clone()).into_sql_str())
@@ -262,11 +281,13 @@ impl SqliteAdapter {
                 type_name: column.type_info().name().to_owned(),
             })
             .collect();
-        let rows = statement
+        let mut rows = statement
             .query()
             .fetch_all(&mut *connection)
             .await
             .map_err(|e| DatabaseError::from_sqlx(e, ErrorCategory::Sql))?;
+        let fetched_len = rows.len();
+        rows.truncate(page.size.get());
         let result_set = ResultSet {
             columns,
             rows: rows.iter().map(decode_row).collect(),
@@ -276,6 +297,7 @@ impl SqliteAdapter {
         Ok(crate::db::RelationPreview {
             sql,
             result: QueryOutcome::from_result_set(result_set, execution, Duration::ZERO),
+            pagination: relation_pagination(page, fetched_len, total),
         })
     }
 
@@ -1765,6 +1787,22 @@ fn append_preview_options(
         sql.push_str(" ORDER BY ");
         sql.push_str(clause);
     }
+}
+
+fn relation_pagination(
+    page: crate::model::pagination::PageRequest,
+    fetched_len: usize,
+    total: Option<u64>,
+) -> crate::model::pagination::ResultPagination {
+    let mut pagination = crate::model::pagination::ResultPagination::from_page(page, fetched_len);
+    if let Some(total) = total {
+        pagination.total = crate::model::pagination::TotalRows::Exact(total);
+    }
+    pagination
+}
+
+fn relation_count_sql(sql: &str) -> String {
+    format!("SELECT COUNT(*) FROM ({sql}) AS __lazydb_count")
 }
 
 fn relation_kind(native_type: &str) -> Result<CatalogKind, DatabaseError> {

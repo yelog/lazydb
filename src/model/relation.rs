@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use unicode_width::UnicodeWidthStr;
 use uuid::Uuid;
 
+use super::pagination::{PageRequest, PageSize, ResultPagination};
 use super::relation_edit::RelationEditSession;
 use super::transaction::TransactionState;
 use super::{data_query::DataQueryOptions, data_query::DataQueryState, tab::DataGridState};
@@ -66,6 +67,7 @@ pub struct RelationRequest {
     pub kind: RelationRequestKind,
     pub scope: CatalogScope,
     pub options: RelationPreviewOptions,
+    pub page: PageRequest,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -172,6 +174,7 @@ pub struct RelationTab {
     pub data: RelationPreviewLoad,
     pub ddl: RelationDdlLoad,
     pub ddl_viewport: DdlViewportState,
+    pub pagination: ResultPagination,
     pub grid: DataGridState,
     pub query: RelationQueryState,
     pub edit: Option<RelationEditSession>,
@@ -268,6 +271,7 @@ impl RelationTab {
             data: RelationLoad::Empty,
             ddl: RelationLoad::Empty,
             ddl_viewport: DdlViewportState::default(),
+            pagination: ResultPagination::from_page(PageRequest::first(PageSize::default()), 0),
             grid: DataGridState::default(),
             query: RelationQueryState {
                 capability: crate::model::data_query::DataQueryCapability::Relation,

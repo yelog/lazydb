@@ -1391,6 +1391,16 @@ impl App {
                         | Action::DdlScrollToStart
                         | Action::DdlScrollToEnd
                         | Action::SetDdlViewportMetrics { .. }
+                        | Action::RelationFirstPage
+                        | Action::RelationPreviousPage
+                        | Action::RelationNextPage
+                        | Action::RelationLastPage
+                        | Action::SetRelationPageSize(_)
+                        | Action::ResultFirstPage
+                        | Action::ResultPreviousPage
+                        | Action::ResultNextPage
+                        | Action::ResultLastPage
+                        | Action::SetResultPageSize(_)
                         | Action::FocusDataQueryInput(_)
                         | Action::DataQueryInsert(_)
                         | Action::DataQueryBackspace
@@ -2535,6 +2545,11 @@ impl App {
             Action::CompletionAccept => self.accept_completion(),
             Action::RunActiveSql => self.run_active_sql(false),
             Action::RunAllSql => self.run_active_sql(true),
+            Action::ResultFirstPage
+            | Action::ResultPreviousPage
+            | Action::ResultNextPage
+            | Action::ResultLastPage
+            | Action::SetResultPageSize(_) => self.result_page(action),
             Action::ConfirmExecution => self.confirm_execution(),
             Action::CancelExecution => self.cancel_execution(),
             Action::ToggleExecutionConfirmationFocus => {
@@ -2701,6 +2716,53 @@ impl App {
                 });
                 Vec::new()
             }
+            Action::OpenPageSizeSelector { relation } => {
+                let selected = self
+                    .tabs
+                    .get(self.active_tab)
+                    .and_then(|tab| match (relation, tab) {
+                        (true, WorkspaceTab::Relation(tab)) => Some(tab.pagination.page_size),
+                        (false, WorkspaceTab::Sql(tab)) => Some(tab.pagination.page_size),
+                        _ => None,
+                    })
+                    .and_then(|size| {
+                        crate::model::pagination::PageSize::ALL
+                            .iter()
+                            .position(|item| *item == size)
+                    })
+                    .unwrap_or(0);
+                self.overlay = Some(Overlay::PageSizeSelector { relation, selected });
+                Vec::new()
+            }
+            Action::MovePageSizeSelector(delta) => {
+                if let Some(Overlay::PageSizeSelector { selected, .. }) = self.overlay.as_mut() {
+                    *selected = (*selected as isize + delta)
+                        .rem_euclid(crate::model::pagination::PageSize::ALL.len() as isize)
+                        as usize;
+                }
+                Vec::new()
+            }
+            Action::ConfirmPageSizeSelector => {
+                let Some(Overlay::PageSizeSelector { relation, selected }) = self.overlay.take()
+                else {
+                    return Vec::new();
+                };
+                let Some(size) = crate::model::pagination::PageSize::ALL
+                    .get(selected)
+                    .copied()
+                else {
+                    return Vec::new();
+                };
+                self.update(if relation {
+                    Action::SetRelationPageSize(size)
+                } else {
+                    Action::SetResultPageSize(size)
+                })
+            }
+            Action::CancelPageSizeSelector => {
+                self.overlay = None;
+                Vec::new()
+            }
             Action::MoveTargetSelector(delta) => {
                 if let Some(Overlay::TargetSelector {
                     candidates,
@@ -2857,6 +2919,11 @@ impl App {
                 self.load_active_relation(false)
             }
             Action::RefreshActiveRelation => self.load_active_relation(true),
+            Action::RelationFirstPage
+            | Action::RelationPreviousPage
+            | Action::RelationNextPage
+            | Action::RelationLastPage
+            | Action::SetRelationPageSize(_) => self.relation_page(action),
             Action::CancelActiveRelationRequest => {
                 let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab) else {
                     return Vec::new();
@@ -3436,6 +3503,64 @@ impl App {
                 tab.query.capability = unavailable_sql_filter_after_unsuccessful_execution();
                 Vec::new()
             }
+            Action::QueryPageFinished {
+                tab_id,
+                generation,
+                connection,
+                outcome,
+                pagination,
+            } => {
+                let valid = self
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.id() == tab_id)
+                    .and_then(WorkspaceTab::as_console)
+                    .is_some_and(|tab| tab.generation == generation)
+                    && self.connection.active_identity() == Some(connection);
+                if !valid {
+                    return Vec::new();
+                }
+                self.finish_query(tab_id, generation, outcome, false);
+                if let Some(tab) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|tab| tab.id() == tab_id)
+                    .and_then(WorkspaceTab::as_console_mut)
+                {
+                    let previous_total = tab.pagination.total;
+                    tab.pagination = pagination;
+                    if let crate::model::pagination::TotalRows::Exact(total) = previous_total {
+                        tab.pagination.total = crate::model::pagination::TotalRows::Exact(total);
+                    }
+                    if let Some(last) = tab.last_execution.as_mut() {
+                        last.result = ExecutionResult::Succeeded;
+                    }
+                }
+                Vec::new()
+            }
+            Action::QueryPageFailed {
+                tab_id,
+                generation,
+                connection,
+                message,
+            } => {
+                let Some(tab) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|tab| tab.id() == tab_id)
+                    .and_then(WorkspaceTab::as_console_mut)
+                else {
+                    return Vec::new();
+                };
+                if tab.generation != generation
+                    || self.connection.active_identity() != Some(connection)
+                {
+                    return Vec::new();
+                }
+                tab.query_status = QueryStatus::Failed;
+                append_failed_execution_output(&mut self.editor, tab, generation, message);
+                Vec::new()
+            }
             Action::DerivedQueryFinished {
                 tab_id,
                 source_generation,
@@ -3471,7 +3596,83 @@ impl App {
                 tab.result_view = ResultView::Data;
                 Vec::new()
             }
+            Action::DerivedQueryPageFinished {
+                tab_id,
+                source_generation,
+                derived_generation,
+                connection,
+                target,
+                outcome,
+                pagination,
+            } => {
+                let Some(tab) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|tab| tab.id() == tab_id)
+                    .and_then(WorkspaceTab::as_console_mut)
+                else {
+                    return Vec::new();
+                };
+                if tab.generation != source_generation
+                    || self.connection.active_identity() != Some(connection)
+                    || tab.execution_target.as_ref() != Some(&target)
+                    || tab
+                        .derived
+                        .as_ref()
+                        .is_none_or(|derived| derived.generation != derived_generation)
+                {
+                    return Vec::new();
+                }
+                if let Some(derived) = tab.derived.as_mut() {
+                    let previous_total = derived.pagination.total;
+                    derived.running = false;
+                    derived.error = None;
+                    derived.outcome = Some(outcome);
+                    derived.pagination = pagination;
+                    if let crate::model::pagination::TotalRows::Exact(total) = previous_total {
+                        derived.pagination.total =
+                            crate::model::pagination::TotalRows::Exact(total);
+                    }
+                }
+                tab.query.error = None;
+                tab.result_view = ResultView::Data;
+                Vec::new()
+            }
             Action::DerivedQueryFailed {
+                tab_id,
+                source_generation,
+                derived_generation,
+                connection,
+                target,
+                message,
+            } => {
+                let Some(tab) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|tab| tab.id() == tab_id)
+                    .and_then(WorkspaceTab::as_console_mut)
+                else {
+                    return Vec::new();
+                };
+                if tab.generation != source_generation
+                    || self.connection.active_identity() != Some(connection)
+                    || tab.execution_target.as_ref() != Some(&target)
+                    || tab
+                        .derived
+                        .as_ref()
+                        .is_none_or(|derived| derived.generation != derived_generation)
+                {
+                    return Vec::new();
+                }
+                let message = crate::security::sanitize_terminal_text(&message);
+                if let Some(derived) = tab.derived.as_mut() {
+                    derived.running = false;
+                    derived.error = Some(message.clone());
+                }
+                tab.query.error = Some(message);
+                Vec::new()
+            }
+            Action::DerivedQueryPageFailed {
                 tab_id,
                 source_generation,
                 derived_generation,
@@ -3584,6 +3785,38 @@ impl App {
                 }
                 Vec::new()
             }
+            Action::ManualQueryPageFinished {
+                tab_id,
+                query_generation,
+                transaction_generation,
+                connection,
+                outcome,
+                pagination,
+            } => {
+                if self.manual_matches(
+                    tab_id,
+                    query_generation,
+                    transaction_generation,
+                    connection,
+                    TransactionState::Active,
+                ) {
+                    self.finish_query(tab_id, query_generation, outcome, true);
+                    if let Some(tab) = self
+                        .tabs
+                        .iter_mut()
+                        .find(|tab| tab.id() == tab_id)
+                        .and_then(WorkspaceTab::as_console_mut)
+                    {
+                        let previous_total = tab.pagination.total;
+                        tab.pagination = pagination;
+                        if let crate::model::pagination::TotalRows::Exact(total) = previous_total {
+                            tab.pagination.total =
+                                crate::model::pagination::TotalRows::Exact(total);
+                        }
+                    }
+                }
+                Vec::new()
+            }
             Action::ManualQueryFailed {
                 tab_id,
                 query_generation,
@@ -3656,6 +3889,31 @@ impl App {
                             apply_transaction_snapshot(tab, next);
                         }
                     }
+                }
+                Vec::new()
+            }
+            Action::ManualQueryPageFailed {
+                tab_id,
+                query_generation,
+                transaction_generation,
+                connection,
+                message,
+            } => {
+                if self.manual_matches(
+                    tab_id,
+                    query_generation,
+                    transaction_generation,
+                    connection,
+                    TransactionState::Active,
+                ) {
+                    let tab = self
+                        .tabs
+                        .iter_mut()
+                        .find(|tab| tab.id() == tab_id)
+                        .and_then(WorkspaceTab::as_console_mut)
+                        .unwrap();
+                    tab.query_status = QueryStatus::Failed;
+                    tab.query.error = Some(crate::security::sanitize_terminal_text(&message));
                 }
                 Vec::new()
             }
@@ -5855,12 +6113,180 @@ impl App {
             draft: draft.clone(),
             result: ExecutionResult::Dispatched,
         });
-        vec![Command::RunQuery {
-            connection: draft.connection,
-            target: draft.target,
-            tab_id: draft.console_id,
+        if sql::derived_query_capable(&draft.sql, draft.dialect) {
+            vec![Command::RunQueryPage {
+                connection: draft.connection,
+                target: draft.target,
+                tab_id: draft.console_id,
+                generation,
+                source_sql: draft.sql,
+                dialect: draft.dialect,
+                page: crate::model::pagination::PageRequest::first(
+                    crate::model::pagination::PageSize::default(),
+                ),
+            }]
+        } else {
+            vec![Command::RunQuery {
+                connection: draft.connection,
+                target: draft.target,
+                tab_id: draft.console_id,
+                generation,
+                sql: draft.sql,
+            }]
+        }
+    }
+
+    fn result_page(&mut self, action: Action) -> Vec<Command> {
+        let Some(WorkspaceTab::Sql(tab)) = self.tabs.get(self.active_tab) else {
+            return Vec::new();
+        };
+        if let Some(derived) = tab.derived.as_ref() {
+            if derived.running || derived.outcome.is_none() {
+                return Vec::new();
+            }
+            let page = match action {
+                Action::ResultFirstPage => derived.pagination.first_request(),
+                Action::ResultPreviousPage => derived.pagination.previous_request(),
+                Action::ResultNextPage => derived.pagination.next_request(),
+                Action::ResultLastPage => derived.pagination.last_request(),
+                Action::SetResultPageSize(size) => {
+                    Some(crate::model::pagination::PageRequest::first(size))
+                }
+                _ => None,
+            };
+            let Some(page) = page else {
+                return Vec::new();
+            };
+            let Some(target) = tab.execution_target.clone() else {
+                return Vec::new();
+            };
+            let Some(connection) = self.database_command_identity() else {
+                return Vec::new();
+            };
+            let tab_id = tab.id;
+            let source_generation = tab.generation;
+            let derived_generation = derived.generation;
+            let source_sql = derived.source.draft.sql.clone();
+            let dialect = derived.source.draft.dialect;
+            let where_clause = derived.query.where_clause.clone().unwrap_or_default();
+            let order_by_clause = derived.query.order_by_clause.clone().unwrap_or_default();
+            let tab = self.active_console_mut();
+            tab.derived.as_mut().unwrap().running = true;
+            tab.grid.selected_row = 0;
+            tab.grid.row_offset = 0;
+            return vec![Command::RunDerivedQueryPage {
+                connection,
+                target,
+                tab_id,
+                source_generation,
+                derived_generation,
+                source_sql,
+                where_clause,
+                order_by_clause,
+                dialect,
+                page,
+            }];
+        }
+        let Some(last) = tab.last_execution.as_ref() else {
+            return Vec::new();
+        };
+        if tab.transaction_mode == TransactionMode::Manual
+            && tab.transaction_state == TransactionState::Active
+        {
+            let page = match action {
+                Action::ResultFirstPage => tab.pagination.first_request(),
+                Action::ResultPreviousPage => tab.pagination.previous_request(),
+                Action::ResultNextPage => tab.pagination.next_request(),
+                Action::ResultLastPage => tab.pagination.last_request(),
+                Action::SetResultPageSize(size) => {
+                    Some(crate::model::pagination::PageRequest::first(size))
+                }
+                _ => None,
+            };
+            let Some(page) = page else {
+                return Vec::new();
+            };
+            let Ok(query) = sql::build_paginated_query(&last.draft.sql, last.draft.dialect, page)
+            else {
+                return Vec::new();
+            };
+            let Some(target) = tab.execution_target.clone() else {
+                return Vec::new();
+            };
+            let Some(connection) = self.database_command_identity() else {
+                return Vec::new();
+            };
+            let tab_id = tab.id;
+            let query_generation = tab.generation.saturating_add(1);
+            let transaction_generation = tab.transaction_generation;
+            let source_sql = last.draft.sql.clone();
+            let dialect = last.draft.dialect;
+            let tab = self.active_console_mut();
+            tab.generation = query_generation;
+            tab.query_status = QueryStatus::Running;
+            tab.pagination.page_size = page.size;
+            tab.pagination.offset = page.offset;
+            tab.grid.selected_row = 0;
+            tab.grid.row_offset = 0;
+            return vec![Command::ManualExecutePage {
+                connection,
+                target,
+                tab_id,
+                query_generation,
+                transaction_generation,
+                source_sql,
+                dialect,
+                count_sql: query.count_sql,
+                page,
+            }];
+        }
+        if last.result != ExecutionResult::Succeeded || tab.query_status == QueryStatus::Running {
+            return Vec::new();
+        }
+        let page = match action {
+            Action::ResultFirstPage => tab.pagination.first_request(),
+            Action::ResultPreviousPage => tab.pagination.previous_request(),
+            Action::ResultNextPage => tab.pagination.next_request(),
+            Action::ResultLastPage => tab.pagination.last_request(),
+            Action::SetResultPageSize(size) => {
+                Some(crate::model::pagination::PageRequest::first(size))
+            }
+            _ => None,
+        };
+        let Some(page) = page else {
+            return Vec::new();
+        };
+        let Some(target) = tab.execution_target.clone() else {
+            return Vec::new();
+        };
+        let Some(connection) = self.database_command_identity() else {
+            return Vec::new();
+        };
+        let tab_id = tab.id;
+        let generation = tab.generation.saturating_add(1);
+        let source_sql = last.draft.sql.clone();
+        let dialect = last.draft.dialect;
+        let Some(tab) = self
+            .tabs
+            .get_mut(self.active_tab)
+            .and_then(WorkspaceTab::as_console_mut)
+        else {
+            return Vec::new();
+        };
+        tab.generation = generation;
+        tab.query_status = QueryStatus::Running;
+        tab.pagination.page_size = page.size;
+        tab.pagination.offset = page.offset;
+        tab.grid.selected_row = 0;
+        tab.grid.row_offset = 0;
+        vec![Command::RunQueryPage {
+            connection,
+            target,
+            tab_id,
             generation,
-            sql: sql::bounded_query(&draft.sql, draft.dialect).unwrap_or(draft.sql),
+            source_sql,
+            dialect,
+            page,
         }]
     }
 
@@ -5873,6 +6299,13 @@ impl App {
         tab.query.capability = DataQueryCapability::AwaitingResult;
         tab.query.completion = None;
         tab.derived = None;
+        tab.pagination = crate::model::pagination::ResultPagination::from_page(
+            crate::model::pagination::PageRequest::first(tab.pagination.page_size),
+            0,
+        );
+        tab.pagination.total = crate::model::pagination::TotalRows::LowerBound(0);
+        tab.grid.selected_row = 0;
+        tab.grid.row_offset = 0;
     }
 
     fn retain_execution(&mut self, draft: sql::ExecutionDraft, result: ExecutionResult) {
@@ -7015,29 +7448,32 @@ impl App {
             console.derived = None;
             return Vec::new();
         }
-        let query = match sql::build_derived_query(
+        if let Err(error) = sql::build_derived_paginated_query(
             &last.draft.sql,
             &where_clause,
             &order_by_clause,
             last.draft.dialect,
+            crate::model::pagination::PageRequest::first(
+                crate::model::pagination::PageSize::default(),
+            ),
         ) {
-            Ok(query) => query,
-            Err(error) => {
-                self.active_console_mut().query.error =
-                    Some(crate::security::sanitize_terminal_text(&error.to_string()));
-                return Vec::new();
-            }
-        };
+            self.active_console_mut().query.error =
+                Some(crate::security::sanitize_terminal_text(&error.to_string()));
+            return Vec::new();
+        }
         let tab_id = tab.id;
         let source_generation = tab.generation;
+        let dialect = last.draft.dialect;
+        let source_sql = last.draft.sql.clone();
         let derived_generation = tab
             .derived
             .as_ref()
             .map_or(0, |derived| derived.generation)
             .saturating_add(1);
         let options = DataQueryOptions {
-            where_clause: (!where_clause.trim().is_empty()).then_some(where_clause),
-            order_by_clause: (!order_by_clause.trim().is_empty()).then_some(order_by_clause),
+            where_clause: (!where_clause.trim().is_empty()).then_some(where_clause.clone()),
+            order_by_clause: (!order_by_clause.trim().is_empty())
+                .then_some(order_by_clause.clone()),
         };
         let target = tab.execution_target.clone().unwrap();
         let Some(connection) = self.database_command_identity() else {
@@ -7055,14 +7491,26 @@ impl App {
             outcome: None,
             error: None,
             running: true,
+            pagination: crate::model::pagination::ResultPagination::from_page(
+                crate::model::pagination::PageRequest::first(
+                    crate::model::pagination::PageSize::default(),
+                ),
+                0,
+            ),
         });
-        vec![Command::RunDerivedQuery {
+        vec![Command::RunDerivedQueryPage {
             connection,
             target,
             tab_id,
             source_generation,
             derived_generation,
-            sql: query,
+            source_sql,
+            where_clause,
+            order_by_clause,
+            dialect,
+            page: crate::model::pagination::PageRequest::first(
+                crate::model::pagination::PageSize::default(),
+            ),
         }]
     }
 
@@ -7989,10 +8437,18 @@ impl App {
     }
 
     fn load_active_relation(&mut self, refresh: bool) -> Vec<Command> {
+        self.load_active_relation_with_page(refresh, None)
+    }
+
+    fn load_active_relation_with_page(
+        &mut self,
+        refresh: bool,
+        requested_page: Option<crate::model::pagination::PageRequest>,
+    ) -> Vec<Command> {
         if let Some(WorkspaceTab::Relation(tab)) = self.tabs.get(self.active_tab)
-            && tab.transaction_state != TransactionState::Idle
+            && (tab.transaction_state != TransactionState::Idle || relation_has_pending_edits(tab))
         {
-            self.status_message("Resolve the active relation transaction before refreshing");
+            self.status_message("Commit or discard relation edits before refreshing");
             return Vec::new();
         }
         let Some(connection) = self.database_command_identity() else {
@@ -8022,6 +8478,15 @@ impl App {
         let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab) else {
             return Vec::new();
         };
+        if refresh && requested_page.is_none() {
+            tab.pagination = crate::model::pagination::ResultPagination::from_page(
+                crate::model::pagination::PageRequest::first(tab.pagination.page_size),
+                0,
+            );
+            tab.pagination.total = crate::model::pagination::TotalRows::LowerBound(0);
+            tab.grid.selected_row = 0;
+            tab.grid.row_offset = 0;
+        }
         let kind = match tab.view {
             RelationView::Data => RelationRequestKind::Preview,
             RelationView::Ddl => RelationRequestKind::Ddl,
@@ -8062,6 +8527,10 @@ impl App {
             kind,
             scope: profile.catalog_scope.clone(),
             options: tab.query.submitted.clone(),
+            page: requested_page.unwrap_or(crate::model::pagination::PageRequest::at(
+                tab.pagination.page_size,
+                tab.pagination.offset,
+            )),
         };
         tab.next_request_id = tab.next_request_id.saturating_add(1);
         match kind {
@@ -8102,6 +8571,45 @@ impl App {
                     .collect()
             }
         }
+    }
+
+    fn relation_page(&mut self, action: Action) -> Vec<Command> {
+        let page = {
+            let Some(WorkspaceTab::Relation(tab)) = self.tabs.get(self.active_tab) else {
+                return Vec::new();
+            };
+            if tab.view != RelationView::Data {
+                return Vec::new();
+            }
+            if relation_has_pending_edits(tab)
+                || tab.transaction_state != TransactionState::Idle
+                || tab.transaction_snapshot.is_some()
+            {
+                self.status_message("Commit or discard relation edits before changing pages");
+                return Vec::new();
+            }
+            match action {
+                Action::RelationFirstPage => tab.pagination.first_request(),
+                Action::RelationPreviousPage => tab.pagination.previous_request(),
+                Action::RelationNextPage => tab.pagination.next_request(),
+                Action::RelationLastPage => tab.pagination.last_request(),
+                Action::SetRelationPageSize(size) => {
+                    Some(crate::model::pagination::PageRequest::first(size))
+                }
+                _ => None,
+            }
+        };
+        let Some(page) = page else {
+            return Vec::new();
+        };
+        let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab) else {
+            return Vec::new();
+        };
+        tab.pagination.page_size = page.size;
+        tab.pagination.offset = page.offset;
+        tab.grid.selected_row = 0;
+        tab.grid.row_offset = 0;
+        self.load_active_relation_with_page(true, Some(page))
     }
 
     fn relation_catalog_readiness(
@@ -8156,6 +8664,7 @@ impl App {
             (RelationRequestKind::Preview, Ok(RelationSnapshot::Preview(snapshot))) => {
                 if matches!(&tab.data, RelationLoad::Loading { request: pending, .. } if pending == &request)
                 {
+                    let pagination = snapshot.pagination;
                     let rows = snapshot
                         .result
                         .result_sets
@@ -8169,6 +8678,9 @@ impl App {
                             scope: request.scope.clone(),
                         },
                     });
+                    tab.pagination = pagination;
+                    tab.grid.selected_row = 0;
+                    tab.grid.row_offset = 0;
                     tab.edit = rows.map(RelationEditSession::from_rows);
                 }
             }
@@ -8347,6 +8859,20 @@ fn relation_is_in_scope(tab: &RelationTab, scope: &crate::profile::CatalogScope)
                 .schema
                 .as_deref()
                 .is_none_or(|schema| scope.allows_schema(database, schema))
+    })
+}
+
+fn relation_has_pending_edits(tab: &RelationTab) -> bool {
+    tab.edit.as_ref().is_some_and(|edit| {
+        !matches!(edit.mode, RelationGridMode::Browse)
+            || edit.rows.iter().any(|row| {
+                !matches!(
+                    row.state,
+                    crate::model::relation_edit::EditableRowState::Clean
+                )
+            })
+            || !edit.mutation_undo.is_empty()
+            || !edit.mutation_redo.is_empty()
     })
 }
 
@@ -8722,6 +9248,9 @@ mod tests {
         let (tab_id, generation) = match &commands[0] {
             Command::RunQuery {
                 tab_id, generation, ..
+            }
+            | Command::RunQueryPage {
+                tab_id, generation, ..
             } => (*tab_id, *generation),
             command => panic!("unexpected command: {command:?}"),
         };
@@ -8756,13 +9285,22 @@ mod tests {
                 outcome: Some(empty_outcome()),
                 error: None,
                 running: false,
+                pagination: crate::model::pagination::ResultPagination::from_page(
+                    crate::model::pagination::PageRequest::first(
+                        crate::model::pagination::PageSize::default(),
+                    ),
+                    0,
+                ),
             });
         }
 
         app.update(Action::ReplaceEditor("SELECT name FROM users".into()));
         let commands = app.update(Action::RunActiveSql);
 
-        assert!(matches!(commands.as_slice(), [Command::RunQuery { .. }]));
+        assert!(matches!(
+            commands.as_slice(),
+            [Command::RunQueryPage { .. }]
+        ));
         let tab = app.active_console();
         assert_eq!(tab.query.capability, DataQueryCapability::AwaitingResult);
         assert_eq!(tab.query.where_input.value(), "");
@@ -8854,8 +9392,8 @@ mod tests {
 
         assert!(matches!(
             commands.as_slice(),
-            [Command::RunDerivedQuery { sql, .. }]
-                if sql.contains("WHERE id > 10") && sql.ends_with("LIMIT 500")
+            [Command::RunDerivedQueryPage { where_clause, .. }]
+                if where_clause == "id > 10"
         ));
     }
 
@@ -9173,7 +9711,11 @@ mod tests {
             kind: RelationRequestKind::Preview,
             scope: scope.clone(),
             options: Default::default(),
+            page: crate::model::pagination::PageRequest::first(
+                crate::model::pagination::PageSize::default(),
+            ),
         };
+        let request_page = request.page;
         if let WorkspaceTab::Relation(tab) = &mut app.tabs[app.active_tab] {
             tab.data = crate::model::relation::RelationLoad::Loading {
                 request: request.clone(),
@@ -9200,6 +9742,7 @@ mod tests {
                     result_sets: vec![result],
                     stats: QueryStats::new(Duration::ZERO, Duration::ZERO, 1),
                 },
+                pagination: crate::model::pagination::ResultPagination::from_page(request_page, 1),
             })),
         });
 
@@ -9534,6 +10077,9 @@ mod tests {
         let commands = app.update(Action::RunActiveSql);
         let (tab_id, generation) = match &commands[0] {
             Command::RunQuery {
+                tab_id, generation, ..
+            }
+            | Command::RunQueryPage {
                 tab_id, generation, ..
             } => (*tab_id, *generation),
             command => panic!("unexpected command: {command:?}"),

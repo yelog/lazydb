@@ -43,6 +43,7 @@ pub use query::RELATION_PREVIEW_LIMIT;
 pub struct RelationPreview {
     pub sql: String,
     pub result: QueryOutcome,
+    pub pagination: crate::model::pagination::ResultPagination,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -251,11 +252,12 @@ impl DatabaseConnection {
         &self,
         relation: &CatalogId,
         options: &crate::model::relation::RelationPreviewOptions,
+        page: crate::model::pagination::PageRequest,
     ) -> Result<RelationPreview, DatabaseError> {
         match self {
-            Self::Postgres(adapter) => adapter.preview_relation(relation, options).await,
-            Self::MySql(adapter) => adapter.preview_relation(relation, options).await,
-            Self::Sqlite(adapter) => adapter.preview_relation(relation, options).await,
+            Self::Postgres(adapter) => adapter.preview_relation(relation, options, page).await,
+            Self::MySql(adapter) => adapter.preview_relation(relation, options, page).await,
+            Self::Sqlite(adapter) => adapter.preview_relation(relation, options, page).await,
         }
     }
 

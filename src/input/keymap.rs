@@ -211,6 +211,16 @@ impl Keymap {
                 _ => None,
             };
         }
+        if matches!(app.overlay, Some(Overlay::PageSizeSelector { .. })) {
+            self.pending = None;
+            return match event.code {
+                KeyCode::Enter => Some(Action::ConfirmPageSizeSelector),
+                KeyCode::Esc => Some(Action::CancelPageSizeSelector),
+                KeyCode::Down | KeyCode::Char('j') => Some(Action::MovePageSizeSelector(1)),
+                KeyCode::Up | KeyCode::Char('k') => Some(Action::MovePageSizeSelector(-1)),
+                _ => None,
+            };
+        }
         if app.focus == Focus::Explorer && app.explorer.find.is_some() {
             let confirmed = app.explorer.find.as_ref().is_some_and(|find| {
                 find.phase == crate::model::workspace::ExplorerSearchPhase::Confirmed
@@ -1265,6 +1275,7 @@ fn is_read_only_editor_key(event: KeyEvent) -> bool {
 
 fn map_results(code: KeyCode, app: &App) -> Option<Action> {
     match code {
+        KeyCode::Char('P') => Some(Action::OpenPageSizeSelector { relation: false }),
         KeyCode::Char('[') => Some(Action::GridResizeColumn(-1)),
         KeyCode::Char(']') => Some(Action::GridResizeColumn(1)),
         KeyCode::Char('=') => Some(Action::GridResetColumnWidth),
@@ -1321,6 +1332,7 @@ fn map_results(code: KeyCode, app: &App) -> Option<Action> {
 
 fn map_relation(code: KeyCode, app: &App) -> Option<Action> {
     match code {
+        KeyCode::Char('P') => Some(Action::OpenPageSizeSelector { relation: true }),
         KeyCode::Char('[') => Some(Action::GridResizeColumn(-1)),
         KeyCode::Char(']') => Some(Action::GridResizeColumn(1)),
         KeyCode::Char('=') => Some(Action::GridResetColumnWidth),

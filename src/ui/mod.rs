@@ -3,6 +3,7 @@ pub mod data_grid;
 pub mod icons;
 pub mod layout;
 pub mod loading;
+pub mod pagination;
 pub mod profiles;
 pub mod query_bar;
 pub mod record_view;
@@ -93,6 +94,16 @@ pub enum HitTarget {
     ProfileToggle(ProfileField),
     ProfileScopeRow(String),
     ProfileButton(ProfileButton),
+    RelationFirstPage,
+    RelationPreviousPage,
+    RelationPageSize,
+    RelationNextPage,
+    RelationLastPage,
+    ResultFirstPage,
+    ResultPreviousPage,
+    ResultPageSize,
+    ResultNextPage,
+    ResultLastPage,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -387,6 +398,7 @@ fn overlay_key(overlay: &Overlay) -> u8 {
         Overlay::TargetSelector { .. } => 11,
         Overlay::DeleteConsole { .. } => 12,
         Overlay::SqlEditorList(_) => 13,
+        Overlay::PageSizeSelector { .. } => 14,
     }
 }
 
@@ -1861,7 +1873,11 @@ fn render_data(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, state
     let query_height = query_bar::height(&tab.query, inner.width, state.activity_icons);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(query_height), Constraint::Min(1)])
+        .constraints([
+            Constraint::Length(query_height),
+            Constraint::Min(2),
+            Constraint::Length(1),
+        ])
         .split(inner);
     let query_cursor = query_bar::render(
         frame,
@@ -1970,6 +1986,14 @@ fn render_data(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, state
             result_area,
         );
     }
+    pagination::render(
+        frame,
+        chunks[2],
+        tab.pagination,
+        pagination::PaginationKind::Result,
+        theme,
+        state,
+    );
     if let (Some(completion), Some(cursor)) = (&tab.query.completion, query_cursor) {
         render_data_query_completion_popup(
             frame,
@@ -2337,6 +2361,39 @@ fn render_overlay(
                 Paragraph::new(lines)
                     .block(panel_block(" TARGET SELECTOR ", true, theme))
                     .style(Style::new().fg(theme.text).bg(theme.surface_raised)),
+                popup,
+            );
+        }
+        Overlay::PageSizeSelector { relation, selected } => {
+            let sizes = pagination::selector_items();
+            let popup = centered(area, 28, sizes.len() as u16 + 4);
+            frame.render_widget(Clear, popup);
+            let mut lines = vec![Line::from(Span::styled(" PAGE SIZE ", theme.title(true)))];
+            lines.extend(sizes.iter().enumerate().map(|(index, size)| {
+                Line::from(Span::styled(
+                    format!(
+                        "{} {}",
+                        if index == *selected { ">" } else { " " },
+                        size.get()
+                    ),
+                    if index == *selected {
+                        theme.base().bg(theme.selection)
+                    } else {
+                        theme.base()
+                    },
+                ))
+            }));
+            lines.push(Line::raw("j/k select  Enter apply  Esc cancel"));
+            frame.render_widget(
+                Paragraph::new(lines).block(panel_block(
+                    if *relation {
+                        " RELATION PAGE SIZE "
+                    } else {
+                        " RESULT PAGE SIZE "
+                    },
+                    true,
+                    theme,
+                )),
                 popup,
             );
         }

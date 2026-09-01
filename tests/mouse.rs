@@ -680,6 +680,50 @@ fn horizontal_scrollbar_track_click_sets_page_offset() {
 }
 
 #[test]
+fn pagination_mouse_targets_emit_page_actions_and_open_size_selector() {
+    let app = App::new(Vec::new());
+    let mut ui = UiState::new();
+    ui.hit_regions.extend([
+        HitRegion {
+            area: Rect::new(1, 1, 2, 1),
+            target: HitTarget::ResultFirstPage,
+        },
+        HitRegion {
+            area: Rect::new(4, 1, 1, 1),
+            target: HitTarget::ResultPageSize,
+        },
+        HitRegion {
+            area: Rect::new(6, 1, 1, 1),
+            target: HitTarget::ResultNextPage,
+        },
+    ]);
+    assert_eq!(
+        map_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 1, 1),
+            &ui,
+            &app
+        ),
+        Some(Action::ResultFirstPage)
+    );
+    assert_eq!(
+        map_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 4, 1),
+            &ui,
+            &app
+        ),
+        Some(Action::OpenPageSizeSelector { relation: false })
+    );
+    assert_eq!(
+        map_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 6, 1),
+            &ui,
+            &app
+        ),
+        Some(Action::ResultNextPage)
+    );
+}
+
+#[test]
 fn horizontal_scrollbar_thumb_drag_maps_to_column_offsets() {
     let app = App::new(Vec::new());
     let mut ui = UiState::new();

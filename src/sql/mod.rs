@@ -24,7 +24,8 @@ pub use completion::{
     should_offer_completion,
 };
 pub use derived_result::{
-    DerivedQueryError, bounded_query, build_derived_query, derived_query_capable,
+    DerivedQueryError, PaginatedSql, bounded_query, build_derived_paginated_query,
+    build_derived_query, build_paginated_query, derived_query_capable,
 };
 pub use dialect::SqlDialect;
 pub use execution::ExecutionDraft;

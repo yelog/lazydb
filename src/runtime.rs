@@ -240,6 +240,17 @@ impl Runtime {
                 generation,
                 sql,
             } => self.run_query(connection, target, tab_id, generation, sql),
+            Command::RunQueryPage {
+                connection,
+                target,
+                tab_id,
+                generation,
+                source_sql,
+                dialect,
+                page,
+            } => self.run_query_page(
+                connection, target, tab_id, generation, source_sql, dialect, page,
+            ),
             Command::RunDerivedQuery {
                 connection,
                 target,
@@ -254,6 +265,29 @@ impl Runtime {
                 source_generation,
                 derived_generation,
                 sql,
+            ),
+            Command::RunDerivedQueryPage {
+                connection,
+                target,
+                tab_id,
+                source_generation,
+                derived_generation,
+                source_sql,
+                where_clause,
+                order_by_clause,
+                dialect,
+                page,
+            } => self.run_derived_query_page(
+                connection,
+                target,
+                tab_id,
+                source_generation,
+                derived_generation,
+                source_sql,
+                where_clause,
+                order_by_clause,
+                dialect,
+                page,
             ),
             Command::ManualBegin {
                 connection,
@@ -282,6 +316,27 @@ impl Runtime {
                 query_generation,
                 transaction_generation,
                 sql,
+            ),
+            Command::ManualExecutePage {
+                connection,
+                target,
+                tab_id,
+                query_generation,
+                transaction_generation,
+                source_sql,
+                dialect,
+                count_sql,
+                page,
+            } => self.manual_execute_page(
+                connection,
+                target,
+                tab_id,
+                query_generation,
+                transaction_generation,
+                source_sql,
+                dialect,
+                count_sql,
+                page,
             ),
             Command::ManualCommit {
                 connection,
@@ -986,7 +1041,11 @@ impl Runtime {
             };
             let result = match task_request.kind {
                 crate::model::relation::RelationRequestKind::Preview => database
-                    .preview_relation(&task_request.relation.object_id, &task_request.options)
+                    .preview_relation(
+                        &task_request.relation.object_id,
+                        &task_request.options,
+                        task_request.page,
+                    )
                     .await
                     .map(crate::model::relation::RelationSnapshot::Preview),
                 crate::model::relation::RelationRequestKind::Ddl => database
@@ -1057,6 +1116,124 @@ impl Runtime {
         self.query_tasks.insert((tab_id, generation), task);
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn run_query_page(
+        &mut self,
+        expected: ConnectionIdentity,
+        target: ExecutionTarget,
+        tab_id: Uuid,
+        generation: u64,
+        source_sql: String,
+        dialect: crate::sql::SqlDialect,
+        mut page: crate::model::pagination::PageRequest,
+    ) {
+        let sender = self.event_sender.clone();
+        let connection = Arc::clone(&self.connection);
+        let task = tokio::spawn(async move {
+            let Some(database) = active_database_for_target(connection, expected, &target).await
+            else {
+                let _ = sender.send(Action::QueryPageFailed {
+                    tab_id,
+                    generation,
+                    connection: expected,
+                    message: "Active connection does not match the execution target".into(),
+                });
+                return;
+            };
+            let query = match crate::sql::build_paginated_query(&source_sql, dialect, page) {
+                Ok(query) => query,
+                Err(error) => {
+                    let _ = sender.send(Action::QueryPageFailed {
+                        tab_id,
+                        generation,
+                        connection: expected,
+                        message: error.to_string(),
+                    });
+                    return;
+                }
+            };
+            let total = if page.resolve_total {
+                match database.execute(&query.count_sql).await {
+                    Ok(outcome) => match count_from_outcome(&outcome) {
+                        Ok(total) => Some(total),
+                        Err(error) => {
+                            let _ = sender.send(Action::QueryPageFailed {
+                                tab_id,
+                                generation,
+                                connection: expected,
+                                message: error.0,
+                            });
+                            return;
+                        }
+                    },
+                    Err(error) => {
+                        let _ = sender.send(Action::QueryPageFailed {
+                            tab_id,
+                            generation,
+                            connection: expected,
+                            message: error.to_string(),
+                        });
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
+            if let Some(total) = total {
+                page.offset =
+                    crate::model::pagination::ResultPagination::last_offset(page.size, total);
+            }
+            let query = match crate::sql::build_paginated_query(&source_sql, dialect, page) {
+                Ok(query) => query,
+                Err(error) => {
+                    let _ = sender.send(Action::QueryPageFailed {
+                        tab_id,
+                        generation,
+                        connection: expected,
+                        message: error.to_string(),
+                    });
+                    return;
+                }
+            };
+            match database.execute(&query.page_sql).await {
+                Ok(mut outcome) => {
+                    let fetched = outcome.stats.row_count;
+                    if let Some(result) = outcome.result_sets.first_mut() {
+                        result.rows.truncate(page.size.get());
+                    }
+                    outcome.stats.row_count = outcome
+                        .result_sets
+                        .iter()
+                        .map(|result| result.rows.len())
+                        .sum();
+                    let mut pagination =
+                        crate::model::pagination::ResultPagination::from_page(page, fetched);
+                    if let Some(total) = total {
+                        pagination.total = crate::model::pagination::TotalRows::Exact(total);
+                        pagination.has_next =
+                            page.offset.saturating_add(pagination.visible_rows as u64) < total;
+                    }
+                    let _ = sender.send(Action::QueryPageFinished {
+                        tab_id,
+                        generation,
+                        connection: expected,
+                        outcome,
+                        pagination,
+                    });
+                }
+                Err(error) => {
+                    let _ = sender.send(Action::QueryPageFailed {
+                        tab_id,
+                        generation,
+                        connection: expected,
+                        message: error.to_string(),
+                    });
+                }
+            }
+        });
+        self.query_tasks.insert((tab_id, generation), task);
+    }
+
     fn run_derived_query(
         &mut self,
         expected: ConnectionIdentity,
@@ -1094,6 +1271,153 @@ impl Runtime {
                 }
                 Err(error) => {
                     let _ = sender.send(Action::DerivedQueryFailed {
+                        tab_id,
+                        source_generation,
+                        derived_generation,
+                        connection: expected,
+                        target,
+                        message: error.to_string(),
+                    });
+                }
+            }
+        });
+        self.query_tasks.insert((tab_id, derived_generation), task);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_derived_query_page(
+        &mut self,
+        expected: ConnectionIdentity,
+        target: ExecutionTarget,
+        tab_id: Uuid,
+        source_generation: u64,
+        derived_generation: u64,
+        source_sql: String,
+        where_clause: String,
+        order_by_clause: String,
+        dialect: crate::sql::SqlDialect,
+        mut page: crate::model::pagination::PageRequest,
+    ) {
+        let sender = self.event_sender.clone();
+        let connection = Arc::clone(&self.connection);
+        let task = tokio::spawn(async move {
+            let Some(database) = active_database_for_target(connection, expected, &target).await
+            else {
+                let _ = sender.send(Action::DerivedQueryPageFailed {
+                    tab_id,
+                    source_generation,
+                    derived_generation,
+                    connection: expected,
+                    target,
+                    message: "Active connection does not match the execution target".into(),
+                });
+                return;
+            };
+            let query = match crate::sql::build_derived_paginated_query(
+                &source_sql,
+                &where_clause,
+                &order_by_clause,
+                dialect,
+                page,
+            ) {
+                Ok(query) => query,
+                Err(error) => {
+                    let _ = sender.send(Action::DerivedQueryPageFailed {
+                        tab_id,
+                        source_generation,
+                        derived_generation,
+                        connection: expected,
+                        target,
+                        message: error.to_string(),
+                    });
+                    return;
+                }
+            };
+            let total = if page.resolve_total {
+                match database.execute(&query.count_sql).await {
+                    Ok(outcome) => match count_from_outcome(&outcome) {
+                        Ok(total) => Some(total),
+                        Err(error) => {
+                            let _ = sender.send(Action::DerivedQueryPageFailed {
+                                tab_id,
+                                source_generation,
+                                derived_generation,
+                                connection: expected,
+                                target,
+                                message: error.0,
+                            });
+                            return;
+                        }
+                    },
+                    Err(error) => {
+                        let _ = sender.send(Action::DerivedQueryPageFailed {
+                            tab_id,
+                            source_generation,
+                            derived_generation,
+                            connection: expected,
+                            target,
+                            message: error.to_string(),
+                        });
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
+            if let Some(total) = total {
+                page.offset =
+                    crate::model::pagination::ResultPagination::last_offset(page.size, total);
+            }
+            let query = match crate::sql::build_derived_paginated_query(
+                &source_sql,
+                &where_clause,
+                &order_by_clause,
+                dialect,
+                page,
+            ) {
+                Ok(query) => query,
+                Err(error) => {
+                    let _ = sender.send(Action::DerivedQueryPageFailed {
+                        tab_id,
+                        source_generation,
+                        derived_generation,
+                        connection: expected,
+                        target,
+                        message: error.to_string(),
+                    });
+                    return;
+                }
+            };
+            match database.execute(&query.page_sql).await {
+                Ok(mut outcome) => {
+                    let fetched = outcome.stats.row_count;
+                    if let Some(result) = outcome.result_sets.first_mut() {
+                        result.rows.truncate(page.size.get());
+                    }
+                    outcome.stats.row_count = outcome
+                        .result_sets
+                        .iter()
+                        .map(|result| result.rows.len())
+                        .sum();
+                    let mut pagination =
+                        crate::model::pagination::ResultPagination::from_page(page, fetched);
+                    if let Some(total) = total {
+                        pagination.total = crate::model::pagination::TotalRows::Exact(total);
+                        pagination.has_next =
+                            page.offset.saturating_add(pagination.visible_rows as u64) < total;
+                    }
+                    let _ = sender.send(Action::DerivedQueryPageFinished {
+                        tab_id,
+                        source_generation,
+                        derived_generation,
+                        connection: expected,
+                        target,
+                        outcome,
+                        pagination,
+                    });
+                }
+                Err(error) => {
+                    let _ = sender.send(Action::DerivedQueryPageFailed {
                         tab_id,
                         source_generation,
                         derived_generation,
@@ -1494,6 +1818,71 @@ impl Runtime {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn manual_execute_page(
+        &mut self,
+        connection: ConnectionIdentity,
+        target: ExecutionTarget,
+        tab_id: Uuid,
+        query_generation: u64,
+        transaction_generation: u64,
+        source_sql: String,
+        dialect: crate::sql::SqlDialect,
+        count_sql: String,
+        page: crate::model::pagination::PageRequest,
+    ) {
+        self.reap_finished_manual_worker(tab_id);
+        let (reply, result) = tokio::sync::oneshot::channel();
+        self.ensure_manual_worker_page(
+            connection,
+            target,
+            tab_id,
+            query_generation,
+            transaction_generation,
+            source_sql,
+            dialect,
+            count_sql,
+            page,
+            reply,
+        );
+        let sender = self.event_sender.clone();
+        self.query_tasks.insert(
+            (tab_id, query_generation),
+            tokio::spawn(async move {
+                match result.await {
+                    Ok(Ok((outcome, pagination))) => {
+                        let _ = sender.send(Action::ManualQueryPageFinished {
+                            tab_id,
+                            query_generation,
+                            transaction_generation,
+                            connection,
+                            outcome,
+                            pagination,
+                        });
+                    }
+                    Ok(Err(error)) => {
+                        let _ = sender.send(Action::ManualQueryPageFailed {
+                            tab_id,
+                            query_generation,
+                            transaction_generation,
+                            connection,
+                            message: error.0,
+                        });
+                    }
+                    Err(_) => {
+                        let _ = sender.send(Action::ManualQueryPageFailed {
+                            tab_id,
+                            query_generation,
+                            transaction_generation,
+                            connection,
+                            message: "Manual query acknowledgement was lost".into(),
+                        });
+                    }
+                }
+            }),
+        );
+    }
+
     fn manual_commit(
         &mut self,
         connection: ConnectionIdentity,
@@ -1616,6 +2005,52 @@ impl Runtime {
                 }
             }
         }));
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn ensure_manual_worker_page(
+        &mut self,
+        connection: ConnectionIdentity,
+        target: ExecutionTarget,
+        tab_id: Uuid,
+        _query_generation: u64,
+        transaction_generation: u64,
+        source_sql: String,
+        dialect: crate::sql::SqlDialect,
+        count_sql: String,
+        page: crate::model::pagination::PageRequest,
+        reply: tokio::sync::oneshot::Sender<
+            Result<
+                (
+                    crate::db::query::QueryOutcome,
+                    crate::model::pagination::ResultPagination,
+                ),
+                crate::db::transaction::TransactionError,
+            >,
+        >,
+    ) {
+        let Some(entry) = self.manual_transactions.get(&tab_id) else {
+            let _ = reply.send(Err(crate::db::transaction::TransactionError(
+                "Manual transaction worker is not active".into(),
+            )));
+            return;
+        };
+        if entry.connection != connection
+            || entry.target != target
+            || entry.transaction_generation != transaction_generation
+        {
+            let _ = reply.send(Err(crate::db::transaction::TransactionError(
+                "Manual transaction does not match the execution target".into(),
+            )));
+            return;
+        }
+        let _ = entry.request_sender.send(TransactionRequest::Page {
+            source_sql,
+            dialect,
+            count_sql,
+            page,
+            reply,
+        });
     }
 
     fn ensure_manual_worker(
@@ -1820,6 +2255,28 @@ impl Runtime {
         if let Some(connection) = self.connection.lock().await.take() {
             connection.database.close().await;
         }
+    }
+}
+
+fn count_from_outcome(
+    outcome: &crate::db::query::QueryOutcome,
+) -> std::result::Result<u64, crate::db::transaction::TransactionError> {
+    let value = outcome
+        .result_sets
+        .first()
+        .and_then(|set| set.rows.first())
+        .and_then(|row| row.first())
+        .ok_or_else(|| {
+            crate::db::transaction::TransactionError("count query returned no count value".into())
+        })?;
+    match value {
+        crate::db::value::CellValue::Integer(value) => (*value).try_into().map_err(|_| {
+            crate::db::transaction::TransactionError("count query returned a negative value".into())
+        }),
+        crate::db::value::CellValue::Unsigned(value) => Ok(*value),
+        _ => Err(crate::db::transaction::TransactionError(
+            "count query returned a non-integer value".into(),
+        )),
     }
 }
 

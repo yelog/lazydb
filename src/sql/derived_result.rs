@@ -1,12 +1,9 @@
-use sqlparser::{
-    ast::{LimitClause, Statement},
-    parser::Parser,
-};
+use sqlparser::{ast::Statement, parser::Parser};
 
 use super::{
     SqlDialect, dialect::parser_dialect, relation_filter::validate_relation_preview_options,
 };
-use crate::db::query::RELATION_PREVIEW_LIMIT;
+use crate::model::pagination::PageRequest;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DerivedQueryError(pub String);
@@ -19,30 +16,30 @@ impl std::fmt::Display for DerivedQueryError {
 
 impl std::error::Error for DerivedQueryError {}
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaginatedSql {
+    pub page_sql: String,
+    pub count_sql: String,
+}
+
 pub fn derived_query_capable(source: &str, dialect: SqlDialect) -> bool {
     parse_source(source, dialect).is_ok()
 }
 
-/// Adds the result cap to a single read-only SELECT without changing queries
-/// that already specify their own row limit.
+/// Builds the default page query for a single read-only SELECT.
 pub fn bounded_query(source: &str, dialect: SqlDialect) -> Option<String> {
-    let source = parse_source(source, dialect).ok()?;
-    let statements = Parser::parse_sql(parser_dialect(dialect), &source).ok()?;
-    let [Statement::Query(query)] = statements.as_slice() else {
-        return None;
-    };
-    let has_row_limit = query.limit_clause.as_ref().is_some_and(|limit| {
-        matches!(
-            limit,
-            LimitClause::LimitOffset { limit: Some(_), .. } | LimitClause::OffsetCommaLimit { .. }
-        )
-    });
-    if has_row_limit || query.fetch.is_some() {
-        return Some(source);
-    }
-    Some(format!(
-        "SELECT * FROM ({source}) AS __lazydb_query LIMIT {RELATION_PREVIEW_LIMIT}"
-    ))
+    build_paginated_query(source, dialect, PageRequest::first(Default::default()))
+        .ok()
+        .map(|query| query.page_sql)
+}
+
+pub fn build_paginated_query(
+    source: &str,
+    dialect: SqlDialect,
+    page: PageRequest,
+) -> Result<PaginatedSql, DerivedQueryError> {
+    let source = parse_source(source, dialect)?;
+    Ok(wrap_paginated_source(&source, page))
 }
 
 pub fn build_derived_query(
@@ -63,8 +60,40 @@ pub fn build_derived_query(
         sql.push_str(" ORDER BY ");
         sql.push_str(&clause);
     }
-    sql.push_str(" LIMIT 500");
-    Ok(sql)
+    Ok(wrap_paginated_source(&sql, PageRequest::first(Default::default())).page_sql)
+}
+
+pub fn build_derived_paginated_query(
+    source: &str,
+    where_clause: &str,
+    order_by_clause: &str,
+    dialect: SqlDialect,
+    page: PageRequest,
+) -> Result<PaginatedSql, DerivedQueryError> {
+    let source = parse_source(source, dialect)?;
+    let options = validate_relation_preview_options(where_clause, order_by_clause, dialect)
+        .map_err(|error| DerivedQueryError(error.to_string()))?;
+    let mut sql = format!("SELECT * FROM ({source}) AS __lazydb_result");
+    if let Some(clause) = options.where_clause {
+        sql.push_str(" WHERE ");
+        sql.push_str(&clause);
+    }
+    if let Some(clause) = options.order_by_clause {
+        sql.push_str(" ORDER BY ");
+        sql.push_str(&clause);
+    }
+    Ok(wrap_paginated_source(&sql, page))
+}
+
+fn wrap_paginated_source(source: &str, page: PageRequest) -> PaginatedSql {
+    let limit = page.size.lookahead_limit();
+    let offset = page.offset;
+    PaginatedSql {
+        page_sql: format!(
+            "SELECT * FROM ({source}) AS __lazydb_page LIMIT {limit} OFFSET {offset}"
+        ),
+        count_sql: format!("SELECT COUNT(*) FROM ({source}) AS __lazydb_count"),
+    }
 }
 
 fn parse_source(source: &str, dialect: SqlDialect) -> Result<String, DerivedQueryError> {
@@ -108,7 +137,7 @@ mod tests {
                 SqlDialect::Sqlite
             )
             .unwrap(),
-            "SELECT * FROM (SELECT id FROM users) AS __lazydb_result WHERE id > 1 ORDER BY id DESC LIMIT 500"
+            "SELECT * FROM (SELECT * FROM (SELECT id FROM users) AS __lazydb_result WHERE id > 1 ORDER BY id DESC) AS __lazydb_page LIMIT 501 OFFSET 0"
         );
     }
 
@@ -131,7 +160,7 @@ mod tests {
     fn bounds_uncapped_selects() {
         assert_eq!(
             bounded_query("SELECT * FROM users;", SqlDialect::Sqlite),
-            Some("SELECT * FROM (SELECT * FROM users) AS __lazydb_query LIMIT 500".into())
+            Some("SELECT * FROM (SELECT * FROM users) AS __lazydb_page LIMIT 501 OFFSET 0".into())
         );
     }
 
@@ -139,7 +168,10 @@ mod tests {
     fn preserves_existing_limits() {
         assert_eq!(
             bounded_query("SELECT * FROM users LIMIT 20;", SqlDialect::Sqlite),
-            Some("SELECT * FROM users LIMIT 20".into())
+            Some(
+                "SELECT * FROM (SELECT * FROM users LIMIT 20) AS __lazydb_page LIMIT 501 OFFSET 0"
+                    .into()
+            )
         );
     }
 
@@ -148,14 +180,55 @@ mod tests {
         assert_eq!(
             bounded_query("SELECT * FROM users OFFSET 10", SqlDialect::Postgres),
             Some(
-                "SELECT * FROM (SELECT * FROM users OFFSET 10) AS __lazydb_query LIMIT 500".into()
+                "SELECT * FROM (SELECT * FROM users OFFSET 10) AS __lazydb_page LIMIT 501 OFFSET 0"
+                    .into()
             )
         );
         assert_eq!(
             bounded_query("SELECT id FROM users UNION SELECT id FROM admins", SqlDialect::Sqlite),
             Some(
-                "SELECT * FROM (SELECT id FROM users UNION SELECT id FROM admins) AS __lazydb_query LIMIT 500".into()
+                "SELECT * FROM (SELECT id FROM users UNION SELECT id FROM admins) AS __lazydb_page LIMIT 501 OFFSET 0".into()
             )
+        );
+    }
+
+    #[test]
+    fn builds_page_and_count_queries_for_requested_page() {
+        let query = build_paginated_query(
+            "SELECT id FROM users;",
+            SqlDialect::Sqlite,
+            PageRequest::at(crate::model::pagination::PageSize::Ten, 20),
+        )
+        .unwrap();
+
+        assert_eq!(
+            query.page_sql,
+            "SELECT * FROM (SELECT id FROM users) AS __lazydb_page LIMIT 11 OFFSET 20"
+        );
+        assert_eq!(
+            query.count_sql,
+            "SELECT COUNT(*) FROM (SELECT id FROM users) AS __lazydb_count"
+        );
+    }
+
+    #[test]
+    fn builds_filtered_page_and_count_queries_together() {
+        let query = build_derived_paginated_query(
+            "SELECT id FROM users;",
+            "id > 1",
+            "id DESC",
+            SqlDialect::Sqlite,
+            PageRequest::at(crate::model::pagination::PageSize::OneThousand, 1000),
+        )
+        .unwrap();
+
+        assert_eq!(
+            query.page_sql,
+            "SELECT * FROM (SELECT * FROM (SELECT id FROM users) AS __lazydb_result WHERE id > 1 ORDER BY id DESC) AS __lazydb_page LIMIT 1001 OFFSET 1000"
+        );
+        assert_eq!(
+            query.count_sql,
+            "SELECT COUNT(*) FROM (SELECT * FROM (SELECT id FROM users) AS __lazydb_result WHERE id > 1 ORDER BY id DESC) AS __lazydb_count"
         );
     }
 
