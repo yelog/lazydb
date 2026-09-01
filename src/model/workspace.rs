@@ -137,6 +137,10 @@ pub enum Overlay {
         candidates: Vec<ExecutionTarget>,
         selected: usize,
     },
+    PageSizeSelector {
+        relation: bool,
+        selected: usize,
+    },
     DeleteConsole {
         console_id: Uuid,
     },

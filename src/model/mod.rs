@@ -3,6 +3,7 @@ pub mod data_query;
 pub mod editor;
 pub mod execution_target;
 pub mod explorer;
+pub mod pagination;
 pub mod profile_manager;
 pub mod record_view;
 pub mod relation;

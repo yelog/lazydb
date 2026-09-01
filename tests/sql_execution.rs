@@ -38,7 +38,7 @@ fn current_run_does_not_fall_back_to_the_whole_buffer() {
 
     let commands = app.update(Action::RunActiveSql);
     assert!(
-        matches!(commands.as_slice(), [Command::RunQuery { sql, .. }] if sql == "SELECT * FROM (SELECT 1) AS __lazydb_query LIMIT 500")
+        matches!(commands.as_slice(), [Command::RunQueryPage { source_sql, page, .. }] if source_sql == "SELECT 1;" && *page == lazydb::model::pagination::PageRequest::first(lazydb::model::pagination::PageSize::default()))
     );
 }
 
@@ -54,11 +54,9 @@ fn current_run_executes_statement_when_cursor_is_on_internal_space() {
     }
 
     let commands = app.update(Action::RunActiveSql);
-
-    assert!(matches!(
-        commands.as_slice(),
-        [Command::RunQuery { sql, .. }] if sql == "SELECT * FROM (SELECT 1) AS __lazydb_query LIMIT 500"
-    ));
+    assert!(
+        matches!(commands.as_slice(), [Command::RunQueryPage { source_sql, .. }] if source_sql == "SELECT 1;")
+    );
 }
 
 #[test]
@@ -188,4 +186,83 @@ fn execution_fails_closed_when_console_target_is_missing_or_stale() {
         });
     assert!(app.update(Action::RunActiveSql).is_empty());
     assert!(app.connection.error.as_deref().unwrap().contains("target"));
+}
+
+#[test]
+fn base_execution_resets_page_and_invalidates_total() {
+    let mut app = connected_app(ConfirmationPolicy::RiskyOnly);
+    app.update(Action::ReplaceEditor("SELECT 1".into()));
+    app.active_console_mut().pagination.offset = 500;
+    app.active_console_mut().pagination.total = lazydb::model::pagination::TotalRows::Exact(501);
+    let commands = app.update(Action::RunActiveSql);
+    assert!(
+        matches!(commands.as_slice(), [Command::RunQueryPage { page, .. }] if page.offset == 0 && !page.resolve_total)
+    );
+    assert_eq!(app.active_console().pagination.offset, 0);
+    assert_eq!(
+        app.active_console().pagination.total,
+        lazydb::model::pagination::TotalRows::LowerBound(0)
+    );
+}
+
+#[test]
+fn stale_page_response_preserves_result_and_result_view() {
+    let mut app = connected_app(ConfirmationPolicy::RiskyOnly);
+    app.update(Action::ReplaceEditor("SELECT 1".into()));
+    let tab_id = app.active_console().id;
+    let connection = app.connection.active_identity().unwrap();
+    app.active_console_mut().result_view = lazydb::model::tab::ResultView::Data;
+    let before = app.active_console().clone();
+    app.update(Action::QueryPageFailed {
+        tab_id,
+        generation: app.active_console().generation.saturating_add(1),
+        connection,
+        message: "stale".into(),
+    });
+    assert_eq!(app.active_console(), &before);
+}
+
+#[test]
+fn page_size_change_requests_a_new_page_without_recounting_exact_total() {
+    let mut app = connected_app(ConfirmationPolicy::RiskyOnly);
+    app.update(Action::ReplaceEditor("SELECT 1".into()));
+    let commands = app.update(Action::RunActiveSql);
+    let (tab_id, generation, connection) = match commands.as_slice() {
+        [
+            Command::RunQueryPage {
+                tab_id,
+                generation,
+                connection,
+                ..
+            },
+        ] => (*tab_id, *generation, *connection),
+        other => panic!("unexpected commands: {other:?}"),
+    };
+    app.update(Action::QueryPageFinished {
+        tab_id,
+        generation,
+        connection,
+        outcome: lazydb::db::query::QueryOutcome {
+            result_sets: Vec::new(),
+            stats: lazydb::db::query::QueryStats::new(
+                std::time::Duration::ZERO,
+                std::time::Duration::ZERO,
+                0,
+            ),
+        },
+        pagination: lazydb::model::pagination::ResultPagination {
+            page_size: lazydb::model::pagination::PageSize::FiveHundred,
+            offset: 0,
+            visible_rows: 500,
+            has_next: false,
+            total: lazydb::model::pagination::TotalRows::Exact(500),
+        },
+    });
+    let commands = app.update(Action::SetResultPageSize(
+        lazydb::model::pagination::PageSize::Ten,
+    ));
+    assert!(matches!(
+        commands.as_slice(),
+        [Command::RunQueryPage { page, .. }] if page.size == lazydb::model::pagination::PageSize::Ten && !page.resolve_total
+    ));
 }

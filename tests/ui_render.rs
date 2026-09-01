@@ -700,11 +700,20 @@ fn relation_loading_with_previous_snapshot_keeps_data_visible_and_exposes_cancel
             kind: lazydb::model::relation::RelationRequestKind::Preview,
             scope: lazydb::profile::CatalogScope::for_profile(DatabaseKind::Sqlite, "db", None),
             options: lazydb::model::relation::RelationPreviewOptions::default(),
+            page: lazydb::model::pagination::PageRequest::first(
+                lazydb::model::pagination::PageSize::default(),
+            ),
         },
         previous: Some(lazydb::model::relation::OwnedSnapshot::new(
             lazydb::db::RelationPreview {
                 sql: "SELECT previous".into(),
                 result: app.active_console().outcome.clone().unwrap(),
+                pagination: lazydb::model::pagination::ResultPagination::from_page(
+                    lazydb::model::pagination::PageRequest::first(
+                        lazydb::model::pagination::PageSize::default(),
+                    ),
+                    0,
+                ),
             },
             lazydb::identity::ConnectionIdentity {
                 profile_id: uuid::Uuid::nil(),
@@ -733,6 +742,12 @@ fn empty_relation_preview_renders_clean_empty_state() {
             lazydb::db::RelationPreview {
                 sql: "SELECT id, name, active FROM users".into(),
                 result: outcome,
+                pagination: lazydb::model::pagination::ResultPagination::from_page(
+                    lazydb::model::pagination::PageRequest::first(
+                        lazydb::model::pagination::PageSize::default(),
+                    ),
+                    0,
+                ),
             },
             connection,
             lazydb::profile::CatalogScope::for_profile(DatabaseKind::Sqlite, "db", None),
@@ -786,6 +801,12 @@ fn relation_query_completion_is_anchored_to_active_input() {
             lazydb::db::RelationPreview {
                 sql: "SELECT * FROM users".into(),
                 result: app.active_console().outcome.clone().unwrap(),
+                pagination: lazydb::model::pagination::ResultPagination::from_page(
+                    lazydb::model::pagination::PageRequest::first(
+                        lazydb::model::pagination::PageSize::default(),
+                    ),
+                    0,
+                ),
             },
             lazydb::identity::ConnectionIdentity {
                 profile_id: uuid::Uuid::nil(),
@@ -1340,6 +1361,18 @@ fn standard_layout_shows_stable_workspace_regions() {
     assert!(output.contains("OUTPUT"));
     assert!(output.contains("Ada"));
     assert!(output.contains("F1 help"));
+}
+
+#[test]
+fn result_pagination_bar_renders_range_and_page_size_target() {
+    let (output, state) = render_with_state(&fixture(), 120, 36);
+    assert!(output.contains("0-0 of 0"), "{output}");
+    assert!(
+        state
+            .hit_regions
+            .iter()
+            .any(|region| region.target == HitTarget::ResultPageSize)
+    );
 }
 
 #[test]

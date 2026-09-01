@@ -156,6 +156,73 @@ where
                         return WorkerDisposition::CancelledAndRolledBack;
                     }
                 }
+                TransactionRequest::Page {
+                    source_sql,
+                    dialect,
+                    count_sql,
+                    mut page,
+                    reply,
+                } => {
+                    let total = if page.resolve_total {
+                        match guard.backend_mut().execute(&count_sql).await {
+                            Ok(outcome) => match count_from_outcome(&outcome) {
+                                Ok(total) => Some(total),
+                                Err(error) => {
+                                    let _ = reply.send(Err(error));
+                                    return WorkerDisposition::Quarantine;
+                                }
+                            },
+                            Err(error) => {
+                                let _ = reply.send(Err(error));
+                                return WorkerDisposition::Quarantine;
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(total) = total {
+                        page.offset = crate::model::pagination::ResultPagination::last_offset(
+                            page.size, total,
+                        );
+                    }
+                    let page_sql =
+                        match crate::sql::build_paginated_query(&source_sql, dialect, page) {
+                            Ok(query) => query.page_sql,
+                            Err(error) => {
+                                let _ = reply.send(Err(TransactionError(error.to_string())));
+                                return WorkerDisposition::Quarantine;
+                            }
+                        };
+                    let result = guard.backend_mut().execute(&page_sql).await;
+                    match result {
+                        Ok(mut outcome) => {
+                            let fetched = outcome.stats.row_count;
+                            if let Some(result) = outcome.result_sets.first_mut() {
+                                result.rows.truncate(page.size.get());
+                            }
+                            outcome.stats.row_count = outcome
+                                .result_sets
+                                .iter()
+                                .map(|result| result.rows.len())
+                                .sum();
+                            let mut pagination =
+                                crate::model::pagination::ResultPagination::from_page(
+                                    page, fetched,
+                                );
+                            if let Some(total) = total {
+                                pagination.total =
+                                    crate::model::pagination::TotalRows::Exact(total);
+                                pagination.has_next =
+                                    page.offset.saturating_add(pagination.visible_rows as u64)
+                                        < total;
+                            }
+                            let _ = reply.send(Ok((outcome, pagination)));
+                        }
+                        Err(error) => {
+                            let _ = reply.send(Err(error));
+                        }
+                    }
+                }
                 TransactionRequest::RelationMutation {
                     request,
                     cancel,
@@ -237,6 +304,27 @@ async fn execute_or_cancel<B: TransactionBackend>(
     }
 }
 
+fn count_from_outcome(outcome: &QueryOutcome) -> Result<u64, TransactionError> {
+    let value = outcome
+        .result_sets
+        .first()
+        .and_then(|set| set.rows.first())
+        .and_then(|row| row.first())
+        .ok_or_else(|| TransactionError("count query returned no count value".into()))?;
+    let count = match value {
+        crate::db::value::CellValue::Integer(value) => (*value)
+            .try_into()
+            .map_err(|_| TransactionError("count query returned a negative value".into()))?,
+        crate::db::value::CellValue::Unsigned(value) => *value,
+        _ => {
+            return Err(TransactionError(
+                "count query returned a non-integer value".into(),
+            ));
+        }
+    };
+    Ok(count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,7 +350,7 @@ mod tests {
 
     #[derive(Clone, Default)]
     struct Fake {
-        log: Arc<Mutex<Vec<&'static str>>>,
+        log: Arc<Mutex<Vec<String>>>,
         depth: usize,
         begin_fails: bool,
         cancel_fails: bool,
@@ -273,7 +361,7 @@ mod tests {
     #[async_trait]
     impl TransactionBackend for Fake {
         async fn begin(&mut self) -> Result<(), TransactionError> {
-            self.log.lock().unwrap().push("begin");
+            self.log.lock().unwrap().push("begin".into());
             if self.begin_fails {
                 Err(TransactionError("begin".into()))
             } else {
@@ -282,17 +370,19 @@ mod tests {
             }
         }
         async fn execute(&mut self, sql: &str) -> Result<QueryOutcome, TransactionError> {
-            self.log
-                .lock()
-                .unwrap()
-                .push(if sql == "slow" { "slow" } else { "execute" });
+            self.log.lock().unwrap().push(sql.to_owned());
             if sql == "slow" {
                 tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+            if sql == "count" {
+                let mut outcome = QueryOutcomeAccumulator::new();
+                outcome.row(Vec::new(), vec![CellValue::Integer(1234)]);
+                return Ok(outcome.finish());
             }
             Ok(QueryOutcomeAccumulator::new().finish())
         }
         async fn commit(&mut self) -> Result<(), TransactionError> {
-            self.log.lock().unwrap().push("commit");
+            self.log.lock().unwrap().push("commit".into());
             if self.commit_fails {
                 Err(TransactionError("commit".into()))
             } else {
@@ -304,13 +394,13 @@ mod tests {
             &mut self,
             _request: RelationMutationRequest,
         ) -> Result<MutationResult, TransactionError> {
-            self.log.lock().unwrap().push("relation_mutation");
+            self.log.lock().unwrap().push("relation_mutation".into());
             Ok(MutationResult::Updated {
                 row: vec![CellValue::Integer(1), CellValue::Text("new".into())],
             })
         }
         async fn rollback(&mut self) -> Result<(), TransactionError> {
-            self.log.lock().unwrap().push("rollback");
+            self.log.lock().unwrap().push("rollback".into());
             if self.rollback_fails {
                 Err(TransactionError("rollback".into()))
             } else {
@@ -319,7 +409,7 @@ mod tests {
             }
         }
         async fn cancel(&mut self) -> Result<(), TransactionError> {
-            self.log.lock().unwrap().push("cancel");
+            self.log.lock().unwrap().push("cancel".into());
             if self.cancel_fails {
                 Err(TransactionError("cancel".into()))
             } else {
@@ -332,7 +422,7 @@ mod tests {
         fn force_close(self) -> BoxFuture<'static, Result<(), TransactionError>> {
             let log = self.log;
             Box::pin(async move {
-                log.lock().unwrap().push("force_close");
+                log.lock().unwrap().push("force_close".into());
                 Ok(())
             })
         }
@@ -368,7 +458,14 @@ mod tests {
             .send(TransactionRequest::Rollback { reply })
             .unwrap();
         assert!(result.await.unwrap().is_ok());
-        assert_eq!(*log.lock().unwrap(), vec!["begin", "execute", "rollback"]);
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![
+                String::from("begin"),
+                String::from("one"),
+                String::from("rollback")
+            ]
+        );
     }
 
     #[tokio::test]
@@ -460,8 +557,16 @@ mod tests {
         cancel.send(()).unwrap();
         assert!(result.await.unwrap().is_err());
         let log = log.lock().unwrap().clone();
-        assert!(log.ends_with(&["cancel", "rollback"]));
-        assert!(log.contains(&"slow") || log == vec!["begin", "cancel", "rollback"]);
+        assert!(log.ends_with(&["cancel".into(), "rollback".into()]));
+        assert!(
+            log.iter().any(|entry| entry == "slow")
+                || log
+                    == vec![
+                        String::from("begin"),
+                        String::from("cancel"),
+                        String::from("rollback"),
+                    ]
+        );
     }
 
     #[tokio::test]
@@ -518,7 +623,12 @@ mod tests {
         worker.worker.abort();
         let _ = worker.worker.await;
         tokio::task::yield_now().await;
-        assert!(log.lock().unwrap().contains(&"force_close"));
+        assert!(
+            log.lock()
+                .unwrap()
+                .iter()
+                .any(|entry| entry == "force_close")
+        );
     }
 
     #[tokio::test]
@@ -541,5 +651,31 @@ mod tests {
         worker.requests.send(TransactionRequest::Shutdown).unwrap();
         assert_eq!(worker.worker.await.unwrap(), WorkerDisposition::RolledBack);
         assert_eq!(*log.lock().unwrap(), vec!["begin", "rollback"]);
+    }
+
+    #[tokio::test]
+    async fn resolved_last_page_rebuilds_page_sql_after_count() {
+        let fake = Fake::default();
+        let log = fake.log.clone();
+        let worker = spawn_transaction_worker(fake);
+        let (reply, result) = oneshot::channel();
+        worker
+            .requests
+            .send(TransactionRequest::Page {
+                source_sql: "SELECT * FROM items".into(),
+                dialect: crate::sql::SqlDialect::Sqlite,
+                count_sql: "count".into(),
+                page: crate::model::pagination::PageRequest::last(
+                    crate::model::pagination::PageSize::FiveHundred,
+                    1,
+                ),
+                reply,
+            })
+            .unwrap();
+        let _ = result.await.unwrap();
+        let log = log.lock().unwrap();
+        assert_eq!(log.len(), 3);
+        assert_eq!(log[1], "count");
+        assert!(log[2].ends_with("LIMIT 501 OFFSET 1000"));
     }
 }

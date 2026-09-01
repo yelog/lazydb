@@ -16,6 +16,15 @@ pub enum TransactionRequest {
         cancel: tokio::sync::oneshot::Receiver<()>,
         reply: tokio::sync::oneshot::Sender<Result<QueryOutcome, TransactionError>>,
     },
+    Page {
+        source_sql: String,
+        dialect: crate::sql::SqlDialect,
+        count_sql: String,
+        page: crate::model::pagination::PageRequest,
+        reply: tokio::sync::oneshot::Sender<
+            Result<(QueryOutcome, crate::model::pagination::ResultPagination), TransactionError>,
+        >,
+    },
     RelationMutation {
         request: RelationMutationRequest,
         cancel: tokio::sync::oneshot::Receiver<()>,

@@ -123,6 +123,18 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                 HitTarget::ProfileToggle(field) => Some(Action::ProfileToggleField(field)),
                 HitTarget::ProfileScopeRow(id) => Some(Action::ProfileToggleScopeRow(id)),
                 HitTarget::ProfileButton(button) => Some(profile_button_action(button)),
+                HitTarget::RelationFirstPage => Some(Action::RelationFirstPage),
+                HitTarget::RelationPreviousPage => Some(Action::RelationPreviousPage),
+                HitTarget::RelationPageSize => {
+                    Some(Action::OpenPageSizeSelector { relation: true })
+                }
+                HitTarget::RelationNextPage => Some(Action::RelationNextPage),
+                HitTarget::RelationLastPage => Some(Action::RelationLastPage),
+                HitTarget::ResultFirstPage => Some(Action::ResultFirstPage),
+                HitTarget::ResultPreviousPage => Some(Action::ResultPreviousPage),
+                HitTarget::ResultPageSize => Some(Action::OpenPageSizeSelector { relation: false }),
+                HitTarget::ResultNextPage => Some(Action::ResultNextPage),
+                HitTarget::ResultLastPage => Some(Action::ResultLastPage),
             }
         }
         MouseEventKind::Down(MouseButton::Right) => {
@@ -244,6 +256,16 @@ fn focus_at(ui: &UiState, column: u16, row: u16) -> Option<Focus> {
         | HitTarget::ProfileToggle(_)
         | HitTarget::ProfileScopeRow(_)
         | HitTarget::ProfileButton(_) => None,
+        HitTarget::RelationFirstPage
+        | HitTarget::RelationPreviousPage
+        | HitTarget::RelationPageSize
+        | HitTarget::RelationNextPage
+        | HitTarget::RelationLastPage
+        | HitTarget::ResultFirstPage
+        | HitTarget::ResultPreviousPage
+        | HitTarget::ResultPageSize
+        | HitTarget::ResultNextPage
+        | HitTarget::ResultLastPage => Some(Focus::Results),
     }
 }
 

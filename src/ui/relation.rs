@@ -156,6 +156,7 @@ fn render_data(
                     Constraint::Length(query_height),
                     Constraint::Length(2),
                     Constraint::Min(1),
+                    Constraint::Length(1),
                 ])
                 .split(inner)
         } else {
@@ -165,6 +166,7 @@ fn render_data(
                     Constraint::Length(query_height),
                     Constraint::Length(0),
                     Constraint::Min(1),
+                    Constraint::Length(1),
                 ])
                 .split(inner)
         };
@@ -220,11 +222,19 @@ fn render_data(
             .unwrap_or("UNKNOWN");
         frame.render_widget(
             Paragraph::new(format!(
-                "SQL: {sql}  [500 row limit]  {} rows  Snapshot: {provenance}",
+                "SQL: {sql}  {} rows  Snapshot: {provenance}",
                 result.rows.len()
             ))
             .style(Style::new().fg(theme.muted).bg(theme.surface)),
             footer,
+        );
+        super::pagination::render(
+            frame,
+            body[3],
+            tab.pagination,
+            super::pagination::PaginationKind::Relation,
+            theme,
+            state,
         );
         if let (Some(completion), Some(cursor)) = (&tab.query.completion, query_cursor) {
             super::render_data_query_completion_popup(
@@ -252,6 +262,7 @@ fn render_data(
                     state.activity_icons,
                 )),
                 Constraint::Min(1),
+                Constraint::Length(1),
             ])
             .split(inner);
         let query_cursor = super::query_bar::render(
@@ -304,6 +315,14 @@ fn render_data(
                 },
             );
         }
+        super::pagination::render(
+            frame,
+            body[2],
+            tab.pagination,
+            super::pagination::PaginationKind::Relation,
+            theme,
+            state,
+        );
     }
 }
 

@@ -115,9 +115,15 @@ async fn query(
     assert!(commands.is_empty());
     dispatch(app, runtime, Action::ToggleExecutionConfirmationFocus);
     let commands = dispatch(app, runtime, Action::ConfirmExecution);
-    assert!(matches!(commands.as_slice(), [Command::RunQuery { .. }]));
+    assert!(matches!(
+        commands.as_slice(),
+        [Command::RunQuery { .. } | Command::RunQueryPage { .. }]
+    ));
     let action = apply_next(app, runtime, receiver).await;
-    assert!(matches!(action, Action::QueryFinished { .. }));
+    assert!(matches!(
+        action,
+        Action::QueryFinished { .. } | Action::QueryPageFinished { .. }
+    ));
     assert!(app.active_console().outcome.is_some());
 }
 

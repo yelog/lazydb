@@ -253,6 +253,68 @@ fn ddl_viewport_survives_workspace_switches_and_refresh() {
 }
 
 #[test]
+fn relation_refresh_returns_to_first_page_and_forgets_exact_total() {
+    let mut app = app_with_relation(RelationView::Data);
+    let mut profile = lazydb::profile::import_connection_url("sqlite::memory:", Some("test"))
+        .unwrap()
+        .profile;
+    profile.id = uuid::Uuid::nil();
+    app.profiles.push(profile);
+    app.connection.profile_id = Some(uuid::Uuid::nil());
+    app.connection.generation = 1;
+    app.connection.status = lazydb::model::workspace::ConnectionStatus::Connected;
+    app.connection.target = Some(lazydb::model::execution_target::ExecutionTarget {
+        profile_id: uuid::Uuid::nil(),
+        database: ":memory:".into(),
+        schema: None,
+    });
+    if let WorkspaceTab::Relation(tab) = &mut app.tabs[1] {
+        tab.pagination = lazydb::model::pagination::ResultPagination {
+            page_size: lazydb::model::pagination::PageSize::Ten,
+            offset: 20,
+            visible_rows: 10,
+            has_next: false,
+            total: lazydb::model::pagination::TotalRows::Exact(30),
+        };
+    }
+    let commands = app.update(Action::RefreshActiveRelation);
+    assert!(commands.iter().any(|command| matches!(
+        command,
+        lazydb::action::Command::LoadRelationPreview(request)
+            if request.page.offset == 0 && !request.page.resolve_total
+    )));
+    assert_eq!(relation_tab(&app).pagination.offset, 0);
+    assert_eq!(
+        relation_tab(&app).pagination.total,
+        lazydb::model::pagination::TotalRows::LowerBound(0)
+    );
+}
+
+#[test]
+fn relation_dirty_edits_block_refresh_and_all_navigation() {
+    let mut app = app_with_relation(RelationView::Data);
+    let WorkspaceTab::Relation(tab) = &mut app.tabs[1] else {
+        panic!()
+    };
+    tab.edit = Some(
+        lazydb::model::relation_edit::RelationEditSession::from_rows(vec![vec![CellValue::Text(
+            "x".into(),
+        )]]),
+    );
+    tab.edit.as_mut().unwrap().mode =
+        lazydb::model::relation_edit::RelationGridMode::VisualLine { anchor: 0 };
+    for action in [
+        Action::RefreshActiveRelation,
+        Action::RelationFirstPage,
+        Action::RelationPreviousPage,
+        Action::RelationNextPage,
+        Action::RelationLastPage,
+    ] {
+        assert!(app.update(action).is_empty());
+    }
+}
+
+#[test]
 fn relation_grid_actions_update_relation_grid_using_preview_dimensions() {
     let mut app = lazydb::app::App::new(Vec::new());
     let mut tab = RelationTab::new("users");
@@ -277,6 +339,7 @@ fn relation_grid_actions_update_relation_grid_using_preview_dimensions() {
                     }],
                     stats: QueryStats::new(std::time::Duration::ZERO, std::time::Duration::ZERO, 1),
                 },
+                pagination: default_pagination(1),
             },
             lazydb::identity::ConnectionIdentity {
                 profile_id: Uuid::nil(),
@@ -513,6 +576,7 @@ fn relation_query_falls_back_to_preview_columns() {
                     }],
                     stats: QueryStats::new(std::time::Duration::ZERO, std::time::Duration::ZERO, 0),
                 },
+                pagination: default_pagination(0),
             },
             connection,
             lazydb::profile::CatalogScope::for_profile(
@@ -598,6 +662,7 @@ fn relation_snapshot_provenance_is_derived_from_current_connection_and_profile()
                         0,
                     ),
                 },
+                pagination: default_pagination(0),
             },
             connection,
             lazydb::profile::CatalogScope::for_profile(
@@ -667,6 +732,15 @@ fn relation_tab_at(app: &lazydb::app::App, index: usize) -> &RelationTab {
 fn ddl_offsets(app: &lazydb::app::App) -> (usize, usize) {
     let viewport = &relation_tab(app).ddl_viewport;
     (viewport.row_offset, viewport.column_offset)
+}
+
+fn default_pagination(fetched_rows: usize) -> lazydb::model::pagination::ResultPagination {
+    lazydb::model::pagination::ResultPagination::from_page(
+        lazydb::model::pagination::PageRequest::first(
+            lazydb::model::pagination::PageSize::default(),
+        ),
+        fetched_rows,
+    )
 }
 
 fn entry(profile: Uuid, kind: CatalogKind, name: &str, parent: Option<CatalogId>) -> CatalogEntry {

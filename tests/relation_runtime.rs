@@ -40,6 +40,9 @@ fn request() -> RelationRequest {
         kind: RelationRequestKind::Preview,
         scope: CatalogScope::for_profile(DatabaseKind::Sqlite, "db", None),
         options: Default::default(),
+        page: lazydb::model::pagination::PageRequest::first(
+            lazydb::model::pagination::PageSize::default(),
+        ),
     }
 }
 
@@ -126,6 +129,7 @@ fn unchanged_relation_response_is_the_only_accepted_identity() {
         value: lazydb::db::RelationPreview {
             sql: "previous".into(),
             result: empty_outcome(),
+            pagination: default_pagination(),
         },
         attribution: lazydb::model::relation::SnapshotAttribution {
             connection: request.connection,
@@ -155,6 +159,7 @@ fn unchanged_relation_response_is_the_only_accepted_identity() {
                     0,
                 ),
             },
+            pagination: default_pagination(),
         })),
     });
     assert!(matches!(
@@ -177,6 +182,7 @@ fn every_stale_field_preserves_pending_and_previous_snapshot() {
             snapshot: Box::new(RelationSnapshot::Preview(lazydb::db::RelationPreview {
                 sql: "stale".into(),
                 result: empty_outcome(),
+                pagination: default_pagination(),
             })),
         });
         assert_eq!(app.tabs[1], before);
@@ -259,6 +265,7 @@ fn relation_event_cannot_mutate_a_cached_inactive_workspace() {
         snapshot: Box::new(RelationSnapshot::Preview(lazydb::db::RelationPreview {
             sql: "stale".into(),
             result: empty_outcome(),
+            pagination: default_pagination(),
         })),
     });
 
@@ -343,6 +350,7 @@ fn relation_app(request: &RelationRequest) -> App {
             value: lazydb::db::RelationPreview {
                 sql: "previous".into(),
                 result: empty_outcome(),
+                pagination: default_pagination(),
             },
             attribution: lazydb::model::relation::SnapshotAttribution {
                 connection: request.connection,
@@ -369,6 +377,15 @@ fn empty_outcome() -> lazydb::db::query::QueryOutcome {
             0,
         ),
     }
+}
+
+fn default_pagination() -> lazydb::model::pagination::ResultPagination {
+    lazydb::model::pagination::ResultPagination::from_page(
+        lazydb::model::pagination::PageRequest::first(
+            lazydb::model::pagination::PageSize::default(),
+        ),
+        0,
+    )
 }
 
 #[tokio::test]
@@ -417,6 +434,7 @@ fn scope_mutation_does_not_change_request_snapshot_attribution() {
         snapshot: Box::new(RelationSnapshot::Preview(lazydb::db::RelationPreview {
             sql: "select 1".into(),
             result: empty_outcome(),
+            pagination: default_pagination(),
         })),
     });
     let WorkspaceTab::Relation(tab) = &app.tabs[1] else {

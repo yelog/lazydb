@@ -962,6 +962,30 @@ fn relation_keys_control_only_the_active_relation_view() {
 }
 
 #[test]
+fn page_size_selector_owns_navigation_and_apply_lifecycle() {
+    let mut app = App::new(Vec::new());
+    app.focus = Focus::Results;
+    let mut keymap = Keymap::default();
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('P')), &app),
+        Some(Action::OpenPageSizeSelector { relation: false })
+    );
+    app.update(Action::OpenPageSizeSelector { relation: false });
+    assert_eq!(
+        keymap.map(key(KeyCode::Down), &app),
+        Some(Action::MovePageSizeSelector(1))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Enter), &app),
+        Some(Action::ConfirmPageSizeSelector)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Esc), &app),
+        Some(Action::CancelPageSizeSelector)
+    );
+}
+
+#[test]
 fn ddl_view_maps_navigation_without_using_grid_move() {
     let mut app = App::new(Vec::new());
     app.tabs.push(lazydb::model::tab::WorkspaceTab::Relation(

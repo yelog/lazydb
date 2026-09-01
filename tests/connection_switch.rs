@@ -187,9 +187,12 @@ async fn run_marker_query(
         Action::ReplaceEditor("SELECT value FROM marker".into()),
     );
     let commands = dispatch(app, runtime, Action::RunActiveSql);
-    assert!(matches!(commands.as_slice(), [Command::RunQuery { .. }]));
+    assert!(matches!(
+        commands.as_slice(),
+        [Command::RunQueryPage { .. }]
+    ));
     let result = next_action(receiver).await;
-    assert!(matches!(result, Action::QueryFinished { .. }));
+    assert!(matches!(result, Action::QueryPageFinished { .. }));
     dispatch(app, runtime, result);
     app.active_console()
         .outcome
@@ -1009,6 +1012,9 @@ async fn successful_switch_installs_the_new_database_and_rejects_stale_commands(
         kind: RelationRequestKind::Preview,
         scope: first.catalog_scope.clone(),
         options: Default::default(),
+        page: lazydb::model::pagination::PageRequest::first(
+            lazydb::model::pagination::PageSize::default(),
+        ),
     };
     runtime.dispatch(Command::LoadRelationPreview(relation_request.clone()));
     assert!(matches!(
