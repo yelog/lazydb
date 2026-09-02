@@ -1772,7 +1772,7 @@ fn map_explorer(code: KeyCode, app: &App) -> Option<Action> {
         KeyCode::Char('a') => {
             if matches!(
                 app.explorer.normalized.selected,
-                Some(ExplorerNodeId::ConnectionGroup { .. })
+                Some(ExplorerNodeId::Profile(_) | ExplorerNodeId::ConnectionGroup { .. })
             ) {
                 return Some(Action::ProfileGroupCreate);
             }

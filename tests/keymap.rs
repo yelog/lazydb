@@ -397,12 +397,15 @@ fn catalog_editor_picker_and_preview_own_their_keys() {
 }
 
 #[test]
-fn explorer_catalog_shortcuts_are_not_advertised_for_sqlite_or_synthetic_rows() {
+fn explorer_catalog_shortcuts_are_not_advertised_for_synthetic_rows() {
     let profile = profile("sqlite");
     let mut app = App::new(vec![profile.clone()]);
     app.focus = Focus::Explorer;
     let mut keymap = Keymap::default();
-    assert_eq!(keymap.map(key(KeyCode::Char('a')), &app), None);
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('a')), &app),
+        Some(Action::ProfileGroupCreate)
+    );
     assert_eq!(
         keymap.map(key(KeyCode::Char('e')), &app),
         Some(Action::OpenCatalogEdit)
@@ -1508,6 +1511,21 @@ fn maps_explorer_and_result_actions_by_context() {
         Some(Action::SetRelationView(
             lazydb::model::relation::RelationView::Data
         ))
+    );
+}
+
+#[test]
+fn explorer_a_on_a_profile_opens_connection_group_creation() {
+    let profile = lazydb::profile::import_connection_url(":memory:", Some("test"))
+        .unwrap()
+        .profile;
+    let mut app = App::new(vec![profile]);
+    app.focus = Focus::Explorer;
+    let mut keymap = Keymap::default();
+
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('a')), &app),
+        Some(Action::ProfileGroupCreate)
     );
 }
 
