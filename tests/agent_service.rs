@@ -1,14 +1,15 @@
 use std::{fs, sync::Arc};
 
 use async_trait::async_trait;
+use lazydb::agent::policy::WritePolicy;
 use lazydb::{
-    agent::{context::AgentProjectContext, service::AgentService},
+    agent::{context::AgentProjectContext, selection::AgentErrorCode, service::AgentService},
     persistence::{
         credentials::CredentialResolver,
         local_credentials::LocalCredentialStore,
         secrets::{SecretStore, SecretStoreError},
     },
-    profile::{ConnectionProfile, ProfileAccess, import_connection_url},
+    profile::{ConnectionProfile, Environment, ProfileAccess, import_connection_url},
 };
 use secrecy::SecretString;
 use tempfile::TempDir;
@@ -117,5 +118,48 @@ async fn query_rejects_write_before_database_io() {
         .await
         .unwrap_err();
     assert!(error.message.contains("query rejected"));
+    assert!(!db.exists());
+}
+
+#[tokio::test]
+async fn execute_reports_server_policy_denial_before_database_io() {
+    let temp = TempDir::new().unwrap();
+    fs::create_dir(temp.path().join(".git")).unwrap();
+    let db = temp.path().join("missing.db");
+    let service = service(&temp, vec![sqlite_profile(&db, "app-dev")]);
+
+    let error = service
+        .execute(None, "UPDATE users SET name = 'x'", WritePolicy::Deny)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code, AgentErrorCode::PolicyDenied);
+    assert_eq!(
+        error.message,
+        "write rejected: the MCP server write policy is deny; restart it with --write-policy non-production for writable development or staging connections"
+    );
+    assert!(!error.message.contains("ServerWritePolicyDenied"));
+    assert!(!db.exists());
+}
+
+#[tokio::test]
+async fn execute_reports_read_only_profile_before_database_io() {
+    let temp = TempDir::new().unwrap();
+    fs::create_dir(temp.path().join(".git")).unwrap();
+    let db = temp.path().join("missing.db");
+    let mut profile = sqlite_profile(&db, "app-dev");
+    profile.read_only = true;
+    profile.environment = Environment::Development;
+    let service = service(&temp, vec![profile]);
+
+    let error = service
+        .execute(None, "UPDATE users SET name = 'x'", WritePolicy::All)
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        error.message,
+        "write rejected: the selected connection is configured as read-only"
+    );
     assert!(!db.exists());
 }

@@ -1,4 +1,5 @@
 use clap::ValueEnum;
+use thiserror::Error;
 
 use crate::{
     profile::{ConnectionProfile, Environment},
@@ -13,14 +14,66 @@ pub enum WritePolicy {
     All,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+impl WritePolicy {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Deny => "deny",
+            Self::NonProduction => "non-production",
+            Self::All => "all",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum PolicyError {
+    #[error("a single read-only SQL statement is required")]
     ReadOnlyQueryRequired,
-    WriteDisabled,
+    #[error("the selected connection is configured as read-only")]
+    ProfileReadOnly,
+    #[error(
+        "the MCP server write policy is deny; restart it with --write-policy non-production for writable development or staging connections"
+    )]
+    ServerWritePolicyDenied,
+    #[error("production writes require --write-policy all")]
     ProductionWriteDisabled,
+    #[error("the SQL statement could not be classified safely")]
     UnknownSql,
+    #[error("transaction-control statements are not supported by agent execution")]
     TransactionControlDisabled,
+    #[error("SQL must not be empty")]
     EmptySql,
+}
+
+impl PolicyError {
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::ProfileReadOnly => "profile_read_only",
+            Self::ServerWritePolicyDenied => "server_policy",
+            Self::ProductionWriteDisabled => "production_policy",
+            Self::ReadOnlyQueryRequired
+            | Self::UnknownSql
+            | Self::TransactionControlDisabled
+            | Self::EmptySql => "sql_policy",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WriteCapability {
+    Allowed,
+    Denied(PolicyError),
+}
+
+pub fn write_capability(profile: &ConnectionProfile, policy: WritePolicy) -> WriteCapability {
+    if profile.read_only {
+        WriteCapability::Denied(PolicyError::ProfileReadOnly)
+    } else if policy == WritePolicy::Deny {
+        WriteCapability::Denied(PolicyError::ServerWritePolicyDenied)
+    } else if profile.environment == Environment::Production && policy != WritePolicy::All {
+        WriteCapability::Denied(PolicyError::ProductionWriteDisabled)
+    } else {
+        WriteCapability::Allowed
+    }
 }
 
 pub fn authorize_query(profile: &ConnectionProfile, sql: &str) -> Result<(), PolicyError> {
@@ -50,11 +103,8 @@ pub fn authorize_write(
     if analysis.risks.contains(&SqlRisk::TransactionControl) {
         return Err(PolicyError::TransactionControlDisabled);
     }
-    if profile.read_only || policy == WritePolicy::Deny {
-        return Err(PolicyError::WriteDisabled);
-    }
-    if profile.environment == Environment::Production && policy != WritePolicy::All {
-        return Err(PolicyError::ProductionWriteDisabled);
+    if let WriteCapability::Denied(error) = write_capability(profile, policy) {
+        return Err(error);
     }
     if matches!(
         analysis.aggregate,

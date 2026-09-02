@@ -335,4 +335,6 @@ hide profiles assigned only to other projects. See
 [`coding-agent-access.md`](coding-agent-access.md) for JSON CLI, stdio MCP,
 Codex, OpenCode, and Claude Code configuration. The MCP server defaults to
 `--write-policy deny`; client-side MCP approval settings are an additional layer
-and cannot relax LazyDB profile or database permissions.
+and cannot relax LazyDB profile or database permissions. For writable
+development or staging sessions, use `--write-policy non-production` and retain
+per-call client approval. Restart the MCP client after changing the command.

@@ -110,7 +110,7 @@ impl AgentService {
         let selected = self.select(selector)?;
         super::policy::authorize_query(selected.profile, sql).map_err(|error| AgentError {
             code: super::selection::AgentErrorCode::PolicyDenied,
-            message: format!("query rejected: {error:?}"),
+            message: format!("query rejected: {error}"),
         })?;
         let password = self
             .credential_resolver
@@ -185,7 +185,7 @@ impl AgentService {
         super::policy::authorize_write(selected.profile, policy, sql).map_err(|error| {
             AgentError {
                 code: super::selection::AgentErrorCode::PolicyDenied,
-                message: format!("write rejected: {error:?}"),
+                message: format!("write rejected: {error}"),
             }
         })?;
         let password = self
