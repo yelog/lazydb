@@ -10,11 +10,11 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::profile::{
-    CatalogScope, ConnectionProfile, ConnectionUrlFormat, CredentialPolicy, DatabaseKind,
-    Environment, ProfileAccess, SslMode,
+    CatalogScope, ConnectionGroup, ConnectionProfile, ConnectionUrlFormat, CredentialPolicy,
+    DatabaseKind, Environment, ProfileAccess, ProfileCollection, SslMode,
 };
 
-const PROFILE_FILE_VERSION: u16 = 5;
+const PROFILE_FILE_VERSION: u16 = 6;
 
 #[derive(Clone, Debug)]
 pub struct ProfileStore {
@@ -33,6 +33,14 @@ pub enum PersistenceError {
     UnsupportedVersion { found: u16, expected: u16 },
     #[error("profile UUID {0} appears more than once")]
     DuplicateProfileId(Uuid),
+    #[error("connection group UUID {0} appears more than once")]
+    DuplicateGroupId(Uuid),
+    #[error("connection group name `{0}` appears more than once")]
+    DuplicateGroupName(String),
+    #[error("connection group `{0}` has an invalid name")]
+    InvalidGroupName(String),
+    #[error("profile {profile_id} references missing connection group {group_id}")]
+    UnknownProfileGroup { profile_id: Uuid, group_id: Uuid },
     #[error("project root `{0}` must be absolute")]
     InvalidProjectRoot(PathBuf),
     #[error("project root `{0}` appears more than once")]
@@ -45,7 +53,68 @@ pub enum PersistenceError {
 #[serde(deny_unknown_fields)]
 struct ProfileFile {
     version: u16,
+    #[serde(default)]
+    groups: Vec<ConnectionGroup>,
     profiles: Vec<ConnectionProfile>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileFileV5 {
+    #[serde(rename = "version")]
+    _version: u16,
+    profiles: Vec<ConnectionProfileV5>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConnectionProfileV5 {
+    id: Uuid,
+    name: String,
+    #[serde(default)]
+    access: ProfileAccess,
+    kind: DatabaseKind,
+    #[serde(default)]
+    url_format: ConnectionUrlFormat,
+    host: Option<String>,
+    port: Option<u16>,
+    user: Option<String>,
+    database: Option<String>,
+    default_schema: Option<String>,
+    sqlite_path: Option<PathBuf>,
+    #[serde(default)]
+    ssl_mode: SslMode,
+    #[serde(default)]
+    credential_policy: CredentialPolicy,
+    #[serde(default)]
+    read_only: bool,
+    #[serde(default)]
+    environment: Environment,
+    catalog_scope: CatalogScope,
+}
+
+impl From<ConnectionProfileV5> for ConnectionProfile {
+    fn from(profile: ConnectionProfileV5) -> Self {
+        Self {
+            id: profile.id,
+            name: profile.name,
+            access: profile.access,
+            group_id: None,
+            kind: profile.kind,
+            url_format: profile.url_format,
+            host: profile.host,
+            port: profile.port,
+            user: profile.user,
+            database: profile.database,
+            default_schema: profile.default_schema,
+            sqlite_path: profile.sqlite_path,
+            ssl_mode: profile.ssl_mode,
+            credential_policy: profile.credential_policy,
+            read_only: profile.read_only,
+            environment: profile.environment,
+            catalog_scope: profile.catalog_scope,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -84,6 +153,7 @@ impl From<ConnectionProfileV2> for ConnectionProfile {
             id: profile.id,
             name: profile.name,
             access: ProfileAccess::Global,
+            group_id: None,
             kind: profile.kind,
             url_format: ConnectionUrlFormat::default_for(profile.kind),
             host: profile.host,
@@ -117,25 +187,40 @@ impl ProfileStore {
         &self.path
     }
 
-    pub fn load(&self) -> Result<Vec<ConnectionProfile>, PersistenceError> {
+    pub fn load(&self) -> Result<ProfileCollection, PersistenceError> {
         let contents = match fs::read_to_string(&self.path) {
             Ok(contents) => contents,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(ProfileCollection::default());
+            }
             Err(error) => return Err(error.into()),
         };
         let header: ProfileFileHeader = toml::from_str(&contents)?;
-        let mut profiles = match header.version {
-            PROFILE_FILE_VERSION => toml::from_str::<ProfileFile>(&contents)?.profiles,
-            2 => toml::from_str::<ProfileFileV2>(&contents)?
-                .profiles
-                .into_iter()
-                .map(ConnectionProfile::from)
-                .collect(),
-            3 | 4 => toml::from_str::<ProfileFile>(&contents)?
-                .profiles
-                .into_iter()
-                .map(normalize_legacy_profile)
-                .collect(),
+        let collection = match header.version {
+            PROFILE_FILE_VERSION => {
+                let file = toml::from_str::<ProfileFile>(&contents)?;
+                ProfileCollection {
+                    groups: file.groups,
+                    profiles: file.profiles,
+                }
+            }
+            2 => ProfileCollection {
+                groups: Vec::new(),
+                profiles: toml::from_str::<ProfileFileV2>(&contents)?
+                    .profiles
+                    .into_iter()
+                    .map(ConnectionProfile::from)
+                    .collect(),
+            },
+            3..=5 => ProfileCollection {
+                groups: Vec::new(),
+                profiles: toml::from_str::<ProfileFileV5>(&contents)?
+                    .profiles
+                    .into_iter()
+                    .map(ConnectionProfile::from)
+                    .map(normalize_legacy_profile)
+                    .collect(),
+            },
             found => {
                 return Err(PersistenceError::UnsupportedVersion {
                     found,
@@ -143,6 +228,7 @@ impl ProfileStore {
                 });
             }
         };
+        let mut profiles = collection.profiles;
         for profile in &mut profiles {
             if let CredentialPolicy::Keyring(reference) = &profile.credential_policy {
                 profile.credential_policy = CredentialPolicy::System(reference.clone());
@@ -151,15 +237,21 @@ impl ProfileStore {
                 profile.url_format = ConnectionUrlFormat::default_for(profile.kind);
             }
         }
-        validate_profile_ids(&profiles)?;
-        validate_profile_access(&profiles)?;
-        Ok(profiles)
+        let collection = ProfileCollection {
+            groups: collection.groups,
+            profiles,
+        };
+        validate_collection(&collection)?;
+        Ok(collection)
     }
 
-    pub fn save(&self, profiles: &[ConnectionProfile]) -> Result<(), PersistenceError> {
-        validate_profile_ids(profiles)?;
-        validate_profile_access(profiles)?;
-        let mut profiles = profiles.to_vec();
+    pub fn save<T>(&self, input: T) -> Result<(), PersistenceError>
+    where
+        T: Into<ProfileCollection>,
+    {
+        let collection: ProfileCollection = input.into();
+        validate_collection(&collection)?;
+        let mut profiles = collection.profiles.clone();
         for profile in &mut profiles {
             if let ProfileAccess::Projects { roots } = &mut profile.access {
                 roots.sort();
@@ -171,6 +263,7 @@ impl ProfileStore {
 
         let contents = toml::to_string_pretty(&ProfileFile {
             version: PROFILE_FILE_VERSION,
+            groups: collection.groups.clone(),
             profiles,
         })?;
         let file_name = self
@@ -233,6 +326,38 @@ fn validate_profile_access(profiles: &[ConnectionProfile]) -> Result<(), Persist
             if !unique.insert(root) {
                 return Err(PersistenceError::DuplicateProjectRoot(root.clone()));
             }
+        }
+    }
+    Ok(())
+}
+
+fn validate_collection(collection: &ProfileCollection) -> Result<(), PersistenceError> {
+    validate_profile_ids(&collection.profiles)?;
+    validate_profile_access(&collection.profiles)?;
+
+    let mut ids = HashSet::with_capacity(collection.groups.len());
+    let mut names = HashSet::with_capacity(collection.groups.len());
+    for group in &collection.groups {
+        if !ids.insert(group.id) {
+            return Err(PersistenceError::DuplicateGroupId(group.id));
+        }
+        let canonical = ConnectionGroup::new(group.id, &group.name)
+            .map_err(|_| PersistenceError::InvalidGroupName(group.name.clone()))?;
+        if canonical.name != group.name {
+            return Err(PersistenceError::InvalidGroupName(group.name.clone()));
+        }
+        if !names.insert(group.normalized_name()) {
+            return Err(PersistenceError::DuplicateGroupName(group.name.clone()));
+        }
+    }
+    for profile in &collection.profiles {
+        if let Some(group_id) = profile.group_id
+            && !ids.contains(&group_id)
+        {
+            return Err(PersistenceError::UnknownProfileGroup {
+                profile_id: profile.id,
+                group_id,
+            });
         }
     }
     Ok(())

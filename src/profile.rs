@@ -1,4 +1,4 @@
-use std::{collections::HashSet, path::PathBuf};
+use std::{collections::HashSet, ops::Deref, path::PathBuf};
 
 use percent_encoding::{AsciiSet, CONTROLS, percent_decode_str, utf8_percent_encode};
 use secrecy::SecretString;
@@ -250,6 +250,87 @@ impl ProfileAccess {
     }
 }
 
+pub const MAX_CONNECTION_GROUP_NAME_CHARS: usize = 64;
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectionGroup {
+    pub id: Uuid,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ProfileCollection {
+    pub groups: Vec<ConnectionGroup>,
+    pub profiles: Vec<ConnectionProfile>,
+}
+
+impl From<Vec<ConnectionProfile>> for ProfileCollection {
+    fn from(profiles: Vec<ConnectionProfile>) -> Self {
+        Self {
+            groups: Vec::new(),
+            profiles,
+        }
+    }
+}
+
+impl From<&[ConnectionProfile]> for ProfileCollection {
+    fn from(profiles: &[ConnectionProfile]) -> Self {
+        Self::from(profiles.to_vec())
+    }
+}
+
+impl<const N: usize> From<&[ConnectionProfile; N]> for ProfileCollection {
+    fn from(profiles: &[ConnectionProfile; N]) -> Self {
+        Self::from(profiles.as_slice())
+    }
+}
+
+impl From<&ProfileCollection> for ProfileCollection {
+    fn from(collection: &ProfileCollection) -> Self {
+        collection.clone()
+    }
+}
+
+impl Deref for ProfileCollection {
+    type Target = [ConnectionProfile];
+
+    fn deref(&self) -> &Self::Target {
+        &self.profiles
+    }
+}
+
+impl PartialEq<Vec<ConnectionProfile>> for ProfileCollection {
+    fn eq(&self, other: &Vec<ConnectionProfile>) -> bool {
+        self.profiles == *other
+    }
+}
+
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+pub enum ConnectionGroupNameError {
+    #[error("group name cannot be empty")]
+    Empty,
+    #[error("group name cannot exceed {MAX_CONNECTION_GROUP_NAME_CHARS} characters")]
+    TooLong,
+}
+
+impl ConnectionGroup {
+    pub fn new(id: Uuid, name: impl Into<String>) -> Result<Self, ConnectionGroupNameError> {
+        let name = name.into().trim().to_owned();
+        if name.is_empty() {
+            return Err(ConnectionGroupNameError::Empty);
+        }
+        if name.chars().count() > MAX_CONNECTION_GROUP_NAME_CHARS {
+            return Err(ConnectionGroupNameError::TooLong);
+        }
+        Ok(Self { id, name })
+    }
+
+    pub fn normalized_name(&self) -> String {
+        self.name.to_lowercase()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum PasswordStorageChoice {
     #[default]
@@ -288,6 +369,8 @@ pub struct ConnectionProfile {
     pub name: String,
     #[serde(default)]
     pub access: ProfileAccess,
+    #[serde(default)]
+    pub group_id: Option<Uuid>,
     pub kind: DatabaseKind,
     #[serde(default)]
     pub url_format: ConnectionUrlFormat,
@@ -436,6 +519,7 @@ pub fn import_connection_url(
             id: Uuid::new_v4(),
             name: choose_name(preferred_name, &derived_name),
             access: ProfileAccess::Global,
+            group_id: None,
             kind: parsed.kind,
             url_format: parsed.format,
             host: parsed.host,

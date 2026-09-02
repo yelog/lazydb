@@ -111,6 +111,7 @@ pub enum Overlay {
         selected: usize,
         options: Vec<ProfileAccessOption>,
     },
+    ProfileGroup(crate::model::profile_group::ProfileGroupOverlay),
     Message {
         title: String,
         body: String,
@@ -856,6 +857,44 @@ impl ExplorerState {
                             true,
                         )
                     }
+                    ExplorerNodeId::ConnectionGroup { group_id, region } => (
+                        self.normalized
+                            .groups
+                            .iter()
+                            .find(|group| group.id == *group_id)
+                            .map(|group| group.name.clone())
+                            .unwrap_or_else(|| "Missing group".to_owned()),
+                        Some(
+                            self.normalized
+                                .profiles
+                                .values()
+                                .filter(|profile| {
+                                    profile.group_id == Some(*group_id)
+                                        && match region {
+                                            crate::model::explorer::ProfileRegion::Primary => {
+                                                matches!(
+                                                    profile.placement,
+                                                    ProfilePlacement::CurrentProject
+                                                        | ProfilePlacement::Global
+                                                )
+                                            }
+                                            crate::model::explorer::ProfileRegion::Others => {
+                                                profile.placement == ProfilePlacement::OtherProject
+                                            }
+                                        }
+                                })
+                                .count()
+                                .to_string(),
+                        ),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        true,
+                    ),
                     ExplorerNodeId::Status { owner, kind } => (
                         status_label(*kind).to_owned(),
                         profile.and_then(|profile| profile.load_errors.get(owner).cloned()),

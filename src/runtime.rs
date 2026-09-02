@@ -8,7 +8,7 @@ use std::{
 use uuid::Uuid;
 
 use crate::{
-    action::{Action, Command, ProfileAccessChange},
+    action::{Action, Command, ProfileAccessChange, ProfileOrganizationMutation},
     app::App,
     cli::{Cli, MouseMode},
     db::{
@@ -36,7 +36,7 @@ use crate::{
         },
         workspace::WorkspaceStore,
     },
-    profile::{ConnectionProfile, CredentialPolicy, import_connection_url},
+    profile::{ConnectionProfile, CredentialPolicy, ProfileCollection, import_connection_url},
     security::sanitize_terminal_text,
     terminal::TerminalSession,
     ui::{self, UiState},
@@ -85,6 +85,7 @@ struct ConnectionAttemptTracker {
 
 #[derive(Clone)]
 struct ProfileRegistry {
+    groups: Vec<crate::profile::ConnectionGroup>,
     order: Vec<Uuid>,
     profiles: HashMap<Uuid, ConnectionProfile>,
     revisions: HashMap<Uuid, u64>,
@@ -143,6 +144,27 @@ impl Runtime {
         secret_store: Arc<dyn SecretStore>,
         event_sender: mpsc::UnboundedSender<Action>,
     ) -> Self {
+        Self::new_with_collection(
+            ProfileCollection::from(profiles),
+            persisted,
+            session_secrets,
+            startup_password,
+            profile_store,
+            secret_store,
+            event_sender,
+        )
+    }
+
+    pub fn new_with_collection(
+        collection: ProfileCollection,
+        persisted: HashSet<Uuid>,
+        session_secrets: HashMap<Uuid, SecretString>,
+        startup_password: Option<(Uuid, SecretString)>,
+        profile_store: ProfileStore,
+        secret_store: Arc<dyn SecretStore>,
+        event_sender: mpsc::UnboundedSender<Action>,
+    ) -> Self {
+        let profiles = collection.profiles;
         let local_credential_store = local_credential_store_for(&profile_store);
         let mut order = Vec::with_capacity(profiles.len());
         let mut profiles_by_id = HashMap::with_capacity(profiles.len());
@@ -163,6 +185,7 @@ impl Runtime {
             .unwrap_or((None, None));
         Self {
             registry: Arc::new(Mutex::new(ProfileRegistry {
+                groups: collection.groups,
                 order,
                 profiles: profiles_by_id,
                 revisions,
@@ -244,6 +267,10 @@ impl Runtime {
                 profile_id,
                 change,
             } => self.update_profile_access(request_id, profile_id, change),
+            Command::UpdateProfileOrganization {
+                request_id,
+                mutation,
+            } => self.update_profile_organization(request_id, mutation),
             Command::Disconnect { connection } => self.disconnect(connection),
             Command::Connect {
                 profile_id,
@@ -752,8 +779,8 @@ impl Runtime {
                 ProfileAccessChange::RemoveProject(root) => profile.access.remove_project(&root),
             }
             let access = profile.access.clone();
-            let persisted_profiles = next.ordered_persisted_profiles();
-            if let Err(message) = save_profiles(profile_store, persisted_profiles).await {
+            let collection = next.ordered_persisted_collection();
+            if let Err(message) = save_profiles(profile_store, collection).await {
                 let _ = sender.send(Action::ProfileAccessUpdateFailed {
                     request_id,
                     profile_id,
@@ -766,6 +793,99 @@ impl Runtime {
                 request_id,
                 profile_id,
                 access,
+            });
+        }));
+    }
+
+    fn update_profile_organization(
+        &mut self,
+        request_id: u64,
+        mutation: ProfileOrganizationMutation,
+    ) {
+        let registry = Arc::clone(&self.registry);
+        let profile_mutation = Arc::clone(&self.profile_mutation);
+        let store = self.profile_store.clone();
+        let sender = self.event_sender.clone();
+        self.profile_tasks.push(tokio::spawn(async move {
+            let _guard = profile_mutation.lock().await;
+            let snapshot = registry.lock().await.clone();
+            let mut collection = snapshot.ordered_collection();
+            let result = match mutation {
+                ProfileOrganizationMutation::CreateGroup { id, name } => {
+                    crate::model::profile_organization::create_group(&mut collection, id, name)
+                        .map(|_| ())
+                }
+                ProfileOrganizationMutation::RenameGroup { group_id, name } => {
+                    crate::model::profile_organization::rename_group(
+                        &mut collection,
+                        group_id,
+                        name,
+                    )
+                }
+                ProfileOrganizationMutation::DeleteGroup { group_id } => {
+                    crate::model::profile_organization::delete_group(&mut collection, group_id)
+                        .map(|_| ())
+                }
+                ProfileOrganizationMutation::AssignProfile {
+                    profile_id,
+                    group_id,
+                } => crate::model::profile_organization::assign_profile(
+                    &mut collection,
+                    profile_id,
+                    group_id,
+                ),
+                ProfileOrganizationMutation::MoveProfile {
+                    profile_id,
+                    sibling_ids,
+                    direction,
+                } => crate::model::profile_organization::move_profile(
+                    &mut collection,
+                    profile_id,
+                    &sibling_ids,
+                    direction,
+                )
+                .map(|_| ()),
+            };
+            if let Err(error) = result {
+                let _ = sender.send(Action::ProfileOrganizationSaveFailed {
+                    request_id,
+                    message: sanitize_terminal_text(&error.to_string()),
+                });
+                return;
+            }
+            let persisted = ProfileCollection {
+                groups: collection.groups.clone(),
+                profiles: collection
+                    .profiles
+                    .iter()
+                    .filter(|profile| snapshot.persisted.contains(&profile.id))
+                    .cloned()
+                    .collect(),
+            };
+            if let Err(error) = save_profiles(store, persisted).await {
+                let _ = sender.send(Action::ProfileOrganizationSaveFailed {
+                    request_id,
+                    message: error,
+                });
+                return;
+            }
+            let mut next = snapshot;
+            next.groups = collection.groups.clone();
+            next.order = collection
+                .profiles
+                .iter()
+                .map(|profile| profile.id)
+                .collect();
+            next.profiles = collection
+                .profiles
+                .iter()
+                .cloned()
+                .map(|profile| (profile.id, profile))
+                .collect();
+            *registry.lock().await = next;
+            let _ = sender.send(Action::ProfileOrganizationSaved {
+                request_id,
+                collection,
             });
         }));
     }
@@ -3017,8 +3137,8 @@ async fn save_profile_transaction(
     next.profiles.insert(profile_id, profile.clone());
     *next.revisions.entry(profile_id).or_default() += 1;
     next.persisted.insert(profile_id);
-    let persisted_profiles = next.ordered_persisted_profiles();
-    if let Err(primary) = save_profiles(profile_store, persisted_profiles).await {
+    let collection = next.ordered_persisted_collection();
+    if let Err(primary) = save_profiles(profile_store, collection).await {
         return Err(
             rollback_after_failure(&secret_store, profile_id, previous_secret, primary).await,
         );
@@ -3069,8 +3189,8 @@ async fn delete_profile_transaction(
     }
 
     if was_persisted {
-        let persisted_profiles = next.ordered_persisted_profiles();
-        if let Err(primary) = save_profiles(profile_store, persisted_profiles).await {
+        let collection = next.ordered_persisted_collection();
+        if let Err(primary) = save_profiles(profile_store, collection).await {
             return Err(rollback_after_failure(
                 &secret_store,
                 profile_id,
@@ -3095,12 +3215,30 @@ async fn delete_profile_transaction(
 }
 
 impl ProfileRegistry {
+    fn ordered_collection(&self) -> ProfileCollection {
+        ProfileCollection {
+            groups: self.groups.clone(),
+            profiles: self
+                .order
+                .iter()
+                .filter_map(|profile_id| self.profiles.get(profile_id).cloned())
+                .collect(),
+        }
+    }
+
     fn ordered_persisted_profiles(&self) -> Vec<ConnectionProfile> {
         self.order
             .iter()
             .filter(|profile_id| self.persisted.contains(profile_id))
             .filter_map(|profile_id| self.profiles.get(profile_id).cloned())
             .collect()
+    }
+
+    fn ordered_persisted_collection(&self) -> ProfileCollection {
+        ProfileCollection {
+            groups: self.groups.clone(),
+            profiles: self.ordered_persisted_profiles(),
+        }
     }
 }
 
@@ -3363,9 +3501,9 @@ async fn rollback_after_failure(
 
 async fn save_profiles(
     profile_store: ProfileStore,
-    profiles: Vec<ConnectionProfile>,
+    collection: ProfileCollection,
 ) -> Result<(), String> {
-    task::spawn_blocking(move || profile_store.save(&profiles))
+    task::spawn_blocking(move || profile_store.save(&collection))
         .await
         .map_err(|_| "Profile persistence task failed".to_owned())?
         .map_err(|error| {
@@ -3566,6 +3704,15 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
         cli.confirm_execution,
         project,
     );
+    app.connection_groups = startup.collection.groups.clone();
+    app.explorer.normalized.sync_organization(
+        startup.collection.groups.clone(),
+        app.profiles.iter().map(|profile| profile.id).collect(),
+        &app.profiles
+            .iter()
+            .map(|profile| (profile.id, profile.group_id))
+            .collect(),
+    );
     if let Some(workspace) = workspace {
         app.restore_workspace(workspace, startup.selected);
     }
@@ -3573,8 +3720,8 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
     app.reveal_startup_profile(startup.selected);
     app.focus = crate::model::workspace::Focus::Explorer;
     let (event_sender, mut event_receiver) = mpsc::unbounded_channel();
-    let mut runtime = Runtime::new(
-        startup.profiles,
+    let mut runtime = Runtime::new_with_collection(
+        startup.collection,
         startup.persisted,
         startup.session_secrets,
         startup.startup_password,
@@ -3867,6 +4014,7 @@ fn sync_ddl_viewport(app: &mut App, runtime: &mut Runtime, state: &UiState) {
 }
 
 pub struct StartupProfiles {
+    pub collection: ProfileCollection,
     pub profiles: Vec<ConnectionProfile>,
     pub persisted: HashSet<Uuid>,
     pub session_secrets: HashMap<Uuid, SecretString>,
@@ -3882,7 +4030,8 @@ pub fn load_startup_profiles(cli: &Cli) -> Result<StartupProfiles> {
         AppPaths::discover()?.profiles_file()
     };
     let store = ProfileStore::new(profile_path);
-    let mut profiles = store.load().context("failed to load connection profiles")?;
+    let mut collection = store.load().context("failed to load connection profiles")?;
+    let mut profiles = collection.profiles.clone();
     let persisted = profiles.iter().map(|profile| profile.id).collect();
     let mut session_secrets = HashMap::new();
 
@@ -3900,6 +4049,7 @@ pub fn load_startup_profiles(cli: &Cli) -> Result<StartupProfiles> {
     } else {
         None
     };
+    collection.profiles = profiles.clone();
 
     let has_direct_profile = direct_profile.is_some();
     let selected = direct_profile.or_else(|| {
@@ -3931,6 +4081,7 @@ pub fn load_startup_profiles(cli: &Cli) -> Result<StartupProfiles> {
     };
 
     Ok(StartupProfiles {
+        collection,
         profiles,
         persisted,
         session_secrets,

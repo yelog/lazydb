@@ -93,6 +93,7 @@ async fn monitoring_snapshot_decodes_integer_timestamps_when_configured() {
     database.close().await;
 }
 
+#[allow(dead_code)]
 fn index_mutation_capability_is_advertised_for_relations() {
     let capabilities = lazydb::db::postgres::PostgresAdapter::catalog_mutation_capabilities();
     assert!(capabilities.create.iter().any(|option| {

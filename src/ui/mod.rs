@@ -173,6 +173,9 @@ pub enum HitTarget {
     ProfileToggle(ProfileField),
     ProfileScopeRow(String),
     ProfileButton(ProfileButton),
+    ProfileGroupOption(usize),
+    ProfileGroupConfirm,
+    ProfileGroupCancel,
     DismissNotification(u64),
     RelationFirstPage,
     RelationPreviousPage,
@@ -756,6 +759,7 @@ fn overlay_key(overlay: &Overlay) -> u8 {
         Overlay::ProfileManager => 3,
         Overlay::CatalogEditor => 18,
         Overlay::ProfileAccess { .. } => 4,
+        Overlay::ProfileGroup(_) => 19,
         Overlay::Message { .. } => 5,
         Overlay::SubstituteConfirm { .. } => 6,
         Overlay::ExecutionConfirm { .. } => 7,
@@ -1466,6 +1470,7 @@ fn explorer_list_item(
         " "
     };
     let icon = match &visible.id {
+        crate::model::explorer::ExplorerNodeId::ConnectionGroup { .. } => "▰",
         crate::model::explorer::ExplorerNodeId::Group { group, .. } => {
             icons.group(*group, expanded)
         }
@@ -1521,7 +1526,13 @@ fn explorer_list_item(
     } else {
         theme.surface
     });
-    if visible.provenance == Some(ProfileProvenance::Session) {
+    let is_connection_group = matches!(
+        visible.id,
+        crate::model::explorer::ExplorerNodeId::ConnectionGroup { .. }
+    );
+    if is_connection_group {
+        // Organization rows intentionally do not expose connection metadata.
+    } else if visible.provenance == Some(ProfileProvenance::Session) {
         spans.push(Span::styled("  SESSION", secondary_style));
     } else if let Some(placement) = visible.placement {
         let label = match placement {
@@ -2998,6 +3009,78 @@ fn render_overlay(
         }
         Overlay::CatalogEditorDestructiveConfirm { plan, input } => {
             render_catalog_mutation_confirm(frame, area, plan, input, theme);
+        }
+        Overlay::ProfileGroup(group) => {
+            let popup = centered(area, 56, 10);
+            frame.render_widget(Clear, popup);
+            let text = match group {
+                crate::model::profile_group::ProfileGroupOverlay::Picker { selected, .. } => {
+                    let mut lines = vec!["Connection group".to_owned(), "Ungrouped".to_owned()];
+                    lines.extend(app.connection_groups.iter().map(|group| group.name.clone()));
+                    lines.push("+ Create group...".to_owned());
+                    lines.push(format!(
+                        "Selected: {}  Enter select  Esc cancel",
+                        selected + 1
+                    ));
+                    lines.join("\n")
+                }
+                crate::model::profile_group::ProfileGroupOverlay::Edit { name, error, .. } => {
+                    format!(
+                        "Edit group\nName: {}\n{}\nEnter save  Esc cancel",
+                        name.value(),
+                        error.as_deref().unwrap_or("")
+                    )
+                }
+                crate::model::profile_group::ProfileGroupOverlay::DeleteConfirm {
+                    member_count,
+                    ..
+                } => {
+                    format!(
+                        "Delete group?\n{} connection(s) will be ungrouped.\nEnter delete  Esc cancel",
+                        member_count
+                    )
+                }
+            };
+            frame.render_widget(
+                Paragraph::new(text).block(panel_block(" CONNECTION GROUP ", true, theme)),
+                popup,
+            );
+            match group {
+                crate::model::profile_group::ProfileGroupOverlay::Picker { .. } => {
+                    let options = app.connection_groups.len() + 2;
+                    for index in 0..options {
+                        state.hit_regions.push(HitRegion {
+                            area: Rect::new(
+                                popup.x + 1,
+                                popup.y + 2 + index as u16,
+                                popup.width.saturating_sub(2),
+                                1,
+                            ),
+                            target: HitTarget::ProfileGroupOption(index),
+                        });
+                    }
+                }
+                _ => {
+                    state.hit_regions.push(HitRegion {
+                        area: Rect::new(
+                            popup.x + 1,
+                            popup.bottom().saturating_sub(2),
+                            popup.width / 2,
+                            1,
+                        ),
+                        target: HitTarget::ProfileGroupConfirm,
+                    });
+                    state.hit_regions.push(HitRegion {
+                        area: Rect::new(
+                            popup.x + popup.width / 2,
+                            popup.bottom().saturating_sub(2),
+                            popup.width / 2,
+                            1,
+                        ),
+                        target: HitTarget::ProfileGroupCancel,
+                    });
+                }
+            }
         }
     }
 }

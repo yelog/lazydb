@@ -203,6 +203,33 @@ and connect. Saved profiles remain available the next time LazyDB starts, and
 passwords can use local encrypted storage or the native operating-system secret
 store when available.
 
+### Explorer Connection Groups
+
+Saved connections can belong to at most one custom group. In Explorer, a group
+is projected independently in the primary and `others` regions when it has
+members in both; empty groups remain available in the group picker but are not
+shown as tree rows. Use `a` to create a group, `e` to rename a selected group,
+`d` to delete it, and `g` on a saved profile to change its membership. Deleting
+a group ungroups its connections without deleting them. `J` and `K` reorder a
+connection only among visible siblings in the same region and group.
+
+The V6 `connections.toml` format stores group metadata and profile order. It
+does not store plaintext credentials:
+
+```toml
+version = 6
+
+[[groups]]
+id = "11111111-1111-1111-1111-111111111111"
+name = "Production"
+
+[[profiles]]
+id = "22222222-2222-2222-2222-222222222222"
+name = "Billing"
+group_id = "11111111-1111-1111-1111-111111111111"
+# existing connection fields follow
+```
+
 ## Coding-Agent Access
 
 LazyDB exposes the same native database adapters through a machine-readable JSON

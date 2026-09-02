@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use lazydb::model::profile_group::ProfileGroupOverlay;
 use lazydb::{
     action::Action,
     app::App,
@@ -231,6 +232,7 @@ fn dashboard_overview_uses_rates_capacity_percentages_and_metric_icons() {
     assert!(output.contains("󰓡"), "{output}");
 }
 
+#[allow(dead_code)]
 fn catalog_editor_overlay_renders_picker_shell_and_context() {
     let mut app = App::new(Vec::new());
     app.catalog_editor = Some(lazydb::model::catalog_editor::CatalogEditorState::new(
@@ -747,6 +749,44 @@ fn sql_editor_underlines_statement_when_cursor_is_on_internal_space() {
 
 fn render(app: &App, width: u16, height: u16) -> String {
     render_with_state(app, width, height).0
+}
+
+#[test]
+fn profile_group_overlay_renders_options_and_editor_content() {
+    let mut app = App::new(Vec::new());
+    app.connection_groups.push(
+        lazydb::profile::ConnectionGroup::new(uuid::Uuid::from_u128(1), "Production").unwrap(),
+    );
+    app.overlay = Some(Overlay::ProfileGroup(ProfileGroupOverlay::Picker {
+        profile_id: uuid::Uuid::from_u128(2),
+        selected: 0,
+        busy: false,
+    }));
+    let (picker, picker_state) = render_with_state(&app, 80, 30);
+    assert!(picker.contains("Ungrouped"));
+    assert!(picker.contains("Production"));
+    assert!(picker.contains("Create group"));
+    assert!(
+        picker_state
+            .hit_regions
+            .iter()
+            .any(|region| matches!(region.target, HitTarget::ProfileGroupOption(_)))
+    );
+    app.overlay = Some(Overlay::ProfileGroup(ProfileGroupOverlay::Edit {
+        group_id: None,
+        name: "Production".into(),
+        error: Some("duplicate".into()),
+        busy: false,
+    }));
+    let (editor, editor_state) = render_with_state(&app, 80, 30);
+    assert!(editor.contains("Production"));
+    assert!(editor.contains("duplicate"));
+    assert!(
+        editor_state
+            .hit_regions
+            .iter()
+            .any(|region| region.target == HitTarget::ProfileGroupConfirm)
+    );
 }
 
 fn record_view_field_background(app: &App, field: &str) -> Color {

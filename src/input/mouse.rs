@@ -65,6 +65,9 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                             | HitTarget::ProfileToggle(_)
                             | HitTarget::ProfileScopeRow(_)
                             | HitTarget::ProfileButton(_)
+                            | HitTarget::ProfileGroupOption(_)
+                            | HitTarget::ProfileGroupConfirm
+                            | HitTarget::ProfileGroupCancel
                     ))
             {
                 return None;
@@ -127,6 +130,9 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                 HitTarget::ProfileToggle(field) => Some(Action::ProfileToggleField(field)),
                 HitTarget::ProfileScopeRow(id) => Some(Action::ProfileToggleScopeRow(id)),
                 HitTarget::ProfileButton(button) => Some(profile_button_action(button)),
+                HitTarget::ProfileGroupOption(index) => Some(Action::ProfileGroupSelect(index)),
+                HitTarget::ProfileGroupConfirm => Some(Action::ProfileGroupConfirm),
+                HitTarget::ProfileGroupCancel => Some(Action::ProfileGroupCancel),
                 HitTarget::RelationFirstPage => Some(Action::RelationFirstPage),
                 HitTarget::RelationPreviousPage => Some(Action::RelationPreviousPage),
                 HitTarget::RelationPageSize => {
@@ -264,7 +270,10 @@ fn focus_at(ui: &UiState, column: u16, row: u16) -> Option<Focus> {
         | HitTarget::ProfileDriver(_)
         | HitTarget::ProfileToggle(_)
         | HitTarget::ProfileScopeRow(_)
-        | HitTarget::ProfileButton(_) => None,
+        | HitTarget::ProfileButton(_)
+        | HitTarget::ProfileGroupOption(_)
+        | HitTarget::ProfileGroupConfirm
+        | HitTarget::ProfileGroupCancel => None,
         HitTarget::RelationFirstPage
         | HitTarget::RelationPreviousPage
         | HitTarget::RelationPageSize

@@ -82,7 +82,7 @@ fn version_two_profiles_migrate_credential_policy_and_save_as_version_five() {
 
     store.save(&loaded).unwrap();
     let serialized = fs::read_to_string(path).unwrap();
-    assert!(serialized.contains("version = 5"));
+    assert!(serialized.contains("version = 6"));
     assert!(serialized.contains("policy = \"system\""));
     assert!(!serialized.contains("secret_ref"));
     assert!(serialized.contains("catalog_scope"));
@@ -126,7 +126,7 @@ include_schemas = ["public"]
         error,
         PersistenceError::UnsupportedVersion {
             found: 1,
-            expected: 5
+            expected: 6
         }
     ));
 }
@@ -195,7 +195,7 @@ fn version_five_round_trips_global_and_multi_project_access() {
 
     assert_eq!(loaded, vec![profile]);
     let serialized = fs::read_to_string(path).unwrap();
-    assert!(serialized.contains("version = 5"));
+    assert!(serialized.contains("version = 6"));
     assert!(serialized.contains("scope = \"projects\""));
     assert!(serialized.contains("/Users/me/code/zeta"));
     assert!(serialized.contains("/Users/me/code/alpha"));

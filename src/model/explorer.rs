@@ -8,7 +8,7 @@ use crate::db::catalog::{
     CatalogRequest, CatalogSearchHit, CatalogTarget, ObjectGroup, search_text_matches,
 };
 use crate::db::catalog_mutation::CatalogMutationAnchor;
-use crate::profile::DatabaseKind;
+use crate::profile::{ConnectionGroup, DatabaseKind};
 
 fn group_label(group: ObjectGroup) -> &'static str {
     match group {
@@ -35,6 +35,12 @@ pub enum ProfilePlacement {
     CurrentProject,
     Global,
     OtherProject,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ProfileRegion {
+    Primary,
+    Others,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -72,6 +78,10 @@ pub enum ExplorerNodeId {
     EmptyProfiles,
     Others,
     Profile(Uuid),
+    ConnectionGroup {
+        group_id: Uuid,
+        region: ProfileRegion,
+    },
     Catalog(CatalogId),
     Group {
         parent: CatalogId,
@@ -124,6 +134,7 @@ pub fn resolve_mutation_intent(
                 group: *group,
             },
         )),
+        ExplorerNodeId::ConnectionGroup { .. } => None,
         ExplorerNodeId::EmptyProfiles
         | ExplorerNodeId::Others
         | ExplorerNodeId::Status { .. }
@@ -142,7 +153,7 @@ impl ExplorerNodeId {
             Self::Status { owner, .. }
             | Self::LoadMore { parent: owner, .. }
             | Self::Empty { owner } => Some(owner.profile_id()),
-            Self::EmptyProfiles | Self::Others => None,
+            Self::EmptyProfiles | Self::Others | Self::ConnectionGroup { .. } => None,
         }
     }
 }
@@ -771,6 +782,7 @@ pub struct ExplorerProfileState {
     pub endpoint: String,
     pub provenance: ProfileProvenance,
     pub placement: ProfilePlacement,
+    pub group_id: Option<Uuid>,
     pub status: ExplorerConnectionStatus,
     pub catalog: CatalogTree,
     pub catalog_epoch: u64,
@@ -798,6 +810,7 @@ impl ExplorerProfileState {
             endpoint,
             provenance,
             placement,
+            group_id: None,
             status: ExplorerConnectionStatus::Offline,
             catalog: CatalogTree::new(profile_id),
             catalog_epoch: 0,
@@ -900,6 +913,7 @@ pub enum ExplorerTreeError {
 
 #[derive(Clone, Debug)]
 pub struct ExplorerTreeState {
+    pub groups: Vec<ConnectionGroup>,
     pub profile_order: Vec<Uuid>,
     pub profiles: HashMap<Uuid, ExplorerProfileState>,
     pub selected: Option<ExplorerNodeId>,
@@ -911,6 +925,7 @@ pub struct ExplorerTreeState {
 impl Default for ExplorerTreeState {
     fn default() -> Self {
         Self {
+            groups: Vec::new(),
             profile_order: Vec::new(),
             profiles: HashMap::new(),
             selected: Some(ExplorerNodeId::EmptyProfiles),
@@ -995,7 +1010,8 @@ impl ExplorerTreeState {
             | ExplorerNodeId::Others
             | ExplorerNodeId::Status { .. }
             | ExplorerNodeId::LoadMore { .. }
-            | ExplorerNodeId::Empty { .. } => None,
+            | ExplorerNodeId::Empty { .. }
+            | ExplorerNodeId::ConnectionGroup { .. } => None,
         }
     }
 
@@ -1107,33 +1123,73 @@ impl ExplorerTreeState {
         provenance: ProfileProvenance,
         placement: ProfilePlacement,
     ) {
+        self.add_profile_with_group(
+            profile_id,
+            display_name,
+            kind,
+            endpoint,
+            provenance,
+            placement,
+            None,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_profile_with_group(
+        &mut self,
+        profile_id: Uuid,
+        display_name: String,
+        kind: DatabaseKind,
+        endpoint: String,
+        provenance: ProfileProvenance,
+        placement: ProfilePlacement,
+        group_id: Option<Uuid>,
+    ) {
         if let Some(profile) = self.profiles.get_mut(&profile_id) {
             profile.display_name = display_name;
             profile.kind = kind;
             profile.endpoint = endpoint;
             profile.provenance = provenance;
             profile.placement = placement;
+            profile.group_id = group_id;
             return;
         }
         if self.profiles.contains_key(&profile_id) {
             return;
         }
-        self.profiles.insert(
+        let mut state = ExplorerProfileState::new(
             profile_id,
-            ExplorerProfileState::new(
-                profile_id,
-                display_name,
-                kind,
-                endpoint,
-                provenance,
-                placement,
-            ),
+            display_name,
+            kind,
+            endpoint,
+            provenance,
+            placement,
         );
+        state.group_id = group_id;
+        self.profiles.insert(profile_id, state);
         self.profile_order.push(profile_id);
         self.expanded.insert(ExplorerNodeId::Profile(profile_id));
         if matches!(self.selected, None | Some(ExplorerNodeId::EmptyProfiles)) {
             self.selected = Some(ExplorerNodeId::Profile(profile_id));
         }
+    }
+
+    pub fn sync_organization(
+        &mut self,
+        groups: Vec<ConnectionGroup>,
+        profile_order: Vec<Uuid>,
+        profile_groups: &HashMap<Uuid, Option<Uuid>>,
+    ) {
+        self.groups = groups;
+        self.profile_order = profile_order;
+        for profile in self.profiles.values_mut() {
+            profile.group_id = profile_groups
+                .get(&profile.catalog.profile_id())
+                .copied()
+                .flatten();
+        }
+        self.retain_existing_expansion();
+        self.reconcile_after_catalog_change(self.selection_fallback_chain());
     }
 
     pub fn remove_profile(&mut self, profile_id: Uuid) -> Option<ExplorerProfileState> {
@@ -1238,8 +1294,7 @@ impl ExplorerTreeState {
     #[doc(hidden)]
     pub fn visible_with_visit_count(&self) -> (Vec<VisibleExplorerNode>, usize) {
         let mut projection = Projection::new(self);
-        self.append_placement(&mut projection, ProfilePlacement::CurrentProject);
-        self.append_placement(&mut projection, ProfilePlacement::Global);
+        self.append_region(&mut projection, ProfileRegion::Primary, 0);
         let other_profiles = self
             .profile_order
             .iter()
@@ -1254,9 +1309,7 @@ impl ExplorerTreeState {
             let others = ExplorerNodeId::Others;
             projection.push(others.clone(), 0);
             if self.expanded.contains(&others) {
-                for profile_id in other_profiles {
-                    self.append_profile(&mut projection, profile_id, 1);
-                }
+                self.append_region(&mut projection, ProfileRegion::Others, 1);
             }
         }
         if projection.rows.is_empty() {
@@ -1265,15 +1318,47 @@ impl ExplorerTreeState {
         (projection.rows, projection.visited_catalog_entries)
     }
 
-    fn append_placement(&self, projection: &mut Projection<'_>, placement: ProfilePlacement) {
-        for profile_id in &self.profile_order {
-            let Some(profile) = self.profiles.get(profile_id) else {
-                continue;
-            };
-            if profile.placement != placement {
+    fn append_region(&self, projection: &mut Projection<'_>, region: ProfileRegion, depth: usize) {
+        let placements = match region {
+            ProfileRegion::Primary => [ProfilePlacement::CurrentProject, ProfilePlacement::Global],
+            ProfileRegion::Others => [
+                ProfilePlacement::OtherProject,
+                ProfilePlacement::OtherProject,
+            ],
+        };
+        for group in &self.groups {
+            let members = self
+                .profile_order
+                .iter()
+                .copied()
+                .filter(|id| {
+                    self.profiles.get(id).is_some_and(|profile| {
+                        profile.group_id == Some(group.id)
+                            && placements.contains(&profile.placement)
+                    })
+                })
+                .collect::<Vec<_>>();
+            if members.is_empty() {
                 continue;
             }
-            self.append_profile(projection, *profile_id, 0);
+            let node = ExplorerNodeId::ConnectionGroup {
+                group_id: group.id,
+                region,
+            };
+            projection.push(node.clone(), depth);
+            if self.expanded.contains(&node) {
+                for id in members {
+                    self.append_profile(projection, id, depth + 1);
+                }
+            }
+        }
+        for id in &self.profile_order {
+            if let Some(profile) = self.profiles.get(id)
+                && profile.group_id.is_none()
+                && placements.contains(&profile.placement)
+            {
+                self.append_profile(projection, *id, depth);
+            }
         }
     }
 
@@ -1335,6 +1420,10 @@ impl ExplorerTreeState {
                 .profiles
                 .get(&parent.profile_id())
                 .is_some_and(|profile| profile.catalog.group_state(parent, *group).is_some()),
+            ExplorerNodeId::ConnectionGroup { group_id, .. } => {
+                let _ = group_id;
+                true
+            }
             ExplorerNodeId::Others => true,
             ExplorerNodeId::EmptyProfiles
             | ExplorerNodeId::Status { .. }
@@ -1633,6 +1722,10 @@ impl ExplorerTreeState {
                 Some(ExplorerNodeId::Catalog(parent.clone()))
             }
             ExplorerNodeId::Group { parent, .. } => Some(ExplorerNodeId::Catalog(parent.clone())),
+            ExplorerNodeId::ConnectionGroup { region, .. } => Some(match region {
+                ProfileRegion::Primary => ExplorerNodeId::EmptyProfiles,
+                ProfileRegion::Others => ExplorerNodeId::Others,
+            }),
             ExplorerNodeId::Status { owner, .. } | ExplorerNodeId::Empty { owner } => {
                 Some(owner.node_id())
             }
@@ -1676,6 +1769,26 @@ impl ExplorerTreeState {
                 .profiles
                 .get(&parent.profile_id())
                 .is_some_and(|profile| profile.catalog.group_state(parent, *group).is_some()),
+            ExplorerNodeId::ConnectionGroup { group_id, region } => {
+                self.groups.iter().any(|group| {
+                    group.id == *group_id
+                        && self.profile_order.iter().any(|profile_id| {
+                            self.profiles.get(profile_id).is_some_and(|profile| {
+                                profile.group_id == Some(*group_id)
+                                    && match region {
+                                        ProfileRegion::Primary => matches!(
+                                            profile.placement,
+                                            ProfilePlacement::CurrentProject
+                                                | ProfilePlacement::Global
+                                        ),
+                                        ProfileRegion::Others => {
+                                            profile.placement == ProfilePlacement::OtherProject
+                                        }
+                                    }
+                            })
+                        })
+                })
+            }
             ExplorerNodeId::Status { owner, kind } => self
                 .load_state(owner)
                 .is_some_and(|state| status_kind(state) == Some(*kind)),
@@ -1754,8 +1867,10 @@ impl ExplorerTreeState {
                     self.append_catalog_ancestors(parent, &mut chain)
                 }
             },
-            ExplorerNodeId::EmptyProfiles | ExplorerNodeId::Others | ExplorerNodeId::Profile(_) => {
-            }
+            ExplorerNodeId::EmptyProfiles
+            | ExplorerNodeId::Others
+            | ExplorerNodeId::Profile(_)
+            | ExplorerNodeId::ConnectionGroup { .. } => {}
         }
         chain
     }

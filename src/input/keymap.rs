@@ -136,6 +136,18 @@ impl Keymap {
                 _ => None,
             };
         }
+        if matches!(app.overlay, Some(Overlay::ProfileGroup(_))) {
+            self.pending = None;
+            return match event.code {
+                KeyCode::Enter => Some(Action::ProfileGroupConfirm),
+                KeyCode::Esc | KeyCode::Char('q') => Some(Action::ProfileGroupCancel),
+                KeyCode::Up | KeyCode::Char('k') => Some(Action::ProfileGroupMove(-1)),
+                KeyCode::Down | KeyCode::Char('j') => Some(Action::ProfileGroupMove(1)),
+                KeyCode::Backspace => Some(Action::ProfileGroupBackspace),
+                KeyCode::Char(character) => Some(Action::ProfileGroupInsert(character)),
+                _ => None,
+            };
+        }
         if matches!(app.overlay, Some(Overlay::RecordView(_))) {
             let pending = self.pending.take();
             return match event.code {
@@ -1758,6 +1770,12 @@ fn map_explorer(code: KeyCode, app: &App) -> Option<Action> {
         KeyCode::Char('f') => return Some(Action::ExplorerSearchOpen),
         KeyCode::Char('n') => return Some(Action::ProfileStartNew),
         KeyCode::Char('a') => {
+            if matches!(
+                app.explorer.normalized.selected,
+                Some(ExplorerNodeId::ConnectionGroup { .. })
+            ) {
+                return Some(Action::ProfileGroupCreate);
+            }
             return crate::help::shortcut_is_available_in_app(
                 app,
                 crate::help::HelpShortcutId::ExplorerCreateCatalog,
@@ -1765,6 +1783,12 @@ fn map_explorer(code: KeyCode, app: &App) -> Option<Action> {
             .then_some(Action::OpenCatalogCreate);
         }
         KeyCode::Char('e') => {
+            if matches!(
+                app.explorer.normalized.selected,
+                Some(ExplorerNodeId::ConnectionGroup { .. })
+            ) {
+                return Some(Action::ProfileGroupOpen);
+            }
             let id = if matches!(
                 app.explorer.normalized.selected,
                 Some(ExplorerNodeId::Profile(_))
@@ -1778,6 +1802,9 @@ fn map_explorer(code: KeyCode, app: &App) -> Option<Action> {
         }
         KeyCode::Char('d') => {
             return match app.explorer.normalized.selected.as_ref() {
+                Some(ExplorerNodeId::ConnectionGroup { .. }) => {
+                    Some(Action::ProfileGroupDeleteConfirm)
+                }
                 Some(ExplorerNodeId::Profile(profile_id)) => Some(Action::ProfileRequestDelete {
                     profile_id: *profile_id,
                 }),
@@ -1795,11 +1822,20 @@ fn map_explorer(code: KeyCode, app: &App) -> Option<Action> {
                 .map(|profile_id| Action::RequestProfileDisconnect { profile_id });
         }
         KeyCode::Char('s') => return Some(Action::OpenProfileAccess),
+        KeyCode::Char('g') => {
+            return matches!(
+                app.explorer.normalized.selected,
+                Some(ExplorerNodeId::Profile(_))
+            )
+            .then_some(Action::ProfileGroupOpen);
+        }
         _ => {}
     }
     match code {
         KeyCode::Char('j') | KeyCode::Down => Some(Action::ExplorerMove(1)),
         KeyCode::Char('k') | KeyCode::Up => Some(Action::ExplorerMove(-1)),
+        KeyCode::Char('J') => Some(Action::ProfileGroupMove(1)),
+        KeyCode::Char('K') => Some(Action::ProfileGroupMove(-1)),
         KeyCode::Char('G') => Some(Action::ExplorerSelectTarget(
             crate::model::explorer::ExplorerNodeTarget::Last,
         )),
