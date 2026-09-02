@@ -270,6 +270,10 @@ pub enum HelpShortcutId {
     ExplorerEditProfile,
     ExplorerCreateCatalog,
     ExplorerEditCatalog,
+    ExplorerCreateGroup,
+    ExplorerEditGroup,
+    ExplorerMoveToGroup,
+    ExplorerDeleteGroup,
     ExplorerDeleteProfile,
     ExplorerConnect,
     ExplorerDisconnect,
@@ -1022,6 +1026,30 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
         "edit selected object",
         CatalogEditAvailable,
         executable
+    ),
+    row!(
+        ExplorerCreateGroup,
+        [Explorer],
+        "a",
+        "new connection group (on a connection or group)"
+    ),
+    row!(
+        ExplorerEditGroup,
+        [Explorer],
+        "e",
+        "edit selected connection group"
+    ),
+    row!(
+        ExplorerMoveToGroup,
+        [Explorer],
+        "g",
+        "move connection to group"
+    ),
+    row!(
+        ExplorerDeleteGroup,
+        [Explorer],
+        "d",
+        "delete selected connection group"
     ),
     row!(ExplorerDeleteProfile, [Explorer], "d", "delete connection"),
     row!(ExplorerConnect, [Explorer], "c", "connect"),
@@ -2841,6 +2869,23 @@ mod tests {
                 .unwrap()
                 .description,
             "add object"
+        );
+    }
+
+    #[test]
+    fn explorer_help_always_lists_group_shortcuts() {
+        let rows = shortcuts(ShortcutContext::Explorer, ShortcutCapabilities::default());
+        assert_eq!(
+            rows.iter()
+                .filter(|row| matches!(
+                    row.id,
+                    HelpShortcutId::ExplorerCreateGroup
+                        | HelpShortcutId::ExplorerEditGroup
+                        | HelpShortcutId::ExplorerMoveToGroup
+                        | HelpShortcutId::ExplorerDeleteGroup
+                ))
+                .count(),
+            4
         );
     }
 
