@@ -188,6 +188,16 @@ fn append_console_output_to_editor(
     let _ = editor.set_read_only_text(tab.output_editor_id, &text, true);
 }
 
+fn console_status_rank(record: &ConsoleRecord) -> u8 {
+    if record.name == "console" {
+        0
+    } else if record.open {
+        1
+    } else {
+        2
+    }
+}
+
 pub struct App {
     pub project: ProjectContext,
     pub profiles: Vec<ConnectionProfile>,
@@ -583,11 +593,37 @@ impl App {
         let used = self
             .sql_editors
             .iter()
-            .filter_map(|record| record.name.strip_prefix("console_"))
+            .map(|record| record.name.trim().to_ascii_lowercase())
+            .filter_map(|name| name.strip_prefix("console_").map(str::to_owned))
             .filter_map(|number| number.parse::<usize>().ok())
             .collect::<HashSet<_>>();
         let number = (1..).find(|number| !used.contains(number)).unwrap_or(1);
         format!("console_{number}")
+    }
+
+    /// Returns the console records in the order used by the console manager.
+    pub fn visible_console_records(&self, query: &str) -> Vec<&ConsoleRecord> {
+        let query = query.to_lowercase();
+        let mut records = self
+            .sql_editors
+            .iter()
+            .filter(|record| record.name.to_lowercase().contains(&query))
+            .collect::<Vec<_>>();
+        records.sort_by(|left, right| {
+            console_status_rank(left)
+                .cmp(&console_status_rank(right))
+                .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+                .then_with(|| left.name.cmp(&right.name))
+                .then_with(|| left.id.as_bytes().cmp(right.id.as_bytes()))
+        });
+        records
+    }
+
+    pub fn visible_console_ids(&self, query: &str) -> Vec<Uuid> {
+        self.visible_console_records(query)
+            .into_iter()
+            .map(|record| record.id)
+            .collect()
     }
 
     fn take_active_workspace(&mut self) -> Option<(Uuid, ConnectionWorkspace)> {
@@ -1357,8 +1393,6 @@ impl App {
             Id::NextTab => vec![Action::NextTab],
             Id::PreviousTabAlias => vec![Action::PreviousTab],
             Id::NextTabAlias => vec![Action::NextTab],
-            Id::NewConsole => vec![Action::NewConsole],
-            Id::GotoSqlConsole => vec![Action::GotoSqlConsole],
             Id::OpenDashboard => vec![Action::OpenDashboard],
             Id::DashboardToggleView => vec![Action::DashboardSetPage(
                 match self.tabs.get(self.active_tab) {
@@ -1725,8 +1759,21 @@ impl App {
                         | Action::CancelDeleteConsole
                         | Action::OpenNotificationHistory
                         | Action::OpenSqlEditorList
-                        | Action::SqlEditorListInsert(_)
-                        | Action::SqlEditorListBackspace
+                        | Action::SqlEditorListActivate
+                        | Action::SqlEditorListCreate
+                        | Action::SqlEditorListSearchStart
+                        | Action::SqlEditorListRenameStart
+                        | Action::SqlEditorListRenameCommit
+                        | Action::SqlEditorListInputInsert(_)
+                        | Action::SqlEditorListInputBackspace
+                        | Action::SqlEditorListInputDeletePreviousWord
+                        | Action::SqlEditorListInputDeleteToStart
+                        | Action::SqlEditorListInputDelete
+                        | Action::SqlEditorListInputMoveLeft
+                        | Action::SqlEditorListInputMoveRight
+                        | Action::SqlEditorListInputMoveHome
+                        | Action::SqlEditorListInputMoveEnd
+                        | Action::SqlEditorListCancel
                         | Action::SqlEditorListMove(_)
                         | Action::ActivateSqlEditor(_)
                         | Action::CatalogDropInsert(_)
@@ -1804,8 +1851,21 @@ impl App {
                     | Action::ConfirmClearTransactionOutcome
                     | Action::CancelClearTransactionOutcome
                     | Action::OpenSqlEditorList
-                    | Action::SqlEditorListInsert(_)
-                    | Action::SqlEditorListBackspace
+                    | Action::SqlEditorListActivate
+                    | Action::SqlEditorListCreate
+                    | Action::SqlEditorListSearchStart
+                    | Action::SqlEditorListRenameStart
+                    | Action::SqlEditorListRenameCommit
+                    | Action::SqlEditorListInputInsert(_)
+                    | Action::SqlEditorListInputBackspace
+                    | Action::SqlEditorListInputDeletePreviousWord
+                    | Action::SqlEditorListInputDeleteToStart
+                    | Action::SqlEditorListInputDelete
+                    | Action::SqlEditorListInputMoveLeft
+                    | Action::SqlEditorListInputMoveRight
+                    | Action::SqlEditorListInputMoveHome
+                    | Action::SqlEditorListInputMoveEnd
+                    | Action::SqlEditorListCancel
                     | Action::SqlEditorListMove(_)
                     | Action::ActivateSqlEditor(_)
                     | Action::RequestDeleteActiveConsole
@@ -2123,48 +2183,7 @@ impl App {
                 {
                     return Vec::new();
                 }
-                if self.active_workspace_profile.is_none()
-                    && let Some(profile_id) = self.connection.profile_id
-                    && let Some(profile) = self
-                        .profiles
-                        .iter()
-                        .find(|profile| profile.id == profile_id)
-                {
-                    let target = self
-                        .connection
-                        .target
-                        .clone()
-                        .filter(|target| target.is_valid(profile))
-                        .unwrap_or_else(|| ExecutionTarget::from_profile(profile));
-                    let workspace = self
-                        .workspaces
-                        .remove(&profile_id)
-                        .unwrap_or_else(|| self.empty_workspace_for(profile_id, target));
-                    self.install_workspace(profile_id, workspace);
-                }
-                if !self.has_active_workspace() {
-                    return Vec::new();
-                }
-                let name = self.next_console_name();
-                let mut tab = ConsoleTab::new(name.clone());
-                tab.execution_target = self.active_profile().map(ExecutionTarget::from_profile);
-                let id = tab.id;
-                self.tabs.push(WorkspaceTab::Sql(tab));
-                self.editor.open_console(id, "");
-                self.sql_editors.push(ConsoleRecord {
-                    id,
-                    name: name.clone(),
-                    execution_target: self
-                        .tabs
-                        .last()
-                        .and_then(WorkspaceTab::as_console)
-                        .and_then(|tab| tab.execution_target.clone()),
-                    transaction_mode: TransactionMode::Auto,
-                    open: true,
-                });
-                self.active_tab = self.tabs.len() - 1;
-                self.focus = Focus::Editor;
-                vec![self.persist_workspace_command()]
+                self.create_and_activate_sql_editor()
             }
             Action::CloseActiveTab => {
                 if self.has_active_workspace() && !self.tabs.is_empty() {
@@ -2206,11 +2225,14 @@ impl App {
                     return Vec::new();
                 };
                 let id = tab.id;
-                if tab.is_default() {
-                    return Vec::new();
-                }
                 if self.transaction_needs_exit(id) {
-                    return self.defer_intent(DeferredIntent::DeleteConsole(id), [id]);
+                    return self.defer_intent(
+                        DeferredIntent::DeleteConsole {
+                            id,
+                            return_to_manager: false,
+                        },
+                        [id],
+                    );
                 }
                 self.overlay = Some(Overlay::DeleteConsole { console_id: id });
                 Vec::new()
@@ -2231,38 +2253,251 @@ impl App {
                 if !self.has_active_workspace() {
                     return Vec::new();
                 }
-                self.sql_editor_list = Default::default();
+                let selected_id = self
+                    .active_console_opt()
+                    .map(|tab| tab.id)
+                    .or_else(|| self.visible_console_ids("").first().copied());
+                self.sql_editor_list =
+                    crate::model::sql_editor_list::SqlEditorListState::new(selected_id);
                 self.overlay = Some(Overlay::SqlEditorList(self.sql_editor_list.clone()));
                 Vec::new()
             }
-            Action::SqlEditorListInsert(value) => {
-                if let Some(Overlay::SqlEditorList(list)) = self.overlay.as_mut() {
-                    list.insert(value);
-                }
-                Vec::new()
-            }
-            Action::SqlEditorListBackspace => {
-                if let Some(Overlay::SqlEditorList(list)) = self.overlay.as_mut() {
-                    list.backspace();
-                }
-                Vec::new()
-            }
             Action::SqlEditorListMove(delta) => {
-                let count = if let Some(Overlay::SqlEditorList(list)) = self.overlay.as_ref() {
-                    self.sql_editors
-                        .iter()
-                        .filter(|record| {
-                            crate::model::sql_editor_list::SqlEditorListState::matches(
-                                &record.name,
-                                &list.query,
-                            )
-                        })
-                        .count()
-                } else {
-                    0
+                let visible_ids = self
+                    .overlay
+                    .as_ref()
+                    .and_then(|overlay| match overlay {
+                        Overlay::SqlEditorList(list) => {
+                            Some(self.visible_console_ids(list.visible_query()))
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                if let Some(Overlay::SqlEditorList(list)) = self.overlay.as_mut() {
+                    list.move_selection(delta, visible_ids.as_slice());
+                }
+                Vec::new()
+            }
+            Action::SqlEditorListActivate => {
+                let id = self.overlay.as_ref().and_then(|overlay| match overlay {
+                    Overlay::SqlEditorList(list) => list.selected_id,
+                    _ => None,
+                });
+                id.map_or_else(Vec::new, |id| self.activate_sql_editor(id))
+            }
+            Action::SqlEditorListCreate => {
+                let commands = self.create_and_activate_sql_editor();
+                if !commands.is_empty() {
+                    self.overlay = None;
+                }
+                commands
+            }
+            Action::SqlEditorListDeleteRequest => {
+                let Some(id) = self.overlay.as_ref().and_then(|overlay| match overlay {
+                    Overlay::SqlEditorList(list) => list.selected_id,
+                    _ => None,
+                }) else {
+                    return Vec::new();
+                };
+                if !self.sql_editors.iter().any(|record| record.id == id) {
+                    return Vec::new();
+                }
+                if self.transaction_needs_exit(id) {
+                    self.overlay.take();
+                    return self.defer_intent(
+                        DeferredIntent::DeleteConsole {
+                            id,
+                            return_to_manager: true,
+                        },
+                        [id],
+                    );
+                }
+                if let Some(Overlay::SqlEditorList(list)) = self.overlay.as_mut() {
+                    list.mode = crate::model::sql_editor_list::SqlEditorListMode::DeleteConfirm {
+                        console_id: id,
+                    };
+                }
+                Vec::new()
+            }
+            Action::SqlEditorListDeleteConfirm => {
+                let Some((id, query, position)) =
+                    self.overlay.as_ref().and_then(|overlay| match overlay {
+                        Overlay::SqlEditorList(list) => match list.mode {
+                            crate::model::sql_editor_list::SqlEditorListMode::DeleteConfirm {
+                                console_id,
+                            } => {
+                                let ids = self.visible_console_ids(list.visible_query());
+                                Some((
+                                    console_id,
+                                    list.visible_query().to_owned(),
+                                    ids.iter().position(|id| *id == console_id),
+                                ))
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    })
+                else {
+                    return Vec::new();
+                };
+                self.overlay = None;
+                let was_last_console = self.sql_editors.len() == 1;
+                let commands = self.delete_console(id);
+                if was_last_console {
+                    return commands;
+                }
+                let ids = self.visible_console_ids(&query);
+                let selected_id = position
+                    .and_then(|position| ids.get(position).copied())
+                    .or_else(|| ids.last().copied());
+                self.sql_editor_list =
+                    crate::model::sql_editor_list::SqlEditorListState::new(selected_id);
+                self.overlay = Some(Overlay::SqlEditorList(self.sql_editor_list.clone()));
+                commands
+            }
+            Action::SqlEditorListDeleteCancel => {
+                if let Some(Overlay::SqlEditorList(list)) = self.overlay.as_mut()
+                    && matches!(
+                        list.mode,
+                        crate::model::sql_editor_list::SqlEditorListMode::DeleteConfirm { .. }
+                    )
+                {
+                    list.mode = crate::model::sql_editor_list::SqlEditorListMode::Browse;
+                }
+                Vec::new()
+            }
+            Action::SqlEditorListSearchStart => {
+                if let Some(Overlay::SqlEditorList(list)) = self.overlay.as_mut() {
+                    list.start_search();
+                }
+                Vec::new()
+            }
+            Action::SqlEditorListRenameStart => {
+                let Some(console_id) = self.overlay.as_ref().and_then(|overlay| match overlay {
+                    Overlay::SqlEditorList(list) => list.selected_id,
+                    _ => None,
+                }) else {
+                    return Vec::new();
+                };
+                let Some(record) = self
+                    .sql_editors
+                    .iter()
+                    .find(|record| record.id == console_id)
+                else {
+                    return Vec::new();
                 };
                 if let Some(Overlay::SqlEditorList(list)) = self.overlay.as_mut() {
-                    list.move_selection(delta, count);
+                    list.mode = crate::model::sql_editor_list::SqlEditorListMode::Rename {
+                        console_id,
+                        input: crate::model::text_input::TextInput::from(record.name.clone()),
+                        error: None,
+                    };
+                }
+                Vec::new()
+            }
+            Action::SqlEditorListRenameCommit => {
+                let Some((console_id, name)) =
+                    self.overlay.as_ref().and_then(|overlay| match overlay {
+                        Overlay::SqlEditorList(list) => match &list.mode {
+                            crate::model::sql_editor_list::SqlEditorListMode::Rename {
+                                console_id,
+                                input,
+                                ..
+                            } => Some((*console_id, input.value().trim().to_owned())),
+                            _ => None,
+                        },
+                        _ => None,
+                    })
+                else {
+                    return Vec::new();
+                };
+                if name.is_empty() {
+                    if let Some(Overlay::SqlEditorList(list)) = self.overlay.as_mut()
+                        && let crate::model::sql_editor_list::SqlEditorListMode::Rename {
+                            error,
+                            ..
+                        } = &mut list.mode
+                    {
+                        *error = Some("Name is required".into());
+                    }
+                    return Vec::new();
+                }
+                if self.sql_editors.iter().any(|record| {
+                    record.id != console_id && record.name.eq_ignore_ascii_case(&name)
+                }) {
+                    if let Some(Overlay::SqlEditorList(list)) = self.overlay.as_mut()
+                        && let crate::model::sql_editor_list::SqlEditorListMode::Rename {
+                            error,
+                            ..
+                        } = &mut list.mode
+                    {
+                        *error = Some("Name already exists".into());
+                    }
+                    return Vec::new();
+                }
+                if let Some(record) = self
+                    .sql_editors
+                    .iter_mut()
+                    .find(|record| record.id == console_id)
+                {
+                    record.name = name.clone();
+                }
+                if let Some(tab) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|tab| tab.id() == console_id)
+                    .and_then(WorkspaceTab::as_console_mut)
+                {
+                    tab.name = name;
+                }
+                let query = self
+                    .overlay
+                    .as_ref()
+                    .and_then(|overlay| match overlay {
+                        Overlay::SqlEditorList(list) => Some(list.visible_query().to_owned()),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                let visible_ids = self.visible_console_ids(&query);
+                if let Some(Overlay::SqlEditorList(list)) = self.overlay.as_mut() {
+                    list.selected_id = Some(console_id);
+                    list.mode = crate::model::sql_editor_list::SqlEditorListMode::Browse;
+                    list.reconcile_selection(&visible_ids);
+                }
+                vec![self.persist_workspace_command()]
+            }
+            Action::SqlEditorListInputInsert(value) => {
+                self.update_sql_editor_list_input(|list| list.insert(value))
+            }
+            Action::SqlEditorListInputBackspace => {
+                self.update_sql_editor_list_input(|list| list.backspace())
+            }
+            Action::SqlEditorListInputDeletePreviousWord => {
+                self.update_sql_editor_list_input(|list| list.delete_previous_word())
+            }
+            Action::SqlEditorListInputDeleteToStart => {
+                self.update_sql_editor_list_input(|list| list.delete_to_start())
+            }
+            Action::SqlEditorListInputDelete => {
+                self.update_sql_editor_list_input(|list| list.delete())
+            }
+            Action::SqlEditorListInputMoveLeft => {
+                self.update_sql_editor_list_input(|list| list.move_left())
+            }
+            Action::SqlEditorListInputMoveRight => {
+                self.update_sql_editor_list_input(|list| list.move_right())
+            }
+            Action::SqlEditorListInputMoveHome => {
+                self.update_sql_editor_list_input(|list| list.move_home())
+            }
+            Action::SqlEditorListInputMoveEnd => {
+                self.update_sql_editor_list_input(|list| list.move_end())
+            }
+            Action::SqlEditorListCancel => {
+                if let Some(Overlay::SqlEditorList(list)) = self.overlay.as_mut()
+                    && list.cancel_mode()
+                {
+                    self.overlay = None;
                 }
                 Vec::new()
             }
@@ -2285,13 +2520,6 @@ impl App {
                     .unwrap_or(self.tabs.len() - 1);
                 self.normalize_focus_after_tab_switch();
                 self.load_active_relation(false)
-            }
-            Action::GotoSqlConsole => {
-                if let Some(index) = self.tabs.iter().position(|tab| tab.as_console().is_some()) {
-                    self.active_tab = index;
-                    self.focus = Focus::Editor;
-                }
-                Vec::new()
             }
             Action::ActivateTab(index) => {
                 if index < self.tabs.len() {
@@ -6548,6 +6776,15 @@ impl App {
             self.deferred
                 .prompts
                 .retain(|queued| queued.intent != intent);
+            if let DeferredIntent::DeleteConsole {
+                id,
+                return_to_manager: true,
+            } = intent
+            {
+                self.overlay = Some(Overlay::SqlEditorList(
+                    crate::model::sql_editor_list::SqlEditorListState::new(Some(id)),
+                ));
+            }
             return Vec::new();
         }
         if tab.transaction_state == TransactionState::OutcomeUnknown {
@@ -6652,8 +6889,23 @@ impl App {
     fn replay_deferred(&mut self, intent: DeferredIntent) -> Vec<Command> {
         match intent {
             DeferredIntent::Stay => Vec::new(),
-            DeferredIntent::DeleteConsole(id) => {
-                self.overlay = Some(Overlay::DeleteConsole { console_id: id });
+            DeferredIntent::DeleteConsole {
+                id,
+                return_to_manager,
+            } => {
+                self.overlay = if return_to_manager {
+                    Some(Overlay::SqlEditorList(
+                        crate::model::sql_editor_list::SqlEditorListState {
+                            selected_id: Some(id),
+                            mode: crate::model::sql_editor_list::SqlEditorListMode::DeleteConfirm {
+                                console_id: id,
+                            },
+                            ..Default::default()
+                        },
+                    ))
+                } else {
+                    Some(Overlay::DeleteConsole { console_id: id })
+                };
                 Vec::new()
             }
             DeferredIntent::CloseConsole => {
@@ -6702,15 +6954,6 @@ impl App {
 
     fn request_close_tab(&mut self, id: Uuid) -> Vec<Command> {
         if !self.has_active_workspace() || !self.tabs.iter().any(|tab| tab.id() == id) {
-            return Vec::new();
-        }
-        if self
-            .tabs
-            .iter()
-            .find(|tab| tab.id() == id)
-            .and_then(WorkspaceTab::as_console)
-            .is_some_and(ConsoleTab::is_default)
-        {
             return Vec::new();
         }
         if self.transaction_needs_exit(id) {
@@ -6810,6 +7053,46 @@ impl App {
         self.create_sql_editor_named(name);
     }
 
+    fn create_and_activate_sql_editor(&mut self) -> Vec<Command> {
+        if self.active_workspace_profile.is_none()
+            && let Some(profile_id) = self.connection.profile_id
+            && let Some(profile) = self
+                .profiles
+                .iter()
+                .find(|profile| profile.id == profile_id)
+        {
+            let target = self
+                .connection
+                .target
+                .clone()
+                .filter(|target| target.is_valid(profile))
+                .unwrap_or_else(|| ExecutionTarget::from_profile(profile));
+            let workspace = self
+                .workspaces
+                .remove(&profile_id)
+                .unwrap_or_else(|| self.empty_workspace_for(profile_id, target));
+            self.install_workspace(profile_id, workspace);
+        }
+        if !self.has_active_workspace() {
+            return Vec::new();
+        }
+        let name = self.next_console_name();
+        self.create_sql_editor_named(name);
+        self.active_tab = self.tabs.len().saturating_sub(1);
+        self.focus = Focus::Editor;
+        vec![self.persist_workspace_command()]
+    }
+
+    fn update_sql_editor_list_input(
+        &mut self,
+        update: impl FnOnce(&mut crate::model::sql_editor_list::SqlEditorListState),
+    ) -> Vec<Command> {
+        if let Some(Overlay::SqlEditorList(list)) = self.overlay.as_mut() {
+            update(list);
+        }
+        Vec::new()
+    }
+
     fn create_sql_editor_named(&mut self, name: String) {
         let mut tab = ConsoleTab::new(name);
         tab.execution_target = self.active_profile().map(ExecutionTarget::from_profile);
@@ -6852,20 +7135,11 @@ impl App {
         if !self.has_active_workspace() || !self.sql_editors.iter().any(|record| record.id == id) {
             return Vec::new();
         }
-        if self
-            .tabs
-            .iter()
-            .find(|tab| tab.id() == id)
-            .and_then(WorkspaceTab::as_console)
-            .is_some_and(ConsoleTab::is_default)
-        {
-            return Vec::new();
-        }
         self.tabs.retain(|tab| tab.id() != id);
         self.editor.close_console(id);
         self.sql_editors.retain(|record| record.id != id);
         if self.sql_editors.is_empty() {
-            self.create_sql_editor();
+            self.create_sql_editor_named("console".to_owned());
         }
         self.ensure_open_sql_editor();
         self.active_tab = self.active_tab.min(self.tabs.len().saturating_sub(1));
@@ -7713,8 +7987,6 @@ impl App {
                 }
                 EditorEffect::RunCurrent => Action::RunActiveSql,
                 EditorEffect::RunAll => Action::RunAllSql,
-                EditorEffect::NewConsole => Action::NewConsole,
-                EditorEffect::GotoSqlConsole => Action::GotoSqlConsole,
                 EditorEffect::CloseConsole => Action::CloseActiveTab,
                 EditorEffect::DeleteConsole => Action::RequestDeleteActiveConsole,
                 EditorEffect::OpenSqlEditorList => Action::OpenSqlEditorList,
@@ -11895,8 +12167,8 @@ mod tests {
             RelationSnapshot, RelationTab, RelationView, SnapshotAttribution,
         },
         model::tab::{
-            ConsoleTab, DerivedResultState, ExecutionResult, GridRowAlignment, GridRowTarget,
-            GridScrollAmount, OutputEntry, OutputKind, ResultView, WorkspaceTab,
+            ConsoleRecord, ConsoleTab, DerivedResultState, ExecutionResult, GridRowAlignment,
+            GridRowTarget, GridScrollAmount, OutputEntry, OutputKind, ResultView, WorkspaceTab,
         },
         model::transaction::{TransactionMode, TransactionState},
         model::workspace::{
@@ -13070,6 +13342,411 @@ mod tests {
     }
 
     #[test]
+    fn console_manager_reopens_closed_console_with_existing_sql() {
+        let mut app = App::new(Vec::new());
+        app.update(Action::NewConsole);
+        let id = app.active_console().id;
+        app.editor.set_text(id, "select 42;").unwrap();
+        app.update(Action::CloseActiveTab);
+        assert!(
+            !app.sql_editors
+                .iter()
+                .find(|record| record.id == id)
+                .unwrap()
+                .open
+        );
+
+        app.update(Action::OpenSqlEditorList);
+        if let Some(Overlay::SqlEditorList(list)) = app.overlay.as_mut() {
+            list.selected_id = Some(id);
+        }
+        let commands = app.update(Action::SqlEditorListActivate);
+
+        assert_eq!(app.active_console().id, id);
+        assert_eq!(app.focus, Focus::Editor);
+        assert!(app.overlay.is_none());
+        assert_eq!(app.editor_text(id).unwrap(), "select 42;");
+        assert!(
+            commands
+                .iter()
+                .any(|command| matches!(command, Command::PersistWorkspace(_)))
+        );
+    }
+
+    #[test]
+    fn console_manager_delete_requires_confirmation_and_deletes_closed_console() {
+        let mut app = App::new(Vec::new());
+        let survivor_id = app.active_console().id;
+        app.update(Action::NewConsole);
+        let id = app.active_console().id;
+        app.update(Action::CloseActiveTab);
+        app.update(Action::OpenSqlEditorList);
+        if let Some(Overlay::SqlEditorList(list)) = app.overlay.as_mut() {
+            list.selected_id = Some(id);
+        }
+
+        app.update(Action::SqlEditorListDeleteRequest);
+        assert!(matches!(
+            app.overlay,
+            Some(Overlay::SqlEditorList(crate::model::sql_editor_list::SqlEditorListState {
+                mode: crate::model::sql_editor_list::SqlEditorListMode::DeleteConfirm { console_id },
+                ..
+            })) if console_id == id
+        ));
+        let commands = app.update(Action::SqlEditorListDeleteConfirm);
+
+        assert!(!app.sql_editors.iter().any(|record| record.id == id));
+        assert!(commands.iter().any(
+            |command| matches!(command, Command::DeleteSqlFile(console_id) if *console_id == id)
+        ));
+        assert!(!commands.iter().any(
+            |command| matches!(command, Command::DeleteSqlFile(console_id) if *console_id == survivor_id)
+        ));
+    }
+
+    #[test]
+    fn cancelling_console_manager_delete_restores_browse_with_same_selection() {
+        let mut app = App::new(Vec::new());
+        let id = app.active_console().id;
+        app.update(Action::OpenSqlEditorList);
+        if let Some(Overlay::SqlEditorList(list)) = app.overlay.as_mut() {
+            list.selected_id = Some(id);
+        }
+
+        app.update(Action::SqlEditorListDeleteRequest);
+        app.update(Action::SqlEditorListDeleteCancel);
+
+        assert!(matches!(
+            app.overlay,
+            Some(Overlay::SqlEditorList(list))
+                if list.selected_id == Some(id)
+                    && matches!(list.mode, crate::model::sql_editor_list::SqlEditorListMode::Browse)
+        ));
+        assert_eq!(app.sql_editors.len(), 1);
+    }
+
+    #[test]
+    fn deleting_last_console_replaces_console_named_console() {
+        let mut app = App::new(Vec::new());
+        let id = app.active_console().id;
+        app.update(Action::OpenSqlEditorList);
+        app.update(Action::SqlEditorListDeleteRequest);
+        app.update(Action::SqlEditorListDeleteConfirm);
+
+        assert_eq!(app.sql_editors.len(), 1);
+        assert_ne!(app.sql_editors[0].id, id);
+        assert_eq!(app.sql_editors[0].name, "console");
+        assert!(app.tabs[0].as_console().is_some());
+    }
+
+    #[test]
+    fn cancelling_transaction_for_manager_delete_restores_browse() {
+        let mut app = App::new(Vec::new());
+        let id = app.active_console().id;
+        app.active_console_mut().transaction_mode = TransactionMode::Manual;
+        app.active_console_mut().transaction_state = TransactionState::Active;
+        app.update(Action::OpenSqlEditorList);
+
+        app.update(Action::SqlEditorListDeleteRequest);
+        assert!(matches!(
+            app.overlay,
+            Some(Overlay::TransactionExitConfirm { .. })
+        ));
+        app.update(Action::CancelTransactionExit);
+
+        assert!(matches!(
+            app.overlay,
+            Some(Overlay::SqlEditorList(list))
+                if list.selected_id == Some(id)
+                    && matches!(list.mode, crate::model::sql_editor_list::SqlEditorListMode::Browse)
+        ));
+        assert!(app.sql_editors.iter().any(|record| record.id == id));
+    }
+
+    #[test]
+    fn resolving_transaction_for_manager_delete_restores_delete_confirmation() {
+        let mut app = App::new(Vec::new());
+        let id = app.active_console().id;
+        app.active_console_mut().transaction_mode = TransactionMode::Manual;
+        app.active_console_mut().transaction_state = TransactionState::OutcomeUnknown;
+        app.update(Action::OpenSqlEditorList);
+
+        app.update(Action::SqlEditorListDeleteRequest);
+        assert!(matches!(
+            app.overlay,
+            Some(Overlay::TransactionExitConfirm {
+                prompt: crate::model::transaction::DeferredTransactionPrompt {
+                    intent: crate::model::transaction::DeferredIntent::DeleteConsole {
+                        id: prompt_id,
+                        return_to_manager: true,
+                    },
+                    ..
+                },
+                ..
+            }) if prompt_id == id
+        ));
+        app.update(Action::ConfirmTransactionExitChoice(
+            crate::model::transaction::TransactionExitChoice::Abandon,
+        ));
+
+        assert!(matches!(
+            app.overlay,
+            Some(Overlay::SqlEditorList(list))
+                if list.selected_id == Some(id)
+                    && matches!(
+                        list.mode,
+                        crate::model::sql_editor_list::SqlEditorListMode::DeleteConfirm {
+                            console_id
+                        } if console_id == id
+                    )
+        ));
+    }
+
+    #[test]
+    fn console_manager_creates_and_activates_a_unique_console() {
+        let mut app = App::new(Vec::new());
+        app.update(Action::NewConsole);
+        let existing = app.active_console().id;
+        app.update(Action::OpenSqlEditorList);
+        let commands = app.update(Action::SqlEditorListCreate);
+
+        assert_ne!(app.active_console().id, existing);
+        assert_eq!(app.active_console().name, "console_2");
+        assert_eq!(app.focus, Focus::Editor);
+        assert!(app.overlay.is_none());
+        assert!(
+            commands
+                .iter()
+                .any(|command| matches!(command, Command::PersistWorkspace(_)))
+        );
+    }
+
+    #[test]
+    fn console_manager_starts_rename_with_the_selected_name() {
+        let mut app = App::new(Vec::new());
+        let id = app.active_console().id;
+        app.active_console_mut().name = "Original".into();
+        app.sql_editors[0].name = "Original".into();
+        app.update(Action::OpenSqlEditorList);
+
+        app.update(Action::SqlEditorListRenameStart);
+
+        let Some(Overlay::SqlEditorList(list)) = app.overlay else {
+            panic!("expected console manager")
+        };
+        assert!(matches!(
+            list.mode,
+            crate::model::sql_editor_list::SqlEditorListMode::Rename {
+                console_id,
+                input,
+                error: None,
+            } if console_id == id && input.value() == "Original" && input.cursor() == 8
+        ));
+    }
+
+    #[test]
+    fn console_manager_renames_open_console_in_record_and_tab() {
+        let mut app = App::new(Vec::new());
+        let id = app.active_console().id;
+        app.update(Action::OpenSqlEditorList);
+        app.update(Action::SqlEditorListRenameStart);
+        app.update(Action::SqlEditorListInputDeleteToStart);
+        for character in "renamed".chars() {
+            app.update(Action::SqlEditorListInputInsert(character));
+        }
+        let commands = app.update(Action::SqlEditorListRenameCommit);
+
+        assert_eq!(
+            app.sql_editors
+                .iter()
+                .find(|record| record.id == id)
+                .unwrap()
+                .name,
+            "renamed"
+        );
+        assert_eq!(
+            app.tabs.iter().find(|tab| tab.id() == id).unwrap().title(),
+            "renamed"
+        );
+        assert!(matches!(app.overlay, Some(Overlay::SqlEditorList(_))));
+        assert!(
+            commands
+                .iter()
+                .any(|command| matches!(command, Command::PersistWorkspace(_)))
+        );
+    }
+
+    #[test]
+    fn console_manager_renames_closed_console_and_persists_it() {
+        let mut app = App::new(Vec::new());
+        app.update(Action::NewConsole);
+        let id = app.active_console().id;
+        app.update(Action::CloseActiveTab);
+        app.update(Action::OpenSqlEditorList);
+        if let Some(Overlay::SqlEditorList(list)) = app.overlay.as_mut() {
+            list.selected_id = Some(id);
+        }
+        app.update(Action::SqlEditorListRenameStart);
+        app.update(Action::SqlEditorListInputDeleteToStart);
+        for character in "closed".chars() {
+            app.update(Action::SqlEditorListInputInsert(character));
+        }
+        let commands = app.update(Action::SqlEditorListRenameCommit);
+
+        assert_eq!(
+            app.sql_editors
+                .iter()
+                .find(|record| record.id == id)
+                .unwrap()
+                .name,
+            "closed"
+        );
+        assert!(
+            !app.sql_editors
+                .iter()
+                .find(|record| record.id == id)
+                .unwrap()
+                .open
+        );
+        let Command::PersistWorkspace(snapshot) = &commands[0] else {
+            panic!("expected workspace persistence")
+        };
+        assert_eq!(
+            snapshot
+                .consoles
+                .iter()
+                .find(|console| console.id == id)
+                .unwrap()
+                .name,
+            "closed"
+        );
+    }
+
+    #[test]
+    fn console_manager_rejects_blank_and_duplicate_names() {
+        let mut app = App::new(Vec::new());
+        app.update(Action::NewConsole);
+        let id = app.active_console().id;
+        app.update(Action::OpenSqlEditorList);
+        app.update(Action::SqlEditorListRenameStart);
+        app.update(Action::SqlEditorListInputDeleteToStart);
+        app.update(Action::SqlEditorListInputInsert(' '));
+        app.update(Action::SqlEditorListRenameCommit);
+        assert!(matches!(
+            app.overlay,
+            Some(Overlay::SqlEditorList(crate::model::sql_editor_list::SqlEditorListState {
+                mode: crate::model::sql_editor_list::SqlEditorListMode::Rename { error: Some(ref error), .. },
+                ..
+            })) if error == "Name is required"
+        ));
+
+        app.update(Action::SqlEditorListInputDeleteToStart);
+        for character in "CONSOLE".chars() {
+            app.update(Action::SqlEditorListInputInsert(character));
+        }
+        app.update(Action::SqlEditorListRenameCommit);
+        assert!(matches!(
+            app.overlay,
+            Some(Overlay::SqlEditorList(crate::model::sql_editor_list::SqlEditorListState {
+                mode: crate::model::sql_editor_list::SqlEditorListMode::Rename { console_id, error: Some(error), .. },
+                ..
+            })) if console_id == id && error == "Name already exists"
+        ));
+    }
+
+    #[test]
+    fn console_manager_keeps_same_uuid_selected_after_rename_reorders_list() {
+        let mut app = App::new(Vec::new());
+        app.update(Action::NewConsole);
+        let id = app.active_console().id;
+        app.update(Action::OpenSqlEditorList);
+        app.update(Action::SqlEditorListRenameStart);
+        app.update(Action::SqlEditorListInputDeleteToStart);
+        for character in "aaa".chars() {
+            app.update(Action::SqlEditorListInputInsert(character));
+        }
+        app.update(Action::SqlEditorListRenameCommit);
+
+        assert!(matches!(
+            app.overlay,
+            Some(Overlay::SqlEditorList(list)) if list.selected_id == Some(id)
+                && matches!(list.mode, crate::model::sql_editor_list::SqlEditorListMode::Browse)
+        ));
+    }
+
+    fn console_record(id: u128, name: &str, open: bool) -> ConsoleRecord {
+        ConsoleRecord {
+            id: Uuid::from_u128(id),
+            name: name.into(),
+            execution_target: None,
+            transaction_mode: TransactionMode::Auto,
+            open,
+        }
+    }
+
+    #[test]
+    fn visible_console_records_put_default_open_other_open_then_closed() {
+        let mut app = App::new(Vec::new());
+        app.sql_editors = vec![
+            console_record(4, "zeta", false),
+            console_record(3, "alpha", true),
+            console_record(2, "console", false),
+            console_record(1, "console", true),
+            console_record(5, "beta", true),
+        ];
+
+        assert_eq!(
+            app.visible_console_ids(""),
+            [
+                Uuid::from_u128(1),
+                Uuid::from_u128(2),
+                Uuid::from_u128(3),
+                Uuid::from_u128(5),
+                Uuid::from_u128(4)
+            ]
+        );
+    }
+
+    #[test]
+    fn visible_console_records_filter_names_case_insensitively() {
+        let mut app = App::new(Vec::new());
+        app.sql_editors = vec![
+            console_record(1, "Backups", true),
+            console_record(2, "backup-report", false),
+            console_record(3, "console", true),
+        ];
+
+        assert_eq!(
+            app.visible_console_records("BACK")
+                .into_iter()
+                .map(|record| record.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Backups", "backup-report"]
+        );
+    }
+
+    #[test]
+    fn visible_console_records_use_case_insensitive_name_order_and_tie_breakers() {
+        let mut app = App::new(Vec::new());
+        app.sql_editors = vec![
+            console_record(3, "alpha", true),
+            console_record(2, "ALPHA", true),
+            console_record(1, "Alpha", true),
+            console_record(4, "beta", true),
+        ];
+
+        assert_eq!(
+            app.visible_console_ids(""),
+            [
+                Uuid::from_u128(2),
+                Uuid::from_u128(1),
+                Uuid::from_u128(3),
+                Uuid::from_u128(4)
+            ]
+        );
+    }
+
+    #[test]
     fn closing_active_tab_chooses_the_left_neighbor() {
         let mut app = App::new(Vec::new());
         app.update(Action::NewConsole);
@@ -13090,21 +13767,6 @@ mod tests {
 
         assert_eq!(app.tabs.len(), 1);
         assert_eq!(app.active_console().name, "console");
-    }
-
-    #[test]
-    fn goto_sql_console_activates_the_first_available_sql_tab() {
-        let mut app = App::new(Vec::new());
-        app.update(Action::NewConsole);
-        app.tabs
-            .push(WorkspaceTab::Relation(RelationTab::new("users")));
-        app.active_tab = 2;
-        app.focus = Focus::Results;
-
-        app.update(Action::GotoSqlConsole);
-
-        assert_eq!(app.active_tab, 0);
-        assert_eq!(app.focus, Focus::Editor);
     }
 
     #[test]
@@ -13173,7 +13835,7 @@ mod tests {
         app.update(Action::ShowHelp);
 
         app.focus = Focus::Editor;
-        app.update(Action::HelpPaste("new SQL console".into()));
+        app.update(Action::HelpPaste("open console manager".into()));
         let help = match app.overlay.as_ref() {
             Some(Overlay::Help(help)) => help,
             _ => panic!("help overlay"),
@@ -13181,7 +13843,7 @@ mod tests {
         assert_eq!(help.context, crate::help::ShortcutContext::Explorer);
         assert_eq!(
             help.selected_id(),
-            Some(crate::help::HelpShortcutId::NewConsole)
+            Some(crate::help::HelpShortcutId::OpenSqlEditors)
         );
     }
 

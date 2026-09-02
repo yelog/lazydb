@@ -91,6 +91,45 @@ fn workspace_v3_round_trip_restores_two_profile_workspaces_and_durable_state() {
 }
 
 #[test]
+fn workspace_round_trip_preserves_open_and_closed_console_sql_and_names() {
+    let temp = TempDir::new().unwrap();
+    let store = WorkspaceStore::new(temp.path().join("workspace.toml"), temp.path().join("sql"));
+    let profile_id = Uuid::new_v4();
+    let open_id = Uuid::new_v4();
+    let closed_id = Uuid::new_v4();
+    let snapshot = WorkspaceSnapshot {
+        active_profile: Some(profile_id),
+        profiles: vec![PersistedProfileWorkspace {
+            profile_id,
+            active_tab: Some(open_id),
+            consoles: vec![
+                console(profile_id, open_id, "renamed open", true),
+                console(profile_id, closed_id, "renamed closed", false),
+            ],
+            tabs: vec![PersistedTab::Console {
+                console_id: open_id,
+            }],
+        }],
+        sql: vec![
+            (open_id, "select open;".into()),
+            (closed_id, "select closed;".into()),
+        ],
+        active_console: Uuid::nil(),
+        consoles: Vec::new(),
+    };
+
+    store.save(&snapshot).unwrap();
+    let restored = store.load().unwrap().unwrap();
+    let consoles = &restored.profiles[0].consoles;
+
+    assert_eq!(consoles[0].name, "renamed open");
+    assert!(consoles[0].open);
+    assert_eq!(consoles[1].name, "renamed closed");
+    assert!(!consoles[1].open);
+    assert_eq!(restored.sql, snapshot.sql);
+}
+
+#[test]
 fn missing_workspace_is_empty_and_unsupported_version_is_rejected() {
     let temp = TempDir::new().unwrap();
     let manifest = temp.path().join("workspace.toml");

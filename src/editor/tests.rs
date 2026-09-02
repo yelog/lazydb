@@ -46,6 +46,25 @@ fn session_starts_insert_and_transitions_with_escape_and_i() {
 }
 
 #[test]
+fn editor_space_s_opens_manager_without_new_or_search_aliases() {
+    let (mut workspace, id) = fixture("");
+    workspace.press(id, EditorKey::Escape).unwrap();
+
+    workspace.press(id, EditorKey::Character(' ')).unwrap();
+    workspace.press(id, EditorKey::Character('s')).unwrap();
+    assert_eq!(
+        workspace.drain_effects(),
+        vec![EditorEffect::OpenSqlEditorList]
+    );
+
+    for key in ['n', 'e'] {
+        workspace.press(id, EditorKey::Character(' ')).unwrap();
+        workspace.press(id, EditorKey::Character(key)).unwrap();
+        assert!(workspace.drain_effects().is_empty());
+    }
+}
+
+#[test]
 fn unicode_positions_are_character_based() {
     let (mut workspace, id) = fixture("数据🙂");
     workspace.move_cursor_to_end(id).unwrap();

@@ -438,24 +438,80 @@ impl Keymap {
         }
         if let Some(Overlay::SqlEditorList(list)) = app.overlay.as_ref() {
             self.pending = None;
-            return match event.code {
-                KeyCode::Enter => app
-                    .sql_editors
-                    .iter()
-                    .filter(|record| {
-                        crate::model::sql_editor_list::SqlEditorListState::matches(
-                            &record.name,
-                            &list.query,
-                        )
-                    })
-                    .nth(list.selected)
-                    .map(|record| Action::ActivateSqlEditor(record.id)),
-                KeyCode::Esc => Some(Action::DismissOverlay),
-                KeyCode::Up | KeyCode::Char('k') => Some(Action::SqlEditorListMove(-1)),
-                KeyCode::Down | KeyCode::Char('j') => Some(Action::SqlEditorListMove(1)),
-                KeyCode::Backspace => Some(Action::SqlEditorListBackspace),
-                KeyCode::Char(value) => Some(Action::SqlEditorListInsert(value)),
-                _ => None,
+            use crate::model::sql_editor_list::SqlEditorListMode;
+            return match list.mode {
+                SqlEditorListMode::Browse => match event.code {
+                    KeyCode::Enter => Some(Action::SqlEditorListActivate),
+                    KeyCode::Up | KeyCode::Char('k') => Some(Action::SqlEditorListMove(-1)),
+                    KeyCode::Down | KeyCode::Char('j') => Some(Action::SqlEditorListMove(1)),
+                    KeyCode::Char('a') => Some(Action::SqlEditorListCreate),
+                    KeyCode::Char('d') => Some(Action::SqlEditorListDeleteRequest),
+                    KeyCode::Char('r') => Some(Action::SqlEditorListRenameStart),
+                    KeyCode::Char('/') => Some(Action::SqlEditorListSearchStart),
+                    KeyCode::Esc => Some(Action::SqlEditorListCancel),
+                    _ => None,
+                },
+                SqlEditorListMode::Search => {
+                    if event.modifiers == KeyModifiers::CONTROL {
+                        return match event.code {
+                            KeyCode::Char('w') => {
+                                Some(Action::SqlEditorListInputDeletePreviousWord)
+                            }
+                            KeyCode::Char('u') => Some(Action::SqlEditorListInputDeleteToStart),
+                            _ => None,
+                        };
+                    }
+                    match event.code {
+                        KeyCode::Enter => Some(Action::SqlEditorListActivate),
+                        KeyCode::Esc => Some(Action::SqlEditorListCancel),
+                        KeyCode::Up => Some(Action::SqlEditorListMove(-1)),
+                        KeyCode::Down => Some(Action::SqlEditorListMove(1)),
+                        KeyCode::Backspace => Some(Action::SqlEditorListInputBackspace),
+                        KeyCode::Delete => Some(Action::SqlEditorListInputDelete),
+                        KeyCode::Left => Some(Action::SqlEditorListInputMoveLeft),
+                        KeyCode::Right => Some(Action::SqlEditorListInputMoveRight),
+                        KeyCode::Home => Some(Action::SqlEditorListInputMoveHome),
+                        KeyCode::End => Some(Action::SqlEditorListInputMoveEnd),
+                        KeyCode::Char(value) if event.modifiers.is_empty() => {
+                            Some(Action::SqlEditorListInputInsert(value))
+                        }
+                        _ => None,
+                    }
+                }
+                SqlEditorListMode::Rename { .. } => {
+                    if event.modifiers == KeyModifiers::CONTROL {
+                        return match event.code {
+                            KeyCode::Char('w') => {
+                                Some(Action::SqlEditorListInputDeletePreviousWord)
+                            }
+                            KeyCode::Char('u') => Some(Action::SqlEditorListInputDeleteToStart),
+                            _ => None,
+                        };
+                    }
+                    match event.code {
+                        KeyCode::Enter if event.modifiers.is_empty() => {
+                            Some(Action::SqlEditorListRenameCommit)
+                        }
+                        KeyCode::Esc => Some(Action::SqlEditorListCancel),
+                        KeyCode::Backspace => Some(Action::SqlEditorListInputBackspace),
+                        KeyCode::Delete => Some(Action::SqlEditorListInputDelete),
+                        KeyCode::Left => Some(Action::SqlEditorListInputMoveLeft),
+                        KeyCode::Right => Some(Action::SqlEditorListInputMoveRight),
+                        KeyCode::Home => Some(Action::SqlEditorListInputMoveHome),
+                        KeyCode::End => Some(Action::SqlEditorListInputMoveEnd),
+                        KeyCode::Char(value) if event.modifiers.is_empty() => {
+                            Some(Action::SqlEditorListInputInsert(value))
+                        }
+                        _ => None,
+                    }
+                }
+                SqlEditorListMode::DeleteConfirm { .. } => match event.code {
+                    KeyCode::Enter | KeyCode::Char('y') => Some(Action::SqlEditorListDeleteConfirm),
+                    KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('q') => {
+                        Some(Action::SqlEditorListDeleteCancel)
+                    }
+                    _ => None,
+                },
             };
         }
         if matches!(app.overlay, Some(Overlay::DeleteConsole { .. })) {
@@ -1287,15 +1343,13 @@ fn map_pending(pending: Pending, event: KeyEvent, app: &App) -> Option<Action> {
     }
     match (pending, event.code) {
         (Pending::Leader, KeyCode::Char('c')) => Some(Action::Focus(Focus::Explorer)),
-        (Pending::Leader, KeyCode::Char('n')) => Some(Action::NewConsole),
         (Pending::Leader, KeyCode::Char('b')) => Some(Action::OpenDashboard),
-        (Pending::Leader, KeyCode::Char('s')) => Some(Action::GotoSqlConsole),
+        (Pending::Leader, KeyCode::Char('s')) => Some(Action::OpenSqlEditorList),
         (Pending::Leader, KeyCode::Char('r')) => Some(Action::RunActiveSql),
         (Pending::Leader, KeyCode::Char('R')) => Some(Action::RunAllSql),
         (Pending::Leader, KeyCode::Char('d')) => Some(Action::OpenTargetSelector),
         (Pending::Leader, KeyCode::Char('q')) => Some(Action::CloseActiveTab),
         (Pending::Leader, KeyCode::Char('x')) => Some(Action::RequestDeleteActiveConsole),
-        (Pending::Leader, KeyCode::Char('e')) => Some(Action::OpenSqlEditorList),
         (Pending::Leader, KeyCode::Char('m')) => Some(Action::OpenNotificationHistory),
         (Pending::Leader, KeyCode::Char('Y')) if is_grid_navigation_focus(app) => {
             Some(Action::CopyGridRow {
@@ -1303,10 +1357,8 @@ fn map_pending(pending: Pending, event: KeyEvent, app: &App) -> Option<Action> {
             })
         }
         (Pending::RelationTransaction, KeyCode::Char('c')) => Some(Action::Focus(Focus::Explorer)),
-        (Pending::RelationTransaction, KeyCode::Char('n')) => Some(Action::NewConsole),
-        (Pending::RelationTransaction, KeyCode::Char('s')) => Some(Action::GotoSqlConsole),
+        (Pending::RelationTransaction, KeyCode::Char('s')) => Some(Action::OpenSqlEditorList),
         (Pending::RelationTransaction, KeyCode::Char('q')) => Some(Action::CloseActiveTab),
-        (Pending::RelationTransaction, KeyCode::Char('e')) => Some(Action::OpenSqlEditorList),
         (Pending::RelationTransaction, KeyCode::Char('m')) => Some(Action::OpenNotificationHistory),
         (Pending::RelationYank, KeyCode::Char('y')) => Some(Action::RelationYank),
         (Pending::Window { .. }, KeyCode::Char('j')) if app.focus == Focus::Editor => {
@@ -2172,6 +2224,12 @@ mod tests {
         assert_eq!(keymap.map(key(KeyCode::Char(code)), app), Some(expected));
     }
 
+    fn leader_action(app: &App, code: char) -> Option<Action> {
+        let mut keymap = Keymap::default();
+        keymap.map(key(KeyCode::Char(' ')), app);
+        keymap.map(key(KeyCode::Char(code)), app)
+    }
+
     #[test]
     fn global_leader_shortcuts_work_outside_explorer() {
         let mut editor = App::new(Vec::new());
@@ -2194,8 +2252,10 @@ mod tests {
 
         let mut results = App::new(Vec::new());
         results.focus = Focus::Results;
+        assert_eq!(leader_action(&results, 'n'), None);
+        assert_eq!(leader_action(&results, 'e'), None);
         for (code, action) in [
-            ('n', Action::NewConsole),
+            ('s', Action::OpenSqlEditorList),
             ('q', Action::CloseActiveTab),
             ('x', Action::RequestDeleteActiveConsole),
         ] {
@@ -2203,7 +2263,12 @@ mod tests {
         }
 
         let relation = relation_app(RelationGridMode::Browse);
-        for (code, action) in [('n', Action::NewConsole), ('q', Action::CloseActiveTab)] {
+        assert_eq!(leader_action(&relation, 'n'), None);
+        assert_eq!(leader_action(&relation, 'e'), None);
+        for (code, action) in [
+            ('s', Action::OpenSqlEditorList),
+            ('q', Action::CloseActiveTab),
+        ] {
             assert_leader_shortcut(&relation, code, action);
         }
     }

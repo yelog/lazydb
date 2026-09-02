@@ -25,6 +25,7 @@ use lazydb::{
         relation::RelationTab,
         tab::WorkspaceTab,
         tab::{CompletionPopup, ResultView},
+        transaction::TransactionMode,
         workspace::{ConnectionStatus, Focus, Overlay},
     },
     persistence::secrets::keyring_ref,
@@ -878,6 +879,111 @@ fn render(app: &App, width: u16, height: u16) -> String {
     render_with_state(app, width, height).0
 }
 
+fn console_manager_fixture() -> App {
+    let mut app = App::new(Vec::new());
+    app.sql_editors = vec![
+        lazydb::model::tab::ConsoleRecord {
+            id: uuid::Uuid::from_u128(1),
+            name: "charlie".into(),
+            execution_target: None,
+            transaction_mode: TransactionMode::Auto,
+            open: false,
+        },
+        lazydb::model::tab::ConsoleRecord {
+            id: uuid::Uuid::from_u128(2),
+            name: "Beta".into(),
+            execution_target: None,
+            transaction_mode: TransactionMode::Auto,
+            open: true,
+        },
+        lazydb::model::tab::ConsoleRecord {
+            id: uuid::Uuid::from_u128(3),
+            name: "console".into(),
+            execution_target: None,
+            transaction_mode: TransactionMode::Auto,
+            open: true,
+        },
+        lazydb::model::tab::ConsoleRecord {
+            id: uuid::Uuid::from_u128(4),
+            name: "alpha".into(),
+            execution_target: None,
+            transaction_mode: TransactionMode::Auto,
+            open: true,
+        },
+    ];
+    app.sql_editor_list.selected_id = Some(uuid::Uuid::from_u128(3));
+    app.overlay = Some(Overlay::SqlEditorList(app.sql_editor_list.clone()));
+    app
+}
+
+fn assert_order(output: &str, names: &[&str]) {
+    let mut previous = 0;
+    for name in names {
+        let position = output[previous..]
+            .find(name)
+            .unwrap_or_else(|| panic!("missing {name:?} in {output}"));
+        previous += position;
+    }
+}
+
+#[test]
+fn console_manager_renders_sorted_open_and_closed_consoles() {
+    let app = console_manager_fixture();
+    let output = render(&app, 100, 30);
+
+    assert_order(&output, &["console", "alpha", "Beta", "charlie"]);
+    assert!(output.contains("OPEN"), "{output}");
+    assert!(output.contains("CLOSED"), "{output}");
+    assert!(output.contains("a new"), "{output}");
+    assert!(output.contains("d delete"), "{output}");
+    assert!(output.contains("r rename"), "{output}");
+    assert!(output.contains("/ search"), "{output}");
+}
+
+#[test]
+fn console_manager_renders_empty_search_rename_and_delete_modes() {
+    let mut app = console_manager_fixture();
+    app.sql_editor_list.query.set("missing");
+    app.overlay = Some(Overlay::SqlEditorList(app.sql_editor_list.clone()));
+    assert!(render(&app, 80, 24).contains("No matching consoles"));
+
+    app.sql_editor_list.mode = lazydb::model::sql_editor_list::SqlEditorListMode::Search;
+    app.sql_editor_list.query.set("alp");
+    app.overlay = Some(Overlay::SqlEditorList(app.sql_editor_list.clone()));
+    let (search, search_state) = render_with_state(&app, 80, 24);
+    assert!(search.contains("/alp"), "{search}");
+    assert!(search_state.cursor_style.is_some(), "{search}");
+
+    app.sql_editor_list.mode = lazydb::model::sql_editor_list::SqlEditorListMode::Rename {
+        console_id: uuid::Uuid::from_u128(4),
+        input: lazydb::model::text_input::TextInput::default(),
+        error: Some("Name is already in use".into()),
+    };
+    app.overlay = Some(Overlay::SqlEditorList(app.sql_editor_list.clone()));
+    let (rename, rename_state) = render_with_state(&app, 80, 24);
+    assert!(rename.contains("Rename alpha"), "{rename}");
+    assert!(rename.contains("Name is already in use"), "{rename}");
+    assert!(rename_state.cursor_style.is_some(), "{rename}");
+
+    app.sql_editor_list.mode = lazydb::model::sql_editor_list::SqlEditorListMode::DeleteConfirm {
+        console_id: uuid::Uuid::from_u128(4),
+    };
+    app.overlay = Some(Overlay::SqlEditorList(app.sql_editor_list.clone()));
+    let (delete, delete_state) = render_with_state(&app, 80, 24);
+    assert!(delete.contains("Permanently delete 'alpha'"), "{delete}");
+    assert!(delete.contains("Enter delete  Esc cancel"), "{delete}");
+    assert!(delete_state.cursor_style.is_none(), "{delete}");
+}
+
+#[test]
+fn console_manager_compact_popup_keeps_border_and_footer() {
+    let app = console_manager_fixture();
+    let output = render(&app, 80, 16);
+    assert!(output.contains("CONSOLES"), "{output}");
+    assert!(output.contains("Esc close"), "{output}");
+    assert!(output.lines().any(|line| line.contains("╭")), "{output}");
+}
+
 #[test]
 fn profile_group_overlay_renders_options_and_editor_content() {
     let mut app = App::new(Vec::new());
@@ -1017,7 +1123,6 @@ fn pending_prefix_opens_floating_shortcut_window() {
         .flat_map(|y| (0..120).map(move |x| buffer[(x, y)].symbol()))
         .collect::<String>();
     assert!(output.contains("Space  Up/Down select  Enter run  Esc/Ctrl-C cancel"));
-    assert!(output.contains("new SQL console"));
     assert!(output.contains("focus Explorer"));
 }
 
@@ -2309,23 +2414,12 @@ fn workspace_tabs_publish_close_targets_for_each_tab() {
         .collect::<Vec<_>>();
     assert!(!visible_tab_ids.is_empty());
     assert!(visible_tab_ids.iter().all(|id| ids.contains(id)));
-    assert!(
-        visible_tab_ids
+    assert!(visible_tab_ids.iter().all(|id| {
+        state
+            .hit_regions
             .iter()
-            .filter(|id| {
-                app.tabs
-                    .iter()
-                    .find(|tab| tab.id() == **id)
-                    .and_then(|tab| tab.as_console())
-                    .is_none_or(|console| !console.is_default())
-            })
-            .all(|id| {
-                state
-                    .hit_regions
-                    .iter()
-                    .any(|region| region.target == HitTarget::CloseTab(*id))
-            })
-    );
+            .any(|region| region.target == HitTarget::CloseTab(*id))
+    }));
 }
 
 #[test]
@@ -2335,7 +2429,7 @@ fn default_console_tab_has_no_close_target() {
     let (_, state) = render_with_state(&app, 120, 36);
 
     assert!(
-        !state
+        state
             .hit_regions
             .iter()
             .any(|region| region.target == HitTarget::CloseTab(id))
