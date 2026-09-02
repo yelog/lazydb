@@ -1272,8 +1272,8 @@ fn normal_mode_does_not_route_keys_to_a_stale_completion_popup() {
     app.update(Action::EditorKey(key(KeyCode::Esc)));
     app.active_console_mut().completion = Some(CompletionPopup::default());
 
-    assert_eq!(keymap.map(ctrl('n'), &app), None);
-    assert_eq!(keymap.map(ctrl('p'), &app), None);
+    assert_eq!(keymap.map(ctrl('n'), &app), Some(Action::NextTab));
+    assert_eq!(keymap.map(ctrl('p'), &app), Some(Action::PreviousTab));
     assert_ne!(
         keymap.map(key(KeyCode::Enter), &app),
         Some(Action::CompletionAccept)
