@@ -21,15 +21,17 @@ silently accepting a setting that LazyDB does not use.
 | --- | --- | --- | --- | --- |
 | `connections.toml` | `$HOME/lazydb/connections.toml` | `$XDG_CONFIG_HOME/lazydb/connections.toml` (normally `~/.config/lazydb/connections.toml`) | `%APPDATA%\\lazydb\\connections.toml` | Saved connection profiles |
 | `credential.key` | Same directory as `connections.toml` | Same directory as `connections.toml` | Same directory as `connections.toml` | Device-local key for `local_encrypted` credentials |
-| `workspace.toml` | Application state directory | `$XDG_STATE_HOME/lazydb/workspace.toml` when supported, otherwise the application data directory | Application state directory | Open profiles, consoles, and tabs |
-| `sql/<UUID>.sql` | Sibling `sql/` directory of `workspace.toml` | Sibling `sql/` directory of `workspace.toml` | Sibling `sql/` directory of `workspace.toml` | SQL text for persisted consoles |
+| `workspace.toml` | `$HOME/lazydb/workspace.toml` | `$XDG_CONFIG_HOME/lazydb/workspace.toml` (normally `~/.config/lazydb/workspace.toml`) | `%APPDATA%\\lazydb\\workspace.toml` | Open profiles, consoles, and tabs |
+| `sql/<UUID>.sql` | `$HOME/lazydb/sql/<UUID>.sql` | `$XDG_CONFIG_HOME/lazydb/sql/<UUID>.sql` (normally `~/.config/lazydb/sql/<UUID>.sql`) | `%APPDATA%\\lazydb\\sql\\<UUID>.sql` | SQL text for persisted consoles |
 
 Linux paths honor the XDG configuration environment. Windows uses the standard
 `%APPDATA%` roaming application-data directory. LazyDB creates private
 configuration directories and writes profile
 files with owner-only permissions on Unix. `--config PATH` overrides the complete
 profile file for the current process; it does not relocate `credential.key` or
-workspace state.
+workspace state. On macOS, the first startup moves the legacy files from
+`~/Library/Application Support/dev.lazydb.lazydb/` into `$HOME/lazydb/` when
+the destination files do not already exist.
 
 ## Command-Line Options
 
