@@ -136,16 +136,33 @@ impl Keymap {
                 _ => None,
             };
         }
-        if matches!(app.overlay, Some(Overlay::ProfileGroup(_))) {
+        if let Some(Overlay::ProfileGroup(group)) = app.overlay.as_ref() {
             self.pending = None;
-            return match event.code {
-                KeyCode::Enter => Some(Action::ProfileGroupConfirm),
-                KeyCode::Esc | KeyCode::Char('q') => Some(Action::ProfileGroupCancel),
-                KeyCode::Up | KeyCode::Char('k') => Some(Action::ProfileGroupMove(-1)),
-                KeyCode::Down | KeyCode::Char('j') => Some(Action::ProfileGroupMove(1)),
-                KeyCode::Backspace => Some(Action::ProfileGroupBackspace),
-                KeyCode::Char(character) => Some(Action::ProfileGroupInsert(character)),
-                _ => None,
+            return match group {
+                crate::model::profile_group::ProfileGroupOverlay::Picker { .. } => match event.code
+                {
+                    KeyCode::Enter => Some(Action::ProfileGroupConfirm),
+                    KeyCode::Esc | KeyCode::Char('q') => Some(Action::ProfileGroupCancel),
+                    KeyCode::Up | KeyCode::Char('k') => Some(Action::ProfileGroupMove(-1)),
+                    KeyCode::Down | KeyCode::Char('j') => Some(Action::ProfileGroupMove(1)),
+                    _ => None,
+                },
+                crate::model::profile_group::ProfileGroupOverlay::Edit { .. } => match event.code {
+                    KeyCode::Enter => Some(Action::ProfileGroupConfirm),
+                    KeyCode::Esc => Some(Action::ProfileGroupCancel),
+                    KeyCode::Backspace => Some(Action::ProfileGroupBackspace),
+                    KeyCode::Char(character) => Some(Action::ProfileGroupInsert(character)),
+                    _ => None,
+                },
+                crate::model::profile_group::ProfileGroupOverlay::DeleteConfirm { .. } => {
+                    match event.code {
+                        KeyCode::Enter | KeyCode::Char('y') => Some(Action::ProfileGroupConfirm),
+                        KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('q') => {
+                            Some(Action::ProfileGroupCancel)
+                        }
+                        _ => None,
+                    }
+                }
             };
         }
         if matches!(app.overlay, Some(Overlay::RecordView(_))) {

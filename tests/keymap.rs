@@ -1530,6 +1530,29 @@ fn explorer_a_on_a_profile_opens_connection_group_creation() {
 }
 
 #[test]
+fn profile_group_editor_routes_j_and_k_to_group_name_input() {
+    let mut app = App::new(Vec::new());
+    app.overlay = Some(Overlay::ProfileGroup(
+        lazydb::model::profile_group::ProfileGroupOverlay::Edit {
+            group_id: None,
+            name: Default::default(),
+            error: None,
+            busy: false,
+        },
+    ));
+    let mut keymap = Keymap::default();
+
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('j')), &app),
+        Some(Action::ProfileGroupInsert('j'))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('k')), &app),
+        Some(Action::ProfileGroupInsert('k'))
+    );
+}
+
+#[test]
 fn confirmed_explorer_find_keeps_navigation_keys_available() {
     let mut app = App::new(Vec::new());
     app.focus = Focus::Explorer;
