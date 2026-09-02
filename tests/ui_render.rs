@@ -112,6 +112,50 @@ fn record_view_renders_the_selected_row_as_ordered_fields() {
 }
 
 #[test]
+fn dashboard_renders_all_pages_without_database_io() {
+    let mut app = App::new(Vec::new());
+    app.tabs.clear();
+    app.tabs.push(WorkspaceTab::Dashboard(
+        lazydb::model::dashboard::DashboardTab::new(),
+    ));
+    app.active_tab = 0;
+    app.focus = Focus::Results;
+
+    assert!(render(&app, 120, 36).contains("Transactions"));
+    app.update(Action::DashboardSetPage(
+        lazydb::model::dashboard::DashboardPage::Processes,
+    ));
+    assert!(render(&app, 120, 36).contains("Process List"));
+    app.update(Action::DashboardSetPage(
+        lazydb::model::dashboard::DashboardPage::Charts,
+    ));
+    assert!(render(&app, 120, 36).contains("Charts will appear"));
+}
+
+#[test]
+fn dashboard_renders_real_chart_series_after_two_samples() {
+    let mut app = App::new(Vec::new());
+    app.tabs.clear();
+    let mut dashboard = lazydb::model::dashboard::DashboardTab::new();
+    dashboard.page = lazydb::model::dashboard::DashboardPage::Charts;
+    dashboard.history.push(
+        lazydb::model::dashboard::RawSample::new(1_000, 1)
+            .with(lazydb::model::dashboard::MetricKey::Commits, 10.0),
+    );
+    dashboard.history.push(
+        lazydb::model::dashboard::RawSample::new(3_000, 1)
+            .with(lazydb::model::dashboard::MetricKey::Commits, 16.0),
+    );
+    app.tabs.push(WorkspaceTab::Dashboard(dashboard));
+    app.active_tab = 0;
+    app.focus = Focus::Results;
+
+    let output = render(&app, 140, 40);
+    assert!(output.contains("commits/s"), "{output}");
+    assert!(output.contains("History"), "{output}");
+}
+
+#[test]
 fn offline_profiles_render_as_collapsed_even_when_expansion_is_pending() {
     let profile = import_connection_url(":memory:", Some("offline-profile"))
         .unwrap()

@@ -15,6 +15,7 @@ use sqlx::{
 use sqlx_core::transaction::TransactionManager;
 use uuid::Uuid;
 
+use crate::model::dashboard::MetricKey;
 use crate::{
     identity::ConnectionIdentity,
     profile::{CatalogScope, CatalogSelection, ConnectionProfile, DatabaseKind, SslMode},
@@ -284,6 +285,143 @@ struct PgSearchCandidate {
 }
 
 impl PostgresAdapter {
+    pub const MONITOR_STATUS_SQL: &str = r#"
+WITH db_stats AS (
+    SELECT coalesce(sum(xact_commit), 0)::double precision AS commits,
+           coalesce(sum(xact_rollback), 0)::double precision AS rollbacks,
+           coalesce(sum(blks_hit), 0)::double precision AS block_hits,
+           coalesce(sum(blks_read), 0)::double precision AS block_reads,
+           coalesce(sum(tup_inserted), 0)::double precision AS inserts,
+           coalesce(sum(tup_updated), 0)::double precision AS updates,
+           coalesce(sum(tup_deleted), 0)::double precision AS deletes,
+           coalesce(sum(deadlocks), 0)::double precision AS deadlocks,
+           coalesce(sum(temp_files), 0)::double precision AS temp_files,
+           coalesce(sum(temp_bytes), 0)::double precision AS temp_bytes
+    FROM pg_stat_database WHERE datname = current_database()
+), activity_stats AS (
+    SELECT count(*)::double precision AS connections,
+           count(*) FILTER (WHERE state = 'active')::double precision AS active_connections,
+           count(*) FILTER (WHERE state = 'idle')::double precision AS idle_connections
+    FROM pg_stat_activity WHERE pid <> pg_backend_pid()
+)
+SELECT extract(epoch FROM clock_timestamp()) * 1000 AS server_time_millis,
+       extract(epoch FROM pg_postmaster_start_time()) * 1000 AS server_generation,
+       db_stats.*, activity_stats.*
+FROM db_stats CROSS JOIN activity_stats
+"#;
+
+    pub const MONITOR_METADATA_SQL: &str = "SELECT current_setting('server_version') AS version, current_setting('max_connections')::bigint AS max_connections";
+
+    pub const PROCESS_LIST_SQL: &str = r#"
+SELECT pid, usename AS user_name, datname AS database_name,
+       coalesce(host(client_addr), client_hostname, 'local') AS client,
+       application_name, state,
+       coalesce(nullif(wait_event_type, '') || ':' || wait_event, wait_event_type) AS wait,
+       extract(epoch FROM clock_timestamp() - coalesce(query_start, xact_start, backend_start)) AS elapsed_seconds,
+       query
+FROM pg_stat_activity
+WHERE pid <> pg_backend_pid()
+ORDER BY CASE WHEN state = 'active' THEN 0 ELSE 1 END,
+         elapsed_seconds DESC NULLS LAST
+LIMIT 2001
+"#;
+
+    pub async fn load_monitor_snapshot(
+        &self,
+    ) -> Result<crate::db::monitor::MonitorSnapshot, DatabaseError> {
+        let row = sqlx::query(Self::MONITOR_STATUS_SQL)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Sql))?;
+        let mut values = std::collections::BTreeMap::new();
+        for (name, key) in [
+            ("commits", MetricKey::Commits),
+            ("rollbacks", MetricKey::Rollbacks),
+            ("block_hits", MetricKey::BlockHits),
+            ("block_reads", MetricKey::BlockReads),
+            ("inserts", MetricKey::Inserts),
+            ("updates", MetricKey::Updates),
+            ("deletes", MetricKey::Deletes),
+            ("deadlocks", MetricKey::Deadlocks),
+            ("temp_files", MetricKey::TempFiles),
+            ("temp_bytes", MetricKey::TempBytes),
+            ("connections", MetricKey::Connections),
+            ("active_connections", MetricKey::ActiveConnections),
+            ("idle_connections", MetricKey::IdleConnections),
+        ] {
+            values.insert(key, row.try_get(name).map_err(decode_error)?);
+        }
+        let commits = values[&MetricKey::Commits];
+        let rollbacks = values[&MetricKey::Rollbacks];
+        values.insert(MetricKey::Transactions, commits + rollbacks);
+        Ok(crate::db::monitor::MonitorSnapshot {
+            server_time_millis: row
+                .try_get::<f64, _>("server_time_millis")
+                .map_err(decode_error)? as u64,
+            server_generation: row
+                .try_get::<f64, _>("server_generation")
+                .map_err(decode_error)? as u64,
+            values,
+        })
+    }
+
+    pub async fn load_monitor_metadata(
+        &self,
+    ) -> Result<crate::db::monitor::MonitorMetadata, DatabaseError> {
+        let row = sqlx::query(Self::MONITOR_METADATA_SQL)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Sql))?;
+        Ok(crate::db::monitor::MonitorMetadata {
+            version: row.try_get("version").map_err(decode_error)?,
+            max_connections: row
+                .try_get::<i64, _>("max_connections")
+                .map_err(decode_error)?
+                .try_into()
+                .ok(),
+        })
+    }
+
+    pub async fn load_process_snapshot(
+        &self,
+    ) -> Result<crate::db::monitor::ProcessSnapshot, DatabaseError> {
+        let rows = sqlx::query(Self::PROCESS_LIST_SQL)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Sql))?;
+        let truncated = rows.len() > crate::db::monitor::MAX_PROCESS_ROWS;
+        let rows = rows
+            .into_iter()
+            .take(crate::db::monitor::MAX_PROCESS_ROWS)
+            .map(|row| {
+                Ok(crate::model::dashboard::ProcessRow {
+                    id: row.try_get::<i32, _>("pid").map_err(decode_error)? as u64,
+                    user: sanitize_terminal_text(
+                        &row.try_get::<Option<String>, _>("user_name")
+                            .map_err(decode_error)?
+                            .unwrap_or_default(),
+                    ),
+                    database: row.try_get("database_name").map_err(decode_error)?,
+                    client: row.try_get("client").map_err(decode_error)?,
+                    application: row.try_get("application_name").map_err(decode_error)?,
+                    state: row.try_get("state").map_err(decode_error)?,
+                    wait: row.try_get("wait").map_err(decode_error)?,
+                    elapsed: crate::db::monitor::parse_process_duration(
+                        row.try_get("elapsed_seconds").map_err(decode_error)?,
+                    ),
+                    query: row
+                        .try_get::<Option<String>, _>("query")
+                        .map_err(decode_error)?
+                        .map(|value| sanitize_terminal_text(&value)),
+                })
+            })
+            .collect::<Result<Vec<_>, DatabaseError>>()?;
+        Ok(crate::db::monitor::ProcessSnapshot {
+            rows,
+            truncated,
+            visibility: crate::db::monitor::MonitorVisibility::Unknown,
+        })
+    }
     pub fn plan_catalog_drop(
         request: CatalogDropRequest,
         entry: &CatalogEntry,

@@ -6,6 +6,20 @@ machine.
 
 ## Driver Matrix
 
+## Monitoring Dashboard
+
+The connection dashboard is available for PostgreSQL and Oracle MySQL. It
+collects read-only status counters, connection gauges, and a bounded process
+list. SQLite reports monitoring as unsupported because it has no server-wide
+activity catalog. Samples remain in memory for the active workspace tab and
+are not persisted. Counter rates use the elapsed time between valid samples;
+the first sample, missing fields, resets, restarts, and failed polls create a
+history gap rather than a fabricated rate.
+
+The process list is bounded to 2,000 rows and may be marked restricted when
+the database role cannot observe every session. Dashboard V1 does not cancel
+queries or terminate sessions.
+
 | Driver | Server/version gate | Namespace model | Catalog groups | Metadata support |
 | --- | --- | --- | --- | --- |
 | PostgreSQL | PostgreSQL 12 or newer | Database + schema | Tables, views, materialized views, sequences, functions, procedures, types | Type family, defaults, identity, generated expressions, character length, collation, comments; numeric precision/scale is not advertised |

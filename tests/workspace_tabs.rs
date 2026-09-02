@@ -30,6 +30,27 @@ fn workspace_tabs_expose_common_identity() {
     assert_eq!(tabs[1].id(), relation_id);
     assert_eq!(tabs[1].title(), "users");
     assert_eq!(tabs[1].kind(), TabKind::Relation);
+
+    let dashboard = WorkspaceTab::Dashboard(lazydb::model::dashboard::DashboardTab::new());
+    assert_eq!(dashboard.title(), "Dashboard");
+    assert_eq!(dashboard.kind(), TabKind::Dashboard);
+}
+
+#[test]
+fn opening_dashboard_is_idempotent_and_focuses_results() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::OpenDashboard);
+    app.update(Action::OpenDashboard);
+
+    assert_eq!(
+        app.tabs
+            .iter()
+            .filter(|tab| tab.kind() == TabKind::Dashboard)
+            .count(),
+        1
+    );
+    assert_eq!(app.focus, Focus::Results);
+    assert_eq!(app.tabs[app.active_tab].title(), "Dashboard");
 }
 
 #[test]

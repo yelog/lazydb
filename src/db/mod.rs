@@ -1,6 +1,7 @@
 pub mod catalog;
 pub mod catalog_drop;
 pub(crate) mod ddl;
+pub mod monitor;
 pub mod mutation;
 pub mod mysql;
 pub mod postgres;
@@ -136,6 +137,38 @@ pub enum DatabaseConnection {
 }
 
 impl DatabaseConnection {
+    pub async fn load_monitor_snapshot(&self) -> Result<monitor::MonitorSnapshot, DatabaseError> {
+        match self {
+            Self::Postgres(adapter) => adapter.load_monitor_snapshot().await,
+            Self::MySql(adapter) => adapter.load_monitor_snapshot().await,
+            Self::Sqlite(_) => Err(DatabaseError {
+                category: ErrorCategory::Unsupported,
+                code: Some("monitoring_unsupported".into()),
+                message: "SQLite does not expose server monitoring metrics".into(),
+            }),
+        }
+    }
+
+    pub async fn load_monitor_metadata(&self) -> Result<monitor::MonitorMetadata, DatabaseError> {
+        match self {
+            Self::Postgres(adapter) => adapter.load_monitor_metadata().await,
+            Self::MySql(adapter) => adapter.load_monitor_metadata().await,
+            Self::Sqlite(_) => Ok(monitor::MonitorMetadata::default()),
+        }
+    }
+
+    pub async fn load_process_snapshot(&self) -> Result<monitor::ProcessSnapshot, DatabaseError> {
+        match self {
+            Self::Postgres(adapter) => adapter.load_process_snapshot().await,
+            Self::MySql(adapter) => adapter.load_process_snapshot().await,
+            Self::Sqlite(_) => Err(DatabaseError {
+                category: ErrorCategory::Unsupported,
+                code: Some("process_list_unsupported".into()),
+                message: "SQLite does not expose a server process list".into(),
+            }),
+        }
+    }
+
     pub(crate) async fn start_transaction_worker(
         &self,
     ) -> Result<crate::runtime::transaction::TransactionWorkerHandle, DatabaseError> {

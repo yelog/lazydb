@@ -106,6 +106,9 @@ pub struct Runtime {
     catalog_drop_plan_tasks: HashMap<(ConnectionIdentity, u64), JoinHandle<()>>,
     catalog_drop_execute_tasks: HashMap<(ConnectionIdentity, u64), JoinHandle<()>>,
     relation_tasks: HashMap<crate::model::relation::RelationRequest, JoinHandle<()>>,
+    dashboard_metric_tasks: HashMap<(Uuid, u64), JoinHandle<()>>,
+    dashboard_metadata_tasks: HashMap<(Uuid, u64), JoinHandle<()>>,
+    dashboard_process_tasks: HashMap<(Uuid, u64), JoinHandle<()>>,
     known_relations: Arc<StdMutex<HashSet<(ConnectionIdentity, crate::db::catalog::CatalogId)>>>,
     background_tasks: Vec<JoinHandle<()>>,
     profile_tasks: Vec<JoinHandle<()>>,
@@ -167,6 +170,9 @@ impl Runtime {
             catalog_drop_plan_tasks: HashMap::new(),
             catalog_drop_execute_tasks: HashMap::new(),
             relation_tasks: HashMap::new(),
+            dashboard_metric_tasks: HashMap::new(),
+            dashboard_metadata_tasks: HashMap::new(),
+            dashboard_process_tasks: HashMap::new(),
             known_relations: Arc::new(StdMutex::new(HashSet::new())),
             background_tasks: Vec::new(),
             profile_tasks: Vec::new(),
@@ -189,6 +195,12 @@ impl Runtime {
         self.catalog_drop_execute_tasks
             .retain(|_, task| !task.is_finished());
         self.relation_tasks.retain(|_, task| !task.is_finished());
+        self.dashboard_metric_tasks
+            .retain(|_, task| !task.is_finished());
+        self.dashboard_metadata_tasks
+            .retain(|_, task| !task.is_finished());
+        self.dashboard_process_tasks
+            .retain(|_, task| !task.is_finished());
         self.background_tasks.retain(|task| !task.is_finished());
         self.profile_tasks.retain(|task| !task.is_finished());
         match command {
@@ -250,6 +262,36 @@ impl Runtime {
                 generation,
                 sql,
             } => self.run_query(connection, target, tab_id, generation, sql),
+            Command::LoadDashboardMetrics {
+                tab_id,
+                tab_generation,
+                connection,
+            } => self.load_dashboard_metrics(tab_id, tab_generation, connection),
+            Command::LoadDashboardMetadata {
+                tab_id,
+                tab_generation,
+                connection,
+            } => self.load_dashboard_metadata(tab_id, tab_generation, connection),
+            Command::LoadDashboardProcesses {
+                tab_id,
+                tab_generation,
+                connection,
+            } => self.load_dashboard_processes(tab_id, tab_generation, connection),
+            Command::CancelDashboardTasks {
+                tab_id,
+                tab_generation,
+            } => {
+                let key = (tab_id, tab_generation);
+                if let Some(task) = self.dashboard_metric_tasks.remove(&key) {
+                    task.abort();
+                }
+                if let Some(task) = self.dashboard_metadata_tasks.remove(&key) {
+                    task.abort();
+                }
+                if let Some(task) = self.dashboard_process_tasks.remove(&key) {
+                    task.abort();
+                }
+            }
             Command::RunQueryPage {
                 connection,
                 target,
@@ -1254,6 +1296,122 @@ impl Runtime {
             }
         });
         self.query_tasks.insert((tab_id, generation), task);
+    }
+
+    fn load_dashboard_metrics(
+        &mut self,
+        tab_id: Uuid,
+        tab_generation: u64,
+        expected: ConnectionIdentity,
+    ) {
+        let key = (tab_id, tab_generation);
+        if self.dashboard_metric_tasks.contains_key(&key) {
+            return;
+        }
+        let sender = self.event_sender.clone();
+        let connection = Arc::clone(&self.connection);
+        let task = tokio::spawn(async move {
+            let Some(database) = active_database(connection, expected).await else {
+                let _ = sender.send(Action::DashboardMetricsFailed {
+                    tab_id,
+                    tab_generation,
+                    connection: expected,
+                    message: "Active connection is no longer available".into(),
+                });
+                return;
+            };
+            match database.load_monitor_snapshot().await {
+                Ok(snapshot) => {
+                    let _ = sender.send(Action::DashboardMetricsLoaded {
+                        tab_id,
+                        tab_generation,
+                        connection: expected,
+                        snapshot,
+                    });
+                }
+                Err(error) => {
+                    let _ = sender.send(Action::DashboardMetricsFailed {
+                        tab_id,
+                        tab_generation,
+                        connection: expected,
+                        message: error.to_string(),
+                    });
+                }
+            }
+        });
+        self.dashboard_metric_tasks.insert(key, task);
+    }
+
+    fn load_dashboard_metadata(
+        &mut self,
+        tab_id: Uuid,
+        tab_generation: u64,
+        expected: ConnectionIdentity,
+    ) {
+        let key = (tab_id, tab_generation);
+        if self.dashboard_metadata_tasks.contains_key(&key) {
+            return;
+        }
+        let sender = self.event_sender.clone();
+        let connection = Arc::clone(&self.connection);
+        let task = tokio::spawn(async move {
+            let Some(database) = active_database(connection, expected).await else {
+                return;
+            };
+            if let Ok(metadata) = database.load_monitor_metadata().await {
+                let _ = sender.send(Action::DashboardMetadataLoaded {
+                    tab_id,
+                    tab_generation,
+                    connection: expected,
+                    metadata,
+                });
+            }
+        });
+        self.dashboard_metadata_tasks.insert(key, task);
+    }
+
+    fn load_dashboard_processes(
+        &mut self,
+        tab_id: Uuid,
+        tab_generation: u64,
+        expected: ConnectionIdentity,
+    ) {
+        let key = (tab_id, tab_generation);
+        if self.dashboard_process_tasks.contains_key(&key) {
+            return;
+        }
+        let sender = self.event_sender.clone();
+        let connection = Arc::clone(&self.connection);
+        let task = tokio::spawn(async move {
+            let Some(database) = active_database(connection, expected).await else {
+                let _ = sender.send(Action::DashboardProcessesFailed {
+                    tab_id,
+                    tab_generation,
+                    connection: expected,
+                    message: "Active connection is no longer available".into(),
+                });
+                return;
+            };
+            match database.load_process_snapshot().await {
+                Ok(snapshot) => {
+                    let _ = sender.send(Action::DashboardProcessesLoaded {
+                        tab_id,
+                        tab_generation,
+                        connection: expected,
+                        snapshot,
+                    });
+                }
+                Err(error) => {
+                    let _ = sender.send(Action::DashboardProcessesFailed {
+                        tab_id,
+                        tab_generation,
+                        connection: expected,
+                        message: error.to_string(),
+                    });
+                }
+            }
+        });
+        self.dashboard_process_tasks.insert(key, task);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3004,20 +3162,6 @@ fn connection_attempt_is_current(
     attempts.latest == Some(expected) && attempts.cancelled != Some(expected)
 }
 
-async fn active_database(
-    connection: Arc<Mutex<Option<ActiveConnection>>>,
-    expected: ConnectionIdentity,
-) -> Option<DatabaseConnection> {
-    connection
-        .lock()
-        .await
-        .as_ref()
-        .filter(|active| {
-            active.profile_id == expected.profile_id && active.generation == expected.generation
-        })
-        .map(|active| active.database.clone())
-}
-
 async fn active_database_for_target(
     connection: Arc<Mutex<Option<ActiveConnection>>>,
     expected: ConnectionIdentity,
@@ -3031,6 +3175,20 @@ async fn active_database_for_target(
             active.profile_id == expected.profile_id
                 && active.generation == expected.generation
                 && &active.target == target
+        })
+        .map(|active| active.database.clone())
+}
+
+async fn active_database(
+    connection: Arc<Mutex<Option<ActiveConnection>>>,
+    expected: ConnectionIdentity,
+) -> Option<DatabaseConnection> {
+    connection
+        .lock()
+        .await
+        .as_ref()
+        .filter(|active| {
+            active.profile_id == expected.profile_id && active.generation == expected.generation
         })
         .map(|active| active.database.clone())
 }
@@ -3206,6 +3364,14 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                     let now = std::time::Instant::now();
                     let expired = keymap.expire_pending(&app, now);
                     let after = keymap.sequence_state(&app, now);
+                    let now_millis = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
+                    let refresh_commands = app.dashboard_refresh_commands(now_millis);
+                    for command in refresh_commands {
+                        runtime.dispatch(command);
+                    }
                     redraw = app.notifications.expire(now)
                         || ui_state.advance_animations(now)
                         || expired

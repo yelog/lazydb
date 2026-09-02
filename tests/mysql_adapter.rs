@@ -20,6 +20,33 @@ use lazydb::{
 use uuid::Uuid;
 
 #[test]
+fn monitoring_sql_is_bounded_and_contains_required_mysql_counters() {
+    assert!(mysql::MySqlAdapter::MONITOR_STATUS_SQL.contains("SHOW GLOBAL STATUS"));
+    for field in [
+        "Queries",
+        "Com_commit",
+        "Com_rollback",
+        "Threads_connected",
+        "Threads_running",
+        "Innodb_buffer_pool_read_requests",
+        "Innodb_buffer_pool_reads",
+        "Created_tmp_files",
+        "Bytes_received",
+        "Bytes_sent",
+    ] {
+        assert!(
+            mysql::MySqlAdapter::MONITOR_STATUS_SQL.contains(field),
+            "missing {field}"
+        );
+    }
+    assert!(mysql::MySqlAdapter::MONITOR_STATUS_SQL.contains("WHERE Variable_name IN"));
+    assert_eq!(
+        mysql::MySqlAdapter::PROCESS_LIST_SQL,
+        "SHOW FULL PROCESSLIST"
+    );
+}
+
+#[test]
 fn mysql_catalog_capabilities_are_truthful_before_lazy_pages() {
     assert_eq!(
         MySqlAdapter::catalog_capabilities(),

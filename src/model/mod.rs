@@ -1,3 +1,4 @@
+pub mod dashboard;
 pub mod data_query;
 pub mod editor;
 pub mod execution_target;
