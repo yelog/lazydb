@@ -45,8 +45,6 @@ pub(crate) enum EditorEffect {
     RunCurrent,
     RunAll,
     FormatCurrent,
-    NewConsole,
-    GotoSqlConsole,
     CloseConsole,
     DeleteConsole,
     OpenSqlEditorList,
@@ -1298,11 +1296,9 @@ impl EditorWorkspace {
                 (PendingBinding::Leader, 'y') => self.effects.push(EditorEffect::CopyStatement),
                 (PendingBinding::Leader, 'Y') => self.effects.push(EditorEffect::CopyBuffer),
                 (PendingBinding::Leader, 'f') => self.effects.push(EditorEffect::FormatCurrent),
-                (PendingBinding::Leader, 'n') => self.effects.push(EditorEffect::NewConsole),
-                (PendingBinding::Leader, 's') => self.effects.push(EditorEffect::GotoSqlConsole),
+                (PendingBinding::Leader, 's') => self.effects.push(EditorEffect::OpenSqlEditorList),
                 (PendingBinding::Leader, 'q') => self.effects.push(EditorEffect::CloseConsole),
                 (PendingBinding::Leader, 'x') => self.effects.push(EditorEffect::DeleteConsole),
-                (PendingBinding::Leader, 'e') => self.effects.push(EditorEffect::OpenSqlEditorList),
                 (PendingBinding::Leader, '?') => self.effects.push(EditorEffect::ShowHelp),
                 (PendingBinding::Leader, 't') => {
                     session.pending_binding = Some(PendingBinding::LeaderTransaction)

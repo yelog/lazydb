@@ -22,6 +22,104 @@ fn key(code: KeyCode) -> KeyEvent {
 }
 
 #[test]
+fn console_manager_browse_and_search_keys_are_mode_aware() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::OpenSqlEditorList);
+    let mut keymap = Keymap::default();
+
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('j')), &app),
+        Some(Action::SqlEditorListMove(1))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('a')), &app),
+        Some(Action::SqlEditorListCreate)
+    );
+    assert_eq!(keymap.map(key(KeyCode::Char('x')), &app), None);
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('/')), &app),
+        Some(Action::SqlEditorListSearchStart)
+    );
+    app.update(Action::SqlEditorListSearchStart);
+
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('j')), &app),
+        Some(Action::SqlEditorListInputInsert('j'))
+    );
+    assert_eq!(
+        keymap.map(ctrl('w'), &app),
+        Some(Action::SqlEditorListInputDeletePreviousWord)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Delete), &app),
+        Some(Action::SqlEditorListInputDelete)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Enter), &app),
+        Some(Action::SqlEditorListActivate)
+    );
+}
+
+#[test]
+fn console_manager_delete_keys_are_confirmation_aware() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::OpenSqlEditorList);
+    let mut keymap = Keymap::default();
+
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('d')), &app),
+        Some(Action::SqlEditorListDeleteRequest)
+    );
+    app.update(Action::SqlEditorListDeleteRequest);
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('y')), &app),
+        Some(Action::SqlEditorListDeleteConfirm)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('n')), &app),
+        Some(Action::SqlEditorListDeleteCancel)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Esc), &app),
+        Some(Action::SqlEditorListDeleteCancel)
+    );
+}
+
+#[test]
+fn console_manager_rename_keys_use_shared_text_input_actions() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::OpenSqlEditorList);
+    let mut keymap = Keymap::default();
+
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('r')), &app),
+        Some(Action::SqlEditorListRenameStart)
+    );
+    app.update(Action::SqlEditorListRenameStart);
+
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('a')), &app),
+        Some(Action::SqlEditorListInputInsert('a'))
+    );
+    assert_eq!(
+        keymap.map(ctrl('w'), &app),
+        Some(Action::SqlEditorListInputDeletePreviousWord)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Home), &app),
+        Some(Action::SqlEditorListInputMoveHome)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Enter), &app),
+        Some(Action::SqlEditorListRenameCommit)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Esc), &app),
+        Some(Action::SqlEditorListCancel)
+    );
+}
+
+#[test]
 fn explorer_s_opens_profile_access_menu() {
     let profile = profile("access");
     let profile_id = profile.id;
@@ -804,10 +902,14 @@ fn maps_global_sequences_and_function_keys() {
         Some(Action::NextTab)
     );
     assert_eq!(keymap.map(key(KeyCode::Char(' ')), &app), None);
+    assert_eq!(keymap.map(key(KeyCode::Char('n')), &app), None);
+    let mut keymap = Keymap::default();
+    assert_eq!(keymap.map(key(KeyCode::Char(' ')), &app), None);
     assert_eq!(
-        keymap.map(key(KeyCode::Char('n')), &app),
-        Some(Action::NewConsole)
+        keymap.map(key(KeyCode::Char('s')), &app),
+        Some(Action::OpenSqlEditorList)
     );
+    let mut keymap = Keymap::default();
     assert_eq!(keymap.map(key(KeyCode::Char(' ')), &app), None);
     assert_eq!(
         keymap.map(key(KeyCode::Char('q')), &app),
@@ -827,8 +929,11 @@ fn maps_sql_editor_delete_and_list_shortcuts() {
         Some(Action::RequestDeleteActiveConsole)
     );
     assert_eq!(keymap.map(key(KeyCode::Char(' ')), &app), None);
+    assert_eq!(keymap.map(key(KeyCode::Char('e')), &app), None);
+    let mut keymap = Keymap::default();
+    assert_eq!(keymap.map(key(KeyCode::Char(' ')), &app), None);
     assert_eq!(
-        keymap.map(key(KeyCode::Char('e')), &app),
+        keymap.map(key(KeyCode::Char('s')), &app),
         Some(Action::OpenSqlEditorList)
     );
 }
@@ -906,24 +1011,7 @@ fn numeric_result_keys_start_window_counts_without_stealing_query_input() {
 }
 
 #[test]
-fn space_n_opens_console_from_explorer_on_relation_tab() {
-    let mut app = App::new(Vec::new());
-    app.tabs.push(lazydb::model::tab::WorkspaceTab::Relation(
-        lazydb::model::relation::RelationTab::new("users"),
-    ));
-    app.active_tab = 1;
-    app.focus = Focus::Explorer;
-    let mut keymap = Keymap::default();
-
-    assert_eq!(keymap.map(key(KeyCode::Char(' ')), &app), None);
-    assert_eq!(
-        keymap.map(key(KeyCode::Char('n')), &app),
-        Some(Action::NewConsole)
-    );
-}
-
-#[test]
-fn space_s_returns_to_the_first_sql_console_from_explorer() {
+fn space_s_opens_console_manager_from_explorer() {
     let mut app = App::new(Vec::new());
     app.update(Action::NewConsole);
     app.tabs.push(lazydb::model::tab::WorkspaceTab::Relation(
@@ -936,15 +1024,12 @@ fn space_s_returns_to_the_first_sql_console_from_explorer() {
     assert_eq!(keymap.map(key(KeyCode::Char(' ')), &app), None);
     assert_eq!(
         keymap.map(key(KeyCode::Char('s')), &app),
-        Some(Action::GotoSqlConsole)
+        Some(Action::OpenSqlEditorList)
     );
-    app.update(Action::GotoSqlConsole);
-    assert_eq!(app.active_tab, 0);
-    assert_eq!(app.focus, Focus::Editor);
 }
 
 #[test]
-fn space_s_takes_priority_over_sql_result_order_input() {
+fn space_s_opens_console_manager_from_sql_results() {
     let mut app = App::new(Vec::new());
     app.focus = Focus::Results;
     let mut keymap = Keymap::default();
@@ -952,7 +1037,7 @@ fn space_s_takes_priority_over_sql_result_order_input() {
     assert_eq!(keymap.map(key(KeyCode::Char(' ')), &app), None);
     assert_eq!(
         keymap.map(key(KeyCode::Char('s')), &app),
-        Some(Action::GotoSqlConsole)
+        Some(Action::OpenSqlEditorList)
     );
 }
 

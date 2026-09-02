@@ -5,6 +5,7 @@ use crate::{
         profile_manager::ProfileManagerPage,
         relation::RelationView,
         relation_edit::RelationGridMode,
+        sql_editor_list::SqlEditorListMode,
         tab::{ResultView, WorkspaceTab},
         workspace::{ExplorerSearchPhase, Focus, Overlay},
     },
@@ -37,7 +38,10 @@ pub enum ShortcutContext {
     CatalogEditorBusy,
     ProfileManagerScope,
     ProfileManagerDelete,
-    SqlEditorList,
+    ConsoleManager,
+    ConsoleManagerSearch,
+    ConsoleManagerRename,
+    ConsoleManagerDeleteConfirm,
     Help,
     ProfileAccess,
     ProfileGroup,
@@ -81,7 +85,10 @@ const ALL_SHORTCUT_CONTEXTS: &[ShortcutContext] = &[
     ShortcutContext::CatalogEditorBusy,
     ShortcutContext::ProfileManagerScope,
     ShortcutContext::ProfileManagerDelete,
-    ShortcutContext::SqlEditorList,
+    ShortcutContext::ConsoleManager,
+    ShortcutContext::ConsoleManagerSearch,
+    ShortcutContext::ConsoleManagerRename,
+    ShortcutContext::ConsoleManagerDeleteConfirm,
     ShortcutContext::Help,
     ShortcutContext::ProfileAccess,
     ShortcutContext::Message,
@@ -133,7 +140,14 @@ fn shortcut_context_with_overlay(app: &App, include_help: bool) -> ShortcutConte
                     },
                     None => ShortcutContext::CatalogEditorBusy,
                 },
-                Overlay::SqlEditorList(_) => ShortcutContext::SqlEditorList,
+                Overlay::SqlEditorList(list) => match list.mode {
+                    SqlEditorListMode::Browse => ShortcutContext::ConsoleManager,
+                    SqlEditorListMode::Search => ShortcutContext::ConsoleManagerSearch,
+                    SqlEditorListMode::Rename { .. } => ShortcutContext::ConsoleManagerRename,
+                    SqlEditorListMode::DeleteConfirm { .. } => {
+                        ShortcutContext::ConsoleManagerDeleteConfirm
+                    }
+                },
                 Overlay::ProfileAccess { .. } => ShortcutContext::ProfileAccess,
                 Overlay::ProfileGroup(_) => ShortcutContext::ProfileGroup,
                 Overlay::Message { .. } => ShortcutContext::Message,
@@ -234,8 +248,6 @@ pub enum HelpShortcutId {
     NextTab,
     PreviousTabAlias,
     NextTabAlias,
-    NewConsole,
-    GotoSqlConsole,
     OpenDashboard,
     DashboardToggleView,
     DashboardRefresh,
@@ -366,10 +378,19 @@ pub enum HelpShortcutId {
     ProfileScopeBack,
     ProfileDeleteConfirm,
     ProfileDeleteCancel,
-    SqlEditorListEdit,
-    SqlEditorListMove,
-    SqlEditorListActivate,
-    SqlEditorListClose,
+    ConsoleManagerMove,
+    ConsoleManagerSearchMove,
+    ConsoleManagerActivate,
+    ConsoleManagerCreate,
+    ConsoleManagerDelete,
+    ConsoleManagerRename,
+    ConsoleManagerSearch,
+    ConsoleManagerClose,
+    ConsoleManagerEdit,
+    ConsoleManagerCommit,
+    ConsoleManagerCancel,
+    ConsoleManagerConfirmDelete,
+    ConsoleManagerDeleteCancel,
     HelpEdit,
     HelpMove,
     HelpExecute,
@@ -438,13 +459,37 @@ pub enum HelpShortcutId {
 const fn footer_priority(id: HelpShortcutId) -> Option<u8> {
     use HelpShortcutId::*;
     Some(match id {
-        ExplorerMoveDown | EditorInsert | ResultsMoveLeft | OutputMove | RelationDdlMove
-        | RecordMoveFields | DataQueryEdit | ExplorerFindEdit | ExplorerFindNext
-        | ExplorerSearchEdit | ExplorerSearchNext | ProfileFormMove | ProfileScopeMove
-        | ProfileDeleteConfirm | SqlEditorListEdit | HelpEdit | ProfileAccessMove
-        | MessageClose | SubstituteChoices | ExecutionConfirm | ManualCancelConfirm
-        | TransactionChoices | ClearOutcomeConfirm | TargetMove | DeleteConsoleConfirm
-        | RelationEditApply | RelationVisualMove | PageSizeMove | CatalogDropEdit
+        ExplorerMoveDown
+        | EditorInsert
+        | ResultsMoveLeft
+        | OutputMove
+        | RelationDdlMove
+        | RecordMoveFields
+        | DataQueryEdit
+        | ExplorerFindEdit
+        | ExplorerFindNext
+        | ExplorerSearchEdit
+        | ExplorerSearchNext
+        | ProfileFormMove
+        | ProfileScopeMove
+        | ProfileDeleteConfirm
+        | ConsoleManagerMove
+        | ConsoleManagerSearchMove
+        | ConsoleManagerEdit
+        | HelpEdit
+        | ProfileAccessMove
+        | MessageClose
+        | SubstituteChoices
+        | ExecutionConfirm
+        | ManualCancelConfirm
+        | TransactionChoices
+        | ClearOutcomeConfirm
+        | TargetMove
+        | DeleteConsoleConfirm
+        | RelationEditApply
+        | RelationVisualMove
+        | PageSizeMove
+        | CatalogDropEdit
         | CatalogEditorMove => 1,
         ExplorerMoveUp
         | EditorRun
@@ -460,7 +505,14 @@ const fn footer_priority(id: HelpShortcutId) -> Option<u8> {
         | ProfileFormActivate
         | ProfileScopeToggle
         | ProfileDeleteCancel
-        | SqlEditorListMove
+        | ConsoleManagerActivate
+        | ConsoleManagerCommit
+        | ConsoleManagerCancel
+        | ConsoleManagerConfirmDelete
+        | ConsoleManagerDeleteCancel
+        | ConsoleManagerDelete
+        | ConsoleManagerRename
+        | ConsoleManagerSearch
         | HelpMove
         | ProfileAccessConfirm
         | SubstituteClose
@@ -483,23 +535,10 @@ const fn footer_priority(id: HelpShortcutId) -> Option<u8> {
         | CatalogEditorCancel
         | RelationRedo
         | RelationRollback => 2,
-        ExplorerCollapse
-        | EditorFormat
-        | ResultsMoveUp
-        | OutputSearch
-        | RelationDdlSearch
-        | RecordEnds
-        | DataQueryCancel
-        | ProfileFormSave
-        | ProfileScopeRefresh
-        | SqlEditorListActivate
-        | HelpExecute
-        | ProfileAccessClose
-        | ExecutionToggle
-        | ManualCancelToggle
-        | TransactionToggle
-        | TargetCancel
-        | RelationEditText
+        ExplorerCollapse | EditorFormat | ResultsMoveUp | OutputSearch | RelationDdlSearch
+        | RecordEnds | DataQueryCancel | ProfileFormSave | ProfileScopeRefresh
+        | ConsoleManagerCreate | HelpExecute | ProfileAccessClose | ExecutionToggle
+        | ManualCancelToggle | TransactionToggle | TargetCancel | RelationEditText
         | RelationVisualDelete => 3,
         ExplorerExpand
         | EditorCopyStatement
@@ -510,7 +549,7 @@ const fn footer_priority(id: HelpShortcutId) -> Option<u8> {
         | DataQuerySwitch
         | ProfileFormClose
         | ProfileScopeBack
-        | SqlEditorListClose
+        | ConsoleManagerClose
         | HelpClose
         | RelationEditDeleteWord
         | RelationVisualCancel => 4,
@@ -801,21 +840,7 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
         "t"
     ),
     row!(
-        NewConsole,
-        [
-            Explorer,
-            SqlResultsData,
-            SqlOutput,
-            RelationDataBrowse,
-            RelationDdl
-        ],
-        "Space n",
-        "new SQL console",
-        Leader,
-        "n"
-    ),
-    row!(
-        GotoSqlConsole,
+        OpenSqlEditors,
         [
             Explorer,
             SqlResultsData,
@@ -824,7 +849,7 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
             RelationDdl
         ],
         "Space s",
-        "go to first SQL console",
+        "open console manager",
         Leader,
         "s"
     ),
@@ -886,23 +911,9 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
         DeleteConsole,
         [Explorer, SqlResultsData, SqlOutput],
         "Space x",
-        "permanently delete SQL editor",
+        "permanently delete console",
         Leader,
         "x"
-    ),
-    row!(
-        OpenSqlEditors,
-        [
-            Explorer,
-            SqlResultsData,
-            SqlOutput,
-            RelationDataBrowse,
-            RelationDdl
-        ],
-        "Space e",
-        "search SQL editors",
-        Leader,
-        "e"
     ),
     row!(
         OpenNotificationHistory,
@@ -1874,31 +1885,94 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
         display
     ),
     row!(
-        SqlEditorListEdit,
-        [SqlEditorList],
-        "type / Backspace",
-        "filter SQL editors",
-        display
-    ),
-    row!(
-        SqlEditorListMove,
-        [SqlEditorList],
-        "j/k",
+        ConsoleManagerMove,
+        [ConsoleManager],
+        "j/k or Up/Down",
         "move selection",
         display
     ),
     row!(
-        SqlEditorListActivate,
-        [SqlEditorList],
+        ConsoleManagerActivate,
+        [ConsoleManager, ConsoleManagerSearch],
         "Enter",
-        "activate SQL editor",
+        "open or focus console",
         display
     ),
     row!(
-        SqlEditorListClose,
-        [SqlEditorList],
+        ConsoleManagerSearchMove,
+        [ConsoleManagerSearch],
+        "Up/Down",
+        "move selection",
+        display
+    ),
+    row!(
+        ConsoleManagerCreate,
+        [ConsoleManager],
+        "a",
+        "new console",
+        display
+    ),
+    row!(
+        ConsoleManagerDelete,
+        [ConsoleManager],
+        "d",
+        "delete console",
+        display
+    ),
+    row!(
+        ConsoleManagerConfirmDelete,
+        [ConsoleManagerDeleteConfirm],
+        "Enter/y",
+        "permanently delete console",
+        display
+    ),
+    row!(
+        ConsoleManagerRename,
+        [ConsoleManager],
+        "r",
+        "rename console",
+        display
+    ),
+    row!(
+        ConsoleManagerSearch,
+        [ConsoleManager],
+        "/",
+        "search consoles",
+        display
+    ),
+    row!(
+        ConsoleManagerClose,
+        [ConsoleManager],
         "Esc",
-        "close list",
+        "close or cancel",
+        display
+    ),
+    row!(
+        ConsoleManagerEdit,
+        [ConsoleManagerSearch, ConsoleManagerRename],
+        "type / Backspace / Delete / Ctrl-w / Ctrl-u",
+        "edit search or name",
+        display
+    ),
+    row!(
+        ConsoleManagerCommit,
+        [ConsoleManagerRename],
+        "Enter",
+        "save new name",
+        display
+    ),
+    row!(
+        ConsoleManagerCancel,
+        [ConsoleManagerSearch, ConsoleManagerRename],
+        "Esc",
+        "cancel or close",
+        display
+    ),
+    row!(
+        ConsoleManagerDeleteCancel,
+        [ConsoleManagerDeleteConfirm],
+        "Esc/n/q",
+        "cancel delete",
         display
     ),
     row!(
@@ -2049,7 +2123,7 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
         DeleteConsoleConfirm,
         [DeleteConsoleConfirmation],
         "Enter",
-        "delete SQL editor",
+        "delete console",
         display
     ),
     row!(
@@ -2396,22 +2470,20 @@ fn prefix_rank(prefix: ShortcutPrefix, id: HelpShortcutId) -> Option<u8> {
     use HelpShortcutId as Id;
     Some(match prefix {
         ShortcutPrefix::Leader => match id {
-            Id::NewConsole => 1,
-            Id::GotoSqlConsole => 2,
-            Id::OpenDashboard => 3,
-            Id::RunSql => 4,
-            Id::RunAllSql => 5,
-            Id::CloseTab => 6,
-            Id::FocusExplorerLeader => 7,
-            Id::DeleteConsole => 8,
-            Id::OpenSqlEditors => 9,
-            Id::EditorFormat => 10,
-            Id::EditorCopyStatement => 11,
-            Id::EditorCopyBuffer => 12,
-            Id::ToggleTransaction => 13,
-            Id::TransactionControl => 14,
-            Id::OpenTargetSelector => 15,
-            Id::ResultsCopyRowWithHeaders => 16,
+            Id::OpenDashboard => 1,
+            Id::RunSql => 2,
+            Id::RunAllSql => 3,
+            Id::CloseTab => 4,
+            Id::FocusExplorerLeader => 5,
+            Id::DeleteConsole => 6,
+            Id::OpenSqlEditors => 7,
+            Id::EditorFormat => 8,
+            Id::EditorCopyStatement => 9,
+            Id::EditorCopyBuffer => 10,
+            Id::ToggleTransaction => 11,
+            Id::TransactionControl => 12,
+            Id::OpenTargetSelector => 13,
+            Id::ResultsCopyRowWithHeaders => 14,
             _ => return None,
         },
         ShortcutPrefix::EditorLeader => match id {
@@ -2419,12 +2491,10 @@ fn prefix_rank(prefix: ShortcutPrefix, id: HelpShortcutId) -> Option<u8> {
             Id::EditorCopyStatement => 2,
             Id::EditorCopyBuffer => 3,
             Id::OpenTargetSelector => 4,
-            Id::NewConsole => 5,
-            Id::GotoSqlConsole => 6,
-            Id::CloseTab => 7,
-            Id::OpenSqlEditors => 8,
-            Id::FocusExplorerLeader => 9,
-            Id::OpenNotificationHistoryLeader => 10,
+            Id::CloseTab => 5,
+            Id::OpenSqlEditors => 6,
+            Id::FocusExplorerLeader => 7,
+            Id::OpenNotificationHistoryLeader => 8,
             _ => return None,
         },
         ShortcutPrefix::Window | ShortcutPrefix::WindowCount(_) => match id {
@@ -2651,7 +2721,10 @@ pub(crate) fn context_name(context: ShortcutContext) -> &'static str {
         ShortcutContext::CatalogEditorForm => "CATALOG FORM",
         ShortcutContext::CatalogEditorPreview => "CATALOG PREVIEW",
         ShortcutContext::CatalogEditorBusy => "CATALOG BUSY",
-        ShortcutContext::SqlEditorList => "SQL EDITORS",
+        ShortcutContext::ConsoleManager
+        | ShortcutContext::ConsoleManagerSearch
+        | ShortcutContext::ConsoleManagerRename
+        | ShortcutContext::ConsoleManagerDeleteConfirm => "CONSOLE MANAGER",
         ShortcutContext::Help => "HELP",
         ShortcutContext::ProfileAccess => "PROFILE ACCESS",
         ShortcutContext::ProfileGroup => "PROFILE GROUP",
@@ -2662,7 +2735,7 @@ pub(crate) fn context_name(context: ShortcutContext) -> &'static str {
         ShortcutContext::TransactionExitConfirmation => "TRANSACTION",
         ShortcutContext::ClearTransactionOutcomeConfirmation => "TRANSACTION OUTCOME",
         ShortcutContext::TargetSelector => "TARGET SELECTOR",
-        ShortcutContext::DeleteConsoleConfirmation => "DELETE SQL EDITOR",
+        ShortcutContext::DeleteConsoleConfirmation => "DELETE CONSOLE",
         ShortcutContext::PageSizeSelector => "PAGE SIZE",
         ShortcutContext::CatalogDropConfirmation => "CATALOG DROP",
         ShortcutContext::NotificationHistory => "NOTIFICATIONS",
@@ -3101,7 +3174,7 @@ mod tests {
             ),
             (
                 Overlay::SqlEditorList(Default::default()),
-                ShortcutContext::SqlEditorList,
+                ShortcutContext::ConsoleManager,
             ),
             (
                 Overlay::DeleteConsole { console_id },
@@ -3119,6 +3192,91 @@ mod tests {
             app.overlay = Some(overlay);
             assert_eq!(shortcut_context(&app), expected);
         }
+    }
+
+    #[test]
+    fn console_manager_help_changes_with_mode() {
+        let mut app = App::new(Vec::new());
+        let id = app.active_console().id;
+        let modes = [
+            (SqlEditorListMode::Browse, ShortcutContext::ConsoleManager),
+            (
+                SqlEditorListMode::Search,
+                ShortcutContext::ConsoleManagerSearch,
+            ),
+            (
+                SqlEditorListMode::Rename {
+                    console_id: id,
+                    input: Default::default(),
+                    error: None,
+                },
+                ShortcutContext::ConsoleManagerRename,
+            ),
+            (
+                SqlEditorListMode::DeleteConfirm { console_id: id },
+                ShortcutContext::ConsoleManagerDeleteConfirm,
+            ),
+        ];
+
+        for (mode, context) in modes {
+            app.overlay = Some(Overlay::SqlEditorList(
+                crate::model::sql_editor_list::SqlEditorListState {
+                    mode,
+                    ..Default::default()
+                },
+            ));
+            assert_eq!(shortcut_context(&app), context);
+            assert!(!shortcuts(context, ShortcutCapabilities::default()).is_empty());
+        }
+
+        let browse = shortcuts(
+            ShortcutContext::ConsoleManager,
+            ShortcutCapabilities::default(),
+        );
+        assert!(browse.iter().any(|row| row.sequence == "a"));
+        assert!(browse.iter().any(|row| row.sequence == "d"));
+        assert!(browse.iter().any(|row| row.sequence == "r"));
+        let search = shortcuts(
+            ShortcutContext::ConsoleManagerSearch,
+            ShortcutCapabilities::default(),
+        );
+        assert!(!search.iter().any(|row| row.sequence == "d"));
+        assert!(!search.iter().any(|row| row.sequence == "r"));
+        let rename = shortcuts(
+            ShortcutContext::ConsoleManagerRename,
+            ShortcutCapabilities::default(),
+        );
+        assert!(!rename.iter().any(|row| row.sequence == "d"));
+        let delete = shortcuts(
+            ShortcutContext::ConsoleManagerDeleteConfirm,
+            ShortcutCapabilities::default(),
+        );
+        assert!(delete.iter().any(|row| row.sequence == "Enter/y"));
+        assert!(!delete.iter().any(|row| row.sequence == "a"));
+    }
+
+    #[test]
+    fn leader_help_lists_only_space_s_for_console_manager() {
+        let rows = prefix_shortcuts(
+            ShortcutContext::Explorer,
+            ShortcutCapabilities::default(),
+            ShortcutPrefix::Leader,
+        );
+        assert!(
+            rows.iter().any(|row| {
+                row.id == HelpShortcutId::OpenSqlEditors && row.sequence == "Space s"
+            })
+        );
+        assert!(
+            !rows
+                .iter()
+                .any(|row| matches!(row.sequence, "Space n" | "Space e"))
+        );
+        assert!(
+            !rows
+                .iter()
+                .any(|row| row.description.contains("first SQL console"))
+        );
     }
 
     #[test]
@@ -3574,8 +3732,29 @@ mod tests {
                 vec!["Enter/y", "Esc/n/q"],
             ),
             (
-                ShortcutContext::SqlEditorList,
-                vec!["type / Backspace", "j/k", "Enter", "Esc"],
+                ShortcutContext::ConsoleManager,
+                vec!["j/k or Up/Down", "Enter", "d", "r", "/", "a", "Esc"],
+            ),
+            (
+                ShortcutContext::ConsoleManagerSearch,
+                vec![
+                    "Up/Down",
+                    "type / Backspace / Delete / Ctrl-w / Ctrl-u",
+                    "Enter",
+                    "Esc",
+                ],
+            ),
+            (
+                ShortcutContext::ConsoleManagerRename,
+                vec![
+                    "type / Backspace / Delete / Ctrl-w / Ctrl-u",
+                    "Enter",
+                    "Esc",
+                ],
+            ),
+            (
+                ShortcutContext::ConsoleManagerDeleteConfirm,
+                vec!["Enter/y", "Esc/n/q"],
             ),
             (
                 ShortcutContext::Help,
@@ -3779,8 +3958,6 @@ mod tests {
         assert_eq!(
             leader,
             vec![
-                HelpShortcutId::NewConsole,
-                HelpShortcutId::GotoSqlConsole,
                 HelpShortcutId::OpenDashboard,
                 HelpShortcutId::RunSql,
                 HelpShortcutId::RunAllSql,

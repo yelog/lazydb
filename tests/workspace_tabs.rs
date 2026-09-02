@@ -220,15 +220,37 @@ fn closing_final_sql_console_creates_a_replacement_editor() {
 }
 
 #[test]
-fn default_console_cannot_be_closed_or_deleted() {
+fn default_console_can_be_closed_and_deleted() {
     let mut app = App::new(Vec::new());
     let id = app.active_console().id;
 
-    assert!(app.update(Action::CloseActiveTab).is_empty());
-    assert!(app.tabs.iter().any(|tab| tab.id() == id));
-    assert!(app.update(Action::RequestDeleteActiveConsole).is_empty());
-    assert!(app.overlay.is_none());
-    assert!(app.sql_editors.iter().any(|record| record.id == id));
+    app.update(Action::CloseActiveTab);
+    assert!(app.tabs.iter().all(|tab| tab.id() != id));
+    assert!(
+        app.sql_editors
+            .iter()
+            .any(|record| record.id == id && !record.open)
+    );
+    assert!(app.active_console_opt().is_some());
+
+    app.update(Action::ActivateSqlEditor(id));
+    app.update(Action::RequestDeleteActiveConsole);
+    assert!(matches!(
+        app.overlay,
+        Some(lazydb::model::workspace::Overlay::DeleteConsole { console_id })
+            if console_id == id
+    ));
+
+    let commands = app.update(Action::ConfirmDeleteConsole);
+    assert!(!app.sql_editors.iter().any(|record| record.id == id));
+    assert!(app.tabs.iter().all(|tab| tab.id() != id));
+    assert!(
+        commands.iter().any(
+            |command| matches!(command, Command::DeleteSqlFile(console_id) if *console_id == id)
+        )
+    );
+    assert!(app.active_console_opt().is_some());
+    assert_eq!(app.active_console().name, "console");
 }
 
 #[test]
@@ -254,6 +276,63 @@ fn closing_and_reopening_sql_editor_preserves_persisted_text_and_target() {
     assert_eq!(app.active_console().id, editor_id);
     assert_eq!(app.active_editor_text().unwrap(), "select 42");
     assert!(app.active_console().execution_target.is_none());
+}
+
+#[test]
+fn workspace_snapshot_restores_open_and_closed_consoles_with_sql_and_names() {
+    let profile = import_connection_url(":memory:", Some("saved"))
+        .unwrap()
+        .profile;
+    let mut app = App::new(vec![profile.clone()]);
+    app.connection.profile_id = Some(profile.id);
+    app.update(Action::NewConsole);
+    let open_id = app.active_console().id;
+    app.update(Action::ReplaceEditor("select open;".into()));
+    app.update(Action::OpenSqlEditorList);
+    app.update(Action::SqlEditorListRenameStart);
+    app.update(Action::SqlEditorListInputDeleteToStart);
+    for character in "renamed open".chars() {
+        app.update(Action::SqlEditorListInputInsert(character));
+    }
+    app.update(Action::SqlEditorListRenameCommit);
+
+    app.update(Action::NewConsole);
+    let closed_id = app.active_console().id;
+    app.update(Action::ReplaceEditor("select closed;".into()));
+    app.update(Action::CloseActiveTab);
+    app.update(Action::OpenSqlEditorList);
+    if let Some(lazydb::model::workspace::Overlay::SqlEditorList(list)) = app.overlay.as_mut() {
+        list.selected_id = Some(closed_id);
+    }
+    app.update(Action::SqlEditorListRenameStart);
+    app.update(Action::SqlEditorListInputDeleteToStart);
+    for character in "renamed closed".chars() {
+        app.update(Action::SqlEditorListInputInsert(character));
+    }
+    app.update(Action::SqlEditorListRenameCommit);
+
+    let snapshot = app.workspace_snapshot();
+    let mut restored = App::new(vec![profile.clone()]);
+    restored.connection.profile_id = Some(profile.id);
+    restored.restore_workspace(snapshot, Some(profile.id));
+
+    assert_eq!(restored.active_console().id, open_id);
+    assert_eq!(restored.active_console().name, "renamed open");
+    assert_eq!(restored.editor_text(open_id).unwrap(), "select open;");
+    let closed = restored
+        .sql_editors
+        .iter()
+        .find(|record| record.id == closed_id)
+        .unwrap();
+    assert_eq!(closed.name, "renamed closed");
+    assert!(!closed.open);
+    assert_eq!(restored.editor_text(closed_id).unwrap(), "select closed;");
+    assert!(restored.tabs.iter().all(|tab| tab.id() != closed_id));
+
+    restored.update(Action::ActivateSqlEditor(closed_id));
+    assert_eq!(restored.active_console().id, closed_id);
+    assert_eq!(restored.active_console().name, "renamed closed");
+    assert_eq!(restored.active_editor_text().unwrap(), "select closed;");
 }
 
 #[test]

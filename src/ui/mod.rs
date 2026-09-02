@@ -1392,7 +1392,7 @@ fn render_tabs(
             };
             let label = format!(" {icon} {title} ");
             let close = format!("{} ", icons.close());
-            let can_close = tab.as_console().is_none_or(|console| !console.is_default());
+            let can_close = true;
             let label_width = label.cell_width();
             let close_width = if can_close { close.cell_width() } else { 0 };
             let width = label_width + close_width;
@@ -3120,32 +3120,7 @@ fn render_overlay(
             );
         }
         Overlay::SqlEditorList(list) => {
-            let popup = centered(area, 72, (app.sql_editors.len() as u16 + 5).clamp(8, 24));
-            frame.render_widget(Clear, popup);
-            let mut lines = vec![Line::raw(format!(" SQL EDITORS  search: {}", list.query))];
-            lines.extend(
-                app.sql_editors
-                    .iter()
-                    .filter(|record| {
-                        crate::model::sql_editor_list::SqlEditorListState::matches(
-                            &record.name,
-                            &list.query,
-                        )
-                    })
-                    .enumerate()
-                    .map(|(index, record)| {
-                        let marker = if index == list.selected { ">" } else { " " };
-                        let open = if record.open { " OPEN" } else { " hidden" };
-                        Line::raw(format!("{marker} {}{open}", record.name))
-                    }),
-            );
-            lines.push(Line::raw("j/k select  Enter activate  Esc cancel"));
-            frame.render_widget(
-                Paragraph::new(lines)
-                    .block(panel_block(" SQL EDITOR LIST ", true, theme))
-                    .style(Style::new().fg(theme.text).bg(theme.surface_raised)),
-                popup,
-            );
+            render_console_manager(frame, area, app, list, state, theme)
         }
         Overlay::CatalogDropConfirm {
             plan,
@@ -3230,6 +3205,171 @@ fn render_overlay(
                 }
             }
         }
+    }
+}
+
+fn render_console_manager(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    list: &crate::model::sql_editor_list::SqlEditorListState,
+    state: &mut UiState,
+    theme: Theme,
+) {
+    use crate::model::sql_editor_list::SqlEditorListMode;
+
+    let records = app.visible_console_records(list.visible_query());
+    let mode_height = match &list.mode {
+        SqlEditorListMode::Browse | SqlEditorListMode::Search => 4,
+        SqlEditorListMode::Rename { error, .. } => 5 + u16::from(error.is_some()),
+        SqlEditorListMode::DeleteConfirm { .. } => 5,
+    };
+    let desired_height = match &list.mode {
+        SqlEditorListMode::Browse | SqlEditorListMode::Search => {
+            records
+                .len()
+                .min(usize::from(area.height.saturating_sub(mode_height))) as u16
+                + mode_height
+        }
+        _ => mode_height,
+    };
+    let popup = centered(area, 72, desired_height.clamp(8, 24));
+    frame.render_widget(Clear, popup);
+
+    let title = match &list.mode {
+        SqlEditorListMode::Browse => " CONSOLES ",
+        SqlEditorListMode::Search => " CONSOLES // SEARCH ",
+        SqlEditorListMode::Rename { .. } => " CONSOLES // RENAME ",
+        SqlEditorListMode::DeleteConfirm { .. } => " CONSOLES // DELETE ",
+    };
+    let inner = popup.inner(ratatui::layout::Margin::new(1, 1));
+    let mut lines = Vec::new();
+    match &list.mode {
+        SqlEditorListMode::Browse | SqlEditorListMode::Search => {
+            if matches!(&list.mode, SqlEditorListMode::Search) {
+                lines.push(Line::raw(format!("/{}", list.visible_query())));
+            }
+            if records.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    "No matching consoles",
+                    theme.muted,
+                )));
+            } else {
+                let status_width = 6usize;
+                let name_width = usize::from(inner.width).saturating_sub(4 + status_width);
+                lines.extend(records.iter().map(|record| {
+                    let selected = list.selected_id == Some(record.id);
+                    let name = truncate_to_cells(&record.name, name_width);
+                    let status = if record.open { "OPEN" } else { "CLOSED" };
+                    let background = if selected {
+                        theme.selection
+                    } else {
+                        theme.surface
+                    };
+                    let prefix = if selected { "> " } else { "  " };
+                    let padding =
+                        status_width + name_width.saturating_sub(usize::from(name.cell_width()));
+                    Line::from(vec![
+                        Span::styled(
+                            format!("{prefix}{name}"),
+                            theme.base().bg(background).add_modifier(if selected {
+                                Modifier::BOLD
+                            } else {
+                                Modifier::empty()
+                            }),
+                        ),
+                        Span::styled(
+                            format!("{:>padding$}", status),
+                            theme
+                                .base()
+                                .fg(if record.open {
+                                    theme.success
+                                } else {
+                                    theme.muted
+                                })
+                                .bg(background),
+                        ),
+                    ])
+                }));
+            }
+            lines.push(Line::raw(""));
+            let footer = if matches!(&list.mode, SqlEditorListMode::Search) {
+                "Enter open  Esc cancel"
+            } else {
+                "j/k move  Enter open  a new  d delete  r rename  / search  Esc close"
+            };
+            lines.push(Line::from(Span::styled(
+                truncate_to_cells(footer, usize::from(inner.width)),
+                theme.muted,
+            )));
+        }
+        SqlEditorListMode::Rename {
+            console_id,
+            input,
+            error,
+        } => {
+            let old_name = app
+                .sql_editors
+                .iter()
+                .find(|record| record.id == *console_id)
+                .map(|record| record.name.as_str())
+                .unwrap_or("unknown");
+            lines.push(Line::raw(format!("Rename {old_name}")));
+            lines.push(Line::raw(""));
+            lines.push(Line::raw(format!("Name: {}", input.value())));
+            if let Some(error) = error {
+                lines.push(Line::from(Span::styled(error.clone(), theme.error)));
+            }
+            lines.push(Line::from(Span::styled(
+                "Enter save  Esc cancel",
+                theme.muted,
+            )));
+        }
+        SqlEditorListMode::DeleteConfirm { console_id } => {
+            let name = app
+                .sql_editors
+                .iter()
+                .find(|record| record.id == *console_id)
+                .map(|record| record.name.as_str())
+                .unwrap_or("unknown");
+            lines.push(Line::raw(format!(
+                "Permanently delete '{name}' and its saved SQL file?"
+            )));
+            lines.push(Line::raw(""));
+            lines.push(Line::from(Span::styled(
+                "Enter delete  Esc cancel",
+                theme.muted,
+            )));
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(panel_block(title, true, theme))
+            .style(theme.base()),
+        popup,
+    );
+    match &list.mode {
+        SqlEditorListMode::Search => {
+            render_text_input(
+                frame,
+                Rect::new(inner.x, inner.y, inner.width, 1),
+                "/",
+                &list.query,
+                theme.base(),
+                state,
+            );
+        }
+        SqlEditorListMode::Rename { input, .. } => {
+            render_text_input(
+                frame,
+                Rect::new(inner.x, inner.y + 2, inner.width, 1),
+                "Name: ",
+                input,
+                theme.base(),
+                state,
+            );
+        }
+        _ => {}
     }
 }
 
