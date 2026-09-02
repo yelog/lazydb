@@ -510,6 +510,12 @@ pub enum Action {
         connection: ConnectionIdentity,
         metadata: crate::db::monitor::MonitorMetadata,
     },
+    DashboardMetadataFailed {
+        tab_id: Uuid,
+        tab_generation: u64,
+        connection: ConnectionIdentity,
+        message: String,
+    },
     DashboardProcessesLoaded {
         tab_id: Uuid,
         tab_generation: u64,

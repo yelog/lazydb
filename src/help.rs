@@ -211,9 +211,7 @@ pub enum HelpShortcutId {
     NewConsole,
     GotoSqlConsole,
     OpenDashboard,
-    DashboardOverview,
-    DashboardProcesses,
-    DashboardCharts,
+    DashboardToggleView,
     DashboardRefresh,
     DashboardTogglePolling,
     RunSql,
@@ -795,9 +793,12 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
         Leader,
         "b"
     ),
-    row!(DashboardOverview, [Dashboard], "1", "show overview"),
-    row!(DashboardProcesses, [Dashboard], "2", "show processes"),
-    row!(DashboardCharts, [Dashboard], "3", "show charts"),
+    row!(
+        DashboardToggleView,
+        [Dashboard],
+        "o",
+        "toggle overview/process list"
+    ),
     row!(DashboardRefresh, [Dashboard], "r", "refresh metrics"),
     row!(
         DashboardTogglePolling,
@@ -2315,12 +2316,10 @@ fn footer_rank(
             _ => None,
         },
         ShortcutContext::Dashboard => match id {
-            Id::DashboardOverview => Some(1),
-            Id::DashboardProcesses => Some(2),
-            Id::DashboardCharts => Some(3),
-            Id::DashboardRefresh => Some(4),
-            Id::DashboardTogglePolling => Some(5),
-            Id::Help => Some(6),
+            Id::DashboardToggleView => Some(1),
+            Id::DashboardRefresh => Some(2),
+            Id::DashboardTogglePolling => Some(3),
+            Id::Help => Some(4),
             _ => None,
         },
         ShortcutContext::RelationDdl => match id {
@@ -2598,9 +2597,7 @@ mod tests {
             },
         );
         for id in [
-            HelpShortcutId::DashboardOverview,
-            HelpShortcutId::DashboardProcesses,
-            HelpShortcutId::DashboardCharts,
+            HelpShortcutId::DashboardToggleView,
             HelpShortcutId::DashboardRefresh,
             HelpShortcutId::DashboardTogglePolling,
             HelpShortcutId::FocusExplorer,

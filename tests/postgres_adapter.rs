@@ -77,6 +77,10 @@ async fn monitoring_snapshot_decodes_integer_timestamps_when_configured() {
     assert!(snapshot.values.contains_key(&MetricKey::Transactions));
     assert!(snapshot.values.contains_key(&MetricKey::Connections));
 
+    let metadata = database.load_monitor_metadata().await.unwrap();
+    assert!(metadata.version.is_some());
+    assert!(metadata.max_connections.is_some());
+
     database.close().await;
 }
 

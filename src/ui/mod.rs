@@ -147,6 +147,7 @@ pub enum HitTarget {
     ToggleResultView,
     ResultView(ResultView),
     RelationView(crate::model::relation::RelationView),
+    DashboardView(crate::model::dashboard::DashboardPage),
     RelationRetry,
     RelationCancel,
     DataQueryInput(crate::model::data_query::DataQueryInput),

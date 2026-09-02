@@ -28,6 +28,18 @@ pub(crate) enum SelectionIcon {
     Partial,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DashboardMetric {
+    Transactions,
+    Connections,
+    ActiveConnections,
+    CacheHit,
+    Deadlocks,
+    TempFiles,
+    Uptime,
+    WriteRate,
+}
+
 impl IconSet {
     pub const fn new(mode: IconMode) -> Self {
         Self { mode }
@@ -47,6 +59,41 @@ impl IconSet {
             IconMode::NerdFont => md::MD_FILTER,
             IconMode::Unicode => "⌕",
             IconMode::Ascii => "F",
+        }
+    }
+
+    pub(crate) const fn dashboard(self, metric: DashboardMetric) -> &'static str {
+        match self.mode {
+            IconMode::NerdFont => match metric {
+                DashboardMetric::Transactions => md::MD_SWAP_HORIZONTAL,
+                DashboardMetric::Connections => md::MD_CONNECTION,
+                DashboardMetric::ActiveConnections => md::MD_PULSE,
+                DashboardMetric::CacheHit => md::MD_PERCENT,
+                DashboardMetric::Deadlocks => md::MD_ALERT_OCTAGON,
+                DashboardMetric::TempFiles => md::MD_FILE_CLOCK,
+                DashboardMetric::Uptime => md::MD_CLOCK_OUTLINE,
+                DashboardMetric::WriteRate => md::MD_TRANSFER,
+            },
+            IconMode::Unicode => match metric {
+                DashboardMetric::Transactions => "↔",
+                DashboardMetric::Connections => "⇄",
+                DashboardMetric::ActiveConnections => "◉",
+                DashboardMetric::CacheHit => "%",
+                DashboardMetric::Deadlocks => "⚠",
+                DashboardMetric::TempFiles => "⌁",
+                DashboardMetric::Uptime => "◷",
+                DashboardMetric::WriteRate => "⇧",
+            },
+            IconMode::Ascii => match metric {
+                DashboardMetric::Transactions => "TX",
+                DashboardMetric::Connections => "CN",
+                DashboardMetric::ActiveConnections => "AC",
+                DashboardMetric::CacheHit => "%",
+                DashboardMetric::Deadlocks => "!!",
+                DashboardMetric::TempFiles => "TF",
+                DashboardMetric::Uptime => "UP",
+                DashboardMetric::WriteRate => "WR",
+            },
         }
     }
 

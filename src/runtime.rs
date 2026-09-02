@@ -1358,13 +1358,23 @@ impl Runtime {
             let Some(database) = active_database(connection, expected).await else {
                 return;
             };
-            if let Ok(metadata) = database.load_monitor_metadata().await {
-                let _ = sender.send(Action::DashboardMetadataLoaded {
-                    tab_id,
-                    tab_generation,
-                    connection: expected,
-                    metadata,
-                });
+            match database.load_monitor_metadata().await {
+                Ok(metadata) => {
+                    let _ = sender.send(Action::DashboardMetadataLoaded {
+                        tab_id,
+                        tab_generation,
+                        connection: expected,
+                        metadata,
+                    });
+                }
+                Err(error) => {
+                    let _ = sender.send(Action::DashboardMetadataFailed {
+                        tab_id,
+                        tab_generation,
+                        connection: expected,
+                        message: error.to_string(),
+                    });
+                }
             }
         });
         self.dashboard_metadata_tasks.insert(key, task);

@@ -122,14 +122,10 @@ fn dashboard_renders_all_pages_without_database_io() {
     app.focus = Focus::Results;
 
     assert!(render(&app, 120, 36).contains("Transactions"));
-    let overview = render(&app, 120, 36);
-    assert!(overview.contains("refresh 5s"), "{overview}");
-    assert!(!overview.contains("Overview"), "{overview}");
-    assert!(!overview.contains("Last sample"), "{overview}");
     app.update(Action::DashboardSetPage(
         lazydb::model::dashboard::DashboardPage::Processes,
     ));
-    assert!(render(&app, 120, 36).contains("Process List"));
+    assert!(render(&app, 120, 36).contains("ProcessList"));
     app.update(Action::DashboardSetPage(
         lazydb::model::dashboard::DashboardPage::Charts,
     ));

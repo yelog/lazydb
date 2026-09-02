@@ -86,6 +86,7 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                 HitTarget::ToggleResultView => Some(Action::ToggleResultView),
                 HitTarget::ResultView(view) => Some(Action::SetResultView(view)),
                 HitTarget::RelationView(view) => Some(Action::SetRelationView(view)),
+                HitTarget::DashboardView(page) => Some(Action::DashboardSetPage(page)),
                 HitTarget::RelationRetry => Some(Action::RefreshActiveRelation),
                 HitTarget::RelationCancel => Some(Action::CancelActiveRelationRequest),
                 HitTarget::DataQueryInput(input) => Some(Action::FocusDataQueryInput(input)),
@@ -246,6 +247,7 @@ fn focus_at(ui: &UiState, column: u16, row: u16) -> Option<Focus> {
         | HitTarget::ToggleResultView
         | HitTarget::ResultView(_)
         | HitTarget::RelationView(_)
+        | HitTarget::DashboardView(_)
         | HitTarget::RelationRetry
         | HitTarget::DataQueryInput(_)
         | HitTarget::RelationColumnResize { .. }

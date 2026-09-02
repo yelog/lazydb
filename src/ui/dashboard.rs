@@ -38,39 +38,70 @@ pub(crate) fn render(
     let area = inner;
     let vertical = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Length(1),
+            Constraint::Min(1),
+        ])
         .split(area);
-    let status = match (&tab.error, tab.loading) {
-        (Some(error), _) => format!("  ERROR  {error}"),
-        (None, true) => format!("  AUTO  ·  refresh {}s  ·  loading", app.dashboard_refresh_interval_seconds()),
-        (None, false) => format!("  AUTO  ·  refresh {}s", app.dashboard_refresh_interval_seconds()),
+    let active = usize::from(tab.page == crate::model::dashboard::DashboardPage::Processes);
+    let regions = super::render_tab_selectors(
+        frame,
+        vertical[0],
+        &["Overview", "ProcessList"],
+        active,
+        theme,
+    );
+    for (region, page) in regions.into_iter().zip([
+        crate::model::dashboard::DashboardPage::Overview,
+        crate::model::dashboard::DashboardPage::Processes,
+    ]) {
+        state.hit_regions.push(super::HitRegion {
+            area: region,
+            target: super::HitTarget::DashboardView(page),
+        });
+    }
+    let status = match (&tab.error, &tab.metadata_error, tab.loading) {
+        (Some(error), _, _) => format!("  ERROR  {error}"),
+        (None, Some(error), _) => format!(
+            "  AUTO  ·  refresh {}s  ·  metadata unavailable: {error}",
+            app.dashboard_refresh_interval_seconds()
+        ),
+        (None, None, true) => format!(
+            "  AUTO  ·  refresh {}s  ·  loading",
+            app.dashboard_refresh_interval_seconds()
+        ),
+        (None, None, false) => format!(
+            "  AUTO  ·  refresh {}s",
+            app.dashboard_refresh_interval_seconds()
+        ),
     };
     frame.render_widget(
         Paragraph::new(Line::styled(
             status,
-            Style::new().fg(if tab.error.is_some() {
+            Style::new().fg(if tab.error.is_some() || tab.metadata_error.is_some() {
                 theme.error
             } else {
                 theme.muted
             }),
         )),
-        vertical[0],
+        vertical[1],
     );
 
     match tab.page {
         crate::model::dashboard::DashboardPage::Processes => render_processes(
             frame,
-            vertical[1],
+            vertical[2],
             theme,
             tab,
             state,
             app.focus == crate::model::workspace::Focus::Results,
         ),
         crate::model::dashboard::DashboardPage::Charts => {
-            render_charts(frame, vertical[1], theme, tab)
+            render_overview(frame, vertical[2], theme, tab, state.activity_icons)
         }
         crate::model::dashboard::DashboardPage::Overview => {
-            render_overview(frame, vertical[1], theme, tab, state.activity_icons)
+            render_overview(frame, vertical[2], theme, tab, state.activity_icons)
         }
     }
 }
@@ -423,15 +454,6 @@ fn render_processes(
         None,
         state.activity_icons,
     );
-}
-
-fn render_charts(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    theme: Theme,
-    tab: &crate::model::dashboard::DashboardTab,
-) {
-    render_history(frame, area, theme, tab);
 }
 
 fn render_history(

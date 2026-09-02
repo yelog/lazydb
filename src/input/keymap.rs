@@ -969,14 +969,15 @@ impl Keymap {
                 };
             }
             let dashboard_action = match event.code {
-                KeyCode::Char('1') => Some(Action::DashboardSetPage(
-                    crate::model::dashboard::DashboardPage::Overview,
-                )),
-                KeyCode::Char('2') => Some(Action::DashboardSetPage(
-                    crate::model::dashboard::DashboardPage::Processes,
-                )),
-                KeyCode::Char('3') => Some(Action::DashboardSetPage(
-                    crate::model::dashboard::DashboardPage::Charts,
+                KeyCode::Char('o') => Some(Action::DashboardSetPage(
+                    match app.tabs.get(app.active_tab) {
+                        Some(crate::model::tab::WorkspaceTab::Dashboard(tab))
+                            if tab.page == crate::model::dashboard::DashboardPage::Processes =>
+                        {
+                            crate::model::dashboard::DashboardPage::Overview
+                        }
+                        _ => crate::model::dashboard::DashboardPage::Processes,
+                    },
                 )),
                 KeyCode::Char('r') => Some(Action::DashboardRefresh),
                 KeyCode::Char('p') => Some(Action::DashboardTogglePolling),
@@ -2724,9 +2725,21 @@ mod tests {
         app.focus = Focus::Results;
 
         assert_eq!(
-            Keymap::default().map(key(KeyCode::Char('1')), &app),
+            Keymap::default().map(key(KeyCode::Char('o')), &app),
             Some(Action::DashboardSetPage(
                 crate::model::dashboard::DashboardPage::Overview
+            ))
+        );
+        for code in ['1', '2', '3'] {
+            assert_eq!(Keymap::default().map(key(KeyCode::Char(code)), &app), None);
+        }
+        app.update(Action::DashboardSetPage(
+            crate::model::dashboard::DashboardPage::Overview,
+        ));
+        assert_eq!(
+            Keymap::default().map(key(KeyCode::Char('o')), &app),
+            Some(Action::DashboardSetPage(
+                crate::model::dashboard::DashboardPage::Processes
             ))
         );
         assert_eq!(

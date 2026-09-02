@@ -236,6 +236,20 @@ enum CompletionAfterEdit {
 }
 
 impl App {
+    fn dashboard_metadata_commands(&self, connection: ConnectionIdentity) -> Vec<Command> {
+        self.tabs
+            .iter()
+            .filter_map(|tab| match tab {
+                WorkspaceTab::Dashboard(tab) => Some(Command::LoadDashboardMetadata {
+                    tab_id: tab.id,
+                    tab_generation: tab.generation,
+                    connection,
+                }),
+                WorkspaceTab::Sql(_) | WorkspaceTab::Relation(_) => None,
+            })
+            .collect()
+    }
+
     pub fn dashboard_refresh_commands(&mut self, now_millis: u64) -> Vec<Command> {
         let Some(connection) = self.connection.active_identity() else {
             return Vec::new();
@@ -1199,14 +1213,15 @@ impl App {
             Id::NewConsole => vec![Action::NewConsole],
             Id::GotoSqlConsole => vec![Action::GotoSqlConsole],
             Id::OpenDashboard => vec![Action::OpenDashboard],
-            Id::DashboardOverview => vec![Action::DashboardSetPage(
-                crate::model::dashboard::DashboardPage::Overview,
-            )],
-            Id::DashboardProcesses => vec![Action::DashboardSetPage(
-                crate::model::dashboard::DashboardPage::Processes,
-            )],
-            Id::DashboardCharts => vec![Action::DashboardSetPage(
-                crate::model::dashboard::DashboardPage::Charts,
+            Id::DashboardToggleView => vec![Action::DashboardSetPage(
+                match self.tabs.get(self.active_tab) {
+                    Some(WorkspaceTab::Dashboard(tab))
+                        if tab.page == crate::model::dashboard::DashboardPage::Processes =>
+                    {
+                        crate::model::dashboard::DashboardPage::Overview
+                    }
+                    _ => crate::model::dashboard::DashboardPage::Processes,
+                },
             )],
             Id::DashboardRefresh => vec![Action::DashboardRefresh],
             Id::DashboardTogglePolling => vec![Action::DashboardTogglePolling],
@@ -1592,6 +1607,7 @@ impl App {
                         | Action::DashboardMetricsLoaded { .. }
                         | Action::DashboardMetricsFailed { .. }
                         | Action::DashboardMetadataLoaded { .. }
+                        | Action::DashboardMetadataFailed { .. }
                         | Action::DashboardProcessesLoaded { .. }
                         | Action::DashboardProcessesFailed { .. }
                 ))
@@ -1725,6 +1741,11 @@ impl App {
                     tab_generation: tab.generation,
                     connection,
                 }];
+                commands.push(Command::LoadDashboardMetadata {
+                    tab_id: tab.id,
+                    tab_generation: tab.generation,
+                    connection,
+                });
                 if tab.page == crate::model::dashboard::DashboardPage::Processes
                     && !tab.process_loading
                 {
@@ -1897,6 +1918,22 @@ impl App {
                     && self.connection.active_identity() == Some(connection)
                 {
                     tab.metadata = metadata;
+                    tab.metadata_error = None;
+                }
+                Vec::new()
+            }
+            Action::DashboardMetadataFailed {
+                tab_id,
+                tab_generation,
+                connection,
+                message,
+            } => {
+                if let Some(WorkspaceTab::Dashboard(tab)) =
+                    self.tabs.iter_mut().find(|tab| tab.id() == tab_id)
+                    && tab.generation == tab_generation
+                    && self.connection.active_identity() == Some(connection)
+                {
+                    tab.metadata_error = Some(message);
                 }
                 Vec::new()
             }
@@ -3976,6 +4013,12 @@ impl App {
                 }
                 let mut commands = std::mem::take(&mut workspace_commands);
                 commands.extend(commands_for_catalog);
+                if should_activate_workspace {
+                    commands.extend(self.dashboard_metadata_commands(ConnectionIdentity {
+                        profile_id,
+                        generation,
+                    }));
+                }
                 if should_activate_workspace && self.is_active_relation_tab() {
                     commands.extend(self.load_active_relation(false));
                 }
@@ -10420,6 +10463,11 @@ mod tests {
             message: "test".into(),
         });
         assert_eq!(app.dashboard_refresh_commands(15_000).len(), 1);
+        assert!(
+            app.update(Action::DashboardRefresh)
+                .iter()
+                .any(|command| { matches!(command, Command::LoadDashboardMetadata { .. }) })
+        );
         assert_eq!(
             match &app.tabs[app.active_tab] {
                 WorkspaceTab::Dashboard(tab) => tab.next_refresh_millis,
@@ -10427,6 +10475,37 @@ mod tests {
             },
             23_000
         );
+    }
+
+    #[test]
+    fn dashboard_metadata_failure_is_visible_without_overwriting_metric_error() {
+        let profile = import_connection_url("postgres://localhost/kms", Some("kms"))
+            .unwrap()
+            .profile;
+        let profile_id = profile.id;
+        let mut app = App::new(vec![profile]);
+        app.connection.profile_id = Some(profile_id);
+        app.connection.generation = 1;
+        app.connection.status = ConnectionStatus::Connected;
+        app.tabs.push(WorkspaceTab::Dashboard(
+            crate::model::dashboard::DashboardTab::new(),
+        ));
+        let tab_id = app.tabs[0].id();
+        app.update(Action::DashboardMetadataFailed {
+            tab_id,
+            tab_generation: 0,
+            connection: ConnectionIdentity {
+                profile_id,
+                generation: 1,
+            },
+            message: "permission denied".into(),
+        });
+
+        let WorkspaceTab::Dashboard(tab) = &app.tabs[0] else {
+            panic!("dashboard tab expected")
+        };
+        assert_eq!(tab.metadata_error.as_deref(), Some("permission denied"));
+        assert!(tab.error.is_none());
     }
 
     fn connected_query_app(sql: &str) -> (App, Uuid, u64) {
