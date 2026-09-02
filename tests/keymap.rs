@@ -1515,16 +1515,21 @@ fn profile_form_maps_navigation_editing_and_commands() {
         keymap.map(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT), &app),
         Some(Action::ProfileFieldPrevious)
     );
-    assert_eq!(
-        keymap.map(key(KeyCode::F(5)), &app),
-        Some(Action::ProfileTest)
-    );
+    assert_eq!(keymap.map(ctrl('t'), &app), Some(Action::ProfileTest));
+    assert_eq!(keymap.map(key(KeyCode::F(5)), &app), None);
     assert_eq!(
         keymap.map(ctrl('s'), &app),
         Some(Action::ProfileSave { connect: false })
     );
     assert_eq!(
         keymap.map(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL), &app,),
+        Some(Action::ProfileSave { connect: true })
+    );
+    assert_eq!(
+        keymap.map(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL | KeyModifiers::SHIFT,),
+            &app,
+        ),
         Some(Action::ProfileSave { connect: true })
     );
     assert_eq!(
@@ -1544,6 +1549,14 @@ fn profile_form_maps_navigation_editing_and_commands() {
     ];
     for (code, expected) in text_mappings {
         assert_eq!(keymap.map(key(code), &app), Some(expected));
+    }
+    for (event, expected) in [
+        (ctrl('w'), Action::ProfileDeletePreviousWord),
+        (ctrl('u'), Action::ProfileDeleteToStart),
+        (ctrl('a'), Action::ProfileMoveHome),
+        (ctrl('e'), Action::ProfileMoveEnd),
+    ] {
+        assert_eq!(keymap.map(event, &app), Some(expected));
     }
     for character in ['h', 'j', 'k', 'l'] {
         assert_eq!(

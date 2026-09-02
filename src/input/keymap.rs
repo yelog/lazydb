@@ -1379,10 +1379,26 @@ fn map_profile_manager(event: KeyEvent, app: &App) -> Option<Action> {
     if manager.page != ProfileManagerPage::Form && !event.modifiers.is_empty() {
         return None;
     }
-    if manager.page == ProfileManagerPage::Form && event.modifiers == KeyModifiers::CONTROL {
+    if manager.page == ProfileManagerPage::Form
+        && event.modifiers.contains(KeyModifiers::CONTROL)
+        && (event.modifiers & !(KeyModifiers::CONTROL | KeyModifiers::SHIFT)).is_empty()
+    {
         return match event.code {
             KeyCode::Char('s') => Some(Action::ProfileSave { connect: false }),
+            KeyCode::Char('t') => Some(Action::ProfileTest),
             KeyCode::Enter => Some(Action::ProfileSave { connect: true }),
+            KeyCode::Char('w') if is_text_field(manager.selected_field) => {
+                Some(Action::ProfileDeletePreviousWord)
+            }
+            KeyCode::Char('u') if is_text_field(manager.selected_field) => {
+                Some(Action::ProfileDeleteToStart)
+            }
+            KeyCode::Char('a') if is_text_field(manager.selected_field) => {
+                Some(Action::ProfileMoveHome)
+            }
+            KeyCode::Char('e') if is_text_field(manager.selected_field) => {
+                Some(Action::ProfileMoveEnd)
+            }
             _ => None,
         };
     }
@@ -1399,9 +1415,6 @@ fn map_profile_manager(event: KeyEvent, app: &App) -> Option<Action> {
         && !alt_gr_text
     {
         return None;
-    }
-    if manager.page == ProfileManagerPage::Form && event.code == KeyCode::F(5) {
-        return Some(Action::ProfileTest);
     }
     match manager.page {
         ProfileManagerPage::Form => map_profile_form(event, manager.selected_field),

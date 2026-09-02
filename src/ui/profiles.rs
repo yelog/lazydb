@@ -219,9 +219,9 @@ fn render_form(
         frame,
         Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
         if inner.width < 70 {
-            "Tab fields  F5 test  Ctrl-s save  Esc cancel"
+            "Tab fields  Ctrl-t test  Ctrl-s save  Esc cancel"
         } else {
-            "Tab fields   F5 test   Ctrl-s save   Ctrl-Enter connect   Esc cancel"
+            "Tab fields   Ctrl-t test   Ctrl-s save   Ctrl-Enter connect   Esc cancel"
         },
         theme,
     );
@@ -499,7 +499,9 @@ fn render_driver_options(
 ) {
     let mut x = area.x;
     for kind in DRIVER_ORDER {
-        let label = format!("{} {}", icons.database(kind), kind_name(kind));
+        let icon = icons.database(kind);
+        let name = kind_name(kind);
+        let label = format!("{icon} {name}");
         let width = label.cell_width();
         if width > area.right().saturating_sub(x) {
             break;
@@ -515,7 +517,20 @@ fn render_driver_options(
                 .fg(if busy { theme.muted } else { theme.text })
                 .bg(theme.surface)
         };
-        frame.render_widget(Paragraph::new(label).style(style), option_area);
+        let background = style.bg.unwrap_or(theme.surface);
+        let icon_color = if busy {
+            theme.muted
+        } else {
+            driver_icon_color(kind)
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(icon, Style::new().fg(icon_color).bg(background)),
+                Span::styled(" ", style),
+                Span::styled(name, style),
+            ])),
+            option_area,
+        );
         if !busy {
             state.hit_regions.push(HitRegion {
                 area: option_area,
@@ -523,6 +538,14 @@ fn render_driver_options(
             });
         }
         x = x.saturating_add(width).saturating_add(1);
+    }
+}
+
+fn driver_icon_color(kind: DatabaseKind) -> ratatui::style::Color {
+    match kind {
+        DatabaseKind::Postgres => ratatui::style::Color::Rgb(87, 169, 220),
+        DatabaseKind::MySql => ratatui::style::Color::Rgb(242, 145, 17),
+        DatabaseKind::Sqlite => ratatui::style::Color::Rgb(68, 184, 214),
     }
 }
 

@@ -613,6 +613,41 @@ impl ProfileDraft {
         self.connection_field_changed(field);
     }
 
+    pub fn delete_previous_word(&mut self, field: ProfileField) {
+        if field == ProfileField::Url {
+            let mut cursor = self.url_cursor;
+            self.edit_url(|url| delete_previous_word(url, &mut cursor));
+            self.url_cursor = cursor;
+        } else if field == ProfileField::Password {
+            let mut password = Zeroizing::new(self.password.expose_secret().to_owned());
+            delete_previous_word(&mut password, &mut self.password_cursor);
+            self.password = SecretString::from(std::mem::take(&mut *password));
+        } else if let Some(input) = self.text_input_mut(field) {
+            input.delete_previous_word();
+        }
+        self.connection_field_changed(field);
+    }
+
+    pub fn delete_to_start(&mut self, field: ProfileField) {
+        if field == ProfileField::Url {
+            let cursor = self.url_cursor;
+            self.edit_url(|url| {
+                let end = character_byte_index(url, cursor);
+                url.replace_range(..end, "");
+            });
+            self.url_cursor = 0;
+        } else if field == ProfileField::Password {
+            let mut password = Zeroizing::new(self.password.expose_secret().to_owned());
+            let end = character_byte_index(&password, self.password_cursor);
+            password.replace_range(..end, "");
+            self.password_cursor = 0;
+            self.password = SecretString::from(std::mem::take(&mut *password));
+        } else if let Some(input) = self.text_input_mut(field) {
+            input.delete_to_start();
+        }
+        self.connection_field_changed(field);
+    }
+
     pub fn delete(&mut self, field: ProfileField) {
         if field == ProfileField::Url {
             let cursor = self.url_cursor;
@@ -1545,6 +1580,22 @@ impl ProfileManagerState {
         }
     }
 
+    pub fn delete_previous_word(&mut self) {
+        let field = self.selected_field;
+        if let Some(draft) = self.draft.as_mut() {
+            draft.delete_previous_word(field);
+            self.message = None;
+        }
+    }
+
+    pub fn delete_to_start(&mut self) {
+        let field = self.selected_field;
+        if let Some(draft) = self.draft.as_mut() {
+            draft.delete_to_start(field);
+            self.message = None;
+        }
+    }
+
     pub fn delete(&mut self) {
         let field = self.selected_field;
         if let Some(draft) = self.draft.as_mut() {
@@ -1720,6 +1771,31 @@ fn character_byte_index(value: &str, character_index: usize) -> usize {
         .char_indices()
         .nth(character_index)
         .map_or(value.len(), |(byte_index, _)| byte_index)
+}
+
+fn delete_previous_word(value: &mut String, cursor: &mut usize) {
+    while *cursor > 0
+        && value[..character_byte_index(value, *cursor)]
+            .chars()
+            .next_back()
+            .is_some_and(char::is_whitespace)
+    {
+        let start = character_byte_index(value, *cursor - 1);
+        let end = character_byte_index(value, *cursor);
+        value.replace_range(start..end, "");
+        *cursor -= 1;
+    }
+    while *cursor > 0
+        && !value[..character_byte_index(value, *cursor)]
+            .chars()
+            .next_back()
+            .is_some_and(char::is_whitespace)
+    {
+        let start = character_byte_index(value, *cursor - 1);
+        let end = character_byte_index(value, *cursor);
+        value.replace_range(start..end, "");
+        *cursor -= 1;
+    }
 }
 
 fn cycle_value<T: Copy + PartialEq>(current: T, values: &[T], delta: i8) -> T {

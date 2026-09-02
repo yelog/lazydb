@@ -1,20 +1,27 @@
 use std::{
     io::{self, Stdout},
     panic,
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 use crossterm::{
     cursor::SetCursorStyle,
     event::{
         DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
-        EnableFocusChange, EnableMouseCapture,
+        EnableFocusChange, EnableMouseCapture, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    terminal::{
+        EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+        supports_keyboard_enhancement,
+    },
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
+
+static KEYBOARD_ENHANCEMENT_ENABLED: AtomicBool = AtomicBool::new(false);
 
 pub struct TerminalSession {
     terminal: Tui,
@@ -33,6 +40,16 @@ impl TerminalSession {
         ) {
             restore_terminal();
             return Err(error);
+        }
+        if supports_keyboard_enhancement().unwrap_or(false) {
+            if let Err(error) = execute!(
+                stdout,
+                PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+            ) {
+                restore_terminal();
+                return Err(error);
+            }
+            KEYBOARD_ENHANCEMENT_ENABLED.store(true, Ordering::Relaxed);
         }
         if mouse_enabled && let Err(error) = execute!(stdout, EnableMouseCapture) {
             restore_terminal();
@@ -78,6 +95,7 @@ impl Drop for TerminalSession {
         if self.mouse_enabled {
             let _ = execute!(backend, DisableMouseCapture);
         }
+        disable_keyboard_enhancement(backend);
         let _ = execute!(
             backend,
             DisableFocusChange,
@@ -103,6 +121,7 @@ pub fn install_panic_hook() {
 
 pub fn restore_terminal() {
     let mut stdout = io::stdout();
+    disable_keyboard_enhancement(&mut stdout);
     let _ = execute!(
         stdout,
         DisableMouseCapture,
@@ -111,4 +130,10 @@ pub fn restore_terminal() {
         LeaveAlternateScreen
     );
     let _ = disable_raw_mode();
+}
+
+fn disable_keyboard_enhancement(writer: &mut impl io::Write) {
+    if KEYBOARD_ENHANCEMENT_ENABLED.swap(false, Ordering::Relaxed) {
+        let _ = execute!(writer, PopKeyboardEnhancementFlags);
+    }
 }

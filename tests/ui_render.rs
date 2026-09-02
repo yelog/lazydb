@@ -2415,12 +2415,7 @@ fn driver_options_have_individual_targets_and_selected_style_survives_field_blur
     app.update(Action::OpenProfileManager);
     app.update(Action::ProfileFocusField(ProfileField::Name));
 
-    let backend = TestBackend::new(80, 24);
-    let mut terminal = Terminal::new(backend).unwrap();
-    let mut state = UiState::new();
-    terminal
-        .draw(|frame| ui::render_with_state(frame, &app, &mut state))
-        .unwrap();
+    let (buffer, state) = render_buffer_with_icons(&app, 80, 24, IconSet::new(IconMode::Ascii));
 
     let options = [
         DatabaseKind::Postgres,
@@ -2441,15 +2436,19 @@ fn driver_options_have_individual_targets_and_selected_style_survives_field_blur
     );
     let selected = options[0].area;
     let unselected = options[1].area;
-    let buffer = terminal.backend().buffer();
-    assert_eq!(
-        buffer[(selected.x, selected.y)].bg,
-        ui::theme::Theme::default().accent
-    );
-    assert_ne!(
-        buffer[(unselected.x, unselected.y)].bg,
-        ui::theme::Theme::default().accent
-    );
+    let theme = ui::theme::Theme::default();
+    assert_eq!(buffer[(selected.x, selected.y)].bg, theme.accent);
+    assert_ne!(buffer[(unselected.x, unselected.y)].bg, theme.accent);
+    let icon_colors = options.map(|option| {
+        (option.area.x..option.area.right())
+            .find_map(|x| {
+                let cell = &buffer[(x, option.area.y)];
+                (!cell.symbol().trim().is_empty()).then_some(cell.fg)
+            })
+            .unwrap()
+    });
+    assert_ne!(icon_colors[0], theme.background);
+    assert_ne!(icon_colors[1], icon_colors[2]);
 }
 
 #[test]

@@ -2310,6 +2310,18 @@ impl App {
                 }
                 Vec::new()
             }
+            Action::ProfileDeletePreviousWord => {
+                if let Some(manager) = self.editable_profile_manager_mut() {
+                    manager.delete_previous_word();
+                }
+                Vec::new()
+            }
+            Action::ProfileDeleteToStart => {
+                if let Some(manager) = self.editable_profile_manager_mut() {
+                    manager.delete_to_start();
+                }
+                Vec::new()
+            }
             Action::ProfileDeleteCharacter => {
                 if let Some(manager) = self.editable_profile_manager_mut() {
                     manager.delete();
@@ -5515,6 +5527,7 @@ impl App {
             manager.operation = None;
             manager.message = warning.or_else(|| Some("Profile saved".into()));
         }
+        self.notify_success("Profile", "Saved successfully");
         if !connect
             && !change.connection_settings_changed
             && !change.credentials_changed

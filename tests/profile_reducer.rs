@@ -1037,6 +1037,10 @@ fn save_success_upserts_without_reordering_profiles() {
     );
     assert_eq!(app.profiles[1].name, "renamed");
     assert!(app.profile_manager.is_none());
+    assert_eq!(
+        app.notifications.history().next().unwrap().body,
+        "Saved successfully"
+    );
 }
 
 #[test]

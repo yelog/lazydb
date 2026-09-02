@@ -114,6 +114,8 @@ pub enum Action {
     ProfileInsert(ProfileInput),
     ProfilePaste(ProfileInput),
     ProfileBackspace,
+    ProfileDeletePreviousWord,
+    ProfileDeleteToStart,
     ProfileDeleteCharacter,
     ProfileMoveLeft,
     ProfileMoveRight,

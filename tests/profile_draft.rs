@@ -25,6 +25,41 @@ fn saved_postgres_profile() -> ConnectionProfile {
 }
 
 #[test]
+fn profile_text_fields_support_shell_style_cursor_editing() {
+    let mut draft = ProfileDraft::new(DatabaseKind::Postgres);
+    draft.name.set("alpha beta  ");
+
+    draft.delete_previous_word(ProfileField::Name);
+    assert_eq!(draft.name.value(), "alpha ");
+    assert_eq!(draft.name.cursor(), 6);
+
+    draft.move_home(ProfileField::Name);
+    draft.move_right(ProfileField::Name);
+    draft.move_right(ProfileField::Name);
+    draft.delete_to_start(ProfileField::Name);
+    assert_eq!(draft.name.value(), "pha ");
+    assert_eq!(draft.name.cursor(), 0);
+
+    draft.move_end(ProfileField::Name);
+    assert_eq!(draft.name.cursor(), draft.name.value().chars().count());
+}
+
+#[test]
+fn profile_secret_fields_support_shell_style_deletion() {
+    let mut draft = ProfileDraft::new(DatabaseKind::Postgres);
+    draft.set_password("alpha beta  ");
+
+    draft.delete_previous_word(ProfileField::Password);
+    assert_eq!(draft.password().expose_secret(), "alpha ");
+
+    draft.move_home(ProfileField::Password);
+    draft.move_right(ProfileField::Password);
+    draft.move_right(ProfileField::Password);
+    draft.delete_to_start(ProfileField::Password);
+    assert_eq!(draft.password().expose_secret(), "pha ");
+}
+
+#[test]
 fn editing_a_profile_preserves_project_access() {
     let mut profile = saved_postgres_profile();
     profile.access = ProfileAccess::Projects {
