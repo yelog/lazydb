@@ -10,7 +10,10 @@ use rmcp::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::{policy::WritePolicy, service::AgentService};
+use super::{
+    policy::{WriteCapability, WritePolicy, write_capability},
+    service::AgentService,
+};
 
 #[derive(Clone)]
 pub struct AgentMcpServer {
@@ -49,6 +52,21 @@ pub struct FileInput {
     pub path: String,
 }
 
+#[derive(Debug, Serialize)]
+struct McpContext {
+    #[serde(flatten)]
+    context: crate::agent::types::AgentContext,
+    server_write_policy: &'static str,
+    write_capability: McpWriteCapability,
+}
+
+#[derive(Debug, Serialize)]
+struct McpWriteCapability {
+    allowed: bool,
+    denial_reason: Option<&'static str>,
+    message: Option<String>,
+}
+
 impl AgentMcpServer {
     pub fn new(service: AgentService, policy: WritePolicy) -> Self {
         Self {
@@ -63,6 +81,35 @@ impl AgentMcpServer {
         service.waiting().await?;
         Ok(())
     }
+
+    pub fn context_json(&self, connection: Option<&str>) -> Result<String, String> {
+        let selected = self
+            .service
+            .select(connection)
+            .map_err(|error| error.message)?;
+        let context = self
+            .service
+            .context(connection)
+            .map_err(|error| error.message)?;
+        let write_capability = match write_capability(selected.profile, self.policy) {
+            WriteCapability::Allowed => McpWriteCapability {
+                allowed: true,
+                denial_reason: None,
+                message: None,
+            },
+            WriteCapability::Denied(error) => McpWriteCapability {
+                allowed: false,
+                denial_reason: Some(error.reason()),
+                message: Some(error.to_string()),
+            },
+        };
+        serde_json::to_string(&McpContext {
+            context,
+            server_write_policy: self.policy.as_str(),
+            write_capability,
+        })
+        .map_err(|error| error.to_string())
+    }
 }
 
 #[tool_router(router = tool_router)]
@@ -70,13 +117,8 @@ impl AgentMcpServer {
     /// Return the current project and selected LazyDB connection context.
     #[tool(name = "get_context", annotations(read_only_hint = true))]
     async fn get_context(&self, input: Parameters<ContextInput>) -> Result<String, String> {
-        let connection = input.0.connection;
-        let connection = connection.filter(|value| !value.is_empty());
-        let context = self
-            .service
-            .context(connection.as_deref())
-            .map_err(|error| error.message)?;
-        serde_json::to_string(&context).map_err(|e| e.to_string())
+        let connection = input.0.connection.filter(|value| !value.is_empty());
+        self.context_json(connection.as_deref())
     }
 
     /// List current-project and global connections visible to this server.

@@ -14,6 +14,16 @@ pub enum WritePolicy {
     All,
 }
 
+impl WritePolicy {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Deny => "deny",
+            Self::NonProduction => "non-production",
+            Self::All => "all",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum PolicyError {
     #[error("a single read-only SQL statement is required")]
@@ -32,6 +42,20 @@ pub enum PolicyError {
     TransactionControlDisabled,
     #[error("SQL must not be empty")]
     EmptySql,
+}
+
+impl PolicyError {
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::ProfileReadOnly => "profile_read_only",
+            Self::ServerWritePolicyDenied => "server_policy",
+            Self::ProductionWriteDisabled => "production_policy",
+            Self::ReadOnlyQueryRequired
+            | Self::UnknownSql
+            | Self::TransactionControlDisabled
+            | Self::EmptySql => "sql_policy",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
