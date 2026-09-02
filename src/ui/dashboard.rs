@@ -6,6 +6,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Axis, Block, Borders, Chart, Dataset, GraphType, Paragraph},
 };
+use unicode_width::UnicodeWidthStr;
 
 use crate::{
     app::App,
@@ -38,29 +39,8 @@ pub(crate) fn render(
     let area = inner;
     let vertical = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2),
-            Constraint::Length(1),
-            Constraint::Min(1),
-        ])
+        .constraints([Constraint::Length(2), Constraint::Min(1)])
         .split(area);
-    let active = usize::from(tab.page == crate::model::dashboard::DashboardPage::Processes);
-    let regions = super::render_tab_selectors(
-        frame,
-        vertical[0],
-        &["Overview", "ProcessList"],
-        active,
-        theme,
-    );
-    for (region, page) in regions.into_iter().zip([
-        crate::model::dashboard::DashboardPage::Overview,
-        crate::model::dashboard::DashboardPage::Processes,
-    ]) {
-        state.hit_regions.push(super::HitRegion {
-            area: region,
-            target: super::HitTarget::DashboardView(page),
-        });
-    }
     let status = match (&tab.error, &tab.metadata_error, tab.loading) {
         (Some(error), _, _) => format!("  ERROR  {error}"),
         (None, Some(error), _) => format!(
@@ -76,6 +56,30 @@ pub(crate) fn render(
             app.dashboard_refresh_interval_seconds()
         ),
     };
+    let header = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Min(1),
+            Constraint::Length(status.width().min(vertical[0].width as usize) as u16),
+        ])
+        .split(vertical[0]);
+    let active = usize::from(tab.page == crate::model::dashboard::DashboardPage::Processes);
+    let regions = super::render_tab_selectors(
+        frame,
+        header[0],
+        &["Overview", "ProcessList"],
+        active,
+        theme,
+    );
+    for (region, page) in regions.into_iter().zip([
+        crate::model::dashboard::DashboardPage::Overview,
+        crate::model::dashboard::DashboardPage::Processes,
+    ]) {
+        state.hit_regions.push(super::HitRegion {
+            area: region,
+            target: super::HitTarget::DashboardView(page),
+        });
+    }
     frame.render_widget(
         Paragraph::new(Line::styled(
             status,
@@ -84,24 +88,25 @@ pub(crate) fn render(
             } else {
                 theme.muted
             }),
-        )),
-        vertical[1],
+        ))
+        .alignment(Alignment::Right),
+        header[1],
     );
 
     match tab.page {
         crate::model::dashboard::DashboardPage::Processes => render_processes(
             frame,
-            vertical[2],
+            vertical[1],
             theme,
             tab,
             state,
             app.focus == crate::model::workspace::Focus::Results,
         ),
         crate::model::dashboard::DashboardPage::Charts => {
-            render_overview(frame, vertical[2], theme, tab, state.activity_icons)
+            render_overview(frame, vertical[1], theme, tab, state.activity_icons)
         }
         crate::model::dashboard::DashboardPage::Overview => {
-            render_overview(frame, vertical[2], theme, tab, state.activity_icons)
+            render_overview(frame, vertical[1], theme, tab, state.activity_icons)
         }
     }
 }
