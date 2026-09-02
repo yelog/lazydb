@@ -287,8 +287,9 @@ Use `--icons unicode` or `--icons ascii` for terminals without Nerd Font
 support. Use `--motion reduced` or `--motion off` to reduce or disable loading
 animation. These display options apply to the current process only.
 
-Read [Configuration](docs/configuration.md) for profile storage, project scope,
-ad hoc URLs, password providers, TLS, and read-only behavior.
+Read the complete [Configuration Guide](docs/configuration.md) for every command-line
+option, configuration and workspace file, connection-profile field, default value,
+project scope, password provider, TLS mode, and read-only behavior.
 
 ## Current Limitations
 

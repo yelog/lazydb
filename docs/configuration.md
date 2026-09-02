@@ -1,5 +1,145 @@
 # Configuration
 
+This document is the reference for LazyDB's configuration surfaces. LazyDB has
+three kinds of settings:
+
+- **Command-line options** apply to the current process. Connection-selection
+  options take precedence over saved-profile selection where stated below.
+- **Connection profiles** are persisted in `connections.toml` and describe how
+  LazyDB connects to a database.
+- **Workspace state** is persisted separately in `workspace.toml` and the `sql/`
+  directory. It stores open consoles and tabs, not credentials.
+
+Unknown TOML fields are rejected. This helps catch spelling mistakes instead of
+silently accepting a setting that LazyDB does not use.
+
+## Configuration Files
+
+`AppPaths` uses the application identifier `dev.lazydb.lazydb`:
+
+| File | macOS | Linux | Purpose |
+| --- | --- | --- | --- |
+| `connections.toml` | `~/Library/Application Support/dev.lazydb.lazydb/connections.toml` | `$XDG_CONFIG_HOME/lazydb/connections.toml` (normally `~/.config/lazydb/connections.toml`) | Saved connection profiles |
+| `credential.key` | Same directory as `connections.toml` | Same directory as `connections.toml` | Device-local key for `local_encrypted` credentials |
+| `workspace.toml` | Application state directory | `$XDG_STATE_HOME/lazydb/workspace.toml` when supported, otherwise the application data directory | Open profiles, consoles, and tabs |
+| `sql/<UUID>.sql` | Sibling `sql/` directory of `workspace.toml` | Sibling `sql/` directory of `workspace.toml` | SQL text for persisted consoles |
+
+The exact Linux paths are determined by the `directories` crate and the XDG
+environment. LazyDB creates private configuration directories and writes profile
+files with owner-only permissions on Unix. `--config PATH` overrides the complete
+profile file for the current process; it does not relocate `credential.key` or
+workspace state.
+
+## Command-Line Options
+
+These options are global and can be placed before a subcommand. They are not
+stored in `connections.toml`.
+
+| Option | Values / argument | Default | Description |
+| --- | --- | --- | --- |
+| `--config PATH` | File path | Platform profile path | Use another `connections.toml` for this run. Parent directories are created when saving. |
+| `--profile NAME` | Profile name | None | Select a saved profile at startup. Ignored as the connection source when `--url` is also supplied, although the name is used for the ad-hoc profile when available. |
+| `--url URL` | Connection URL | None | Open a session-only profile. It is never persisted and takes precedence over `--profile`. |
+| `--read-only` | Flag | Off | Force an ad-hoc connection to read-only. For a saved profile, the stored profile setting remains unchanged; adapter behavior is described below. |
+| `--mouse MODE` | `auto`, `on`, `off` | `auto` | Enable mouse input automatically, force it on, or disable it. |
+| `--color MODE` | `auto`, `always`, `never` | `auto` | Select automatic, forced, or disabled terminal color output. |
+| `--icons MODE` | `nerd-font`, `unicode`, `ascii` | `nerd-font` | Select branded Nerd Font glyphs, standard Unicode fallbacks, or ASCII-only output. |
+| `--motion MODE` | `full`, `reduced`, `off` | `full` | Select full loading animation, reduced animation, or no animation. |
+| `--confirm-execution POLICY` | `risky`, `always` | `risky` | Confirm only risky SQL statements, or confirm every execution. |
+
+`--color`, `--mouse`, `--icons`, `--motion`, and `--confirm-execution` affect
+only the current process. The `--config` option is also accepted by agent and
+MCP commands so they read the same profile set.
+
+Subcommand-specific options are not connection-file settings. They include
+`update --channel stable|beta`, agent `--project`, `--connection`, `--limit`,
+`--sql`, `--file`, `--write-policy`, and MCP `serve --project`, `--connection`,
+and `--write-policy`. The MCP and agent execution write policy defaults to
+`deny`; see [Coding-Agent Database Access](coding-agent-access.md).
+
+## Connection Profile Fields
+
+The current profile file format is version `5`:
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `id` | UUID string | Generated on creation | Stable identity used by workspace state and system credential references. Must be unique within the file. |
+| `name` | String | Derived from the database, host, or SQLite filename | Name shown in the Explorer and accepted by `--profile` and agent `--connection`. |
+| `access` | Table | `{ scope = "global" }` | Controls which projects can see a saved profile. |
+| `kind` | `postgres`, `mysql`, `sqlite` | Required | Database adapter to use. |
+| `url_format` | Kebab-case enum | Driver-specific | URL spelling used when LazyDB displays or regenerates the connection URL. |
+| `host` | String or `null` | `null` | Server hostname or address. PostgreSQL and MySQL only. |
+| `port` | Integer or `null` | Driver default when imported | Server port. PostgreSQL defaults to `5432`; MySQL defaults to `3306`. |
+| `user` | String or `null` | `null` | Server login name. SQLite does not use it. |
+| `database` | String or `null` | `null` | Database name for PostgreSQL/MySQL, or the logical SQLite path value. |
+| `default_schema` | String or `null` | `null` | PostgreSQL `currentSchema`; SQLite is normally `main`. MySQL has no separate default-schema field. |
+| `sqlite_path` | Path or `null` | `null` | SQLite file path. It is `null` for an in-memory database. |
+| `ssl_mode` | `disable`, `prefer`, `require`, `verify-ca`, `verify-full` | `prefer` | TLS policy for PostgreSQL/MySQL. SQLite always uses `disable`. |
+| `credential_policy` | Tagged table | `{ policy = "none" }` | Where the password comes from. |
+| `read_only` | Boolean | `false` | Requests adapter-level read-only behavior. Use database grants for authorization. |
+| `environment` | `development`, `staging`, `production` | `development` | Environment label used by the UI and agent write-policy checks. |
+| `catalog_scope` | Table | Derived from database and schema | Databases and schemas visible to Explorer and completion. |
+
+`url_format` accepts `postgres`, `postgresql`, `jdbc-postgresql` for PostgreSQL;
+`mysql`, `jdbc-mysql` for MySQL; and `sqlite`, `file-uri`, `jdbc-sqlite` for
+SQLite. Defaults are `postgresql`, `mysql`, and `sqlite` respectively.
+
+### Profile Access
+
+Global profiles use `access = { scope = "global" }`. Project-scoped profiles use
+absolute, canonical project roots:
+
+```toml
+access = { scope = "projects", roots = ["/Users/alice/src/orders"] }
+```
+
+The current project is the nearest Git root above the startup directory. Project
+scope controls organization and discovery, not database authorization.
+
+### Credential Policy
+
+The `credential_policy` table is tagged by `policy`:
+
+| Value | Example | Behavior |
+| --- | --- | --- |
+| `none` | `{ policy = "none" }` | Connect without a stored password. |
+| `prompt` | `{ policy = "prompt" }` | Ask for a password for the current process. |
+| `local_encrypted` | `{ policy = "local_encrypted", reference = { version = 1, nonce = "...", ciphertext = "..." } }` | Store authenticated ciphertext in `connections.toml`; the key is in `credential.key`. |
+| `system` | `{ policy = "system", reference = "<profile UUID>" }` | Use macOS Login Keychain or Linux Secret Service. |
+
+`keyring` may appear in legacy version 3 files and is normalized to `system` on
+load. Do not hand-edit encrypted values or copy only `connections.toml` and
+expect local-encrypted passwords to work; the key file is required too.
+
+### Catalog Scope
+
+`catalog_scope` contains a `databases` selection. Each selection is either `all`
+or `selected`:
+
+```toml
+catalog_scope = { databases = { mode = "selected", items = [
+  { name = "orders", schemas = { mode = "selected", items = ["public", "audit"] } },
+  { name = "reporting", schemas = { mode = "all" } },
+] } }
+```
+
+The unrestricted form is `catalog_scope = { databases = { mode = "all" } }`.
+Selected names must be non-empty and unique. A new PostgreSQL or SQLite profile
+selects its database; a PostgreSQL `default_schema` narrows that selection.
+MySQL treats each selected database as its own schema and has no separate schema
+toggle.
+
+## Workspace File
+
+Workspace state is not an application-settings file. Its current format is
+version `3` and contains `version`, optional `active_profile`, and `profiles`.
+Each profile workspace contains `profile_id`, optional `active_tab`, `consoles`,
+and `tabs`. A console contains `id`, `name`, `sql_file`, optional `target`,
+`transaction_mode`, and `open` (default `true`). A tab is either a console tab
+or a relation tab with its relation identity, qualified name, catalog kind, title,
+and view. SQL contents are stored in the referenced `sql/UUID.sql` file.
+Workspace files do not contain passwords.
+
 ## Installation Updates
 
 `lazydb update --check` checks the configured channel without changing the
@@ -141,7 +281,7 @@ user = "app_user"
 database = "app"
 default_schema = "public"
 ssl_mode = "require"
-credential_policy = { policy = "local_encrypted", value = { version = 1, nonce = "...", ciphertext = "..." } }
+credential_policy = { policy = "local_encrypted", reference = { version = 1, nonce = "...", ciphertext = "..." } }
 read_only = false
 environment = "development"
 catalog_scope = { databases = { mode = "selected", items = [{ name = "app", schemas = { mode = "selected", items = ["public"] } }] } }
