@@ -2337,6 +2337,8 @@ impl Runtime {
         let target = request.target.clone();
         let worker_target = target.clone();
         let worker_request = request.clone();
+        let forced_close = ForcedCloseHandle::new();
+        let worker_forced_close = forced_close.clone();
         let worker_handle = tokio::spawn(async move {
             let Some(database) =
                 active_database_for_target(active.clone(), connection, &worker_target).await
@@ -2354,7 +2356,10 @@ impl Runtime {
                 return crate::db::transaction::WorkerDisposition::Quarantine;
             };
             let invalidates = matches!(database, DatabaseConnection::Sqlite(_));
-            let worker = match database.start_transaction_worker().await {
+            let worker = match database
+                .start_transaction_worker_with_forced_close(worker_forced_close)
+                .await
+            {
                 Ok(worker) => worker,
                 Err(error) => {
                     let _ = sender.send(Action::RelationTransactionStartFailed {
@@ -2415,7 +2420,7 @@ impl Runtime {
                 request_sender: proxy.clone(),
                 worker_handle,
                 cancellation_sender: None,
-                forced_close_handle: ForcedCloseHandle::new(),
+                forced_close_handle: forced_close,
             },
         );
         let _ = proxy.send(TransactionRequest::RelationMutation {
@@ -2772,6 +2777,8 @@ impl Runtime {
         let active_connection = Arc::clone(&self.connection);
         let sender = self.event_sender.clone();
         let worker_target = target.clone();
+        let forced_close = ForcedCloseHandle::new();
+        let worker_forced_close = forced_close.clone();
         let worker_handle = tokio::spawn(async move {
             let Some(database) = active_database_for_target(
                 Arc::clone(&active_connection),
@@ -2791,9 +2798,14 @@ impl Runtime {
             };
             let quarantine_invalidates_connection = match &database {
                 DatabaseConnection::Sqlite(_) => true,
-                DatabaseConnection::Postgres(_) | DatabaseConnection::MySql(_) => false,
+                DatabaseConnection::Postgres(_)
+                | DatabaseConnection::MySql(_)
+                | DatabaseConnection::SqlServer(_) => false,
             };
-            let worker = match database.start_transaction_worker().await {
+            let worker = match database
+                .start_transaction_worker_with_forced_close(worker_forced_close)
+                .await
+            {
                 Ok(worker) => worker,
                 Err(error) => {
                     let _ = sender.send(Action::ManualStartFailed {
@@ -2861,7 +2873,7 @@ impl Runtime {
                 request_sender: proxy,
                 worker_handle,
                 cancellation_sender: None,
-                forced_close_handle: ForcedCloseHandle::new(),
+                forced_close_handle: forced_close,
             },
         );
         if let Some((sql, cancel, reply)) = request

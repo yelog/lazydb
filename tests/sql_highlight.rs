@@ -49,3 +49,21 @@ fn selected_ranges_highlight_sql_without_tokenizing_log_prefixes() {
         &text[span.range.start..span.range.end] == "2026" && span.kind == HighlightKind::Number
     }));
 }
+
+#[test]
+fn sql_server_highlights_tsql_identifiers_unicode_variables_and_comments() {
+    let text = "SELECT TOP (1) [odd]]name], @value, N'你好' -- note";
+    let spans = highlight_sql(text, SqlDialect::SqlServer);
+    let kind = |needle: &str| {
+        spans
+            .iter()
+            .find(|span| &text[span.range.start..span.range.end] == needle)
+            .map(|span| span.kind)
+    };
+
+    assert_eq!(kind("TOP"), Some(HighlightKind::Keyword));
+    assert_eq!(kind("[odd]]name]"), Some(HighlightKind::Identifier));
+    assert_eq!(kind("@value"), Some(HighlightKind::Parameter));
+    assert_eq!(kind("N'你好'"), Some(HighlightKind::String));
+    assert!(spans.iter().any(|span| span.kind == HighlightKind::Comment));
+}

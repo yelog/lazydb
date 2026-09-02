@@ -65,3 +65,26 @@ fn preserves_each_statement_and_explicitly_marks_multi_statement() {
 fn read_only_is_only_a_risk_signal() {
     assert_eq!(risk("SELECT side_effecting_function()"), SqlRisk::ReadOnly);
 }
+
+#[test]
+fn sql_server_classifies_every_go_batch() {
+    let analysis = classify_sql(
+        "SELECT TOP (1) [id] FROM [dbo].[items]\r\nGO\r\nUPDATE [dbo].[items] SET [id] = 2 OUTPUT inserted.[id]\r\nGO 1\r\nCREATE TABLE [dbo].[audit] ([id] int)",
+        SqlDialect::SqlServer,
+    );
+    assert_eq!(analysis.statement_count, 3);
+    assert_eq!(
+        analysis.risks,
+        vec![SqlRisk::ReadOnly, SqlRisk::Dml, SqlRisk::Ddl]
+    );
+    assert_eq!(analysis.aggregate, SqlRiskAggregate::MultiStatement);
+
+    let rejected = classify_sql("SELECT 1\nGO 2\nDELETE FROM users", SqlDialect::SqlServer);
+    assert_eq!(rejected.risks, vec![SqlRisk::Unknown]);
+
+    let malformed = classify_sql(
+        "not valid sql\nGO\nDELETE FROM [dbo].[items]",
+        SqlDialect::SqlServer,
+    );
+    assert_eq!(malformed.risks, vec![SqlRisk::Unknown, SqlRisk::Dml]);
+}

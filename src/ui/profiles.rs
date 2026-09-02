@@ -547,6 +547,7 @@ fn driver_icon_color(kind: DatabaseKind) -> ratatui::style::Color {
     match kind {
         DatabaseKind::Postgres => ratatui::style::Color::Rgb(87, 169, 220),
         DatabaseKind::MySql => ratatui::style::Color::Rgb(242, 145, 17),
+        DatabaseKind::SqlServer => ratatui::style::Color::Rgb(204, 41, 48),
         DatabaseKind::Sqlite => ratatui::style::Color::Rgb(68, 184, 214),
     }
 }
@@ -958,6 +959,7 @@ fn url_help(kind: DatabaseKind) -> &'static str {
     match kind {
         DatabaseKind::Postgres => "Accepts postgres://, postgresql://, and jdbc:postgresql://",
         DatabaseKind::MySql => "Accepts mysql:// and jdbc:mysql://",
+        DatabaseKind::SqlServer => "Accepts sqlserver://, mssql://, and jdbc:sqlserver://",
         DatabaseKind::Sqlite => "Accepts sqlite://, file:, and jdbc:sqlite:",
     }
 }
@@ -1027,6 +1029,7 @@ fn kind_name(kind: DatabaseKind) -> &'static str {
     match kind {
         DatabaseKind::Postgres => "PostgreSQL",
         DatabaseKind::MySql => "MySQL",
+        DatabaseKind::SqlServer => "SQL Server",
         DatabaseKind::Sqlite => "SQLite",
     }
 }

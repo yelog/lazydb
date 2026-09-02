@@ -14,6 +14,7 @@ use crate::persistence::local_credentials::EncryptedCredential;
 pub enum DatabaseKind {
     Postgres,
     MySql,
+    SqlServer,
     Sqlite,
 }
 
@@ -26,6 +27,9 @@ pub enum ConnectionUrlFormat {
     JdbcPostgreSql,
     MySql,
     JdbcMySql,
+    SqlServer,
+    MsSql,
+    JdbcSqlServer,
     Sqlite,
     FileUri,
     JdbcSqlite,
@@ -36,6 +40,7 @@ impl ConnectionUrlFormat {
         match kind {
             DatabaseKind::Postgres => Self::PostgreSql,
             DatabaseKind::MySql => Self::MySql,
+            DatabaseKind::SqlServer => Self::SqlServer,
             DatabaseKind::Sqlite => Self::Sqlite,
         }
     }
@@ -48,6 +53,10 @@ impl ConnectionUrlFormat {
                 DatabaseKind::Postgres
             ) | (Self::MySql | Self::JdbcMySql, DatabaseKind::MySql)
                 | (
+                    Self::SqlServer | Self::MsSql | Self::JdbcSqlServer,
+                    DatabaseKind::SqlServer
+                )
+                | (
                     Self::Sqlite | Self::FileUri | Self::JdbcSqlite,
                     DatabaseKind::Sqlite
                 )
@@ -58,6 +67,7 @@ impl ConnectionUrlFormat {
         match kind {
             DatabaseKind::Postgres => &[Self::Postgres, Self::PostgreSql, Self::JdbcPostgreSql],
             DatabaseKind::MySql => &[Self::MySql, Self::JdbcMySql],
+            DatabaseKind::SqlServer => &[Self::SqlServer, Self::MsSql, Self::JdbcSqlServer],
             DatabaseKind::Sqlite => &[Self::Sqlite, Self::FileUri, Self::JdbcSqlite],
         }
     }
@@ -415,6 +425,10 @@ pub enum ProfileError {
     ConflictingQueryParameter(String),
     #[error("connection URL has an invalid value for query parameter `{0}`")]
     InvalidQueryParameter(String),
+    #[error(
+        "connection property `{0}` is unsupported; use SQL Server username/password authentication with an explicit TCP host and port"
+    )]
+    UnsupportedProperty(String),
     #[error("connection URL format is incompatible with the database driver")]
     IncompatibleFormat,
 }
@@ -476,6 +490,13 @@ pub fn parse_connection_url(input: &str) -> Result<ParsedConnectionUrl, ProfileE
     if normalized.starts_with("sqlite:") || normalized.starts_with("file:") {
         return parse_sqlite_url(normalized, jdbc);
     }
+    if jdbc
+        && normalized
+            .get(..12)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("sqlserver://"))
+    {
+        return parse_jdbc_sql_server_url(normalized);
+    }
 
     let url = Url::parse(normalized)?;
     let (kind, format) = match (url.scheme().to_ascii_lowercase().as_str(), jdbc) {
@@ -484,6 +505,8 @@ pub fn parse_connection_url(input: &str) -> Result<ParsedConnectionUrl, ProfileE
         ("postgresql", true) => (DatabaseKind::Postgres, ConnectionUrlFormat::JdbcPostgreSql),
         ("mysql", false) => (DatabaseKind::MySql, ConnectionUrlFormat::MySql),
         ("mysql", true) => (DatabaseKind::MySql, ConnectionUrlFormat::JdbcMySql),
+        ("sqlserver", false) => (DatabaseKind::SqlServer, ConnectionUrlFormat::SqlServer),
+        ("mssql", false) => (DatabaseKind::SqlServer, ConnectionUrlFormat::MsSql),
         (scheme, _) => return Err(ProfileError::UnsupportedScheme(scheme.to_owned())),
     };
     parse_server_url(url, kind, format)
@@ -556,9 +579,14 @@ fn parse_server_url(
     let mut seen_schema = false;
     let mut seen_ssl = false;
     let mut seen_read_only = false;
+    let mut encrypt = None;
+    let mut trust_server_certificate = None;
 
     for (key, value) in url.query_pairs() {
-        if key.eq_ignore_ascii_case("currentSchema") && kind == DatabaseKind::Postgres {
+        if (key.eq_ignore_ascii_case("currentSchema")
+            || key.eq_ignore_ascii_case("schema") && kind == DatabaseKind::SqlServer)
+            && matches!(kind, DatabaseKind::Postgres | DatabaseKind::SqlServer)
+        {
             reject_duplicate(&mut seen_schema, "currentSchema")?;
             default_schema = Some(value.into_owned());
         } else if key.eq_ignore_ascii_case("sslmode") && kind == DatabaseKind::Postgres {
@@ -576,17 +604,31 @@ fn parse_server_url(
             reject_duplicate(&mut seen_ssl, "ssl")?;
             ssl_mode = parse_ssl_mode(&value)
                 .ok_or_else(|| ProfileError::InvalidQueryParameter("sslMode".into()))?;
+        } else if key.eq_ignore_ascii_case("encrypt") && kind == DatabaseKind::SqlServer {
+            reject_option_duplicate(&encrypt, "encrypt")?;
+            encrypt = Some(parse_bool(&value, "encrypt")?);
+        } else if key.eq_ignore_ascii_case("trustServerCertificate")
+            && kind == DatabaseKind::SqlServer
+        {
+            reject_option_duplicate(&trust_server_certificate, "trustServerCertificate")?;
+            trust_server_certificate = Some(parse_bool(&value, "trustServerCertificate")?);
         } else if key.eq_ignore_ascii_case("readOnly") || key.eq_ignore_ascii_case("read_only") {
             reject_duplicate(&mut seen_read_only, "readOnly")?;
             read_only = parse_bool(&value, "readOnly")?;
+        } else if kind == DatabaseKind::SqlServer && is_unsupported_sql_server_property(&key) {
+            return Err(ProfileError::UnsupportedProperty(key.into_owned()));
         } else {
             return Err(ProfileError::UnknownQueryParameter(key.into_owned()));
         }
+    }
+    if kind == DatabaseKind::SqlServer {
+        ssl_mode = sql_server_ssl_mode(encrypt, trust_server_certificate)?;
     }
 
     let default_port = match kind {
         DatabaseKind::Postgres => 5432,
         DatabaseKind::MySql => 3306,
+        DatabaseKind::SqlServer => 1433,
         DatabaseKind::Sqlite => unreachable!("server URL cannot be SQLite"),
     };
     Ok(ParsedConnectionUrl {
@@ -603,6 +645,155 @@ fn parse_server_url(
         ssl_mode,
         read_only,
     })
+}
+
+fn parse_jdbc_sql_server_url(input: &str) -> Result<ParsedConnectionUrl, ProfileError> {
+    let rest = &input[12..];
+    let (server, properties) = rest.split_once(';').unwrap_or((rest, ""));
+    if server.contains('\\') {
+        return Err(ProfileError::UnsupportedProperty("instanceName".into()));
+    }
+    let endpoint = Url::parse(&format!("sqlserver://{server}"))?;
+    let host = endpoint
+        .host_str()
+        .ok_or(ProfileError::MissingHost)?
+        .to_owned();
+    if !matches!(endpoint.path(), "" | "/")
+        || endpoint.query().is_some()
+        || endpoint.fragment().is_some()
+        || !endpoint.username().is_empty()
+        || endpoint.password().is_some()
+    {
+        return Err(ProfileError::InvalidQueryParameter("serverName".into()));
+    }
+
+    let mut database = None;
+    let mut user = None;
+    let mut password = None;
+    let mut default_schema = None;
+    let mut encrypt = None;
+    let mut trust_server_certificate = None;
+    let mut read_only = None;
+    for (key, value) in parse_jdbc_properties(properties)? {
+        if key.eq_ignore_ascii_case("databaseName") {
+            reject_option_duplicate(&database, "databaseName")?;
+            database = Some(value);
+        } else if key.eq_ignore_ascii_case("user") {
+            reject_option_duplicate(&user, "user")?;
+            user = Some(value);
+        } else if key.eq_ignore_ascii_case("password") {
+            reject_option_duplicate(&password, "password")?;
+            password = Some(SecretString::from(value));
+        } else if key.eq_ignore_ascii_case("currentSchema") {
+            reject_option_duplicate(&default_schema, "currentSchema")?;
+            default_schema = Some(value);
+        } else if key.eq_ignore_ascii_case("encrypt") {
+            reject_option_duplicate(&encrypt, "encrypt")?;
+            encrypt = Some(parse_bool(&value, "encrypt")?);
+        } else if key.eq_ignore_ascii_case("trustServerCertificate") {
+            reject_option_duplicate(&trust_server_certificate, "trustServerCertificate")?;
+            trust_server_certificate = Some(parse_bool(&value, "trustServerCertificate")?);
+        } else if key.eq_ignore_ascii_case("readOnly") {
+            reject_option_duplicate(&read_only, "readOnly")?;
+            read_only = Some(parse_bool(&value, "readOnly")?);
+        } else if is_unsupported_sql_server_property(&key) {
+            return Err(ProfileError::UnsupportedProperty(key));
+        } else {
+            return Err(ProfileError::UnknownQueryParameter(key));
+        }
+    }
+
+    Ok(ParsedConnectionUrl {
+        kind: DatabaseKind::SqlServer,
+        format: ConnectionUrlFormat::JdbcSqlServer,
+        host: Some(host),
+        port: Some(endpoint.port().unwrap_or(1433)),
+        user,
+        password,
+        database,
+        default_schema,
+        sqlite_path: None,
+        sqlite_memory: false,
+        ssl_mode: sql_server_ssl_mode(encrypt, trust_server_certificate)?,
+        read_only: read_only.unwrap_or(false),
+    })
+}
+
+fn parse_jdbc_properties(input: &str) -> Result<Vec<(String, String)>, ProfileError> {
+    let mut properties = Vec::new();
+    let mut start = 0;
+    let bytes = input.as_bytes();
+    while start < bytes.len() {
+        let Some(relative_equals) = input[start..].find('=') else {
+            return Err(ProfileError::InvalidQueryParameter("JDBC property".into()));
+        };
+        let equals = start + relative_equals;
+        let key = &input[start..equals];
+        if key.is_empty() || key.contains(';') {
+            return Err(ProfileError::InvalidQueryParameter("JDBC property".into()));
+        }
+        let value_start = equals + 1;
+        let (value, next) = if bytes.get(value_start) == Some(&b'{') {
+            let mut value = String::new();
+            let mut cursor = value_start + 1;
+            loop {
+                match bytes.get(cursor) {
+                    Some(b'}') if bytes.get(cursor + 1) == Some(&b'}') => {
+                        value.push('}');
+                        cursor += 2;
+                    }
+                    Some(b'}') => {
+                        cursor += 1;
+                        if cursor < bytes.len() && bytes[cursor] != b';' {
+                            return Err(ProfileError::InvalidQueryParameter(key.to_owned()));
+                        }
+                        break (value, cursor.saturating_add(1));
+                    }
+                    Some(_) => {
+                        let character = input[cursor..].chars().next().unwrap();
+                        value.push(character);
+                        cursor += character.len_utf8();
+                    }
+                    None => return Err(ProfileError::InvalidQueryParameter(key.to_owned())),
+                }
+            }
+        } else {
+            let end = input[value_start..]
+                .find(';')
+                .map_or(bytes.len(), |offset| value_start + offset);
+            (input[value_start..end].to_owned(), end.saturating_add(1))
+        };
+        properties.push((key.to_owned(), value));
+        start = next;
+    }
+    Ok(properties)
+}
+
+fn is_unsupported_sql_server_property(key: &str) -> bool {
+    [
+        "integratedSecurity",
+        "authentication",
+        "instanceName",
+        "accessToken",
+        "accessTokenCallbackClass",
+    ]
+    .iter()
+    .any(|candidate| key.eq_ignore_ascii_case(candidate))
+}
+
+fn sql_server_ssl_mode(
+    encrypt: Option<bool>,
+    trust_server_certificate: Option<bool>,
+) -> Result<SslMode, ProfileError> {
+    match (encrypt, trust_server_certificate) {
+        (None, None) => Ok(SslMode::Prefer),
+        (None, Some(_)) | (Some(false), Some(true)) => Err(
+            ProfileError::ConflictingQueryParameter("trustServerCertificate".into()),
+        ),
+        (Some(false), None | Some(false)) => Ok(SslMode::Disable),
+        (Some(true), Some(true)) => Ok(SslMode::Require),
+        (Some(true), None | Some(false)) => Ok(SslMode::VerifyFull),
+    }
 }
 
 fn parse_sqlite_url(input: &str, jdbc: bool) -> Result<ParsedConnectionUrl, ProfileError> {
@@ -698,17 +889,24 @@ pub fn format_connection_url(
         }
         return Ok(output);
     }
+    if format == ConnectionUrlFormat::JdbcSqlServer {
+        return format_jdbc_sql_server_url(profile);
+    }
     let scheme = match format {
         ConnectionUrlFormat::Postgres => "postgres",
         ConnectionUrlFormat::PostgreSql | ConnectionUrlFormat::JdbcPostgreSql => "postgresql",
         ConnectionUrlFormat::MySql | ConnectionUrlFormat::JdbcMySql => "mysql",
+        ConnectionUrlFormat::SqlServer | ConnectionUrlFormat::JdbcSqlServer => "sqlserver",
+        ConnectionUrlFormat::MsSql => "mssql",
         _ => return Err(ProfileError::IncompatibleFormat),
     };
     let host = profile.host.as_deref().ok_or(ProfileError::MissingHost)?;
     let mut output = String::new();
     if matches!(
         format,
-        ConnectionUrlFormat::JdbcPostgreSql | ConnectionUrlFormat::JdbcMySql
+        ConnectionUrlFormat::JdbcPostgreSql
+            | ConnectionUrlFormat::JdbcMySql
+            | ConnectionUrlFormat::JdbcSqlServer
     ) {
         output.push_str("jdbc:");
     }
@@ -750,8 +948,20 @@ pub fn format_connection_url(
             ));
         }
         query.push(format!("sslmode={}", ssl_mode_value(profile.ssl_mode)));
-    } else {
+    } else if profile.kind == DatabaseKind::MySql {
         query.push(format!("sslMode={}", ssl_mode_value(profile.ssl_mode)));
+    } else {
+        if let Some(schema) = profile
+            .default_schema
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            query.push(format!(
+                "schema={}",
+                utf8_percent_encode(schema, QUERY_VALUE)
+            ));
+        }
+        append_sql_server_tls_query(&mut query, profile.ssl_mode);
     }
     if profile.read_only {
         query.push("readOnly=true".to_owned());
@@ -761,6 +971,83 @@ pub fn format_connection_url(
         output.push_str(&query.join("&"));
     }
     Ok(output)
+}
+
+fn format_jdbc_sql_server_url(profile: &ConnectionProfile) -> Result<String, ProfileError> {
+    let host = profile.host.as_deref().ok_or(ProfileError::MissingHost)?;
+    let mut output = "jdbc:sqlserver://".to_owned();
+    if host.contains(':') && !host.starts_with('[') {
+        output.push('[');
+        output.push_str(host);
+        output.push(']');
+    } else {
+        output.push_str(host);
+    }
+    if let Some(port) = profile.port {
+        output.push(':');
+        output.push_str(&port.to_string());
+    }
+    if let Some(database) = profile
+        .database
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        append_jdbc_property(&mut output, "databaseName", database);
+    }
+    if let Some(user) = profile.user.as_deref().filter(|value| !value.is_empty()) {
+        append_jdbc_property(&mut output, "user", user);
+    }
+    if let Some(schema) = profile
+        .default_schema
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        append_jdbc_property(&mut output, "currentSchema", schema);
+    }
+    match profile.ssl_mode {
+        SslMode::Disable => append_jdbc_property(&mut output, "encrypt", "false"),
+        SslMode::Prefer => {}
+        SslMode::Require => {
+            append_jdbc_property(&mut output, "encrypt", "true");
+            append_jdbc_property(&mut output, "trustServerCertificate", "true");
+        }
+        SslMode::VerifyCa | SslMode::VerifyFull => {
+            append_jdbc_property(&mut output, "encrypt", "true");
+            append_jdbc_property(&mut output, "trustServerCertificate", "false");
+        }
+    }
+    if profile.read_only {
+        append_jdbc_property(&mut output, "readOnly", "true");
+    }
+    Ok(output)
+}
+
+fn append_sql_server_tls_query(query: &mut Vec<String>, ssl_mode: SslMode) {
+    match ssl_mode {
+        SslMode::Disable => query.push("encrypt=false".to_owned()),
+        SslMode::Prefer => {}
+        SslMode::Require => {
+            query.push("encrypt=true".to_owned());
+            query.push("trustServerCertificate=true".to_owned());
+        }
+        SslMode::VerifyCa | SslMode::VerifyFull => {
+            query.push("encrypt=true".to_owned());
+            query.push("trustServerCertificate=false".to_owned());
+        }
+    }
+}
+
+fn append_jdbc_property(output: &mut String, key: &str, value: &str) {
+    output.push(';');
+    output.push_str(key);
+    output.push('=');
+    if value.contains([';', '=']) || value.starts_with('{') || value.ends_with('}') {
+        output.push('{');
+        output.push_str(&value.replace('}', "}}"));
+        output.push('}');
+    } else {
+        output.push_str(value);
+    }
 }
 
 fn parse_sqlite_query(query: &str) -> Result<bool, ProfileError> {
@@ -786,6 +1073,14 @@ fn reject_duplicate(seen: &mut bool, name: &str) -> Result<(), ProfileError> {
         Err(ProfileError::ConflictingQueryParameter(name.to_owned()))
     } else {
         *seen = true;
+        Ok(())
+    }
+}
+
+fn reject_option_duplicate<T>(value: &Option<T>, name: &str) -> Result<(), ProfileError> {
+    if value.is_some() {
+        Err(ProfileError::ConflictingQueryParameter(name.to_owned()))
+    } else {
         Ok(())
     }
 }

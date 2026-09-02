@@ -3,7 +3,7 @@ use sqlparser::{
     parser::Parser,
 };
 
-use super::{SqlDialect, dialect::parser_dialect};
+use super::{SqlDialect, dialect::parser_dialect, split_sql_server_batches};
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum SqlRisk {
@@ -29,10 +29,16 @@ pub struct SqlRiskAnalysis {
 }
 
 pub fn classify_sql(sql: &str, dialect: SqlDialect) -> SqlRiskAnalysis {
-    let parsed = Parser::parse_sql(parser_dialect(dialect), sql);
-    let risks = match parsed {
-        Ok(statements) => statements.iter().map(classify_statement).collect(),
-        Err(_) => vec![SqlRisk::Unknown],
+    let risks = if dialect == SqlDialect::SqlServer {
+        match split_sql_server_batches(sql) {
+            Ok(batches) => batches
+                .into_iter()
+                .flat_map(|batch| parse_risks(batch, dialect))
+                .collect(),
+            Err(_) => vec![SqlRisk::Unknown],
+        }
+    } else {
+        parse_risks(sql, dialect)
     };
     let statement_count = risks.len();
     let aggregate = match risks.as_slice() {
@@ -44,6 +50,13 @@ pub fn classify_sql(sql: &str, dialect: SqlDialect) -> SqlRiskAnalysis {
         statement_count,
         risks,
         aggregate,
+    }
+}
+
+fn parse_risks(sql: &str, dialect: SqlDialect) -> Vec<SqlRisk> {
+    match Parser::parse_sql(parser_dialect(dialect), sql) {
+        Ok(statements) => statements.iter().map(classify_statement).collect(),
+        Err(_) => vec![SqlRisk::Unknown],
     }
 }
 

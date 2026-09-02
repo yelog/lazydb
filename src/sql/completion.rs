@@ -410,9 +410,17 @@ fn relation_insert_text(
                 vec![schema.or(database).unwrap_or_default(), object]
             }
         }
-        _ => {
-            if database.is_some_and(|value| context.database == Some(value)) {
-                if schema.is_some_and(|value| context.schema == Some(value)) {
+        SqlDialect::Postgres | SqlDialect::SqlServer | SqlDialect::Generic => {
+            if database.is_some_and(|value| {
+                context
+                    .database
+                    .is_some_and(|active| active.eq_ignore_ascii_case(value))
+            }) {
+                if schema.is_some_and(|value| {
+                    context
+                        .schema
+                        .is_some_and(|active| active.eq_ignore_ascii_case(value))
+                }) {
                     vec![object]
                 } else {
                     vec![schema.unwrap_or_default(), object]
@@ -652,7 +660,7 @@ fn identifier_at(
         }
         text[q..start - 1]
             .split('.')
-            .map(|value| value.trim_matches(['"', '`']).to_owned())
+            .map(|value| value.trim_matches(['"', '`', '[', ']']).to_owned())
             .filter(|value| !value.is_empty())
             .collect()
     } else {
@@ -660,7 +668,7 @@ fn identifier_at(
     };
     (
         TextRange::new(start, cursor),
-        prefix.trim_matches(['"', '`']).to_owned(),
+        prefix.trim_matches(['"', '`', '[', ']']).to_owned(),
         qualifiers,
     )
 }
@@ -974,8 +982,15 @@ fn completion_tokens(text: &str, dialect: SqlDialect) -> Vec<CompletionToken> {
             }
             continue;
         }
-        if bytes[index] == b'\'' {
+        if bytes[index] == b'\''
+            || dialect == SqlDialect::SqlServer
+                && matches!(bytes[index], b'N' | b'n')
+                && bytes.get(index + 1) == Some(&b'\'')
+        {
             let start = index;
+            if bytes[index] != b'\'' {
+                index += 1;
+            }
             index += 1;
             while index < bytes.len() {
                 if bytes[index] == b'\'' {
@@ -1000,6 +1015,7 @@ fn completion_tokens(text: &str, dialect: SqlDialect) -> Vec<CompletionToken> {
         }
         let quote = match bytes[index] {
             b'"' if dialect != SqlDialect::MySql => Some(b'"'),
+            b'[' if dialect == SqlDialect::SqlServer => Some(b']'),
             b'`' if dialect == SqlDialect::MySql => Some(b'`'),
             _ => None,
         };
@@ -1089,11 +1105,17 @@ fn completion_tokens(text: &str, dialect: SqlDialect) -> Vec<CompletionToken> {
 }
 
 fn is_identifier_byte(byte: u8, dialect: SqlDialect) -> bool {
-    let _ = dialect;
-    byte.is_ascii_alphanumeric() || byte == b'_' || byte >= 0x80 || matches!(byte, b'"' | b'`')
+    byte.is_ascii_alphanumeric()
+        || byte == b'_'
+        || byte >= 0x80
+        || matches!(byte, b'"' | b'`')
+        || dialect == SqlDialect::SqlServer && matches!(byte, b'[' | b']' | b'@')
 }
 
 pub fn quote_identifier(value: &str, dialect: SqlDialect) -> String {
+    if dialect == SqlDialect::SqlServer {
+        return format!("[{}]", value.replace(']', "]]"));
+    }
     let (quote, escaped) = if dialect == SqlDialect::MySql {
         ('`', value.replace('`', "``"))
     } else {

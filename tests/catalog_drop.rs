@@ -3,6 +3,7 @@ use lazydb::{
     db::{
         catalog::{CatalogEntry, CatalogId, CatalogKind, OptionalMetadata, QualifiedName},
         catalog_drop::{CatalogDropError, CatalogDropPlan, CatalogDropRequest},
+        mssql::MsSqlAdapter,
         mysql::MySqlAdapter,
         postgres::PostgresAdapter,
         sqlite::SqliteAdapter,
@@ -566,6 +567,183 @@ fn sqlite_planner_rejects_objects_requiring_unsupported_or_rebuild_operations() 
         let request = CatalogDropRequest::new(connection, entry.id.clone(), 2);
         assert!(matches!(
             SqliteAdapter::plan_catalog_drop(request, &entry),
+            Err(CatalogDropError::Unsupported { kind: found, .. }) if found == kind
+        ));
+    }
+}
+
+#[test]
+fn sql_server_planner_generates_supported_drops_and_rejects_children_safely() {
+    let profile_id = Uuid::new_v4();
+    let connection = ConnectionIdentity {
+        profile_id,
+        generation: 1,
+    };
+    let schema = CatalogId::new(profile_id, CatalogKind::Schema, ["db", "schema"]);
+    let relation = CatalogId::new(
+        profile_id,
+        CatalogKind::Table,
+        ["db", "schema", "table", "42"],
+    );
+    let make = |kind: CatalogKind,
+                id: CatalogId,
+                parent_id: Option<CatalogId>,
+                relation_id: Option<CatalogId>,
+                object: &str| CatalogEntry {
+        id,
+        parent_id,
+        kind,
+        native_kind: "sql_server".into(),
+        qualified_name: QualifiedName {
+            database: Some("db".into()),
+            schema: Some("schema".into()),
+            object: object.to_owned(),
+        },
+        comment: OptionalMetadata::Unsupported,
+        metadata: Default::default(),
+        expandable: false,
+        relation_id,
+    };
+    for (kind, keyword) in [
+        (CatalogKind::Table, "TABLE"),
+        (CatalogKind::View, "VIEW"),
+        (CatalogKind::Sequence, "SEQUENCE"),
+        (CatalogKind::Function, "FUNCTION"),
+        (CatalogKind::Procedure, "PROCEDURE"),
+    ] {
+        let id = if kind == CatalogKind::Table {
+            relation.clone()
+        } else {
+            CatalogId::new(profile_id, kind, ["db", "schema", "object", "42"])
+        };
+        let object_name = if kind == CatalogKind::Table {
+            "table"
+        } else {
+            "object"
+        };
+        let object = make(kind, id.clone(), Some(schema.clone()), None, object_name);
+        let request = CatalogDropRequest::new(connection, id, 1);
+        assert_eq!(
+            MsSqlAdapter::plan_catalog_drop(request, &object)
+                .unwrap()
+                .sql(),
+            format!("DROP {keyword} [db].[schema].[{object_name}]")
+        );
+    }
+
+    let index_id = CatalogId::new(
+        profile_id,
+        CatalogKind::Index,
+        ["db", "schema", "table", "42", "7"],
+    );
+    let index = make(
+        CatalogKind::Index,
+        index_id.clone(),
+        Some(relation.clone()),
+        Some(relation.clone()),
+        "ix]name",
+    );
+    assert_eq!(
+        MsSqlAdapter::plan_catalog_drop(CatalogDropRequest::new(connection, index_id, 2), &index)
+            .unwrap()
+            .sql(),
+        "DROP INDEX [ix]]name] ON [db].[schema].[table]"
+    );
+
+    let trigger_id = CatalogId::new(
+        profile_id,
+        CatalogKind::Trigger,
+        ["db", "schema", "audit", "99"],
+    );
+    let trigger = make(
+        CatalogKind::Trigger,
+        trigger_id.clone(),
+        Some(relation.clone()),
+        Some(relation.clone()),
+        "audit",
+    );
+    assert_eq!(
+        MsSqlAdapter::plan_catalog_drop(
+            CatalogDropRequest::new(connection, trigger_id, 2),
+            &trigger,
+        )
+        .unwrap()
+        .sql(),
+        "DROP TRIGGER [db].[schema].[audit]"
+    );
+    let mut forged_index = index.clone();
+    forged_index.parent_id = Some(CatalogId::new(
+        profile_id,
+        CatalogKind::Table,
+        ["db", "schema", "other", "42"],
+    ));
+    assert!(matches!(
+        MsSqlAdapter::plan_catalog_drop(
+            CatalogDropRequest::new(connection, forged_index.id.clone(), 2),
+            &forged_index,
+        ),
+        Err(CatalogDropError::Unsupported {
+            kind: CatalogKind::Index,
+            reason,
+        }) if reason == "catalog entry has an invalid owning relation identity"
+    ));
+
+    let odd_id = CatalogId::new(
+        profile_id,
+        CatalogKind::Table,
+        ["db.;\n", "schema].", "table;\r", "43"],
+    );
+    let odd = CatalogEntry {
+        id: odd_id.clone(),
+        parent_id: Some(CatalogId::new(
+            profile_id,
+            CatalogKind::Schema,
+            ["db.;\n", "schema]."],
+        )),
+        kind: CatalogKind::Table,
+        native_kind: "sql_server".into(),
+        qualified_name: QualifiedName {
+            database: Some("db.;\n".into()),
+            schema: Some("schema].".into()),
+            object: "table;\r".into(),
+        },
+        comment: OptionalMetadata::Unsupported,
+        metadata: Default::default(),
+        expandable: false,
+        relation_id: None,
+    };
+    let odd_sql =
+        MsSqlAdapter::plan_catalog_drop(CatalogDropRequest::new(connection, odd_id, 4), &odd)
+            .unwrap()
+            .sql()
+            .to_owned();
+    assert_eq!(odd_sql, "DROP TABLE [db.;\n].[schema]].].[table;\r]");
+    assert!(
+        CatalogDropPlan::new(
+            CatalogDropRequest::new(connection, odd.id.clone(), 4),
+            &odd,
+            odd_sql,
+        )
+        .is_ok()
+    );
+
+    for kind in [
+        CatalogKind::Column,
+        CatalogKind::PrimaryKey,
+        CatalogKind::UniqueConstraint,
+        CatalogKind::ForeignKey,
+        CatalogKind::CheckConstraint,
+    ] {
+        let id = CatalogId::new(profile_id, kind, ["db", "schema", "table", "42", "7"]);
+        let object = make(
+            kind,
+            id.clone(),
+            Some(relation.clone()),
+            Some(relation.clone()),
+            "child",
+        );
+        assert!(matches!(
+            MsSqlAdapter::plan_catalog_drop(CatalogDropRequest::new(connection, id, 3), &object),
             Err(CatalogDropError::Unsupported { kind: found, .. }) if found == kind
         ));
     }

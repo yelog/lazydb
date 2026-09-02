@@ -36,7 +36,7 @@ jobs:
       - run: cargo test --all-targets --all-features
 
   databases:
-    name: PostgreSQL and MySQL adapters
+    name: PostgreSQL, MySQL, and SQL Server adapters
     runs-on: ubuntu-24.04
     services:
       postgres:
@@ -63,12 +63,26 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 10
+      sqlserver:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: Y
+          MSSQL_SA_PASSWORD: LazydbC1!SqlServer2022
+        ports:
+          - 1433:1433
+        options: >-
+          --platform linux/amd64
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$MSSQL_SA_PASSWORD\" -Q \"SELECT 1\" -C"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 30
     env:
       LAZYDB_TEST_POSTGRES_URL: postgresql://postgres:lazydb_test@127.0.0.1:5432/lazydb_test
       LAZYDB_TEST_MYSQL_URL: mysql://root:lazydb_test@127.0.0.1:3306/lazydb_test
+      LAZYDB_TEST_SQLSERVER_URL: sqlserver://sa:LazydbC1!SqlServer2022@127.0.0.1:1433/tempdb?encrypt=false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
       - run: rustup toolchain install 1.94.0 --profile minimal --no-self-update
       - run: rustup default 1.94.0
-      - run: cargo test --locked --test postgres_adapter --test mysql_adapter -- --nocapture --test-threads=1
+      - run: cargo test --locked --test postgres_adapter --test mysql_adapter --test sqlserver_adapter --test sqlserver_transactions -- --nocapture --test-threads=1

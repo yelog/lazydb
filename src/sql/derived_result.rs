@@ -39,7 +39,7 @@ pub fn build_paginated_query(
     page: PageRequest,
 ) -> Result<PaginatedSql, DerivedQueryError> {
     let source = parse_source(source, dialect)?;
-    Ok(wrap_paginated_source(&source, page))
+    Ok(wrap_paginated_source(&source, dialect, page, None))
 }
 
 pub fn build_derived_query(
@@ -51,16 +51,26 @@ pub fn build_derived_query(
     let source = parse_source(source, dialect)?;
     let options = validate_relation_preview_options(where_clause, order_by_clause, dialect)
         .map_err(|error| DerivedQueryError(error.to_string()))?;
-    let mut sql = format!("SELECT * FROM ({source}) AS __lazydb_result");
+    let result_alias = derived_alias(dialect, "__lazydb_result");
+    let mut sql = format!("SELECT * FROM ({source}) AS {result_alias}");
+    let order_by = options.order_by_clause.clone();
     if let Some(clause) = options.where_clause {
         sql.push_str(" WHERE ");
         sql.push_str(&clause);
     }
-    if let Some(clause) = options.order_by_clause {
+    if dialect != SqlDialect::SqlServer
+        && let Some(clause) = options.order_by_clause
+    {
         sql.push_str(" ORDER BY ");
         sql.push_str(&clause);
     }
-    Ok(wrap_paginated_source(&sql, PageRequest::first(Default::default())).page_sql)
+    Ok(wrap_paginated_source(
+        &sql,
+        dialect,
+        PageRequest::first(Default::default()),
+        order_by,
+    )
+    .page_sql)
 }
 
 pub fn build_derived_paginated_query(
@@ -73,26 +83,54 @@ pub fn build_derived_paginated_query(
     let source = parse_source(source, dialect)?;
     let options = validate_relation_preview_options(where_clause, order_by_clause, dialect)
         .map_err(|error| DerivedQueryError(error.to_string()))?;
-    let mut sql = format!("SELECT * FROM ({source}) AS __lazydb_result");
+    let result_alias = derived_alias(dialect, "__lazydb_result");
+    let mut sql = format!("SELECT * FROM ({source}) AS {result_alias}");
+    let order_by = options.order_by_clause.clone();
     if let Some(clause) = options.where_clause {
         sql.push_str(" WHERE ");
         sql.push_str(&clause);
     }
-    if let Some(clause) = options.order_by_clause {
+    if dialect != SqlDialect::SqlServer
+        && let Some(clause) = options.order_by_clause
+    {
         sql.push_str(" ORDER BY ");
         sql.push_str(&clause);
     }
-    Ok(wrap_paginated_source(&sql, page))
+    Ok(wrap_paginated_source(&sql, dialect, page, order_by))
 }
 
-fn wrap_paginated_source(source: &str, page: PageRequest) -> PaginatedSql {
+fn wrap_paginated_source(
+    source: &str,
+    dialect: SqlDialect,
+    page: PageRequest,
+    order_by: Option<String>,
+) -> PaginatedSql {
     let limit = page.size.lookahead_limit();
     let offset = page.offset;
+    if dialect == SqlDialect::SqlServer {
+        let page_alias = derived_alias(dialect, "__lazydb_page");
+        let count_alias = derived_alias(dialect, "__lazydb_count");
+        let order_by = order_by.unwrap_or_else(|| "(SELECT NULL)".to_owned());
+        return PaginatedSql {
+            page_sql: format!(
+                "SELECT * FROM ({source}) AS {page_alias} ORDER BY {order_by} OFFSET {offset} ROWS FETCH NEXT {limit} ROWS ONLY"
+            ),
+            count_sql: format!("SELECT COUNT(*) FROM ({source}) AS {count_alias}"),
+        };
+    }
     PaginatedSql {
         page_sql: format!(
             "SELECT * FROM ({source}) AS __lazydb_page LIMIT {limit} OFFSET {offset}"
         ),
         count_sql: format!("SELECT COUNT(*) FROM ({source}) AS __lazydb_count"),
+    }
+}
+
+fn derived_alias(dialect: SqlDialect, name: &str) -> String {
+    if dialect == SqlDialect::SqlServer {
+        format!("[{name}]")
+    } else {
+        name.to_owned()
     }
 }
 
@@ -229,6 +267,27 @@ mod tests {
         assert_eq!(
             query.count_sql,
             "SELECT COUNT(*) FROM (SELECT * FROM (SELECT id FROM users) AS __lazydb_result WHERE id > 1 ORDER BY id DESC) AS __lazydb_count"
+        );
+    }
+
+    #[test]
+    fn uses_sql_server_offset_fetch_and_bracketed_aliases() {
+        let query = build_derived_paginated_query(
+            "SELECT id FROM users;",
+            "id > 1",
+            "id DESC",
+            SqlDialect::SqlServer,
+            PageRequest::at(crate::model::pagination::PageSize::Ten, 20),
+        )
+        .unwrap();
+
+        assert_eq!(
+            query.page_sql,
+            "SELECT * FROM (SELECT * FROM (SELECT id FROM users) AS [__lazydb_result] WHERE id > 1) AS [__lazydb_page] ORDER BY id DESC OFFSET 20 ROWS FETCH NEXT 11 ROWS ONLY"
+        );
+        assert_eq!(
+            query.count_sql,
+            "SELECT COUNT(*) FROM (SELECT * FROM (SELECT id FROM users) AS [__lazydb_result] WHERE id > 1) AS [__lazydb_count]"
         );
     }
 

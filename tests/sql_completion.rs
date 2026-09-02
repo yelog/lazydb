@@ -684,6 +684,62 @@ fn completion_is_contextual_and_quotes_raw_names() {
         quote_identifier("odd`name", SqlDialect::MySql),
         "`odd``name`"
     );
+    assert_eq!(
+        quote_identifier("odd]name", SqlDialect::SqlServer),
+        "[odd]]name]"
+    );
+}
+
+#[test]
+fn sql_server_completion_understands_bracketed_relations() {
+    let index = CompletionIndex::new(&multi_relation_fixture());
+    let text = "SELECT [users]. FROM [public].[users]";
+    let candidates = complete(
+        text,
+        "SELECT [users].".len(),
+        SqlDialect::SqlServer,
+        &index,
+        CompletionContext {
+            database: Some("app"),
+            schema: Some("public"),
+        },
+    );
+    assert!(candidates.iter().any(|candidate| {
+        candidate.kind == CompletionKind::Column && candidate.insert_text == "[id]"
+    }));
+
+    let variable = "SELECT @user";
+    assert!(
+        complete(
+            variable,
+            variable.len(),
+            SqlDialect::SqlServer,
+            &index,
+            CompletionContext::default(),
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn sql_server_completion_uses_case_insensitive_active_database_and_schema() {
+    let index = CompletionIndex::new(&multi_relation_fixture());
+    let text = "SELECT * FROM ";
+    let candidates = complete(
+        text,
+        text.len(),
+        SqlDialect::SqlServer,
+        &index,
+        CompletionContext {
+            database: Some("APP"),
+            schema: Some("PUBLIC"),
+        },
+    );
+    let users = candidates
+        .iter()
+        .find(|candidate| candidate.kind == CompletionKind::Table && candidate.label == "users")
+        .expect("active SQL Server target should resolve users");
+    assert_eq!(users.insert_text, "users");
 }
 
 #[test]

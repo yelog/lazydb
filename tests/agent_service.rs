@@ -49,6 +49,23 @@ fn sqlite_profile(path: &std::path::Path, name: &str) -> ConnectionProfile {
         .profile
 }
 
+#[test]
+fn connection_projection_never_exposes_sql_server_credentials() {
+    let mut profile = import_connection_url("sqlserver://db.example.test/app", Some("mssql"))
+        .unwrap()
+        .profile;
+    profile.user = Some("sa".into());
+    profile.credential_policy = lazydb::profile::CredentialPolicy::Prompt;
+    let temp = TempDir::new().unwrap();
+    let service = service(&temp, vec![profile]);
+    let serialized = serde_json::to_string(&service.connections()).unwrap();
+
+    assert!(serialized.contains("db.example.test"));
+    assert!(serialized.contains("sa"));
+    assert!(!serialized.contains("password"));
+    assert!(!serialized.contains("credential_policy"));
+}
+
 #[tokio::test]
 async fn context_lists_current_project_before_global_and_excludes_other_project() {
     let temp = TempDir::new().unwrap();

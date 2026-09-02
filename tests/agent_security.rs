@@ -12,7 +12,7 @@ use lazydb::{
         local_credentials::LocalCredentialStore,
         secrets::{SecretStore, SecretStoreError},
     },
-    profile::{Environment, ProfileAccess, import_connection_url},
+    profile::{Environment, ProfileAccess, import_connection_url, parse_connection_url},
 };
 use secrecy::SecretString;
 use tempfile::TempDir;
@@ -83,5 +83,28 @@ fn sql_policy_rejects_nested_writes_and_transaction_control() {
     assert_eq!(
         authorize_query(&profile, "SELECT * INTO copy FROM source"),
         Err(PolicyError::ReadOnlyQueryRequired)
+    );
+}
+
+#[test]
+fn sql_server_jdbc_password_never_appears_in_errors_or_debug_output() {
+    let password = "agent-secret-never-print";
+    let input = format!(
+        "jdbc:sqlserver://localhost:1433;databaseName=app;user=sa;password={password};unknownProperty=value"
+    );
+    let error = parse_connection_url(&input).unwrap_err();
+    assert!(!error.to_string().contains(password));
+    assert!(!format!("{error:?}").contains(password));
+
+    let imported = import_connection_url(
+        &format!("jdbc:sqlserver://localhost:1433;databaseName=app;user=sa;password={password}"),
+        None,
+    )
+    .unwrap();
+    assert!(!format!("{imported:?}").contains(password));
+    assert!(
+        !toml::to_string(&imported.profile)
+            .unwrap()
+            .contains(password)
     );
 }

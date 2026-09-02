@@ -7,7 +7,9 @@ use std::{
 use lazydb::{
     action::{Action, Command},
     app::App,
+    model::profile_manager::DRIVER_ORDER,
     persistence::{profiles::ProfileStore, secrets::NativeSecretStore},
+    profile::DatabaseKind,
     runtime::Runtime,
 };
 use tempfile::TempDir;
@@ -66,7 +68,13 @@ async fn drain_catalog(
 }
 
 fn set_sqlite_draft(app: &mut App, name: &str, path: &std::path::Path) {
-    app.update(Action::ProfileCycle(2));
+    let sqlite_index = DRIVER_ORDER
+        .iter()
+        .position(|kind| *kind == DatabaseKind::Sqlite)
+        .expect("SQLite must be present in the profile driver order");
+    app.update(Action::ProfileCycle(
+        i8::try_from(sqlite_index).expect("profile driver order fits in a cycle delta"),
+    ));
     let manager = app.profile_manager.as_mut().unwrap();
     let draft = manager.draft.as_mut().unwrap();
     draft.name.set(name);

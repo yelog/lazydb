@@ -161,16 +161,19 @@ impl IconSet {
             IconMode::NerdFont => match kind {
                 DatabaseKind::Postgres => dev::DEV_POSTGRESQL,
                 DatabaseKind::MySql => dev::DEV_MYSQL,
+                DatabaseKind::SqlServer => md::MD_DATABASE,
                 DatabaseKind::Sqlite => dev::DEV_SQLITE,
             },
             IconMode::Unicode => match kind {
                 DatabaseKind::Postgres => "PG",
                 DatabaseKind::MySql => "MY",
+                DatabaseKind::SqlServer => "MS",
                 DatabaseKind::Sqlite => "SQ",
             },
             IconMode::Ascii => match kind {
                 DatabaseKind::Postgres => "PG",
                 DatabaseKind::MySql => "MY",
+                DatabaseKind::SqlServer => "MS",
                 DatabaseKind::Sqlite => "SQ",
             },
         }
@@ -297,9 +300,10 @@ impl IconSet {
 mod tests {
     use super::*;
 
-    const DATABASE_KINDS: [DatabaseKind; 3] = [
+    const DATABASE_KINDS: [DatabaseKind; 4] = [
         DatabaseKind::Postgres,
         DatabaseKind::MySql,
+        DatabaseKind::SqlServer,
         DatabaseKind::Sqlite,
     ];
 

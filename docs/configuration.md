@@ -92,23 +92,24 @@ The current profile file format is version `5`:
 | `id` | UUID string | Generated on creation | Stable identity used by workspace state and system credential references. Must be unique within the file. |
 | `name` | String | Derived from the database, host, or SQLite filename | Name shown in the Explorer and accepted by `--profile` and agent `--connection`. |
 | `access` | Table | `{ scope = "global" }` | Controls which projects can see a saved profile. |
-| `kind` | `postgres`, `mysql`, `sqlite` | Required | Database adapter to use. |
+| `kind` | `postgres`, `mysql`, `sqlserver`, `sqlite` | Required | Database adapter to use. |
 | `url_format` | Kebab-case enum | Driver-specific | URL spelling used when LazyDB displays or regenerates the connection URL. |
-| `host` | String or `null` | `null` | Server hostname or address. PostgreSQL and MySQL only. |
-| `port` | Integer or `null` | Driver default when imported | Server port. PostgreSQL defaults to `5432`; MySQL defaults to `3306`. |
-| `user` | String or `null` | `null` | Server login name. SQLite does not use it. |
-| `database` | String or `null` | `null` | Database name for PostgreSQL/MySQL, or the logical SQLite path value. |
-| `default_schema` | String or `null` | `null` | PostgreSQL `currentSchema`; SQLite is normally `main`. MySQL has no separate default-schema field. |
+| `host` | String or `null` | `null` | Server hostname or address. PostgreSQL, MySQL, and SQL Server use this field. |
+| `port` | Integer or `null` | Driver default when imported | Server port. PostgreSQL defaults to `5432`, MySQL to `3306`, and SQL Server to `1433`. SQL Server profiles require an explicit TCP port when connecting. |
+| `user` | String or `null` | `null` | Server login name. SQL Server uses SQL username/password authentication; SQLite does not use it. |
+| `database` | String or `null` | `null` | Database name for PostgreSQL, MySQL, or SQL Server, or the logical SQLite path value. |
+| `default_schema` | String or `null` | `null` | PostgreSQL `currentSchema`, SQL Server schema, or SQLite `main`. MySQL has no separate default-schema field. |
 | `sqlite_path` | Path or `null` | `null` | SQLite file path. It is `null` for an in-memory database. |
-| `ssl_mode` | `disable`, `prefer`, `require`, `verify-ca`, `verify-full` | `prefer` | TLS policy for PostgreSQL/MySQL. SQLite always uses `disable`. |
+| `ssl_mode` | `disable`, `prefer`, `require`, `verify-ca`, `verify-full` | `prefer` | TLS policy for PostgreSQL, MySQL, and SQL Server. SQLite always uses `disable`. |
 | `credential_policy` | Tagged table | `{ policy = "none" }` | Where the password comes from. |
 | `read_only` | Boolean | `false` | Requests adapter-level read-only behavior. Use database grants for authorization. |
 | `environment` | `development`, `staging`, `production` | `development` | Environment label used by the UI and agent write-policy checks. |
 | `catalog_scope` | Table | Derived from database and schema | Databases and schemas visible to Explorer and completion. |
 
 `url_format` accepts `postgres`, `postgresql`, `jdbc-postgresql` for PostgreSQL;
-`mysql`, `jdbc-mysql` for MySQL; and `sqlite`, `file-uri`, `jdbc-sqlite` for
-SQLite. Defaults are `postgresql`, `mysql`, and `sqlite` respectively.
+`mysql`, `jdbc-mysql` for MySQL; `sqlserver`, `mssql`, `jdbc-sqlserver` for SQL
+Server; and `sqlite`, `file-uri`, `jdbc-sqlite` for SQLite. Defaults are
+`postgresql`, `mysql`, `sqlserver`, and `sqlite` respectively.
 
 ### Profile Access
 
@@ -260,7 +261,18 @@ postgresql://user@host:5432/database?sslmode=require
 jdbc:postgresql://host:5432/database?currentSchema=tools
 mysql://user@host:3306/database?sslMode=REQUIRED
 jdbc:mysql://host:3306/database?useSSL=true
+sqlserver://<username>:<password>@<host>:1433/<database>?encrypt=true&trustServerCertificate=false
+mssql://<username>:<password>@<host>:1433/<database>?encrypt=true&trustServerCertificate=true
+jdbc:sqlserver://<host>:1433;databaseName=<database>;user=<username>;password=<password>;encrypt=true;trustServerCertificate=false
 ```
+
+SQL Server URLs use SQL username/password authentication and an explicit TCP
+port. The `sqlserver://` and `mssql://` forms accept `schema` or
+`currentSchema`, `encrypt`, `trustServerCertificate`, and `readOnly` query
+parameters. JDBC uses the corresponding semicolon properties. Windows
+Integrated Authentication, Kerberos, Entra authentication, Named Instance or
+SQL Browser properties are not supported yet. The examples use placeholders;
+do not put real passwords in command-line arguments.
 
 Supply a session password through `LAZYDB_PASSWORD`. It is read at startup only,
 bound to the selected profile, and is not reused for a different profile. Avoid
@@ -340,8 +352,13 @@ database. Explicit Visible Objects selections are preserved and must include the
 configured default schema. MySQL has no separate default-schema field; SQLite
 uses `main` by default.
 
-TLS mode maps to native driver modes. `verify-full`/`verify-identity` is
-recommended for remote production connections.
+TLS mode maps to native driver modes. For SQL Server, `disable` requests
+plaintext, `require` enables encryption while trusting the server certificate,
+and `verify-ca`/`verify-full` enable encryption with certificate verification.
+`prefer` is the default and fails closed as verified TLS in the native TDS
+adapter. `verify-full`/`verify-identity` is recommended for remote production
+connections. SQL Server cancellation closes the active session; SQL Server rolls
+back any open transaction on that session.
 
 ## Read-only
 
@@ -350,6 +367,7 @@ recommended for remote production connections.
 - SQLite uses read-only database open flags.
 - PostgreSQL configures `default_transaction_read_only=on`.
 - MySQL configures each pooled session as transaction read-only.
+- SQL Server configures the session as read-only where supported by the driver.
 
 For PostgreSQL and MySQL, use a database role with read-only grants as the actual
 security boundary. Session settings can be changed by sufficiently privileged

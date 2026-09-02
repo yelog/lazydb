@@ -1,6 +1,7 @@
 use sqlparser::{
     dialect::{
-        Dialect as ParserDialect, GenericDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect,
+        Dialect as ParserDialect, GenericDialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect,
+        SQLiteDialect,
     },
     tokenizer::{Token, Tokenizer},
 };
@@ -23,6 +24,7 @@ pub fn format_sql(sql: &str, dialect: SqlDialect) -> Result<String, FormatError>
         uppercase: Some(true),
         dialect: match dialect {
             SqlDialect::Postgres => sqlformat::Dialect::PostgreSql,
+            SqlDialect::SqlServer => sqlformat::Dialect::SQLServer,
             _ => sqlformat::Dialect::Generic,
         },
         ..Default::default()
@@ -31,6 +33,7 @@ pub fn format_sql(sql: &str, dialect: SqlDialect) -> Result<String, FormatError>
     let parser_dialect: &dyn ParserDialect = match dialect {
         SqlDialect::Postgres => &PostgreSqlDialect {},
         SqlDialect::MySql => &MySqlDialect {},
+        SqlDialect::SqlServer => &MsSqlDialect {},
         SqlDialect::Sqlite => &SQLiteDialect {},
         SqlDialect::Generic => &GenericDialect {},
     };

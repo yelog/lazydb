@@ -24,3 +24,16 @@ fn formatting_accepts_unicode_identifiers() {
     assert!(output.contains("数据"));
     assert!(output.contains("表"));
 }
+
+#[test]
+fn formatting_preserves_tsql_tokens() {
+    let output = format_sql(
+        "select top (1) [display name], @value from [user] where [name] = N'你好'",
+        SqlDialect::SqlServer,
+    )
+    .unwrap();
+    assert!(output.to_ascii_uppercase().contains("TOP"));
+    assert!(output.contains("[display name]"));
+    assert!(output.contains("@value"));
+    assert!(output.contains("N'你好'"));
+}

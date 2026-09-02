@@ -297,6 +297,21 @@ fn new_mysql_and_sqlite_use_driver_defaults() {
 }
 
 #[test]
+fn new_sql_server_uses_server_defaults_and_fields() {
+    let draft = ProfileDraft::new(DatabaseKind::SqlServer);
+
+    assert_eq!(draft.host.value(), "localhost");
+    assert_eq!(draft.port.value(), "1433");
+    assert_eq!(draft.schema.value(), "dbo");
+    assert_eq!(draft.ssl_mode, SslMode::Prefer);
+    assert_eq!(draft.url_format, ConnectionUrlFormat::SqlServer);
+    assert!(draft.url_display().starts_with("sqlserver://"));
+    assert!(draft.visible_fields().contains(&ProfileField::Schema));
+    assert!(draft.visible_fields().contains(&ProfileField::Password));
+    assert!(!draft.visible_fields().contains(&ProfileField::SqlitePath));
+}
+
+#[test]
 fn new_profiles_derive_catalog_scope_defaults() {
     let postgres = valid_postgres_draft().validate(&[]).unwrap().profile;
     assert_eq!(
@@ -667,6 +682,56 @@ fn structured_edits_refresh_url_and_invalid_port_keeps_last_valid_url() {
 }
 
 #[test]
+fn jdbc_sql_server_url_commit_redacts_password_and_preserves_format_after_edits() {
+    let mut draft = ProfileDraft::new(DatabaseKind::SqlServer);
+    while draft.url_cursor() > 0 {
+        draft.backspace(ProfileField::Url);
+    }
+    draft.paste(
+        ProfileField::Url,
+        "jdbc:sqlserver://db.example:1444;databaseName=app;user=sa;password={super;secret};encrypt=true;trustServerCertificate=true;currentSchema=dbo;readOnly=true",
+    );
+
+    assert!(!draft.url_display().contains("super;secret"));
+    assert!(draft.url_display().contains("password=[REDACTED]"));
+    assert!(!format!("{draft:?}").contains("super;secret"));
+    draft.commit_url().unwrap();
+    assert_eq!(draft.url_format, ConnectionUrlFormat::JdbcSqlServer);
+    assert_eq!(draft.password().expose_secret(), "super;secret");
+    assert_eq!(draft.host.value(), "db.example");
+    assert_eq!(draft.port.value(), "1444");
+    assert_eq!(draft.database.value(), "app");
+    assert_eq!(draft.schema.value(), "dbo");
+    assert_eq!(draft.ssl_mode, SslMode::Require);
+    assert!(draft.read_only);
+    assert!(!draft.url_display().contains("password="));
+
+    draft.database.set("app archive");
+    draft.insert(ProfileField::Database, '!');
+    assert!(draft.url_display().starts_with("jdbc:sqlserver://"));
+    assert!(draft.url_display().contains(";databaseName="));
+    assert!(!draft.url_display().contains("/app"));
+}
+
+#[test]
+fn jdbc_sql_server_draft_redacts_every_duplicate_password_before_validation() {
+    let mut draft = ProfileDraft::new(DatabaseKind::SqlServer);
+    while draft.url_cursor() > 0 {
+        draft.backspace(ProfileField::Url);
+    }
+    draft.paste(
+        ProfileField::Url,
+        "jdbc:sqlserver://db;password=first-secret;PASSWORD={second;secret}",
+    );
+
+    let display = draft.url_display();
+    assert!(!display.contains("first-secret"));
+    assert!(!display.contains("second;secret"));
+    assert_eq!(display.matches("[REDACTED]").count(), 2);
+    assert!(draft.commit_url().is_err());
+}
+
+#[test]
 fn url_format_cycles_only_compatible_values_and_driver_resets_default() {
     let mut state = ProfileManagerState::new(false);
     state.start_new(DatabaseKind::Postgres);
@@ -690,6 +755,32 @@ fn url_format_cycles_only_compatible_values_and_driver_resets_default() {
             .url_display()
             .starts_with("mysql://")
     );
+    state.select_driver(DatabaseKind::SqlServer);
+    assert_eq!(
+        state.draft.as_ref().unwrap().url_format,
+        ConnectionUrlFormat::SqlServer
+    );
+    assert!(
+        state
+            .draft
+            .as_ref()
+            .unwrap()
+            .url_display()
+            .starts_with("sqlserver://")
+    );
+}
+
+#[test]
+fn driver_cycle_includes_sql_server_before_sqlite() {
+    let mut state = ProfileManagerState::new(false);
+    state.start_new(DatabaseKind::Postgres);
+
+    state.cycle(1);
+    assert_eq!(state.draft.as_ref().unwrap().kind, DatabaseKind::MySql);
+    state.cycle(1);
+    assert_eq!(state.draft.as_ref().unwrap().kind, DatabaseKind::SqlServer);
+    state.cycle(1);
+    assert_eq!(state.draft.as_ref().unwrap().kind, DatabaseKind::Sqlite);
 }
 
 #[test]

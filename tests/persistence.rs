@@ -4,7 +4,7 @@ use lazydb::{
     persistence::profiles::{PersistenceError, ProfileStore},
     profile::{
         CatalogScope, CatalogSelection, ConnectionProfile, ConnectionUrlFormat, CredentialPolicy,
-        DatabaseScope, Environment, ProfileAccess, import_connection_url,
+        DatabaseKind, DatabaseScope, Environment, ProfileAccess, SslMode, import_connection_url,
     },
 };
 use tempfile::TempDir;
@@ -199,6 +199,29 @@ fn version_five_round_trips_global_and_multi_project_access() {
     assert!(serialized.contains("scope = \"projects\""));
     assert!(serialized.contains("/Users/me/code/zeta"));
     assert!(serialized.contains("/Users/me/code/alpha"));
+}
+
+#[test]
+fn sql_server_profile_round_trips_without_a_persistence_migration() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("connections.toml");
+    let store = ProfileStore::new(path.clone());
+    let mut profile = import_connection_url("postgres://localhost/app", Some("sql-server"))
+        .unwrap()
+        .profile;
+    profile.kind = DatabaseKind::SqlServer;
+    profile.url_format = ConnectionUrlFormat::MsSql;
+    profile.port = Some(1433);
+    profile.default_schema = Some("dbo".into());
+    profile.ssl_mode = SslMode::Prefer;
+    profile.catalog_scope = CatalogScope::for_profile(DatabaseKind::SqlServer, "app", Some("dbo"));
+
+    store.save(&[profile.clone()]).unwrap();
+
+    assert_eq!(store.load().unwrap(), vec![profile]);
+    let serialized = fs::read_to_string(path).unwrap();
+    assert!(serialized.contains("kind = \"sqlserver\""));
+    assert!(serialized.contains("url_format = \"ms-sql\""));
 }
 
 #[test]

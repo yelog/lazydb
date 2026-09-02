@@ -1,4 +1,4 @@
-use super::{SqlDialect, SqlRisk, classify_sql, scan_statements};
+use super::{SqlDialect, SqlRisk, classify_sql, scan_statements, split_sql_server_batches};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BeginRequest {
@@ -44,14 +44,13 @@ pub enum TransactionSqlClassification {
 }
 
 pub fn classify_transaction_sql(sql: &str, dialect: SqlDialect) -> TransactionSqlClassification {
-    let statements = scan_statements(sql, dialect);
+    let statements = transaction_statements(sql, dialect);
     if statements.is_empty() {
         return TransactionSqlClassification::Unsupported(TransactionSqlError::Empty);
     }
     if statements.len() != 1 {
         let classifications: Vec<_> = statements
             .iter()
-            .filter_map(|range| range.get(sql))
             .map(|statement| classify_single(statement, dialect))
             .collect();
         if classifications.iter().any(is_control)
@@ -63,20 +62,20 @@ pub fn classify_transaction_sql(sql: &str, dialect: SqlDialect) -> TransactionSq
         }
         return TransactionSqlClassification::Unsupported(TransactionSqlError::MultipleStatements);
     }
-    classify_single(statements[0].get(sql).unwrap_or_default(), dialect)
+    classify_single(statements[0], dialect)
 }
 
 pub fn classify_transaction_batch(
     sql: &str,
     dialect: SqlDialect,
 ) -> Result<Vec<TransactionControl>, TransactionSqlError> {
-    let statements = scan_statements(sql, dialect);
+    let statements = transaction_statements(sql, dialect);
     if statements.is_empty() {
         return Err(TransactionSqlError::Empty);
     }
     let mut controls = Vec::with_capacity(statements.len());
-    for range in statements {
-        match classify_single(range.get(sql).unwrap_or_default(), dialect) {
+    for statement in statements {
+        match classify_single(statement, dialect) {
             TransactionSqlClassification::Control(control) => controls.push(control),
             TransactionSqlClassification::Data { .. } => {
                 return Err(TransactionSqlError::MixedControlAndData);
@@ -85,6 +84,25 @@ pub fn classify_transaction_batch(
         }
     }
     Ok(controls)
+}
+
+fn transaction_statements(sql: &str, dialect: SqlDialect) -> Vec<&str> {
+    let batches = if dialect == SqlDialect::SqlServer {
+        match split_sql_server_batches(sql) {
+            Ok(batches) => batches,
+            Err(_) => return vec![sql],
+        }
+    } else {
+        vec![sql]
+    };
+    batches
+        .into_iter()
+        .flat_map(|batch| {
+            scan_statements(batch, dialect)
+                .into_iter()
+                .filter_map(move |range| range.get(batch))
+        })
+        .collect()
 }
 
 pub fn savepoint_requires_active_manual(

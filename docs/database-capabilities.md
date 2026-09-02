@@ -8,7 +8,7 @@ machine.
 
 ## Monitoring Dashboard
 
-The connection dashboard is available for PostgreSQL and Oracle MySQL. It
+The connection dashboard is available for PostgreSQL and MySQL. It
 collects read-only status counters, connection gauges, and a bounded process
 list. SQLite reports monitoring as unsupported because it has no server-wide
 activity catalog. Samples remain in memory for the active workspace tab and
@@ -23,11 +23,31 @@ queries or terminate sessions.
 | Driver | Server/version gate | Namespace model | Catalog groups | Metadata support |
 | --- | --- | --- | --- | --- |
 | PostgreSQL | PostgreSQL 12 or newer | Database + schema | Tables, views, materialized views, sequences, functions, procedures, types | Type family, defaults, identity, generated expressions, character length, collation, comments; numeric precision/scale is not advertised |
-| Oracle MySQL | Oracle MySQL 8.0.13 or newer; MariaDB is rejected for this catalog contract | Database is schema | Tables, views, functions, procedures, triggers | Type family, defaults, auto-increment, generated expressions, numeric precision/scale, character length, collation, character set, comments |
+| MySQL | Oracle MySQL 8.0.13 or newer; MariaDB is rejected for this catalog contract | Database is schema | Tables, views, functions, procedures, triggers | Type family, defaults, auto-increment, generated expressions, numeric precision/scale, character length, collation, character set, comments |
+| SQL Server | SQL Server 2012 or newer | Database + schema | Tables, views, functions, procedures, sequences, triggers; relation children include columns, indexes, keys, and foreign keys | Type family, defaults, identity, computed/generated expressions, numeric precision/scale, character length, collation, comments, and rowversion metadata |
 | SQLite | SQLite metadata support through native schema tables; no server-version gate | Database + attached schema aliases | Tables, views, triggers | Default expressions and hidden-column metadata; unsupported fields are represented as unsupported |
 
-All three adapters advertise lazy children. SQLite opens a pool with exactly
-one physical connection.
+PostgreSQL, MySQL, and SQLite advertise lazy children. SQLite opens a pool with
+exactly one physical connection; SQL Server loads its supported catalog groups
+without lazy child requests.
+
+SQL Server catalog reads are scoped to databases and schemas and use native
+`sys.*` catalog views. SQL Server does not currently use lazy child requests.
+The adapter gates connections at SQL Server 2012, supports SQL username/password
+authentication only, and requires an explicit TCP host and port. Windows
+Integrated Authentication, Kerberos, Entra, Named Instance/SQL Browser discovery,
+Dashboard metrics, process metrics, and additional specialized types are
+deferred.
+
+SQL Server query support includes multiple result sets, empty-result column
+metadata, bounded relation previews, adapter-owned relation DDL, and relation
+data editing with bound values. Standalone `GO` batch separator lines are split
+before execution; `GO` and `GO 1` are supported, while other repeat counts are
+rejected. The value layer decodes NULL, booleans, signed and unsigned integers,
+floating point, text, bytes, dates, times, date-times, timestamps,
+`uniqueidentifier` as text, and XML as text. Types that do not have a safe
+normalized representation, including `money`/`smallmoney` and `sql_variant`, are
+shown as unsupported values rather than being silently coerced.
 
 ## Profile Discovery
 
@@ -117,6 +137,11 @@ stale, the result is discarded. Explicit completion performs no database I/O,
 returns ranked context-aware candidates, and is capped at ten results.
 PostgreSQL and MySQL routine entries can contribute function and procedure
 completion; SQLite does not advertise routine completion.
+
+Cancelling SQL Server execution closes the active session because the TDS driver
+does not expose a cancellation primitive. SQL Server rolls back an open
+transaction when that session closes; LazyDB does not claim commit or rollback
+acknowledgement after the forced close.
 ## Coding Agent Boundary
 
 LazyDB's agent interface uses the same native adapters as the TUI, but each
