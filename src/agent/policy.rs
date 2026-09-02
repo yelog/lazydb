@@ -34,6 +34,24 @@ pub enum PolicyError {
     EmptySql,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WriteCapability {
+    Allowed,
+    Denied(PolicyError),
+}
+
+pub fn write_capability(profile: &ConnectionProfile, policy: WritePolicy) -> WriteCapability {
+    if profile.read_only {
+        WriteCapability::Denied(PolicyError::ProfileReadOnly)
+    } else if policy == WritePolicy::Deny {
+        WriteCapability::Denied(PolicyError::ServerWritePolicyDenied)
+    } else if profile.environment == Environment::Production && policy != WritePolicy::All {
+        WriteCapability::Denied(PolicyError::ProductionWriteDisabled)
+    } else {
+        WriteCapability::Allowed
+    }
+}
+
 pub fn authorize_query(profile: &ConnectionProfile, sql: &str) -> Result<(), PolicyError> {
     if sql.trim().is_empty() {
         return Err(PolicyError::EmptySql);
@@ -61,14 +79,8 @@ pub fn authorize_write(
     if analysis.risks.contains(&SqlRisk::TransactionControl) {
         return Err(PolicyError::TransactionControlDisabled);
     }
-    if profile.read_only {
-        return Err(PolicyError::ProfileReadOnly);
-    }
-    if policy == WritePolicy::Deny {
-        return Err(PolicyError::ServerWritePolicyDenied);
-    }
-    if profile.environment == Environment::Production && policy != WritePolicy::All {
-        return Err(PolicyError::ProductionWriteDisabled);
+    if let WriteCapability::Denied(error) = write_capability(profile, policy) {
+        return Err(error);
     }
     if matches!(
         analysis.aggregate,
