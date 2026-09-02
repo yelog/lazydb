@@ -158,6 +158,21 @@ fn cycling_relation_tabs_normalizes_editor_focus() {
 }
 
 #[test]
+fn cycling_console_tabs_focuses_sql_editor() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::NewConsole);
+    app.update(Action::NewConsole);
+    app.focus = Focus::Results;
+
+    app.update(Action::NextTab);
+
+    assert_eq!(app.focus, Focus::Editor);
+    app.focus = Focus::Results;
+    app.update(Action::PreviousTab);
+    assert_eq!(app.focus, Focus::Editor);
+}
+
+#[test]
 fn closing_relation_tab_bypasses_transaction_exit() {
     let mut app = App::new(Vec::new());
     app.tabs

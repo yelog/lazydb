@@ -786,6 +786,14 @@ impl App {
         }
     }
 
+    fn normalize_focus_after_tab_switch(&mut self) {
+        if self.active_console_opt().is_some() {
+            self.focus = Focus::Editor;
+        } else {
+            self.normalize_focus();
+        }
+    }
+
     pub fn active_editor_text(&self) -> Result<String, EditorError> {
         self.active_console_opt()
             .map_or_else(|| Ok(String::new()), |tab| self.editor_text(tab.id))
@@ -2264,7 +2272,7 @@ impl App {
                     return Vec::new();
                 }
                 self.active_tab = (self.active_tab + 1) % self.tabs.len();
-                self.normalize_focus();
+                self.normalize_focus_after_tab_switch();
                 self.load_active_relation(false)
             }
             Action::PreviousTab => {
@@ -2275,7 +2283,7 @@ impl App {
                     .active_tab
                     .checked_sub(1)
                     .unwrap_or(self.tabs.len() - 1);
-                self.normalize_focus();
+                self.normalize_focus_after_tab_switch();
                 self.load_active_relation(false)
             }
             Action::GotoSqlConsole => {
