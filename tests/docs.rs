@@ -14,6 +14,7 @@ fn keyboard_reference_is_dedicated_and_complete() {
         "## Pane Navigation and Resize",
         "## Prefixes",
         "## Explorer",
+        "## Catalog Editor",
         "## SQL Editor",
         "### Normal",
         "### Insert and Replace",
@@ -58,4 +59,19 @@ fn keyboard_reference_is_dedicated_and_complete() {
     assert!(keys.contains("Output o"));
     assert!(keys.contains("0` / `^"));
     assert!(keys.contains("Printable `y` and `Y` are text input"));
+    assert!(keys.contains("capability-aware"));
+
+    let architecture = include_str!("../docs/architecture.md");
+    for term in [
+        "cross-database",
+        "stale checks",
+        "Materialized View",
+        "Role node",
+        "targeted refresh",
+    ] {
+        assert!(
+            architecture.contains(term),
+            "missing architecture term {term}"
+        );
+    }
 }

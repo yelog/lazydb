@@ -190,6 +190,21 @@ tab moves focus to Results; SQL-only editor, transaction, execution, and
 completion actions are no-ops there. Relation focus cycles between Explorer and
 Results.
 
+Explorer catalog mutation help is derived from the selected node and
+adapter-owned mutation capabilities. `n` remains profile creation; `a` opens
+the supported child-object picker; `e` edits a directly selected profile or
+catalog object, never a synthetic group/status row. Plans are guarded by
+connection identity, target identity, catalog generation/epoch, and
+definition/plan stale checks. PostgreSQL cross-database operations use
+temporary target connections where required, then perform targeted refresh and
+relation snapshot invalidation.
+
+The implemented PostgreSQL editor scope covers Schema, Table, Column, Index,
+Primary Key, Unique/Foreign Key/Check Constraints, View, Materialized View,
+Sequence, Database, and Role. Login Role and Role creation are exposed from a
+profile anchor. The Role node itself is not represented in the Explorer tree,
+so existing roles cannot currently be selected and edited from Explorer.
+
 ## Transaction Boundary
 
 AUTO queries carry both `ConnectionIdentity` and the exact `ExecutionTarget`.

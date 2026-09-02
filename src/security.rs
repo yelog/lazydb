@@ -1,7 +1,39 @@
 use std::fmt::Write;
 
+use secrecy::{ExposeSecret, SecretString};
 use unicode_width::UnicodeWidthChar;
 use url::Url;
+
+/// A secret that is safe to carry through cloned runtime commands.
+/// Equality is intentionally non-observing so application state cannot become
+/// a password oracle; the value is only exposed at the execution boundary.
+#[derive(Clone)]
+pub struct RedactedSecret(SecretString);
+
+impl RedactedSecret {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(SecretString::from(value.into()))
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0.expose_secret().is_empty()
+    }
+    pub fn expose(&self) -> &str {
+        self.0.expose_secret()
+    }
+}
+
+impl std::fmt::Debug for RedactedSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
+
+impl PartialEq for RedactedSecret {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+impl Eq for RedactedSecret {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DisplayLineProjection {

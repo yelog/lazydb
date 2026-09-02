@@ -1,4 +1,5 @@
 pub mod animation;
+pub mod catalog_editor;
 pub mod data_grid;
 pub mod icons;
 pub mod layout;
@@ -578,6 +579,7 @@ fn overlay_key(overlay: &Overlay) -> u8 {
         Overlay::NotificationHistory(_) => 17,
         Overlay::RecordView(_) => 2,
         Overlay::ProfileManager => 3,
+        Overlay::CatalogEditor => 18,
         Overlay::ProfileAccess { .. } => 4,
         Overlay::Message { .. } => 5,
         Overlay::SubstituteConfirm { .. } => 6,
@@ -590,7 +592,7 @@ fn overlay_key(overlay: &Overlay) -> u8 {
         Overlay::DeleteConsole { .. } => 13,
         Overlay::SqlEditorList(_) => 14,
         Overlay::PageSizeSelector { .. } => 15,
-        Overlay::CatalogDropConfirm { .. } => 16,
+        Overlay::CatalogDropConfirm { .. } | Overlay::CatalogEditorDestructiveConfirm { .. } => 16,
     }
 }
 
@@ -2425,6 +2427,7 @@ fn render_overlay(
         Overlay::ProfileManager => {
             profiles::render_profile_manager(frame, area, app, state, theme, icons)
         }
+        Overlay::CatalogEditor => catalog_editor::render(frame, area, app, state, theme),
         Overlay::ProfileAccess {
             profile_id,
             selected,
@@ -2747,7 +2750,49 @@ fn render_overlay(
         } => {
             render_catalog_drop_confirm(frame, area, plan, input, *busy, error.as_deref(), theme);
         }
+        Overlay::CatalogEditorDestructiveConfirm { plan, input } => {
+            render_catalog_mutation_confirm(frame, area, plan, input, theme);
+        }
     }
+}
+
+fn render_catalog_mutation_confirm(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    plan: &crate::db::catalog_mutation::CatalogMutationPlan,
+    input: &crate::model::text_input::TextInput,
+    theme: Theme,
+) {
+    let popup = centered(area, 82, 16);
+    frame.render_widget(Clear, popup);
+    let mut lines = vec![
+        Line::from(Span::styled(
+            " DESTRUCTIVE CATALOG MUTATION ",
+            theme.title(true),
+        )),
+        Line::raw("This operation may lose data:"),
+        Line::raw(plan.sql()),
+        Line::raw(""),
+    ];
+    lines.extend(
+        plan.warnings
+            .iter()
+            .map(|warning| Line::raw(sanitize_terminal_text(warning))),
+    );
+    lines.extend([
+        Line::raw("Type exactly lowercase y and press Enter to execute:"),
+        Line::from(Span::styled(
+            format!("> {}", input.value()),
+            Style::new().fg(theme.accent),
+        )),
+        Line::raw("Esc cancel"),
+    ]);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(panel_block(" CATALOG MUTATION CONFIRMATION ", true, theme))
+            .wrap(Wrap { trim: true }),
+        popup,
+    );
 }
 
 fn render_catalog_drop_confirm(

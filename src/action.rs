@@ -2,6 +2,10 @@ use crossterm::event::KeyEvent;
 use std::path::PathBuf;
 use uuid::Uuid;
 
+use crate::db::catalog_mutation::{
+    CatalogMutationPlan, CatalogMutationRequest, CatalogObjectDefinition,
+    CatalogObjectDefinitionRequest,
+};
 use crate::db::{
     ErrorCategory, ServerInfo,
     catalog::{
@@ -82,6 +86,8 @@ pub enum Action {
     ProfileStartEdit {
         profile_id: Uuid,
     },
+    OpenCatalogCreate,
+    OpenCatalogEdit,
     ProfileRequestDelete {
         profile_id: Uuid,
     },
@@ -101,11 +107,51 @@ pub enum Action {
         plan: CatalogDropPlan,
         message: String,
     },
+    CatalogMutationPlanReady(CatalogMutationPlan),
+    CatalogMutationPlanFailed {
+        request: CatalogMutationRequest,
+        message: String,
+    },
+    CatalogMutationSucceeded {
+        plan: CatalogMutationPlan,
+        outcome: QueryOutcome,
+    },
+    CatalogMutationFailed {
+        plan: CatalogMutationPlan,
+        message: String,
+    },
+    CatalogObjectDefinitionLoaded {
+        request: CatalogObjectDefinitionRequest,
+        definition: CatalogObjectDefinition,
+    },
+    CatalogObjectDefinitionLoadFailed {
+        request: CatalogObjectDefinitionRequest,
+        message: String,
+    },
     CatalogDropInsert(char),
     CatalogDropBackspace,
     CatalogDropClear,
     CatalogDropConfirm,
     CatalogDropCancel,
+    CatalogEditorCancel,
+    CatalogEditorMove(isize),
+    CatalogEditorSelect,
+    CatalogEditorFieldNext,
+    CatalogEditorFieldPrevious,
+    CatalogEditorInsert(char),
+    CatalogEditorBackspace,
+    CatalogEditorDeletePreviousWord,
+    CatalogEditorDeleteToStart,
+    CatalogEditorDelete,
+    CatalogEditorMoveLeft,
+    CatalogEditorMoveRight,
+    CatalogEditorMoveHome,
+    CatalogEditorMoveEnd,
+    CatalogEditorToggleMaterializedViewData,
+    CatalogEditorPreview,
+    CatalogEditorApply,
+    CatalogEditorBack,
+    CatalogEditorConfirmInsert(char),
     ProfileConfirmDelete,
     ProfileCancelDelete,
     ProfileFieldNext,
@@ -664,6 +710,7 @@ pub enum Action {
     Quit,
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 pub enum Command {
     TestProfile {
@@ -697,10 +744,17 @@ pub enum Command {
         target: ExecutionTarget,
     },
     LoadCatalogPage(CatalogRequest),
+    LoadCatalogObjectDefinition(CatalogObjectDefinitionRequest),
     SearchCatalog(CatalogSearchRequest),
     CancelCatalogSearch,
     PlanCatalogDrop(CatalogDropRequest),
     ExecuteCatalogDrop(CatalogDropPlan),
+    PlanCatalogMutation {
+        request: CatalogMutationRequest,
+        draft: crate::model::catalog_editor::CatalogDraft,
+        baseline: Option<CatalogObjectDefinition>,
+    },
+    ExecuteCatalogMutation(CatalogMutationPlan),
     LoadRelationPreview(crate::model::relation::RelationRequest),
     LoadRelationDdl(crate::model::relation::RelationRequest),
     CancelRelationRequest(crate::model::relation::RelationRequest),

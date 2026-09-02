@@ -118,6 +118,10 @@ impl Keymap {
             self.pending = None;
             return map_profile_manager(event, app);
         }
+        if matches!(app.overlay, Some(Overlay::CatalogEditor)) {
+            self.pending = None;
+            return map_catalog_editor(event, app);
+        }
         if is_relation_cell_editor(app) {
             self.pending = None;
             return map_relation_data(event, app);
@@ -256,6 +260,20 @@ impl Keymap {
                 KeyCode::Char(character) if event.modifiers.is_empty() => {
                     Some(Action::CatalogDropInsert(character))
                 }
+                _ => None,
+            };
+        }
+        if matches!(
+            app.overlay,
+            Some(Overlay::CatalogEditorDestructiveConfirm { .. })
+        ) {
+            return match event.code {
+                KeyCode::Enter => Some(Action::CatalogEditorApply),
+                KeyCode::Esc => Some(Action::CatalogEditorCancel),
+                KeyCode::Char(character) if event.modifiers.is_empty() => {
+                    Some(Action::CatalogEditorConfirmInsert(character))
+                }
+                KeyCode::Backspace => Some(Action::CatalogEditorBackspace),
                 _ => None,
             };
         }
@@ -1029,6 +1047,69 @@ impl Keymap {
     }
 }
 
+fn map_catalog_editor(event: KeyEvent, app: &App) -> Option<Action> {
+    let editor = app.catalog_editor.as_ref()?;
+    if editor.is_busy() {
+        return match event.code {
+            KeyCode::Esc => Some(Action::CatalogEditorCancel),
+            _ => None,
+        };
+    }
+    match editor.page {
+        crate::model::catalog_editor::CatalogEditorPage::ObjectPicker => match event.code {
+            KeyCode::Up | KeyCode::Char('k') => Some(Action::CatalogEditorMove(-1)),
+            KeyCode::Down | KeyCode::Char('j') => Some(Action::CatalogEditorMove(1)),
+            KeyCode::Enter => Some(Action::CatalogEditorSelect),
+            KeyCode::Esc | KeyCode::Char('q') => Some(Action::CatalogEditorCancel),
+            _ => None,
+        },
+        crate::model::catalog_editor::CatalogEditorPage::Form => match event.code {
+            KeyCode::Esc => Some(Action::CatalogEditorCancel),
+            KeyCode::Tab | KeyCode::Down => Some(Action::CatalogEditorFieldNext),
+            KeyCode::BackTab | KeyCode::Up => Some(Action::CatalogEditorFieldPrevious),
+            KeyCode::Enter => Some(Action::CatalogEditorPreview),
+            KeyCode::Char(' ') if event.modifiers.is_empty() => {
+                let toggle_data = editor.mode
+                    == crate::db::catalog_mutation::CatalogMutationMode::Create
+                    && matches!(
+                        editor.draft.as_ref(),
+                        Some(crate::model::catalog_editor::CatalogDraft::MaterializedView(draft))
+                            if draft.selected_field == 5
+                    );
+                Some(if toggle_data {
+                    Action::CatalogEditorToggleMaterializedViewData
+                } else {
+                    Action::CatalogEditorInsert(' ')
+                })
+            }
+            KeyCode::Char(character) if event.modifiers.is_empty() => {
+                Some(Action::CatalogEditorInsert(character))
+            }
+            KeyCode::Backspace => Some(Action::CatalogEditorBackspace),
+            KeyCode::Delete => Some(Action::CatalogEditorDelete),
+            KeyCode::Left => Some(Action::CatalogEditorMoveLeft),
+            KeyCode::Right => Some(Action::CatalogEditorMoveRight),
+            KeyCode::Home => Some(Action::CatalogEditorMoveHome),
+            KeyCode::End => Some(Action::CatalogEditorMoveEnd),
+            KeyCode::Char('w') if event.modifiers == KeyModifiers::CONTROL => {
+                Some(Action::CatalogEditorDeletePreviousWord)
+            }
+            KeyCode::Char('u') if event.modifiers == KeyModifiers::CONTROL => {
+                Some(Action::CatalogEditorDeleteToStart)
+            }
+            _ => None,
+        },
+        crate::model::catalog_editor::CatalogEditorPage::SqlPreview => match event.code {
+            KeyCode::Enter => Some(Action::CatalogEditorApply),
+            KeyCode::Esc => Some(Action::CatalogEditorBack),
+            _ => None,
+        },
+        crate::model::catalog_editor::CatalogEditorPage::Loading => {
+            (event.code == KeyCode::Esc).then_some(Action::CatalogEditorCancel)
+        }
+    }
+}
+
 fn pending_is_valid(pending: &PendingState, app: &App, _now: Instant, generation: u64) -> bool {
     pending.focus == app.focus
         && pending.editor_mode == app.active_editor_mode()
@@ -1190,6 +1271,24 @@ pub fn map_paste(value: String, app: &App) -> Vec<Action> {
             .then(|| Action::ProfilePaste(ProfileInput::from(value)))
             .into_iter()
             .collect();
+    }
+    if app.overlay == Some(Overlay::CatalogEditor) {
+        let editable = app.catalog_editor.as_ref().is_some_and(|editor| {
+            editor.page == crate::model::catalog_editor::CatalogEditorPage::Form
+                && !editor.is_busy()
+                && matches!(
+                    editor.draft,
+                    Some(
+                        crate::model::catalog_editor::CatalogDraft::Schema(_)
+                            | crate::model::catalog_editor::CatalogDraft::Sequence(_)
+                    )
+                )
+        });
+        return if editable {
+            value.chars().map(Action::CatalogEditorInsert).collect()
+        } else {
+            Vec::new()
+        };
     }
     if app.overlay.is_some() {
         return Vec::new();
@@ -1563,8 +1662,24 @@ fn map_explorer(code: KeyCode, app: &App) -> Option<Action> {
         KeyCode::Char('/') => return Some(Action::ExplorerFindOpen),
         KeyCode::Char('f') => return Some(Action::ExplorerSearchOpen),
         KeyCode::Char('n') => return Some(Action::ProfileStartNew),
+        KeyCode::Char('a') => {
+            return crate::help::shortcut_is_available_in_app(
+                app,
+                crate::help::HelpShortcutId::ExplorerCreateCatalog,
+            )
+            .then_some(Action::OpenCatalogCreate);
+        }
         KeyCode::Char('e') => {
-            return selected_profile.map(|profile_id| Action::ProfileStartEdit { profile_id });
+            let id = if matches!(
+                app.explorer.normalized.selected,
+                Some(ExplorerNodeId::Profile(_))
+            ) {
+                crate::help::HelpShortcutId::ExplorerEditProfile
+            } else {
+                crate::help::HelpShortcutId::ExplorerEditCatalog
+            };
+            return crate::help::shortcut_is_available_in_app(app, id)
+                .then_some(Action::OpenCatalogEdit);
         }
         KeyCode::Char('d') => {
             return match app.explorer.normalized.selected.as_ref() {

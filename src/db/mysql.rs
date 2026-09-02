@@ -36,6 +36,7 @@ use super::{
         ObjectGroup, OptionalMetadata, QualifiedName, RelationDdl, finalize_keyset_page,
     },
     catalog_drop::{CatalogDropError, CatalogDropPlan, CatalogDropRequest},
+    catalog_mutation::CatalogMutationCapabilities,
     ddl::{DdlSection, assemble_ddl},
     mutation::{InputValue, MutationResult, RelationMutation, RelationMutationRequest},
     query::{ColumnMeta, QueryOutcome, QueryOutcomeAccumulator, RELATION_PREVIEW_LIMIT, ResultSet},
@@ -271,6 +272,10 @@ impl MySqlAdapter {
             },
             supports_lazy_children: true,
         }
+    }
+
+    pub fn catalog_mutation_capabilities() -> CatalogMutationCapabilities {
+        CatalogMutationCapabilities::default()
     }
 
     pub(crate) async fn transaction_backend(

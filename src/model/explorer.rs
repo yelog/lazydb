@@ -7,6 +7,7 @@ use crate::db::catalog::{
     CatalogCompleteness, CatalogCount, CatalogCursor, CatalogEntry, CatalogId, CatalogKind,
     CatalogRequest, CatalogSearchHit, CatalogTarget, ObjectGroup, search_text_matches,
 };
+use crate::db::catalog_mutation::CatalogMutationAnchor;
 use crate::profile::DatabaseKind;
 
 fn group_label(group: ObjectGroup) -> &'static str {
@@ -87,6 +88,49 @@ pub enum ExplorerNodeId {
     Empty {
         owner: ExplorerOwnerId,
     },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ExplorerMutationIntent {
+    EditProfile(Uuid),
+    Create(CatalogMutationAnchor),
+    Edit(CatalogMutationAnchor),
+}
+
+pub fn resolve_mutation_intent(
+    selected: Option<&ExplorerNodeId>,
+    edit: bool,
+) -> Option<ExplorerMutationIntent> {
+    match selected? {
+        ExplorerNodeId::Profile(profile_id) => {
+            if edit {
+                Some(ExplorerMutationIntent::EditProfile(*profile_id))
+            } else {
+                Some(ExplorerMutationIntent::Create(
+                    CatalogMutationAnchor::Profile {
+                        profile_id: *profile_id,
+                    },
+                ))
+            }
+        }
+        ExplorerNodeId::Catalog(id) => Some(if edit {
+            ExplorerMutationIntent::Edit(CatalogMutationAnchor::Catalog(id.clone()))
+        } else {
+            ExplorerMutationIntent::Create(CatalogMutationAnchor::Catalog(id.clone()))
+        }),
+        ExplorerNodeId::Group { parent, group } if !edit => Some(ExplorerMutationIntent::Create(
+            CatalogMutationAnchor::Group {
+                schema: parent.clone(),
+                group: *group,
+            },
+        )),
+        ExplorerNodeId::EmptyProfiles
+        | ExplorerNodeId::Others
+        | ExplorerNodeId::Status { .. }
+        | ExplorerNodeId::LoadMore { .. }
+        | ExplorerNodeId::Empty { .. }
+        | ExplorerNodeId::Group { .. } => None,
+    }
 }
 
 impl ExplorerNodeId {
@@ -778,6 +822,20 @@ impl ExplorerProfileState {
         let next = self.catalog_epoch.checked_add(1)?;
         self.catalog_epoch = next;
         Some(next)
+    }
+
+    pub fn invalidate_catalog_target(&mut self, target: &CatalogTarget) {
+        let owner = owner_for_target(self.catalog.profile_id(), target);
+        let next_cursor = match self.load_states.get(&owner) {
+            Some(ExplorerLoadState::Loaded { next_cursor })
+            | Some(ExplorerLoadState::Stale { next_cursor }) => next_cursor.clone(),
+            _ => None,
+        };
+        self.pending_requests.remove(&owner);
+        self.previous_load_states.remove(&owner);
+        self.load_errors.remove(&owner);
+        self.load_states
+            .insert(owner, ExplorerLoadState::Stale { next_cursor });
     }
 }
 

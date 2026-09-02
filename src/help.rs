@@ -30,6 +30,10 @@ pub enum ShortcutContext {
     RecordView,
     DataQueryInput,
     ProfileManagerForm,
+    CatalogEditorPicker,
+    CatalogEditorForm,
+    CatalogEditorPreview,
+    CatalogEditorBusy,
     ProfileManagerScope,
     ProfileManagerDelete,
     SqlEditorList,
@@ -68,6 +72,10 @@ const ALL_SHORTCUT_CONTEXTS: &[ShortcutContext] = &[
     ShortcutContext::RecordView,
     ShortcutContext::DataQueryInput,
     ShortcutContext::ProfileManagerForm,
+    ShortcutContext::CatalogEditorPicker,
+    ShortcutContext::CatalogEditorForm,
+    ShortcutContext::CatalogEditorPreview,
+    ShortcutContext::CatalogEditorBusy,
     ShortcutContext::ProfileManagerScope,
     ShortcutContext::ProfileManagerDelete,
     ShortcutContext::SqlEditorList,
@@ -109,6 +117,19 @@ fn shortcut_context_with_overlay(app: &App, include_help: bool) -> ShortcutConte
                         }
                     }
                 }
+                Overlay::CatalogEditor => match app.catalog_editor.as_ref() {
+                    Some(editor) if editor.is_busy() => ShortcutContext::CatalogEditorBusy,
+                    Some(editor) => match editor.page {
+                        crate::model::catalog_editor::CatalogEditorPage::ObjectPicker => {
+                            ShortcutContext::CatalogEditorPicker
+                        }
+                        crate::model::catalog_editor::CatalogEditorPage::SqlPreview => {
+                            ShortcutContext::CatalogEditorPreview
+                        }
+                        _ => ShortcutContext::CatalogEditorForm,
+                    },
+                    None => ShortcutContext::CatalogEditorBusy,
+                },
                 Overlay::SqlEditorList(_) => ShortcutContext::SqlEditorList,
                 Overlay::ProfileAccess { .. } => ShortcutContext::ProfileAccess,
                 Overlay::Message { .. } => ShortcutContext::Message,
@@ -128,6 +149,9 @@ fn shortcut_context_with_overlay(app: &App, include_help: bool) -> ShortcutConte
                 Overlay::DeleteConsole { .. } => ShortcutContext::DeleteConsoleConfirmation,
                 Overlay::PageSizeSelector { .. } => ShortcutContext::PageSizeSelector,
                 Overlay::CatalogDropConfirm { .. } => ShortcutContext::CatalogDropConfirmation,
+                Overlay::CatalogEditorDestructiveConfirm { .. } => {
+                    ShortcutContext::CatalogEditorPreview
+                }
                 Overlay::NotificationHistory(_) => ShortcutContext::NotificationHistory,
             };
         }
@@ -232,6 +256,8 @@ pub enum HelpShortcutId {
     ExplorerActivate,
     ExplorerNewProfile,
     ExplorerEditProfile,
+    ExplorerCreateCatalog,
+    ExplorerEditCatalog,
     ExplorerDeleteProfile,
     ExplorerConnect,
     ExplorerDisconnect,
@@ -360,6 +386,14 @@ pub enum HelpShortcutId {
     CatalogDropEdit,
     CatalogDropConfirm,
     CatalogDropCancel,
+    CatalogEditorMove,
+    CatalogEditorSelect,
+    CatalogEditorActivate,
+    CatalogEditorEdit,
+    CatalogEditorPreview,
+    CatalogEditorApply,
+    CatalogEditorBack,
+    CatalogEditorCancel,
     EditorComplete,
     EditorDeleteWord,
     RelationEditCell,
@@ -394,7 +428,8 @@ const fn footer_priority(id: HelpShortcutId) -> Option<u8> {
         | ProfileDeleteConfirm | SqlEditorListEdit | HelpEdit | ProfileAccessMove
         | MessageClose | SubstituteChoices | ExecutionConfirm | ManualCancelConfirm
         | TransactionChoices | ClearOutcomeConfirm | TargetMove | DeleteConsoleConfirm
-        | RelationEditApply | RelationVisualMove | PageSizeMove | CatalogDropEdit => 1,
+        | RelationEditApply | RelationVisualMove | PageSizeMove | CatalogDropEdit
+        | CatalogEditorMove => 1,
         ExplorerMoveUp
         | EditorRun
         | ResultsMoveDown
@@ -425,6 +460,11 @@ const fn footer_priority(id: HelpShortcutId) -> Option<u8> {
         | PageSizeCancel
         | CatalogDropConfirm
         | CatalogDropCancel
+        | CatalogEditorActivate
+        | CatalogEditorPreview
+        | CatalogEditorApply
+        | CatalogEditorBack
+        | CatalogEditorCancel
         | RelationRedo
         | RelationRollback => 2,
         ExplorerCollapse
@@ -525,6 +565,9 @@ enum ShortcutRequirement {
     RelationEditAvailable,
     ProfileScopeReady,
     ActiveSqlConsole,
+    ProfileEditAvailable,
+    CatalogCreateAvailable,
+    CatalogEditAvailable,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -902,7 +945,30 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
         "open table preview / activate"
     ),
     row!(ExplorerNewProfile, [Explorer], "n", "new connection"),
-    row!(ExplorerEditProfile, [Explorer], "e", "edit connection"),
+    row!(
+        ExplorerEditProfile,
+        [Explorer],
+        "e",
+        "edit connection",
+        ProfileEditAvailable,
+        executable
+    ),
+    row!(
+        ExplorerCreateCatalog,
+        [Explorer],
+        "a",
+        "add object",
+        CatalogCreateAvailable,
+        executable
+    ),
+    row!(
+        ExplorerEditCatalog,
+        [Explorer],
+        "e",
+        "edit selected object",
+        CatalogEditAvailable,
+        executable
+    ),
     row!(ExplorerDeleteProfile, [Explorer], "d", "delete connection"),
     row!(ExplorerConnect, [Explorer], "c", "connect"),
     row!(ExplorerDisconnect, [Explorer], "x", "disconnect"),
@@ -1954,6 +2020,62 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
         display
     ),
     row!(
+        CatalogEditorMove,
+        [CatalogEditorPicker],
+        "j/k",
+        "move through object types",
+        display
+    ),
+    row!(
+        CatalogEditorSelect,
+        [CatalogEditorPicker],
+        "Enter",
+        "choose object type",
+        display
+    ),
+    row!(
+        CatalogEditorActivate,
+        [CatalogEditorPicker],
+        "Enter",
+        "choose object type",
+        display
+    ),
+    row!(
+        CatalogEditorEdit,
+        [CatalogEditorForm],
+        "type / Backspace",
+        "edit object name",
+        display
+    ),
+    row!(
+        CatalogEditorPreview,
+        [CatalogEditorForm],
+        "Enter",
+        "preview mutation",
+        display
+    ),
+    row!(
+        CatalogEditorApply,
+        [CatalogEditorPreview],
+        "Enter",
+        "apply mutation",
+        display
+    ),
+    row!(
+        CatalogEditorBack,
+        [CatalogEditorPreview],
+        "Esc",
+        "return to form",
+        display
+    ),
+    row!(
+        CatalogEditorCancel,
+        [CatalogEditorForm, CatalogEditorPicker, CatalogEditorBusy],
+        "Esc",
+        "cancel editor",
+        display
+    ),
+    row!(
         RelationBusyData,
         [RelationDataBusy],
         "p",
@@ -1979,6 +2101,9 @@ pub struct ShortcutCapabilities {
     record_view_available: bool,
     profile_scope_loading: bool,
     active_sql_console: bool,
+    pub(crate) profile_edit_available: bool,
+    pub(crate) catalog_create_available: bool,
+    pub(crate) catalog_edit_available: bool,
 }
 
 impl ShortcutCapabilities {
@@ -1992,6 +2117,9 @@ impl ShortcutCapabilities {
             record_view_available: true,
             profile_scope_loading: false,
             active_sql_console: true,
+            profile_edit_available: false,
+            catalog_create_available: false,
+            catalog_edit_available: false,
         }
     }
 }
@@ -2015,6 +2143,8 @@ pub(crate) fn shortcut_capabilities(app: &App) -> ShortcutCapabilities {
                 && tab.edit.as_ref().is_some_and(|edit| !matches!(edit.mode, RelationGridMode::Busy))
     );
     let (rows, columns) = app.active_grid_dimensions_for_input();
+    let (profile_edit_available, catalog_create_available, catalog_edit_available) =
+        catalog_editor_capabilities(app);
     ShortcutCapabilities {
         relation_data: matches!(app.tabs.get(app.active_tab),
         Some(WorkspaceTab::Relation(tab)) if tab.view == RelationView::Data),
@@ -2028,7 +2158,54 @@ pub(crate) fn shortcut_capabilities(app: &App) -> ShortcutCapabilities {
             .as_ref()
             .is_some_and(|manager| manager.scope_discovery_loading()),
         active_sql_console: app.active_console_opt().is_some(),
+        profile_edit_available,
+        catalog_create_available,
+        catalog_edit_available,
     }
+}
+
+fn catalog_editor_capabilities(app: &App) -> (bool, bool, bool) {
+    use crate::db::catalog_mutation::CatalogMutationAnchor;
+    use crate::model::explorer::ExplorerNodeId;
+
+    let Some(selected) = app.explorer.normalized.selected.as_ref() else {
+        return (false, false, false);
+    };
+    let Some(profile_id) = selected.profile_id() else {
+        return (false, false, false);
+    };
+    let Some(profile) = app.profiles.iter().find(|profile| profile.id == profile_id) else {
+        return (false, false, false);
+    };
+    let profile_edit_available = matches!(selected, ExplorerNodeId::Profile(_));
+    if profile.kind != crate::profile::DatabaseKind::Postgres {
+        return (profile_edit_available, false, false);
+    }
+    let capabilities = crate::db::postgres::PostgresAdapter::catalog_mutation_capabilities();
+    let entry = match selected {
+        ExplorerNodeId::Catalog(id) => app
+            .explorer
+            .normalized
+            .profiles
+            .get(&profile_id)
+            .and_then(|state| state.catalog.get(id)),
+        _ => None,
+    };
+    let anchor = match selected {
+        ExplorerNodeId::Profile(id) => CatalogMutationAnchor::Profile { profile_id: *id },
+        ExplorerNodeId::Catalog(id) => CatalogMutationAnchor::Catalog(id.clone()),
+        ExplorerNodeId::Group { parent, group } => CatalogMutationAnchor::Group {
+            schema: parent.clone(),
+            group: *group,
+        },
+        _ => return (profile_edit_available, false, false),
+    };
+    let create = capabilities
+        .create_options(&anchor, entry)
+        .is_ok_and(|options| !options.is_empty());
+    let edit = matches!(selected, ExplorerNodeId::Catalog(_))
+        && capabilities.can_edit(&anchor, entry).unwrap_or(false);
+    (profile_edit_available, create, edit)
 }
 
 fn available(shortcut: &Shortcut, capabilities: ShortcutCapabilities) -> bool {
@@ -2060,6 +2237,9 @@ fn available(shortcut: &Shortcut, capabilities: ShortcutCapabilities) -> bool {
         ShortcutRequirement::RelationEditAvailable => capabilities.relation_edit_available,
         ShortcutRequirement::ProfileScopeReady => !capabilities.profile_scope_loading,
         ShortcutRequirement::ActiveSqlConsole => capabilities.active_sql_console,
+        ShortcutRequirement::ProfileEditAvailable => capabilities.profile_edit_available,
+        ShortcutRequirement::CatalogCreateAvailable => capabilities.catalog_create_available,
+        ShortcutRequirement::CatalogEditAvailable => capabilities.catalog_edit_available,
     }
 }
 
@@ -2376,6 +2556,10 @@ pub(crate) fn context_name(context: ShortcutContext) -> &'static str {
         ShortcutContext::ProfileManagerForm
         | ShortcutContext::ProfileManagerScope
         | ShortcutContext::ProfileManagerDelete => "PROFILE MANAGER",
+        ShortcutContext::CatalogEditorPicker => "CATALOG PICKER",
+        ShortcutContext::CatalogEditorForm => "CATALOG FORM",
+        ShortcutContext::CatalogEditorPreview => "CATALOG PREVIEW",
+        ShortcutContext::CatalogEditorBusy => "CATALOG BUSY",
         ShortcutContext::SqlEditorList => "SQL EDITORS",
         ShortcutContext::Help => "HELP",
         ShortcutContext::ProfileAccess => "PROFILE ACCESS",
@@ -2529,6 +2713,44 @@ mod tests {
                 .any(|row| row.id == HelpShortcutId::RelationWhere)
         );
         assert!(available.len() > unavailable.len());
+    }
+
+    #[test]
+    fn catalog_shortcuts_require_selected_capabilities() {
+        let unavailable = shortcuts(ShortcutContext::Explorer, ShortcutCapabilities::default());
+        assert!(!unavailable.iter().any(|row| matches!(
+            row.id,
+            HelpShortcutId::ExplorerCreateCatalog
+                | HelpShortcutId::ExplorerEditCatalog
+                | HelpShortcutId::ExplorerEditProfile
+        )));
+
+        let available = ShortcutCapabilities {
+            profile_edit_available: true,
+            catalog_create_available: true,
+            catalog_edit_available: true,
+            ..ShortcutCapabilities::default()
+        };
+        let rows = shortcuts(ShortcutContext::Explorer, available);
+        assert!(
+            rows.iter()
+                .any(|row| row.id == HelpShortcutId::ExplorerCreateCatalog)
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.id == HelpShortcutId::ExplorerEditCatalog)
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.id == HelpShortcutId::ExplorerEditProfile)
+        );
+        assert_eq!(
+            rows.iter()
+                .find(|row| row.id == HelpShortcutId::ExplorerCreateCatalog)
+                .unwrap()
+                .description,
+            "add object"
+        );
     }
 
     #[test]

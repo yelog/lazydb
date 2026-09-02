@@ -115,6 +115,51 @@ fn frontend_explorer_search_opens_freshly_after_close() {
 }
 
 #[test]
+fn targeted_refresh_invalidates_one_owner_and_preserves_stale_rows() {
+    let (mut app, profile) = connected_app();
+    let database = install_database(&mut app, &profile);
+    let schema = install_schema(&mut app, &profile, &database);
+    let target = CatalogTarget::objects(schema.id.clone(), ObjectGroup::Tables).unwrap();
+    let request = load(&mut app, target.clone());
+    let table = relation(profile.id, &schema.id, "users");
+    app.update(Action::CatalogPageLoaded(page(
+        &request,
+        vec![table.clone()],
+        None,
+    )));
+
+    let commands = app.commands_for_catalog_targets(profile.id, std::slice::from_ref(&target));
+    assert!(
+        matches!(commands.as_slice(), [Command::LoadCatalogPage(request)] if request.key.target == target)
+    );
+    assert_eq!(catalog(&app, profile.id).get(&table.id), Some(&table));
+    assert!(matches!(
+        load_state(
+            &app,
+            lazydb::model::explorer::owner_for_target(profile.id, &target)
+        ),
+        ExplorerLoadState::Loading { .. }
+    ));
+}
+
+#[test]
+fn targeted_refresh_deduplicates_targets_and_increments_generation_once() {
+    let (mut app, profile) = connected_app();
+    let before = app.explorer.catalog_generation;
+    let target = CatalogTarget::Databases;
+    let commands = app.commands_for_catalog_targets(profile.id, &[target.clone(), target.clone()]);
+    assert_eq!(
+        commands
+            .iter()
+            .filter(|command| matches!(command, Command::LoadCatalogPage(_)))
+            .count(),
+        1
+    );
+    app.explorer.catalog_generation = before.saturating_add(1);
+    assert_eq!(app.explorer.catalog_generation, before + 1);
+}
+
+#[test]
 fn search_edit_clears_query_metadata_and_empty_query_is_neutral() {
     let (mut app, _) = connected_app();
     app.focus = lazydb::model::workspace::Focus::Explorer;

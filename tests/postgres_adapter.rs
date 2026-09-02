@@ -11,13 +11,137 @@ use lazydb::{
             ConstraintMembership, ConstraintMetadata, IndexMetadata, NamespaceModel, ObjectGroup,
             OptionalMetadata,
         },
+        catalog_mutation::{
+            CatalogMutationAnchor, CatalogMutationAvailability, CatalogMutationMode,
+            CatalogMutationRequest, CatalogObjectDefinition, CatalogObjectDefinitionRequest,
+            CatalogObjectType, ConstraintDefinitionKind, SequenceBound,
+        },
         postgres::{self, PostgresAdapter},
         value::CellValue,
     },
     identity::ConnectionIdentity,
+    model::{
+        catalog_editor::{CatalogDraft, ColumnDraft, DraftRowState},
+        execution_target::ExecutionTarget,
+    },
     profile::{CatalogScope, CatalogSelection, DatabaseScope, import_connection_url},
 };
 use uuid::Uuid;
+
+#[test]
+fn index_mutation_capability_is_advertised_for_relations() {
+    let capabilities = lazydb::db::postgres::PostgresAdapter::catalog_mutation_capabilities();
+    assert!(capabilities.create.iter().any(|option| {
+        option.object_type
+            == lazydb::db::catalog_mutation::CatalogObjectType::Catalog(
+                lazydb::db::catalog::CatalogKind::Index,
+            )
+    }));
+    assert!(capabilities.edit.iter().any(|option| {
+        option.object_type
+            == lazydb::db::catalog_mutation::CatalogObjectType::Catalog(
+                lazydb::db::catalog::CatalogKind::Index,
+            )
+    }));
+}
+
+#[test]
+fn materialized_view_mutation_create_and_native_safe_edit_never_replaces_definition() {
+    use lazydb::{
+        db::catalog_mutation::{
+            CatalogMutationAnchor, CatalogMutationMode, CatalogMutationRequest,
+            CatalogObjectDefinition, MaterializedViewDefinition,
+        },
+        model::catalog_editor::{CatalogDraft, MaterializedViewDraft},
+    };
+    let profile = Uuid::new_v4();
+    let connection = ConnectionIdentity {
+        profile_id: profile,
+        generation: 1,
+    };
+    let schema = CatalogId::new(profile, CatalogKind::Schema, ["app", "public"]);
+    let mut create = MaterializedViewDraft {
+        name: "mv".into(),
+        schema: "public".into(),
+        owner: "alice".into(),
+        comment: "note".into(),
+        query: "SELECT 1".into(),
+        tablespace: "fast".into(),
+        with_data: false,
+        selected_field: 0,
+        query_editable: true,
+    };
+    let request = CatalogMutationRequest::new(
+        connection,
+        1,
+        1,
+        CatalogMutationMode::Create,
+        CatalogMutationAnchor::Catalog(schema.clone()),
+        CatalogObjectType::Catalog(CatalogKind::MaterializedView),
+    )
+    .unwrap();
+    let plan = PostgresAdapter::plan_catalog_mutation(
+        request,
+        CatalogDraft::MaterializedView(create.clone()),
+        None,
+    )
+    .unwrap();
+    assert!(
+        plan.sql()
+            .contains("CREATE MATERIALIZED VIEW \"public\".\"mv\"")
+    );
+    assert!(plan.sql().contains("WITH NO DATA"));
+    create.name = "renamed".into();
+    create.query = "SELECT 999".into();
+    let object = CatalogId::new(
+        profile,
+        CatalogKind::MaterializedView,
+        ["app", "public", "mv", "42"],
+    );
+    let request = CatalogMutationRequest::new(
+        connection,
+        2,
+        1,
+        CatalogMutationMode::Edit,
+        CatalogMutationAnchor::Catalog(object),
+        CatalogObjectType::Catalog(CatalogKind::MaterializedView),
+    )
+    .unwrap();
+    let baseline = CatalogObjectDefinition::MaterializedView(MaterializedViewDefinition {
+        database: "app".into(),
+        schema: "public".into(),
+        name: "mv".into(),
+        owner: "alice".into(),
+        comment: OptionalMetadata::Supported(Some("note".into())),
+        query: "SELECT 1".into(),
+        tablespace: OptionalMetadata::Supported(Some("fast".into())),
+        populated: false,
+        baseline_fingerprint: "sha256:x".into(),
+    });
+    let plan = PostgresAdapter::plan_catalog_mutation(
+        request,
+        CatalogDraft::MaterializedView(create),
+        Some(baseline),
+    )
+    .unwrap();
+    assert!(plan.sql().contains("RENAME TO \"renamed\""));
+    assert!(!plan.sql().contains("SELECT 999"));
+    assert!(!plan.sql().contains("CREATE MATERIALIZED VIEW"));
+}
+
+#[test]
+fn postgres_constraint_definition_uses_authoritative_constraint_attributes() {
+    let source = include_str!("../src/db/postgres.rs");
+    assert!(source.contains("con.condeferrable"));
+    assert!(source.contains("con.convalidated"));
+    assert!(source.contains("con.connoinherit"));
+    assert!(source.contains("confmatchtype"));
+    assert!(source.contains("confupdtype"));
+    assert!(source.contains("confdeltype"));
+    assert!(source.contains("VALIDATE CONSTRAINT"));
+    assert!(postgres::CATALOG_CONSTRAINT_DEFINITION_SQL.contains("confmatchtype"));
+    assert!(postgres::CATALOG_CONSTRAINT_DEFINITION_SQL.contains("connoinherit"));
+}
 
 #[test]
 fn postgres_catalog_capabilities_are_truthful_before_lazy_pages() {
@@ -48,6 +172,103 @@ fn postgres_catalog_capabilities_are_truthful_before_lazy_pages() {
             supports_lazy_children: true,
         }
     );
+}
+
+#[test]
+fn postgres_mutation_capabilities_expose_only_schema_slice() {
+    let capabilities = PostgresAdapter::catalog_mutation_capabilities();
+    assert_eq!(
+        capabilities.create_availability(CatalogObjectType::Catalog(CatalogKind::Schema)),
+        Some(CatalogMutationAvailability::Available)
+    );
+    assert_eq!(
+        capabilities.edit_availability(CatalogObjectType::Catalog(CatalogKind::Schema)),
+        Some(CatalogMutationAvailability::Available)
+    );
+    assert_eq!(
+        capabilities.create_availability(CatalogObjectType::Catalog(CatalogKind::Database)),
+        None
+    );
+    assert_eq!(
+        capabilities
+            .profile_create
+            .iter()
+            .find(|option| option.object_type == CatalogObjectType::Catalog(CatalogKind::Database))
+            .map(|option| option.availability),
+        Some(CatalogMutationAvailability::Available)
+    );
+    assert_eq!(
+        capabilities
+            .profile_create
+            .iter()
+            .find(|option| option.object_type == CatalogObjectType::LoginRole)
+            .map(|option| option.availability),
+        Some(CatalogMutationAvailability::Available)
+    );
+    assert_eq!(
+        capabilities
+            .profile_create
+            .iter()
+            .find(|option| option.object_type == CatalogObjectType::Role)
+            .map(|option| option.availability),
+        Some(CatalogMutationAvailability::Available)
+    );
+    assert!(
+        capabilities
+            .create_options(
+                &lazydb::db::catalog_mutation::CatalogMutationAnchor::Profile {
+                    profile_id: Uuid::new_v4()
+                },
+                None
+            )
+            .unwrap()
+            == vec![
+                CatalogObjectType::Catalog(CatalogKind::Database),
+                CatalogObjectType::LoginRole,
+                CatalogObjectType::Role,
+            ]
+    );
+    assert_eq!(
+        capabilities.create_availability(CatalogObjectType::Catalog(CatalogKind::View)),
+        Some(CatalogMutationAvailability::Available)
+    );
+    assert_eq!(
+        capabilities.edit_availability(CatalogObjectType::Catalog(CatalogKind::View)),
+        Some(CatalogMutationAvailability::Available)
+    );
+}
+
+#[test]
+fn schema_definition_shape_includes_authoritative_baseline() {
+    let definition = lazydb::db::catalog_mutation::SchemaDefinition {
+        database: "app".to_owned(),
+        name: "public".to_owned(),
+        owner: "alice".to_owned(),
+        comment: OptionalMetadata::Supported(Some("owned schema".to_owned())),
+        baseline_fingerprint: "sha256:baseline".to_owned(),
+    };
+    assert_eq!(definition.database, "app");
+    assert_eq!(definition.name, "public");
+    assert_eq!(definition.owner, "alice");
+    assert_eq!(definition.baseline_fingerprint, "sha256:baseline");
+}
+
+#[test]
+fn table_definition_shape_includes_ordered_column_attributes_and_placeholders() {
+    let definition = lazydb::db::catalog_mutation::TableDefinition {
+        database: "app".into(),
+        schema: "public".into(),
+        name: "events".into(),
+        owner: "alice".into(),
+        comment: OptionalMetadata::Supported(Some("event log".into())),
+        columns: vec![],
+        indexes: vec![],
+        constraints: vec![],
+        baseline_fingerprint: "sha256:table".into(),
+    };
+    assert_eq!(definition.schema, "public");
+    assert!(definition.indexes.is_empty());
+    assert!(definition.constraints.is_empty());
 }
 
 #[test]
@@ -106,6 +327,32 @@ fn postgres_catalog_search_sql_pushes_literal_matching_scope_order_and_limit() {
 fn postgres_version_support_starts_at_twelve() {
     assert!(!postgres::supports_server_version(119_999));
     assert!(postgres::supports_server_version(120_000));
+}
+
+#[test]
+fn postgres_sequence_mutation_is_advertised_without_sequence_children() {
+    let profile = uuid::Uuid::new_v4();
+    let caps = lazydb::db::postgres::PostgresAdapter::catalog_mutation_capabilities();
+    assert!(
+        caps.create_availability(lazydb::db::catalog_mutation::CatalogObjectType::Catalog(
+            lazydb::db::catalog::CatalogKind::Sequence
+        ))
+        .is_some()
+    );
+    assert!(
+        caps.create_options(
+            &lazydb::db::catalog_mutation::CatalogMutationAnchor::Catalog(
+                lazydb::db::catalog::CatalogId::new(
+                    profile,
+                    lazydb::db::catalog::CatalogKind::Sequence,
+                    ["app", "public", "seq", "1"]
+                )
+            ),
+            None
+        )
+        .unwrap()
+        .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -178,6 +425,44 @@ async fn connects_and_decodes_common_postgres_values_when_configured() {
         .unwrap_err();
     assert_eq!(error.category, lazydb::db::ErrorCategory::Sql);
     database.close().await;
+}
+
+#[tokio::test]
+async fn privileged_role_mutation_is_gated_by_environment_and_createrole() {
+    let Ok(url) = std::env::var("LAZYDB_TEST_POSTGRES_URL") else {
+        eprintln!("skipping role mutation: LAZYDB_TEST_POSTGRES_URL is not set");
+        return;
+    };
+    let imported = import_connection_url(&url, Some("postgres-role-test")).unwrap();
+    let database =
+        DatabaseConnection::connect(&imported.profile, imported.transient_password.as_ref())
+            .await
+            .unwrap();
+    let privilege = database
+        .execute("SELECT rolcreaterole FROM pg_roles WHERE rolname = current_user")
+        .await
+        .unwrap();
+    let can_create = matches!(
+        privilege
+            .result_sets
+            .last()
+            .and_then(|set| set.rows.first())
+            .and_then(|row| row.first()),
+        Some(CellValue::Boolean(true))
+    );
+    if !can_create {
+        eprintln!("skipping role mutation: current PostgreSQL role lacks CREATEROLE");
+        return;
+    }
+    let name = format!("lazydb_role_test_{}", Uuid::new_v4().simple());
+    database
+        .execute(&format!("CREATE ROLE \"{name}\" NOLOGIN"))
+        .await
+        .unwrap();
+    database
+        .execute(&format!("DROP ROLE \"{name}\""))
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -259,6 +544,812 @@ async fn materialized_view_structure_reports_truthful_ddl_and_native_kind_when_c
         .await
         .unwrap();
     database.close().await;
+}
+
+#[tokio::test]
+async fn serialized_postgres_catalog_mutations_round_trip_catalog_definitions() {
+    let Ok(url) = std::env::var("LAZYDB_TEST_POSTGRES_URL") else {
+        eprintln!("skipping serialized catalog mutations: LAZYDB_TEST_POSTGRES_URL is not set");
+        return;
+    };
+    let imported = import_connection_url(&url, Some("postgres-catalog-mutations")).unwrap();
+    let profile_id = imported.profile.id;
+    let database =
+        DatabaseConnection::connect(&imported.profile, imported.transient_password.as_ref())
+            .await
+            .unwrap();
+    let database_name = database.probe().await.unwrap().database;
+    let suffix = Uuid::new_v4().simple().to_string();
+    let schema_name = format!("lazydb_mutation_{suffix}");
+    let table_name = format!("events_{suffix}");
+    let parent_name = format!("parents_{suffix}");
+    let index_name = format!("events_value_idx_{suffix}");
+    let primary_name = format!("events_pk_{suffix}");
+    let unique_name = format!("events_value_key_{suffix}");
+    let foreign_name = format!("events_parent_fk_{suffix}");
+    let check_name = format!("events_value_check_{suffix}");
+    let view_name = format!("events_view_{suffix}");
+    let materialized_name = format!("events_snapshot_{suffix}");
+    let sequence_name = format!("events_sequence_{suffix}");
+    let qschema = postgres::quote_identifier(&schema_name);
+    let mut cleanup = vec![
+        format!("DROP SCHEMA IF EXISTS {qschema} CASCADE"),
+        format!("DROP SEQUENCE IF EXISTS {qschema}.{sequence_name}"),
+        format!("DROP TABLE IF EXISTS {qschema}.{parent_name} CASCADE"),
+        format!("DROP TABLE IF EXISTS {qschema}.{table_name} CASCADE"),
+        format!("DROP VIEW IF EXISTS {qschema}.{view_name}"),
+        format!("DROP MATERIALIZED VIEW IF EXISTS {qschema}.{materialized_name}"),
+    ];
+
+    let result = AssertUnwindSafe(async {
+        let owner = scalar_text(&database, "SELECT current_user").await;
+        let schema_anchor = CatalogId::new(
+            profile_id,
+            CatalogKind::Schema,
+            [&database_name, &schema_name],
+        );
+        let database_anchor = CatalogId::new(profile_id, CatalogKind::Database, [&database_name]);
+        apply_plan(
+            &database,
+            mutation_request(
+                profile_id,
+                CatalogMutationMode::Create,
+                CatalogMutationAnchor::Catalog(database_anchor.clone()),
+                CatalogObjectType::Catalog(CatalogKind::Schema),
+            ),
+            CatalogDraft::Schema(lazydb::model::catalog_editor::SchemaDraft {
+                name: schema_name.clone().into(),
+                owner: owner.clone().into(),
+                comment: "created".into(),
+            }),
+        )
+        .await;
+        let schema_definition =
+            load_definition(&database, profile_id, schema_anchor.clone(), &database_name).await;
+        assert!(matches!(
+            schema_definition,
+            CatalogObjectDefinition::Schema(_)
+        ));
+
+        let parent_anchor = CatalogId::new(
+            profile_id,
+            CatalogKind::Table,
+            [&database_name, &schema_name, &parent_name, ""],
+        );
+        let table_anchor = CatalogId::new(
+            profile_id,
+            CatalogKind::Table,
+            [&database_name, &schema_name, &table_name, ""],
+        );
+        for (name, anchor) in [
+            (&parent_name, parent_anchor.clone()),
+            (&table_name, table_anchor.clone()),
+        ] {
+            apply_plan(
+                &database,
+                mutation_request(
+                    profile_id,
+                    CatalogMutationMode::Create,
+                    CatalogMutationAnchor::Group {
+                        schema: schema_anchor.clone(),
+                        group: ObjectGroup::Tables,
+                    },
+                    CatalogObjectType::Catalog(CatalogKind::Table),
+                ),
+                CatalogDraft::Table(lazydb::model::catalog_editor::TableDraft {
+                    name: name.clone().into(),
+                    schema: schema_name.clone().into(),
+                    owner: owner.clone().into(),
+                    comment: "table".into(),
+                    columns: vec![
+                        added_column("id", 1, "integer", false),
+                        added_column("value", 2, "text", true),
+                    ],
+                    selected_section: lazydb::model::catalog_editor::CatalogEditorSection::Columns,
+                    selected_column: 0,
+                    indexes: vec![],
+                    constraints: vec![],
+                }),
+            )
+            .await;
+            assert!(matches!(
+                load_definition(&database, profile_id, anchor, &database_name).await,
+                CatalogObjectDefinition::Table(_)
+            ));
+        }
+        let table = find_entry(
+            &database,
+            profile_id,
+            &table_name,
+            CatalogKind::Table,
+            &database_name,
+            &schema_name,
+        )
+        .await;
+        let parent = find_entry(
+            &database,
+            profile_id,
+            &parent_name,
+            CatalogKind::Table,
+            &database_name,
+            &schema_name,
+        )
+        .await;
+        apply_plan(
+            &database,
+            mutation_request(
+                profile_id,
+                CatalogMutationMode::Create,
+                CatalogMutationAnchor::Catalog(parent.id.clone()),
+                CatalogObjectType::Catalog(CatalogKind::PrimaryKey),
+            ),
+            CatalogDraft::Constraint(constraint_draft(
+                &database_name,
+                &schema_name,
+                &parent_name,
+                ConstraintDefinitionKind::PrimaryKey {
+                    columns: vec!["id".into()],
+                },
+                &format!("{parent_name}_pk"),
+            )),
+        )
+        .await;
+        let CatalogObjectDefinition::Table(mut table_definition) =
+            load_definition(&database, profile_id, table.id.clone(), &database_name).await
+        else {
+            panic!("table definition expected")
+        };
+        table_definition.comment = OptionalMetadata::Supported(Some("edited table".into()));
+        let mut table_draft =
+            lazydb::model::catalog_editor::TableDraft::from_definition(&table_definition);
+        table_draft.comment = "edited table".into();
+        apply_plan(
+            &database,
+            mutation_request(
+                profile_id,
+                CatalogMutationMode::Edit,
+                CatalogMutationAnchor::Catalog(table.id.clone()),
+                CatalogObjectType::Catalog(CatalogKind::Table),
+            ),
+            CatalogDraft::Table(table_draft),
+        )
+        .await;
+        assert!(matches!(
+            load_definition(&database, profile_id, table.id.clone(), &database_name).await,
+            CatalogObjectDefinition::Table(_)
+        ));
+
+        let CatalogObjectDefinition::Table(column_table) =
+            load_definition(&database, profile_id, table.id.clone(), &database_name).await
+        else {
+            panic!("table definition expected")
+        };
+        let mut column_draft =
+            lazydb::model::catalog_editor::TableDraft::from_definition(&column_table);
+        column_draft
+            .columns
+            .push(added_column("extra", 3, "integer", true));
+        apply_plan(
+            &database,
+            mutation_request(
+                profile_id,
+                CatalogMutationMode::Edit,
+                CatalogMutationAnchor::Catalog(table.id.clone()),
+                CatalogObjectType::Catalog(CatalogKind::Table),
+            ),
+            CatalogDraft::Table(column_draft),
+        )
+        .await;
+        let table = find_entry(
+            &database,
+            profile_id,
+            &table_name,
+            CatalogKind::Table,
+            &database_name,
+            &schema_name,
+        )
+        .await;
+        let column = find_child(
+            &database,
+            profile_id,
+            &table.id,
+            "extra",
+            CatalogKind::Column,
+            &database_name,
+            &schema_name,
+        )
+        .await;
+        assert!(matches!(
+            load_definition(&database, profile_id, column.id.clone(), &database_name).await,
+            CatalogObjectDefinition::Table(_)
+        ));
+
+        let index = apply_index(
+            &database,
+            profile_id,
+            &database_name,
+            &schema_name,
+            &table,
+            &index_name,
+            false,
+        )
+        .await;
+        assert!(matches!(
+            load_definition(&database, profile_id, index.id.clone(), &database_name).await,
+            CatalogObjectDefinition::Index(_)
+        ));
+        let mut index_definition =
+            match load_definition(&database, profile_id, index.id.clone(), &database_name).await {
+                CatalogObjectDefinition::Index(v) => v,
+                _ => unreachable!(),
+            };
+        index_definition.name = format!("{index_name}_renamed");
+        let index_draft =
+            lazydb::model::catalog_editor::IndexDraft::from_definition(&index_definition);
+        apply_plan(
+            &database,
+            mutation_request(
+                profile_id,
+                CatalogMutationMode::Edit,
+                CatalogMutationAnchor::Catalog(index.id.clone()),
+                CatalogObjectType::Catalog(CatalogKind::Index),
+            ),
+            CatalogDraft::Index(index_draft),
+        )
+        .await;
+
+        for (name, kind, draft) in [
+            (
+                primary_name.clone(),
+                CatalogKind::PrimaryKey,
+                constraint_draft(
+                    &database_name,
+                    &schema_name,
+                    &table_name,
+                    ConstraintDefinitionKind::PrimaryKey {
+                        columns: vec!["id".into()],
+                    },
+                    &primary_name,
+                ),
+            ),
+            (
+                unique_name.clone(),
+                CatalogKind::UniqueConstraint,
+                constraint_draft(
+                    &database_name,
+                    &schema_name,
+                    &table_name,
+                    ConstraintDefinitionKind::Unique {
+                        columns: vec!["value".into()],
+                    },
+                    &unique_name,
+                ),
+            ),
+            (
+                foreign_name.clone(),
+                CatalogKind::ForeignKey,
+                foreign_constraint(
+                    &database_name,
+                    &schema_name,
+                    &table_name,
+                    &parent_name,
+                    &foreign_name,
+                ),
+            ),
+            (
+                check_name.clone(),
+                CatalogKind::CheckConstraint,
+                constraint_draft(
+                    &database_name,
+                    &schema_name,
+                    &table_name,
+                    ConstraintDefinitionKind::Check {
+                        expression: "value IS NOT NULL".into(),
+                        no_inherit: false,
+                    },
+                    &check_name,
+                ),
+            ),
+        ] {
+            apply_plan(
+                &database,
+                mutation_request(
+                    profile_id,
+                    CatalogMutationMode::Create,
+                    CatalogMutationAnchor::Catalog(table.id.clone()),
+                    CatalogObjectType::Catalog(kind),
+                ),
+                CatalogDraft::Constraint(draft),
+            )
+            .await;
+            let entry = find_entry(
+                &database,
+                profile_id,
+                &name,
+                kind,
+                &database_name,
+                &schema_name,
+            )
+            .await;
+            assert!(matches!(
+                load_definition(&database, profile_id, entry.id.clone(), &database_name).await,
+                CatalogObjectDefinition::Constraint(_)
+            ));
+            cleanup.push(format!(
+                "ALTER TABLE {qschema}.{table_name} DROP CONSTRAINT IF EXISTS {}",
+                postgres::quote_identifier(&name)
+            ));
+        }
+        let view = apply_view(
+            &database,
+            profile_id,
+            &database_name,
+            &schema_name,
+            &table_name,
+            &view_name,
+            false,
+        )
+        .await;
+        assert!(matches!(
+            load_definition(&database, profile_id, view.id.clone(), &database_name).await,
+            CatalogObjectDefinition::View(_)
+        ));
+        let materialized = apply_materialized(
+            &database,
+            profile_id,
+            &database_name,
+            &schema_name,
+            &table_name,
+            &materialized_name,
+        )
+        .await;
+        assert!(matches!(
+            load_definition(
+                &database,
+                profile_id,
+                materialized.id.clone(),
+                &database_name
+            )
+            .await,
+            CatalogObjectDefinition::MaterializedView(_)
+        ));
+        let sequence = apply_sequence(
+            &database,
+            profile_id,
+            &database_name,
+            &schema_name,
+            &sequence_name,
+        )
+        .await;
+        assert!(matches!(
+            load_definition(&database, profile_id, sequence.id.clone(), &database_name).await,
+            CatalogObjectDefinition::Sequence(_)
+        ));
+    })
+    .catch_unwind()
+    .await;
+    let mut cleanup_errors = Vec::new();
+    while let Some(sql) = cleanup.pop() {
+        if let Err(error) = database.execute(&sql).await {
+            cleanup_errors.push(error);
+        }
+    }
+    database.close().await;
+    if let Err(panic) = result {
+        eprintln!("mutation cleanup errors after panic: {cleanup_errors:?}");
+        std::panic::resume_unwind(panic);
+    }
+    assert!(
+        cleanup_errors.is_empty(),
+        "mutation cleanup failed: {cleanup_errors:?}"
+    );
+}
+
+async fn apply_plan(
+    database: &DatabaseConnection,
+    request: CatalogMutationRequest,
+    draft: CatalogDraft,
+) {
+    let baseline = if request.mode == CatalogMutationMode::Edit
+        || request.object_type == CatalogObjectType::Catalog(CatalogKind::Column)
+    {
+        let CatalogMutationAnchor::Catalog(id) = &request.anchor else {
+            panic!("catalog anchor expected")
+        };
+        let object = if request.object_type == CatalogObjectType::Catalog(CatalogKind::Column) {
+            CatalogId::new(
+                request.connection.profile_id,
+                CatalogKind::Table,
+                id.native_path[..4].to_vec(),
+            )
+        } else {
+            id.clone()
+        };
+        let database_name = match &request.anchor {
+            CatalogMutationAnchor::Catalog(id) => {
+                id.native_path.first().cloned().unwrap_or_default()
+            }
+            CatalogMutationAnchor::Group { schema, .. } => {
+                schema.native_path.first().cloned().unwrap_or_default()
+            }
+            CatalogMutationAnchor::Profile { .. } => String::new(),
+        };
+        Some(
+            load_definition(
+                database,
+                request.connection.profile_id,
+                object,
+                &database_name,
+            )
+            .await,
+        )
+    } else {
+        None
+    };
+    let plan = PostgresAdapter::plan_catalog_mutation(request, draft, baseline).unwrap();
+    database.execute_catalog_mutation(&plan).await.unwrap();
+}
+
+async fn apply_index(
+    database: &DatabaseConnection,
+    profile_id: Uuid,
+    db: &str,
+    schema: &str,
+    table: &CatalogEntry,
+    name: &str,
+    unique: bool,
+) -> CatalogEntry {
+    let draft = lazydb::model::catalog_editor::IndexDraft {
+        name: name.into(),
+        schema: schema.into(),
+        relation: table.qualified_name.object.clone().into(),
+        unique,
+        access_method: "btree".into(),
+        columns: vec![lazydb::model::catalog_editor::IndexColumnDraft {
+            expression: "value".into(),
+            descending: false,
+            nulls_first: false,
+            is_expression: false,
+        }],
+        include_columns: "".into(),
+        predicate: "".into(),
+        tablespace: "".into(),
+    };
+    apply_plan(
+        database,
+        mutation_request(
+            profile_id,
+            CatalogMutationMode::Create,
+            CatalogMutationAnchor::Catalog(table.id.clone()),
+            CatalogObjectType::Catalog(CatalogKind::Index),
+        ),
+        CatalogDraft::Index(draft),
+    )
+    .await;
+    find_entry(database, profile_id, name, CatalogKind::Index, db, schema).await
+}
+
+async fn apply_view(
+    database: &DatabaseConnection,
+    profile_id: Uuid,
+    db: &str,
+    schema: &str,
+    table: &str,
+    name: &str,
+    _replace: bool,
+) -> CatalogEntry {
+    let draft = lazydb::model::catalog_editor::ViewDraft {
+        name: name.into(),
+        schema: schema.into(),
+        owner: "".into(),
+        comment: "view".into(),
+        query: format!(
+            "SELECT id, value FROM {}.{}",
+            postgres::quote_identifier(schema),
+            postgres::quote_identifier(table)
+        )
+        .into(),
+        output_columns: "".into(),
+        security_barrier: lazydb::db::catalog_mutation::ViewOption::available(None),
+        security_invoker: lazydb::db::catalog_mutation::ViewOption::available(None),
+        check_option: lazydb::db::catalog_mutation::ViewOption::available(None),
+        selected_field: 0,
+    };
+    apply_plan(
+        database,
+        mutation_request(
+            profile_id,
+            CatalogMutationMode::Create,
+            CatalogMutationAnchor::Catalog(CatalogId::new(
+                profile_id,
+                CatalogKind::Schema,
+                [db, schema],
+            )),
+            CatalogObjectType::Catalog(CatalogKind::View),
+        ),
+        CatalogDraft::View(draft),
+    )
+    .await;
+    find_entry(database, profile_id, name, CatalogKind::View, db, schema).await
+}
+
+async fn apply_materialized(
+    database: &DatabaseConnection,
+    profile_id: Uuid,
+    db: &str,
+    schema: &str,
+    table: &str,
+    name: &str,
+) -> CatalogEntry {
+    let draft = lazydb::model::catalog_editor::MaterializedViewDraft {
+        name: name.into(),
+        schema: schema.into(),
+        owner: "".into(),
+        comment: "snapshot".into(),
+        query: format!(
+            "SELECT id, value FROM {}.{}",
+            postgres::quote_identifier(schema),
+            postgres::quote_identifier(table)
+        )
+        .into(),
+        tablespace: "".into(),
+        with_data: true,
+        selected_field: 0,
+        query_editable: true,
+    };
+    apply_plan(
+        database,
+        mutation_request(
+            profile_id,
+            CatalogMutationMode::Create,
+            CatalogMutationAnchor::Catalog(CatalogId::new(
+                profile_id,
+                CatalogKind::Schema,
+                [db, schema],
+            )),
+            CatalogObjectType::Catalog(CatalogKind::MaterializedView),
+        ),
+        CatalogDraft::MaterializedView(draft),
+    )
+    .await;
+    find_entry(
+        database,
+        profile_id,
+        name,
+        CatalogKind::MaterializedView,
+        db,
+        schema,
+    )
+    .await
+}
+
+async fn apply_sequence(
+    database: &DatabaseConnection,
+    profile_id: Uuid,
+    db: &str,
+    schema: &str,
+    name: &str,
+) -> CatalogEntry {
+    let draft = lazydb::model::catalog_editor::SequenceDraft {
+        name: name.into(),
+        schema: schema.into(),
+        owner: "".into(),
+        comment: "sequence".into(),
+        data_type: "bigint".into(),
+        increment: "1".into(),
+        min_value: SequenceBound::Unset,
+        max_value: SequenceBound::Unset,
+        start_value: "1".into(),
+        restart_value: "".into(),
+        cache: "1".into(),
+        cycle: false,
+        owned_by: "NONE".into(),
+        selected_field: 0,
+    };
+    apply_plan(
+        database,
+        mutation_request(
+            profile_id,
+            CatalogMutationMode::Create,
+            CatalogMutationAnchor::Catalog(CatalogId::new(
+                profile_id,
+                CatalogKind::Schema,
+                [db, schema],
+            )),
+            CatalogObjectType::Catalog(CatalogKind::Sequence),
+        ),
+        CatalogDraft::Sequence(draft),
+    )
+    .await;
+    find_entry(
+        database,
+        profile_id,
+        name,
+        CatalogKind::Sequence,
+        db,
+        schema,
+    )
+    .await
+}
+
+async fn load_definition(
+    database: &DatabaseConnection,
+    profile_id: Uuid,
+    object: CatalogId,
+    database_name: &str,
+) -> CatalogObjectDefinition {
+    database
+        .load_catalog_object_definition(&CatalogObjectDefinitionRequest {
+            connection: ConnectionIdentity {
+                profile_id,
+                generation: 7,
+            },
+            request_id: 1,
+            catalog_epoch: 1,
+            object,
+            target: ExecutionTarget {
+                profile_id,
+                database: database_name.to_owned(),
+                schema: None,
+            },
+        })
+        .await
+        .unwrap()
+}
+
+fn mutation_request(
+    profile_id: Uuid,
+    mode: CatalogMutationMode,
+    anchor: CatalogMutationAnchor,
+    object_type: CatalogObjectType,
+) -> CatalogMutationRequest {
+    CatalogMutationRequest::new(
+        ConnectionIdentity {
+            profile_id,
+            generation: 7,
+        },
+        1,
+        1,
+        mode,
+        anchor,
+        object_type,
+    )
+    .unwrap()
+    .with_current_database("postgres")
+}
+
+async fn scalar_text(database: &DatabaseConnection, sql: &str) -> String {
+    match &database
+        .execute(sql)
+        .await
+        .unwrap()
+        .result_sets
+        .last()
+        .unwrap()
+        .rows[0][0]
+    {
+        CellValue::Text(value) => value.clone(),
+        value => panic!("expected text, got {value:?}"),
+    }
+}
+
+fn added_column(
+    name: &str,
+    ordinal_position: u32,
+    native_type: &str,
+    nullable: bool,
+) -> ColumnDraft {
+    ColumnDraft {
+        row_id: Uuid::new_v4(),
+        ordinal_position,
+        existing_name: None,
+        name: name.into(),
+        native_type: native_type.into(),
+        nullable,
+        default_expression: "".into(),
+        identity: false,
+        generated_expression: "".into(),
+        collation: "".into(),
+        comment: "".into(),
+        state: DraftRowState::Added,
+    }
+}
+
+async fn find_entry(
+    database: &DatabaseConnection,
+    profile_id: Uuid,
+    name: &str,
+    kind: CatalogKind,
+    database_name: &str,
+    schema: &str,
+) -> CatalogEntry {
+    database
+        .search_catalog(&catalog_search_request(
+            profile_id,
+            name,
+            selected_scope(database_name, &[schema]),
+            20,
+        ))
+        .await
+        .unwrap()
+        .hits
+        .into_iter()
+        .find(|hit| hit.entry.kind == kind && hit.entry.qualified_name.object == name)
+        .unwrap()
+        .entry
+}
+
+async fn find_child(
+    database: &DatabaseConnection,
+    profile_id: Uuid,
+    relation: &CatalogId,
+    name: &str,
+    kind: CatalogKind,
+    database_name: &str,
+    schema: &str,
+) -> CatalogEntry {
+    database
+        .load_catalog_page(&catalog_request(
+            profile_id,
+            CatalogTarget::relation_children(relation.clone()).unwrap(),
+            selected_scope(database_name, &[schema]),
+            100,
+            None,
+            99,
+        ))
+        .await
+        .unwrap()
+        .entries
+        .into_iter()
+        .find(|entry| entry.kind == kind && entry.qualified_name.object == name)
+        .unwrap()
+}
+
+fn constraint_draft(
+    database: &str,
+    schema: &str,
+    relation: &str,
+    kind: ConstraintDefinitionKind,
+    name: &str,
+) -> lazydb::model::catalog_editor::ConstraintDraft {
+    let mut draft = lazydb::model::catalog_editor::ConstraintDraft::new(kind, schema, relation);
+    draft.database = database.into();
+    draft.name = name.into();
+    draft.columns = match &draft.kind {
+        ConstraintDefinitionKind::PrimaryKey { columns }
+        | ConstraintDefinitionKind::Unique { columns } => columns.join(", ").into(),
+        _ => "".into(),
+    };
+    draft
+}
+
+fn foreign_constraint(
+    database: &str,
+    schema: &str,
+    relation: &str,
+    parent: &str,
+    name: &str,
+) -> lazydb::model::catalog_editor::ConstraintDraft {
+    let mut draft = constraint_draft(
+        database,
+        schema,
+        relation,
+        ConstraintDefinitionKind::ForeignKey {
+            columns: vec!["id".into()],
+            referenced_schema: schema.into(),
+            referenced_relation: parent.into(),
+            referenced_columns: vec!["id".into()],
+            match_type: "SIMPLE".into(),
+            on_update: "NO ACTION".into(),
+            on_delete: "NO ACTION".into(),
+        },
+        name,
+    );
+    draft.columns = "id".into();
+    draft.referenced_schema = schema.into();
+    draft.referenced_relation = parent.into();
+    draft.referenced_columns = "id".into();
+    draft
 }
 
 fn selected_scope(database: &str, schemas: &[&str]) -> CatalogScope {

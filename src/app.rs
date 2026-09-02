@@ -1,3 +1,5 @@
+#![allow(clippy::collapsible_if)]
+
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     time::{Instant, SystemTime, UNIX_EPOCH},
@@ -10,6 +12,9 @@ use crate::{
     action::{Action, Command, ProfileAccessChange},
     cli::ConfirmationPolicy,
     clipboard::{ClipboardPayload, copy_cell, copy_row_tsv},
+    db::catalog_mutation::{
+        CatalogMutationAnchor, CatalogMutationMode, CatalogObjectType, CatalogSelectionHint,
+    },
     db::{
         ErrorCategory,
         catalog::{
@@ -21,6 +26,7 @@ use crate::{
     },
     editor::{EditorEffect, EditorError, EditorWorkspace},
     model::{
+        catalog_editor::CatalogEditorState,
         data_query::{
             DataQueryCandidate, DataQueryCapability, DataQueryCompletion, DataQueryInput,
             DataQueryOptions,
@@ -28,8 +34,8 @@ use crate::{
         editor::{EditorMode, EditorRenderSnapshot, EditorViewport},
         execution_target::ExecutionTarget,
         explorer::{
-            CatalogGroupState, ExplorerConnectionStatus, ExplorerLoadState, ExplorerNodeId,
-            ExplorerOwnerId, ProfileProvenance, owner_for_target,
+            CatalogGroupState, ExplorerConnectionStatus, ExplorerLoadState, ExplorerMutationIntent,
+            ExplorerNodeId, ExplorerOwnerId, ProfileProvenance, owner_for_target,
         },
         notification::{NotificationCenter, NotificationLevel, NotificationSource},
         profile_manager::{
@@ -196,11 +202,13 @@ pub struct App {
     pane_layout: PaneLayoutMetrics,
     pub overlay: Option<Overlay>,
     pub profile_manager: Option<ProfileManagerState>,
+    pub catalog_editor: Option<CatalogEditorState>,
     pub system_credential_availability: crate::persistence::secrets::SecretStoreAvailability,
     pub should_quit: bool,
     connection_request_generation: u64,
     connection_terminal_generation: u64,
     next_search_session: u64,
+    pending_catalog_selection: Option<(CatalogTarget, CatalogSelectionHint)>,
     editor: EditorWorkspace,
     confirmation_policy: ConfirmationPolicy,
     deferred: DeferredIntentQueue,
@@ -218,6 +226,107 @@ enum CatalogRequestIntent {
     Explicit,
     Refresh,
     Completion,
+}
+
+fn selection_target_contains(target: &CatalogTarget, selection: &CatalogSelectionHint) -> bool {
+    let CatalogSelectionHint::Object(object) = selection else {
+        return true;
+    };
+    match target {
+        CatalogTarget::Databases => object.kind == crate::db::catalog::CatalogKind::Database,
+        CatalogTarget::Schemas { database } => {
+            object.native_path.starts_with(&database.native_path)
+                && object.native_path.len() == database.native_path.len() + 1
+        }
+        CatalogTarget::Groups { schema } => {
+            object.native_path.starts_with(&schema.native_path)
+                && object.native_path.len() == schema.native_path.len() + 1
+        }
+        CatalogTarget::Objects { schema, group } => {
+            object.native_path.starts_with(&schema.native_path)
+                && object.native_path.len() == schema.native_path.len() + 1
+                && group.contains_kind(object.kind)
+        }
+        CatalogTarget::RelationChildren { relation } => {
+            object.native_path.starts_with(&relation.native_path)
+                && object.native_path.len() == relation.native_path.len() + 1
+        }
+    }
+}
+
+fn definition_matches_request(
+    definition: &crate::db::catalog_mutation::CatalogObjectDefinition,
+    object: &crate::db::catalog::CatalogId,
+) -> bool {
+    match (object.kind, definition) {
+        (
+            crate::db::catalog::CatalogKind::Database,
+            crate::db::catalog_mutation::CatalogObjectDefinition::Database(database),
+        ) => database.name == object.native_path.first().cloned().unwrap_or_default(),
+        (
+            crate::db::catalog::CatalogKind::Database,
+            crate::db::catalog_mutation::CatalogObjectDefinition::Role(role),
+        ) => object.native_path.get(1) == Some(&role.name),
+        (
+            crate::db::catalog::CatalogKind::Schema,
+            crate::db::catalog_mutation::CatalogObjectDefinition::Schema(schema),
+        ) => {
+            schema.database == object.native_path.first().cloned().unwrap_or_default()
+                && schema.name == object.native_path.get(1).cloned().unwrap_or_default()
+        }
+        (
+            crate::db::catalog::CatalogKind::Table | crate::db::catalog::CatalogKind::Column,
+            crate::db::catalog_mutation::CatalogObjectDefinition::Table(table),
+        ) => {
+            table.database == object.native_path.first().cloned().unwrap_or_default()
+                && table.schema == object.native_path.get(1).cloned().unwrap_or_default()
+                && table.name == object.native_path.get(2).cloned().unwrap_or_default()
+        }
+        (
+            crate::db::catalog::CatalogKind::Index,
+            crate::db::catalog_mutation::CatalogObjectDefinition::Index(index),
+        ) => {
+            index.database == object.native_path.first().cloned().unwrap_or_default()
+                && index.schema == object.native_path.get(1).cloned().unwrap_or_default()
+                && object
+                    .native_path
+                    .get(4)
+                    .and_then(|oid| oid.parse::<i64>().ok())
+                    .is_some()
+        }
+        (kind, crate::db::catalog_mutation::CatalogObjectDefinition::Constraint(constraint))
+            if constraint.kind.catalog_kind() == kind =>
+        {
+            constraint.database == object.native_path.first().cloned().unwrap_or_default()
+                && constraint.schema == object.native_path.get(1).cloned().unwrap_or_default()
+                && constraint.relation == object.native_path.get(2).cloned().unwrap_or_default()
+                && object
+                    .native_path
+                    .get(3)
+                    .is_some_and(|oid| oid.parse::<i64>().is_ok())
+                && object
+                    .native_path
+                    .get(4)
+                    .is_some_and(|oid| oid.parse::<i64>().is_ok())
+        }
+        (
+            crate::db::catalog::CatalogKind::View,
+            crate::db::catalog_mutation::CatalogObjectDefinition::View(view),
+        ) => {
+            view.database == object.native_path.first().cloned().unwrap_or_default()
+                && view.schema == object.native_path.get(1).cloned().unwrap_or_default()
+                && view.name == object.native_path.get(2).cloned().unwrap_or_default()
+        }
+        (
+            crate::db::catalog::CatalogKind::MaterializedView,
+            crate::db::catalog_mutation::CatalogObjectDefinition::MaterializedView(view),
+        ) => {
+            view.database == object.native_path.first().cloned().unwrap_or_default()
+                && view.schema == object.native_path.get(1).cloned().unwrap_or_default()
+                && view.name == object.native_path.get(2).cloned().unwrap_or_default()
+        }
+        _ => false,
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -362,12 +471,14 @@ impl App {
             pane_layout: PaneLayoutMetrics::default(),
             overlay: None,
             profile_manager: None,
+            catalog_editor: None,
             system_credential_availability:
                 crate::persistence::secrets::SecretStoreAvailability::Unavailable,
             should_quit: false,
             connection_request_generation: 0,
             connection_terminal_generation: 0,
             next_search_session: 0,
+            pending_catalog_selection: None,
             editor,
             confirmation_policy,
             deferred: DeferredIntentQueue::default(),
@@ -1182,14 +1293,7 @@ impl App {
             Id::ExplorerToggle => vec![Action::ExplorerToggle],
             Id::ExplorerActivate => vec![Action::ExplorerOpenSelected],
             Id::ExplorerNewProfile => vec![Action::ProfileStartNew],
-            Id::ExplorerEditProfile => self
-                .explorer
-                .normalized
-                .selected
-                .as_ref()
-                .and_then(|node| node.profile_id())
-                .map(|profile_id| vec![Action::ProfileStartEdit { profile_id }])
-                .unwrap_or_default(),
+            Id::ExplorerEditProfile => vec![Action::OpenCatalogEdit],
             Id::ExplorerDeleteProfile => self
                 .explorer
                 .normalized
@@ -2066,6 +2170,1034 @@ impl App {
                     self.profile_manager = Some(manager);
                     self.overlay = Some(Overlay::ProfileManager);
                 }
+                Vec::new()
+            }
+            Action::OpenCatalogCreate => {
+                if let Some(ExplorerMutationIntent::Create(anchor)) =
+                    self.resolve_explorer_mutation_intent(false)
+                {
+                    let options = match &anchor {
+                        CatalogMutationAnchor::Profile { .. } => {
+                            vec![
+                                crate::model::catalog_editor::CatalogMutationOption {
+                                    object_type: CatalogObjectType::Catalog(
+                                        crate::db::catalog::CatalogKind::Database,
+                                    ),
+                                    label: "Database".into(),
+                                },
+                                crate::model::catalog_editor::CatalogMutationOption {
+                                    object_type: CatalogObjectType::LoginRole,
+                                    label: "Login Role".into(),
+                                },
+                                crate::model::catalog_editor::CatalogMutationOption {
+                                    object_type: CatalogObjectType::Role,
+                                    label: "Role".into(),
+                                },
+                            ]
+                        }
+                        CatalogMutationAnchor::Catalog(id)
+                            if id.kind == crate::db::catalog::CatalogKind::Table =>
+                        {
+                            [
+                                crate::db::catalog::CatalogKind::PrimaryKey,
+                                crate::db::catalog::CatalogKind::UniqueConstraint,
+                                crate::db::catalog::CatalogKind::ForeignKey,
+                                crate::db::catalog::CatalogKind::CheckConstraint,
+                            ]
+                            .into_iter()
+                            .map(|kind| crate::model::catalog_editor::CatalogMutationOption {
+                                object_type: CatalogObjectType::Catalog(kind),
+                                label: CatalogObjectType::Catalog(kind).display_label().into(),
+                            })
+                            .collect()
+                        }
+                        CatalogMutationAnchor::Catalog(id)
+                            if id.kind == crate::db::catalog::CatalogKind::Schema =>
+                        {
+                            vec![crate::model::catalog_editor::CatalogMutationOption {
+                                object_type: CatalogObjectType::Catalog(
+                                    crate::db::catalog::CatalogKind::View,
+                                ),
+                                label: "View".into(),
+                            }]
+                        }
+                        CatalogMutationAnchor::Group {
+                            group: crate::db::catalog::ObjectGroup::Sequences,
+                            ..
+                        } => vec![crate::model::catalog_editor::CatalogMutationOption {
+                            object_type: CatalogObjectType::Catalog(
+                                crate::db::catalog::CatalogKind::Sequence,
+                            ),
+                            label: "Sequence".into(),
+                        }],
+                        CatalogMutationAnchor::Catalog(id)
+                            if id.kind == crate::db::catalog::CatalogKind::Schema =>
+                        {
+                            vec![
+                                crate::model::catalog_editor::CatalogMutationOption {
+                                    object_type: CatalogObjectType::Catalog(
+                                        crate::db::catalog::CatalogKind::View,
+                                    ),
+                                    label: "View".into(),
+                                },
+                                crate::model::catalog_editor::CatalogMutationOption {
+                                    object_type: CatalogObjectType::Catalog(
+                                        crate::db::catalog::CatalogKind::Sequence,
+                                    ),
+                                    label: "Sequence".into(),
+                                },
+                            ]
+                        }
+                        CatalogMutationAnchor::Group {
+                            group: crate::db::catalog::ObjectGroup::Views,
+                            ..
+                        } => vec![crate::model::catalog_editor::CatalogMutationOption {
+                            object_type: CatalogObjectType::Catalog(
+                                crate::db::catalog::CatalogKind::View,
+                            ),
+                            label: "View".into(),
+                        }],
+                        _ => Vec::new(),
+                    };
+                    let has_options = !options.is_empty();
+                    self.catalog_editor = Some(CatalogEditorState::new(
+                        CatalogMutationMode::Create,
+                        anchor.clone(),
+                        self.explorer.catalog_generation,
+                        options,
+                    ));
+                    if has_options {
+                        let editor = self.catalog_editor.as_mut().unwrap();
+                        editor.page = crate::model::catalog_editor::CatalogEditorPage::ObjectPicker;
+                    }
+                    self.overlay = Some(Overlay::CatalogEditor);
+                }
+                Vec::new()
+            }
+            Action::OpenCatalogEdit => match self.resolve_explorer_mutation_intent(true) {
+                Some(ExplorerMutationIntent::EditProfile(profile_id)) => {
+                    self.update(Action::ProfileStartEdit { profile_id })
+                }
+                Some(ExplorerMutationIntent::Edit(anchor)) => {
+                    let CatalogMutationAnchor::Catalog(object) = &anchor else {
+                        self.notify_warning("Catalog", "This catalog object cannot be edited");
+                        return Vec::new();
+                    };
+                    if !matches!(
+                        object.kind,
+                        crate::db::catalog::CatalogKind::Database
+                            | crate::db::catalog::CatalogKind::Schema
+                            | crate::db::catalog::CatalogKind::Table
+                            | crate::db::catalog::CatalogKind::Column
+                            | crate::db::catalog::CatalogKind::PrimaryKey
+                            | crate::db::catalog::CatalogKind::UniqueConstraint
+                            | crate::db::catalog::CatalogKind::ForeignKey
+                            | crate::db::catalog::CatalogKind::CheckConstraint
+                            | crate::db::catalog::CatalogKind::View
+                            | crate::db::catalog::CatalogKind::Sequence
+                    ) {
+                        self.notify_warning("Catalog", "This catalog object cannot be edited yet");
+                        return Vec::new();
+                    }
+                    let Some(connection) = self.database_command_identity() else {
+                        self.notify_warning(
+                            "Catalog",
+                            "Catalog is unavailable for the active profile",
+                        );
+                        return Vec::new();
+                    };
+                    let Some(profile) = self.active_profile() else {
+                        self.notify_warning("Catalog", "The active connection profile is missing");
+                        return Vec::new();
+                    };
+                    if profile.kind != DatabaseKind::Postgres || profile.read_only {
+                        self.notify_warning(
+                            "Catalog",
+                            "Schema editing requires a writable PostgreSQL profile",
+                        );
+                        return Vec::new();
+                    }
+                    let Some(entry) = self
+                        .explorer
+                        .normalized
+                        .profiles
+                        .get(&connection.profile_id)
+                        .and_then(|state| state.catalog.get(object))
+                    else {
+                        self.notify_warning(
+                            "Catalog",
+                            "The selected catalog object is not in the active catalog",
+                        );
+                        return Vec::new();
+                    };
+                    if entry.id != *object || entry.kind != object.kind {
+                        self.notify_warning("Catalog", "The selected catalog entry is invalid");
+                        return Vec::new();
+                    }
+                    let Some(database) = object.native_path.first() else {
+                        self.notify_warning("Catalog", "The selected catalog ID is invalid");
+                        return Vec::new();
+                    };
+                    let Some(target) = self.connection.target.clone().filter(|target| {
+                        object.kind == crate::db::catalog::CatalogKind::Database
+                            || object
+                                .native_path
+                                .first()
+                                .is_some_and(|value| value == "__role__")
+                            || target.database == *database
+                    }) else {
+                        self.notify_warning(
+                            "Catalog",
+                            "The selected catalog database is not the active target database",
+                        );
+                        return Vec::new();
+                    };
+                    if !target.is_valid(profile)
+                        || connection != self.connection.active_identity().unwrap()
+                    {
+                        self.notify_warning(
+                            "Catalog",
+                            "The selected catalog target is unavailable",
+                        );
+                        return Vec::new();
+                    }
+                    let Some(profile_state) = self
+                        .explorer
+                        .normalized
+                        .profiles
+                        .get_mut(&connection.profile_id)
+                    else {
+                        self.notify_warning("Catalog", "The active catalog state is missing");
+                        return Vec::new();
+                    };
+                    let catalog_epoch = profile_state.catalog_epoch;
+                    let Some(request_id) = profile_state.allocate_request_id() else {
+                        self.notify_warning("Catalog", "Catalog request ID exhausted");
+                        return Vec::new();
+                    };
+                    self.catalog_editor = Some(CatalogEditorState::new(
+                        CatalogMutationMode::Edit,
+                        anchor.clone(),
+                        catalog_epoch,
+                        Vec::new(),
+                    ));
+                    self.overlay = Some(Overlay::CatalogEditor);
+                    let editor = self.catalog_editor.as_mut().unwrap();
+                    editor.begin_loading(request_id);
+                    vec![Command::LoadCatalogObjectDefinition(
+                        crate::db::catalog_mutation::CatalogObjectDefinitionRequest {
+                            connection,
+                            request_id,
+                            catalog_epoch: editor.catalog_epoch,
+                            object: object.clone(),
+                            target,
+                        },
+                    )]
+                }
+                Some(ExplorerMutationIntent::Create(_)) | None => {
+                    self.notify_warning("Catalog", "The selected catalog object cannot be edited");
+                    Vec::new()
+                }
+            },
+            Action::CatalogEditorCancel => {
+                if matches!(
+                    self.overlay,
+                    Some(Overlay::CatalogEditorDestructiveConfirm { .. })
+                ) {
+                    self.overlay = Some(Overlay::CatalogEditor);
+                    return Vec::new();
+                }
+                if self.catalog_editor.is_some() {
+                    self.catalog_editor = None;
+                    if self.overlay == Some(Overlay::CatalogEditor) {
+                        self.overlay = None;
+                    }
+                }
+                Vec::new()
+            }
+            Action::CatalogObjectDefinitionLoaded {
+                request,
+                definition,
+            } => {
+                let valid = self.database_command_identity() == Some(request.connection)
+                    && self
+                        .explorer
+                        .normalized
+                        .profiles
+                        .get(&request.connection.profile_id)
+                        .is_some_and(|state| state.catalog_epoch == request.catalog_epoch)
+                    && self
+                        .catalog_editor
+                        .as_ref()
+                        .is_some_and(|editor| editor.accepts_definition_request(&request))
+                    && definition_matches_request(&definition, &request.object);
+                if valid {
+                    if let Some(editor) = self.catalog_editor.as_mut() {
+                        editor.finish_loading(request.request_id, Some(definition.clone()));
+                        editor.draft = Some(match definition {
+                             crate::db::catalog_mutation::CatalogObjectDefinition::Schema(
+                                schema,
+                            ) => crate::model::catalog_editor::CatalogDraft::Schema(
+                                crate::model::catalog_editor::SchemaDraft {
+                                    name: schema.name.into(),
+                                    owner: schema.owner.into(),
+                                    comment: match schema.comment {
+                                        crate::db::catalog::OptionalMetadata::Supported(Some(
+                                            comment,
+                                        )) => comment.into(),
+                                        _ => String::new().into(),
+                                    },
+                                },
+                             ),
+                             crate::db::catalog_mutation::CatalogObjectDefinition::Database(database) => crate::model::catalog_editor::CatalogDraft::Database(crate::model::catalog_editor::DatabaseDraft::from_definition(&database)),
+                            crate::db::catalog_mutation::CatalogObjectDefinition::Table(table) => {
+                                let mut draft =
+                                    crate::model::catalog_editor::TableDraft::from_definition(
+                                        &table,
+                                    );
+                                if request.object.kind == crate::db::catalog::CatalogKind::Column {
+                                    if let Some(column) = request.object.native_path.get(4) {
+                                        if let Ok(ordinal) = column.parse::<usize>() {
+                                            draft.selected_section = crate::model::catalog_editor::CatalogEditorSection::Columns;
+                                            draft.selected_column = draft
+                                                .columns
+                                                .iter()
+                                                .position(|row| {
+                                                    row.ordinal_position as usize == ordinal
+                                                })
+                                                .unwrap_or(0);
+                                        }
+                                    }
+                                }
+                                crate::model::catalog_editor::CatalogDraft::Table(draft)
+                            }
+                            crate::db::catalog_mutation::CatalogObjectDefinition::Index(index) => {
+                                crate::model::catalog_editor::CatalogDraft::Index(
+                                    crate::model::catalog_editor::IndexDraft::from_definition(
+                                        &index,
+                                    ),
+                                )
+                            }
+                            crate::db::catalog_mutation::CatalogObjectDefinition::Constraint(
+                                constraint,
+                            ) => crate::model::catalog_editor::CatalogDraft::Constraint(
+                                crate::model::catalog_editor::ConstraintDraft::from_definition(
+                                    &constraint,
+                                ),
+                            ),
+                            crate::db::catalog_mutation::CatalogObjectDefinition::View(view) => {
+                                crate::model::catalog_editor::CatalogDraft::View(
+                                    crate::model::catalog_editor::ViewDraft::from_definition(&view),
+                                )
+                            }
+                             crate::db::catalog_mutation::CatalogObjectDefinition::MaterializedView(view) => {
+                                crate::model::catalog_editor::CatalogDraft::MaterializedView(
+                                    crate::model::catalog_editor::MaterializedViewDraft::from_definition(&view),
+                                )
+                             }
+                              crate::db::catalog_mutation::CatalogObjectDefinition::Sequence(sequence) => crate::model::catalog_editor::CatalogDraft::Sequence(crate::model::catalog_editor::SequenceDraft::from_definition(&sequence)),
+                              crate::db::catalog_mutation::CatalogObjectDefinition::Role(role) => crate::model::catalog_editor::CatalogDraft::Role(crate::model::catalog_editor::RoleDraft::from_definition(&role)),
+                        });
+                    }
+                }
+                Vec::new()
+            }
+            Action::CatalogObjectDefinitionLoadFailed { request, message } => {
+                if self.database_command_identity() == Some(request.connection)
+                    && self
+                        .explorer
+                        .normalized
+                        .profiles
+                        .get(&request.connection.profile_id)
+                        .is_some_and(|state| state.catalog_epoch == request.catalog_epoch)
+                    && let Some(editor) = self
+                        .catalog_editor
+                        .as_mut()
+                        .filter(|editor| editor.accepts_definition_request(&request))
+                {
+                    editor.operation = None;
+                    editor.error = Some(message);
+                    editor.page = crate::model::catalog_editor::CatalogEditorPage::Form;
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorMove(delta) => {
+                if let Some(editor) = self.catalog_editor.as_mut()
+                    && !editor.is_busy()
+                    && !editor.options.is_empty()
+                {
+                    let last = editor.options.len().saturating_sub(1) as isize;
+                    editor.selected_option =
+                        (editor.selected_option as isize + delta).clamp(0, last) as usize;
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorSelect => {
+                if let Some(editor) = self.catalog_editor.as_mut() {
+                    let selected = editor.selected_option;
+                    editor.select_option(selected);
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorFieldNext => {
+                if let Some(draft) = self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut()) {
+                    if matches!(
+                        draft,
+                        crate::model::catalog_editor::CatalogDraft::Sequence(_)
+                    ) {
+                        draft.move_field(1);
+                        return Vec::new();
+                    }
+                    if matches!(
+                        draft,
+                        crate::model::catalog_editor::CatalogDraft::MaterializedView(_)
+                    ) {
+                        draft.move_field(1);
+                        return Vec::new();
+                    }
+                }
+                if let Some(crate::model::catalog_editor::CatalogDraft::View(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.move_field(1);
+                    return Vec::new();
+                }
+                if let Some(crate::model::catalog_editor::CatalogDraft::Constraint(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.move_field(1);
+                    return Vec::new();
+                }
+                if let Some(crate::model::catalog_editor::CatalogDraft::Table(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.select_section(1);
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorFieldPrevious => {
+                if let Some(draft) = self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut()) {
+                    if matches!(
+                        draft,
+                        crate::model::catalog_editor::CatalogDraft::Sequence(_)
+                    ) {
+                        draft.move_field(-1);
+                        return Vec::new();
+                    }
+                    if matches!(
+                        draft,
+                        crate::model::catalog_editor::CatalogDraft::MaterializedView(_)
+                    ) {
+                        draft.move_field(-1);
+                        return Vec::new();
+                    }
+                }
+                if let Some(crate::model::catalog_editor::CatalogDraft::View(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.move_field(-1);
+                    return Vec::new();
+                }
+                if let Some(crate::model::catalog_editor::CatalogDraft::Constraint(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.move_field(-1);
+                    return Vec::new();
+                }
+                if let Some(crate::model::catalog_editor::CatalogDraft::Table(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.select_section(-1);
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorInsert(character) => {
+                if let Some(draft) = self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut()) {
+                    if matches!(
+                        draft,
+                        crate::model::catalog_editor::CatalogDraft::Sequence(_)
+                    ) {
+                        draft.insert(character);
+                        return Vec::new();
+                    }
+                    if matches!(
+                        draft,
+                        crate::model::catalog_editor::CatalogDraft::MaterializedView(_)
+                    ) {
+                        draft.insert(character);
+                        return Vec::new();
+                    }
+                }
+                if let Some(crate::model::catalog_editor::CatalogDraft::View(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.insert(character);
+                    return Vec::new();
+                }
+                if let Some(crate::model::catalog_editor::CatalogDraft::Constraint(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.insert(character);
+                    return Vec::new();
+                }
+                if let Some(crate::model::catalog_editor::CatalogDraft::Schema(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.name.insert(character);
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorBackspace => {
+                if let Some(crate::model::catalog_editor::CatalogDraft::Sequence(draft)) =
+                    self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut())
+                {
+                    draft.backspace();
+                    return Vec::new();
+                }
+                if let Some(draft) = self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut()) {
+                    if matches!(
+                        draft,
+                        crate::model::catalog_editor::CatalogDraft::MaterializedView(_)
+                    ) {
+                        draft.backspace();
+                        return Vec::new();
+                    }
+                }
+                if let Some(crate::model::catalog_editor::CatalogDraft::View(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.backspace();
+                    return Vec::new();
+                }
+                if let Some(crate::model::catalog_editor::CatalogDraft::Constraint(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.backspace();
+                    return Vec::new();
+                }
+                if let Some(crate::model::catalog_editor::CatalogDraft::Schema(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.name.backspace();
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorDeletePreviousWord => {
+                if let Some(crate::model::catalog_editor::CatalogDraft::Sequence(draft)) =
+                    self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut())
+                {
+                    draft.delete_previous_word();
+                    return Vec::new();
+                }
+                if let Some(draft) = self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut()) {
+                    if matches!(
+                        draft,
+                        crate::model::catalog_editor::CatalogDraft::MaterializedView(_)
+                    ) {
+                        draft.delete_previous_word();
+                        return Vec::new();
+                    }
+                }
+                if let Some(crate::model::catalog_editor::CatalogDraft::View(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.delete_previous_word();
+                    return Vec::new();
+                }
+                if let Some(crate::model::catalog_editor::CatalogDraft::Constraint(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.delete_previous_word();
+                    return Vec::new();
+                }
+                if let Some(crate::model::catalog_editor::CatalogDraft::Schema(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.name.delete_previous_word();
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorDeleteToStart => {
+                if let Some(crate::model::catalog_editor::CatalogDraft::Sequence(draft)) =
+                    self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut())
+                {
+                    draft.delete_to_start();
+                    return Vec::new();
+                }
+                if let Some(draft) = self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut()) {
+                    if matches!(
+                        draft,
+                        crate::model::catalog_editor::CatalogDraft::MaterializedView(_)
+                    ) {
+                        draft.delete_to_start();
+                        return Vec::new();
+                    }
+                }
+                if let Some(crate::model::catalog_editor::CatalogDraft::View(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.delete_to_start();
+                    return Vec::new();
+                }
+                if let Some(crate::model::catalog_editor::CatalogDraft::Constraint(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.delete_to_start();
+                    return Vec::new();
+                }
+                if let Some(crate::model::catalog_editor::CatalogDraft::Schema(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.name.delete_to_start();
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorDelete => {
+                if let Some(crate::model::catalog_editor::CatalogDraft::Sequence(draft)) =
+                    self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut())
+                {
+                    draft.delete();
+                    return Vec::new();
+                }
+                if let Some(draft) = self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut()) {
+                    if matches!(
+                        draft,
+                        crate::model::catalog_editor::CatalogDraft::MaterializedView(_)
+                    ) {
+                        draft.delete();
+                        return Vec::new();
+                    }
+                }
+                if let Some(crate::model::catalog_editor::CatalogDraft::View(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.delete();
+                    return Vec::new();
+                }
+                if let Some(crate::model::catalog_editor::CatalogDraft::Constraint(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.delete();
+                    return Vec::new();
+                }
+                if let Some(crate::model::catalog_editor::CatalogDraft::Schema(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.name.delete();
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorMoveLeft => {
+                if let Some(crate::model::catalog_editor::CatalogDraft::Sequence(draft)) =
+                    self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut())
+                {
+                    draft.move_left();
+                    return Vec::new();
+                }
+                if let Some(draft) = self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut()) {
+                    if matches!(
+                        draft,
+                        crate::model::catalog_editor::CatalogDraft::MaterializedView(_)
+                    ) {
+                        draft.move_left();
+                        return Vec::new();
+                    }
+                }
+                if let Some(crate::model::catalog_editor::CatalogDraft::View(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.move_left();
+                    return Vec::new();
+                }
+                if let Some(crate::model::catalog_editor::CatalogDraft::Constraint(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.move_left();
+                    return Vec::new();
+                }
+                if let Some(crate::model::catalog_editor::CatalogDraft::Schema(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.name.move_left();
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorMoveRight => {
+                if let Some(crate::model::catalog_editor::CatalogDraft::Sequence(draft)) =
+                    self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut())
+                {
+                    draft.move_right();
+                    return Vec::new();
+                }
+                if let Some(draft) = self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut()) {
+                    if matches!(
+                        draft,
+                        crate::model::catalog_editor::CatalogDraft::MaterializedView(_)
+                    ) {
+                        draft.move_right();
+                        return Vec::new();
+                    }
+                }
+                if let Some(crate::model::catalog_editor::CatalogDraft::View(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.move_right();
+                    return Vec::new();
+                }
+                if let Some(crate::model::catalog_editor::CatalogDraft::Constraint(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.move_right();
+                    return Vec::new();
+                }
+                if let Some(crate::model::catalog_editor::CatalogDraft::Schema(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.name.move_right();
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorMoveHome => {
+                if let Some(crate::model::catalog_editor::CatalogDraft::Sequence(draft)) =
+                    self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut())
+                {
+                    draft.move_home();
+                    return Vec::new();
+                }
+                if let Some(draft) = self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut()) {
+                    if matches!(
+                        draft,
+                        crate::model::catalog_editor::CatalogDraft::MaterializedView(_)
+                    ) {
+                        draft.move_home();
+                        return Vec::new();
+                    }
+                }
+                if let Some(crate::model::catalog_editor::CatalogDraft::View(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.move_home();
+                    return Vec::new();
+                }
+                if let Some(crate::model::catalog_editor::CatalogDraft::Constraint(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.move_home();
+                    return Vec::new();
+                }
+                if let Some(crate::model::catalog_editor::CatalogDraft::Schema(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.name.move_home();
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorMoveEnd => {
+                if let Some(crate::model::catalog_editor::CatalogDraft::Sequence(draft)) =
+                    self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut())
+                {
+                    draft.move_end();
+                    return Vec::new();
+                }
+                if let Some(draft) = self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut()) {
+                    if matches!(
+                        draft,
+                        crate::model::catalog_editor::CatalogDraft::MaterializedView(_)
+                    ) {
+                        draft.move_end();
+                        return Vec::new();
+                    }
+                }
+                if let Some(crate::model::catalog_editor::CatalogDraft::View(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.move_end();
+                    return Vec::new();
+                }
+                if let Some(crate::model::catalog_editor::CatalogDraft::Constraint(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.move_end();
+                    return Vec::new();
+                }
+                if let Some(crate::model::catalog_editor::CatalogDraft::Schema(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.name.move_end();
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorToggleMaterializedViewData => {
+                if let Some(editor) = self.catalog_editor.as_mut()
+                    && editor.mode == crate::db::catalog_mutation::CatalogMutationMode::Create
+                    && let Some(crate::model::catalog_editor::CatalogDraft::MaterializedView(draft)) =
+                        editor.draft.as_mut()
+                    && draft.selected_field == 5
+                {
+                    draft.with_data = !draft.with_data;
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorPreview => {
+                let Some((draft, catalog_epoch, mode, anchor, object_type, baseline)) =
+                    self.catalog_editor.as_ref().and_then(|editor| {
+                        Some((
+                            editor.draft.clone()?,
+                            editor.catalog_epoch,
+                            editor.mode,
+                            editor.anchor.clone(),
+                            editor.object_type,
+                            editor.baseline.clone(),
+                        ))
+                    })
+                else {
+                    return Vec::new();
+                };
+                if let Err(error) = match &draft {
+                    crate::model::catalog_editor::CatalogDraft::Schema(draft) => draft.validate(),
+                    crate::model::catalog_editor::CatalogDraft::Table(draft) => draft.validate(),
+                    crate::model::catalog_editor::CatalogDraft::Index(draft) => draft.validate(),
+                    crate::model::catalog_editor::CatalogDraft::Constraint(draft) => {
+                        draft.validate()
+                    }
+                    crate::model::catalog_editor::CatalogDraft::View(draft) => draft.validate(),
+                    crate::model::catalog_editor::CatalogDraft::MaterializedView(draft) => {
+                        draft.validate()
+                    }
+                    crate::model::catalog_editor::CatalogDraft::Sequence(draft) => draft.validate(),
+                    crate::model::catalog_editor::CatalogDraft::Database(draft) => draft.validate(),
+                    crate::model::catalog_editor::CatalogDraft::Role(draft) => draft.validate(),
+                } {
+                    if let Some(editor) = self.catalog_editor.as_mut() {
+                        editor.set_validation_error(error.to_string());
+                    }
+                    return Vec::new();
+                }
+                let Some(connection) = self.database_command_identity() else {
+                    return Vec::new();
+                };
+                let request_id = self.next_profile_request_id();
+                let object_type = object_type.unwrap_or(CatalogObjectType::Catalog(
+                    crate::db::catalog::CatalogKind::Schema,
+                ));
+                let Ok(request) = crate::db::catalog_mutation::CatalogMutationRequest::new(
+                    connection,
+                    request_id,
+                    catalog_epoch,
+                    mode,
+                    anchor,
+                    object_type,
+                )
+                .map(|request| {
+                    self.connection
+                        .target
+                        .as_ref()
+                        .map_or(request.clone(), |target| {
+                            request.with_current_database(target.database.clone())
+                        })
+                }) else {
+                    return Vec::new();
+                };
+                if let Some(editor) = self.catalog_editor.as_mut() {
+                    editor.begin_planning(request_id);
+                }
+                vec![Command::PlanCatalogMutation {
+                    request,
+                    draft,
+                    baseline,
+                }]
+            }
+            Action::CatalogEditorApply => {
+                if let Some(Overlay::CatalogEditorDestructiveConfirm { plan, input }) =
+                    self.overlay.as_ref()
+                {
+                    if input.value() != "y" {
+                        return Vec::new();
+                    }
+                    let plan = plan.as_ref().clone();
+                    self.overlay = Some(Overlay::CatalogEditor);
+                    if let Some(editor) = self.catalog_editor.as_mut()
+                        && editor.begin_apply(plan.request.request_id)
+                    {
+                        return vec![Command::ExecuteCatalogMutation(plan)];
+                    }
+                    return Vec::new();
+                }
+                let Some(editor) = self.catalog_editor.as_ref() else {
+                    return Vec::new();
+                };
+                let Some(plan) = editor.plan.clone() else {
+                    return Vec::new();
+                };
+                if self.connection.active_identity() != Some(plan.request.connection) {
+                    return Vec::new();
+                }
+                if let Some(editor) = self.catalog_editor.as_mut()
+                    && editor.begin_apply(plan.request.request_id)
+                {
+                    if plan.destructive {
+                        self.overlay = Some(Overlay::CatalogEditorDestructiveConfirm {
+                            plan: Box::new(plan),
+                            input: Default::default(),
+                        });
+                        if let Some(editor) = self.catalog_editor.as_mut() {
+                            editor.operation = None;
+                        }
+                        return Vec::new();
+                    }
+                    vec![Command::ExecuteCatalogMutation(plan)]
+                } else {
+                    Vec::new()
+                }
+            }
+            Action::CatalogEditorConfirmInsert(character) => {
+                if let Some(Overlay::CatalogEditorDestructiveConfirm { input, .. }) =
+                    self.overlay.as_mut()
+                {
+                    input.insert(character);
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorBack => {
+                if let Some(editor) = self.catalog_editor.as_mut()
+                    && editor.page == crate::model::catalog_editor::CatalogEditorPage::SqlPreview
+                    && !editor.is_busy()
+                {
+                    editor.page = crate::model::catalog_editor::CatalogEditorPage::Form;
+                }
+                Vec::new()
+            }
+            Action::CatalogMutationPlanReady(plan) => {
+                if let Some(editor) = self.catalog_editor.as_mut() {
+                    editor.plan_ready(plan.request.request_id, plan);
+                }
+                Vec::new()
+            }
+            Action::CatalogMutationPlanFailed { request, message } => {
+                if let Some(editor) = self.catalog_editor.as_mut() {
+                    editor.planning_failed(request.request_id, message);
+                }
+                Vec::new()
+            }
+            Action::CatalogMutationSucceeded { plan, .. } => {
+                let valid = self.catalog_editor.as_ref().is_some_and(|editor| {
+                    editor.plan.as_ref() == Some(&plan)
+                        && editor.operation
+                            == Some(
+                                crate::model::catalog_editor::CatalogEditorOperation::Applying {
+                                    request_id: plan.request.request_id,
+                                },
+                            )
+                }) && self.connection.active_identity()
+                    == Some(plan.request.connection);
+                if !valid {
+                    return Vec::new();
+                }
+                let epoch_matches = self
+                    .explorer
+                    .normalized
+                    .profiles
+                    .get(&plan.request.connection.profile_id)
+                    .is_some_and(|state| state.catalog_epoch == plan.request.catalog_epoch);
+                if !epoch_matches {
+                    self.notify_info("Catalog", "Stale catalog mutation result discarded");
+                    return Vec::new();
+                }
+                for tab in &mut self.tabs {
+                    if let WorkspaceTab::Relation(tab) = tab
+                        && tab.invalidated_by_catalog_mutation(&plan.impact)
+                    {
+                        tab.invalidate_catalog_mutation(plan.impact.native_identity_changed);
+                    }
+                }
+                self.catalog_editor = None;
+                self.overlay = None;
+                self.notify_success("Catalog", "Schema mutation applied");
+                let profile_id = plan.request.connection.profile_id;
+                self.pending_catalog_selection = plan
+                    .refresh
+                    .iter()
+                    .find(|target| selection_target_contains(target, &plan.selection))
+                    .cloned()
+                    .or_else(|| plan.refresh.first().cloned())
+                    .map(|target| (target, plan.selection.clone()));
+                self.explorer.catalog_generation =
+                    self.explorer.catalog_generation.saturating_add(1);
+                self.explorer.refresh_frontend_search();
+                self.commands_for_catalog_targets(profile_id, &plan.refresh)
+            }
+            Action::CatalogMutationFailed { plan: _, message } => {
+                if let Some(editor) = self.catalog_editor.as_mut() {
+                    editor.operation = None;
+                    editor.error = Some(message.clone());
+                }
+                self.notify_error("Catalog", message);
                 Vec::new()
             }
             Action::ProfileRequestDelete { profile_id } => {
@@ -4701,6 +5833,13 @@ impl App {
         }
     }
 
+    pub fn resolve_explorer_mutation_intent(&self, edit: bool) -> Option<ExplorerMutationIntent> {
+        crate::model::explorer::resolve_mutation_intent(
+            self.explorer.normalized.selected.as_ref(),
+            edit,
+        )
+    }
+
     fn close_profile_manager(&mut self) {
         let Some(manager) = self.profile_manager.as_ref() else {
             return;
@@ -6889,6 +8028,26 @@ impl App {
         Vec::new()
     }
 
+    pub fn commands_for_catalog_targets(
+        &mut self,
+        profile_id: Uuid,
+        targets: &[CatalogTarget],
+    ) -> Vec<Command> {
+        let mut commands = Vec::new();
+        let mut unique = HashSet::new();
+        for target in targets {
+            if unique.insert(target.clone()) {
+                self.explorer.invalidate_catalog_target(profile_id, target);
+                commands.extend(self.start_catalog_request(
+                    target.clone(),
+                    None,
+                    CatalogRequestIntent::Refresh,
+                ));
+            }
+        }
+        commands
+    }
+
     fn accept_catalog_page(&mut self, page: CatalogPage) -> Vec<Command> {
         let profile_id = page.key.connection.profile_id;
         if self.connection.active_identity() != Some(page.key.connection) {
@@ -7000,6 +8159,31 @@ impl App {
             state.status = ExplorerConnectionStatus::Online;
         }
         self.explorer.normalized = next_explorer;
+        if let Some((target, hint)) = self.pending_catalog_selection.clone()
+            && target == request.key.target
+        {
+            let selected = match &hint {
+                CatalogSelectionHint::Object(id)
+                    if self.explorer.normalized.profiles[&profile_id]
+                        .catalog
+                        .get(id)
+                        .is_some() =>
+                {
+                    Some(ExplorerNodeId::Catalog(id.clone()))
+                }
+                CatalogSelectionHint::Object(_) if page.next_cursor.is_none() => {
+                    Some(owner_for_target(profile_id, &request.key.target).node_id())
+                }
+                CatalogSelectionHint::Parent(parent) => {
+                    Some(owner_for_target(profile_id, parent).node_id())
+                }
+                _ => None,
+            };
+            if let Some(selected) = selected {
+                self.explorer.apply_catalog_selection(selected);
+                self.pending_catalog_selection = None;
+            }
+        }
         let scope = self
             .profiles
             .iter()
@@ -8316,6 +9500,11 @@ impl App {
         let Some(connection) = self.database_command_identity() else {
             return Vec::new();
         };
+        if self.tabs.get(self.active_tab).is_some_and(
+            |tab| matches!(tab, WorkspaceTab::Relation(tab) if tab.stale_native_identity),
+        ) {
+            return Vec::new();
+        }
         if !self.tabs.get(self.active_tab).is_some_and(
             |tab| matches!(tab, WorkspaceTab::Relation(tab) if matches!(tab.ddl, RelationLoad::Ready(_))),
         ) {
@@ -9049,6 +10238,9 @@ impl App {
             return Vec::new();
         };
         if tab.descriptor.key.profile_id != connection.profile_id {
+            return Vec::new();
+        }
+        if tab.stale_native_identity {
             return Vec::new();
         }
         let Some(profile) = self

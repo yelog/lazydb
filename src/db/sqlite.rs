@@ -37,6 +37,7 @@ use super::{
         finalize_keyset_page,
     },
     catalog_drop::{CatalogDropError, CatalogDropPlan, CatalogDropRequest},
+    catalog_mutation::CatalogMutationCapabilities,
     ddl::{DdlSection, assemble_ddl},
     mutation::{InputValue, MutationResult, RelationMutation, RelationMutationRequest},
     query::{ColumnMeta, QueryOutcome, QueryOutcomeAccumulator, RELATION_PREVIEW_LIMIT, ResultSet},
@@ -135,6 +136,10 @@ impl SqliteAdapter {
             },
             supports_lazy_children: true,
         }
+    }
+
+    pub fn catalog_mutation_capabilities() -> CatalogMutationCapabilities {
+        CatalogMutationCapabilities::default()
     }
 
     async fn acquire_operation(&self) -> Result<OwnedSemaphorePermit, DatabaseError> {
