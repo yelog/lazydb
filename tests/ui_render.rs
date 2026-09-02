@@ -231,6 +231,7 @@ fn dashboard_overview_uses_rates_capacity_percentages_and_metric_icons() {
     assert!(output.contains("󰓡"), "{output}");
 }
 
+#[test]
 fn catalog_editor_overlay_renders_picker_shell_and_context() {
     let mut app = App::new(Vec::new());
     app.catalog_editor = Some(lazydb::model::catalog_editor::CatalogEditorState::new(

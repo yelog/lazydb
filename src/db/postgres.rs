@@ -3474,7 +3474,7 @@ LIMIT 2001
             return Err(DatabaseError::configuration("index object ID is stale"));
         }
         let key_count: i32 = row.try_get("key_count").map_err(decode_error)?;
-        let parts = sqlx::query("SELECT k.ord::int AS ordinal, a.attname AS column_name, pg_get_indexdef(i.indexrelid, k.ord, true) AS expression, (i.indoption[k.ord-1] & 1) <> 0 AS descending, (i.indoption[k.ord-1] & 2) <> 0 AS nulls_first FROM pg_index i CROSS JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) LEFT JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=k.attnum WHERE i.indexrelid=$1::oid ORDER BY k.ord")
+        let parts = sqlx::query("SELECT k.ord::int AS ordinal, a.attname AS column_name, pg_get_indexdef(i.indexrelid, k.ord::int, true) AS expression, (i.indoption[k.ord-1] & 1) <> 0 AS descending, (i.indoption[k.ord-1] & 2) <> 0 AS nulls_first FROM pg_index i CROSS JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) LEFT JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=k.attnum WHERE i.indexrelid=$1::oid ORDER BY k.ord")
             .bind(oid).fetch_all(&mut *connection).await.map_err(sql_error)?;
         let mut columns = Vec::new();
         let mut include_columns = Vec::new();
