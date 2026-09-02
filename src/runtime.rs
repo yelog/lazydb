@@ -3243,6 +3243,10 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
         .context("failed to resolve current project")?;
     let startup = load_startup_profiles(&cli)?;
     let paths = AppPaths::discover()?;
+    let settings = crate::persistence::settings::AppSettings::load(
+        paths.config_dir.join("settings.toml"),
+    )
+        .context("failed to load application settings")?;
     let workspace_store = WorkspaceStore::new(paths.workspace_file(), paths.workspace_sql_dir());
     let workspace = workspace_store.load().context("failed to load workspace")?;
     let mut app = App::with_startup_project(
@@ -3254,6 +3258,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
     if let Some(workspace) = workspace {
         app.restore_workspace(workspace, startup.selected);
     }
+    app.set_dashboard_refresh_interval_millis(settings.dashboard_refresh_interval_millis());
     app.reveal_startup_profile(startup.selected);
     app.focus = crate::model::workspace::Focus::Explorer;
     let (event_sender, mut event_receiver) = mpsc::unbounded_channel();

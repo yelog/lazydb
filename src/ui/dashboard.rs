@@ -1,6 +1,6 @@
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     symbols,
     text::{Line, Span},
@@ -378,15 +378,25 @@ fn render_metric_chart(
     let legend = series
         .iter()
         .enumerate()
-        .flat_map(|(index, (_, label, color))| {
+        .flat_map(|(index, (key, label, color))| {
             let separator = (index > 0).then(|| Span::raw("  "));
+            let value = tab
+                .history
+                .points(*key)
+                .iter()
+                .rev()
+                .find_map(|point| point.value)
+                .map_or_else(|| "--".into(), format_value);
             separator.into_iter().chain(std::iter::once(Span::styled(
-                *label,
+                legend_value(label, &value),
                 Style::new().fg(*color),
             )))
         })
         .collect::<Vec<_>>();
-    frame.render_widget(Paragraph::new(Line::from(legend)), sections[0]);
+    frame.render_widget(
+        Paragraph::new(Line::from(legend)).alignment(Alignment::Center),
+        sections[0],
+    );
     let datasets = series_data
         .iter()
         .map(|(label, color, points)| {
@@ -419,24 +429,51 @@ fn render_metric_chart(
         .unwrap_or(x_end - 1.0);
     let x_mid = (x_start + x_end) / 2.0;
     let labels = [
-        Span::styled(format_timestamp(x_start), Style::new().fg(theme.muted)),
-        Span::styled(format_timestamp(x_mid), Style::new().fg(theme.muted)),
-        Span::styled(format_timestamp(x_end), Style::new().fg(theme.muted)),
+        Span::styled(
+            format!("┬ {}", format_timestamp(x_start)),
+            Style::new().fg(theme.muted),
+        ),
+        Span::styled(
+            format!("┬ {}", format_timestamp(x_mid)),
+            Style::new().fg(theme.muted),
+        ),
+        Span::styled(
+            format!("{} ┬", format_timestamp(x_end)),
+            Style::new().fg(theme.muted),
+        ),
     ];
+    let axis_style = Style::new().fg(theme.border).bg(theme.background);
+    let label_style = Style::new().fg(theme.muted).bg(theme.background);
     frame.render_widget(
         Chart::new(datasets)
+            .style(Style::new().bg(theme.background))
             .x_axis(
                 Axis::default()
+                    .style(axis_style)
                     .bounds([x_start, x_end.max(x_start + 1.0)])
-                    .labels(labels),
+                    .labels(labels)
+                    .labels_alignment(Alignment::Right),
             )
-            .y_axis(Axis::default().bounds([0.0, max_y * 1.05]).labels([
-                Span::styled("0", Style::new().fg(theme.muted)),
-                Span::styled(format_value(max_y / 2.0), Style::new().fg(theme.muted)),
-                Span::styled(format_value(max_y), Style::new().fg(theme.muted)),
-            ])),
+            .y_axis(
+                Axis::default()
+                    .style(axis_style)
+                    .bounds([0.0, max_y * 1.05])
+                    .labels([
+                        Span::styled("0 ─", label_style),
+                        Span::styled(format!("{} ─", format_value(max_y / 2.0)), label_style),
+                        Span::styled(format!("{} ─", format_value(max_y)), label_style),
+                    ])
+                    .labels_alignment(Alignment::Right),
+            ),
         sections[1],
     );
+}
+
+fn legend_value(label: &str, value: &str) -> String {
+    label.strip_suffix(" activity/s").map_or_else(
+        || format!("{value} {label}"),
+        |operation| format!("{operation} {value} activity/s"),
+    )
 }
 
 fn format_timestamp(seconds: f64) -> String {

@@ -3,4 +3,5 @@ pub mod local_credentials;
 pub mod paths;
 pub mod profiles;
 pub mod secrets;
+pub mod settings;
 pub mod workspace;

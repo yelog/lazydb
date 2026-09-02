@@ -155,9 +155,11 @@ fn dashboard_renders_real_chart_series_after_two_samples() {
     app.focus = Focus::Results;
 
     let output = render(&app, 140, 40);
-    assert!(output.contains("commits/s"), "{output}");
-    assert!(output.contains("select activity/s"), "{output}");
-    assert!(output.contains("insert activity/s"), "{output}");
+    assert!(output.contains("3 commits/s"), "{output}");
+    assert!(output.contains("select 20 activity/s"), "{output}");
+    assert!(output.contains("insert 2 activity/s"), "{output}");
+    assert!(output.contains("0 ─"), "{output}");
+    assert!(output.contains("┬ 00:00:01"), "{output}");
     assert!(output.contains("Transactions and connections"), "{output}");
     assert!(output.contains("Statement activity"), "{output}");
 }

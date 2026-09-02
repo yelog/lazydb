@@ -209,6 +209,7 @@ pub struct App {
     pub sql_editor_list: crate::model::sql_editor_list::SqlEditorListState,
     workspaces: HashMap<Uuid, ConnectionWorkspace>,
     pub notifications: NotificationCenter,
+    dashboard_refresh_interval_millis: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -246,7 +247,7 @@ impl App {
             return Vec::new();
         }
         tab.loading = true;
-        tab.next_refresh_millis = now_millis.saturating_add(2_000);
+        tab.next_refresh_millis = now_millis.saturating_add(self.dashboard_refresh_interval_millis);
         let mut commands = vec![Command::LoadDashboardMetrics {
             tab_id: tab.id,
             tab_generation: tab.generation,
@@ -404,7 +405,13 @@ impl App {
             sql_editor_list: Default::default(),
             workspaces: HashMap::new(),
             notifications: NotificationCenter::default(),
+            dashboard_refresh_interval_millis: crate::persistence::settings::AppSettings::default()
+                .dashboard_refresh_interval_millis(),
         }
+    }
+
+    pub fn set_dashboard_refresh_interval_millis(&mut self, interval_millis: u64) {
+        self.dashboard_refresh_interval_millis = interval_millis.max(1_000);
     }
 
     fn active_tab_id(&self) -> Option<Uuid> {
@@ -10224,6 +10231,49 @@ mod tests {
         assert_eq!(ranges.len(), 1);
         assert_eq!(ranges[0].get(&text), Some("SELECT 'Ada'"));
         assert!(!ranges[0].get(&text).unwrap().contains("2026"));
+    }
+
+    #[test]
+    fn dashboard_refresh_uses_configured_interval() {
+        let profile = import_connection_url("postgres://localhost/kms", Some("kms"))
+            .unwrap()
+            .profile;
+        let profile_id = profile.id;
+        let mut app = App::new(vec![profile]);
+        app.connection.profile_id = Some(profile_id);
+        app.connection.generation = 1;
+        app.connection.status = ConnectionStatus::Connected;
+        app.tabs.push(WorkspaceTab::Dashboard(
+            crate::model::dashboard::DashboardTab::new(),
+        ));
+        app.active_tab = app.tabs.len() - 1;
+
+        assert_eq!(app.dashboard_refresh_commands(10_000).len(), 1);
+        assert_eq!(
+            match &app.tabs[app.active_tab] {
+                WorkspaceTab::Dashboard(tab) => tab.next_refresh_millis,
+                _ => panic!("dashboard tab expected"),
+            },
+            15_000
+        );
+        app.set_dashboard_refresh_interval_millis(8_000);
+        app.update(Action::DashboardMetricsFailed {
+            tab_id: app.tabs[app.active_tab].id(),
+            tab_generation: 0,
+            connection: ConnectionIdentity {
+                profile_id,
+                generation: 1,
+            },
+            message: "test".into(),
+        });
+        assert_eq!(app.dashboard_refresh_commands(15_000).len(), 1);
+        assert_eq!(
+            match &app.tabs[app.active_tab] {
+                WorkspaceTab::Dashboard(tab) => tab.next_refresh_millis,
+                _ => panic!("dashboard tab expected"),
+            },
+            23_000
+        );
     }
 
     fn connected_query_app(sql: &str) -> (App, Uuid, u64) {
