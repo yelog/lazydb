@@ -1334,7 +1334,7 @@ fn map_relation_data(event: KeyEvent, app: &App) -> Option<Action> {
             _ => None,
         },
         _ => match event.code {
-            KeyCode::Char('i') => Some(Action::RelationEditCell),
+            KeyCode::Char('e') => Some(Action::RelationEditCell),
             KeyCode::Char('V') => Some(Action::RelationVisualLine),
             KeyCode::Char('d') => {
                 // Keep d available for the dd sequence instead of deleting immediately.
@@ -2257,7 +2257,7 @@ mod tests {
         let mut keymap = Keymap::default();
 
         assert_eq!(
-            keymap.map(key(KeyCode::Char('i')), &app),
+            keymap.map(key(KeyCode::Char('e')), &app),
             Some(Action::RelationEditCell)
         );
         assert_eq!(

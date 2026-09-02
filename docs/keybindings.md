@@ -206,7 +206,7 @@ The catalog contexts are `RelationDataBrowse`, `RelationDataEdit`,
 | `yy` | Yank current row |
 | `Y` | Copy current row as TSV |
 | `dd` | Delete current row after the real pending sequence |
-| `i` | Edit selected cell when editing is available |
+| `e` | Edit selected cell when editing is available |
 | `a` | Insert row when editing is available |
 | `V` | Enter Visual Line when editing is available |
 | `p` | Paste row when editing is available |

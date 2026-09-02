@@ -1260,7 +1260,7 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
     row!(
         RelationEditCell,
         [RelationDataBrowse],
-        "i",
+        "e",
         "edit selected cell",
         RelationEditAvailable,
         display
@@ -2970,7 +2970,7 @@ mod tests {
         );
         for (sequence, id, expected) in [
             (
-                "i",
+                "e",
                 HelpShortcutId::RelationEditCell,
                 Action::RelationEditCell,
             ),
@@ -3107,7 +3107,7 @@ mod tests {
         };
         assert_eq!(
             footer_sequences(ShortcutContext::RelationDataBrowse, editable),
-            vec!["h", "j", "k", "l", "yy", "i", "a", "V", "p", "Ctrl-s"]
+            vec!["h", "j", "k", "l", "yy", "e", "a", "V", "p", "Ctrl-s"]
         );
         assert_eq!(
             footer_sequences(ShortcutContext::RelationDataEdit, editable),
@@ -3129,7 +3129,7 @@ mod tests {
             rows,
             vec!["h", "j", "k", "l", "v", "yy", "Y", "/", "s", "r"]
         );
-        for editing in ["i", "a", "V", "p", "Ctrl-s"] {
+        for editing in ["e", "a", "V", "p", "Ctrl-s"] {
             assert!(!rows.contains(&editing));
         }
     }
@@ -3146,7 +3146,7 @@ mod tests {
             ..ShortcutCapabilities::default()
         };
         let rows = footer_sequences(ShortcutContext::RelationDataBrowse, relation);
-        assert!(!rows.contains(&"i"));
+        assert!(!rows.contains(&"e"));
         assert!(!rows.contains(&"v"));
         assert!(!rows.contains(&"/"));
     }
@@ -3374,7 +3374,7 @@ mod tests {
             Some(Action::ShowHelp)
         );
         for code in [
-            KeyCode::Char('i'),
+            KeyCode::Char('e'),
             KeyCode::Char('a'),
             KeyCode::Char('V'),
             KeyCode::Char('y'),
