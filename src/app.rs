@@ -2673,9 +2673,11 @@ impl App {
                 let Some(id) = self.active_console_opt().map(|tab| tab.id) else {
                     return Vec::new();
                 };
-                self.active_console_opt_mut().unwrap().completion = None;
                 if self.editor.key(id, key).is_err() {
                     return Vec::new();
+                }
+                if self.active_editor_mode() != EditorMode::Insert {
+                    self.active_console_mut().completion = None;
                 }
                 self.apply_editor_effects(CompletionAfterEdit::Schedule)
             }
@@ -2698,9 +2700,11 @@ impl App {
                 let Some(id) = self.active_console_opt().map(|tab| tab.id) else {
                     return Vec::new();
                 };
-                self.active_console_opt_mut().unwrap().completion = None;
                 if self.editor.paste(id, &text).is_err() {
                     return Vec::new();
+                }
+                if self.active_editor_mode() != EditorMode::Insert {
+                    self.active_console_mut().completion = None;
                 }
                 self.apply_editor_effects(CompletionAfterEdit::Schedule)
             }
@@ -5966,9 +5970,13 @@ impl App {
                         self.active_console_mut().completion = None;
                         continue;
                     }
+                    let completion_is_open = self
+                        .active_console_opt()
+                        .is_some_and(|tab| tab.completion.is_some());
                     if self
                         .active_editor_text()
                         .is_ok_and(|text| text.ends_with('.'))
+                        || completion_is_open
                     {
                         commands.extend(self.complete_now());
                     } else if let Some(key) = self.completion_key() {
@@ -6051,6 +6059,17 @@ impl App {
             self.active_console_mut().completion = None;
             return Vec::new();
         }
+        let selected_identity = self
+            .active_console_opt()
+            .and_then(|tab| tab.completion.as_ref())
+            .and_then(|popup| popup.candidates.get(popup.selected))
+            .map(|candidate| {
+                (
+                    candidate.insert_text.clone(),
+                    candidate.kind,
+                    candidate.detail.clone(),
+                )
+            });
         let text = self.active_editor_text().unwrap_or_default();
         let snapshot = self
             .active_editor_render_snapshot(EditorViewport {
@@ -6116,8 +6135,16 @@ impl App {
             return Vec::new();
         };
         tab.completion = (!candidates.is_empty()).then_some(CompletionPopup {
+            selected: selected_identity
+                .as_ref()
+                .and_then(|identity| {
+                    candidates.iter().position(|candidate| {
+                        (&candidate.insert_text, candidate.kind, &candidate.detail)
+                            == (&identity.0, identity.1, &identity.2)
+                    })
+                })
+                .unwrap_or(0),
             candidates,
-            selected: 0,
         });
         commands
     }
