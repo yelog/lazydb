@@ -3,6 +3,28 @@ use lazydb::profile::{
     import_connection_url, parse_connection_url,
 };
 use secrecy::ExposeSecret;
+use uuid::Uuid;
+
+use lazydb::profile::{ConnectionGroup, ProfileCollection};
+
+#[test]
+fn imported_profiles_are_ungrouped() {
+    let imported = import_connection_url("postgres://localhost/app", Some("app"))
+        .unwrap()
+        .profile;
+    assert_eq!(imported.group_id, None);
+}
+
+#[test]
+fn profile_collection_preserves_declared_order() {
+    let first = ConnectionGroup::new(Uuid::from_u128(1), "Production").unwrap();
+    let second = ConnectionGroup::new(Uuid::from_u128(2), "Development").unwrap();
+    let collection = ProfileCollection {
+        groups: vec![first.clone(), second.clone()],
+        profiles: vec![],
+    };
+    assert_eq!(collection.groups, vec![first, second]);
+}
 
 #[test]
 fn parses_all_server_formats_and_connection_settings() {

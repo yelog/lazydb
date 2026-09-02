@@ -154,6 +154,36 @@ fn workspace_tab_overflow_arrows_activate_adjacent_hidden_tabs() {
 }
 
 #[test]
+fn maps_profile_group_options_and_buttons_to_semantic_actions() {
+    let app = App::new(Vec::new());
+    let mut ui = UiState::new();
+    ui.hit_regions.push(HitRegion {
+        area: Rect::new(2, 2, 10, 1),
+        target: HitTarget::ProfileGroupOption(2),
+    });
+    ui.hit_regions.push(HitRegion {
+        area: Rect::new(2, 3, 10, 1),
+        target: HitTarget::ProfileGroupConfirm,
+    });
+    ui.hit_regions.push(HitRegion {
+        area: Rect::new(2, 4, 10, 1),
+        target: HitTarget::ProfileGroupCancel,
+    });
+    assert_eq!(
+        click_action(&ui, &app, &HitTarget::ProfileGroupOption(2)),
+        Action::ProfileGroupSelect(2)
+    );
+    assert_eq!(
+        click_action(&ui, &app, &HitTarget::ProfileGroupConfirm),
+        Action::ProfileGroupConfirm
+    );
+    assert_eq!(
+        click_action(&ui, &app, &HitTarget::ProfileGroupCancel),
+        Action::ProfileGroupCancel
+    );
+}
+
+#[test]
 fn relation_view_and_retry_hit_targets_emit_semantic_actions() {
     let mut app = App::new(Vec::new());
     app.tabs.push(lazydb::model::tab::WorkspaceTab::Relation(

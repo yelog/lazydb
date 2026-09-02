@@ -354,7 +354,7 @@ async fn local_encrypted_password_is_persisted_and_resolved_after_restart() {
     first_runtime.shutdown().await;
 
     let (mut second_runtime, mut second_receiver) = runtime(
-        ProfileStore::new(path).load().unwrap(),
+        ProfileStore::new(path).load().unwrap().profiles,
         HashSet::from([profile_id]),
         ProfileStore::new(temp.path().join("connections.toml")),
         fake,
@@ -457,7 +457,7 @@ async fn remembered_password_is_resolved_after_runtime_reconstruction() {
         Some(keyring_ref(profile_id).as_str())
     );
     let (mut second_runtime, mut second_receiver) = runtime(
-        stored_profiles,
+        stored_profiles.profiles,
         HashSet::from([profile_id]),
         ProfileStore::new(path),
         Arc::clone(&fake),

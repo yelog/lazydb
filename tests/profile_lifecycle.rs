@@ -263,7 +263,7 @@ async fn two_sqlite_profiles_complete_the_full_runtime_lifecycle() {
         .collect();
     let (reload_events, _reload_receiver) = mpsc::unbounded_channel();
     let reloaded_runtime = Runtime::new(
-        persisted_profiles.clone(),
+        persisted_profiles.profiles.clone(),
         reloaded_ids,
         HashMap::new(),
         None,

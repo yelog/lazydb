@@ -1,5 +1,6 @@
+use lazydb::model::profile_group::ProfileGroupOverlay;
 use lazydb::{
-    action::{Action, Command},
+    action::{Action, Command, ProfileOrganizationMutation},
     app::App,
     db::{
         ServerInfo,
@@ -22,11 +23,157 @@ use lazydb::{
         ProfileAccess, import_connection_url,
     },
 };
+use uuid::Uuid;
 
 fn sqlite_profile(name: &str) -> ConnectionProfile {
     import_connection_url(":memory:", Some(name))
         .unwrap()
         .profile
+}
+
+#[test]
+fn profile_group_overlay_creates_renames_assigns_unassigns_and_deletes() {
+    let mut profile = sqlite_profile("one");
+    profile.id = Uuid::from_u128(1);
+    let mut app = App::new(vec![profile.clone()]);
+    app.explorer.normalized.selected = Some(ExplorerNodeId::Profile(profile.id));
+    app.overlay = Some(Overlay::ProfileGroup(ProfileGroupOverlay::Edit {
+        group_id: None,
+        name: "  Prod  ".into(),
+        error: None,
+        busy: false,
+    }));
+    let commands = app.update(Action::ProfileGroupConfirm);
+    let Command::UpdateProfileOrganization {
+        mutation: ProfileOrganizationMutation::CreateGroup { id, name },
+        ..
+    } = commands.into_iter().next().unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(name, "Prod");
+    let group = lazydb::profile::ConnectionGroup::new(id, name).unwrap();
+    app.update(Action::ProfileOrganizationSaved {
+        request_id: 1,
+        collection: lazydb::profile::ProfileCollection {
+            groups: vec![group.clone()],
+            profiles: vec![profile.clone()],
+        },
+    });
+    app.explorer.normalized.selected = Some(ExplorerNodeId::Profile(profile.id));
+    app.update(Action::ProfileGroupOpen);
+    app.update(Action::ProfileGroupSelect(1));
+    let commands = app.update(Action::ProfileGroupConfirm);
+    assert!(matches!(
+        commands.as_slice(),
+        [Command::UpdateProfileOrganization {
+            mutation: ProfileOrganizationMutation::AssignProfile {
+                profile_id,
+                group_id: Some(found),
+            },
+            ..
+        }] if *profile_id == profile.id && *found == group.id
+    ));
+    app.overlay = Some(Overlay::ProfileGroup(ProfileGroupOverlay::Picker {
+        profile_id: profile.id,
+        selected: 0,
+        busy: false,
+    }));
+    let commands = app.update(Action::ProfileGroupConfirm);
+    assert!(matches!(
+        commands.as_slice(),
+        [Command::UpdateProfileOrganization {
+            mutation: ProfileOrganizationMutation::AssignProfile { group_id: None, .. },
+            ..
+        }]
+    ));
+}
+
+#[test]
+fn profile_group_overlay_cancel_and_invalid_name_do_not_emit_commands() {
+    let mut app = App::new(vec![sqlite_profile("one")]);
+    app.overlay = Some(Overlay::ProfileGroup(ProfileGroupOverlay::Edit {
+        group_id: None,
+        name: "".into(),
+        error: None,
+        busy: false,
+    }));
+    assert!(app.update(Action::ProfileGroupConfirm).is_empty());
+    assert!(matches!(
+        app.overlay,
+        Some(Overlay::ProfileGroup(ProfileGroupOverlay::Edit {
+            error: Some(_),
+            ..
+        }))
+    ));
+    assert!(app.update(Action::ProfileGroupCancel).is_empty());
+    assert!(app.overlay.is_none());
+}
+
+#[test]
+fn profile_group_picker_reaches_create_option_and_emits_create_command() {
+    let profile = sqlite_profile("one");
+    let profile_id = profile.id;
+    let mut app = App::new(vec![profile]);
+    app.explorer.normalized.selected = Some(ExplorerNodeId::Profile(profile_id));
+    app.update(Action::ProfileGroupOpen);
+    app.update(Action::ProfileGroupSelect(1));
+    assert!(app.update(Action::ProfileGroupConfirm).is_empty());
+    assert!(matches!(
+        app.overlay,
+        Some(Overlay::ProfileGroup(ProfileGroupOverlay::Edit {
+            group_id: None,
+            ..
+        }))
+    ));
+    app.update(Action::ProfileGroupInsert('P'));
+    app.update(Action::ProfileGroupInsert('r'));
+    app.update(Action::ProfileGroupInsert('o'));
+    app.update(Action::ProfileGroupInsert('d'));
+    assert!(matches!(
+        app.update(Action::ProfileGroupConfirm).as_slice(),
+        [Command::UpdateProfileOrganization {
+            mutation: ProfileOrganizationMutation::CreateGroup { name, .. },
+            ..
+        }] if name == "Prod"
+    ));
+}
+
+#[test]
+fn profile_group_overlay_emits_rename_delete_and_reorder_commands() {
+    let mut first = sqlite_profile("first");
+    first.id = Uuid::from_u128(10);
+    let mut second = sqlite_profile("second");
+    second.id = Uuid::from_u128(11);
+    let group_id = Uuid::from_u128(12);
+    let mut app = App::from_profile_collection(lazydb::profile::ProfileCollection {
+        groups: vec![lazydb::profile::ConnectionGroup::new(group_id, "Production").unwrap()],
+        profiles: vec![first.clone(), second],
+    });
+    app.overlay = Some(Overlay::ProfileGroup(ProfileGroupOverlay::Edit {
+        group_id: Some(group_id),
+        name: "Renamed".into(),
+        error: None,
+        busy: false,
+    }));
+    assert!(matches!(
+        app.update(Action::ProfileGroupConfirm).as_slice(),
+        [Command::UpdateProfileOrganization { mutation: ProfileOrganizationMutation::RenameGroup { group_id: found, name }, .. }] if *found == group_id && name == "Renamed"
+    ));
+    app.overlay = Some(Overlay::ProfileGroup(ProfileGroupOverlay::DeleteConfirm {
+        group_id,
+        member_count: 2,
+        busy: false,
+    }));
+    assert!(matches!(
+        app.update(Action::ProfileGroupConfirm).as_slice(),
+        [Command::UpdateProfileOrganization { mutation: ProfileOrganizationMutation::DeleteGroup { group_id: found }, .. }] if *found == group_id
+    ));
+    app.explorer.normalized.selected = Some(ExplorerNodeId::Profile(first.id));
+    assert!(matches!(
+        app.update(Action::ProfileGroupMove(1)).as_slice(),
+        [Command::UpdateProfileOrganization { mutation: ProfileOrganizationMutation::MoveProfile { profile_id, direction: lazydb::model::profile_organization::MoveDirection::Down, .. }, .. }] if *profile_id == first.id
+    ));
 }
 
 #[test]

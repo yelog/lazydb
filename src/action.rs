@@ -2,6 +2,9 @@ use crossterm::event::KeyEvent;
 use std::path::PathBuf;
 use uuid::Uuid;
 
+use crate::model::profile_organization::MoveDirection;
+use crate::profile::ProfileCollection;
+
 use crate::db::catalog_mutation::{
     CatalogMutationPlan, CatalogMutationRequest, CatalogObjectDefinition,
     CatalogObjectDefinitionRequest,
@@ -238,6 +241,15 @@ pub enum Action {
     ProfileAccessMove(isize),
     ProfileAccessConfirm,
     ProfileAccessCancel,
+    ProfileGroupOpen,
+    ProfileGroupCreate,
+    ProfileGroupMove(isize),
+    ProfileGroupSelect(usize),
+    ProfileGroupInsert(char),
+    ProfileGroupBackspace,
+    ProfileGroupConfirm,
+    ProfileGroupCancel,
+    ProfileGroupDeleteConfirm,
     ProfileAccessUpdated {
         request_id: u64,
         profile_id: Uuid,
@@ -254,6 +266,14 @@ pub enum Action {
         active_connection: Option<ConnectionIdentity>,
     },
     ProfileDeleteFailed {
+        request_id: u64,
+        message: String,
+    },
+    ProfileOrganizationSaved {
+        request_id: u64,
+        collection: ProfileCollection,
+    },
+    ProfileOrganizationSaveFailed {
         request_id: u64,
         message: String,
     },
@@ -790,6 +810,10 @@ pub enum Command {
         profile_id: Uuid,
         change: ProfileAccessChange,
     },
+    UpdateProfileOrganization {
+        request_id: u64,
+        mutation: ProfileOrganizationMutation,
+    },
     Disconnect {
         connection: ConnectionIdentity,
     },
@@ -935,6 +959,30 @@ pub enum Command {
     CheckSecretStoreAvailability,
     ScheduleCompletion(crate::sql::CompletionScheduleKey),
     Quit,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProfileOrganizationMutation {
+    CreateGroup {
+        id: Uuid,
+        name: String,
+    },
+    RenameGroup {
+        group_id: Uuid,
+        name: String,
+    },
+    DeleteGroup {
+        group_id: Uuid,
+    },
+    AssignProfile {
+        profile_id: Uuid,
+        group_id: Option<Uuid>,
+    },
+    MoveProfile {
+        profile_id: Uuid,
+        sibling_ids: Vec<Uuid>,
+        direction: MoveDirection,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

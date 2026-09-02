@@ -45,6 +45,7 @@ impl AgentService {
                 code: super::selection::AgentErrorCode::NoVisibleConnections,
                 message: error.to_string(),
             })?;
+        let profiles = profiles.profiles;
         let credentials = CredentialResolver::new(
             Arc::new(NativeSecretStore),
             LocalCredentialStore::from_paths(&paths, "lazydb"),

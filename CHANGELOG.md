@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Add persistent Explorer connection groups, group membership, and profile ordering.
+
 All notable changes to LazyDB are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),

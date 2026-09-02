@@ -14,6 +14,7 @@ fn profile(kind: DatabaseKind) -> ConnectionProfile {
         id,
         name: "target".into(),
         access: ProfileAccess::Global,
+        group_id: None,
         kind,
         url_format: ConnectionUrlFormat::default_for(kind),
         host: Some("localhost".into()),

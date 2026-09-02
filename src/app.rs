@@ -9,7 +9,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use uuid::Uuid;
 
 use crate::{
-    action::{Action, Command, ProfileAccessChange},
+    action::{Action, Command, ProfileAccessChange, ProfileOrganizationMutation},
     cli::ConfirmationPolicy,
     clipboard::{ClipboardPayload, copy_cell, copy_row_tsv},
     db::catalog_mutation::{
@@ -191,6 +191,7 @@ fn append_console_output_to_editor(
 pub struct App {
     pub project: ProjectContext,
     pub profiles: Vec<ConnectionProfile>,
+    pub connection_groups: Vec<crate::profile::ConnectionGroup>,
     pub connection: ConnectionState,
     pub active_workspace_profile: Option<Uuid>,
     pub explorer: ExplorerState,
@@ -410,6 +411,32 @@ impl App {
         )
     }
 
+    pub fn from_profile_collection(collection: crate::profile::ProfileCollection) -> Self {
+        let persisted = collection
+            .profiles
+            .iter()
+            .map(|profile| profile.id)
+            .collect();
+        let groups = collection.groups.clone();
+        let profiles = collection.profiles;
+        let mut app = Self::with_profiles(
+            profiles,
+            persisted,
+            ConfirmationPolicy::RiskyOnly,
+            ProjectContext::resolve_current().expect("current project must be resolvable"),
+        );
+        app.connection_groups = groups.clone();
+        app.explorer.normalized.sync_organization(
+            groups,
+            app.profiles.iter().map(|profile| profile.id).collect(),
+            &app.profiles
+                .iter()
+                .map(|profile| (profile.id, profile.group_id))
+                .collect(),
+        );
+        app
+    }
+
     pub fn with_startup_profiles(
         profiles: Vec<ConnectionProfile>,
         persisted: HashSet<Uuid>,
@@ -503,6 +530,7 @@ impl App {
         Self {
             project,
             profiles,
+            connection_groups: Vec::new(),
             connection: ConnectionState::default(),
             active_workspace_profile: None,
             explorer,
@@ -4127,6 +4155,50 @@ impl App {
                 }
                 Vec::new()
             }
+            Action::ProfileOrganizationSaved { collection, .. } => {
+                self.connection_groups = collection.groups.clone();
+                self.profiles = collection.profiles.clone();
+                self.explorer.normalized.sync_organization(
+                    collection.groups,
+                    collection
+                        .profiles
+                        .iter()
+                        .map(|profile| profile.id)
+                        .collect(),
+                    &self
+                        .profiles
+                        .iter()
+                        .map(|profile| (profile.id, profile.group_id))
+                        .collect(),
+                );
+                Vec::new()
+            }
+            Action::ProfileOrganizationSaveFailed { message, .. } => {
+                self.notify(NotificationLevel::Error, "Connection organization", message);
+                Vec::new()
+            }
+            Action::ProfileGroupOpen => self.open_profile_group(),
+            Action::ProfileGroupCreate => {
+                self.overlay = Some(Overlay::ProfileGroup(
+                    crate::model::profile_group::ProfileGroupOverlay::Edit {
+                        group_id: None,
+                        name: Default::default(),
+                        error: None,
+                        busy: false,
+                    },
+                ));
+                Vec::new()
+            }
+            Action::ProfileGroupMove(delta) => self.move_profile_group(delta),
+            Action::ProfileGroupSelect(index) => self.select_profile_group(index),
+            Action::ProfileGroupInsert(character) => self.profile_group_insert(character),
+            Action::ProfileGroupBackspace => self.profile_group_backspace(),
+            Action::ProfileGroupConfirm => self.confirm_profile_group(),
+            Action::ProfileGroupCancel => {
+                self.overlay = None;
+                Vec::new()
+            }
+            Action::ProfileGroupDeleteConfirm => self.confirm_profile_group_delete(),
             Action::CredentialsRequired {
                 profile_id,
                 generation,
@@ -8942,6 +9014,262 @@ impl App {
         }]
     }
 
+    fn profile_group_options(&self) -> Vec<Option<Uuid>> {
+        std::iter::once(None)
+            .chain(self.connection_groups.iter().map(|group| Some(group.id)))
+            .collect()
+    }
+
+    fn open_profile_group(&mut self) -> Vec<Command> {
+        if let Some(ExplorerNodeId::ConnectionGroup { group_id, .. }) = self.explorer.selected_id()
+        {
+            let Some(group) = self
+                .connection_groups
+                .iter()
+                .find(|group| group.id == *group_id)
+            else {
+                return Vec::new();
+            };
+            self.overlay = Some(Overlay::ProfileGroup(
+                crate::model::profile_group::ProfileGroupOverlay::Edit {
+                    group_id: Some(group.id),
+                    name: group.name.clone().into(),
+                    error: None,
+                    busy: false,
+                },
+            ));
+            return Vec::new();
+        }
+        let Some(ExplorerNodeId::Profile(profile_id)) = self.explorer.selected_id().cloned() else {
+            return Vec::new();
+        };
+        let Some(profile) = self
+            .profiles
+            .iter()
+            .find(|profile| profile.id == profile_id)
+        else {
+            return Vec::new();
+        };
+        if !self
+            .explorer
+            .normalized
+            .profiles
+            .get(&profile_id)
+            .is_some_and(|state| state.provenance == ProfileProvenance::Saved)
+        {
+            self.notify_warning(
+                "Connection group",
+                "Session connections cannot be organized",
+            );
+            return Vec::new();
+        }
+        let selected = self
+            .profile_group_options()
+            .iter()
+            .position(|group_id| *group_id == profile.group_id)
+            .unwrap_or(0);
+        self.overlay = Some(Overlay::ProfileGroup(
+            crate::model::profile_group::ProfileGroupOverlay::Picker {
+                profile_id,
+                selected,
+                busy: false,
+            },
+        ));
+        Vec::new()
+    }
+
+    fn move_profile_group(&mut self, delta: isize) -> Vec<Command> {
+        let len = self.profile_group_options().len();
+        if let Some(Overlay::ProfileGroup(
+            crate::model::profile_group::ProfileGroupOverlay::Picker { selected, .. },
+        )) = self.overlay.as_mut()
+        {
+            *selected = selected
+                .saturating_add_signed(delta)
+                .min(len.saturating_sub(1));
+            return Vec::new();
+        }
+        let Some(ExplorerNodeId::Profile(profile_id)) = self.explorer.selected_id().cloned() else {
+            return Vec::new();
+        };
+        let Some(profile) = self
+            .profiles
+            .iter()
+            .find(|profile| profile.id == profile_id)
+        else {
+            return Vec::new();
+        };
+        let Some(state) = self.explorer.normalized.profiles.get(&profile_id) else {
+            return Vec::new();
+        };
+        if state.provenance != ProfileProvenance::Saved {
+            self.notify_warning(
+                "Connection group",
+                "Session connections cannot be reordered",
+            );
+            return Vec::new();
+        }
+        let sibling_ids = self
+            .profiles
+            .iter()
+            .filter(|candidate| {
+                self.explorer
+                    .normalized
+                    .profiles
+                    .get(&candidate.id)
+                    .is_some_and(|candidate_state| {
+                        candidate_state.placement == state.placement
+                            && candidate.group_id == profile.group_id
+                    })
+            })
+            .map(|candidate| candidate.id)
+            .collect();
+        let direction = if delta.is_negative() {
+            crate::model::profile_organization::MoveDirection::Up
+        } else {
+            crate::model::profile_organization::MoveDirection::Down
+        };
+        vec![Command::UpdateProfileOrganization {
+            request_id: self.next_profile_request_id(),
+            mutation: ProfileOrganizationMutation::MoveProfile {
+                profile_id,
+                sibling_ids,
+                direction,
+            },
+        }]
+    }
+
+    fn select_profile_group(&mut self, index: usize) -> Vec<Command> {
+        if let Some(Overlay::ProfileGroup(
+            crate::model::profile_group::ProfileGroupOverlay::Picker { selected, .. },
+        )) = self.overlay.as_mut()
+        {
+            *selected = index;
+        }
+        Vec::new()
+    }
+
+    fn profile_group_insert(&mut self, character: char) -> Vec<Command> {
+        if let Some(Overlay::ProfileGroup(
+            crate::model::profile_group::ProfileGroupOverlay::Edit { name, .. },
+        )) = self.overlay.as_mut()
+        {
+            name.insert(character);
+        }
+        Vec::new()
+    }
+
+    fn profile_group_backspace(&mut self) -> Vec<Command> {
+        if let Some(Overlay::ProfileGroup(
+            crate::model::profile_group::ProfileGroupOverlay::Edit { name, .. },
+        )) = self.overlay.as_mut()
+        {
+            name.backspace();
+        }
+        Vec::new()
+    }
+
+    fn confirm_profile_group(&mut self) -> Vec<Command> {
+        let Some(Overlay::ProfileGroup(overlay)) = self.overlay.take() else {
+            return Vec::new();
+        };
+        match overlay {
+            crate::model::profile_group::ProfileGroupOverlay::Picker {
+                profile_id,
+                selected,
+                ..
+            } => {
+                let groups = self.profile_group_options();
+                let create_index = groups.len();
+                if selected == create_index {
+                    self.overlay = Some(Overlay::ProfileGroup(
+                        crate::model::profile_group::ProfileGroupOverlay::Edit {
+                            group_id: None,
+                            name: Default::default(),
+                            error: None,
+                            busy: false,
+                        },
+                    ));
+                    return Vec::new();
+                }
+                let Some(group_id) = groups.get(selected).copied() else {
+                    return Vec::new();
+                };
+                vec![Command::UpdateProfileOrganization {
+                    request_id: self.next_profile_request_id(),
+                    mutation: ProfileOrganizationMutation::AssignProfile {
+                        profile_id,
+                        group_id,
+                    },
+                }]
+            }
+            crate::model::profile_group::ProfileGroupOverlay::Edit { group_id, name, .. } => {
+                let name = name.value().trim().to_owned();
+                let Some(group_id) = group_id else {
+                    if name.is_empty()
+                        || name.chars().count() > crate::profile::MAX_CONNECTION_GROUP_NAME_CHARS
+                    {
+                        self.overlay = Some(Overlay::ProfileGroup(
+                            crate::model::profile_group::ProfileGroupOverlay::Edit {
+                                group_id: None,
+                                name: name.into(),
+                                error: Some("Group name must be 1-64 characters".into()),
+                                busy: false,
+                            },
+                        ));
+                        return Vec::new();
+                    }
+                    let id = Uuid::new_v4();
+                    return vec![Command::UpdateProfileOrganization {
+                        request_id: self.next_profile_request_id(),
+                        mutation: ProfileOrganizationMutation::CreateGroup { id, name },
+                    }];
+                };
+                vec![Command::UpdateProfileOrganization {
+                    request_id: self.next_profile_request_id(),
+                    mutation: ProfileOrganizationMutation::RenameGroup { group_id, name },
+                }]
+            }
+            crate::model::profile_group::ProfileGroupOverlay::DeleteConfirm {
+                group_id, ..
+            } => {
+                vec![Command::UpdateProfileOrganization {
+                    request_id: self.next_profile_request_id(),
+                    mutation: ProfileOrganizationMutation::DeleteGroup { group_id },
+                }]
+            }
+        }
+    }
+
+    fn confirm_profile_group_delete(&mut self) -> Vec<Command> {
+        if let Some(Overlay::ProfileGroup(
+            crate::model::profile_group::ProfileGroupOverlay::DeleteConfirm { group_id, .. },
+        )) = self.overlay.take()
+        {
+            return vec![Command::UpdateProfileOrganization {
+                request_id: self.next_profile_request_id(),
+                mutation: ProfileOrganizationMutation::DeleteGroup { group_id },
+            }];
+        }
+        if let Some(ExplorerNodeId::ConnectionGroup { group_id, .. }) = self.explorer.selected_id()
+        {
+            let member_count = self
+                .profiles
+                .iter()
+                .filter(|profile| profile.group_id == Some(*group_id))
+                .count();
+            self.overlay = Some(Overlay::ProfileGroup(
+                crate::model::profile_group::ProfileGroupOverlay::DeleteConfirm {
+                    group_id: *group_id,
+                    member_count,
+                    busy: false,
+                },
+            ));
+            return Vec::new();
+        }
+        Vec::new()
+    }
+
     fn next_profile_request_id(&mut self) -> u64 {
         self.connection_request_generation = self.connection_request_generation.saturating_add(1);
         self.connection_request_generation
@@ -8970,6 +9298,7 @@ impl App {
             | ExplorerNodeId::LoadMore { parent: owner, .. } => self.target_for_owner(owner),
             ExplorerNodeId::EmptyProfiles => None,
             ExplorerNodeId::Others => None,
+            ExplorerNodeId::ConnectionGroup { .. } => None,
         }
     }
 
@@ -9063,6 +9392,10 @@ impl App {
                 Vec::new()
             }
             ExplorerNodeId::Status { .. } | ExplorerNodeId::Empty { .. } => Vec::new(),
+            ExplorerNodeId::ConnectionGroup { .. } => {
+                self.explorer.toggle_selected();
+                Vec::new()
+            }
         }
     }
 
@@ -11223,6 +11556,9 @@ fn add_explorer_profile(
         provenance,
         placement,
     );
+    if let Some(state) = explorer.normalized.profiles.get_mut(&profile.id) {
+        state.group_id = profile.group_id;
+    }
 }
 
 fn profile_placement(
