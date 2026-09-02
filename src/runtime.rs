@@ -3243,9 +3243,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
         .context("failed to resolve current project")?;
     let startup = load_startup_profiles(&cli)?;
     let paths = AppPaths::discover()?;
-    let settings = crate::persistence::settings::AppSettings::load(
-        paths.config_dir.join("settings.toml"),
-    )
+    let settings = crate::persistence::settings::AppSettings::load(paths.settings_file())
         .context("failed to load application settings")?;
     let workspace_store = WorkspaceStore::new(paths.workspace_file(), paths.workspace_sql_dir());
     let workspace = workspace_store.load().context("failed to load workspace")?;

@@ -49,6 +49,10 @@ impl AppPaths {
         self.config_dir.join("connections.toml")
     }
 
+    pub fn settings_file(&self) -> PathBuf {
+        self.config_dir.join("settings.toml")
+    }
+
     pub fn credential_key_file(&self) -> PathBuf {
         self.config_dir.join("credential.key")
     }
