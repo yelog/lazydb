@@ -155,9 +155,12 @@ impl AgentMcpServer {
         serde_json::to_string(&result).map_err(|error| error.to_string())
     }
 
-    /// Execute a project-local SQL file subject to the server write policy.
+    /// Execute a project-local SQL file subject to LazyDB write policy. Client
+    /// approval does not override --write-policy, a read-only profile,
+    /// production restrictions, or database grants.
     #[tool(
         name = "execute_file",
+        description = "Execute a project-local SQL file subject to LazyDB write policy. Client approval does not override --write-policy, a read-only profile, production restrictions, or database grants.",
         annotations(read_only_hint = false, destructive_hint = true)
     )]
     async fn execute_file(&self, input: Parameters<FileInput>) -> Result<String, String> {
@@ -189,9 +192,13 @@ impl AgentMcpServer {
         serde_json::to_string(&result).map_err(|e| e.to_string())
     }
 
-    /// Execute a change subject to the server write policy and profile policy.
+    /// Execute a SQL change subject to LazyDB write policy. Client approval
+    /// does not override --write-policy, a read-only profile, production
+    /// restrictions, or database grants. Call get_context first to inspect
+    /// effective capability.
     #[tool(
         name = "execute_change",
+        description = "Execute a SQL change subject to LazyDB write policy. Client approval does not override --write-policy, a read-only profile, production restrictions, or database grants. Call get_context first to inspect effective capability.",
         annotations(read_only_hint = false, destructive_hint = true)
     )]
     async fn execute_change(&self, input: Parameters<QueryInput>) -> Result<String, String> {

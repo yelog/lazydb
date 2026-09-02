@@ -91,6 +91,14 @@ fn tool_definitions_are_split_between_read_and_write_operations() {
             .destructive_hint,
         Some(true)
     );
+    let change_tool = AgentMcpServer::execute_change_tool_attr();
+    let change_description = change_tool.description.as_deref().unwrap();
+    assert!(change_description.contains("Client approval does not override"));
+    assert!(change_description.contains("--write-policy"));
+    assert!(change_description.contains("read-only"));
+    let file_tool = AgentMcpServer::execute_file_tool_attr();
+    let file_description = file_tool.description.as_deref().unwrap();
+    assert!(file_description.contains("Client approval does not override"));
 }
 
 #[test]
