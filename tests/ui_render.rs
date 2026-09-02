@@ -156,6 +156,29 @@ fn dashboard_renders_real_chart_series_after_two_samples() {
 }
 
 #[test]
+fn dashboard_overview_uses_remaining_space_for_history() {
+    let mut app = App::new(Vec::new());
+    app.tabs.clear();
+    let mut dashboard = lazydb::model::dashboard::DashboardTab::new();
+    dashboard.history.push(
+        lazydb::model::dashboard::RawSample::new(1_000, 1)
+            .with(lazydb::model::dashboard::MetricKey::Commits, 10.0),
+    );
+    dashboard.history.push(
+        lazydb::model::dashboard::RawSample::new(3_000, 1)
+            .with(lazydb::model::dashboard::MetricKey::Commits, 16.0),
+    );
+    app.tabs.push(WorkspaceTab::Dashboard(dashboard));
+    app.active_tab = 0;
+    app.focus = Focus::Results;
+
+    let output = render(&app, 140, 40);
+    assert!(output.contains("Transactions"), "{output}");
+    assert!(output.contains("commits/s"), "{output}");
+    assert!(output.contains("History · last 10 minutes"), "{output}");
+}
+
+#[test]
 fn offline_profiles_render_as_collapsed_even_when_expansion_is_pending() {
     let profile = import_connection_url(":memory:", Some("offline-profile"))
         .unwrap()

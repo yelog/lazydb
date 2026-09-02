@@ -304,8 +304,8 @@ WITH db_stats AS (
            count(*) FILTER (WHERE state = 'idle')::double precision AS idle_connections
     FROM pg_stat_activity WHERE pid <> pg_backend_pid()
 )
-SELECT extract(epoch FROM clock_timestamp()) * 1000 AS server_time_millis,
-       extract(epoch FROM pg_postmaster_start_time()) * 1000 AS server_generation,
+SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint AS server_time_millis,
+       floor(extract(epoch FROM pg_postmaster_start_time()) * 1000)::bigint AS server_generation,
        db_stats.*, activity_stats.*
 FROM db_stats CROSS JOIN activity_stats
 "#;
@@ -355,12 +355,8 @@ LIMIT 2001
         let rollbacks = values[&MetricKey::Rollbacks];
         values.insert(MetricKey::Transactions, commits + rollbacks);
         Ok(crate::db::monitor::MonitorSnapshot {
-            server_time_millis: row
-                .try_get::<f64, _>("server_time_millis")
-                .map_err(decode_error)? as u64,
-            server_generation: row
-                .try_get::<f64, _>("server_generation")
-                .map_err(decode_error)? as u64,
+            server_time_millis: monitor_timestamp(&row, "server_time_millis")?,
+            server_generation: monitor_timestamp(&row, "server_generation")?,
             values,
         })
     }
@@ -3046,6 +3042,15 @@ fn unsupported(type_name: &str, preview: &str) -> CellValue {
 
 fn decode_error(error: sqlx::Error) -> DatabaseError {
     DatabaseError::from_sqlx(error, ErrorCategory::Internal)
+}
+
+fn monitor_timestamp(row: &PgRow, name: &str) -> Result<u64, DatabaseError> {
+    let value = row.try_get::<i64, _>(name).map_err(decode_error)?;
+    u64::try_from(value).map_err(|_| DatabaseError {
+        category: ErrorCategory::Internal,
+        code: Some("postgres_monitor_decode".to_owned()),
+        message: format!("PostgreSQL returned a negative monitoring timestamp: {name}"),
+    })
 }
 
 #[cfg(test)]

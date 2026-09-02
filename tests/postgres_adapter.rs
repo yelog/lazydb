@@ -15,6 +15,7 @@ use lazydb::{
         value::CellValue,
     },
     identity::ConnectionIdentity,
+    model::dashboard::MetricKey,
     profile::{CatalogScope, CatalogSelection, DatabaseScope, import_connection_url},
 };
 use uuid::Uuid;
@@ -28,6 +29,12 @@ fn monitoring_sql_aggregates_database_and_activity_stats_separately() {
     assert!(status.contains("pg_stat_activity"));
     assert!(status.contains("pg_backend_pid()"));
     assert!(status.contains("pg_postmaster_start_time()"));
+    assert!(status.contains(
+        "floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint AS server_time_millis"
+    ));
+    assert!(status.contains(
+        "floor(extract(epoch FROM pg_postmaster_start_time()) * 1000)::bigint AS server_generation"
+    ));
 
     let process = postgres::PostgresAdapter::PROCESS_LIST_SQL;
     for field in [
@@ -44,6 +51,27 @@ fn monitoring_sql_aggregates_database_and_activity_stats_separately() {
         assert!(process.contains(field), "missing {field}");
     }
     assert!(process.contains("LIMIT 2001"));
+}
+
+#[tokio::test]
+async fn monitoring_snapshot_decodes_integer_timestamps_when_configured() {
+    let Ok(url) = std::env::var("LAZYDB_TEST_POSTGRES_URL") else {
+        return;
+    };
+    let imported = import_connection_url(&url, Some("postgres-monitoring")).unwrap();
+    let database =
+        DatabaseConnection::connect(&imported.profile, imported.transient_password.as_ref())
+            .await
+            .unwrap();
+
+    let snapshot = database.load_monitor_snapshot().await.unwrap();
+    assert!(snapshot.server_time_millis > 0);
+    assert!(snapshot.server_generation > 0);
+    assert!(snapshot.server_time_millis >= snapshot.server_generation);
+    assert!(snapshot.values.contains_key(&MetricKey::Transactions));
+    assert!(snapshot.values.contains_key(&MetricKey::Connections));
+
+    database.close().await;
 }
 
 #[test]

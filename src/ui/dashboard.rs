@@ -76,6 +76,7 @@ fn render_overview(
         .constraints([
             Constraint::Length(5),
             Constraint::Length(5),
+            Constraint::Length(1),
             Constraint::Min(1),
         ])
         .split(area);
@@ -161,6 +162,7 @@ fn render_overview(
         Paragraph::new(metadata).style(Style::new().fg(theme.muted)),
         rows[2],
     );
+    render_history(frame, rows[3], theme, tab);
 }
 
 fn metric_value(
@@ -284,6 +286,18 @@ fn render_charts(
     theme: Theme,
     tab: &crate::model::dashboard::DashboardTab,
 ) {
+    render_history(frame, area, theme, tab);
+}
+
+fn render_history(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    theme: Theme,
+    tab: &crate::model::dashboard::DashboardTab,
+) {
+    if area.width < 2 || area.height < 2 {
+        return;
+    }
     let chart_area = area;
     let inner = Block::new()
         .borders(Borders::ALL)
