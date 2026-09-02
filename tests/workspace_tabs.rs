@@ -54,6 +54,24 @@ fn opening_dashboard_is_idempotent_and_focuses_results() {
 }
 
 #[test]
+fn dashboard_cycles_focus_only_between_explorer_and_results() {
+    let mut app = App::new(Vec::new());
+    app.tabs.clear();
+    app.tabs.push(WorkspaceTab::Dashboard(
+        lazydb::model::dashboard::DashboardTab::new(),
+    ));
+    app.active_tab = 0;
+    app.focus = Focus::Explorer;
+
+    app.update(Action::FocusNext);
+    assert_eq!(app.focus, Focus::Results);
+    app.update(Action::FocusNext);
+    assert_eq!(app.focus, Focus::Explorer);
+    app.update(Action::FocusPrevious);
+    assert_eq!(app.focus, Focus::Results);
+}
+
+#[test]
 fn new_app_with_profiles_has_no_active_workspace_until_connected() {
     let profile = import_connection_url(":memory:", Some("saved"))
         .unwrap()

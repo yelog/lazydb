@@ -22,6 +22,7 @@ pub enum ShortcutContext {
     EditorVisual,
     SqlResultsData,
     SqlOutput,
+    Dashboard,
     RelationDataBrowse,
     RelationDataEdit,
     RelationDataVisual,
@@ -60,6 +61,7 @@ const ALL_SHORTCUT_CONTEXTS: &[ShortcutContext] = &[
     ShortcutContext::EditorVisual,
     ShortcutContext::SqlResultsData,
     ShortcutContext::SqlOutput,
+    ShortcutContext::Dashboard,
     ShortcutContext::RelationDataBrowse,
     ShortcutContext::RelationDataEdit,
     ShortcutContext::RelationDataVisual,
@@ -171,6 +173,9 @@ fn shortcut_context_with_overlay(app: &App, include_help: bool) -> ShortcutConte
             ResultView::Data => ShortcutContext::SqlResultsData,
             ResultView::Output | ResultView::Plan => ShortcutContext::SqlOutput,
         },
+        Some(WorkspaceTab::Dashboard(_)) if app.focus == Focus::Results => {
+            ShortcutContext::Dashboard
+        }
         _ => match app.focus {
             Focus::Explorer => ShortcutContext::Explorer,
             Focus::Results => ShortcutContext::SqlResultsData,
@@ -205,6 +210,12 @@ pub enum HelpShortcutId {
     NextTabAlias,
     NewConsole,
     GotoSqlConsole,
+    OpenDashboard,
+    DashboardOverview,
+    DashboardProcesses,
+    DashboardCharts,
+    DashboardRefresh,
+    DashboardTogglePolling,
     RunSql,
     RunAllSql,
     CloseTab,
@@ -618,7 +629,8 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
             RelationDataEdit,
             RelationDataVisual,
             RelationDataBusy,
-            RelationDdl
+            RelationDdl,
+            Dashboard
         ],
         "? (also F1)",
         "open this help panel",
@@ -633,7 +645,8 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
             SqlOutput,
             RelationDataBrowse,
             RelationDataVisual,
-            RelationDdl
+            RelationDdl,
+            Dashboard
         ],
         "Ctrl-w h",
         "move focus left to Explorer",
@@ -766,6 +779,31 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
         "go to first SQL console",
         Leader,
         "s"
+    ),
+    row!(
+        OpenDashboard,
+        [
+            Explorer,
+            SqlResultsData,
+            SqlOutput,
+            RelationDataBrowse,
+            RelationDdl,
+            Dashboard
+        ],
+        "Space b",
+        "open database dashboard",
+        Leader,
+        "b"
+    ),
+    row!(DashboardOverview, [Dashboard], "1", "show overview"),
+    row!(DashboardProcesses, [Dashboard], "2", "show processes"),
+    row!(DashboardCharts, [Dashboard], "3", "show charts"),
+    row!(DashboardRefresh, [Dashboard], "r", "refresh metrics"),
+    row!(
+        DashboardTogglePolling,
+        [Dashboard],
+        "p",
+        "toggle automatic refresh"
     ),
     row!(
         CloseTab,
@@ -2136,19 +2174,20 @@ fn prefix_rank(prefix: ShortcutPrefix, id: HelpShortcutId) -> Option<u8> {
         ShortcutPrefix::Leader => match id {
             Id::NewConsole => 1,
             Id::GotoSqlConsole => 2,
-            Id::RunSql => 3,
-            Id::RunAllSql => 4,
-            Id::CloseTab => 5,
-            Id::FocusExplorerLeader => 5,
-            Id::DeleteConsole => 6,
-            Id::OpenSqlEditors => 7,
-            Id::EditorFormat => 8,
-            Id::EditorCopyStatement => 9,
-            Id::EditorCopyBuffer => 10,
-            Id::ToggleTransaction => 11,
-            Id::TransactionControl => 12,
-            Id::OpenTargetSelector => 13,
-            Id::ResultsCopyRowWithHeaders => 14,
+            Id::OpenDashboard => 3,
+            Id::RunSql => 4,
+            Id::RunAllSql => 5,
+            Id::CloseTab => 6,
+            Id::FocusExplorerLeader => 7,
+            Id::DeleteConsole => 8,
+            Id::OpenSqlEditors => 9,
+            Id::EditorFormat => 10,
+            Id::EditorCopyStatement => 11,
+            Id::EditorCopyBuffer => 12,
+            Id::ToggleTransaction => 13,
+            Id::TransactionControl => 14,
+            Id::OpenTargetSelector => 15,
+            Id::ResultsCopyRowWithHeaders => 16,
             _ => return None,
         },
         ShortcutPrefix::EditorLeader => match id {
@@ -2275,6 +2314,15 @@ fn footer_rank(
             Id::Help => Some(10),
             _ => None,
         },
+        ShortcutContext::Dashboard => match id {
+            Id::DashboardOverview => Some(1),
+            Id::DashboardProcesses => Some(2),
+            Id::DashboardCharts => Some(3),
+            Id::DashboardRefresh => Some(4),
+            Id::DashboardTogglePolling => Some(5),
+            Id::Help => Some(6),
+            _ => None,
+        },
         ShortcutContext::RelationDdl => match id {
             Id::RelationDdlMove => Some(1),
             Id::RelationDdlEnds => Some(2),
@@ -2371,6 +2419,7 @@ pub(crate) fn context_name(context: ShortcutContext) -> &'static str {
         | ShortcutContext::RelationDataVisual
         | ShortcutContext::RelationDataBusy
         | ShortcutContext::RelationDdl => "RESULTS",
+        ShortcutContext::Dashboard => "DASHBOARD",
         ShortcutContext::RecordView => "RECORD VIEW",
         ShortcutContext::DataQueryInput => "DATA QUERY",
         ShortcutContext::ProfileManagerForm
@@ -2529,6 +2578,35 @@ mod tests {
                 .any(|row| row.id == HelpShortcutId::RelationWhere)
         );
         assert!(available.len() > unavailable.len());
+    }
+
+    #[test]
+    fn explorer_and_dashboard_contexts_expose_dashboard_controls() {
+        let explorer = shortcuts(ShortcutContext::Explorer, ShortcutCapabilities::default());
+        assert!(
+            explorer.iter().any(|row| {
+                row.id == HelpShortcutId::OpenDashboard && row.sequence == "Space b"
+            })
+        );
+
+        let dashboard = shortcuts(
+            ShortcutContext::Dashboard,
+            ShortcutCapabilities {
+                focus: Focus::Results,
+                relation_layout: true,
+                ..ShortcutCapabilities::default()
+            },
+        );
+        for id in [
+            HelpShortcutId::DashboardOverview,
+            HelpShortcutId::DashboardProcesses,
+            HelpShortcutId::DashboardCharts,
+            HelpShortcutId::DashboardRefresh,
+            HelpShortcutId::DashboardTogglePolling,
+            HelpShortcutId::FocusExplorer,
+        ] {
+            assert!(dashboard.iter().any(|row| row.id == id), "missing {id:?}");
+        }
     }
 
     #[test]
@@ -3423,6 +3501,7 @@ mod tests {
             vec![
                 HelpShortcutId::NewConsole,
                 HelpShortcutId::GotoSqlConsole,
+                HelpShortcutId::OpenDashboard,
                 HelpShortcutId::RunSql,
                 HelpShortcutId::RunAllSql,
                 HelpShortcutId::CloseTab,

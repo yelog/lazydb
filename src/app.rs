@@ -1174,6 +1174,18 @@ impl App {
             Id::NextTabAlias => vec![Action::NextTab],
             Id::NewConsole => vec![Action::NewConsole],
             Id::GotoSqlConsole => vec![Action::GotoSqlConsole],
+            Id::OpenDashboard => vec![Action::OpenDashboard],
+            Id::DashboardOverview => vec![Action::DashboardSetPage(
+                crate::model::dashboard::DashboardPage::Overview,
+            )],
+            Id::DashboardProcesses => vec![Action::DashboardSetPage(
+                crate::model::dashboard::DashboardPage::Processes,
+            )],
+            Id::DashboardCharts => vec![Action::DashboardSetPage(
+                crate::model::dashboard::DashboardPage::Charts,
+            )],
+            Id::DashboardRefresh => vec![Action::DashboardRefresh],
+            Id::DashboardTogglePolling => vec![Action::DashboardTogglePolling],
             Id::RunSql => vec![Action::RunActiveSql],
             Id::RunAllSql => vec![Action::RunAllSql],
             Id::CloseTab => vec![Action::CloseActiveTab],
@@ -1963,7 +1975,7 @@ impl App {
                 Vec::new()
             }
             Action::FocusNext => {
-                self.focus = if self.is_active_relation_tab() {
+                self.focus = if self.active_console_opt().is_none() {
                     match self.focus {
                         Focus::Explorer => Focus::Results,
                         _ => Focus::Explorer,
@@ -1974,7 +1986,7 @@ impl App {
                 Vec::new()
             }
             Action::FocusPrevious => {
-                self.focus = if self.is_active_relation_tab() {
+                self.focus = if self.active_console_opt().is_none() {
                     match self.focus {
                         Focus::Explorer => Focus::Results,
                         _ => Focus::Explorer,

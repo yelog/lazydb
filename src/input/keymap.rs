@@ -613,6 +613,10 @@ impl Keymap {
 
         if app.focus != Focus::Editor
             && event.modifiers.is_empty()
+            && !matches!(
+                app.tabs.get(app.active_tab),
+                Some(crate::model::tab::WorkspaceTab::Dashboard(_))
+            )
             && let KeyCode::Char(character @ '1'..='9') = event.code
         {
             self.set_pending(
@@ -913,6 +917,23 @@ impl Keymap {
             Some(crate::model::tab::WorkspaceTab::Dashboard(_))
         );
         if dashboard_tab && app.focus == Focus::Results {
+            let dashboard_action = match event.code {
+                KeyCode::Char('1') => Some(Action::DashboardSetPage(
+                    crate::model::dashboard::DashboardPage::Overview,
+                )),
+                KeyCode::Char('2') => Some(Action::DashboardSetPage(
+                    crate::model::dashboard::DashboardPage::Processes,
+                )),
+                KeyCode::Char('3') => Some(Action::DashboardSetPage(
+                    crate::model::dashboard::DashboardPage::Charts,
+                )),
+                KeyCode::Char('r') => Some(Action::DashboardRefresh),
+                KeyCode::Char('p') => Some(Action::DashboardTogglePolling),
+                _ => None,
+            };
+            if dashboard_action.is_some() {
+                return dashboard_action;
+            }
             if matches!(
                 app.tabs.get(app.active_tab),
                 Some(crate::model::tab::WorkspaceTab::Dashboard(tab))
@@ -929,20 +950,7 @@ impl Keymap {
                     };
                 }
             }
-            return match event.code {
-                KeyCode::Char('1') => Some(Action::DashboardSetPage(
-                    crate::model::dashboard::DashboardPage::Overview,
-                )),
-                KeyCode::Char('2') => Some(Action::DashboardSetPage(
-                    crate::model::dashboard::DashboardPage::Processes,
-                )),
-                KeyCode::Char('3') => Some(Action::DashboardSetPage(
-                    crate::model::dashboard::DashboardPage::Charts,
-                )),
-                KeyCode::Char('r') => Some(Action::DashboardRefresh),
-                KeyCode::Char('p') => Some(Action::DashboardTogglePolling),
-                _ => None,
-            };
+            return None;
         }
         if relation_tab
             && app.focus == Focus::Results
@@ -1153,7 +1161,7 @@ fn map_pending(pending: Pending, event: KeyEvent, app: &App) -> Option<Action> {
             Some(Action::Focus(Focus::Editor))
         }
         (Pending::Window { .. }, KeyCode::Char('l')) if app.focus == Focus::Explorer => {
-            Some(Action::Focus(if app.is_active_relation_tab() {
+            Some(Action::Focus(if app.active_console_opt().is_none() {
                 Focus::Results
             } else {
                 Focus::Editor
@@ -2629,6 +2637,52 @@ mod tests {
         assert_eq!(
             keymap.map(key(KeyCode::Char('h')), &app),
             Some(Action::Focus(Focus::Explorer))
+        );
+    }
+
+    #[test]
+    fn dashboard_window_right_focuses_results_instead_of_missing_editor() {
+        let mut app = App::new(Vec::new());
+        app.tabs.clear();
+        app.tabs.push(WorkspaceTab::Dashboard(
+            crate::model::dashboard::DashboardTab::new(),
+        ));
+        app.active_tab = 0;
+        app.focus = Focus::Explorer;
+        let mut keymap = Keymap::default();
+
+        assert_eq!(
+            keymap.map(
+                KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+                &app,
+            ),
+            None
+        );
+        assert_eq!(
+            keymap.map(key(KeyCode::Char('l')), &app),
+            Some(Action::Focus(Focus::Results))
+        );
+    }
+
+    #[test]
+    fn dashboard_controls_remain_available_on_processes_page() {
+        let mut app = App::new(Vec::new());
+        app.tabs.clear();
+        let mut dashboard = crate::model::dashboard::DashboardTab::new();
+        dashboard.page = crate::model::dashboard::DashboardPage::Processes;
+        app.tabs.push(WorkspaceTab::Dashboard(dashboard));
+        app.active_tab = 0;
+        app.focus = Focus::Results;
+
+        assert_eq!(
+            Keymap::default().map(key(KeyCode::Char('1')), &app),
+            Some(Action::DashboardSetPage(
+                crate::model::dashboard::DashboardPage::Overview
+            ))
+        );
+        assert_eq!(
+            Keymap::default().map(key(KeyCode::Char('r')), &app),
+            Some(Action::DashboardRefresh)
         );
     }
 }

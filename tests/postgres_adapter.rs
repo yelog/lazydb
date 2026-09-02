@@ -29,6 +29,7 @@ fn monitoring_sql_aggregates_database_and_activity_stats_separately() {
     assert!(status.contains("pg_stat_activity"));
     assert!(status.contains("pg_backend_pid()"));
     assert!(status.contains("pg_postmaster_start_time()"));
+    assert!(status.contains("sum(tup_returned)"));
     assert!(status.contains(
         "floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint AS server_time_millis"
     ));

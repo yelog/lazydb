@@ -140,11 +140,15 @@ fn dashboard_renders_real_chart_series_after_two_samples() {
     dashboard.page = lazydb::model::dashboard::DashboardPage::Charts;
     dashboard.history.push(
         lazydb::model::dashboard::RawSample::new(1_000, 1)
-            .with(lazydb::model::dashboard::MetricKey::Commits, 10.0),
+            .with(lazydb::model::dashboard::MetricKey::Commits, 10.0)
+            .with(lazydb::model::dashboard::MetricKey::Selects, 100.0)
+            .with(lazydb::model::dashboard::MetricKey::Inserts, 5.0),
     );
     dashboard.history.push(
         lazydb::model::dashboard::RawSample::new(3_000, 1)
-            .with(lazydb::model::dashboard::MetricKey::Commits, 16.0),
+            .with(lazydb::model::dashboard::MetricKey::Commits, 16.0)
+            .with(lazydb::model::dashboard::MetricKey::Selects, 140.0)
+            .with(lazydb::model::dashboard::MetricKey::Inserts, 9.0),
     );
     app.tabs.push(WorkspaceTab::Dashboard(dashboard));
     app.active_tab = 0;
@@ -152,7 +156,10 @@ fn dashboard_renders_real_chart_series_after_two_samples() {
 
     let output = render(&app, 140, 40);
     assert!(output.contains("commits/s"), "{output}");
-    assert!(output.contains("History"), "{output}");
+    assert!(output.contains("select activity/s"), "{output}");
+    assert!(output.contains("insert activity/s"), "{output}");
+    assert!(output.contains("Transactions and connections"), "{output}");
+    assert!(output.contains("Statement activity"), "{output}");
 }
 
 #[test]
@@ -175,7 +182,8 @@ fn dashboard_overview_uses_remaining_space_for_history() {
     let output = render(&app, 140, 40);
     assert!(output.contains("Transactions"), "{output}");
     assert!(output.contains("commits/s"), "{output}");
-    assert!(output.contains("History · last 10 minutes"), "{output}");
+    assert!(output.contains("Transactions and connections"), "{output}");
+    assert!(output.contains("Statement activity"), "{output}");
 }
 
 #[test]

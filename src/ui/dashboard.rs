@@ -18,6 +18,14 @@ pub(crate) fn render(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme)
     let Some(crate::model::tab::WorkspaceTab::Dashboard(tab)) = app.tabs.get(app.active_tab) else {
         return;
     };
+    let block = super::panel_block(
+        " DASHBOARD ",
+        app.focus == crate::model::workspace::Focus::Results,
+        theme,
+    );
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let area = inner;
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(3), Constraint::Min(1)])
@@ -298,19 +306,56 @@ fn render_history(
     if area.width < 2 || area.height < 2 {
         return;
     }
-    let chart_area = area;
-    let inner = Block::new()
+    let charts = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)])
+        .split(area);
+    render_metric_chart(
+        frame,
+        charts[0],
+        theme,
+        tab,
+        "Transactions and connections · last 10 minutes",
+        &[
+            (MetricKey::Commits, "commits/s", theme.accent),
+            (MetricKey::Rollbacks, "rollbacks/s", theme.error),
+            (MetricKey::Connections, "connections", theme.action),
+        ],
+    );
+    render_metric_chart(
+        frame,
+        charts[1],
+        theme,
+        tab,
+        "Statement activity · last 10 minutes",
+        &[
+            (MetricKey::Selects, "select activity/s", theme.action),
+            (MetricKey::Inserts, "insert activity/s", theme.success),
+            (MetricKey::Updates, "update activity/s", theme.warning),
+            (MetricKey::Deletes, "delete activity/s", theme.error),
+        ],
+    );
+}
+
+fn render_metric_chart(
+    frame: &mut Frame<'_>,
+    chart_area: Rect,
+    theme: Theme,
+    tab: &crate::model::dashboard::DashboardTab,
+    title: &'static str,
+    series: &[(MetricKey, &'static str, ratatui::style::Color)],
+) {
+    if chart_area.width < 2 || chart_area.height < 2 {
+        return;
+    }
+    let block = Block::new()
         .borders(Borders::ALL)
         .border_style(Style::new().fg(theme.border))
-        .title("History · last 10 minutes")
-        .inner(chart_area);
+        .title(title);
+    let inner = block.inner(chart_area);
     let latest = tab.latest.as_ref();
     let mut series_data = Vec::new();
-    for (key, label, color) in [
-        (MetricKey::Commits, "commits/s", theme.accent),
-        (MetricKey::Rollbacks, "rollbacks/s", theme.error),
-        (MetricKey::Connections, "connections", theme.action),
-    ] {
+    for &(key, label, color) in series {
         let points = downsample_series(tab.history.points(key), inner.width as usize * 2);
         if !points.is_empty() {
             series_data.push((label, color, points));
@@ -320,11 +365,28 @@ fn render_history(
         frame.render_widget(
             Paragraph::new("Charts will appear after two valid samples.")
                 .style(Style::new().fg(theme.muted))
-                .block(Block::new().borders(Borders::ALL).title("History")),
-            area,
+                .block(Block::new().borders(Borders::ALL).title(title)),
+            chart_area,
         );
         return;
     }
+    frame.render_widget(block, chart_area);
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .split(inner);
+    let legend = series
+        .iter()
+        .enumerate()
+        .flat_map(|(index, (_, label, color))| {
+            let separator = (index > 0).then(|| Span::raw("  "));
+            separator.into_iter().chain(std::iter::once(Span::styled(
+                *label,
+                Style::new().fg(*color),
+            )))
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(Line::from(legend)), sections[0]);
     let datasets = series_data
         .iter()
         .map(|(label, color, points)| {
@@ -337,11 +399,7 @@ fn render_history(
         })
         .collect::<Vec<_>>();
     let mut max_y: f64 = 1.0;
-    for key in [
-        MetricKey::Commits,
-        MetricKey::Rollbacks,
-        MetricKey::Connections,
-    ] {
+    for &(key, _, _) in series {
         max_y = max_y.max(
             tab.history
                 .points(key)
@@ -367,11 +425,6 @@ fn render_history(
     ];
     frame.render_widget(
         Chart::new(datasets)
-            .block(
-                Block::new()
-                    .borders(Borders::ALL)
-                    .title("History · last 10 minutes"),
-            )
             .x_axis(
                 Axis::default()
                     .bounds([x_start, x_end.max(x_start + 1.0)])
@@ -382,7 +435,7 @@ fn render_history(
                 Span::styled(format_value(max_y / 2.0), Style::new().fg(theme.muted)),
                 Span::styled(format_value(max_y), Style::new().fg(theme.muted)),
             ])),
-        chart_area,
+        sections[1],
     );
 }
 

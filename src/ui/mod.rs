@@ -400,9 +400,17 @@ pub fn render_with_state_using_icons_and_sequence(
     }
     if is_dashboard {
         if let Some(area) = layout.explorer {
+            state.hit_regions.push(HitRegion {
+                area,
+                target: HitTarget::Focus(Focus::Explorer),
+            });
             render_explorer(frame, area, app, theme, state, icons);
         }
         if let Some(area) = layout.relation {
+            state.hit_regions.push(HitRegion {
+                area,
+                target: HitTarget::Focus(Focus::Results),
+            });
             dashboard::render(frame, area, app, theme);
         }
         render_footer(frame, layout.footer, app, theme, sequence);
