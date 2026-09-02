@@ -258,9 +258,20 @@ relation, result-grid, search, and confirmation controls.
 
 ## Configuration
 
-Connection profiles are stored in the platform configuration directory. Use
-`--config PATH` to select a different profile file for the current run. Common
-options include:
+Connection profiles, the local credential key, and workspace state are stored in
+`~/.config/lazydb/` on macOS and Linux by default. Set `LAZYDB_CONFIG_HOME` to
+use another directory for these files. For example, to keep using the previous
+macOS location:
+
+```bash
+export LAZYDB_CONFIG_HOME=$HOME/lazydb
+```
+
+Windows continues to use `%APPDATA%\\lazydb\\`. The directory contains
+`connections.toml`, `credential.key`, `workspace.toml`, and the `sql/` directory
+for persisted console text. Use `--config PATH` to select a different profile
+file for the current run; this does not relocate the key or workspace files.
+Common options include:
 
 ```bash
 lazydb --profile NAME

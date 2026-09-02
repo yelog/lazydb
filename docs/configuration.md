@@ -15,28 +15,51 @@ silently accepting a setting that LazyDB does not use.
 
 ## Configuration Files
 
-`AppPaths` uses a platform-specific user configuration directory:
+`AppPaths` uses `~/.config/lazydb/` on macOS and Linux by default. Set
+`LAZYDB_CONFIG_HOME` to override that directory, for example:
+
+```bash
+export LAZYDB_CONFIG_HOME=$HOME/lazydb
+```
+
+Windows continues to use the standard `%APPDATA%\\lazydb\\` directory.
+
+`AppPaths` uses the following platform-specific user configuration directories:
 
 | File | macOS | Linux | Windows | Purpose |
 | --- | --- | --- | --- | --- |
-| `connections.toml` | `$HOME/lazydb/connections.toml` | `$XDG_CONFIG_HOME/lazydb/connections.toml` (normally `~/.config/lazydb/connections.toml`) | `%APPDATA%\\lazydb\\connections.toml` | Saved connection profiles |
+| `connections.toml` | `~/.config/lazydb/connections.toml` | `~/.config/lazydb/connections.toml` | `%APPDATA%\\lazydb\\connections.toml` | Saved connection profiles |
 | `credential.key` | Same directory as `connections.toml` | Same directory as `connections.toml` | Same directory as `connections.toml` | Device-local key for `local_encrypted` credentials |
-| `workspace.toml` | `$HOME/lazydb/workspace.toml` | `$XDG_CONFIG_HOME/lazydb/workspace.toml` (normally `~/.config/lazydb/workspace.toml`) | `%APPDATA%\\lazydb\\workspace.toml` | Open profiles, consoles, and tabs |
-| `sql/<UUID>.sql` | `$HOME/lazydb/sql/<UUID>.sql` | `$XDG_CONFIG_HOME/lazydb/sql/<UUID>.sql` (normally `~/.config/lazydb/sql/<UUID>.sql`) | `%APPDATA%\\lazydb\\sql\\<UUID>.sql` | SQL text for persisted consoles |
+| `workspace.toml` | `~/.config/lazydb/workspace.toml` | `~/.config/lazydb/workspace.toml` | `%APPDATA%\\lazydb\\workspace.toml` | Open profiles, consoles, and tabs |
+| `sql/<UUID>.sql` | `~/.config/lazydb/sql/<UUID>.sql` | `~/.config/lazydb/sql/<UUID>.sql` | `%APPDATA%\\lazydb\\sql\\<UUID>.sql` | SQL text for persisted consoles |
+| `settings.toml` | `~/.config/lazydb/settings.toml` | `~/.config/lazydb/settings.toml` | `%APPDATA%\\lazydb\\settings.toml` | Application settings |
 
-Linux paths honor the XDG configuration environment. Windows uses the standard
+`LAZYDB_CONFIG_HOME` applies to macOS and Linux only. Windows uses the standard
 `%APPDATA%` roaming application-data directory. LazyDB creates private
-configuration directories and writes profile
-files with owner-only permissions on Unix. `--config PATH` overrides the complete
+configuration directories and writes profile files with owner-only permissions
+on Unix. `--config PATH` overrides the complete
 profile file for the current process; it does not relocate `credential.key` or
 workspace state. On macOS, the first startup moves the legacy files from
-`~/Library/Application Support/dev.lazydb.lazydb/` into `$HOME/lazydb/` when
-the destination files do not already exist.
+`~/Library/Application Support/dev.lazydb.lazydb/` into the selected config
+directory when the destination files do not already exist.
 
 ## Command-Line Options
 
 These options are global and can be placed before a subcommand. They are not
 stored in `connections.toml`.
+
+## Application Settings
+
+Application settings are stored in `settings.toml` beside `connections.toml`.
+Dashboard monitoring uses a five-second interval by default. Change it with:
+
+```toml
+[dashboard]
+refresh_interval_seconds = 5
+```
+
+The value must be at least one second. The setting controls both metric and
+process polling when the Dashboard is active.
 
 | Option | Values / argument | Default | Description |
 | --- | --- | --- | --- |
@@ -165,8 +188,8 @@ currently unavailable; use the Pages installer or Homebrew instead.
 
 M0 loads connection profiles from the platform configuration directory:
 
-- macOS: `$HOME/lazydb/connections.toml`
-- Linux: `$XDG_CONFIG_HOME/lazydb/connections.toml`, normally `~/.config/lazydb/connections.toml`
+- macOS/Linux: `$HOME/.config/lazydb/connections.toml` by default, or
+  `$LAZYDB_CONFIG_HOME/connections.toml` when the environment variable is set
 - Windows: `%APPDATA%\\lazydb\\connections.toml`
 
 Use `lazydb --config /path/to/connections.toml` to override the profile file for

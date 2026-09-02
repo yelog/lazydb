@@ -3,6 +3,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use std::env;
+
 use directories::{BaseDirs, ProjectDirs};
 use thiserror::Error;
 
@@ -60,9 +63,22 @@ impl AppPaths {
 }
 
 fn config_dir(base_dirs: &BaseDirs) -> PathBuf {
-    if cfg!(target_os = "macos") {
-        base_dirs.home_dir().join("lazydb")
-    } else {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        if let Some(path) = env::var_os("LAZYDB_CONFIG_HOME").filter(|path| !path.is_empty()) {
+            return PathBuf::from(path);
+        }
+
+        base_dirs.home_dir().join(".config/lazydb")
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        base_dirs.config_dir().join("lazydb")
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
         base_dirs.config_dir().join("lazydb")
     }
 }
@@ -123,8 +139,12 @@ mod tests {
         let base_dirs = BaseDirs::new().expect("test environment has a home directory");
         let path = config_dir(&base_dirs);
 
-        if cfg!(target_os = "macos") {
-            assert_eq!(path, base_dirs.home_dir().join("lazydb"));
+        if cfg!(any(target_os = "macos", target_os = "linux")) {
+            if let Some(config_home) = std::env::var_os("LAZYDB_CONFIG_HOME") {
+                assert_eq!(path, config_home);
+            } else {
+                assert_eq!(path, base_dirs.home_dir().join(".config/lazydb"));
+            }
         } else {
             assert_eq!(path, base_dirs.config_dir().join("lazydb"));
         }
