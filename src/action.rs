@@ -56,6 +56,7 @@ pub enum Action {
     DashboardMetricsDue,
     DashboardProcessesDue,
     CloseActiveTab,
+    CloseOtherTabs,
     CloseTab(Uuid),
     RequestDeleteActiveConsole,
     ConfirmDeleteConsole,

@@ -243,6 +243,7 @@ pub enum HelpShortcutId {
     RunSql,
     RunAllSql,
     CloseTab,
+    CloseOtherTabs,
     DeleteConsole,
     OpenSqlEditors,
     OpenNotificationHistory,
@@ -864,6 +865,18 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
         "close current tab",
         Leader,
         "q"
+    ),
+    row!(
+        CloseOtherTabs,
+        [
+            Explorer,
+            SqlResultsData,
+            SqlOutput,
+            RelationDataBrowse,
+            RelationDdl
+        ],
+        "Ctrl+Shift+q",
+        "close other tabs"
     ),
     row!(
         DeleteConsole,

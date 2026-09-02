@@ -502,11 +502,11 @@ impl Keymap {
         }) {
             let completion_action = match event.code {
                 KeyCode::Down if event.modifiers.is_empty() => Some(Action::CompletionNext),
-                KeyCode::Char('n') if event.modifiers.contains(KeyModifiers::CONTROL) => {
+                KeyCode::Char('n') if event.modifiers == KeyModifiers::CONTROL => {
                     Some(Action::CompletionNext)
                 }
                 KeyCode::Up if event.modifiers.is_empty() => Some(Action::CompletionPrevious),
-                KeyCode::Char('p') if event.modifiers.contains(KeyModifiers::CONTROL) => {
+                KeyCode::Char('p') if event.modifiers == KeyModifiers::CONTROL => {
                     Some(Action::CompletionPrevious)
                 }
                 KeyCode::Enter => Some(Action::CompletionAccept),
@@ -516,6 +516,18 @@ impl Keymap {
             if completion_action.is_some() {
                 return completion_action;
             }
+        }
+
+        match (event.modifiers, event.code) {
+            (KeyModifiers::CONTROL, KeyCode::Char('n')) => return Some(Action::NextTab),
+            (KeyModifiers::CONTROL, KeyCode::Char('p')) => return Some(Action::PreviousTab),
+            (KeyModifiers::CONTROL, KeyCode::Char('q')) => return Some(Action::CloseActiveTab),
+            (modifiers, KeyCode::Char('q' | 'Q'))
+                if modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT) =>
+            {
+                return Some(Action::CloseOtherTabs);
+            }
+            _ => {}
         }
 
         if self
@@ -2010,13 +2022,13 @@ fn map_data_query(event: KeyEvent, app: &App) -> Option<Action> {
                 KeyCode::Down if event.modifiers.is_empty() => {
                     return Some(Action::DataQueryCompletionNext);
                 }
-                KeyCode::Char('n') if event.modifiers.contains(KeyModifiers::CONTROL) => {
+                KeyCode::Char('n') if event.modifiers == KeyModifiers::CONTROL => {
                     return Some(Action::DataQueryCompletionNext);
                 }
                 KeyCode::Up if event.modifiers.is_empty() => {
                     return Some(Action::DataQueryCompletionPrevious);
                 }
-                KeyCode::Char('p') if event.modifiers.contains(KeyModifiers::CONTROL) => {
+                KeyCode::Char('p') if event.modifiers == KeyModifiers::CONTROL => {
                     return Some(Action::DataQueryCompletionPrevious);
                 }
                 KeyCode::Tab | KeyCode::Enter if event.modifiers.is_empty() => {
@@ -2111,6 +2123,47 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn control_key(code: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(code), KeyModifiers::CONTROL)
+    }
+
+    fn control_shift_key(code: char) -> KeyEvent {
+        KeyEvent::new(
+            KeyCode::Char(code),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        )
+    }
+
+    #[test]
+    fn control_tab_shortcuts_and_close_other_tabs_map_globally() {
+        let app = App::new(Vec::new());
+        let mut keymap = Keymap::default();
+
+        assert_eq!(keymap.map(control_key('n'), &app), Some(Action::NextTab));
+        assert_eq!(
+            keymap.map(control_key('p'), &app),
+            Some(Action::PreviousTab)
+        );
+        assert_eq!(
+            keymap.map(control_key('q'), &app),
+            Some(Action::CloseActiveTab)
+        );
+        assert_eq!(
+            keymap.map(control_shift_key('q'), &app),
+            Some(Action::CloseOtherTabs)
+        );
+        assert_eq!(
+            keymap.map(
+                KeyEvent::new(
+                    KeyCode::Char('Q'),
+                    KeyModifiers::CONTROL | KeyModifiers::SHIFT
+                ),
+                &app
+            ),
+            Some(Action::CloseOtherTabs)
+        );
     }
 
     fn assert_leader_shortcut(app: &App, code: char, expected: Action) {

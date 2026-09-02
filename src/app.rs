@@ -1367,6 +1367,7 @@ impl App {
             Id::RunSql => vec![Action::RunActiveSql],
             Id::RunAllSql => vec![Action::RunAllSql],
             Id::CloseTab => vec![Action::CloseActiveTab],
+            Id::CloseOtherTabs => vec![Action::CloseOtherTabs],
             Id::DeleteConsole => vec![Action::RequestDeleteActiveConsole],
             Id::OpenSqlEditors => vec![Action::OpenSqlEditorList],
             Id::OpenNotificationHistory => vec![Action::OpenNotificationHistory],
@@ -1709,6 +1710,7 @@ impl App {
                         | Action::ExplorerSearchClose
                         | Action::ExplorerSearchRetry
                         | Action::CloseActiveTab
+                        | Action::CloseOtherTabs
                         | Action::CloseTab(_)
                         | Action::RequestDeleteActiveConsole
                         | Action::ConfirmDeleteConsole
@@ -2162,6 +2164,30 @@ impl App {
                     return self.request_close_tab(id);
                 }
                 Vec::new()
+            }
+            Action::CloseOtherTabs => {
+                if !self.has_active_workspace() || self.tabs.is_empty() {
+                    return Vec::new();
+                }
+                let active_id = self.tabs[self.active_tab].id();
+                let ids = self
+                    .tabs
+                    .iter()
+                    .filter(|tab| tab.id() != active_id)
+                    .map(WorkspaceTab::id)
+                    .collect::<Vec<_>>();
+                let transaction_ids = ids
+                    .iter()
+                    .copied()
+                    .filter(|id| self.transaction_needs_exit(*id))
+                    .collect::<Vec<_>>();
+                if !transaction_ids.is_empty() {
+                    return self
+                        .defer_intent(DeferredIntent::CloseOtherTabs(active_id), transaction_ids);
+                }
+                ids.into_iter()
+                    .flat_map(|id| self.request_close_tab(id))
+                    .collect()
             }
             Action::CloseTab(id) => self.request_close_tab(id),
             Action::RequestDeleteActiveConsole => {
@@ -6629,6 +6655,17 @@ impl App {
                 self.close_console(id)
             }
             DeferredIntent::CloseTab(id) => self.close_console(id),
+            DeferredIntent::CloseOtherTabs(active_id) => {
+                let ids = self
+                    .tabs
+                    .iter()
+                    .filter(|tab| tab.id() != active_id)
+                    .map(WorkspaceTab::id)
+                    .collect::<Vec<_>>();
+                ids.into_iter()
+                    .flat_map(|id| self.request_close_tab(id))
+                    .collect()
+            }
             DeferredIntent::SetMode(TransactionMode::Auto) => {
                 self.set_transaction_mode(TransactionMode::Auto)
             }
