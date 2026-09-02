@@ -70,15 +70,13 @@ It verifies a channel manifest and the matching archive SHA-256 digest, then
 installs to `~/.local/bin` by default. It never uses `sudo`:
 
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf \
-  https://lazydb.yelog.org/install.sh | sh
+curl -fsSL https://lazydb.yelog.org/install.sh | sh
 ```
 
 The beta installer is clearly separate and never changes the stable channel:
 
 ```bash
-curl --proto '=https' --tlsv1.2 -LsSf \
-  https://lazydb.yelog.org/install-beta.sh | sh
+curl -fsSL https://lazydb.yelog.org/install-beta.sh | sh
 ```
 
 Beta is for testing prereleases. It does not update Homebrew, the stable
@@ -86,7 +84,7 @@ installer, or the `latest` release path. To inspect either installer before
 running it, download it first:
 
 ```bash
-curl --proto '=https' --tlsv1.2 -fL \
+curl -fsSL \
   https://lazydb.yelog.org/install.sh \
   -o lazydb-installer.sh
 less lazydb-installer.sh
@@ -97,31 +95,38 @@ The installer supports `--channel stable|beta`, `--version VERSION`, and
 `--install-dir PATH`. The stable and beta Pages entrypoints lock their own
 channel, so use the matching entrypoint when selecting a channel explicitly.
 
-### Release binaries and packages
+### Offline installation from GitHub Releases
 
-Download stable or beta archives and checksums from
-[GitHub Releases](https://github.com/yelog/lazydb/releases). Stable releases
-also include `.deb`, `.rpm`, and `.pkg.tar.zst` Linux package assets. These are
-direct Release downloads, not `apt`, DNF, or Pacman repositories.
+For a machine without internet access, download the matching archive from
+[GitHub Releases](https://github.com/yelog/lazydb/releases) on a connected
+machine, then transfer it to the offline machine. Each archive contains a
+standalone `lazydb` executable; it is not an `apt`, DNF, or Pacman package.
+
+Choose the archive that matches the offline machine:
+
+| Platform | Release target |
+| --- | --- |
+| macOS on Apple silicon | `aarch64-apple-darwin` |
+| macOS on Intel | `x86_64-apple-darwin` |
+| Linux on ARM64 | `aarch64-unknown-linux-gnu` |
+| Linux on x86-64 | `x86_64-unknown-linux-gnu` |
+
+After transferring the archive to the offline machine, extract it, create a
+user-local binary directory, copy the executable, and verify the installation.
+For example, on Apple silicon macOS with `v0.1.0-beta.2`:
 
 ```bash
-sudo apt install ./lazydb_VERSION_ARCH.deb
-sudo dnf install ./lazydb_VERSION_ARCH.rpm
-sudo pacman -U ./lazydb_VERSION_ARCH.pkg.tar.zst
+tar -xJf lazydb_0.1.0-beta.2_aarch64-apple-darwin.tar.xz
+mkdir -p "$HOME/.local/bin"
+cp lazydb_0.1.0-beta.2_aarch64-apple-darwin/lazydb "$HOME/.local/bin/lazydb"
+chmod +x "$HOME/.local/bin/lazydb"
+lazydb version
 ```
 
-The package manager owns these installations. Use that manager to upgrade;
-`lazydb update` reports the required manager action instead of replacing the
-package:
-
-```bash
-sudo apt install --only-upgrade ./lazydb_VERSION_ARCH.deb
-sudo dnf upgrade ./lazydb_VERSION_ARCH.rpm
-sudo pacman -U ./lazydb_VERSION_ARCH.pkg.tar.zst
-```
-
-Direct `apt install lazydb`, `dnf install lazydb`, and `pacman -S lazydb` are
-not supported.
+Ensure `$HOME/.local/bin` is in `PATH`. To upgrade an offline installation,
+repeat the download, transfer, extraction, and replacement steps with the newer
+release. Use the [Pages installer](#pages-installer) instead when the target
+machine has internet access and should receive automatic channel updates.
 
 ### Cargo package
 
@@ -155,8 +160,8 @@ installed.
 Verify a binary installation:
 
 ```bash
-lazydb version --json
-lazydb doctor --json
+lazydb version
+lazydb doctor
 ```
 
 Check for an available update without changing files:
@@ -181,35 +186,17 @@ receive an explicit manager command instead. npm-managed installations are
 detected and protected, but official npm distribution is currently unavailable;
 use the Pages installer or Homebrew instead.
 
-Start an in-memory SQLite workspace:
+Start LazyDB:
 
 ```bash
-lazydb --url sqlite::memory:
+lazydb
 ```
 
-Open a SQLite file:
-
-```bash
-lazydb --url sqlite:///tmp/lazydb-demo.db
-```
-
-Connect to PostgreSQL or MySQL without putting a password in process arguments:
-
-```bash
-LAZYDB_PASSWORD='session-only-password' \
-  lazydb --url 'postgresql://alice@localhost:5432/app?sslmode=require'
-
-LAZYDB_PASSWORD='session-only-password' \
-  lazydb --url 'mysql://alice@localhost:3306/app?sslMode=REQUIRED'
-```
-
-Do not include passwords in `--url`; command-line arguments may be visible to
-other local processes. `LAZYDB_PASSWORD` is read only at startup and is bound to
-the selected profile or ad hoc connection. It is never written to disk.
-
-You can also start LazyDB without arguments and create a connection in the
-Profile Manager. `--url` creates a session-only profile; `--profile NAME`
-selects a saved profile. If both are supplied, `--url` takes precedence.
+On first launch, the Profile Manager opens automatically. Select PostgreSQL,
+MySQL, or SQLite; enter the connection details; test the connection; then save
+and connect. Saved profiles remain available the next time LazyDB starts, and
+passwords can use local encrypted storage or the native operating-system secret
+store when available.
 
 ## Coding-Agent Access
 
