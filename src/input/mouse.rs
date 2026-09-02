@@ -72,6 +72,9 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
             match target {
                 HitTarget::Focus(focus) => Some(Action::Focus(focus)),
                 HitTarget::Tab(index) => Some(Action::ActivateTab(index)),
+                HitTarget::TabScrollLeft(index) | HitTarget::TabScrollRight(index) => {
+                    Some(Action::ActivateTab(index))
+                }
                 HitTarget::CloseTab(id) => Some(Action::CloseTab(id)),
                 HitTarget::DismissNotification(id) => Some(Action::DismissNotification(id)),
                 HitTarget::ExplorerRow(id) => {
@@ -256,6 +259,8 @@ fn focus_at(ui: &UiState, column: u16, row: u16) -> Option<Focus> {
         | HitTarget::GridScrollbarPage { .. } => Some(Focus::Results),
         HitTarget::RelationCancel => Some(Focus::Results),
         HitTarget::Tab(_)
+        | HitTarget::TabScrollLeft(_)
+        | HitTarget::TabScrollRight(_)
         | HitTarget::CloseTab(_)
         | HitTarget::DismissNotification(_)
         | HitTarget::Help

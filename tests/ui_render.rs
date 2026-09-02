@@ -517,6 +517,132 @@ fn materialized_view_editor_renders_data_state_and_read_only_query() {
 }
 
 #[test]
+fn overflowing_workspace_tabs_keep_the_active_tab_visible() {
+    let mut app = App::new(Vec::new());
+    app.tabs.clear();
+    for name in ["alpha-tab", "bravo-tab", "charlie-tab", "delta-active"] {
+        app.tabs
+            .push(WorkspaceTab::Sql(lazydb::model::tab::ConsoleTab::new(name)));
+    }
+    app.active_tab = 3;
+
+    let (output, state) = render_with_icons(&app, 56, 20, IconSet::new(IconMode::Unicode));
+
+    assert!(output.contains("delta-active"), "{output}");
+    assert!(
+        state
+            .hit_regions
+            .iter()
+            .any(|region| region.target == HitTarget::Tab(app.active_tab))
+    );
+    assert!(
+        state
+            .hit_regions
+            .iter()
+            .any(|region| matches!(region.target, HitTarget::TabScrollLeft(_)))
+    );
+}
+
+#[test]
+fn workspace_tab_arrows_are_hidden_when_all_tabs_fit() {
+    let mut app = App::new(Vec::new());
+    app.tabs.clear();
+    app.tabs
+        .push(WorkspaceTab::Sql(lazydb::model::tab::ConsoleTab::new(
+            "alpha",
+        )));
+    app.tabs
+        .push(WorkspaceTab::Sql(lazydb::model::tab::ConsoleTab::new(
+            "bravo",
+        )));
+
+    let (output, state) = render_with_icons(&app, 120, 20, IconSet::new(IconMode::Ascii));
+
+    assert!(!output.contains('<'));
+    assert!(!output.contains('>'));
+    assert!(!state.hit_regions.iter().any(|region| matches!(
+        region.target,
+        HitTarget::TabScrollLeft(_) | HitTarget::TabScrollRight(_)
+    )));
+}
+
+#[test]
+fn workspace_tab_viewport_follows_tab_changes_and_wraparound() {
+    let mut app = App::new(Vec::new());
+    app.tabs.clear();
+    for name in ["alpha-tab", "bravo-tab", "charlie-tab", "delta-active"] {
+        app.tabs
+            .push(WorkspaceTab::Sql(lazydb::model::tab::ConsoleTab::new(name)));
+    }
+    let mut state = UiState::new();
+    let mut terminal = Terminal::new(TestBackend::new(56, 20)).unwrap();
+
+    terminal
+        .draw(|frame| ui::render_with_state(frame, &app, &mut state))
+        .unwrap();
+    app.update(Action::PreviousTab);
+    terminal
+        .draw(|frame| ui::render_with_state(frame, &app, &mut state))
+        .unwrap();
+
+    assert_eq!(app.active_tab, 3);
+    assert!(
+        state
+            .hit_regions
+            .iter()
+            .any(|region| region.target == HitTarget::Tab(app.active_tab))
+    );
+    app.update(Action::NextTab);
+    terminal
+        .draw(|frame| ui::render_with_state(frame, &app, &mut state))
+        .unwrap();
+
+    assert_eq!(app.active_tab, 0);
+    assert!(
+        state
+            .hit_regions
+            .iter()
+            .any(|region| region.target == HitTarget::Tab(app.active_tab))
+    );
+}
+
+#[test]
+fn workspace_tab_viewport_recalculates_after_resize() {
+    let mut app = App::new(Vec::new());
+    app.tabs.clear();
+    for name in ["alpha-tab", "bravo-tab", "charlie-tab", "delta-active"] {
+        app.tabs
+            .push(WorkspaceTab::Sql(lazydb::model::tab::ConsoleTab::new(name)));
+    }
+    app.active_tab = 3;
+    let mut state = UiState::new();
+    let mut narrow = Terminal::new(TestBackend::new(56, 20)).unwrap();
+    narrow
+        .draw(|frame| ui::render_with_state(frame, &app, &mut state))
+        .unwrap();
+    assert!(
+        state
+            .hit_regions
+            .iter()
+            .any(|region| region.target == HitTarget::Tab(app.active_tab))
+    );
+
+    let mut wide = Terminal::new(TestBackend::new(120, 20)).unwrap();
+    wide.draw(|frame| ui::render_with_state(frame, &app, &mut state))
+        .unwrap();
+    assert!(
+        state
+            .hit_regions
+            .iter()
+            .any(|region| region.target == HitTarget::Tab(app.active_tab))
+    );
+    assert!(!state.hit_regions.iter().any(|region| matches!(
+        region.target,
+        HitTarget::TabScrollLeft(_) | HitTarget::TabScrollRight(_)
+    )));
+}
+
+#[test]
 fn offline_profiles_render_as_collapsed_even_when_expansion_is_pending() {
     let profile = import_connection_url(":memory:", Some("offline-profile"))
         .unwrap()

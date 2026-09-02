@@ -138,6 +138,8 @@ pub enum ProfileButton {
 pub enum HitTarget {
     Focus(Focus),
     Tab(usize),
+    TabScrollLeft(usize),
+    TabScrollRight(usize),
     CloseTab(Uuid),
     ExplorerRow(crate::model::explorer::ExplorerNodeId),
     ResultCell {
@@ -1261,6 +1263,89 @@ fn header_text(value: &str) -> String {
         .replace('\t', "<TAB>")
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TabViewport {
+    start: usize,
+    end: usize,
+    overflowed: bool,
+}
+
+struct RenderedTab {
+    index: usize,
+    id: Uuid,
+    label: String,
+    close: Option<String>,
+    width: u16,
+}
+
+const TAB_OVERFLOW_CONTROLS_WIDTH: u16 = 2;
+
+fn tab_viewport(widths: &[u16], active: usize, area_width: u16) -> TabViewport {
+    if widths.is_empty() {
+        return TabViewport {
+            start: 0,
+            end: 0,
+            overflowed: false,
+        };
+    }
+
+    let total = widths.iter().copied().fold(0_u16, u16::saturating_add);
+    if total <= area_width {
+        return TabViewport {
+            start: 0,
+            end: widths.len(),
+            overflowed: false,
+        };
+    }
+
+    let active = active.min(widths.len() - 1);
+    let available = area_width.saturating_sub(TAB_OVERFLOW_CONTROLS_WIDTH);
+    let mut start = active;
+    let mut end = active + 1;
+    let mut used = widths[active].min(available);
+
+    while end < widths.len() && used.saturating_add(widths[end]) <= available {
+        used = used.saturating_add(widths[end]);
+        end += 1;
+    }
+    while start > 0 && used.saturating_add(widths[start - 1]) <= available {
+        start -= 1;
+        used = used.saturating_add(widths[start]);
+    }
+
+    TabViewport {
+        start,
+        end,
+        overflowed: true,
+    }
+}
+
+fn truncate_to_cell_width(value: &str, max_width: u16) -> String {
+    if value.cell_width() <= max_width {
+        return value.to_owned();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+
+    let ellipsis_width = '…'.width().unwrap_or(1) as u16;
+    let limit = max_width.saturating_sub(ellipsis_width);
+    let mut result = String::new();
+    let mut width: u16 = 0;
+    for character in value.chars() {
+        let character_width = character.width().unwrap_or(0) as u16;
+        if width.saturating_add(character_width) > limit {
+            break;
+        }
+        result.push(character);
+        width = width.saturating_add(character_width);
+    }
+    if max_width >= ellipsis_width {
+        result.push('…');
+    }
+    result
+}
+
 fn render_tabs(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -1269,91 +1354,154 @@ fn render_tabs(
     state: &mut UiState,
     icons: icons::IconSet,
 ) {
-    let mut spans = Vec::new();
-    let mut x = area.x;
-    for (index, tab) in app.tabs.iter().enumerate() {
-        let title = sanitize_terminal_text(tab.title())
-            .chars()
-            .take(48)
-            .collect::<String>();
-        let icon = match tab {
-            WorkspaceTab::Relation(tab) => icons.catalog(tab.descriptor.kind),
-            WorkspaceTab::Dashboard(_) => icons.database(crate::profile::DatabaseKind::Postgres),
-            WorkspaceTab::Sql(tab) => tab
-                .execution_target
-                .as_ref()
-                .and_then(|target| {
-                    app.profiles
-                        .iter()
-                        .find(|profile| profile.id == target.profile_id)
-                })
-                .or_else(|| app.active_profile())
-                .map(|profile| icons.database(profile.kind))
-                .or_else(|| {
-                    app.connection
-                        .server
-                        .as_ref()
-                        .map(|server| icons.database(server.kind))
-                })
-                .unwrap_or_else(|| icons.catalog(CatalogKind::Database)),
-        };
-        let label = format!(" {icon} {title} ");
-        let close = format!("{} ", icons.close());
-        let can_close = tab.as_console().is_none_or(|console| !console.is_default());
-        let label_width = label.cell_width();
-        let close_width = if can_close { close.cell_width() } else { 0 };
-        let width = label_width + close_width;
-        let active = index == app.active_tab;
-        spans.push(Span::styled(
-            label,
-            if active {
-                Style::new()
-                    .fg(theme.background)
-                    .bg(theme.accent)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::new().fg(theme.muted).bg(theme.surface)
-            },
-        ));
-        if can_close {
-            spans.push(Span::styled(
-                close,
-                if active {
-                    Style::new()
-                        .fg(theme.background)
-                        .bg(theme.accent)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::new().fg(theme.muted).bg(theme.surface)
-                },
-            ));
-        }
-        state.hit_regions.push(HitRegion {
-            area: Rect::new(
-                x,
+    let rendered_tabs = app
+        .tabs
+        .iter()
+        .enumerate()
+        .map(|(index, tab)| {
+            let title = sanitize_terminal_text(tab.title())
+                .chars()
+                .take(48)
+                .collect::<String>();
+            let icon = match tab {
+                WorkspaceTab::Relation(tab) => icons.catalog(tab.descriptor.kind),
+                WorkspaceTab::Dashboard(_) => {
+                    icons.database(crate::profile::DatabaseKind::Postgres)
+                }
+                WorkspaceTab::Sql(tab) => tab
+                    .execution_target
+                    .as_ref()
+                    .and_then(|target| {
+                        app.profiles
+                            .iter()
+                            .find(|profile| profile.id == target.profile_id)
+                    })
+                    .or_else(|| app.active_profile())
+                    .map(|profile| icons.database(profile.kind))
+                    .or_else(|| {
+                        app.connection
+                            .server
+                            .as_ref()
+                            .map(|server| icons.database(server.kind))
+                    })
+                    .unwrap_or_else(|| icons.catalog(CatalogKind::Database)),
+            };
+            let label = format!(" {icon} {title} ");
+            let close = format!("{} ", icons.close());
+            let can_close = tab.as_console().is_none_or(|console| !console.is_default());
+            let label_width = label.cell_width();
+            let close_width = if can_close { close.cell_width() } else { 0 };
+            let width = label_width + close_width;
+            RenderedTab {
+                index,
+                id: tab.id(),
+                label,
+                close: can_close.then_some(close),
+                width,
+            }
+        })
+        .collect::<Vec<_>>();
+    let widths = rendered_tabs
+        .iter()
+        .map(|tab| tab.width)
+        .collect::<Vec<_>>();
+    let viewport = tab_viewport(&widths, app.active_tab, area.width);
+    let (tabs_area, left_area, right_area) = if viewport.overflowed {
+        (
+            Rect::new(
+                area.x.saturating_add(1),
                 area.y,
-                label_width.min(area.right().saturating_sub(x)),
+                area.width.saturating_sub(2),
                 1,
             ),
-            target: HitTarget::Tab(index),
-        });
+            Rect::new(area.x, area.y, 1, 1),
+            Rect::new(area.right().saturating_sub(1), area.y, 1, 1),
+        )
+    } else {
+        (area, Rect::default(), Rect::default())
+    };
+    let active_style = Style::new()
+        .fg(theme.background)
+        .bg(theme.accent)
+        .add_modifier(Modifier::BOLD);
+    let inactive_style = Style::new().fg(theme.muted).bg(theme.surface);
+    let mut spans = Vec::new();
+    let mut x = tabs_area.x;
+    for tab in &rendered_tabs[viewport.start..viewport.end] {
+        let active = tab.index == app.active_tab;
+        let style = if active { active_style } else { inactive_style };
+        let close_width = tab.close.as_ref().map_or(0, |close| close.cell_width());
+        let max_label_width = tabs_area.width.saturating_sub(close_width);
+        let label = truncate_to_cell_width(&tab.label, max_label_width);
+        let label_width = label.cell_width();
+        spans.push(Span::styled(label, style));
+        if let Some(close) = &tab.close {
+            spans.push(Span::styled(close.clone(), style));
+        }
+        if x < tabs_area.right() {
+            state.hit_regions.push(HitRegion {
+                area: Rect::new(
+                    x,
+                    tabs_area.y,
+                    label_width.min(tabs_area.right().saturating_sub(x)),
+                    1,
+                ),
+                target: HitTarget::Tab(tab.index),
+            });
+        }
         let close_x = x.saturating_add(label_width);
-        if can_close && close_x < area.right() {
+        if close_width > 0 && close_x < tabs_area.right() {
             state.hit_regions.push(HitRegion {
                 area: Rect::new(
                     close_x,
-                    area.y,
-                    close_width.min(area.right().saturating_sub(close_x)),
+                    tabs_area.y,
+                    close_width.min(tabs_area.right().saturating_sub(close_x)),
                     1,
                 ),
-                target: HitTarget::CloseTab(tab.id()),
+                target: HitTarget::CloseTab(tab.id),
             });
         }
-        x = x.saturating_add(width);
+        x = x.saturating_add(tab.width);
+    }
+    if viewport.overflowed {
+        let left_enabled = viewport.start > 0;
+        let right_enabled = viewport.end < rendered_tabs.len();
+        let arrow_style = |enabled| {
+            if enabled {
+                Style::new().fg(theme.action).bg(theme.background)
+            } else {
+                Style::new().fg(theme.border).bg(theme.background)
+            }
+        };
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                icons.tab_previous(),
+                arrow_style(left_enabled),
+            ))
+            .alignment(Alignment::Center),
+            left_area,
+        );
+        frame.render_widget(
+            Paragraph::new(Span::styled(icons.tab_next(), arrow_style(right_enabled)))
+                .alignment(Alignment::Center),
+            right_area,
+        );
+        if left_enabled {
+            state.hit_regions.push(HitRegion {
+                area: left_area,
+                target: HitTarget::TabScrollLeft(viewport.start - 1),
+            });
+        }
+        if right_enabled {
+            state.hit_regions.push(HitRegion {
+                area: right_area,
+                target: HitTarget::TabScrollRight(viewport.end),
+            });
+        }
     }
     frame.render_widget(
         Paragraph::new(Line::from(spans)).style(Style::new().bg(theme.background)),
-        area,
+        tabs_area,
     );
 }
 
@@ -3467,6 +3615,63 @@ mod footer_tests {
         let packed = pack_hints(&["aaaa", "bb", "cc"], 15);
         assert_eq!(packed, "aaaa   bb   cc");
         assert!(packed.cell_width() <= 15);
+    }
+}
+
+#[cfg(test)]
+mod tab_viewport_tests {
+    use super::*;
+
+    #[test]
+    fn tab_viewport_uses_full_width_without_overflow_controls() {
+        assert_eq!(
+            tab_viewport(&[8, 10, 12], 1, 30),
+            TabViewport {
+                start: 0,
+                end: 3,
+                overflowed: false,
+            }
+        );
+    }
+
+    #[test]
+    fn tab_viewport_keeps_active_tab_visible_at_each_position() {
+        let widths = [8, 8, 8, 8];
+        for active in 0..widths.len() {
+            let viewport = tab_viewport(&widths, active, 20);
+            assert!(viewport.overflowed);
+            assert!(viewport.start <= active);
+            assert!(active < viewport.end);
+            assert!(viewport.end <= widths.len());
+        }
+    }
+
+    #[test]
+    fn tab_viewport_handles_empty_and_oversized_tabs() {
+        assert_eq!(
+            tab_viewport(&[], 0, 20),
+            TabViewport {
+                start: 0,
+                end: 0,
+                overflowed: false,
+            }
+        );
+        let viewport = tab_viewport(&[40], 0, 12);
+        assert_eq!(viewport.start, 0);
+        assert_eq!(viewport.end, 1);
+        assert!(viewport.overflowed);
+    }
+
+    #[test]
+    fn tab_viewport_treats_exact_fit_as_not_overflowed() {
+        assert!(!tab_viewport(&[8, 10], 1, 18).overflowed);
+    }
+
+    #[test]
+    fn truncate_to_cell_width_does_not_split_wide_characters() {
+        assert_eq!(truncate_to_cell_width("界abc", 4), "界a…");
+        assert_eq!(truncate_to_cell_width("界abc", 1), "…");
+        assert_eq!(truncate_to_cell_width("short", 10), "short");
     }
 }
 
