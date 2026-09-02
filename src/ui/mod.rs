@@ -338,6 +338,153 @@ impl UiState {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DisconnectedWorkspace {
+    NoProfiles,
+    NoActiveConnection,
+}
+
+impl DisconnectedWorkspace {
+    fn for_app(app: &App) -> Option<Self> {
+        (app.connection.status == ConnectionStatus::Disconnected).then(|| {
+            if app.profiles.is_empty() {
+                Self::NoProfiles
+            } else {
+                Self::NoActiveConnection
+            }
+        })
+    }
+
+    const fn title(self) -> &'static str {
+        match self {
+            Self::NoProfiles => "NO CONNECTIONS YET",
+            Self::NoActiveConnection => "NO ACTIVE CONNECTION",
+        }
+    }
+
+    const fn instruction(self, compact: bool) -> &'static str {
+        match (self, compact) {
+            (Self::NoProfiles, false) => "Select NEW in Explorer, then press Enter.",
+            (Self::NoActiveConnection, false) => {
+                "Select a connection in Explorer, then press Enter."
+            }
+            (Self::NoProfiles, true) => "Select NEW in Explorer; press Enter.",
+            (Self::NoActiveConnection, true) => "Select a connection; press Enter.",
+        }
+    }
+}
+
+const LAZYDB_ASCII: [&str; 5] = [
+    " L     A   ZZZZZ  Y   Y DDDD  BBBB ",
+    " L    A A     Z   Y Y  D   D B   B",
+    " L   AAAAA   Z     Y   D   D BBBB ",
+    " L  A     A Z      Y   D   D B   B",
+    " L A       AZZZZZ  Y   DDDD  BBBB ",
+];
+
+fn disconnected_workspace_area(layout: AppLayout) -> Option<Rect> {
+    [
+        layout.tabs,
+        layout.editor,
+        layout.result_tabs,
+        layout.results,
+    ]
+    .into_iter()
+    .flatten()
+    .reduce(|left, right| {
+        let x = left.x.min(right.x);
+        let y = left.y.min(right.y);
+        let right_edge = left.right().max(right.right());
+        let bottom = left.bottom().max(right.bottom());
+        Rect::new(x, y, right_edge.saturating_sub(x), bottom.saturating_sub(y))
+    })
+}
+
+fn render_disconnected_workspace(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    workspace: DisconnectedWorkspace,
+    theme: Theme,
+) {
+    if area.is_empty() {
+        return;
+    }
+
+    let spacious = area.width >= 47 && area.height >= 11;
+    let medium = area.width >= 40 && area.height >= 5;
+    let compact = !spacious && !medium;
+    let lines = if spacious {
+        LAZYDB_ASCII
+            .iter()
+            .map(|line| {
+                Line::from(Span::styled(
+                    *line,
+                    Style::new()
+                        .fg(theme.muted)
+                        .bg(theme.background)
+                        .add_modifier(Modifier::DIM),
+                ))
+            })
+            .chain([
+                Line::from(""),
+                Line::from(Span::styled(
+                    workspace.title(),
+                    Style::new()
+                        .fg(theme.text)
+                        .bg(theme.background)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    workspace.instruction(false),
+                    Style::new().fg(theme.muted).bg(theme.background),
+                )),
+            ])
+            .collect::<Vec<_>>()
+    } else if medium {
+        vec![
+            Line::from(Span::styled(
+                workspace.title(),
+                Style::new()
+                    .fg(theme.text)
+                    .bg(theme.background)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                workspace.instruction(false),
+                Style::new().fg(theme.muted).bg(theme.background),
+            )),
+        ]
+    } else if compact {
+        vec![
+            Line::from(Span::styled(
+                workspace.title(),
+                Style::new()
+                    .fg(theme.text)
+                    .bg(theme.background)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                workspace.instruction(true),
+                Style::new().fg(theme.muted).bg(theme.background),
+            )),
+        ]
+    } else {
+        Vec::new()
+    };
+    let content_height = lines.len().min(usize::from(area.height)) as u16;
+    let content = Rect::new(area.x, area.y, area.width, content_height);
+    let top = area
+        .y
+        .saturating_add(area.height.saturating_sub(content_height) / 2);
+    let content = Rect::new(content.x, top, content.width, content.height);
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .alignment(Alignment::Center)
+            .style(Style::new().bg(theme.background)),
+        content,
+    );
+}
+
 pub fn render(frame: &mut Frame<'_>, app: &App) {
     let mut state = UiState::new();
     render_with_state(frame, app, &mut state);
@@ -442,23 +589,29 @@ pub fn render_with_state_using_icons_and_sequence(
             });
             render_explorer(frame, area, app, theme, state, icons);
         }
-        if let Some(area) = layout.editor {
-            let completion_anchor = render_editor(frame, area, app, theme, state);
-            render_completion_popup(frame, app, theme, state, completion_anchor, icons);
-            state.hit_regions.push(HitRegion {
-                area,
-                target: HitTarget::Focus(Focus::Editor),
-            });
-        }
-        if let Some(area) = layout.result_tabs {
-            render_result_tabs(frame, area, app, theme, state);
-        }
-        if let Some(area) = layout.results {
-            state.hit_regions.push(HitRegion {
-                area,
-                target: HitTarget::Focus(Focus::Results),
-            });
-            render_results(frame, area, app, theme, state);
+        if let Some(workspace) = DisconnectedWorkspace::for_app(app) {
+            if let Some(area) = disconnected_workspace_area(layout) {
+                render_disconnected_workspace(frame, area, workspace, theme);
+            }
+        } else {
+            if let Some(area) = layout.editor {
+                let completion_anchor = render_editor(frame, area, app, theme, state);
+                render_completion_popup(frame, app, theme, state, completion_anchor, icons);
+                state.hit_regions.push(HitRegion {
+                    area,
+                    target: HitTarget::Focus(Focus::Editor),
+                });
+            }
+            if let Some(area) = layout.result_tabs {
+                render_result_tabs(frame, area, app, theme, state);
+            }
+            if let Some(area) = layout.results {
+                state.hit_regions.push(HitRegion {
+                    area,
+                    target: HitTarget::Focus(Focus::Results),
+                });
+                render_results(frame, area, app, theme, state);
+            }
         }
         render_footer(frame, layout.footer, app, theme, sequence);
         state.hit_regions.push(HitRegion {
