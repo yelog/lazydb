@@ -302,6 +302,52 @@ fn statement_and_expression_keywords_are_contextual() {
 }
 
 #[test]
+fn completed_projection_prefers_from_keyword() {
+    let index = CompletionIndex::new(&contextual_fixture());
+
+    for sql in ["select * f", "select \"username\" f"] {
+        let candidates = complete(
+            sql,
+            sql.len(),
+            SqlDialect::Postgres,
+            &index,
+            CompletionContext::default(),
+        );
+
+        assert_eq!(
+            candidates.first().map(|candidate| candidate.label.as_str()),
+            Some("FROM"),
+            "unexpected candidates for {sql}: {candidates:?}"
+        );
+    }
+}
+
+#[test]
+fn incomplete_projection_prefers_expression_keyword() {
+    let index = CompletionIndex::new(&contextual_fixture());
+
+    for sql in ["select f", "select username, f", "select username + f"] {
+        let candidates = complete(
+            sql,
+            sql.len(),
+            SqlDialect::Postgres,
+            &index,
+            CompletionContext::default(),
+        );
+
+        assert_eq!(
+            candidates.first().map(|candidate| candidate.label.as_str()),
+            Some("FALSE"),
+            "unexpected candidates for {sql}: {candidates:?}"
+        );
+        assert!(
+            candidates.iter().all(|candidate| candidate.label != "FROM"),
+            "FROM should not be offered for {sql}: {candidates:?}"
+        );
+    }
+}
+
+#[test]
 fn predicate_completion_offers_predicate_keywords() {
     let index = CompletionIndex::new(&contextual_fixture());
     let sql = "select * from sys_user where n";

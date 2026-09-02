@@ -180,6 +180,9 @@ enum ExpressionContext {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum CompletionTokenKind {
     Word(String),
+    Literal,
+    Operator,
+    Star,
     Dot,
     Comma,
     LeftParen,
@@ -220,6 +223,12 @@ pub fn complete(
         statement_cursor,
         active_scopes.last().copied().flatten(),
     );
+    let projection_complete = context == Context::Expression(ExpressionContext::Projection)
+        && projection_is_complete(
+            &tokens,
+            statement_cursor,
+            active_scopes.last().copied().flatten(),
+        );
     let bindings = visible_relation_bindings(&tokens, &active_scopes);
     let visible_relations = bindings
         .iter()
@@ -302,7 +311,7 @@ pub fn complete(
         });
     }
     if qualifiers.is_empty() {
-        for keyword in keywords(context, dialect) {
+        for keyword in keywords(context, dialect, projection_complete) {
             if keyword.to_lowercase().starts_with(&folded_prefix) {
                 candidates.push(CompletionCandidate {
                     label: (*keyword).to_owned(),
@@ -311,11 +320,12 @@ pub fn complete(
                     detail: None,
                     replace,
                     score: CompletionScore {
-                        context: match context {
-                            Context::Statement => 4,
-                            Context::Expression(_) => 2,
-                            Context::Relation | Context::Routine => 1,
-                            Context::Qualifier => 0,
+                        context: match (context, projection_complete, *keyword) {
+                            (Context::Expression(ExpressionContext::Projection), true, "FROM") => 4,
+                            (Context::Statement, _, _) => 4,
+                            (Context::Expression(_), _, _) => 2,
+                            (Context::Relation | Context::Routine, _, _) => 1,
+                            (Context::Qualifier, _, _) => 0,
                         },
                         name_match: 2,
                         schema: 0,
@@ -568,6 +578,57 @@ fn context_at(tokens: &[CompletionToken], cursor: usize, current_scope: Option<u
         Context::Qualifier
     } else {
         context
+    }
+}
+
+fn projection_is_complete(
+    tokens: &[CompletionToken],
+    cursor: usize,
+    current_scope: Option<usize>,
+) -> bool {
+    let tokens = tokens
+        .iter()
+        .filter(|token| token.end <= cursor && token.scope_start == current_scope)
+        .collect::<Vec<_>>();
+    let Some(select_index) = tokens.iter().rposition(|token| {
+        token_word(Some(token)).is_some_and(|word| word.eq_ignore_ascii_case("select"))
+    }) else {
+        return false;
+    };
+    let Some(last) = tokens
+        .get(select_index + 1..)
+        .and_then(|tokens| tokens.last())
+    else {
+        return false;
+    };
+
+    match &last.kind {
+        CompletionTokenKind::Literal
+        | CompletionTokenKind::Star
+        | CompletionTokenKind::RightParen => true,
+        CompletionTokenKind::Word(word) => !matches!(
+            word.to_ascii_lowercase().as_str(),
+            "all"
+                | "and"
+                | "as"
+                | "at"
+                | "between"
+                | "case"
+                | "collate"
+                | "distinct"
+                | "else"
+                | "in"
+                | "is"
+                | "like"
+                | "not"
+                | "or"
+                | "then"
+                | "when"
+        ),
+        CompletionTokenKind::Operator
+        | CompletionTokenKind::Dot
+        | CompletionTokenKind::Comma
+        | CompletionTokenKind::LeftParen => false,
     }
 }
 
@@ -914,6 +975,7 @@ fn completion_tokens(text: &str, dialect: SqlDialect) -> Vec<CompletionToken> {
             continue;
         }
         if bytes[index] == b'\'' {
+            let start = index;
             index += 1;
             while index < bytes.len() {
                 if bytes[index] == b'\'' {
@@ -927,6 +989,13 @@ fn completion_tokens(text: &str, dialect: SqlDialect) -> Vec<CompletionToken> {
                     index += 1;
                 }
             }
+            tokens.push(CompletionToken {
+                kind: CompletionTokenKind::Literal,
+                start,
+                end: index,
+                depth,
+                scope_start: scope_starts.last().copied(),
+            });
             continue;
         }
         let quote = match bytes[index] {
@@ -974,6 +1043,10 @@ fn completion_tokens(text: &str, dialect: SqlDialect) -> Vec<CompletionToken> {
             b',' => Some(CompletionTokenKind::Comma),
             b'(' => Some(CompletionTokenKind::LeftParen),
             b')' => Some(CompletionTokenKind::RightParen),
+            b'*' => Some(CompletionTokenKind::Star),
+            b'+' | b'-' | b'/' | b'%' | b'=' | b'<' | b'>' | b'!' | b'|' | b'&' | b'^' | b':' => {
+                Some(CompletionTokenKind::Operator)
+            }
             _ => None,
         };
         if let Some(kind) = punctuation {
@@ -1029,12 +1102,19 @@ pub fn quote_identifier(value: &str, dialect: SqlDialect) -> String {
     format!("{quote}{escaped}{quote}")
 }
 
-fn keywords(context: Context, dialect: SqlDialect) -> &'static [&'static str] {
+fn keywords(
+    context: Context,
+    dialect: SqlDialect,
+    projection_complete: bool,
+) -> &'static [&'static str] {
     match context {
         Context::Statement => match dialect {
             SqlDialect::MySql => &["SELECT", "INSERT", "UPDATE", "DELETE"],
             _ => &["SELECT", "WITH", "INSERT", "UPDATE", "DELETE"],
         },
+        Context::Expression(ExpressionContext::Projection) if projection_complete => {
+            &["FROM", "CASE", "NULL", "TRUE", "FALSE"]
+        }
         Context::Expression(ExpressionContext::Projection) => {
             &["DISTINCT", "CASE", "NULL", "TRUE", "FALSE"]
         }
