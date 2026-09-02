@@ -118,6 +118,42 @@ fn maps_tabs_tree_rows_and_result_cells_from_rendered_hit_regions() {
 }
 
 #[test]
+fn workspace_tab_overflow_arrows_activate_adjacent_hidden_tabs() {
+    let mut app = App::new(Vec::new());
+    app.tabs.clear();
+    for name in ["alpha-tab", "bravo-tab", "charlie-tab", "delta-active"] {
+        app.tabs.push(lazydb::model::tab::WorkspaceTab::Sql(
+            lazydb::model::tab::ConsoleTab::new(name),
+        ));
+    }
+    app.active_tab = 0;
+    let backend = TestBackend::new(56, 20);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut state = UiState::new();
+
+    terminal
+        .draw(|frame| ui::render_with_state(frame, &app, &mut state))
+        .unwrap();
+    assert_click_maps(
+        &state,
+        &app,
+        &HitTarget::TabScrollRight(3),
+        Action::ActivateTab(3),
+    );
+
+    app.active_tab = 3;
+    terminal
+        .draw(|frame| ui::render_with_state(frame, &app, &mut state))
+        .unwrap();
+    assert_click_maps(
+        &state,
+        &app,
+        &HitTarget::TabScrollLeft(0),
+        Action::ActivateTab(0),
+    );
+}
+
+#[test]
 fn relation_view_and_retry_hit_targets_emit_semantic_actions() {
     let mut app = App::new(Vec::new());
     app.tabs.push(lazydb::model::tab::WorkspaceTab::Relation(

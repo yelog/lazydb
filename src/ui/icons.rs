@@ -119,6 +119,20 @@ impl IconSet {
         }
     }
 
+    pub const fn tab_previous(self) -> &'static str {
+        match self.mode {
+            IconMode::NerdFont | IconMode::Unicode => "‹",
+            IconMode::Ascii => "<",
+        }
+    }
+
+    pub const fn tab_next(self) -> &'static str {
+        match self.mode {
+            IconMode::NerdFont | IconMode::Unicode => "›",
+            IconMode::Ascii => ">",
+        }
+    }
+
     pub const fn notification(self, level: NotificationLevel) -> &'static str {
         match self.mode {
             IconMode::NerdFont => match level {
@@ -409,5 +423,16 @@ mod tests {
         assert_eq!(icons.group(ObjectGroup::Tables, true), md::MD_FOLDER_OPEN);
         assert_eq!(icons.query_filter(), md::MD_FILTER);
         assert_eq!(icons.query_sort(), md::MD_SORT);
+    }
+
+    #[test]
+    fn tab_navigation_icons_are_single_cell_in_each_mode() {
+        use ratatui::buffer::CellWidth;
+
+        for mode in [IconMode::NerdFont, IconMode::Unicode, IconMode::Ascii] {
+            let icons = IconSet::new(mode);
+            assert_eq!(icons.tab_previous().cell_width(), 1);
+            assert_eq!(icons.tab_next().cell_width(), 1);
+        }
     }
 }
