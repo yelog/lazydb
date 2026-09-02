@@ -689,7 +689,7 @@ impl Keymap {
             return None;
         }
 
-        if is_sql_grid_focus(app)
+        if (is_sql_grid_focus(app) || is_read_only_grid_focus(app))
             && (event.modifiers.is_empty() || event.modifiers == KeyModifiers::SHIFT)
         {
             match event.code {
@@ -898,6 +898,14 @@ impl Keymap {
                     && !is_relation_ddl_focus(app)
                     && !is_relation_data_focus(app) =>
             {
+                if matches!(
+                    app.tabs.get(app.active_tab),
+                    Some(crate::model::tab::WorkspaceTab::Dashboard(tab))
+                        if tab.page == crate::model::dashboard::DashboardPage::Processes
+                            && tab.process_filter_active
+                ) {
+                    return None;
+                }
                 self.set_pending(Pending::Goto, app);
                 return None;
             }
@@ -917,6 +925,49 @@ impl Keymap {
             Some(crate::model::tab::WorkspaceTab::Dashboard(_))
         );
         if dashboard_tab && app.focus == Focus::Results {
+            let process_page = matches!(
+                app.tabs.get(app.active_tab),
+                Some(crate::model::tab::WorkspaceTab::Dashboard(tab))
+                    if tab.page == crate::model::dashboard::DashboardPage::Processes
+            );
+            let filter_active = matches!(
+                app.tabs.get(app.active_tab),
+                Some(crate::model::tab::WorkspaceTab::Dashboard(tab))
+                    if tab.process_filter_active
+            );
+            if process_page
+                && !filter_active
+                && event.modifiers.is_empty()
+                && event.code == KeyCode::Char('/')
+            {
+                return Some(Action::DashboardProcessFilterStart);
+            }
+            if process_page && filter_active {
+                if let Some(edit) = map_text_input_edit(event) {
+                    return Some(match edit {
+                        TextInputEdit::Insert(value) => Action::DashboardProcessFilterInsert(value),
+                        TextInputEdit::Backspace => Action::DashboardProcessFilterBackspace,
+                        TextInputEdit::DeletePreviousWord => {
+                            Action::DashboardProcessFilterDeletePreviousWord
+                        }
+                        TextInputEdit::DeleteToStart => Action::DashboardProcessFilterDeleteToStart,
+                        TextInputEdit::Delete => Action::DashboardProcessFilterDelete,
+                        TextInputEdit::MoveLeft => Action::DashboardProcessFilterMoveLeft,
+                        TextInputEdit::MoveRight => Action::DashboardProcessFilterMoveRight,
+                        TextInputEdit::MoveHome => Action::DashboardProcessFilterMoveHome,
+                        TextInputEdit::MoveEnd => Action::DashboardProcessFilterMoveEnd,
+                    });
+                }
+                return match event.code {
+                    KeyCode::Enter if event.modifiers.is_empty() => {
+                        Some(Action::DashboardProcessFilterCommit)
+                    }
+                    KeyCode::Esc if event.modifiers.is_empty() => {
+                        Some(Action::DashboardProcessFilterCancel)
+                    }
+                    _ => None,
+                };
+            }
             let dashboard_action = match event.code {
                 KeyCode::Char('1') => Some(Action::DashboardSetPage(
                     crate::model::dashboard::DashboardPage::Overview,
@@ -934,23 +985,6 @@ impl Keymap {
             if dashboard_action.is_some() {
                 return dashboard_action;
             }
-            if matches!(
-                app.tabs.get(app.active_tab),
-                Some(crate::model::tab::WorkspaceTab::Dashboard(tab))
-                    if tab.page == crate::model::dashboard::DashboardPage::Processes
-            ) {
-                if event.modifiers == KeyModifiers::CONTROL && event.code == KeyCode::Char('u') {
-                    return Some(Action::DashboardProcessFilterClear);
-                }
-                if event.modifiers.is_empty() {
-                    return match event.code {
-                        KeyCode::Backspace => Some(Action::DashboardProcessFilterBackspace),
-                        KeyCode::Char(value) => Some(Action::DashboardProcessFilterInsert(value)),
-                        _ => None,
-                    };
-                }
-            }
-            return None;
         }
         if relation_tab
             && app.focus == Focus::Results
@@ -1313,6 +1347,12 @@ fn is_grid_navigation_focus(app: &App) -> bool {
                 )
             })
         }
+        Some(crate::model::tab::WorkspaceTab::Dashboard(tab))
+            if tab.page == crate::model::dashboard::DashboardPage::Processes
+                && !tab.process_filter_active =>
+        {
+            true
+        }
         _ => false,
     }
 }
@@ -1323,6 +1363,15 @@ fn is_sql_grid_focus(app: &App) -> bool {
             app.tabs.get(app.active_tab),
             Some(crate::model::tab::WorkspaceTab::Sql(tab))
                 if tab.result_view == crate::model::tab::ResultView::Data
+        )
+}
+
+fn is_read_only_grid_focus(app: &App) -> bool {
+    is_grid_navigation_focus(app)
+        && matches!(
+            app.tabs.get(app.active_tab),
+            Some(crate::model::tab::WorkspaceTab::Dashboard(tab))
+                if !tab.process_filter_active
         )
 }
 

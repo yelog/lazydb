@@ -414,6 +414,10 @@ impl App {
         self.dashboard_refresh_interval_millis = interval_millis.max(1_000);
     }
 
+    pub fn dashboard_refresh_interval_seconds(&self) -> u64 {
+        self.dashboard_refresh_interval_millis / 1_000
+    }
+
     fn active_tab_id(&self) -> Option<Uuid> {
         self.tabs.get(self.active_tab).map(WorkspaceTab::id)
     }
@@ -680,7 +684,9 @@ impl App {
         let label = columns
             .get(column)
             .map_or("cell", |meta| meta.name.as_str());
-        vec![Command::WriteClipboard(copy_cell(label, value))]
+        let mut payload = copy_cell(label, value);
+        payload.sensitive = self.active_process_grid();
+        vec![Command::WriteClipboard(payload)]
     }
 
     fn copy_grid_row(&mut self, include_headers: bool) -> Vec<Command> {
@@ -689,16 +695,27 @@ impl App {
             return Vec::new();
         };
         copy_row_tsv(&columns, &row, include_headers)
-            .map(Command::WriteClipboard)
+            .map(|mut payload| {
+                payload.sensitive = self.active_process_grid();
+                Command::WriteClipboard(payload)
+            })
             .into_iter()
             .collect()
+    }
+
+    fn active_process_grid(&self) -> bool {
+        matches!(
+            self.tabs.get(self.active_tab),
+            Some(WorkspaceTab::Dashboard(tab))
+                if tab.page == crate::model::dashboard::DashboardPage::Processes
+        )
     }
 
     fn active_grid_column(&self) -> usize {
         match self.tabs.get(self.active_tab) {
             Some(WorkspaceTab::Sql(tab)) => tab.grid.selected_column,
             Some(WorkspaceTab::Relation(tab)) => tab.grid.selected_column,
-            Some(WorkspaceTab::Dashboard(_)) => 0,
+            Some(WorkspaceTab::Dashboard(tab)) => tab.grid.selected_column,
             None => 0,
         }
     }
@@ -1422,7 +1439,12 @@ impl App {
 
     pub fn update(&mut self, action: Action) -> Vec<Command> {
         if self.active_console_opt().is_none()
-            && !(self.is_active_relation_tab()
+            && !((self.is_active_relation_tab()
+                || matches!(
+                    self.tabs.get(self.active_tab),
+                    Some(WorkspaceTab::Dashboard(tab))
+                        if tab.page == crate::model::dashboard::DashboardPage::Processes
+                ))
                 && matches!(
                     action,
                     Action::GridMove { .. }
@@ -1562,6 +1584,9 @@ impl App {
                         | Action::DashboardProcessFilterInsert(_)
                         | Action::DashboardProcessFilterBackspace
                         | Action::DashboardProcessFilterClear
+                        | Action::DashboardProcessFilterStart
+                        | Action::DashboardProcessFilterCommit
+                        | Action::DashboardProcessFilterCancel
                         | Action::DashboardMetricsDue
                         | Action::DashboardProcessesDue
                         | Action::DashboardMetricsLoaded { .. }
@@ -1695,11 +1720,22 @@ impl App {
                     return Vec::new();
                 };
                 tab.loading = true;
-                vec![Command::LoadDashboardMetrics {
+                let mut commands = vec![Command::LoadDashboardMetrics {
                     tab_id: tab.id,
                     tab_generation: tab.generation,
                     connection,
-                }]
+                }];
+                if tab.page == crate::model::dashboard::DashboardPage::Processes
+                    && !tab.process_loading
+                {
+                    tab.process_loading = true;
+                    commands.push(Command::LoadDashboardProcesses {
+                        tab_id: tab.id,
+                        tab_generation: tab.generation,
+                        connection,
+                    });
+                }
+                commands
             }
             Action::DashboardTogglePolling => {
                 if let Some(WorkspaceTab::Dashboard(tab)) = self.tabs.get_mut(self.active_tab) {
@@ -1709,19 +1745,99 @@ impl App {
             }
             Action::DashboardProcessFilterInsert(value) => {
                 if let Some(WorkspaceTab::Dashboard(tab)) = self.tabs.get_mut(self.active_tab) {
-                    tab.process_filter.push(value);
+                    if let Some(draft) = tab.process_filter_draft.as_mut() {
+                        draft.insert(value);
+                    }
+                    tab.reconcile_process_grid();
                 }
                 Vec::new()
             }
             Action::DashboardProcessFilterBackspace => {
                 if let Some(WorkspaceTab::Dashboard(tab)) = self.tabs.get_mut(self.active_tab) {
-                    tab.process_filter.pop();
+                    if let Some(draft) = tab.process_filter_draft.as_mut() {
+                        draft.backspace();
+                    }
+                    tab.reconcile_process_grid();
                 }
                 Vec::new()
             }
             Action::DashboardProcessFilterClear => {
                 if let Some(WorkspaceTab::Dashboard(tab)) = self.tabs.get_mut(self.active_tab) {
-                    tab.process_filter.clear();
+                    if let Some(draft) = tab.process_filter_draft.as_mut() {
+                        draft.delete_to_start();
+                    }
+                    tab.reconcile_process_grid();
+                }
+                Vec::new()
+            }
+            Action::DashboardProcessFilterStart => {
+                if let Some(WorkspaceTab::Dashboard(tab)) = self.tabs.get_mut(self.active_tab) {
+                    tab.process_filter_active = true;
+                    tab.process_filter_draft = Some(crate::model::text_input::TextInput::from(
+                        tab.process_filter.as_str(),
+                    ));
+                }
+                Vec::new()
+            }
+            Action::DashboardProcessFilterCommit => {
+                if let Some(WorkspaceTab::Dashboard(tab)) = self.tabs.get_mut(self.active_tab) {
+                    if let Some(draft) = tab.process_filter_draft.take() {
+                        tab.process_filter = draft.value().to_owned();
+                    }
+                    tab.process_filter_active = false;
+                    tab.reconcile_process_grid();
+                }
+                Vec::new()
+            }
+            Action::DashboardProcessFilterCancel => {
+                if let Some(WorkspaceTab::Dashboard(tab)) = self.tabs.get_mut(self.active_tab) {
+                    tab.process_filter_draft = None;
+                    tab.process_filter_active = false;
+                    tab.reconcile_process_grid();
+                }
+                Vec::new()
+            }
+            Action::DashboardProcessFilterDeletePreviousWord => {
+                if let Some(WorkspaceTab::Dashboard(tab)) = self.tabs.get_mut(self.active_tab) {
+                    if let Some(draft) = tab.process_filter_draft.as_mut() {
+                        draft.delete_previous_word();
+                    }
+                    tab.reconcile_process_grid();
+                }
+                Vec::new()
+            }
+            Action::DashboardProcessFilterDeleteToStart => {
+                if let Some(WorkspaceTab::Dashboard(tab)) = self.tabs.get_mut(self.active_tab) {
+                    if let Some(draft) = tab.process_filter_draft.as_mut() {
+                        draft.delete_to_start();
+                    }
+                    tab.reconcile_process_grid();
+                }
+                Vec::new()
+            }
+            Action::DashboardProcessFilterDelete => {
+                if let Some(WorkspaceTab::Dashboard(tab)) = self.tabs.get_mut(self.active_tab) {
+                    if let Some(draft) = tab.process_filter_draft.as_mut() {
+                        draft.delete();
+                    }
+                    tab.reconcile_process_grid();
+                }
+                Vec::new()
+            }
+            Action::DashboardProcessFilterMoveLeft
+            | Action::DashboardProcessFilterMoveRight
+            | Action::DashboardProcessFilterMoveHome
+            | Action::DashboardProcessFilterMoveEnd => {
+                if let Some(WorkspaceTab::Dashboard(tab)) = self.tabs.get_mut(self.active_tab)
+                    && let Some(draft) = tab.process_filter_draft.as_mut()
+                {
+                    match action {
+                        Action::DashboardProcessFilterMoveLeft => draft.move_left(),
+                        Action::DashboardProcessFilterMoveRight => draft.move_right(),
+                        Action::DashboardProcessFilterMoveHome => draft.move_home(),
+                        Action::DashboardProcessFilterMoveEnd => draft.move_end(),
+                        _ => unreachable!(),
+                    }
                 }
                 Vec::new()
             }
@@ -1800,6 +1916,7 @@ impl App {
                     tab.visibility = snapshot.visibility;
                     tab.process_loading = false;
                     tab.process_error = None;
+                    tab.reconcile_process_grid();
                 }
                 Vec::new()
             }
@@ -8335,6 +8452,12 @@ impl App {
 
     fn active_grid_dimensions(&self) -> (usize, usize) {
         match self.tabs.get(self.active_tab) {
+            Some(WorkspaceTab::Dashboard(tab))
+                if tab.page == crate::model::dashboard::DashboardPage::Processes =>
+            {
+                let result = tab.process_result_set();
+                (result.rows.len(), result.columns.len())
+            }
             Some(WorkspaceTab::Relation(tab)) if tab.view == RelationView::Data => {
                 tab.edit.as_ref().map_or_else(
                     || relation_grid_dimensions(&tab.data),
@@ -8402,6 +8525,18 @@ impl App {
                         .map_or(result.rows.len(), |edit| edit.rows.len()),
                 ))
             }
+            Some(WorkspaceTab::Dashboard(tab))
+                if tab.page == crate::model::dashboard::DashboardPage::Processes =>
+            {
+                let result = tab.process_result_set();
+                let row = result.rows.get(tab.grid.selected_row)?.clone();
+                Some((
+                    result.columns,
+                    row,
+                    tab.grid.selected_row,
+                    result.rows.len(),
+                ))
+            }
             _ => None,
         }
     }
@@ -8417,6 +8552,11 @@ impl App {
                 f(&mut tab.grid, dimensions)
             }
             Some(WorkspaceTab::Sql(tab)) if tab.result_view == ResultView::Data => {
+                f(&mut tab.grid, dimensions)
+            }
+            Some(WorkspaceTab::Dashboard(tab))
+                if tab.page == crate::model::dashboard::DashboardPage::Processes =>
+            {
                 f(&mut tab.grid, dimensions)
             }
             _ => {}
@@ -8443,6 +8583,11 @@ impl App {
         let grid = match tab {
             WorkspaceTab::Sql(tab) if tab.result_view == ResultView::Data => &mut tab.grid,
             WorkspaceTab::Relation(tab) if tab.view == RelationView::Data => &mut tab.grid,
+            WorkspaceTab::Dashboard(tab)
+                if tab.page == crate::model::dashboard::DashboardPage::Processes =>
+            {
+                &mut tab.grid
+            }
             _ => return,
         };
         grid.column_offset = viewport.column_offset;
@@ -9290,7 +9435,15 @@ impl App {
                     .and_then(|outcome| outcome.result_sets.last())
             })
             .map(automatic_relation_column_widths);
-        let base = base.or(sql_base);
+        let dashboard_base = self.tabs.get(self.active_tab).and_then(|tab| match tab {
+            WorkspaceTab::Dashboard(tab)
+                if tab.page == crate::model::dashboard::DashboardPage::Processes =>
+            {
+                Some(automatic_relation_column_widths(&tab.process_result_set()))
+            }
+            _ => None,
+        });
+        let base = base.or(sql_base).or(dashboard_base);
         self.with_active_grid(|grid, (rows, columns)| {
             let Some(base) = base.as_deref() else { return };
             let column = grid.selected_column;
@@ -10840,6 +10993,52 @@ mod tests {
         );
         app.update(Action::GridResetColumnWidth);
         assert_eq!(app.active_console().grid.column_widths, vec![None, None]);
+    }
+
+    #[test]
+    fn dashboard_process_grid_actions_are_not_blocked_without_a_console() {
+        let mut app = App::new(Vec::new());
+        app.tabs.clear();
+        let mut dashboard = crate::model::dashboard::DashboardTab::new();
+        dashboard.page = crate::model::dashboard::DashboardPage::Processes;
+        dashboard.processes = vec![
+            crate::model::dashboard::ProcessRow {
+                id: 1,
+                user: "alice".into(),
+                database: None,
+                client: None,
+                application: None,
+                state: Some("active".into()),
+                wait: None,
+                elapsed: Duration::from_secs(1),
+                query: None,
+            },
+            crate::model::dashboard::ProcessRow {
+                id: 2,
+                user: "bob".into(),
+                database: None,
+                client: None,
+                application: None,
+                state: Some("idle".into()),
+                wait: None,
+                elapsed: Duration::from_secs(2),
+                query: None,
+            },
+        ];
+        app.tabs.push(WorkspaceTab::Dashboard(dashboard));
+        app.active_tab = 0;
+        app.focus = Focus::Results;
+
+        app.update(Action::GridMove {
+            rows: 1,
+            columns: 1,
+        });
+
+        let WorkspaceTab::Dashboard(tab) = &app.tabs[0] else {
+            panic!("expected dashboard tab");
+        };
+        assert_eq!(tab.grid.selected_row, 1);
+        assert_eq!(tab.grid.selected_column, 1);
     }
 
     #[test]

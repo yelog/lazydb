@@ -29,6 +29,9 @@ fn monitoring_sql_aggregates_database_and_activity_stats_separately() {
     assert!(status.contains("pg_stat_activity"));
     assert!(status.contains("pg_backend_pid()"));
     assert!(status.contains("pg_postmaster_start_time()"));
+    assert!(status.contains("pg_wal_lsn_diff(pg_current_wal_lsn(), '0/0')"));
+    assert!(status.contains("AS wal_bytes"));
+    assert!(status.contains("AS server_uptime"));
     assert!(status.contains("sum(tup_returned)"));
     assert!(status.contains(
         "floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint AS server_time_millis"
@@ -52,6 +55,8 @@ fn monitoring_sql_aggregates_database_and_activity_stats_separately() {
         assert!(process.contains(field), "missing {field}");
     }
     assert!(process.contains("LIMIT 2001"));
+    assert!(process.contains("AS elapsed_seconds"));
+    assert!(process.contains("::double precision AS elapsed_seconds"));
 }
 
 #[tokio::test]

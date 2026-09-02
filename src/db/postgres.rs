@@ -297,7 +297,8 @@ WITH db_stats AS (
            coalesce(sum(tup_deleted), 0)::double precision AS deletes,
            coalesce(sum(deadlocks), 0)::double precision AS deadlocks,
            coalesce(sum(temp_files), 0)::double precision AS temp_files,
-           coalesce(sum(temp_bytes), 0)::double precision AS temp_bytes
+           coalesce(sum(temp_bytes), 0)::double precision AS temp_bytes,
+           coalesce(pg_wal_lsn_diff(pg_current_wal_lsn(), '0/0'), 0)::double precision AS wal_bytes
     FROM pg_stat_database WHERE datname = current_database()
 ), activity_stats AS (
     SELECT count(*)::double precision AS connections,
@@ -307,6 +308,7 @@ WITH db_stats AS (
 )
 SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint AS server_time_millis,
        floor(extract(epoch FROM pg_postmaster_start_time()) * 1000)::bigint AS server_generation,
+       extract(epoch FROM clock_timestamp() - pg_postmaster_start_time())::double precision AS server_uptime,
        db_stats.*, activity_stats.*
 FROM db_stats CROSS JOIN activity_stats
 "#;
@@ -318,7 +320,7 @@ SELECT pid, usename AS user_name, datname AS database_name,
        coalesce(host(client_addr), client_hostname, 'local') AS client,
        application_name, state,
        coalesce(nullif(wait_event_type, '') || ':' || wait_event, wait_event_type) AS wait,
-       extract(epoch FROM clock_timestamp() - coalesce(query_start, xact_start, backend_start)) AS elapsed_seconds,
+       extract(epoch FROM clock_timestamp() - coalesce(query_start, xact_start, backend_start))::double precision AS elapsed_seconds,
        query
 FROM pg_stat_activity
 WHERE pid <> pg_backend_pid()
@@ -347,6 +349,7 @@ LIMIT 2001
             ("deadlocks", MetricKey::Deadlocks),
             ("temp_files", MetricKey::TempFiles),
             ("temp_bytes", MetricKey::TempBytes),
+            ("wal_bytes", MetricKey::WalBytes),
             ("connections", MetricKey::Connections),
             ("active_connections", MetricKey::ActiveConnections),
             ("idle_connections", MetricKey::IdleConnections),
@@ -356,6 +359,10 @@ LIMIT 2001
         let commits = values[&MetricKey::Commits];
         let rollbacks = values[&MetricKey::Rollbacks];
         values.insert(MetricKey::Transactions, commits + rollbacks);
+        values.insert(
+            MetricKey::ServerUptime,
+            row.try_get("server_uptime").map_err(decode_error)?,
+        );
         Ok(crate::db::monitor::MonitorSnapshot {
             server_time_millis: monitor_timestamp(&row, "server_time_millis")?,
             server_generation: monitor_timestamp(&row, "server_generation")?,

@@ -122,6 +122,10 @@ fn dashboard_renders_all_pages_without_database_io() {
     app.focus = Focus::Results;
 
     assert!(render(&app, 120, 36).contains("Transactions"));
+    let overview = render(&app, 120, 36);
+    assert!(overview.contains("refresh 5s"), "{overview}");
+    assert!(!overview.contains("Overview"), "{overview}");
+    assert!(!overview.contains("Last sample"), "{overview}");
     app.update(Action::DashboardSetPage(
         lazydb::model::dashboard::DashboardPage::Processes,
     ));
@@ -186,6 +190,49 @@ fn dashboard_overview_uses_remaining_space_for_history() {
     assert!(output.contains("commits/s"), "{output}");
     assert!(output.contains("Transactions and connections"), "{output}");
     assert!(output.contains("Statement activity"), "{output}");
+}
+
+#[test]
+fn dashboard_overview_uses_rates_capacity_percentages_and_metric_icons() {
+    let mut app = App::new(Vec::new());
+    app.tabs.clear();
+    let mut dashboard = lazydb::model::dashboard::DashboardTab::new();
+    dashboard.metadata.max_connections = Some(100);
+    dashboard.history.push(
+        lazydb::model::dashboard::RawSample::new(1_000, 1)
+            .with(lazydb::model::dashboard::MetricKey::Commits, 10.0)
+            .with(lazydb::model::dashboard::MetricKey::Rollbacks, 2.0)
+            .with(lazydb::model::dashboard::MetricKey::Transactions, 12.0)
+            .with(lazydb::model::dashboard::MetricKey::Connections, 40.0)
+            .with(lazydb::model::dashboard::MetricKey::BlockHits, 90.0)
+            .with(lazydb::model::dashboard::MetricKey::BlockReads, 10.0)
+            .with(lazydb::model::dashboard::MetricKey::ServerUptime, 86_401.0),
+    );
+    dashboard.history.push(
+        lazydb::model::dashboard::RawSample::new(3_000, 1)
+            .with(lazydb::model::dashboard::MetricKey::Commits, 16.0)
+            .with(lazydb::model::dashboard::MetricKey::Rollbacks, 4.0)
+            .with(lazydb::model::dashboard::MetricKey::Transactions, 20.0)
+            .with(lazydb::model::dashboard::MetricKey::Connections, 42.0)
+            .with(lazydb::model::dashboard::MetricKey::BlockHits, 190.0)
+            .with(lazydb::model::dashboard::MetricKey::BlockReads, 10.0)
+            .with(lazydb::model::dashboard::MetricKey::ServerUptime, 86_403.0),
+    );
+    dashboard.latest = Some(dashboard.history.samples().last().unwrap().clone());
+    app.tabs.push(WorkspaceTab::Dashboard(dashboard));
+    app.active_tab = 0;
+    app.focus = Focus::Results;
+
+    let output = render(&app, 140, 40);
+    assert!(output.contains("Transactions/s"), "{output}");
+    assert!(output.contains("4"), "{output}");
+    assert!(output.contains("Connections"), "{output}");
+    assert!(output.contains("42/100"), "{output}");
+    assert!(output.contains("Cache hit rate"), "{output}");
+    assert!(output.contains("95.00%"), "{output}");
+    assert!(output.contains("Uptime"), "{output}");
+    assert!(output.contains("1d 00:00:03"), "{output}");
+    assert!(output.contains("󰓡"), "{output}");
 }
 
 #[test]

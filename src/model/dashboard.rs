@@ -27,6 +27,7 @@ pub enum MetricKey {
     TempBytes,
     BytesRead,
     BytesWritten,
+    WalBytes,
     AbortedClients,
     AbortedConnections,
     ServerUptime,
@@ -43,9 +44,10 @@ impl MetricKey {
     pub const fn kind(self) -> MetricKind {
         match self {
             Self::CacheHitRatio => MetricKind::Ratio,
-            Self::Connections | Self::ActiveConnections | Self::IdleConnections => {
-                MetricKind::Gauge
-            }
+            Self::Connections
+            | Self::ActiveConnections
+            | Self::IdleConnections
+            | Self::ServerUptime => MetricKind::Gauge,
             _ => MetricKind::Counter,
         }
     }
@@ -258,6 +260,76 @@ pub struct ProcessRow {
     pub query: Option<String>,
 }
 
+pub const PROCESS_COLUMN_COUNT: usize = 9;
+
+fn optional_text(value: Option<&str>) -> crate::db::value::CellValue {
+    value.map_or(crate::db::value::CellValue::Null, |value| {
+        crate::db::value::CellValue::Text(value.to_owned())
+    })
+}
+
+pub fn format_process_elapsed(elapsed: Duration) -> String {
+    if elapsed < Duration::from_secs(1) {
+        return format!("{}ms", elapsed.as_millis());
+    }
+    if elapsed < Duration::from_secs(60) {
+        return format!("{:.3}s", elapsed.as_secs_f64());
+    }
+    let total = elapsed.as_secs();
+    let seconds = total % 60;
+    let minutes = (total / 60) % 60;
+    let hours = total / 3_600;
+    if hours > 0 {
+        format!("{hours}h {minutes:02}m {seconds:02}s")
+    } else {
+        format!("{minutes}m {seconds:02}s")
+    }
+}
+
+pub fn process_result_set(rows: &[ProcessRow], needle: &str) -> crate::db::query::ResultSet {
+    use crate::db::{query::ColumnMeta, value::CellValue};
+
+    let columns = [
+        ("PID", "UNSIGNED"),
+        ("USER", "TEXT"),
+        ("DB", "TEXT"),
+        ("CLIENT", "TEXT"),
+        ("APPLICATION", "TEXT"),
+        ("STATE", "TEXT"),
+        ("WAIT", "TEXT"),
+        ("ELAPSED", "DURATION"),
+        ("QUERY", "TEXT"),
+    ]
+    .into_iter()
+    .map(|(name, type_name)| ColumnMeta {
+        name: name.into(),
+        type_name: type_name.into(),
+    })
+    .collect();
+    let rows = rows
+        .iter()
+        .filter(|row| process_matches(row, needle))
+        .map(|row| {
+            vec![
+                CellValue::Unsigned(row.id),
+                CellValue::Text(row.user.clone()),
+                optional_text(row.database.as_deref()),
+                optional_text(row.client.as_deref()),
+                optional_text(row.application.as_deref()),
+                optional_text(row.state.as_deref()),
+                optional_text(row.wait.as_deref()),
+                CellValue::Text(format_process_elapsed(row.elapsed)),
+                optional_text(row.query.as_deref()),
+            ]
+        })
+        .collect();
+    crate::db::query::ResultSet {
+        columns,
+        rows,
+        affected_rows: 0,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct DashboardTab {
     pub id: Uuid,
@@ -266,6 +338,8 @@ pub struct DashboardTab {
     pub refresh_enabled: bool,
     pub include_idle: bool,
     pub process_filter: String,
+    pub process_filter_active: bool,
+    pub process_filter_draft: Option<crate::model::text_input::TextInput>,
     pub history: MetricHistory,
     pub latest: Option<RawSample>,
     pub metadata: crate::db::monitor::MonitorMetadata,
@@ -278,6 +352,7 @@ pub struct DashboardTab {
     pub next_refresh_millis: u64,
     pub loading: bool,
     pub process_loading: bool,
+    pub grid: crate::model::tab::DataGridState,
 }
 
 impl DashboardTab {
@@ -289,6 +364,8 @@ impl DashboardTab {
             refresh_enabled: true,
             include_idle: false,
             process_filter: String::new(),
+            process_filter_active: false,
+            process_filter_draft: None,
             history: MetricHistory::default(),
             latest: None,
             metadata: Default::default(),
@@ -301,7 +378,24 @@ impl DashboardTab {
             next_refresh_millis: 0,
             loading: false,
             process_loading: false,
+            grid: Default::default(),
         }
+    }
+
+    pub fn process_result_set(&self) -> crate::db::query::ResultSet {
+        process_result_set(&self.processes, self.effective_process_filter())
+    }
+
+    pub fn effective_process_filter(&self) -> &str {
+        self.process_filter_draft
+            .as_ref()
+            .map_or(self.process_filter.as_str(), |draft| draft.value())
+    }
+
+    pub fn reconcile_process_grid(&mut self) {
+        let row_count = self.process_result_set().rows.len();
+        self.grid.clamp(row_count, PROCESS_COLUMN_COUNT);
+        self.grid.ensure_row_visible(row_count);
     }
 }
 
@@ -341,6 +435,7 @@ impl Default for DashboardTab {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn sample(at_millis: u64, commits: f64) -> RawSample {
         RawSample::new(at_millis, 1)
@@ -365,6 +460,18 @@ mod tests {
 
         assert_eq!(history.points(MetricKey::Commits)[1].value, Some(3.0));
         assert_eq!(history.points(MetricKey::Connections)[1].value, Some(4.0));
+    }
+
+    #[test]
+    fn uptime_is_a_gauge_and_write_bytes_are_a_rate_counter() {
+        assert_eq!(MetricKey::ServerUptime.kind(), MetricKind::Gauge);
+        assert_eq!(MetricKey::WalBytes.kind(), MetricKind::Counter);
+
+        let mut history = MetricHistory::default();
+        history.push(RawSample::new(1_000, 1).with(MetricKey::WalBytes, 1_000.0));
+        history.push(RawSample::new(3_000, 1).with(MetricKey::WalBytes, 5_000.0));
+
+        assert_eq!(history.points(MetricKey::WalBytes)[1].value, Some(2_000.0));
     }
 
     #[test]
@@ -402,5 +509,56 @@ mod tests {
 
         assert!(result.iter().any(|(_, value)| *value == 1_000.0));
         assert!(result.len() <= 10);
+    }
+
+    #[test]
+    fn process_projection_preserves_all_fields_and_filters_case_insensitively() {
+        let row = ProcessRow {
+            id: 42,
+            user: "Ada".into(),
+            database: Some("demo".into()),
+            client: Some("localhost".into()),
+            application: Some("worker".into()),
+            state: Some("active".into()),
+            wait: Some("Lock".into()),
+            elapsed: Duration::from_millis(1_250),
+            query: Some("select * from users".into()),
+        };
+
+        let result = process_result_set(&[row], "ADA");
+        assert_eq!(result.columns.len(), PROCESS_COLUMN_COUNT);
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0][0], crate::db::value::CellValue::Unsigned(42));
+        assert_eq!(
+            result.rows[0][7],
+            crate::db::value::CellValue::Text("1.250s".into())
+        );
+        assert_eq!(
+            result.rows[0][8],
+            crate::db::value::CellValue::Text("select * from users".into())
+        );
+    }
+
+    #[test]
+    fn process_projection_uses_null_for_missing_optional_values() {
+        let row = ProcessRow {
+            id: 7,
+            user: "u".into(),
+            database: None,
+            client: None,
+            application: None,
+            state: None,
+            wait: None,
+            elapsed: Duration::ZERO,
+            query: None,
+        };
+
+        let result = process_result_set(&[row], "");
+        assert!(matches!(
+            result.rows[0][2],
+            crate::db::value::CellValue::Null
+        ));
+        assert_eq!(format_process_elapsed(Duration::ZERO), "0ms");
+        assert_eq!(format_process_elapsed(Duration::from_secs(65)), "1m 05s");
     }
 }

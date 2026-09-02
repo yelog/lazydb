@@ -411,7 +411,7 @@ pub fn render_with_state_using_icons_and_sequence(
                 area,
                 target: HitTarget::Focus(Focus::Results),
             });
-            dashboard::render(frame, area, app, theme);
+            dashboard::render(frame, area, app, theme, state);
         }
         render_footer(frame, layout.footer, app, theme, sequence);
     } else if is_relation {
