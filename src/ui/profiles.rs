@@ -704,12 +704,7 @@ fn render_buttons(
         let button_area = Rect::new(x, area.y, width.min(area.right().saturating_sub(x)), 1);
         let style = if !enabled {
             Style::new().fg(theme.muted).bg(theme.surface_raised)
-        } else if *selected {
-            Style::new()
-                .fg(theme.background)
-                .bg(theme.accent)
-                .add_modifier(Modifier::BOLD)
-        } else if *button == ProfileButton::SaveAndConnect {
+        } else if *selected || *button == ProfileButton::SaveAndConnect {
             Style::new()
                 .fg(theme.background)
                 .bg(theme.accent)
