@@ -1,4 +1,5 @@
 use clap::ValueEnum;
+use thiserror::Error;
 
 use crate::{
     profile::{ConnectionProfile, Environment},
@@ -13,13 +14,23 @@ pub enum WritePolicy {
     All,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum PolicyError {
+    #[error("a single read-only SQL statement is required")]
     ReadOnlyQueryRequired,
-    WriteDisabled,
+    #[error("the selected connection is configured as read-only")]
+    ProfileReadOnly,
+    #[error(
+        "the MCP server write policy is deny; restart it with --write-policy non-production for writable development or staging connections"
+    )]
+    ServerWritePolicyDenied,
+    #[error("production writes require --write-policy all")]
     ProductionWriteDisabled,
+    #[error("the SQL statement could not be classified safely")]
     UnknownSql,
+    #[error("transaction-control statements are not supported by agent execution")]
     TransactionControlDisabled,
+    #[error("SQL must not be empty")]
     EmptySql,
 }
 
@@ -50,8 +61,11 @@ pub fn authorize_write(
     if analysis.risks.contains(&SqlRisk::TransactionControl) {
         return Err(PolicyError::TransactionControlDisabled);
     }
-    if profile.read_only || policy == WritePolicy::Deny {
-        return Err(PolicyError::WriteDisabled);
+    if profile.read_only {
+        return Err(PolicyError::ProfileReadOnly);
+    }
+    if policy == WritePolicy::Deny {
+        return Err(PolicyError::ServerWritePolicyDenied);
     }
     if profile.environment == Environment::Production && policy != WritePolicy::All {
         return Err(PolicyError::ProductionWriteDisabled);

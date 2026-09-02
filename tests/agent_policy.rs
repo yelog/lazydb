@@ -31,13 +31,25 @@ fn writes_obey_profile_environment_and_server_policy() {
     let read_only = profile(true, Environment::Development);
     assert_eq!(
         authorize_write(&read_only, WritePolicy::All, "UPDATE t SET x = 1"),
-        Err(PolicyError::WriteDisabled)
+        Err(PolicyError::ProfileReadOnly)
     );
 
     let development = profile(false, Environment::Development);
     assert_eq!(
         authorize_write(&development, WritePolicy::Deny, "UPDATE t SET x = 1"),
-        Err(PolicyError::WriteDisabled)
+        Err(PolicyError::ServerWritePolicyDenied)
+    );
+    assert_eq!(
+        PolicyError::ServerWritePolicyDenied.to_string(),
+        "the MCP server write policy is deny; restart it with --write-policy non-production for writable development or staging connections"
+    );
+    assert_eq!(
+        PolicyError::ProfileReadOnly.to_string(),
+        "the selected connection is configured as read-only"
+    );
+    assert_eq!(
+        PolicyError::ProductionWriteDisabled.to_string(),
+        "production writes require --write-policy all"
     );
     assert_eq!(
         authorize_write(
