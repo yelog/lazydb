@@ -15,6 +15,7 @@ use lazydb::{
     },
     profile::{ConnectionProfile, import_connection_url},
 };
+use uuid::Uuid;
 
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
@@ -59,6 +60,81 @@ fn profile_access_menu_navigates_and_cancels() {
 
 fn ctrl(character: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL)
+}
+
+#[test]
+fn constraint_editor_maps_field_navigation_and_text_input() {
+    let mut app = App::new(Vec::new());
+    app.catalog_editor = Some(lazydb::model::catalog_editor::CatalogEditorState {
+        mode: lazydb::db::catalog_mutation::CatalogMutationMode::Create,
+        anchor: lazydb::db::catalog_mutation::CatalogMutationAnchor::Profile {
+            profile_id: Uuid::nil(),
+        },
+        object_type: Some(lazydb::db::catalog_mutation::CatalogObjectType::Catalog(
+            lazydb::db::catalog::CatalogKind::CheckConstraint,
+        )),
+        page: lazydb::model::catalog_editor::CatalogEditorPage::Form,
+        operation: None,
+        catalog_epoch: 0,
+        options: vec![],
+        selected_option: 0,
+        baseline: None,
+        plan: None,
+        error: None,
+        draft: Some(lazydb::model::catalog_editor::CatalogDraft::Constraint(
+            lazydb::model::catalog_editor::ConstraintDraft::new(
+                lazydb::db::catalog_mutation::ConstraintDefinitionKind::Check {
+                    expression: String::new(),
+                    no_inherit: false,
+                },
+                "public",
+                "items",
+            ),
+        )),
+    });
+    app.overlay = Some(Overlay::CatalogEditor);
+    let mut keymap = Keymap::default();
+    assert_eq!(
+        keymap.map(key(KeyCode::Tab), &app),
+        Some(Action::CatalogEditorFieldNext)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('x')), &app),
+        Some(Action::CatalogEditorInsert('x'))
+    );
+}
+
+#[test]
+fn role_editor_uses_catalog_editor_field_keymap() {
+    let mut app = App::new(Vec::new());
+    app.catalog_editor = Some(lazydb::model::catalog_editor::CatalogEditorState {
+        mode: lazydb::db::catalog_mutation::CatalogMutationMode::Create,
+        anchor: lazydb::db::catalog_mutation::CatalogMutationAnchor::Profile {
+            profile_id: Uuid::nil(),
+        },
+        object_type: Some(lazydb::db::catalog_mutation::CatalogObjectType::Role),
+        page: lazydb::model::catalog_editor::CatalogEditorPage::Form,
+        operation: None,
+        catalog_epoch: 0,
+        options: vec![],
+        selected_option: 0,
+        draft: Some(lazydb::model::catalog_editor::CatalogDraft::Role(
+            lazydb::model::catalog_editor::RoleDraft::new(false),
+        )),
+        baseline: None,
+        plan: None,
+        error: None,
+    });
+    app.overlay = Some(lazydb::model::workspace::Overlay::CatalogEditor);
+    let mut keymap = Keymap::default();
+    assert_eq!(
+        keymap.map(key(KeyCode::Tab), &app),
+        Some(Action::CatalogEditorFieldNext)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Enter), &app),
+        Some(Action::CatalogEditorPreview)
+    );
 }
 
 #[test]
@@ -276,6 +352,153 @@ fn catalog_drop_overlay_maps_only_confirmation_keys_without_bypassing_text_entry
         keymap.map(key(KeyCode::Esc), &app),
         Some(Action::CatalogDropCancel)
     );
+}
+
+#[test]
+fn catalog_editor_picker_and_preview_own_their_keys() {
+    let mut app = App::new(Vec::new());
+    app.catalog_editor = Some(lazydb::model::catalog_editor::CatalogEditorState::new(
+        lazydb::db::catalog_mutation::CatalogMutationMode::Create,
+        lazydb::db::catalog_mutation::CatalogMutationAnchor::Profile {
+            profile_id: uuid::Uuid::nil(),
+        },
+        0,
+        vec![lazydb::model::catalog_editor::CatalogMutationOption {
+            object_type: lazydb::db::catalog_mutation::CatalogObjectType::LoginRole,
+            label: "Login Role".into(),
+        }],
+    ));
+    app.overlay = Some(Overlay::CatalogEditor);
+    let mut keymap = Keymap::default();
+
+    assert_eq!(
+        keymap.map(key(KeyCode::Down), &app),
+        Some(Action::CatalogEditorMove(1))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Enter), &app),
+        Some(Action::CatalogEditorSelect)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Esc), &app),
+        Some(Action::CatalogEditorCancel)
+    );
+
+    app.catalog_editor.as_mut().unwrap().page =
+        lazydb::model::catalog_editor::CatalogEditorPage::SqlPreview;
+    assert_eq!(
+        keymap.map(key(KeyCode::Enter), &app),
+        Some(Action::CatalogEditorApply)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Esc), &app),
+        Some(Action::CatalogEditorBack)
+    );
+}
+
+#[test]
+fn explorer_catalog_shortcuts_are_not_advertised_for_sqlite_or_synthetic_rows() {
+    let profile = profile("sqlite");
+    let mut app = App::new(vec![profile.clone()]);
+    app.focus = Focus::Explorer;
+    let mut keymap = Keymap::default();
+    assert_eq!(keymap.map(key(KeyCode::Char('a')), &app), None);
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('e')), &app),
+        Some(Action::OpenCatalogEdit)
+    );
+    app.explorer.normalized.selected = Some(ExplorerNodeId::Status {
+        owner: lazydb::model::explorer::ExplorerOwnerId::Profile(profile.id),
+        kind: lazydb::model::explorer::StatusRowKind::Loading,
+    });
+    assert_eq!(keymap.map(key(KeyCode::Char('a')), &app), None);
+}
+
+#[test]
+fn view_editor_form_owns_navigation_and_preview_keys() {
+    let mut app = App::new(Vec::new());
+    app.catalog_editor = Some(lazydb::model::catalog_editor::CatalogEditorState {
+        mode: lazydb::db::catalog_mutation::CatalogMutationMode::Create,
+        anchor: lazydb::db::catalog_mutation::CatalogMutationAnchor::Profile {
+            profile_id: Uuid::nil(),
+        },
+        object_type: Some(lazydb::db::catalog_mutation::CatalogObjectType::Catalog(
+            lazydb::db::catalog::CatalogKind::View,
+        )),
+        page: lazydb::model::catalog_editor::CatalogEditorPage::Form,
+        operation: None,
+        catalog_epoch: 0,
+        options: vec![],
+        selected_option: 0,
+        baseline: None,
+        plan: None,
+        error: None,
+        draft: Some(lazydb::model::catalog_editor::CatalogDraft::View(
+            lazydb::model::catalog_editor::ViewDraft {
+                name: "v".into(),
+                schema: "public".into(),
+                owner: "postgres".into(),
+                comment: "".into(),
+                query: "SELECT 1".into(),
+                output_columns: "".into(),
+                security_barrier: lazydb::db::catalog_mutation::ViewOption::unavailable("test"),
+                security_invoker: lazydb::db::catalog_mutation::ViewOption::unavailable("test"),
+                check_option: lazydb::db::catalog_mutation::ViewOption::unavailable("test"),
+                selected_field: 0,
+            },
+        )),
+    });
+    app.overlay = Some(Overlay::CatalogEditor);
+    let mut keymap = Keymap::default();
+    assert_eq!(
+        keymap.map(key(KeyCode::Tab), &app),
+        Some(Action::CatalogEditorFieldNext)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('x')), &app),
+        Some(Action::CatalogEditorInsert('x'))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Enter), &app),
+        Some(Action::CatalogEditorPreview)
+    );
+}
+
+#[test]
+fn sequence_editor_form_owns_text_input_keys() {
+    let mut app = App::new(vec![
+        import_connection_url(":memory:", Some("test"))
+            .unwrap()
+            .profile,
+    ]);
+    app.catalog_editor = Some(lazydb::model::catalog_editor::CatalogEditorState {
+        draft: Some(lazydb::model::catalog_editor::CatalogDraft::Sequence(
+            lazydb::model::catalog_editor::SequenceDraft {
+                name: "seq".into(),
+                schema: "public".into(),
+                owner: "owner".into(),
+                comment: "".into(),
+                data_type: "bigint".into(),
+                increment: "1".into(),
+                min_value: lazydb::db::catalog_mutation::SequenceBound::Unset,
+                max_value: lazydb::db::catalog_mutation::SequenceBound::Unset,
+                start_value: "1".into(),
+                restart_value: "".into(),
+                cache: "1".into(),
+                cycle: false,
+                owned_by: "NONE".into(),
+                selected_field: 0,
+            },
+        )),
+        page: lazydb::model::catalog_editor::CatalogEditorPage::Form,
+        ..Default::default()
+    });
+    app.overlay = Some(lazydb::model::workspace::Overlay::CatalogEditor);
+    let mut keymap = Keymap::default();
+    assert!(matches!(
+        keymap.map(key(KeyCode::Char('x')), &app),
+        Some(Action::CatalogEditorInsert('x'))
+    ));
 }
 
 #[test]
@@ -815,7 +1038,7 @@ fn maps_explicit_full_buffer_execution_separately() {
 }
 
 #[test]
-fn maps_selected_profile_root_actions_by_stable_id() {
+fn explorer_catalog_mutation_maps_selected_profile_root_actions_by_stable_id() {
     let profile = profile("root");
     let profile_id = profile.id;
     let mut app = App::new(vec![profile]);
@@ -825,7 +1048,14 @@ fn maps_selected_profile_root_actions_by_stable_id() {
 
     assert_eq!(
         keymap.map(key(KeyCode::Char('e')), &app),
-        Some(Action::ProfileStartEdit { profile_id })
+        Some(Action::OpenCatalogEdit)
+    );
+    app.update(Action::OpenCatalogEdit);
+    assert!(matches!(app.overlay, Some(Overlay::ProfileManager)));
+    app.update(Action::CloseProfileManager);
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('n')), &app),
+        Some(Action::ProfileStartNew)
     );
     assert_eq!(
         keymap.map(key(KeyCode::Char('d')), &app),
@@ -852,7 +1082,7 @@ fn maps_selected_profile_root_actions_by_stable_id() {
 }
 
 #[test]
-fn maps_profile_actions_from_a_catalog_node_to_its_owner_except_delete() {
+fn explorer_catalog_mutation_maps_catalog_node_without_profile_fallback() {
     let profile = profile("owner");
     let profile_id = profile.id;
     let mut app = App::new(vec![profile]);
@@ -865,10 +1095,8 @@ fn maps_profile_actions_from_a_catalog_node_to_its_owner_except_delete() {
     app.explorer.normalized.selected = Some(ExplorerNodeId::Catalog(node_id.clone()));
     let mut keymap = Keymap::default();
 
-    assert_eq!(
-        keymap.map(key(KeyCode::Char('e')), &app),
-        Some(Action::ProfileStartEdit { profile_id })
-    );
+    assert_eq!(keymap.map(key(KeyCode::Char('e')), &app), None);
+    assert_eq!(keymap.map(key(KeyCode::Char('a')), &app), None);
     assert_eq!(
         keymap.map(key(KeyCode::Char('d')), &app),
         Some(Action::RequestDropCatalogObject {
@@ -883,6 +1111,84 @@ fn maps_profile_actions_from_a_catalog_node_to_its_owner_except_delete() {
         keymap.map(key(KeyCode::Char('x')), &app),
         Some(Action::RequestProfileDisconnect { profile_id })
     );
+}
+
+#[test]
+fn explorer_catalog_mutation_synthetic_nodes_are_noops() {
+    let profile = profile("synthetic");
+    let profile_id = profile.id;
+    let mut app = App::new(vec![profile]);
+    app.focus = Focus::Explorer;
+    let mut keymap = Keymap::default();
+
+    for selected in [
+        ExplorerNodeId::EmptyProfiles,
+        ExplorerNodeId::Others,
+        ExplorerNodeId::Status {
+            owner: lazydb::model::explorer::ExplorerOwnerId::Profile(profile_id),
+            kind: lazydb::model::explorer::StatusRowKind::Loading,
+        },
+        ExplorerNodeId::Empty {
+            owner: lazydb::model::explorer::ExplorerOwnerId::Profile(profile_id),
+        },
+    ] {
+        app.explorer.normalized.selected = Some(selected);
+        assert_eq!(keymap.map(key(KeyCode::Char('a')), &app), None);
+        assert_eq!(keymap.map(key(KeyCode::Char('e')), &app), None);
+    }
+}
+
+#[test]
+fn materialized_view_create_form_maps_space_to_data_state_toggle() {
+    let mut app = App::new(Vec::new());
+    app.catalog_editor = Some(lazydb::model::catalog_editor::CatalogEditorState {
+        mode: lazydb::db::catalog_mutation::CatalogMutationMode::Create,
+        anchor: lazydb::db::catalog_mutation::CatalogMutationAnchor::Profile {
+            profile_id: uuid::Uuid::nil(),
+        },
+        object_type: Some(lazydb::db::catalog_mutation::CatalogObjectType::Catalog(
+            lazydb::db::catalog::CatalogKind::MaterializedView,
+        )),
+        page: lazydb::model::catalog_editor::CatalogEditorPage::Form,
+        operation: None,
+        catalog_epoch: 0,
+        options: vec![],
+        selected_option: 0,
+        draft: Some(
+            lazydb::model::catalog_editor::CatalogDraft::MaterializedView(
+                lazydb::model::catalog_editor::MaterializedViewDraft {
+                    name: "mv".into(),
+                    schema: "public".into(),
+                    owner: "postgres".into(),
+                    comment: "".into(),
+                    query: "SELECT 1".into(),
+                    tablespace: "".into(),
+                    with_data: true,
+                    selected_field: 5,
+                    query_editable: true,
+                },
+            ),
+        ),
+        baseline: None,
+        plan: None,
+        error: None,
+    });
+    app.focus = lazydb::model::workspace::Focus::Explorer;
+    app.overlay = Some(Overlay::CatalogEditor);
+    let mut keymap = Keymap::default();
+    assert_eq!(
+        keymap.map(key(KeyCode::Char(' ')), &app),
+        Some(Action::CatalogEditorToggleMaterializedViewData)
+    );
+    app.update(Action::CatalogEditorToggleMaterializedViewData);
+    let Some(lazydb::model::catalog_editor::CatalogDraft::MaterializedView(draft)) = app
+        .catalog_editor
+        .as_ref()
+        .and_then(|editor| editor.draft.as_ref())
+    else {
+        panic!("materialized view draft expected");
+    };
+    assert!(!draft.with_data);
 }
 
 #[test]

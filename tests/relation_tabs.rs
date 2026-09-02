@@ -4,6 +4,7 @@ use lazydb::{
         CatalogEntry, CatalogId, CatalogKind, CatalogMetadata, ColumnMetadata, ConstraintMetadata,
         IndexMetadata, OptionalMetadata, QualifiedName,
     },
+    db::catalog_mutation::{CatalogMutationImpact, CatalogMutationNamespace},
     db::query::{ColumnMeta, QueryOutcome, QueryStats, ResultSet},
     db::value::CellValue,
     model::{
@@ -120,6 +121,78 @@ fn ddl_viewport_defaults_to_zero() {
     assert_eq!(tab.ddl_viewport.visible_columns, 0);
     assert_eq!(tab.ddl_viewport.total_rows, 0);
     assert_eq!(tab.ddl_viewport.max_line_width, 0);
+}
+
+#[test]
+fn catalog_mutation_invalidates_matching_relation_snapshots_only() {
+    let profile = Uuid::new_v4();
+    let schema = CatalogId::new(profile, CatalogKind::Schema, ["db", "public"]);
+    let users = CatalogId::new(profile, CatalogKind::Table, ["db", "public", "users"]);
+    let orders = CatalogId::new(profile, CatalogKind::Table, ["db", "public", "orders"]);
+    let impact = CatalogMutationImpact {
+        old_object_id: CatalogId::new(
+            profile,
+            CatalogKind::Column,
+            ["db", "public", "users", "id"],
+        ),
+        owning_relation_id: Some(users.clone()),
+        namespace: CatalogMutationNamespace {
+            database: None,
+            schema: None,
+        },
+        native_identity_changed: false,
+    };
+    let matching = RelationTab::with_descriptor(descriptor(users, "users"), RelationView::Data);
+    let unrelated = RelationTab::with_descriptor(descriptor(orders, "orders"), RelationView::Data);
+    assert!(matching.invalidated_by_catalog_mutation(&impact));
+    assert!(!unrelated.invalidated_by_catalog_mutation(&impact));
+
+    let schema_impact = CatalogMutationImpact {
+        old_object_id: schema.clone(),
+        owning_relation_id: None,
+        namespace: CatalogMutationNamespace {
+            database: None,
+            schema: Some(schema),
+        },
+        native_identity_changed: true,
+    };
+    assert!(matching.invalidated_by_catalog_mutation(&schema_impact));
+}
+
+#[test]
+fn renamed_relation_is_marked_as_native_identity_stale() {
+    let profile = Uuid::new_v4();
+    let id = CatalogId::new(profile, CatalogKind::Table, ["db", "public", "users"]);
+    let impact = CatalogMutationImpact {
+        old_object_id: id.clone(),
+        owning_relation_id: None,
+        namespace: CatalogMutationNamespace {
+            database: None,
+            schema: None,
+        },
+        native_identity_changed: true,
+    };
+    let mut tab = RelationTab::with_descriptor(descriptor(id, "users"), RelationView::Data);
+    assert!(tab.invalidated_by_catalog_mutation(&impact));
+    tab.invalidate_catalog_mutation(true);
+    assert!(tab.stale_native_identity);
+}
+
+#[test]
+fn schema_and_database_impacts_match_open_relation_namespace() {
+    let profile = Uuid::new_v4();
+    let id = CatalogId::new(profile, CatalogKind::Table, ["db", "public", "users"]);
+    let tab = RelationTab::with_descriptor(descriptor(id, "users"), RelationView::Data);
+    let database = CatalogMutationImpact {
+        old_object_id: CatalogId::new(profile, CatalogKind::Database, ["db"]),
+        owning_relation_id: None,
+        namespace: CatalogMutationNamespace {
+            database: Some(CatalogId::new(profile, CatalogKind::Database, ["db"])),
+            schema: None,
+        },
+        native_identity_changed: true,
+    };
+    assert!(tab.invalidated_by_catalog_mutation(&database));
 }
 
 #[test]
@@ -731,6 +804,22 @@ fn relation_tab_at(app: &lazydb::app::App, index: usize) -> &RelationTab {
         WorkspaceTab::Relation(tab) => tab,
         WorkspaceTab::Sql(_) => panic!("expected relation tab"),
         WorkspaceTab::Dashboard(_) => panic!("expected relation tab"),
+    }
+}
+
+fn descriptor(id: CatalogId, title: &str) -> RelationDescriptor {
+    RelationDescriptor {
+        key: RelationKey {
+            profile_id: id.profile_id(),
+            object_id: id,
+        },
+        qualified_name: QualifiedName {
+            database: Some("db".into()),
+            schema: Some("public".into()),
+            object: title.into(),
+        },
+        kind: CatalogKind::Table,
+        title: title.into(),
     }
 }
 

@@ -64,6 +64,19 @@ struct ActiveConnection {
     database: DatabaseConnection,
 }
 
+struct CatalogMutationConnection {
+    database: DatabaseConnection,
+    owned: bool,
+}
+
+impl CatalogMutationConnection {
+    async fn close_if_owned(self) {
+        if self.owned {
+            self.database.close().await;
+        }
+    }
+}
+
 #[derive(Default)]
 struct ConnectionAttemptTracker {
     latest: Option<ConnectionIdentity>,
@@ -105,6 +118,7 @@ pub struct Runtime {
     query_tasks: HashMap<(Uuid, u64), JoinHandle<()>>,
     catalog_drop_plan_tasks: HashMap<(ConnectionIdentity, u64), JoinHandle<()>>,
     catalog_drop_execute_tasks: HashMap<(ConnectionIdentity, u64), JoinHandle<()>>,
+    catalog_mutation_tasks: HashMap<(ConnectionIdentity, u64), JoinHandle<()>>,
     relation_tasks: HashMap<crate::model::relation::RelationRequest, JoinHandle<()>>,
     dashboard_metric_tasks: HashMap<(Uuid, u64), JoinHandle<()>>,
     dashboard_metadata_tasks: HashMap<(Uuid, u64), JoinHandle<()>>,
@@ -169,6 +183,7 @@ impl Runtime {
             query_tasks: HashMap::new(),
             catalog_drop_plan_tasks: HashMap::new(),
             catalog_drop_execute_tasks: HashMap::new(),
+            catalog_mutation_tasks: HashMap::new(),
             relation_tasks: HashMap::new(),
             dashboard_metric_tasks: HashMap::new(),
             dashboard_metadata_tasks: HashMap::new(),
@@ -193,6 +208,8 @@ impl Runtime {
         self.catalog_drop_plan_tasks
             .retain(|_, task| !task.is_finished());
         self.catalog_drop_execute_tasks
+            .retain(|_, task| !task.is_finished());
+        self.catalog_mutation_tasks
             .retain(|_, task| !task.is_finished());
         self.relation_tasks.retain(|_, task| !task.is_finished());
         self.dashboard_metric_tasks
@@ -239,6 +256,9 @@ impl Runtime {
                 self.connect(profile_id, generation, target);
             }
             Command::LoadCatalogPage(request) => self.load_catalog_page(request),
+            Command::LoadCatalogObjectDefinition(request) => {
+                self.load_catalog_object_definition(request)
+            }
             Command::SearchCatalog(request) => self.search_catalog(request),
             Command::CancelCatalogSearch => {
                 if let Some(task) = self.catalog_search_task.take() {
@@ -247,6 +267,12 @@ impl Runtime {
             }
             Command::PlanCatalogDrop(request) => self.plan_catalog_drop(request),
             Command::ExecuteCatalogDrop(plan) => self.execute_catalog_drop(plan),
+            Command::PlanCatalogMutation {
+                request,
+                draft,
+                baseline,
+            } => self.plan_catalog_mutation(request, draft, baseline),
+            Command::ExecuteCatalogMutation(plan) => self.execute_catalog_mutation(plan),
             Command::LoadRelationPreview(request) | Command::LoadRelationDdl(request) => {
                 self.load_relation(request)
             }
@@ -1010,6 +1036,57 @@ impl Runtime {
         }));
     }
 
+    fn load_catalog_object_definition(
+        &mut self,
+        request: crate::db::catalog_mutation::CatalogObjectDefinitionRequest,
+    ) {
+        let sender = self.event_sender.clone();
+        let connection = Arc::clone(&self.connection);
+        let registry = Arc::clone(&self.registry);
+        let secret_store = Arc::clone(&self.secret_store);
+        let local_credential_store = self.local_credential_store.clone();
+        self.background_tasks.push(tokio::spawn(async move {
+            let routed = match resolve_catalog_mutation_connection(
+                Arc::clone(&connection),
+                request.connection,
+                crate::db::catalog_mutation::CatalogMutationTarget::Database(
+                    request.target.clone(),
+                ),
+                &registry,
+                &secret_store,
+                &local_credential_store,
+            )
+            .await
+            {
+                Ok(routed) => routed,
+                Err(message) => {
+                    let _ =
+                        sender.send(Action::CatalogObjectDefinitionLoadFailed { request, message });
+                    return;
+                }
+            };
+            match routed
+                .database
+                .load_catalog_object_definition(&request)
+                .await
+            {
+                Ok(definition) => {
+                    let _ = sender.send(Action::CatalogObjectDefinitionLoaded {
+                        request,
+                        definition,
+                    });
+                }
+                Err(error) => {
+                    let _ = sender.send(Action::CatalogObjectDefinitionLoadFailed {
+                        request,
+                        message: sanitize_terminal_text(&error.to_string()),
+                    });
+                }
+            }
+            routed.close_if_owned().await;
+        }));
+    }
+
     fn plan_catalog_drop(&mut self, request: crate::db::catalog_drop::CatalogDropRequest) {
         let key = (request.connection, request.request_id);
         if self.catalog_drop_plan_tasks.contains_key(&key) {
@@ -1074,6 +1151,168 @@ impl Runtime {
             }
         });
         self.catalog_drop_plan_tasks.insert(key, task);
+    }
+
+    fn plan_catalog_mutation(
+        &mut self,
+        request: crate::db::catalog_mutation::CatalogMutationRequest,
+        draft: crate::model::catalog_editor::CatalogDraft,
+        baseline: Option<crate::db::catalog_mutation::CatalogObjectDefinition>,
+    ) {
+        let sender = self.event_sender.clone();
+        let connection = Arc::clone(&self.connection);
+        let task_request = request.clone();
+        self.background_tasks.push(tokio::spawn(async move {
+            let Some(database) = active_database(connection, request.connection).await else {
+                let _ = sender.send(Action::CatalogMutationPlanFailed {
+                    request: task_request,
+                    message: "Active connection is no longer available".into(),
+                });
+                return;
+            };
+            match database.plan_catalog_mutation(request, draft, baseline) {
+                Ok(plan) => {
+                    let _ = sender.send(Action::CatalogMutationPlanReady(plan));
+                }
+                Err(error) => {
+                    let _ = sender.send(Action::CatalogMutationPlanFailed {
+                        request: task_request,
+                        message: sanitize_terminal_text(&error.to_string()),
+                    });
+                }
+            }
+        }));
+    }
+
+    fn execute_catalog_mutation(&mut self, plan: crate::db::catalog_mutation::CatalogMutationPlan) {
+        let key = (plan.request.connection, plan.request.request_id);
+        if self.catalog_mutation_tasks.contains_key(&key) {
+            return;
+        }
+        let sender = self.event_sender.clone();
+        let connection = Arc::clone(&self.connection);
+        let registry = Arc::clone(&self.registry);
+        let secret_store = Arc::clone(&self.secret_store);
+        let local_credential_store = self.local_credential_store.clone();
+        let task_plan = plan.clone();
+        let task = tokio::spawn(async move {
+            if let Err(error) = task_plan.validate() {
+                let _ = sender.send(Action::CatalogMutationFailed {
+                    plan: task_plan,
+                    message: error.to_string(),
+                });
+                return;
+            }
+            let target = match task_plan.execution_target.clone() {
+                Some(target) => target,
+                None => match task_plan.refresh.first() {
+                    Some(crate::db::catalog::CatalogTarget::Schemas { database }) => {
+                        crate::db::catalog_mutation::CatalogMutationTarget::Database(
+                            crate::model::execution_target::ExecutionTarget {
+                                profile_id: task_plan.request.connection.profile_id,
+                                database: database.native_path.first().cloned().unwrap_or_default(),
+                                schema: None,
+                            },
+                        )
+                    }
+                    _ => {
+                        let _ = sender.send(Action::CatalogMutationFailed {
+                            plan: task_plan,
+                            message: "Mutation has an invalid schema refresh target".into(),
+                        });
+                        return;
+                    }
+                },
+            };
+            let database = match resolve_catalog_mutation_connection(
+                Arc::clone(&connection),
+                task_plan.request.connection,
+                target.clone(),
+                &registry,
+                &secret_store,
+                &local_credential_store,
+            )
+            .await
+            {
+                Ok(database) => database,
+                Err(message) => {
+                    let _ = sender.send(Action::CatalogMutationFailed {
+                        plan: task_plan,
+                        message,
+                    });
+                    return;
+                }
+            };
+            let Some(profile) = registry
+                .lock()
+                .await
+                .profiles
+                .get(&task_plan.request.connection.profile_id)
+                .cloned()
+            else {
+                let _ = sender.send(Action::CatalogMutationFailed {
+                    plan: task_plan,
+                    message: "Mutation profile no longer exists".into(),
+                });
+                database.close_if_owned().await;
+                return;
+            };
+            if profile.read_only {
+                let _ = sender.send(Action::CatalogMutationFailed {
+                    plan: task_plan,
+                    message: "Schema mutation is unavailable on a read-only profile".into(),
+                });
+                database.close_if_owned().await;
+                return;
+            }
+            if let Some(expected) = task_plan.baseline_fingerprint.as_deref()
+                && let crate::db::catalog_mutation::CatalogMutationAnchor::Catalog(object) =
+                    &task_plan.request.anchor
+            {
+                let definition_target =
+                    target.execution_target(task_plan.request.connection.profile_id);
+                let request = crate::db::catalog_mutation::CatalogObjectDefinitionRequest {
+                    connection: task_plan.request.connection,
+                    request_id: task_plan.request.request_id,
+                    catalog_epoch: task_plan.request.catalog_epoch,
+                    object: object.clone(),
+                    target: definition_target,
+                };
+                match database
+                    .database
+                    .load_catalog_object_definition(&request)
+                    .await
+                {
+                    Ok(definition)
+                        if definition_baseline_fingerprint(&definition).as_deref()
+                            == Some(expected) => {}
+                    _ => {
+                        let _ = sender.send(Action::CatalogMutationFailed {
+                            plan: task_plan,
+                            message: "Schema changed since the plan was created".into(),
+                        });
+                        database.close_if_owned().await;
+                        return;
+                    }
+                }
+            }
+            match database.database.execute_catalog_mutation(&task_plan).await {
+                Ok(outcome) => {
+                    let _ = sender.send(Action::CatalogMutationSucceeded {
+                        plan: task_plan,
+                        outcome,
+                    });
+                }
+                Err(error) => {
+                    let _ = sender.send(Action::CatalogMutationFailed {
+                        plan: task_plan,
+                        message: sanitize_terminal_text(&error.to_string()),
+                    });
+                }
+            }
+            database.close_if_owned().await;
+        });
+        self.catalog_mutation_tasks.insert(key, task);
     }
 
     fn execute_catalog_drop(&mut self, plan: crate::db::catalog_drop::CatalogDropPlan) {
@@ -3201,6 +3440,70 @@ async fn active_database(
             active.profile_id == expected.profile_id && active.generation == expected.generation
         })
         .map(|active| active.database.clone())
+}
+
+fn definition_baseline_fingerprint(
+    definition: &crate::db::catalog_mutation::CatalogObjectDefinition,
+) -> Option<String> {
+    use crate::db::catalog_mutation::CatalogObjectDefinition;
+    Some(match definition {
+        CatalogObjectDefinition::Database(value) => value.baseline_fingerprint.clone(),
+        CatalogObjectDefinition::Schema(value) => value.baseline_fingerprint.clone(),
+        CatalogObjectDefinition::Table(value) => value.baseline_fingerprint.clone(),
+        CatalogObjectDefinition::Index(value) => value.baseline_fingerprint.clone(),
+        CatalogObjectDefinition::Constraint(value) => value.baseline_fingerprint.clone(),
+        CatalogObjectDefinition::View(value) => value.baseline_fingerprint.clone(),
+        CatalogObjectDefinition::MaterializedView(value) => value.baseline_fingerprint.clone(),
+        CatalogObjectDefinition::Sequence(value) => value.baseline_fingerprint.clone(),
+        CatalogObjectDefinition::Role(value) => value.baseline_fingerprint.clone(),
+    })
+}
+
+async fn resolve_catalog_mutation_connection(
+    connection: Arc<Mutex<Option<ActiveConnection>>>,
+    expected: ConnectionIdentity,
+    target: crate::db::catalog_mutation::CatalogMutationTarget,
+    registry: &Arc<Mutex<ProfileRegistry>>,
+    secret_store: &Arc<dyn SecretStore>,
+    local_credential_store: &LocalCredentialStore,
+) -> Result<CatalogMutationConnection, String> {
+    let profile = registry
+        .lock()
+        .await
+        .profiles
+        .get(&expected.profile_id)
+        .cloned()
+        .ok_or_else(|| "Mutation profile no longer exists".to_owned())?;
+    let target = target.execution_target(profile.id);
+    if !target.is_valid(&profile) {
+        return Err("Catalog mutation target is invalid for this profile".to_owned());
+    }
+    let active_guard = connection.lock().await;
+    if active_guard.as_ref().is_none_or(|active| {
+        active.profile_id != expected.profile_id || active.generation != expected.generation
+    }) {
+        return Err("Active connection is no longer available".to_owned());
+    }
+    if let Some(active) = active_guard.as_ref().filter(|active| {
+        active.profile_id == expected.profile_id
+            && active.generation == expected.generation
+            && active.target == target
+    }) {
+        return Ok(CatalogMutationConnection {
+            database: active.database.clone(),
+            owned: false,
+        });
+    }
+    drop(active_guard);
+    let password =
+        resolve_profile_password(registry, secret_store, local_credential_store, &profile).await?;
+    DatabaseConnection::connect_target(&profile, password.as_ref(), &target)
+        .await
+        .map(|database| CatalogMutationConnection {
+            database,
+            owned: true,
+        })
+        .map_err(|error| sanitize_terminal_text(&error.to_string()))
 }
 
 fn take_active_connection(

@@ -7,7 +7,7 @@ pub use crate::identity::ConnectionIdentity;
 use crate::db::catalog::{CatalogSearchHit, CatalogSearchPage, search_text_matches};
 use crate::db::{
     ServerInfo,
-    catalog::{CatalogEntry, CatalogId, CatalogKind, CatalogNode, OptionalMetadata},
+    catalog::{CatalogEntry, CatalogId, CatalogKind, CatalogNode, CatalogTarget, OptionalMetadata},
 };
 use crate::help::HelpState;
 use crate::model::execution_target::ExecutionTarget;
@@ -105,6 +105,7 @@ pub enum Overlay {
     NotificationHistory(crate::model::notification::NotificationHistoryState),
     RecordView(crate::model::record_view::RecordViewState),
     ProfileManager,
+    CatalogEditor,
     ProfileAccess {
         profile_id: Uuid,
         selected: usize,
@@ -155,6 +156,10 @@ pub enum Overlay {
         input: crate::model::text_input::TextInput,
         busy: bool,
         error: Option<String>,
+    },
+    CatalogEditorDestructiveConfirm {
+        plan: Box<crate::db::catalog_mutation::CatalogMutationPlan>,
+        input: crate::model::text_input::TextInput,
     },
 }
 
@@ -360,6 +365,18 @@ impl ExplorerSearchState {
 }
 
 impl ExplorerState {
+    pub fn invalidate_catalog_target(&mut self, profile_id: Uuid, target: &CatalogTarget) {
+        if let Some(state) = self.normalized.profiles.get_mut(&profile_id) {
+            state.invalidate_catalog_target(target);
+        }
+    }
+
+    pub fn apply_catalog_selection(&mut self, id: ExplorerNodeId) {
+        self.normalized.selected = Some(id);
+        self.normalized.ensure_selected_visible();
+        self.sync_selected_index();
+    }
+
     pub fn connection_changed(&mut self) {
         self.catalog_generation = self.catalog_generation.saturating_add(1);
         self.nodes.clear();

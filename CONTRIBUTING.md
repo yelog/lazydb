@@ -24,6 +24,33 @@ LAZYDB_TEST_MYSQL_URL='mysql://user:password@localhost:3306/database' \
   cargo test --test mysql_adapter
 ```
 
+The PostgreSQL adapter mutation coverage is intentionally serialized and uses
+unique, temporary schema/object names. Run it directly with:
+
+```bash
+LAZYDB_TEST_POSTGRES_URL='postgresql://user:password@localhost:5432/database' \
+  cargo test --test postgres_adapter serialized_postgres_catalog_mutations_round_trip_catalog_definitions -- --exact --nocapture
+```
+
+The mutation test needs only ordinary privileges to create and drop objects in
+the configured database. Database and role creation are not part of standard
+CI: they require elevated PostgreSQL privileges (`CREATEDB` for databases and
+`CREATEROLE` for roles). To exercise the optional role path, use a disposable
+test database and a role with `CREATEROLE`, set
+`LAZYDB_TEST_POSTGRES_URL`, and run the privilege-gated role test directly. Do
+not grant `SUPERUSER`, `BYPASSRLS`, or unrestricted production access solely for
+the test suite. The exact command is:
+
+```bash
+LAZYDB_TEST_POSTGRES_URL='postgresql://user:password@localhost:5432/database' \
+  cargo test --test postgres_adapter privileged_role_mutation_is_gated_by_environment_and_createrole -- --exact --nocapture
+```
+
+Database creation is likewise privilege-gated by PostgreSQL's `CREATEDB` (or
+superuser) privilege and is intentionally not required by the standard adapter
+suite; use a disposable maintenance database if exercising database mutation
+manually.
+
 Never paste real credentials into issues, tests, command examples, snapshots, or
 logs.
 

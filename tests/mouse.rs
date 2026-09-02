@@ -244,7 +244,7 @@ fn relation_pane_background_click_focuses_results() {
 }
 
 #[test]
-fn secondary_click_on_profile_root_edits_that_stable_id() {
+fn secondary_click_on_profile_or_catalog_row_uses_semantic_edit_action() {
     let profile = import_connection_url(":memory:", Some("root"))
         .unwrap()
         .profile;
@@ -262,7 +262,19 @@ fn secondary_click_on_profile_root_edits_that_stable_id() {
             &ui,
             &app
         ),
-        Some(Action::ProfileStartEdit { profile_id })
+        Some(Action::OpenCatalogEdit)
+    );
+
+    let catalog =
+        ExplorerNodeId::Catalog(CatalogId::new(profile_id, CatalogKind::Database, ["demo"]));
+    ui.hit_regions[0].target = HitTarget::ExplorerRow(catalog);
+    assert_eq!(
+        map_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Right), 1, 1),
+            &ui,
+            &app
+        ),
+        Some(Action::OpenCatalogEdit)
     );
 }
 

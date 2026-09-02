@@ -1,3 +1,4 @@
+pub mod catalog_editor;
 pub mod dashboard;
 pub mod data_query;
 pub mod editor;

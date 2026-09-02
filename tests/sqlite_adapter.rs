@@ -756,6 +756,14 @@ async fn catalog_capabilities_match_implemented_sqlite_metadata() {
     database.close().await;
 }
 
+#[test]
+fn sqlite_mutation_capabilities_are_empty() {
+    assert_eq!(
+        lazydb::db::sqlite::SqliteAdapter::catalog_mutation_capabilities(),
+        lazydb::db::catalog_mutation::CatalogMutationCapabilities::default()
+    );
+}
+
 #[tokio::test]
 async fn catalog_aliases_remain_connection_local_for_file_and_memory_profiles() {
     let fixture = CatalogFixture::new().await;

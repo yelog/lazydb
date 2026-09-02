@@ -132,6 +132,29 @@ fn dispatch(app: &mut App, runtime: &mut Runtime, action: Action) -> Vec<Command
     commands
 }
 
+#[test]
+fn catalog_mutation_targets_are_isolated_from_console_targets() {
+    let profile_id = Uuid::new_v4();
+    let console_target = ExecutionTarget {
+        profile_id,
+        database: "app".into(),
+        schema: Some("public".into()),
+    };
+    let maintenance =
+        lazydb::db::catalog_mutation::CatalogMutationTarget::maintenance("postgres").unwrap();
+    assert_eq!(maintenance.database(), "postgres");
+    assert_eq!(
+        maintenance.execution_target(profile_id),
+        ExecutionTarget {
+            profile_id,
+            database: "postgres".into(),
+            schema: None,
+        }
+    );
+    assert_eq!(console_target.database, "app");
+    assert_eq!(console_target.schema.as_deref(), Some("public"));
+}
+
 async fn next_action(receiver: &mut mpsc::UnboundedReceiver<Action>) -> Action {
     timeout(Duration::from_secs(3), receiver.recv())
         .await

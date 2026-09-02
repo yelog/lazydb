@@ -104,6 +104,8 @@ not expose every session. Filtering applies to the bounded visible snapshot.
 | `n/N` | Next/previous confirmed find/search match |
 | `n` | New profile |
 | `e` | Edit selected profile |
+| `a` | Add a supported object when the selected PostgreSQL node has a create option |
+| `e` | Edit the directly selected PostgreSQL catalog object when supported |
 | `c/x` | Connect/disconnect selected profile |
 | `d` | Request profile deletion |
 | `r` | Refresh catalog |
@@ -117,6 +119,18 @@ Backspace, Ctrl-U, Enter, and Esc belong to find input. After confirmation,
 `n`, `N`, and Esc cycle or close it. Catalog search Editing accepts text,
 Backspace, Ctrl-U, navigation, Enter to locate, and Esc; after confirmation,
 `n`, `N`, and Esc are the active controls.
+
+The Explorer `a` and catalog-object `e` rows are capability-aware. They are
+not shown for unsupported drivers, synthetic/status rows, or objects without
+an adapter-provided create/edit capability. The Catalog Editor picker, form,
+preview, and busy pages expose their own contextual rows; busy `Esc` dismisses
+the editor and late responses are rejected by request identity and stale checks.
+
+## Catalog Editor
+
+`j/k` selects an object type in the picker, `Enter` chooses it, `Enter` previews
+a form mutation, and `Enter` applies the SQL preview. `Esc` cancels the picker
+or form, returns from preview, or cancels a busy editor.
 
 ## SQL Editor
 

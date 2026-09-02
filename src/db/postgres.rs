@@ -1,3 +1,10 @@
+#![allow(clippy::collapsible_if)]
+#![allow(clippy::explicit_auto_deref)]
+#![allow(clippy::format_in_format_args)]
+#![allow(clippy::nonminimal_bool)]
+#![allow(clippy::obfuscated_if_else)]
+#![allow(clippy::redundant_closure)]
+
 use std::{
     collections::{HashMap, HashSet},
     time::{Duration, Instant},
@@ -6,6 +13,7 @@ use std::{
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use futures_util::TryStreamExt;
 use secrecy::{ExposeSecret, SecretString};
+use sha2::{Digest, Sha256};
 use sqlx::{
     AssertSqlSafe, Column, Connection, Either, Executor, PgPool, Row, SqlSafeStr, Statement,
     TypeInfo, ValueRef,
@@ -18,6 +26,7 @@ use uuid::Uuid;
 use crate::model::dashboard::MetricKey;
 use crate::{
     identity::ConnectionIdentity,
+    model::catalog_editor::CatalogDraft,
     profile::{CatalogScope, CatalogSelection, ConnectionProfile, DatabaseKind, SslMode},
     security::sanitize_terminal_text,
 };
@@ -35,6 +44,16 @@ use super::{
         finalize_keyset_page,
     },
     catalog_drop::{CatalogDropError, CatalogDropPlan, CatalogDropRequest},
+    catalog_mutation::{
+        CatalogMutationAnchor, CatalogMutationAvailability, CatalogMutationCapabilities,
+        CatalogMutationError, CatalogMutationExecutionMode, CatalogMutationMode,
+        CatalogMutationOption, CatalogMutationPlan, CatalogMutationRequest,
+        CatalogObjectDefinition, CatalogObjectDefinitionRequest, CatalogObjectType,
+        CatalogSelectionHint, ColumnDefinition, ConstraintDefinition, ConstraintDefinitionKind,
+        DatabaseDefinition, IndexColumnDefinition, IndexDefinition, MaterializedViewDefinition,
+        RoleDefinition, SchemaDefinition, TableDefinition, ViewDefinition,
+        ViewMutationCapabilities, ViewMutationOptionAvailability, ViewOption,
+    },
     ddl::{DdlSection, assemble_ddl},
     mutation::{InputValue, MutationResult, RelationMutation, RelationMutationRequest},
     query::{ColumnMeta, QueryOutcome, QueryOutcomeAccumulator, RELATION_PREVIEW_LIMIT, ResultSet},
@@ -85,6 +104,15 @@ FROM pg_indexes
 WHERE schemaname <> 'information_schema'
   AND schemaname NOT LIKE 'pg\_%' ESCAPE '\'
 ORDER BY schemaname, tablename, indexname
+"#;
+
+pub const CATALOG_CONSTRAINT_DEFINITION_SQL: &str = r#"
+SELECT con.conname, con.contype::text, con.conkey, con.confkey,
+       con.confmatchtype::text, con.confupdtype::text, con.confdeltype::text,
+       con.condeferrable, con.condeferred, con.convalidated, con.connoinherit,
+       pg_get_expr(con.conbin, con.conrelid, true)
+FROM pg_constraint con
+WHERE con.conrelid = $1::oid AND con.oid = $2::oid
 "#;
 
 pub const SEARCH_CATALOG_SQL: &str = r#"
@@ -218,6 +246,7 @@ pub struct PostgresAdapter {
     pool: PgPool,
     connection_id: Uuid,
     catalog_scope: CatalogScope,
+    server_version_num: i32,
 }
 
 struct PgIndexInfo {
@@ -509,6 +538,2339 @@ LIMIT 2001
         }
     }
 
+    pub fn catalog_mutation_capabilities() -> CatalogMutationCapabilities {
+        Self::catalog_mutation_capabilities_for_version(120_000)
+    }
+
+    pub fn catalog_mutation_capabilities_for_version(
+        server_version_num: i32,
+    ) -> CatalogMutationCapabilities {
+        CatalogMutationCapabilities {
+            profile_create: vec![
+                CatalogMutationOption {
+                    object_type: CatalogObjectType::Catalog(CatalogKind::Database),
+                    availability: CatalogMutationAvailability::Available,
+                },
+                CatalogMutationOption {
+                    object_type: CatalogObjectType::LoginRole,
+                    availability: CatalogMutationAvailability::Available,
+                },
+                CatalogMutationOption {
+                    object_type: CatalogObjectType::Role,
+                    availability: CatalogMutationAvailability::Available,
+                },
+            ],
+            create: vec![
+                CatalogMutationOption {
+                    object_type: CatalogObjectType::Catalog(CatalogKind::Schema),
+                    availability: CatalogMutationAvailability::Available,
+                },
+                CatalogMutationOption {
+                    object_type: CatalogObjectType::Catalog(CatalogKind::Table),
+                    availability: CatalogMutationAvailability::Available,
+                },
+                CatalogMutationOption {
+                    object_type: CatalogObjectType::Catalog(CatalogKind::Column),
+                    availability: CatalogMutationAvailability::Available,
+                },
+                CatalogMutationOption {
+                    object_type: CatalogObjectType::Catalog(CatalogKind::Index),
+                    availability: CatalogMutationAvailability::Available,
+                },
+                CatalogMutationOption {
+                    object_type: CatalogObjectType::Catalog(CatalogKind::PrimaryKey),
+                    availability: CatalogMutationAvailability::Available,
+                },
+                CatalogMutationOption {
+                    object_type: CatalogObjectType::Catalog(CatalogKind::UniqueConstraint),
+                    availability: CatalogMutationAvailability::Available,
+                },
+                CatalogMutationOption {
+                    object_type: CatalogObjectType::Catalog(CatalogKind::ForeignKey),
+                    availability: CatalogMutationAvailability::Available,
+                },
+                CatalogMutationOption {
+                    object_type: CatalogObjectType::Catalog(CatalogKind::CheckConstraint),
+                    availability: CatalogMutationAvailability::Available,
+                },
+                CatalogMutationOption {
+                    object_type: CatalogObjectType::Catalog(CatalogKind::View),
+                    availability: CatalogMutationAvailability::Available,
+                },
+                CatalogMutationOption {
+                    object_type: CatalogObjectType::Catalog(CatalogKind::MaterializedView),
+                    availability: CatalogMutationAvailability::Available,
+                },
+                CatalogMutationOption {
+                    object_type: CatalogObjectType::Catalog(CatalogKind::Sequence),
+                    availability: CatalogMutationAvailability::Available,
+                },
+            ],
+            edit: vec![
+                CatalogMutationOption {
+                    object_type: CatalogObjectType::Catalog(CatalogKind::Schema),
+                    availability: CatalogMutationAvailability::Available,
+                },
+                CatalogMutationOption {
+                    object_type: CatalogObjectType::Catalog(CatalogKind::Table),
+                    availability: CatalogMutationAvailability::Available,
+                },
+                CatalogMutationOption {
+                    object_type: CatalogObjectType::Catalog(CatalogKind::Column),
+                    availability: CatalogMutationAvailability::Available,
+                },
+                CatalogMutationOption {
+                    object_type: CatalogObjectType::Catalog(CatalogKind::Index),
+                    availability: CatalogMutationAvailability::Available,
+                },
+                CatalogMutationOption {
+                    object_type: CatalogObjectType::Catalog(CatalogKind::PrimaryKey),
+                    availability: CatalogMutationAvailability::Available,
+                },
+                CatalogMutationOption {
+                    object_type: CatalogObjectType::Catalog(CatalogKind::UniqueConstraint),
+                    availability: CatalogMutationAvailability::Available,
+                },
+                CatalogMutationOption {
+                    object_type: CatalogObjectType::Catalog(CatalogKind::ForeignKey),
+                    availability: CatalogMutationAvailability::Available,
+                },
+                CatalogMutationOption {
+                    object_type: CatalogObjectType::Catalog(CatalogKind::CheckConstraint),
+                    availability: CatalogMutationAvailability::Available,
+                },
+                CatalogMutationOption {
+                    object_type: CatalogObjectType::Catalog(CatalogKind::View),
+                    availability: CatalogMutationAvailability::Available,
+                },
+                CatalogMutationOption {
+                    object_type: CatalogObjectType::Catalog(CatalogKind::MaterializedView),
+                    availability: CatalogMutationAvailability::Available,
+                },
+                CatalogMutationOption {
+                    object_type: CatalogObjectType::Catalog(CatalogKind::Sequence),
+                    availability: CatalogMutationAvailability::Available,
+                },
+            ],
+            view_options: ViewMutationCapabilities {
+                security_barrier: if server_version_num >= 90200 {
+                    ViewMutationOptionAvailability::Available
+                } else {
+                    ViewMutationOptionAvailability::Unavailable {
+                        reason: "security_barrier requires PostgreSQL 9.2 or newer",
+                    }
+                },
+                security_invoker: if server_version_num >= 150000 {
+                    ViewMutationOptionAvailability::Available
+                } else {
+                    ViewMutationOptionAvailability::Unavailable {
+                        reason: "security_invoker requires PostgreSQL 15 or newer",
+                    }
+                },
+                check_option: if server_version_num >= 90400 {
+                    ViewMutationOptionAvailability::Available
+                } else {
+                    ViewMutationOptionAvailability::Unavailable {
+                        reason: "view check options require PostgreSQL 9.4 or newer",
+                    }
+                },
+            },
+        }
+    }
+
+    pub fn plan_catalog_mutation(
+        request: CatalogMutationRequest,
+        draft: crate::model::catalog_editor::CatalogDraft,
+        baseline: Option<CatalogObjectDefinition>,
+    ) -> Result<CatalogMutationPlan, CatalogMutationError> {
+        if request.object_type == CatalogObjectType::Catalog(CatalogKind::Database) {
+            return Self::plan_database_mutation(request, draft, baseline);
+        }
+        if matches!(
+            request.object_type,
+            CatalogObjectType::LoginRole | CatalogObjectType::Role
+        ) {
+            return Self::plan_role_mutation(request, draft, baseline);
+        }
+        Self::plan_catalog_mutation_for_version(request, draft, baseline, 120_000)
+    }
+
+    fn plan_role_mutation(
+        request: CatalogMutationRequest,
+        draft: CatalogDraft,
+        baseline: Option<CatalogObjectDefinition>,
+    ) -> Result<CatalogMutationPlan, CatalogMutationError> {
+        let object_type = request.object_type;
+        let CatalogDraft::Role(mut draft) = draft else {
+            return Err(CatalogMutationError::InvalidDraft {
+                reason: "role draft required".into(),
+            });
+        };
+        draft.login = object_type == CatalogObjectType::LoginRole;
+        draft.validate()?;
+        let old = match baseline {
+            Some(CatalogObjectDefinition::Role(r)) => Some(r),
+            None => None,
+            _ => return Err(CatalogMutationError::StaleState),
+        };
+        let name = draft.name.value().trim();
+        let mut statements = Vec::new();
+        let mut secret = None;
+        if let Some(old) = old.as_ref() {
+            if old.name != name {
+                statements.push(format!(
+                    "ALTER ROLE {} RENAME TO {}",
+                    quote_identifier(&old.name),
+                    quote_identifier(name)
+                ));
+            }
+            let attrs = [
+                (old.login, draft.login, "LOGIN", "NOLOGIN"),
+                (old.superuser, draft.superuser, "SUPERUSER", "NOSUPERUSER"),
+                (old.createdb, draft.createdb, "CREATEDB", "NOCREATEDB"),
+                (
+                    old.createrole,
+                    draft.createrole,
+                    "CREATEROLE",
+                    "NOCREATEROLE",
+                ),
+                (old.inherit, draft.inherit, "INHERIT", "NOINHERIT"),
+                (
+                    old.replication,
+                    draft.replication,
+                    "REPLICATION",
+                    "NOREPLICATION",
+                ),
+                (old.bypass_rls, draft.bypass_rls, "BYPASSRLS", "NOBYPASSRLS"),
+            ];
+            let changed = attrs
+                .iter()
+                .filter_map(|(a, b, yes, no)| (a != b).then_some(if *b { *yes } else { *no }))
+                .collect::<Vec<_>>();
+            if old.connection_limit.to_string() != draft.connection_limit.value().trim() {
+                statements.push(format!(
+                    "ALTER ROLE {} CONNECTION LIMIT {}",
+                    quote_identifier(name),
+                    draft.connection_limit.value().trim()
+                ));
+            }
+            if !changed.is_empty() {
+                statements.push(format!(
+                    "ALTER ROLE {} {}",
+                    quote_identifier(name),
+                    changed.join(" ")
+                ));
+            }
+            if let Some(password) = draft.password.take() {
+                if !password.is_empty() {
+                    statements.push(format!(
+                        "ALTER ROLE {} PASSWORD '<REDACTED>'",
+                        quote_identifier(name)
+                    ));
+                    secret = Some(password);
+                }
+            }
+            if old.valid_until
+                != OptionalMetadata::Supported(Some(draft.valid_until.value().to_owned()))
+                && !draft.valid_until.value().trim().is_empty()
+            {
+                statements.push(format!(
+                    "ALTER ROLE {} VALID UNTIL {}",
+                    quote_identifier(name),
+                    quote_literal(draft.valid_until.value().trim())
+                ));
+            }
+            if old.comment
+                != OptionalMetadata::Supported(
+                    (!draft.comment.value().trim().is_empty())
+                        .then(|| draft.comment.value().trim().to_owned()),
+                )
+            {
+                statements.push(format!(
+                    "COMMENT ON ROLE {} IS {}",
+                    quote_identifier(name),
+                    if draft.comment.value().trim().is_empty() {
+                        "NULL".into()
+                    } else {
+                        quote_literal(draft.comment.value().trim())
+                    }
+                ));
+            }
+            let current: std::collections::HashSet<_> =
+                old.memberships.iter().map(String::as_str).collect();
+            let next = draft
+                .memberships
+                .value()
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect::<std::collections::HashSet<_>>();
+            for member in next.difference(&current) {
+                statements.push(format!(
+                    "GRANT {} TO {}",
+                    quote_identifier(name),
+                    quote_identifier(member)
+                ));
+            }
+            for member in current.difference(&next) {
+                statements.push(format!(
+                    "REVOKE {} FROM {}",
+                    quote_identifier(name),
+                    quote_identifier(member)
+                ));
+            }
+        } else {
+            let mut create = format!(
+                "CREATE ROLE {} {}",
+                quote_identifier(name),
+                if draft.login { "LOGIN" } else { "NOLOGIN" }
+            );
+            for enabled in [
+                (draft.superuser, "SUPERUSER"),
+                (draft.createdb, "CREATEDB"),
+                (draft.createrole, "CREATEROLE"),
+                (draft.inherit, "INHERIT"),
+                (draft.replication, "REPLICATION"),
+                (draft.bypass_rls, "BYPASSRLS"),
+            ] {
+                create.push(' ');
+                create.push_str(if enabled.0 {
+                    enabled.1
+                } else {
+                    match enabled.1 {
+                        "SUPERUSER" => "NOSUPERUSER",
+                        "CREATEDB" => "NOCREATEDB",
+                        "CREATEROLE" => "NOCREATEROLE",
+                        "INHERIT" => "NOINHERIT",
+                        "REPLICATION" => "NOREPLICATION",
+                        "BYPASSRLS" => "NOBYPASSRLS",
+                        _ => "",
+                    }
+                });
+            }
+            create.push_str(&format!(
+                " CONNECTION LIMIT {} VALID UNTIL {}",
+                draft.connection_limit.value().trim(),
+                quote_literal(draft.valid_until.value().trim())
+            ));
+            if let Some(password) = draft.password.take() {
+                if !password.is_empty() {
+                    create.push_str(" PASSWORD '<REDACTED>'");
+                    secret = Some(password);
+                }
+            }
+            statements.push(create);
+            if !draft.comment.value().trim().is_empty() {
+                statements.push(format!(
+                    "COMMENT ON ROLE {} IS {}",
+                    quote_identifier(name),
+                    quote_literal(draft.comment.value().trim())
+                ));
+            }
+            for member in draft
+                .memberships
+                .value()
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                statements.push(format!(
+                    "GRANT {} TO {}",
+                    quote_identifier(name),
+                    quote_identifier(member)
+                ));
+            }
+        }
+        if statements.is_empty() {
+            return Err(CatalogMutationError::NoChanges);
+        }
+        let id = CatalogId::new(
+            request.connection.profile_id,
+            CatalogKind::Database,
+            ["__role__", name],
+        );
+        let plan = CatalogMutationPlan::new(
+            request,
+            object_type,
+            CatalogMutationExecutionMode::Transactional,
+            vec![CatalogTarget::Databases],
+            CatalogSelectionHint::Parent(CatalogTarget::Databases),
+            old.as_ref().map(|r| r.baseline_fingerprint.clone()),
+            Vec::new(),
+            statements,
+        )?;
+        Ok(plan
+            .with_execution_target(
+                crate::db::catalog_mutation::CatalogMutationTarget::maintenance("postgres")
+                    .unwrap(),
+            )
+            .with_execution_secret_opt(secret)
+            .with_impact(crate::db::catalog_mutation::CatalogMutationImpact {
+                old_object_id: id,
+                owning_relation_id: None,
+                namespace: crate::db::catalog_mutation::CatalogMutationNamespace {
+                    database: None,
+                    schema: None,
+                },
+                native_identity_changed: false,
+            }))
+    }
+
+    fn plan_database_mutation(
+        request: CatalogMutationRequest,
+        draft: CatalogDraft,
+        baseline: Option<CatalogObjectDefinition>,
+    ) -> Result<CatalogMutationPlan, CatalogMutationError> {
+        let CatalogDraft::Database(draft) = draft else {
+            return Err(CatalogMutationError::InvalidDraft {
+                reason: "database draft required".into(),
+            });
+        };
+        draft.validate()?;
+        let old = match baseline {
+            Some(CatalogObjectDefinition::Database(value)) => Some(value),
+            None => None,
+            _ => return Err(CatalogMutationError::StaleState),
+        };
+        let name = draft.name.value().trim();
+        let owner = draft.owner.value().trim();
+        let limit = draft.connection_limit.value().trim();
+        let mut statements = Vec::new();
+        let mut warnings = Vec::new();
+        let (old_name, fingerprint) = if let Some(old) = old.as_ref() {
+            if let CatalogMutationAnchor::Catalog(id) = &request.anchor
+                && id.native_path.first() != Some(&old.name)
+            {
+                return Err(CatalogMutationError::StaleState);
+            }
+            if old.name != name {
+                if request.current_database.as_deref() == Some(old.name.as_str()) {
+                    return Err(CatalogMutationError::InvalidPlan {
+                        reason: "cannot rename the currently connected database".into(),
+                    });
+                }
+                statements.push(format!(
+                    "ALTER DATABASE {} RENAME TO {}",
+                    quote_identifier(&old.name),
+                    quote_identifier(name)
+                ));
+                warnings.push("Connection profiles and saved SQL execution targets were not rewritten after the rename.".into());
+            }
+            if old.owner != owner {
+                statements.push(format!(
+                    "ALTER DATABASE {} OWNER TO {}",
+                    quote_identifier(name),
+                    quote_identifier(owner)
+                ));
+            }
+            if old.connection_limit.to_string() != limit {
+                statements.push(format!(
+                    "ALTER DATABASE {} CONNECTION LIMIT {}",
+                    quote_identifier(name),
+                    limit
+                ));
+            }
+            if old.allow_connections != draft.allow_connections {
+                statements.push(format!(
+                    "ALTER DATABASE {} ALLOW_CONNECTIONS {}",
+                    quote_identifier(name),
+                    draft.allow_connections
+                ));
+            }
+            if old.is_template != draft.is_template {
+                statements.push(format!(
+                    "ALTER DATABASE {} {}TEMPLATE",
+                    quote_identifier(name),
+                    if draft.is_template { "IS " } else { "IS NOT " }
+                ));
+            }
+            let current_comment = match &old.comment {
+                OptionalMetadata::Supported(value) => value.clone(),
+                OptionalMetadata::Unsupported => None,
+            };
+            let next_comment = (!draft.comment.value().trim().is_empty())
+                .then(|| draft.comment.value().trim().to_owned());
+            if current_comment != next_comment {
+                statements.push(format!(
+                    "COMMENT ON DATABASE {} IS {}",
+                    quote_identifier(name),
+                    next_comment
+                        .as_deref()
+                        .map_or_else(|| "NULL".into(), quote_literal)
+                ));
+            }
+            (
+                Some(old.name.clone()),
+                Some(old.baseline_fingerprint.clone()),
+            )
+        } else {
+            let mut create = format!(
+                "CREATE DATABASE {} OWNER {}",
+                quote_identifier(name),
+                quote_identifier(owner)
+            );
+            for (key, value) in [
+                ("TEMPLATE", draft.template.value().trim()),
+                ("ENCODING", draft.encoding.value().trim()),
+                ("LOCALE_PROVIDER", draft.locale_provider.value().trim()),
+                ("LOCALE", draft.locale.value().trim()),
+                ("LC_COLLATE", draft.collation.value().trim()),
+                ("LC_CTYPE", draft.ctype.value().trim()),
+                ("TABLESPACE", draft.tablespace.value().trim()),
+            ] {
+                if !value.is_empty() {
+                    create.push_str(&format!(" {key} {}", quote_literal(value)));
+                }
+            }
+            create.push_str(&format!(" CONNECTION LIMIT {limit}"));
+            statements.push(create);
+            if !draft.comment.value().trim().is_empty() {
+                statements.push(format!(
+                    "COMMENT ON DATABASE {} IS {}",
+                    quote_identifier(name),
+                    quote_literal(draft.comment.value().trim())
+                ));
+            }
+            (None, None)
+        };
+        if statements.is_empty() {
+            return Err(CatalogMutationError::NoChanges);
+        }
+        let id = CatalogId::new(request.connection.profile_id, CatalogKind::Database, [name]);
+        let renamed = old_name.as_ref().is_some_and(|old| old != name);
+        let old_id = CatalogId::new(
+            request.connection.profile_id,
+            CatalogKind::Database,
+            [old_name.clone().unwrap_or_else(|| name.to_owned())],
+        );
+        CatalogMutationPlan::new(
+            request,
+            CatalogObjectType::Catalog(CatalogKind::Database),
+            CatalogMutationExecutionMode::Autocommit,
+            vec![CatalogTarget::Databases],
+            CatalogSelectionHint::Object(id.clone()),
+            fingerprint,
+            warnings,
+            statements,
+        )
+        .map(|plan| {
+            let maintenance_database = plan
+                .request
+                .current_database
+                .clone()
+                .unwrap_or_else(|| "postgres".into());
+            plan.with_execution_target(
+                crate::db::catalog_mutation::CatalogMutationTarget::maintenance(
+                    maintenance_database,
+                )
+                .unwrap(),
+            )
+            .with_impact(crate::db::catalog_mutation::CatalogMutationImpact {
+                old_object_id: old_id,
+                owning_relation_id: None,
+                namespace: crate::db::catalog_mutation::CatalogMutationNamespace {
+                    database: Some(id),
+                    schema: None,
+                },
+                native_identity_changed: renamed,
+            })
+        })
+    }
+
+    pub fn plan_catalog_mutation_for_version(
+        request: CatalogMutationRequest,
+        draft: crate::model::catalog_editor::CatalogDraft,
+        baseline: Option<CatalogObjectDefinition>,
+        server_version_num: i32,
+    ) -> Result<CatalogMutationPlan, CatalogMutationError> {
+        if request.object_type == CatalogObjectType::Catalog(CatalogKind::Sequence) {
+            return Self::plan_sequence_mutation(request, draft, baseline);
+        }
+        if request.object_type == CatalogObjectType::Catalog(CatalogKind::Table) {
+            return Self::plan_table_mutation(request, draft, baseline);
+        }
+        if request.object_type == CatalogObjectType::Catalog(CatalogKind::Column) {
+            let CatalogMutationAnchor::Catalog(column_id) = request.anchor.clone() else {
+                return Err(CatalogMutationError::InvalidAnchor {
+                    reason: "column mutation requires a column anchor",
+                });
+            };
+            let Some(CatalogObjectDefinition::Table(table)) = baseline else {
+                return Err(CatalogMutationError::StaleState);
+            };
+            let CatalogDraft::Table(table_draft) = draft else {
+                return Err(CatalogMutationError::InvalidDraft {
+                    reason: "column mutation requires a table draft".into(),
+                });
+            };
+            let ordinal = column_id
+                .native_path
+                .last()
+                .and_then(|value| value.parse::<u32>().ok());
+            let Some(row) = table_draft.columns.iter().find(|row| {
+                row.ordinal_position == ordinal.unwrap_or_default()
+                    || row.existing_name.as_deref()
+                        == column_id.native_path.last().map(String::as_str)
+            }) else {
+                return Err(CatalogMutationError::StaleState);
+            };
+            let relation = format!(
+                "{}.{}",
+                quote_identifier(&table.schema),
+                quote_identifier(&table.name)
+            );
+            let old_name = row
+                .existing_name
+                .as_deref()
+                .unwrap_or(row.name.value().trim());
+            let mut statements = Vec::new();
+            if old_name != row.name.value().trim() {
+                statements.push(format!(
+                    "ALTER TABLE {} RENAME COLUMN {} TO {}",
+                    relation,
+                    quote_identifier(old_name),
+                    quote_identifier(row.name.value().trim())
+                ));
+            }
+            if let Some(old) = table.columns.iter().find(|column| column.name == old_name) {
+                if old.native_type != row.native_type.value().trim() {
+                    statements.push(format!(
+                        "ALTER TABLE {} ALTER COLUMN {} TYPE {}",
+                        relation,
+                        quote_identifier(old_name),
+                        row.native_type.value().trim()
+                    ));
+                }
+                let old_default = match &old.default_expression {
+                    OptionalMetadata::Supported(value) => value.clone(),
+                    OptionalMetadata::Unsupported => None,
+                };
+                let new_default = (!row.default_expression.value().trim().is_empty())
+                    .then(|| row.default_expression.value().trim().to_owned());
+                if old_default != new_default {
+                    statements.push(if let Some(value) = new_default {
+                        format!(
+                            "ALTER TABLE {} ALTER COLUMN {} SET DEFAULT {}",
+                            relation,
+                            quote_identifier(old_name),
+                            value
+                        )
+                    } else {
+                        format!(
+                            "ALTER TABLE {} ALTER COLUMN {} DROP DEFAULT",
+                            relation,
+                            quote_identifier(old_name)
+                        )
+                    });
+                }
+                if old.nullable != row.nullable {
+                    statements.push(format!(
+                        "ALTER TABLE {} ALTER COLUMN {} {} NOT NULL",
+                        relation,
+                        quote_identifier(old_name),
+                        if row.nullable { "DROP" } else { "SET" }
+                    ));
+                }
+                let old_comment = match &old.comment {
+                    OptionalMetadata::Supported(value) => value.clone(),
+                    OptionalMetadata::Unsupported => None,
+                };
+                let new_comment = (!row.comment.value().trim().is_empty())
+                    .then(|| row.comment.value().trim().to_owned());
+                if old_comment != new_comment {
+                    statements.push(format!(
+                        "COMMENT ON COLUMN {}.{} IS {}",
+                        relation,
+                        quote_identifier(row.name.value().trim()),
+                        new_comment.as_deref().map_or("NULL".into(), quote_literal)
+                    ));
+                }
+            }
+            if statements.is_empty() {
+                return Err(CatalogMutationError::NoChanges);
+            }
+            let table_id = CatalogId::new(
+                request.connection.profile_id,
+                CatalogKind::Table,
+                [
+                    table.database.clone(),
+                    table.schema.clone(),
+                    table.name.clone(),
+                ],
+            );
+            let schema_id = CatalogId::new(
+                request.connection.profile_id,
+                CatalogKind::Schema,
+                [table.database.clone(), table.schema.clone()],
+            );
+            return CatalogMutationPlan::new(
+                request,
+                CatalogObjectType::Catalog(CatalogKind::Column),
+                CatalogMutationExecutionMode::Transactional,
+                vec![CatalogTarget::RelationChildren {
+                    relation: table_id.clone(),
+                }],
+                CatalogSelectionHint::Object(column_id.clone()),
+                Some(table.baseline_fingerprint),
+                Vec::new(),
+                statements,
+            )
+            .map(|plan| {
+                plan.with_impact(crate::db::catalog_mutation::CatalogMutationImpact {
+                    old_object_id: column_id,
+                    owning_relation_id: Some(table_id),
+                    namespace: crate::db::catalog_mutation::CatalogMutationNamespace {
+                        database: None,
+                        schema: Some(schema_id),
+                    },
+                    native_identity_changed: old_name != row.name.value().trim(),
+                })
+            });
+        }
+        if request.object_type == CatalogObjectType::Catalog(CatalogKind::Index) {
+            return Self::plan_index_mutation(request, draft, baseline);
+        }
+        if request.object_type == CatalogObjectType::Catalog(CatalogKind::View) {
+            return Self::plan_view_mutation(request, draft, baseline, server_version_num);
+        }
+        if request.object_type == CatalogObjectType::Catalog(CatalogKind::MaterializedView) {
+            return Self::plan_materialized_view_mutation(request, draft, baseline);
+        }
+        if matches!(
+            request.object_type,
+            CatalogObjectType::Catalog(
+                CatalogKind::PrimaryKey
+                    | CatalogKind::UniqueConstraint
+                    | CatalogKind::ForeignKey
+                    | CatalogKind::CheckConstraint
+            )
+        ) {
+            return Self::plan_constraint_mutation(request, draft, baseline);
+        }
+        if request.object_type != CatalogObjectType::Catalog(CatalogKind::Schema) {
+            return Err(CatalogMutationError::UnsupportedOperation {
+                object_type: request.object_type,
+            });
+        }
+        let crate::model::catalog_editor::CatalogDraft::Schema(draft) = draft else {
+            return Err(CatalogMutationError::UnsupportedOperation {
+                object_type: request.object_type,
+            });
+        };
+        draft.validate()?;
+        let (database, old_name, baseline_fingerprint) =
+            match (&request.mode, &request.anchor, baseline.as_ref()) {
+                (
+                    crate::db::catalog_mutation::CatalogMutationMode::Create,
+                    CatalogMutationAnchor::Catalog(id),
+                    _,
+                ) => {
+                    let [database] = id.native_path.as_slice() else {
+                        return Err(CatalogMutationError::InvalidAnchor {
+                            reason: "schema create requires a database anchor",
+                        });
+                    };
+                    (database.clone(), None, None)
+                }
+                (
+                    crate::db::catalog_mutation::CatalogMutationMode::Edit,
+                    CatalogMutationAnchor::Catalog(id),
+                    Some(CatalogObjectDefinition::Schema(schema)),
+                ) => {
+                    let [database, name] = id.native_path.as_slice() else {
+                        return Err(CatalogMutationError::InvalidAnchor {
+                            reason: "schema edit requires a schema ID",
+                        });
+                    };
+                    if schema.database != *database || schema.name != *name {
+                        return Err(CatalogMutationError::StaleState);
+                    }
+                    if schema.baseline_fingerprint.is_empty() {
+                        return Err(CatalogMutationError::StaleState);
+                    }
+                    (
+                        database.clone(),
+                        Some(name.clone()),
+                        Some(schema.baseline_fingerprint.clone()),
+                    )
+                }
+                (crate::db::catalog_mutation::CatalogMutationMode::Edit, _, _) => {
+                    return Err(CatalogMutationError::InvalidAnchor {
+                        reason: "schema edit requires a schema anchor",
+                    });
+                }
+                _ => {
+                    return Err(CatalogMutationError::InvalidDraft {
+                        reason: "schema baseline is missing".into(),
+                    });
+                }
+            };
+        let mut statements = Vec::new();
+        let name = draft.name.value().trim();
+        let owner = draft.owner.value().trim();
+        let comment = draft.comment.value();
+        if old_name.is_some() {
+            let CatalogObjectDefinition::Schema(schema) =
+                baseline.expect("validated schema baseline")
+            else {
+                return Err(CatalogMutationError::StaleState);
+            };
+            if schema.name != name {
+                statements.push(format!(
+                    "ALTER SCHEMA {} RENAME TO {}",
+                    quote_identifier(&schema.name),
+                    quote_identifier(name)
+                ));
+            }
+            if schema.owner != owner {
+                statements.push(format!(
+                    "ALTER SCHEMA {} OWNER TO {}",
+                    quote_identifier(name),
+                    quote_identifier(owner)
+                ));
+            }
+            let current_comment = match schema.comment {
+                OptionalMetadata::Supported(value) => value,
+                OptionalMetadata::Unsupported => None,
+            };
+            let next_comment = (!comment.is_empty()).then(|| comment.to_owned());
+            if current_comment != next_comment {
+                statements.push(format!(
+                    "COMMENT ON SCHEMA {} IS {}",
+                    quote_identifier(name),
+                    next_comment
+                        .as_deref()
+                        .map_or_else(|| "NULL".to_owned(), quote_literal)
+                ));
+            }
+        } else {
+            statements.push(format!(
+                "CREATE SCHEMA {} AUTHORIZATION {}",
+                quote_identifier(name),
+                quote_identifier(owner)
+            ));
+            if !comment.is_empty() {
+                statements.push(format!(
+                    "COMMENT ON SCHEMA {} IS {}",
+                    quote_identifier(name),
+                    quote_literal(comment)
+                ));
+            }
+        }
+        if statements.is_empty() {
+            return Err(CatalogMutationError::NoChanges);
+        }
+        let schema_id = CatalogId::new(
+            request.connection.profile_id,
+            CatalogKind::Schema,
+            [database.clone(), name.to_owned()],
+        );
+        let database_id = CatalogId::new(
+            request.connection.profile_id,
+            CatalogKind::Database,
+            [database.clone()],
+        );
+        let old_schema_id = CatalogId::new(
+            request.connection.profile_id,
+            CatalogKind::Schema,
+            [
+                database.clone(),
+                old_name.clone().unwrap_or_else(|| name.to_owned()),
+            ],
+        );
+        let native_identity_changed = old_name.as_deref() != Some(name);
+        CatalogMutationPlan::new(
+            request.clone(),
+            CatalogObjectType::Catalog(CatalogKind::Schema),
+            CatalogMutationExecutionMode::Transactional,
+            vec![CatalogTarget::Schemas {
+                database: database_id.clone(),
+            }],
+            CatalogSelectionHint::Object(schema_id),
+            baseline_fingerprint,
+            Vec::new(),
+            statements,
+        )
+        .map(|plan| {
+            plan.with_impact(crate::db::catalog_mutation::CatalogMutationImpact {
+                old_object_id: old_schema_id.clone(),
+                owning_relation_id: None,
+                namespace: crate::db::catalog_mutation::CatalogMutationNamespace {
+                    database: Some(database_id),
+                    schema: Some(old_schema_id.clone()),
+                },
+                native_identity_changed,
+            })
+        })
+    }
+
+    pub fn plan_catalog_mutation_for_adapter(
+        &self,
+        request: CatalogMutationRequest,
+        draft: CatalogDraft,
+        baseline: Option<CatalogObjectDefinition>,
+    ) -> Result<CatalogMutationPlan, CatalogMutationError> {
+        Self::plan_catalog_mutation_for_version(request, draft, baseline, self.server_version_num)
+    }
+
+    fn plan_sequence_mutation(
+        request: CatalogMutationRequest,
+        draft: CatalogDraft,
+        baseline: Option<CatalogObjectDefinition>,
+    ) -> Result<CatalogMutationPlan, CatalogMutationError> {
+        let CatalogDraft::Sequence(draft) = draft else {
+            return Err(CatalogMutationError::InvalidDraft {
+                reason: "sequence draft required".into(),
+            });
+        };
+        draft.validate()?;
+        let old = match baseline {
+            Some(CatalogObjectDefinition::Sequence(s)) => Some(s),
+            None => None,
+            _ => return Err(CatalogMutationError::StaleState),
+        };
+        let name = draft.name.value().trim();
+        let schema = draft.schema.value().trim();
+        let qualified = format!("{}.{}", quote_identifier(schema), quote_identifier(name));
+        let bound = |b: &crate::db::catalog_mutation::SequenceBound, keyword: &str| match b {
+            crate::db::catalog_mutation::SequenceBound::Unset => String::new(),
+            crate::db::catalog_mutation::SequenceBound::NoLimit => format!(" NO {keyword}"),
+            crate::db::catalog_mutation::SequenceBound::Value(v) => format!(" {keyword} {v}"),
+        };
+        let mut clauses = format!(
+            " AS {} INCREMENT BY {} START WITH {} CACHE {}",
+            draft.data_type.value().trim(),
+            draft.increment.value().trim(),
+            draft.start_value.value().trim(),
+            draft.cache.value().trim()
+        );
+        clauses.push_str(&bound(&draft.min_value, "MINVALUE"));
+        clauses.push_str(&bound(&draft.max_value, "MAXVALUE"));
+        if draft.cycle {
+            clauses.push_str(" CYCLE");
+        }
+        let owned = draft.owned_by.value().trim();
+        if !owned.is_empty() {
+            clauses.push_str(&format!(
+                " OWNED BY {}",
+                if owned.eq_ignore_ascii_case("NONE") {
+                    "NONE".into()
+                } else {
+                    owned
+                        .split('.')
+                        .map(quote_identifier)
+                        .collect::<Vec<_>>()
+                        .join(".")
+                }
+            ));
+        }
+        let mut statements = Vec::new();
+        let old_name = old.as_ref().map(|s| s.name.as_str());
+        let baseline_fingerprint = old.as_ref().map(|s| s.baseline_fingerprint.clone());
+        if let Some(old) = old.as_ref() {
+            if old.name != name || old.schema != schema {
+                statements.push(format!(
+                    "ALTER SEQUENCE {} RENAME TO {}",
+                    format!(
+                        "{}.{}",
+                        quote_identifier(&old.schema),
+                        quote_identifier(&old.name)
+                    ),
+                    quote_identifier(name)
+                ));
+            }
+            statements.push(format!("ALTER SEQUENCE {}{}", qualified, clauses));
+            if old.owner != draft.owner.value().trim() {
+                statements.push(format!(
+                    "ALTER SEQUENCE {} OWNER TO {}",
+                    qualified,
+                    quote_identifier(draft.owner.value().trim())
+                ));
+            }
+        } else {
+            statements.push(format!("CREATE SEQUENCE {}{}", qualified, clauses));
+            if !draft.owner.value().trim().is_empty() {
+                statements.push(format!(
+                    "ALTER SEQUENCE {} OWNER TO {}",
+                    qualified,
+                    quote_identifier(draft.owner.value().trim())
+                ));
+            }
+        }
+        let comment = draft.comment.value().trim();
+        let old_comment = old.as_ref().and_then(|sequence| match &sequence.comment {
+            OptionalMetadata::Supported(value) => value.as_deref(),
+            OptionalMetadata::Unsupported => None,
+        });
+        if old_comment != (!comment.is_empty()).then_some(comment) {
+            statements.push(format!(
+                "COMMENT ON SEQUENCE {} IS {}",
+                qualified,
+                (!comment.is_empty())
+                    .then(|| quote_literal(comment))
+                    .unwrap_or_else(|| "NULL".into())
+            ));
+        }
+        if !draft.restart_value.value().trim().is_empty() {
+            statements.push(format!(
+                "ALTER SEQUENCE {} RESTART WITH {}",
+                qualified,
+                draft.restart_value.value().trim()
+            ));
+        }
+        if statements.is_empty() {
+            return Err(CatalogMutationError::NoChanges);
+        }
+        let database = match &request.anchor {
+            CatalogMutationAnchor::Catalog(id)
+            | CatalogMutationAnchor::Group { schema: id, .. } => {
+                id.native_path.first().cloned().unwrap_or_default()
+            }
+            CatalogMutationAnchor::Profile { .. } => String::new(),
+        };
+        let schema_id = CatalogId::new(
+            request.connection.profile_id,
+            CatalogKind::Schema,
+            [database.clone(), schema.to_owned()],
+        );
+        let sequence_id = CatalogId::new(
+            request.connection.profile_id,
+            CatalogKind::Sequence,
+            [
+                database.clone(),
+                schema.to_owned(),
+                name.to_owned(),
+                String::new(),
+            ],
+        );
+        CatalogMutationPlan::new(
+            request.clone(),
+            CatalogObjectType::Catalog(CatalogKind::Sequence),
+            CatalogMutationExecutionMode::Transactional,
+            vec![CatalogTarget::Objects {
+                schema: schema_id.clone(),
+                group: ObjectGroup::Sequences,
+            }],
+            CatalogSelectionHint::Object(sequence_id.clone()),
+            baseline_fingerprint,
+            Vec::new(),
+            statements,
+        )
+        .map(|p| {
+            p.with_impact(crate::db::catalog_mutation::CatalogMutationImpact {
+                old_object_id: sequence_id,
+                owning_relation_id: None,
+                namespace: crate::db::catalog_mutation::CatalogMutationNamespace {
+                    database: Some(CatalogId::new(
+                        request.connection.profile_id,
+                        CatalogKind::Database,
+                        [database],
+                    )),
+                    schema: Some(schema_id),
+                },
+                native_identity_changed: old_name != Some(name),
+            })
+        })
+    }
+
+    fn plan_view_mutation(
+        request: CatalogMutationRequest,
+        draft: CatalogDraft,
+        baseline: Option<CatalogObjectDefinition>,
+        server_version_num: i32,
+    ) -> Result<CatalogMutationPlan, CatalogMutationError> {
+        let CatalogDraft::View(draft) = draft else {
+            return Err(CatalogMutationError::InvalidDraft {
+                reason: "view draft required".into(),
+            });
+        };
+        draft.validate()?;
+        if draft.security_barrier.value.is_some() && server_version_num < 90200
+            || draft.check_option.value.is_some() && server_version_num < 90400
+            || draft.security_invoker.value.is_some() && server_version_num < 150000
+        {
+            return Err(CatalogMutationError::UnsupportedOperation {
+                object_type: CatalogObjectType::Catalog(CatalogKind::View),
+            });
+        }
+        let (database, old, fingerprint) = match (&request.mode, &request.anchor, baseline.as_ref())
+        {
+            (CatalogMutationMode::Create, CatalogMutationAnchor::Group { schema, .. }, _)
+            | (CatalogMutationMode::Create, CatalogMutationAnchor::Catalog(schema), _)
+                if schema.kind == CatalogKind::Schema =>
+            {
+                (
+                    schema.native_path.first().cloned().unwrap_or_default(),
+                    None,
+                    None,
+                )
+            }
+            (
+                CatalogMutationMode::Edit,
+                CatalogMutationAnchor::Catalog(id),
+                Some(CatalogObjectDefinition::View(view)),
+            ) => {
+                let [database, schema, name, ..] = id.native_path.as_slice() else {
+                    return Err(CatalogMutationError::StaleState);
+                };
+                if *database != view.database || *schema != view.schema || *name != view.name {
+                    return Err(CatalogMutationError::StaleState);
+                }
+                (
+                    database.clone(),
+                    Some(view.clone()),
+                    Some(view.baseline_fingerprint.clone()),
+                )
+            }
+            (CatalogMutationMode::Edit, ..) => return Err(CatalogMutationError::StaleState),
+            _ => {
+                return Err(CatalogMutationError::InvalidAnchor {
+                    reason: "view create requires a schema group anchor",
+                });
+            }
+        };
+        let name = draft.name.value().trim();
+        let schema = draft.schema.value().trim();
+        let qualified = format!("{}.{}", quote_identifier(schema), quote_identifier(name));
+        let columns = split_view_columns(draft.output_columns.value())?;
+        let query = draft.query.value().trim().trim_end_matches(';').trim();
+        let mut statements = Vec::new();
+        let mut warnings = Vec::new();
+        if let Some(old) = old {
+            if old.name != name || old.schema != schema {
+                warnings.push("CREATE OR REPLACE VIEW cannot rename or move a view; the existing view identity is retained".into());
+            }
+            let column_clause = (!columns.is_empty())
+                .then(|| {
+                    format!(
+                        " ({})",
+                        columns
+                            .iter()
+                            .map(|v| quote_identifier(v))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                })
+                .unwrap_or_default();
+            let options = view_options_clause(&draft, server_version_num)?;
+            statements.push(format!(
+                "CREATE OR REPLACE VIEW {}{}{} AS {}{}",
+                qualified, column_clause, options.0, query, options.1
+            ));
+            if old.owner != draft.owner.value().trim() {
+                statements.push(format!(
+                    "ALTER VIEW {} OWNER TO {}",
+                    qualified,
+                    quote_identifier(draft.owner.value().trim())
+                ));
+            }
+            let old_comment = match &old.comment {
+                OptionalMetadata::Supported(v) => v.clone(),
+                OptionalMetadata::Unsupported => None,
+            };
+            let new_comment = (!draft.comment.value().trim().is_empty())
+                .then(|| draft.comment.value().trim().to_owned());
+            if old_comment != new_comment {
+                statements.push(format!(
+                    "COMMENT ON VIEW {} IS {}",
+                    qualified,
+                    new_comment.as_deref().map_or("NULL".into(), quote_literal)
+                ));
+            }
+            if old.query.trim() != query || old.output_columns != columns {
+                warnings.push(
+                    "Replacing a view may fail when existing output columns change type or name"
+                        .into(),
+                );
+            }
+        } else {
+            let column_clause = (!columns.is_empty())
+                .then(|| {
+                    format!(
+                        " ({})",
+                        columns
+                            .iter()
+                            .map(|v| quote_identifier(v))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                })
+                .unwrap_or_default();
+            let options = view_options_clause(&draft, server_version_num)?;
+            statements.push(format!(
+                "CREATE VIEW {}{}{} AS {}{}",
+                qualified, column_clause, options.0, query, options.1
+            ));
+            if !draft.owner.value().trim().is_empty() {
+                statements.push(format!(
+                    "ALTER VIEW {} OWNER TO {}",
+                    qualified,
+                    quote_identifier(draft.owner.value().trim())
+                ));
+            }
+            if !draft.comment.value().trim().is_empty() {
+                statements.push(format!(
+                    "COMMENT ON VIEW {} IS {}",
+                    qualified,
+                    quote_literal(draft.comment.value().trim())
+                ));
+            }
+        }
+        if statements.is_empty() {
+            return Err(CatalogMutationError::NoChanges);
+        }
+        let schema_id = CatalogId::new(
+            request.connection.profile_id,
+            CatalogKind::Schema,
+            [database.clone(), schema.to_owned()],
+        );
+        let view_id = CatalogId::new(
+            request.connection.profile_id,
+            CatalogKind::View,
+            [
+                database.clone(),
+                schema.to_owned(),
+                name.to_owned(),
+                String::new(),
+            ],
+        );
+        CatalogMutationPlan::new(
+            request.clone(),
+            CatalogObjectType::Catalog(CatalogKind::View),
+            CatalogMutationExecutionMode::Transactional,
+            vec![CatalogTarget::Objects {
+                schema: schema_id.clone(),
+                group: ObjectGroup::Views,
+            }],
+            CatalogSelectionHint::Object(view_id.clone()),
+            fingerprint,
+            warnings,
+            statements,
+        )
+        .map(|plan| {
+            plan.with_impact(crate::db::catalog_mutation::CatalogMutationImpact {
+                old_object_id: view_id,
+                owning_relation_id: None,
+                namespace: crate::db::catalog_mutation::CatalogMutationNamespace {
+                    database: Some(CatalogId::new(
+                        request.connection.profile_id,
+                        CatalogKind::Database,
+                        [database],
+                    )),
+                    schema: Some(schema_id),
+                },
+                native_identity_changed: false,
+            })
+        })
+    }
+
+    fn plan_materialized_view_mutation(
+        request: CatalogMutationRequest,
+        draft: CatalogDraft,
+        baseline: Option<CatalogObjectDefinition>,
+    ) -> Result<CatalogMutationPlan, CatalogMutationError> {
+        let CatalogDraft::MaterializedView(draft) = draft else {
+            return Err(CatalogMutationError::InvalidDraft {
+                reason: "materialized view draft required".into(),
+            });
+        };
+        draft.validate()?;
+        let (database, old, fingerprint) = match (&request.mode, &request.anchor, baseline.as_ref())
+        {
+            (CatalogMutationMode::Create, CatalogMutationAnchor::Group { schema, .. }, _)
+            | (CatalogMutationMode::Create, CatalogMutationAnchor::Catalog(schema), _)
+                if schema.kind == CatalogKind::Schema =>
+            {
+                (
+                    schema.native_path.first().cloned().unwrap_or_default(),
+                    None,
+                    None,
+                )
+            }
+            (
+                CatalogMutationMode::Edit,
+                CatalogMutationAnchor::Catalog(id),
+                Some(CatalogObjectDefinition::MaterializedView(view)),
+            ) => {
+                let [database, schema, name, ..] = id.native_path.as_slice() else {
+                    return Err(CatalogMutationError::StaleState);
+                };
+                if *database != view.database || *schema != view.schema || *name != view.name {
+                    return Err(CatalogMutationError::StaleState);
+                }
+                (
+                    database.clone(),
+                    Some(view),
+                    Some(view.baseline_fingerprint.clone()),
+                )
+            }
+            (CatalogMutationMode::Edit, ..) => return Err(CatalogMutationError::StaleState),
+            _ => {
+                return Err(CatalogMutationError::InvalidAnchor {
+                    reason: "materialized view create requires a schema anchor",
+                });
+            }
+        };
+        let name = draft.name.value().trim();
+        let schema = draft.schema.value().trim();
+        let qualified = format!("{}.{}", quote_identifier(schema), quote_identifier(name));
+        let mut statements = Vec::new();
+        let mut native_identity_changed = false;
+        if let Some(old) = old {
+            let mut current_schema = old.schema.clone();
+            let mut current_name = old.name.clone();
+            if old.name != name {
+                statements.push(format!(
+                    "ALTER MATERIALIZED VIEW {}.{} RENAME TO {}",
+                    quote_identifier(&current_schema),
+                    quote_identifier(&current_name),
+                    quote_identifier(name)
+                ));
+                current_name = name.to_owned();
+                native_identity_changed = true;
+            }
+            if old.schema != schema {
+                statements.push(format!(
+                    "ALTER MATERIALIZED VIEW {} SET SCHEMA {}",
+                    format!(
+                        "{}.{}",
+                        quote_identifier(&current_schema),
+                        quote_identifier(&current_name)
+                    ),
+                    quote_identifier(schema)
+                ));
+                current_schema = schema.to_owned();
+                native_identity_changed = true;
+            }
+            if old.owner != draft.owner.value().trim() {
+                statements.push(format!(
+                    "ALTER MATERIALIZED VIEW {} OWNER TO {}",
+                    format!(
+                        "{}.{}",
+                        quote_identifier(&current_schema),
+                        quote_identifier(&current_name)
+                    ),
+                    quote_identifier(draft.owner.value().trim())
+                ));
+            }
+            let old_comment = match &old.comment {
+                OptionalMetadata::Supported(v) => v.clone(),
+                OptionalMetadata::Unsupported => None,
+            };
+            let new_comment = (!draft.comment.value().trim().is_empty())
+                .then(|| draft.comment.value().trim().to_owned());
+            if old_comment != new_comment {
+                statements.push(format!(
+                    "COMMENT ON MATERIALIZED VIEW {} IS {}",
+                    format!(
+                        "{}.{}",
+                        quote_identifier(&current_schema),
+                        quote_identifier(&current_name)
+                    ),
+                    new_comment.as_deref().map_or("NULL".into(), quote_literal)
+                ));
+            }
+            let old_tablespace = match &old.tablespace {
+                OptionalMetadata::Supported(v) => v.clone(),
+                OptionalMetadata::Unsupported => None,
+            };
+            let new_tablespace = (!draft.tablespace.value().trim().is_empty())
+                .then(|| draft.tablespace.value().trim().to_owned());
+            if old_tablespace != new_tablespace {
+                statements.push(format!(
+                    "ALTER MATERIALIZED VIEW {} SET TABLESPACE {}",
+                    format!(
+                        "{}.{}",
+                        quote_identifier(&current_schema),
+                        quote_identifier(&current_name)
+                    ),
+                    new_tablespace
+                        .as_deref()
+                        .map_or_else(|| "pg_default".to_owned(), quote_identifier)
+                ));
+            }
+        } else {
+            let data = if draft.with_data {
+                "WITH DATA"
+            } else {
+                "WITH NO DATA"
+            };
+            statements.push(format!(
+                "CREATE MATERIALIZED VIEW {} TABLESPACE {} AS {} {}",
+                qualified,
+                if draft.tablespace.value().trim().is_empty() {
+                    "pg_default".into()
+                } else {
+                    quote_identifier(draft.tablespace.value().trim())
+                },
+                draft.query.value().trim().trim_end_matches(';').trim(),
+                data
+            ));
+            if !draft.owner.value().trim().is_empty() {
+                statements.push(format!(
+                    "ALTER MATERIALIZED VIEW {} OWNER TO {}",
+                    qualified,
+                    quote_identifier(draft.owner.value().trim())
+                ));
+            }
+            if !draft.comment.value().trim().is_empty() {
+                statements.push(format!(
+                    "COMMENT ON MATERIALIZED VIEW {} IS {}",
+                    qualified,
+                    quote_literal(draft.comment.value().trim())
+                ));
+            }
+        }
+        if statements.is_empty() {
+            return Err(CatalogMutationError::NoChanges);
+        }
+        let schema_id = CatalogId::new(
+            request.connection.profile_id,
+            CatalogKind::Schema,
+            [database.clone(), schema.to_owned()],
+        );
+        let view_id = CatalogId::new(
+            request.connection.profile_id,
+            CatalogKind::MaterializedView,
+            [
+                database.clone(),
+                schema.to_owned(),
+                name.to_owned(),
+                String::new(),
+            ],
+        );
+        CatalogMutationPlan::new(
+            request.clone(),
+            CatalogObjectType::Catalog(CatalogKind::MaterializedView),
+            CatalogMutationExecutionMode::Transactional,
+            vec![CatalogTarget::Objects {
+                schema: schema_id.clone(),
+                group: ObjectGroup::MaterializedViews,
+            }],
+            CatalogSelectionHint::Object(view_id.clone()),
+            fingerprint,
+            Vec::new(),
+            statements,
+        )
+        .map(|plan| {
+            plan.with_impact(crate::db::catalog_mutation::CatalogMutationImpact {
+                old_object_id: match &request.anchor {
+                    CatalogMutationAnchor::Catalog(id) => id.clone(),
+                    _ => view_id,
+                },
+                owning_relation_id: None,
+                namespace: crate::db::catalog_mutation::CatalogMutationNamespace {
+                    database: Some(CatalogId::new(
+                        request.connection.profile_id,
+                        CatalogKind::Database,
+                        [database],
+                    )),
+                    schema: Some(schema_id),
+                },
+                native_identity_changed,
+            })
+        })
+    }
+
+    fn plan_constraint_mutation(
+        request: CatalogMutationRequest,
+        draft: CatalogDraft,
+        baseline: Option<CatalogObjectDefinition>,
+    ) -> Result<CatalogMutationPlan, CatalogMutationError> {
+        use crate::model::catalog_editor::CatalogDraft;
+        let CatalogDraft::Constraint(draft) = draft else {
+            return Err(CatalogMutationError::InvalidDraft {
+                reason: "constraint draft required".into(),
+            });
+        };
+        draft.validate()?;
+        let kind = match draft.kind {
+            ConstraintDefinitionKind::PrimaryKey { .. } => ConstraintDefinitionKind::PrimaryKey {
+                columns: draft
+                    .columns
+                    .value()
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .map(str::to_owned)
+                    .collect(),
+            },
+            ConstraintDefinitionKind::Unique { .. } => ConstraintDefinitionKind::Unique {
+                columns: draft
+                    .columns
+                    .value()
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .map(str::to_owned)
+                    .collect(),
+            },
+            ConstraintDefinitionKind::ForeignKey { .. } => ConstraintDefinitionKind::ForeignKey {
+                columns: draft
+                    .columns
+                    .value()
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .map(str::to_owned)
+                    .collect(),
+                referenced_schema: draft.referenced_schema.value().trim().to_owned(),
+                referenced_relation: draft.referenced_relation.value().trim().to_owned(),
+                referenced_columns: draft
+                    .referenced_columns
+                    .value()
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .map(str::to_owned)
+                    .collect(),
+                match_type: draft.match_type.value().trim().to_owned(),
+                on_update: draft.on_update.value().trim().to_owned(),
+                on_delete: draft.on_delete.value().trim().to_owned(),
+            },
+            ConstraintDefinitionKind::Check { .. } => ConstraintDefinitionKind::Check {
+                expression: draft.expression.value().trim().to_owned(),
+                no_inherit: draft.no_inherit,
+            },
+        };
+        let columns = constraint_columns(&kind)
+            .split(',')
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(quote_identifier)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let name = (!draft.name.value().trim().is_empty())
+            .then(|| quote_identifier(draft.name.value().trim()));
+        let relation = format!(
+            "{}.{}",
+            quote_identifier(draft.schema.value().trim()),
+            quote_identifier(draft.relation.value().trim())
+        );
+        let mut body = match &kind {
+            ConstraintDefinitionKind::PrimaryKey { .. } => format!("PRIMARY KEY ({columns})"),
+            ConstraintDefinitionKind::Unique { .. } => format!("UNIQUE ({columns})"),
+            ConstraintDefinitionKind::ForeignKey { .. } => format!(
+                "FOREIGN KEY ({columns}) REFERENCES {}.{} ({}) MATCH {} ON UPDATE {} ON DELETE {}",
+                quote_identifier(draft.referenced_schema.value().trim()),
+                quote_identifier(draft.referenced_relation.value().trim()),
+                draft
+                    .referenced_columns
+                    .value()
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .map(quote_identifier)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                draft.match_type.value().trim(),
+                draft.on_update.value().trim(),
+                draft.on_delete.value().trim()
+            ),
+            ConstraintDefinitionKind::Check { .. } => format!(
+                "CHECK ({}){}",
+                draft.expression.value().trim(),
+                if draft.no_inherit { " NO INHERIT" } else { "" }
+            ),
+        };
+        if draft.deferrable {
+            body.push_str(" DEFERRABLE");
+        } else if matches!(
+            &kind,
+            ConstraintDefinitionKind::PrimaryKey { .. }
+                | ConstraintDefinitionKind::Unique { .. }
+                | ConstraintDefinitionKind::ForeignKey { .. }
+        ) {
+            body.push_str(" NOT DEFERRABLE");
+        }
+        if draft.initially_deferred {
+            body.push_str(" INITIALLY DEFERRED");
+        }
+        if draft.not_valid
+            && matches!(
+                &kind,
+                ConstraintDefinitionKind::ForeignKey { .. }
+                    | ConstraintDefinitionKind::Check { .. }
+            )
+        {
+            body.push_str(" NOT VALID");
+        }
+        let create = if let Some(name) = name {
+            format!("ALTER TABLE {relation} ADD CONSTRAINT {name} {body}")
+        } else {
+            format!("ALTER TABLE {relation} ADD {body}")
+        };
+        let relation_id = match &request.anchor {
+            CatalogMutationAnchor::Catalog(id) if id.kind.is_relation() => id.clone(),
+            CatalogMutationAnchor::Catalog(id) if id.native_path.len() >= 4 => CatalogId::new(
+                request.connection.profile_id,
+                CatalogKind::Table,
+                id.native_path[..4].to_vec(),
+            ),
+            _ => CatalogId::new(
+                request.connection.profile_id,
+                CatalogKind::Table,
+                [
+                    draft.database.value().trim(),
+                    draft.schema.value().trim(),
+                    draft.relation.value().trim(),
+                    "",
+                ],
+            ),
+        };
+        let (statements, destructive, baseline_fp, old_id) =
+            if let Some(CatalogObjectDefinition::Constraint(old)) = baseline {
+                let CatalogMutationAnchor::Catalog(id) = &request.anchor else {
+                    return Err(CatalogMutationError::InvalidAnchor {
+                        reason: "constraint edit requires an anchor",
+                    });
+                };
+                let structural_same = match (&old.kind, &kind) {
+                    (
+                        ConstraintDefinitionKind::PrimaryKey { columns: a },
+                        ConstraintDefinitionKind::PrimaryKey { columns: b },
+                    )
+                    | (
+                        ConstraintDefinitionKind::Unique { columns: a },
+                        ConstraintDefinitionKind::Unique { columns: b },
+                    ) => a == b,
+                    (
+                        ConstraintDefinitionKind::Check {
+                            expression: a,
+                            no_inherit: ai,
+                        },
+                        ConstraintDefinitionKind::Check { .. },
+                    ) => a == draft.expression.value().trim() && *ai == draft.no_inherit,
+                    (
+                        ConstraintDefinitionKind::ForeignKey {
+                            columns,
+                            referenced_schema,
+                            referenced_relation,
+                            referenced_columns,
+                            match_type,
+                            on_update,
+                            on_delete,
+                        },
+                        ConstraintDefinitionKind::ForeignKey { .. },
+                    ) => {
+                        columns
+                            == &draft
+                                .columns
+                                .value()
+                                .split(',')
+                                .map(|v| v.trim().to_owned())
+                                .collect::<Vec<_>>()
+                            && referenced_schema == draft.referenced_schema.value().trim()
+                            && referenced_relation == draft.referenced_relation.value().trim()
+                            && referenced_columns
+                                == &draft
+                                    .referenced_columns
+                                    .value()
+                                    .split(',')
+                                    .map(|v| v.trim().to_owned())
+                                    .collect::<Vec<_>>()
+                            && match_type == draft.match_type.value().trim()
+                            && on_update == draft.on_update.value().trim()
+                            && on_delete == draft.on_delete.value().trim()
+                    }
+                    _ => false,
+                };
+                if old.name == draft.name.value().trim()
+                    && structural_same
+                    && old.deferrable == draft.deferrable
+                    && old.initially_deferred == draft.initially_deferred
+                    && old.validated == !draft.not_valid
+                {
+                    return Err(CatalogMutationError::NoChanges);
+                }
+                if structural_same
+                    && old.deferrable == draft.deferrable
+                    && old.initially_deferred == draft.initially_deferred
+                    && old.name != draft.name.value().trim()
+                {
+                    (
+                        vec![format!(
+                            "ALTER TABLE {relation} RENAME CONSTRAINT {} TO {}",
+                            quote_identifier(&old.name),
+                            quote_identifier(draft.name.value().trim())
+                        )],
+                        false,
+                        Some(old.baseline_fingerprint),
+                        id.clone(),
+                    )
+                } else if structural_same
+                    && old.deferrable == draft.deferrable
+                    && old.initially_deferred == draft.initially_deferred
+                    && old.name == draft.name.value().trim()
+                    && !old.validated
+                    && !draft.not_valid
+                {
+                    (
+                        vec![format!(
+                            "ALTER TABLE {relation} VALIDATE CONSTRAINT {}",
+                            quote_identifier(&old.name)
+                        )],
+                        false,
+                        Some(old.baseline_fingerprint),
+                        id.clone(),
+                    )
+                } else {
+                    (
+                        vec![
+                            format!(
+                                "ALTER TABLE {relation} DROP CONSTRAINT {}",
+                                quote_identifier(&old.name)
+                            ),
+                            create,
+                        ],
+                        true,
+                        Some(old.baseline_fingerprint),
+                        id.clone(),
+                    )
+                }
+            } else {
+                (vec![create], false, None, {
+                    let mut path = relation_id.native_path.clone();
+                    path.push(draft.name.value().trim().to_owned());
+                    CatalogId::new(
+                        request.connection.profile_id,
+                        match request.object_type {
+                            CatalogObjectType::Catalog(kind) => kind,
+                            _ => CatalogKind::CheckConstraint,
+                        },
+                        path,
+                    )
+                })
+            };
+        CatalogMutationPlan::new(
+            request.clone(),
+            request.object_type,
+            CatalogMutationExecutionMode::Transactional,
+            vec![CatalogTarget::RelationChildren {
+                relation: relation_id.clone(),
+            }],
+            CatalogSelectionHint::Object(old_id.clone()),
+            baseline_fp,
+            Vec::new(),
+            statements,
+        )
+        .map(|plan| {
+            plan.with_destructive(destructive).with_impact(
+                crate::db::catalog_mutation::CatalogMutationImpact {
+                    old_object_id: old_id,
+                    owning_relation_id: Some(relation_id),
+                    namespace: crate::db::catalog_mutation::CatalogMutationNamespace {
+                        database: Some(CatalogId::new(
+                            request.connection.profile_id,
+                            CatalogKind::Database,
+                            [draft.database.value().trim()],
+                        )),
+                        schema: Some(CatalogId::new(
+                            request.connection.profile_id,
+                            CatalogKind::Schema,
+                            [draft.database.value().trim(), draft.schema.value().trim()],
+                        )),
+                    },
+                    native_identity_changed: false,
+                },
+            )
+        })
+    }
+
+    fn plan_table_mutation(
+        request: CatalogMutationRequest,
+        draft: crate::model::catalog_editor::CatalogDraft,
+        baseline: Option<CatalogObjectDefinition>,
+    ) -> Result<CatalogMutationPlan, CatalogMutationError> {
+        use crate::model::catalog_editor::{CatalogDraft, DraftRowState};
+        let CatalogDraft::Table(draft) = draft else {
+            return Err(CatalogMutationError::InvalidDraft {
+                reason: "table draft required".into(),
+            });
+        };
+        draft.validate()?;
+        let (database, old_schema, old_name, old_oid, baseline_fingerprint, base) =
+            match (&request.mode, &request.anchor, baseline) {
+                (
+                    CatalogMutationMode::Create,
+                    CatalogMutationAnchor::Group { schema, .. },
+                    None,
+                ) => {
+                    let [database, schema] = schema.native_path.as_slice() else {
+                        return Err(CatalogMutationError::InvalidAnchor {
+                            reason: "table create requires a schema anchor",
+                        });
+                    };
+                    (database.clone(), schema.clone(), None, None, None, None)
+                }
+                (
+                    CatalogMutationMode::Edit,
+                    CatalogMutationAnchor::Catalog(id),
+                    Some(CatalogObjectDefinition::Table(table)),
+                ) => {
+                    let [database, schema, name, oid] = id.native_path.as_slice() else {
+                        return Err(CatalogMutationError::InvalidAnchor {
+                            reason: "table edit requires a table ID",
+                        });
+                    };
+                    if table.database != *database
+                        || table.schema != *schema
+                        || table.name != *name
+                        || table.baseline_fingerprint.is_empty()
+                    {
+                        return Err(CatalogMutationError::StaleState);
+                    }
+                    (
+                        database.clone(),
+                        schema.clone(),
+                        Some(name.clone()),
+                        oid.parse::<u32>().ok(),
+                        Some(table.baseline_fingerprint.clone()),
+                        Some(table),
+                    )
+                }
+                (CatalogMutationMode::Edit, _, _) => {
+                    return Err(CatalogMutationError::InvalidAnchor {
+                        reason: "table edit requires a table baseline",
+                    });
+                }
+                _ => {
+                    return Err(CatalogMutationError::InvalidDraft {
+                        reason: "table baseline is missing".into(),
+                    });
+                }
+            };
+        let schema = draft.schema.value().trim();
+        let name = draft.name.value().trim();
+        let owner = draft.owner.value().trim();
+        let relation =
+            |s: &str, n: &str| format!("{}.{}", quote_identifier(s), quote_identifier(n));
+        let mut statements = Vec::new();
+        let mut warnings = Vec::new();
+        let mut destructive = false;
+        if let Some(table) = &base {
+            let old_relation = relation(&table.schema, &table.name);
+            let current_relation = relation(schema, name);
+            if table.name != name {
+                statements.push(format!(
+                    "ALTER TABLE {} RENAME TO {}",
+                    old_relation,
+                    quote_identifier(name)
+                ));
+            }
+            if table.schema != schema {
+                statements.push(format!(
+                    "ALTER TABLE {} SET SCHEMA {}",
+                    current_relation,
+                    quote_identifier(schema)
+                ));
+            }
+            let relation = relation(schema, name);
+            if table.owner != owner {
+                statements.push(format!(
+                    "ALTER TABLE {} OWNER TO {}",
+                    relation,
+                    quote_identifier(owner)
+                ));
+            }
+            let old_comment = match &table.comment {
+                OptionalMetadata::Supported(value) => value.clone(),
+                OptionalMetadata::Unsupported => None,
+            };
+            let new_comment = (!draft.comment.value().trim().is_empty())
+                .then(|| draft.comment.value().to_owned());
+            if old_comment != new_comment {
+                statements.push(format!(
+                    "COMMENT ON TABLE {} IS {}",
+                    relation,
+                    new_comment.as_deref().map_or("NULL".into(), quote_literal)
+                ));
+            }
+            let mut existing = table.columns.iter();
+            for row in &draft.columns {
+                if matches!(row.state, DraftRowState::Removed { .. }) {
+                    continue;
+                }
+                let old = row
+                    .existing_name
+                    .as_deref()
+                    .and_then(|n| table.columns.iter().find(|c| c.name == n));
+                let Some(old) = old else {
+                    statements.push(format!(
+                        "ALTER TABLE {} ADD COLUMN {}",
+                        relation,
+                        column_definition_fragment(row)?
+                    ));
+                    continue;
+                };
+                if old.native_type != row.native_type.value().trim() {
+                    statements.push(format!(
+                        "ALTER TABLE {} ALTER COLUMN {} TYPE {}",
+                        relation,
+                        quote_identifier(&old.name),
+                        row.native_type.value().trim()
+                    ));
+                    warnings.push(format!(
+                        "Changing type of column {} may fail or lose data",
+                        old.name
+                    ));
+                    destructive = true;
+                }
+                let old_default = match &old.default_expression {
+                    OptionalMetadata::Supported(v) => v.clone(),
+                    OptionalMetadata::Unsupported => None,
+                };
+                let new_default = (!row.default_expression.value().trim().is_empty())
+                    .then(|| row.default_expression.value().trim().to_owned());
+                if old_default != new_default {
+                    if let Some(value) = new_default.as_deref() {
+                        statements.push(format!(
+                            "ALTER TABLE {} ALTER COLUMN {} SET DEFAULT {}",
+                            relation,
+                            quote_identifier(&old.name),
+                            value
+                        ));
+                    } else {
+                        statements.push(format!(
+                            "ALTER TABLE {} ALTER COLUMN {} DROP DEFAULT",
+                            relation,
+                            quote_identifier(&old.name)
+                        ));
+                    }
+                }
+                if old.nullable != row.nullable {
+                    statements.push(format!(
+                        "ALTER TABLE {} ALTER COLUMN {} {} NOT NULL",
+                        relation,
+                        quote_identifier(&old.name),
+                        if row.nullable { "DROP" } else { "SET" }
+                    ));
+                }
+                let old_identity = matches!(old.identity, OptionalMetadata::Supported(Some(true)));
+                if old_identity != row.identity {
+                    if row.identity {
+                        statements.push(format!(
+                            "ALTER TABLE {} ALTER COLUMN {} ADD GENERATED BY DEFAULT AS IDENTITY",
+                            relation,
+                            quote_identifier(&old.name)
+                        ));
+                    } else {
+                        statements.push(format!(
+                            "ALTER TABLE {} ALTER COLUMN {} DROP IDENTITY",
+                            relation,
+                            quote_identifier(&old.name)
+                        ));
+                    }
+                }
+                let old_generated = match &old.generated_expression {
+                    OptionalMetadata::Supported(v) => v.clone(),
+                    OptionalMetadata::Unsupported => None,
+                };
+                let new_generated = (!row.generated_expression.value().trim().is_empty())
+                    .then(|| row.generated_expression.value().trim().to_owned());
+                if old_generated != new_generated {
+                    return Err(CatalogMutationError::UnsupportedOperation {
+                        object_type: request.object_type,
+                    });
+                }
+                let old_comment = match &old.comment {
+                    OptionalMetadata::Supported(v) => v.clone(),
+                    OptionalMetadata::Unsupported => None,
+                };
+                let new_comment = (!row.comment.value().trim().is_empty())
+                    .then(|| row.comment.value().trim().to_owned());
+                if old_comment != new_comment {
+                    statements.push(format!(
+                        "COMMENT ON COLUMN {}.{} IS {}",
+                        relation,
+                        quote_identifier(&old.name),
+                        new_comment.as_deref().map_or("NULL".into(), quote_literal)
+                    ));
+                }
+                if row.name.value().trim() != old.name {
+                    statements.push(format!(
+                        "ALTER TABLE {} RENAME COLUMN {} TO {}",
+                        relation,
+                        quote_identifier(&old.name),
+                        quote_identifier(row.name.value().trim())
+                    ));
+                }
+            }
+            for old in &table.columns {
+                if !draft.columns.iter().any(|row| {
+                    row.existing_name.as_deref() == Some(old.name.as_str())
+                        && !matches!(row.state, DraftRowState::Removed { .. })
+                }) {
+                    statements.push(format!(
+                        "ALTER TABLE {} DROP COLUMN {}",
+                        relation,
+                        quote_identifier(&old.name)
+                    ));
+                    warnings.push(format!(
+                        "Dropping column {} permanently deletes its data",
+                        old.name
+                    ));
+                    destructive = true;
+                }
+            }
+            let _ = existing.next();
+        } else {
+            if draft.columns.is_empty() {
+                return Err(CatalogMutationError::InvalidDraft {
+                    reason: "a table requires at least one column".into(),
+                });
+            }
+            let columns = draft
+                .columns
+                .iter()
+                .map(|row| column_definition_fragment(row))
+                .collect::<Result<Vec<_>, _>>()?
+                .join(", ");
+            statements.push(format!(
+                "CREATE TABLE {} ({})",
+                relation(schema, name),
+                columns
+            ));
+            if !owner.is_empty() {
+                statements.push(format!(
+                    "ALTER TABLE {} OWNER TO {}",
+                    relation(schema, name),
+                    quote_identifier(owner)
+                ));
+            }
+            if !draft.comment.value().trim().is_empty() {
+                statements.push(format!(
+                    "COMMENT ON TABLE {} IS {}",
+                    relation(schema, name),
+                    quote_literal(draft.comment.value().trim())
+                ));
+            }
+        }
+        if statements.is_empty() {
+            return Err(CatalogMutationError::NoChanges);
+        }
+        let old_name = old_name.clone().unwrap_or_else(|| name.to_owned());
+        let old_id = CatalogId::new(
+            request.connection.profile_id,
+            CatalogKind::Table,
+            [
+                database.clone(),
+                old_schema.clone(),
+                old_name.clone(),
+                old_oid.map_or_else(String::new, |v| v.to_string()),
+            ],
+        );
+        let new_id = CatalogId::new(
+            request.connection.profile_id,
+            CatalogKind::Table,
+            [
+                database.clone(),
+                schema.to_owned(),
+                name.to_owned(),
+                old_oid.map_or_else(String::new, |v| v.to_string()),
+            ],
+        );
+        let database_id = CatalogId::new(
+            request.connection.profile_id,
+            CatalogKind::Database,
+            [database.clone()],
+        );
+        let old_schema_id = CatalogId::new(
+            request.connection.profile_id,
+            CatalogKind::Schema,
+            [database.clone(), old_schema],
+        );
+        let new_schema_id = CatalogId::new(
+            request.connection.profile_id,
+            CatalogKind::Schema,
+            [database.clone(), schema.to_owned()],
+        );
+        CatalogMutationPlan::new(
+            request,
+            CatalogObjectType::Catalog(CatalogKind::Table),
+            CatalogMutationExecutionMode::Transactional,
+            vec![
+                CatalogTarget::Objects {
+                    schema: old_schema_id.clone(),
+                    group: ObjectGroup::Tables,
+                },
+                CatalogTarget::Objects {
+                    schema: new_schema_id.clone(),
+                    group: ObjectGroup::Tables,
+                },
+                CatalogTarget::RelationChildren {
+                    relation: new_id.clone(),
+                },
+            ],
+            CatalogSelectionHint::Object(new_id.clone()),
+            baseline_fingerprint,
+            warnings,
+            statements,
+        )
+        .map(|plan| {
+            plan.with_destructive(destructive).with_impact(
+                crate::db::catalog_mutation::CatalogMutationImpact {
+                    old_object_id: old_id,
+                    owning_relation_id: Some(new_id),
+                    namespace: crate::db::catalog_mutation::CatalogMutationNamespace {
+                        database: Some(database_id),
+                        schema: Some(new_schema_id.clone()),
+                    },
+                    native_identity_changed: old_name != name || old_schema_id != new_schema_id,
+                },
+            )
+        })
+    }
+
+    fn plan_index_mutation(
+        request: CatalogMutationRequest,
+        draft: crate::model::catalog_editor::CatalogDraft,
+        baseline: Option<CatalogObjectDefinition>,
+    ) -> Result<CatalogMutationPlan, CatalogMutationError> {
+        use crate::model::catalog_editor::CatalogDraft;
+        let CatalogDraft::Index(draft) = draft else {
+            return Err(CatalogMutationError::InvalidDraft {
+                reason: "index draft required".into(),
+            });
+        };
+        draft.validate()?;
+        let current = match baseline {
+            Some(CatalogObjectDefinition::Index(index)) => Some(index),
+            None => None,
+            _ => return Err(CatalogMutationError::StaleState),
+        };
+        let schema = draft.schema.value().trim();
+        let relation_name = draft.relation.value().trim();
+        let name = draft.name.value().trim();
+        let qualified_relation = format!(
+            "{}.{}",
+            quote_identifier(schema),
+            quote_identifier(relation_name)
+        );
+        let definition = draft
+            .columns
+            .iter()
+            .map(|column| {
+                let expression = if column.is_expression {
+                    column.expression.value().trim().to_owned()
+                } else {
+                    quote_identifier(column.expression.value().trim())
+                };
+                format!(
+                    "{} {}",
+                    expression,
+                    if column.descending { "DESC" } else { "ASC" }
+                ) + if column.nulls_first {
+                    " NULLS FIRST"
+                } else {
+                    " NULLS LAST"
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let include = draft
+            .include_columns
+            .value()
+            .split(',')
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(quote_identifier)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut create = format!(
+            "CREATE {}INDEX {} ON {} USING {} ({})",
+            if draft.unique { "UNIQUE " } else { "" },
+            quote_identifier(name),
+            qualified_relation,
+            quote_identifier(draft.access_method.value().trim()),
+            definition
+        );
+        if !include.is_empty() {
+            create.push_str(&format!(" INCLUDE ({include})"));
+        }
+        if !draft.predicate.value().trim().is_empty() {
+            create.push_str(&format!(" WHERE {}", draft.predicate.value().trim()));
+        }
+        if !draft.tablespace.value().trim().is_empty() {
+            create.push_str(&format!(
+                " TABLESPACE {}",
+                quote_identifier(draft.tablespace.value().trim())
+            ));
+        }
+
+        let (database, old_name, old_id, fingerprint, statements, destructive, warnings) =
+            if let Some(old) = current.clone() {
+                let old_id = match &request.anchor {
+                    CatalogMutationAnchor::Catalog(id) => id.clone(),
+                    _ => {
+                        return Err(CatalogMutationError::InvalidAnchor {
+                            reason: "index edit requires an index anchor",
+                        });
+                    }
+                };
+                let mut warnings = Vec::new();
+                let mut destructive = false;
+                let mut statements = Vec::new();
+                let structural_changed = old.unique != draft.unique
+                    || old.access_method != draft.access_method.value().trim()
+                    || old.columns.len() != draft.columns.len()
+                    || old.columns.iter().zip(&draft.columns).any(|(a, b)| {
+                        a.expression != b.expression.value().trim()
+                            || a.descending != b.descending
+                            || a.nulls_first != b.nulls_first
+                    })
+                    || old.include_columns
+                        != draft
+                            .include_columns
+                            .value()
+                            .split(',')
+                            .map(str::trim)
+                            .filter(|v| !v.is_empty())
+                            .map(str::to_owned)
+                            .collect::<Vec<_>>();
+                let predicate = (!draft.predicate.value().trim().is_empty())
+                    .then(|| draft.predicate.value().trim().to_owned());
+                let tablespace = (!draft.tablespace.value().trim().is_empty())
+                    .then(|| draft.tablespace.value().trim().to_owned());
+                let old_predicate = matches!(old.predicate, OptionalMetadata::Supported(Some(_)));
+                let old_tablespace = matches!(old.tablespace, OptionalMetadata::Supported(Some(_)));
+                let predicate_changed = old_predicate != predicate.is_some();
+                let tablespace_changed = old_tablespace != tablespace.is_some();
+                if structural_changed || predicate_changed || tablespace_changed {
+                    statements.push(format!(
+                        "DROP INDEX {}",
+                        qualified_index_name(&old.schema, &old.name)
+                    ));
+                    statements.push(create);
+                    warnings.push(
+                        "Changing index definition requires dropping and recreating the index"
+                            .into(),
+                    );
+                    destructive = true;
+                } else if old.name != name {
+                    statements.push(format!(
+                        "ALTER INDEX {} RENAME TO {}",
+                        qualified_index_name(&old.schema, &old.name),
+                        quote_identifier(name)
+                    ));
+                }
+                (
+                    old.database,
+                    Some(old.name),
+                    old_id,
+                    Some(old.baseline_fingerprint),
+                    statements,
+                    destructive,
+                    warnings,
+                )
+            } else {
+                if request.mode == CatalogMutationMode::Edit {
+                    return Err(CatalogMutationError::StaleState);
+                }
+                let database = match &request.anchor {
+                    CatalogMutationAnchor::Catalog(relation) if relation.kind.is_relation() => {
+                        relation.native_path.first().cloned().unwrap_or_default()
+                    }
+                    CatalogMutationAnchor::Group { schema, .. } => {
+                        schema.native_path.first().cloned().unwrap_or_default()
+                    }
+                    _ => {
+                        return Err(CatalogMutationError::InvalidAnchor {
+                            reason: "index create requires a relation anchor",
+                        });
+                    }
+                };
+                (
+                    database,
+                    None,
+                    CatalogId::new(
+                        request.connection.profile_id,
+                        CatalogKind::Index,
+                        ["", schema, relation_name, name],
+                    ),
+                    None,
+                    vec![create],
+                    false,
+                    Vec::new(),
+                )
+            };
+        if statements.is_empty() {
+            return Err(CatalogMutationError::NoChanges);
+        }
+        let relation_id = CatalogId::new(
+            request.connection.profile_id,
+            match &request.anchor {
+                CatalogMutationAnchor::Catalog(id) if id.kind.is_relation() => id.kind,
+                CatalogMutationAnchor::Catalog(_) => current
+                    .as_ref()
+                    .map_or(CatalogKind::Table, |index| index.relation_kind),
+                _ => CatalogKind::Table,
+            },
+            match &request.anchor {
+                CatalogMutationAnchor::Catalog(id) if id.kind.is_relation() => {
+                    id.native_path.clone()
+                }
+                CatalogMutationAnchor::Catalog(id) => id.native_path[..4].to_vec(),
+                _ => vec![
+                    database.clone(),
+                    schema.to_owned(),
+                    relation_name.to_owned(),
+                    String::new(),
+                ],
+            },
+        );
+        let schema_id = CatalogId::new(
+            request.connection.profile_id,
+            CatalogKind::Schema,
+            [database.clone(), schema.to_owned()],
+        );
+        let new_id = CatalogId::new(
+            request.connection.profile_id,
+            CatalogKind::Index,
+            [
+                database.clone(),
+                schema.to_owned(),
+                relation_name.to_owned(),
+                match &request.anchor {
+                    CatalogMutationAnchor::Catalog(id) => {
+                        id.native_path.get(3).cloned().unwrap_or_default()
+                    }
+                    _ => String::new(),
+                },
+                name.to_owned(),
+            ],
+        );
+        CatalogMutationPlan::new(
+            request.clone(),
+            CatalogObjectType::Catalog(CatalogKind::Index),
+            CatalogMutationExecutionMode::Transactional,
+            vec![CatalogTarget::RelationChildren {
+                relation: relation_id.clone(),
+            }],
+            CatalogSelectionHint::Object(new_id),
+            fingerprint,
+            warnings,
+            statements,
+        )
+        .map(|plan| {
+            plan.with_destructive(destructive).with_impact(
+                crate::db::catalog_mutation::CatalogMutationImpact {
+                    old_object_id: old_id,
+                    owning_relation_id: Some(relation_id),
+                    namespace: crate::db::catalog_mutation::CatalogMutationNamespace {
+                        database: Some(CatalogId::new(
+                            request.connection.profile_id,
+                            CatalogKind::Database,
+                            [database],
+                        )),
+                        schema: Some(schema_id),
+                    },
+                    native_identity_changed: old_name.as_deref() != Some(name),
+                },
+            )
+        })
+    }
+
     pub(crate) async fn transaction_backend(
         &self,
     ) -> Result<PostgresTransactionBackend, DatabaseError> {
@@ -593,7 +2955,16 @@ LIMIT 2001
             pool,
             connection_id: profile.id,
             catalog_scope: profile.catalog_scope.clone(),
+            server_version_num: server_version,
         })
+    }
+
+    pub fn mutation_capabilities(&self) -> CatalogMutationCapabilities {
+        Self::catalog_mutation_capabilities_for_version(self.server_version_num)
+    }
+
+    pub fn server_version_num(&self) -> i32 {
+        self.server_version_num
     }
 
     pub async fn probe(&self) -> Result<ServerInfo, DatabaseError> {
@@ -655,6 +3026,51 @@ LIMIT 2001
     ) -> Result<QueryOutcome, DatabaseError> {
         let mut stream = sqlx::raw_sql(AssertSqlSafe(sql)).fetch_many(&mut *connection);
         self.collect_stream(&mut stream).await
+    }
+
+    pub(crate) async fn execute_catalog_mutation(
+        &self,
+        plan: &CatalogMutationPlan,
+    ) -> Result<QueryOutcome, DatabaseError> {
+        plan.validate()
+            .map_err(|error| DatabaseError::configuration(error.to_string()))?;
+        let mut connection = self.pool.acquire().await.map_err(sql_error)?;
+        if matches!(
+            plan.execution_mode,
+            CatalogMutationExecutionMode::Autocommit
+        ) {
+            let mut outcome = None;
+            for statement in plan.statements() {
+                let executable = plan
+                    .execution_secret()
+                    .map(|secret| {
+                        statement.replace("'<REDACTED>'", &quote_literal(secret.expose()))
+                    })
+                    .unwrap_or_else(|| statement.clone());
+                outcome = Some(
+                    self.execute_connection(&mut *connection, &executable)
+                        .await?,
+                );
+            }
+            return outcome.ok_or_else(|| {
+                DatabaseError::configuration("catalog mutation plan has no statements")
+            });
+        }
+        let mut transaction = connection.begin().await.map_err(sql_error)?;
+        let mut outcome = None;
+        for statement in plan.statements() {
+            let executable = plan
+                .execution_secret()
+                .map(|secret| statement.replace("'<REDACTED>'", &quote_literal(secret.expose())))
+                .unwrap_or_else(|| statement.clone());
+            outcome = Some(
+                self.execute_connection(&mut *transaction, &executable)
+                    .await?,
+            );
+        }
+        transaction.commit().await.map_err(sql_error)?;
+        outcome
+            .ok_or_else(|| DatabaseError::configuration("catalog mutation plan has no statements"))
     }
 
     async fn collect_stream<E>(&self, stream: &mut E) -> Result<QueryOutcome, DatabaseError>
@@ -745,6 +3161,606 @@ LIMIT 2001
             };
         }
         page
+    }
+
+    pub async fn load_catalog_object_definition(
+        &self,
+        request: &CatalogObjectDefinitionRequest,
+    ) -> Result<CatalogObjectDefinition, DatabaseError> {
+        request
+            .validate()
+            .map_err(|error| DatabaseError::configuration(error.to_string()))?;
+        if request.connection.profile_id != self.connection_id {
+            return Err(DatabaseError::configuration(
+                "catalog definition profile mismatch",
+            ));
+        }
+        let mut connection = self.pool.acquire().await.map_err(sql_error)?;
+        let mut transaction = connection.begin().await.map_err(sql_error)?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            .execute(&mut *transaction)
+            .await
+            .map_err(sql_error)?;
+        let result = if request.is_role() {
+            self.load_role_definition_snapshot(&mut transaction, request)
+                .await
+        } else {
+            match request.object.kind {
+                CatalogKind::Database => {
+                    self.load_database_definition_snapshot(&mut transaction, request)
+                        .await
+                }
+                CatalogKind::Schema => {
+                    self.load_schema_definition_snapshot(&mut transaction, request)
+                        .await
+                }
+                CatalogKind::View => {
+                    self.load_view_definition_snapshot(&mut transaction, request)
+                        .await
+                }
+                CatalogKind::MaterializedView => {
+                    self.load_materialized_view_definition_snapshot(&mut transaction, request)
+                        .await
+                }
+                CatalogKind::Sequence => {
+                    self.load_sequence_definition_snapshot(&mut transaction, request)
+                        .await
+                }
+                CatalogKind::Table | CatalogKind::Column => {
+                    self.load_table_definition_snapshot(&mut transaction, request)
+                        .await
+                }
+                CatalogKind::Index => {
+                    self.load_index_definition_snapshot(&mut transaction, request)
+                        .await
+                }
+                CatalogKind::PrimaryKey
+                | CatalogKind::UniqueConstraint
+                | CatalogKind::ForeignKey
+                | CatalogKind::CheckConstraint => {
+                    self.load_constraint_definition_snapshot(&mut transaction, request)
+                        .await
+                }
+                _ => Err(DatabaseError::configuration(
+                    "unsupported catalog definition object",
+                )),
+            }
+        };
+        let rollback = transaction.rollback().await.map_err(sql_error);
+        if let Err(error) = rollback {
+            return result.and(Err(error));
+        }
+        result
+    }
+
+    async fn load_database_definition_snapshot(
+        &self,
+        connection: &mut PgConnection,
+        request: &CatalogObjectDefinitionRequest,
+    ) -> Result<CatalogObjectDefinition, DatabaseError> {
+        let [name] = request.object.native_path.as_slice() else {
+            return Err(DatabaseError::configuration(
+                "database object ID has invalid shape",
+            ));
+        };
+        let row = sqlx::query("SELECT datname AS name, pg_get_userbyid(datdba) AS owner, datistemplate AS is_template, datallowconn AS allow_connections, datconnlimit AS connection_limit, pg_encoding_to_char(encoding) AS encoding, datlocprovider::text AS locale_provider, datcollate AS collation, datctype AS ctype, COALESCE(pg_tablespace.spcname, 'pg_default') AS tablespace, obj_description(oid, 'pg_database') AS comment FROM pg_database LEFT JOIN pg_tablespace ON pg_tablespace.oid = dattablespace WHERE datname = $1").bind(name).fetch_optional(&mut *connection).await.map_err(sql_error)?.ok_or_else(|| DatabaseError::configuration("database catalog entry was not found"))?;
+        let definition = DatabaseDefinition {
+            name: row.try_get("name").map_err(decode_error)?,
+            owner: row.try_get("owner").map_err(decode_error)?,
+            template: "template0".into(),
+            encoding: row.try_get("encoding").map_err(decode_error)?,
+            locale_provider: row.try_get("locale_provider").map_err(decode_error)?,
+            locale: String::new(),
+            collation: row.try_get("collation").map_err(decode_error)?,
+            ctype: row.try_get("ctype").map_err(decode_error)?,
+            tablespace: row.try_get("tablespace").map_err(decode_error)?,
+            connection_limit: row.try_get("connection_limit").map_err(decode_error)?,
+            allow_connections: row.try_get("allow_connections").map_err(decode_error)?,
+            is_template: row.try_get("is_template").map_err(decode_error)?,
+            comment: OptionalMetadata::Supported(row.try_get("comment").map_err(decode_error)?),
+            baseline_fingerprint: format!("sha256:{:x}", Sha256::digest(name.as_bytes())),
+        };
+        Ok(CatalogObjectDefinition::Database(definition))
+    }
+
+    async fn load_role_definition_snapshot(
+        &self,
+        connection: &mut PgConnection,
+        request: &CatalogObjectDefinitionRequest,
+    ) -> Result<CatalogObjectDefinition, DatabaseError> {
+        let Some(name) = request.object.native_path.get(1) else {
+            return Err(DatabaseError::configuration(
+                "role object ID has invalid shape",
+            ));
+        };
+        let row = sqlx::query("SELECT rolname, rolsuper, rolcreatedb, rolcreaterole, rolinherit, rolreplication, rolbypassrls, rolcanlogin, rolconnlimit, rolvaliduntil::text, obj_description(oid, 'pg_authid') AS comment FROM pg_authid WHERE rolname = $1")
+            .bind(name).fetch_optional(&mut *connection).await.map_err(sql_error)?
+            .ok_or_else(|| DatabaseError::configuration("role catalog entry was not found"))?;
+        let memberships = sqlx::query_scalar::<_, String>("SELECT granted_role.rolname FROM pg_auth_members m JOIN pg_roles member_role ON member_role.oid = m.member JOIN pg_roles granted_role ON granted_role.oid = m.roleid WHERE member_role.rolname = $1 ORDER BY granted_role.rolname COLLATE \"C\"")
+            .bind(name).fetch_all(&mut *connection).await.map_err(sql_error)?;
+        Ok(CatalogObjectDefinition::Role(RoleDefinition {
+            name: row.try_get("rolname").map_err(decode_error)?,
+            login: row.try_get("rolcanlogin").map_err(decode_error)?,
+            superuser: row.try_get("rolsuper").map_err(decode_error)?,
+            createdb: row.try_get("rolcreatedb").map_err(decode_error)?,
+            createrole: row.try_get("rolcreaterole").map_err(decode_error)?,
+            inherit: row.try_get("rolinherit").map_err(decode_error)?,
+            replication: row.try_get("rolreplication").map_err(decode_error)?,
+            bypass_rls: row.try_get("rolbypassrls").map_err(decode_error)?,
+            connection_limit: row.try_get("rolconnlimit").map_err(decode_error)?,
+            valid_until: OptionalMetadata::Supported(
+                row.try_get("rolvaliduntil").map_err(decode_error)?,
+            ),
+            memberships,
+            comment: OptionalMetadata::Supported(row.try_get("comment").map_err(decode_error)?),
+            baseline_fingerprint: format!("sha256:{:x}", Sha256::digest(name.as_bytes())),
+        }))
+    }
+
+    async fn load_table_definition_snapshot(
+        &self,
+        connection: &mut PgConnection,
+        request: &CatalogObjectDefinitionRequest,
+    ) -> Result<CatalogObjectDefinition, DatabaseError> {
+        let path = &request.object.native_path;
+        if path.len() < 3 {
+            return Err(DatabaseError::configuration(
+                "table object ID has invalid shape",
+            ));
+        }
+        let database = &path[0];
+        let schema = &path[1];
+        let name = &path[2];
+        let relation_oid = path.get(3).and_then(|value| value.parse::<u32>().ok());
+        let row = sqlx::query(
+            "SELECT current_database() AS database, c.oid::int4 AS oid, c.relname AS name, n.nspname AS schema, r.rolname AS owner, obj_description(c.oid, 'pg_class') AS comment FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_roles r ON r.oid = c.relowner WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r','p')"
+        )
+        .bind(schema)
+        .bind(name)
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(sql_error)?
+        .ok_or_else(|| DatabaseError::configuration("table catalog entry was not found"))?;
+        let current: String = row.try_get("database").map_err(decode_error)?;
+        if current != *database || request.target.database != current {
+            return Err(DatabaseError::configuration(
+                "table target database does not match object ID",
+            ));
+        }
+        let oid: u32 = u32::try_from(row.try_get::<i32, _>("oid").map_err(decode_error)?)
+            .map_err(|_| catalog_internal("invalid PostgreSQL relation OID"))?;
+        if relation_oid.is_some_and(|expected| expected != oid) {
+            return Err(DatabaseError::configuration("table object ID is stale"));
+        }
+        let owner: String = row.try_get("owner").map_err(decode_error)?;
+        let comment = OptionalMetadata::Supported(row.try_get("comment").map_err(decode_error)?);
+        let rows = sqlx::query(
+            "SELECT a.attnum::int AS ordinal_position, a.attname AS name, format_type(a.atttypid,a.atttypmod) AS native_type, NOT a.attnotnull AS nullable, pg_get_expr(d.adbin,d.adrelid) AS expression, a.attidentity::text AS identity_kind, a.attgenerated::text AS generated_kind, col_description(a.attrelid,a.attnum) AS comment, CASE WHEN a.attcollation <> 0 THEN coll_ns.nspname || '.' || coll.collname END AS collation FROM pg_attribute a JOIN pg_type t ON t.oid=a.atttypid LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum LEFT JOIN pg_collation coll ON coll.oid=a.attcollation LEFT JOIN pg_namespace coll_ns ON coll_ns.oid=coll.collnamespace WHERE a.attrelid=$1::oid AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum"
+        )
+        .bind(oid as i64)
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(sql_error)?;
+        let mut columns = Vec::with_capacity(rows.len());
+        for row in rows {
+            let generated = row
+                .try_get::<String, _>("generated_kind")
+                .map_err(decode_error)?;
+            let expression: Option<String> = row.try_get("expression").map_err(decode_error)?;
+            columns.push(ColumnDefinition {
+                name: row.try_get("name").map_err(decode_error)?,
+                ordinal_position: u32::try_from(
+                    row.try_get::<i32, _>("ordinal_position")
+                        .map_err(decode_error)?,
+                )
+                .map_err(|_| catalog_internal("invalid PostgreSQL column ordinal"))?,
+                native_type: row.try_get("native_type").map_err(decode_error)?,
+                nullable: row.try_get("nullable").map_err(decode_error)?,
+                default_expression: OptionalMetadata::Supported(if generated.is_empty() {
+                    expression.clone()
+                } else {
+                    None
+                }),
+                identity: OptionalMetadata::Supported(Some(
+                    !row.try_get::<String, _>("identity_kind")
+                        .map_err(decode_error)?
+                        .is_empty(),
+                )),
+                generated_expression: OptionalMetadata::Supported(if generated.is_empty() {
+                    None
+                } else {
+                    expression
+                }),
+                collation: OptionalMetadata::Supported(
+                    row.try_get("collation").map_err(decode_error)?,
+                ),
+                comment: OptionalMetadata::Supported(row.try_get("comment").map_err(decode_error)?),
+            });
+        }
+        let definition = TableDefinition {
+            database: current,
+            schema: schema.clone(),
+            name: name.clone(),
+            owner,
+            comment,
+            columns,
+            indexes: Vec::new(),
+            constraints: Vec::new(),
+            baseline_fingerprint: format!(
+                "sha256:{:x}",
+                Sha256::digest(format!("{schema}.{name}:{oid}").as_bytes())
+            ),
+        };
+        Ok(CatalogObjectDefinition::Table(definition))
+    }
+
+    async fn load_sequence_definition_snapshot(
+        &self,
+        connection: &mut PgConnection,
+        request: &CatalogObjectDefinitionRequest,
+    ) -> Result<CatalogObjectDefinition, DatabaseError> {
+        let [database, schema, name, oid] = request.object.native_path.as_slice() else {
+            return Err(DatabaseError::configuration(
+                "sequence object ID has invalid shape",
+            ));
+        };
+        let row = sqlx::query("SELECT current_database() AS database, c.oid::int8 AS oid, n.nspname AS schema, c.relname AS name, r.rolname AS owner, obj_description(c.oid, 'pg_class') AS comment, format_type(s.seqtypid, NULL) AS data_type, s.seqincrement::text AS increment, s.seqmin::text AS min_value, s.seqmax::text AS max_value, s.seqstart::text AS start_value, s.seqcache::text AS cache, s.seqcycle AS cycle, own_ns.nspname AS owned_schema, own_rel.relname AS owned_table, own_col.attname AS owned_column FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_roles r ON r.oid=c.relowner JOIN pg_sequence s ON s.seqrelid=c.oid LEFT JOIN pg_depend dep ON dep.objid=c.oid AND dep.deptype='a' LEFT JOIN pg_class own_rel ON own_rel.oid=dep.refobjid LEFT JOIN pg_namespace own_ns ON own_ns.oid=own_rel.relnamespace LEFT JOIN pg_attribute own_col ON own_col.attrelid=own_rel.oid AND own_col.attnum=dep.refobjsubid WHERE c.oid=$1::oid AND c.relkind='S' AND n.nspname=$2 AND c.relname=$3")
+            .bind(oid).bind(schema).bind(name).fetch_optional(&mut *connection).await.map_err(sql_error)?.ok_or_else(|| DatabaseError::configuration("sequence catalog entry was not found"))?;
+        let current: String = row.try_get("database").map_err(decode_error)?;
+        if current != *database || request.target.database != current {
+            return Err(DatabaseError::configuration(
+                "sequence target database does not match object ID",
+            ));
+        }
+        let parse_bound = |value: String, default: &str| {
+            if value == default {
+                crate::db::catalog_mutation::SequenceBound::NoLimit
+            } else {
+                crate::db::catalog_mutation::SequenceBound::Value(value)
+            }
+        };
+        let owned_schema: Option<String> = row.try_get("owned_schema").map_err(decode_error)?;
+        let definition = crate::db::catalog_mutation::SequenceDefinition {
+            database: current,
+            schema: schema.clone(),
+            name: name.clone(),
+            owner: row.try_get("owner").map_err(decode_error)?,
+            comment: OptionalMetadata::Supported(row.try_get("comment").map_err(decode_error)?),
+            data_type: row.try_get("data_type").map_err(decode_error)?,
+            increment: row.try_get("increment").map_err(decode_error)?,
+            min_value: parse_bound(row.try_get("min_value").map_err(decode_error)?, "1"),
+            max_value: parse_bound(
+                row.try_get("max_value").map_err(decode_error)?,
+                "9223372036854775807",
+            ),
+            start_value: row.try_get("start_value").map_err(decode_error)?,
+            cache: row.try_get("cache").map_err(decode_error)?,
+            cycle: row.try_get("cycle").map_err(decode_error)?,
+            owned_by: owned_schema.map(|s| {
+                (
+                    s,
+                    row.try_get("owned_table").ok().unwrap_or_default(),
+                    row.try_get("owned_column").ok().unwrap_or_default(),
+                )
+            }),
+            baseline_fingerprint: format!(
+                "sha256:{:x}",
+                Sha256::digest(format!("{database}.{schema}.{name}.{oid}").as_bytes())
+            ),
+        };
+        Ok(CatalogObjectDefinition::Sequence(definition))
+    }
+
+    async fn load_index_definition_snapshot(
+        &self,
+        connection: &mut PgConnection,
+        request: &CatalogObjectDefinitionRequest,
+    ) -> Result<CatalogObjectDefinition, DatabaseError> {
+        let [database, schema, relation, _relation_oid, oid] =
+            request.object.native_path.as_slice()
+        else {
+            return Err(DatabaseError::configuration(
+                "index object ID has invalid shape",
+            ));
+        };
+        let row = sqlx::query("SELECT current_database() AS database, i.indexrelid::int8 AS oid, ic.relname AS name, c.relname AS relation, c.relkind::text AS relation_kind, n.nspname AS schema, i.indisunique AS unique, am.amname AS access_method, pg_get_expr(i.indpred, i.indrelid) AS predicate, ts.spcname AS tablespace, i.indnkeyatts::int AS key_count FROM pg_index i JOIN pg_class c ON c.oid=i.indrelid JOIN pg_class ic ON ic.oid=i.indexrelid JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_am am ON am.oid=ic.relam LEFT JOIN pg_tablespace ts ON ts.oid=ic.reltablespace WHERE n.nspname=$1 AND c.relname=$2 AND i.indexrelid=$3::oid AND c.relkind IN ('r','p','m')")
+            .bind(schema).bind(relation).bind(oid).fetch_optional(&mut *connection).await.map_err(sql_error)?
+            .ok_or_else(|| DatabaseError::configuration("index catalog entry was not found"))?;
+        let current: String = row.try_get("database").map_err(decode_error)?;
+        if current != *database
+            || request.target.database != current
+            || oid.parse::<i64>().ok() != row.try_get("oid").ok()
+        {
+            return Err(DatabaseError::configuration("index object ID is stale"));
+        }
+        let key_count: i32 = row.try_get("key_count").map_err(decode_error)?;
+        let parts = sqlx::query("SELECT k.ord::int AS ordinal, a.attname AS column_name, pg_get_indexdef(i.indexrelid, k.ord, true) AS expression, (i.indoption[k.ord-1] & 1) <> 0 AS descending, (i.indoption[k.ord-1] & 2) <> 0 AS nulls_first FROM pg_index i CROSS JOIN LATERAL unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) LEFT JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=k.attnum WHERE i.indexrelid=$1::oid ORDER BY k.ord")
+            .bind(oid).fetch_all(&mut *connection).await.map_err(sql_error)?;
+        let mut columns = Vec::new();
+        let mut include_columns = Vec::new();
+        for part in parts {
+            let ordinal: i32 = part.try_get("ordinal").map_err(decode_error)?;
+            let expression: String = part.try_get("expression").map_err(decode_error)?;
+            let column_name: Option<String> = part.try_get("column_name").map_err(decode_error)?;
+            let is_expression = column_name.is_none();
+            if ordinal <= key_count {
+                columns.push(IndexColumnDefinition {
+                    expression: column_name.unwrap_or(expression),
+                    descending: part.try_get("descending").map_err(decode_error)?,
+                    nulls_first: part.try_get("nulls_first").map_err(decode_error)?,
+                    is_expression,
+                });
+            } else if let Some(column) = column_name {
+                include_columns.push(column);
+            }
+        }
+        let predicate: Option<String> = row.try_get("predicate").map_err(decode_error)?;
+        let tablespace: Option<String> = row.try_get("tablespace").map_err(decode_error)?;
+        let mut hasher = Sha256::new();
+        let name: String = row.try_get("name").map_err(decode_error)?;
+        let relation_kind = match row
+            .try_get::<String, _>("relation_kind")
+            .map_err(decode_error)?
+            .as_str()
+        {
+            "m" => CatalogKind::MaterializedView,
+            "v" => CatalogKind::View,
+            _ => CatalogKind::Table,
+        };
+        hasher.update(format!("{database}.{schema}.{relation}.{name}.{oid}").as_bytes());
+        Ok(CatalogObjectDefinition::Index(IndexDefinition {
+            database: current,
+            schema: schema.clone(),
+            relation: relation.clone(),
+            relation_kind,
+            name,
+            unique: row.try_get("unique").map_err(decode_error)?,
+            access_method: row.try_get("access_method").map_err(decode_error)?,
+            columns,
+            include_columns,
+            predicate: OptionalMetadata::Supported(predicate),
+            tablespace: OptionalMetadata::Supported(tablespace),
+            baseline_fingerprint: format!("sha256:{:x}", hasher.finalize()),
+        }))
+    }
+
+    async fn load_constraint_definition_snapshot(
+        &self,
+        connection: &mut PgConnection,
+        request: &CatalogObjectDefinitionRequest,
+    ) -> Result<CatalogObjectDefinition, DatabaseError> {
+        let [database, schema, relation, relation_oid, constraint_oid] =
+            request.object.native_path.as_slice()
+        else {
+            return Err(DatabaseError::configuration(
+                "constraint object ID has invalid shape",
+            ));
+        };
+        let row = sqlx::query("SELECT current_database() AS database, con.conname AS name, con.contype::text AS kind, con.condeferrable AS deferrable, con.condeferred AS initially_deferred, con.convalidated AS validated, con.connoinherit AS no_inherit, pg_get_expr(con.conbin, con.conrelid, true) AS check_expression, ARRAY(SELECT a.attname FROM unnest(con.conkey) WITH ORDINALITY k(attnum, ord) JOIN pg_attribute a ON a.attrelid=con.conrelid AND a.attnum=k.attnum ORDER BY k.ord) AS columns, target_ns.nspname AS referenced_schema, target.relname AS referenced_relation, ARRAY(SELECT a.attname FROM unnest(con.confkey) WITH ORDINALITY k(attnum, ord) JOIN pg_attribute a ON a.attrelid=con.confrelid AND a.attnum=k.attnum ORDER BY k.ord) AS referenced_columns, obj_description(con.oid, 'pg_constraint') AS comment FROM pg_constraint con JOIN pg_class c ON c.oid=con.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace LEFT JOIN pg_class target ON target.oid=con.confrelid LEFT JOIN pg_namespace target_ns ON target_ns.oid=target.relnamespace WHERE con.conrelid=$1::oid AND con.oid=$2::oid AND n.nspname=$3") .bind(relation_oid).bind(constraint_oid).bind(schema).fetch_optional(&mut *connection).await.map_err(sql_error)?.ok_or_else(|| DatabaseError::configuration("constraint catalog entry was not found"))?;
+        let current: String = row.try_get("database").map_err(decode_error)?;
+        if current != *database || request.target.database != current {
+            return Err(DatabaseError::configuration(
+                "constraint target database does not match object ID",
+            ));
+        }
+        let code: String = row.try_get("kind").map_err(decode_error)?;
+        let expected_kind = match request.object.kind {
+            CatalogKind::PrimaryKey => "p",
+            CatalogKind::UniqueConstraint => "u",
+            CatalogKind::ForeignKey => "f",
+            CatalogKind::CheckConstraint => "c",
+            _ => {
+                return Err(DatabaseError::configuration(
+                    "constraint request has invalid kind",
+                ));
+            }
+        };
+        if code != expected_kind {
+            return Err(DatabaseError::configuration(
+                "constraint object kind is stale",
+            ));
+        }
+        let columns: Vec<String> = row.try_get("columns").map_err(decode_error)?;
+        let fk_options = sqlx::query("SELECT con.confmatchtype::text AS match_type, con.confupdtype::text AS update_action, con.confdeltype::text AS delete_action FROM pg_constraint con WHERE con.conrelid=$1::oid AND con.oid=$2::oid")
+            .bind(relation_oid)
+            .bind(constraint_oid)
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(sql_error)?;
+        let kind = match code.as_str() {
+            "p" => ConstraintDefinitionKind::PrimaryKey { columns },
+            "u" => ConstraintDefinitionKind::Unique { columns },
+            "f" => ConstraintDefinitionKind::ForeignKey {
+                columns,
+                referenced_schema: row.try_get("referenced_schema").map_err(decode_error)?,
+                referenced_relation: row.try_get("referenced_relation").map_err(decode_error)?,
+                referenced_columns: row.try_get("referenced_columns").map_err(decode_error)?,
+                match_type: pg_fk_match(fk_options.try_get("match_type").map_err(decode_error)?),
+                on_update: pg_fk_action(fk_options.try_get("update_action").map_err(decode_error)?),
+                on_delete: pg_fk_action(fk_options.try_get("delete_action").map_err(decode_error)?),
+            },
+            "c" => ConstraintDefinitionKind::Check {
+                expression: row.try_get("check_expression").map_err(decode_error)?,
+                no_inherit: row.try_get("no_inherit").map_err(decode_error)?,
+            },
+            _ => return Err(catalog_internal("unexpected PostgreSQL constraint type")),
+        };
+        let name: String = row.try_get("name").map_err(decode_error)?;
+        Ok(CatalogObjectDefinition::Constraint(ConstraintDefinition {
+            database: current,
+            schema: schema.clone(),
+            relation: relation.clone(),
+            relation_kind: CatalogKind::Table,
+            name,
+            kind,
+            deferrable: row.try_get("deferrable").map_err(decode_error)?,
+            initially_deferred: row.try_get("initially_deferred").map_err(decode_error)?,
+            validated: row.try_get("validated").map_err(decode_error)?,
+            comment: OptionalMetadata::Supported(row.try_get("comment").map_err(decode_error)?),
+            baseline_fingerprint: format!(
+                "sha256:{:x}",
+                Sha256::digest(
+                    format!("{database}.{schema}.{relation}.{constraint_oid}").as_bytes()
+                )
+            ),
+        }))
+    }
+
+    async fn load_schema_definition_snapshot(
+        &self,
+        connection: &mut PgConnection,
+        request: &CatalogObjectDefinitionRequest,
+    ) -> Result<CatalogObjectDefinition, DatabaseError> {
+        let [database, schema] = request.object.native_path.as_slice() else {
+            return Err(DatabaseError::configuration(
+                "schema object ID has invalid shape",
+            ));
+        };
+        let row = sqlx::query(
+            "SELECT current_database() AS database, n.nspname AS name, r.rolname AS owner, obj_description(n.oid, 'pg_namespace') AS comment FROM pg_namespace n JOIN pg_roles r ON r.oid = n.nspowner WHERE n.nspname = $1 AND n.nspname <> 'information_schema' AND n.nspname NOT LIKE 'pg\\_%' ESCAPE '\\'"
+        ).bind(schema).fetch_optional(&mut *connection).await.map_err(sql_error)?;
+        let Some(row) = row else {
+            return Err(DatabaseError::configuration(
+                "schema catalog entry was not found",
+            ));
+        };
+        let current: String = row.try_get("database").map_err(decode_error)?;
+        if current != *database || request.target.database != current {
+            return Err(DatabaseError::configuration(
+                "schema target database does not match object ID",
+            ));
+        }
+        let name: String = row.try_get("name").map_err(decode_error)?;
+        let owner: String = row.try_get("owner").map_err(decode_error)?;
+        let comment: OptionalMetadata<String> =
+            OptionalMetadata::Supported(row.try_get("comment").map_err(decode_error)?);
+        let mut hasher = Sha256::new();
+        hasher.update(b"postgres-schema-definition\0");
+        for value in [&current, &name, &owner] {
+            hasher.update((value.len() as u64).to_be_bytes());
+            hasher.update(value.as_bytes());
+        }
+        match &comment {
+            OptionalMetadata::Supported(Some(value)) => {
+                hasher.update([1]);
+                hasher.update((value.len() as u64).to_be_bytes());
+                hasher.update(value.as_bytes());
+            }
+            OptionalMetadata::Supported(None) => hasher.update([0]),
+            OptionalMetadata::Unsupported => hasher.update([2]),
+        }
+        Ok(CatalogObjectDefinition::Schema(SchemaDefinition {
+            database: current,
+            name,
+            owner,
+            comment,
+            baseline_fingerprint: format!("sha256:{:x}", hasher.finalize()),
+        }))
+    }
+
+    async fn load_view_definition_snapshot(
+        &self,
+        connection: &mut PgConnection,
+        request: &CatalogObjectDefinitionRequest,
+    ) -> Result<CatalogObjectDefinition, DatabaseError> {
+        let [database, schema, name, oid] = request.object.native_path.as_slice() else {
+            return Err(DatabaseError::configuration(
+                "view object ID has invalid shape",
+            ));
+        };
+        let row = sqlx::query("SELECT current_database() AS database, c.oid::int8 AS oid, n.nspname AS schema, c.relname AS name, r.rolname AS owner, pg_get_viewdef(c.oid, true) AS definition, obj_description(c.oid, 'pg_class') AS comment, c.reloptions, v.check_option FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_roles r ON r.oid=c.relowner JOIN information_schema.views v ON v.table_schema=n.nspname AND v.table_name=c.relname WHERE c.oid=$1::oid AND c.relkind='v' AND n.nspname=$2")
+            .bind(oid).bind(schema).fetch_optional(&mut *connection).await.map_err(sql_error)?
+            .ok_or_else(|| DatabaseError::configuration("view catalog entry was not found"))?;
+        let current: String = row.try_get("database").map_err(decode_error)?;
+        if current != *database || request.target.database != current {
+            return Err(DatabaseError::configuration(
+                "view target database does not match object ID",
+            ));
+        }
+        let definition: String = row.try_get("definition").map_err(decode_error)?;
+        let options: Option<Vec<String>> = row.try_get("reloptions").map_err(decode_error)?;
+        let option = |prefix: &str| {
+            options
+                .as_ref()
+                .and_then(|values| values.iter().find_map(|v| v.strip_prefix(prefix)))
+                .map(|v| v.eq_ignore_ascii_case("true"))
+        };
+        let output_columns = sqlx::query_scalar::<_, String>("SELECT a.attname FROM pg_attribute a WHERE a.attrelid=$1::oid AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum").bind(oid).fetch_all(&mut *connection).await.map_err(sql_error)?;
+        let mut hasher = Sha256::new();
+        hasher.update(
+            format!(
+                "{database}\0{schema}\0{name}\0{definition}\0{:?}",
+                output_columns
+            )
+            .as_bytes(),
+        );
+        Ok(CatalogObjectDefinition::View(ViewDefinition {
+            database: current,
+            schema: schema.clone(),
+            name: name.clone(),
+            owner: row.try_get("owner").map_err(decode_error)?,
+            comment: OptionalMetadata::Supported(row.try_get("comment").map_err(decode_error)?),
+            query: definition,
+            output_columns,
+            security_barrier: if self.server_version_num >= 90_200 {
+                ViewOption::available(option("security_barrier="))
+            } else {
+                ViewOption::unavailable("security_barrier requires PostgreSQL 9.2 or newer")
+            },
+            security_invoker: if self.server_version_num >= 150_000 {
+                ViewOption::available(option("security_invoker="))
+            } else {
+                ViewOption::unavailable("security_invoker requires PostgreSQL 15 or newer")
+            },
+            check_option: if self.server_version_num >= 90_400 {
+                ViewOption::available(row.try_get("check_option").map_err(decode_error)?)
+            } else {
+                ViewOption::unavailable("view check options require PostgreSQL 9.4 or newer")
+            },
+            baseline_fingerprint: format!("sha256:{:x}", hasher.finalize()),
+        }))
+    }
+
+    async fn load_materialized_view_definition_snapshot(
+        &self,
+        connection: &mut PgConnection,
+        request: &CatalogObjectDefinitionRequest,
+    ) -> Result<CatalogObjectDefinition, DatabaseError> {
+        let [database, schema, name, oid] = request.object.native_path.as_slice() else {
+            return Err(DatabaseError::configuration(
+                "materialized view object ID has invalid shape",
+            ));
+        };
+        let row = sqlx::query("SELECT current_database() AS database, c.oid::int8 AS oid, n.nspname AS schema, c.relname AS name, r.rolname AS owner, pg_get_viewdef(c.oid, true) AS definition, obj_description(c.oid, 'pg_class') AS comment, c.reloptions, c.relispopulated, ts.spcname AS tablespace FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_roles r ON r.oid=c.relowner LEFT JOIN pg_tablespace ts ON ts.oid=c.reltablespace WHERE c.oid=$1::oid AND c.relkind='m' AND n.nspname=$2")
+            .bind(oid).bind(schema).fetch_optional(&mut *connection).await.map_err(sql_error)?
+            .ok_or_else(|| DatabaseError::configuration("materialized view catalog entry was not found"))?;
+        let current: String = row.try_get("database").map_err(decode_error)?;
+        if current != *database || request.target.database != current {
+            return Err(DatabaseError::configuration(
+                "materialized view target database does not match object ID",
+            ));
+        }
+        let definition: String = row.try_get("definition").map_err(decode_error)?;
+        let populated: bool = row.try_get("relispopulated").map_err(decode_error)?;
+        let tablespace: Option<String> = row.try_get("tablespace").map_err(decode_error)?;
+        let mut hasher = Sha256::new();
+        hasher.update(
+            format!("{database}\0{schema}\0{name}\0{definition}\0{tablespace:?}\0{populated}")
+                .as_bytes(),
+        );
+        Ok(CatalogObjectDefinition::MaterializedView(
+            MaterializedViewDefinition {
+                database: current,
+                schema: schema.clone(),
+                name: name.clone(),
+                owner: row.try_get("owner").map_err(decode_error)?,
+                comment: OptionalMetadata::Supported(row.try_get("comment").map_err(decode_error)?),
+                query: definition,
+                tablespace: OptionalMetadata::Supported(tablespace),
+                populated,
+                baseline_fingerprint: format!("sha256:{:x}", hasher.finalize()),
+            },
+        ))
     }
 
     pub async fn search_catalog(
@@ -2760,6 +5776,10 @@ fn relation_child_id(relation: &CatalogId, kind: CatalogKind, native_identity: &
     CatalogId::new(relation.profile_id(), kind, path)
 }
 
+fn qualified_index_name(schema: &str, name: &str) -> String {
+    format!("{}.{}", quote_identifier(schema), quote_identifier(name))
+}
+
 fn add_memberships(
     memberships: &mut HashMap<String, Vec<ConstraintMembership>>,
     columns: &[String],
@@ -2899,6 +5919,63 @@ pub fn quote_identifier(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
 
+fn constraint_columns(kind: &ConstraintDefinitionKind) -> String {
+    match kind {
+        ConstraintDefinitionKind::PrimaryKey { columns }
+        | ConstraintDefinitionKind::Unique { columns }
+        | ConstraintDefinitionKind::ForeignKey { columns, .. } => columns.join(", "),
+        ConstraintDefinitionKind::Check { .. } => String::new(),
+    }
+}
+
+fn pg_fk_match(value: String) -> String {
+    match value.as_str() {
+        "f" => "FULL",
+        "p" => "PARTIAL",
+        _ => "SIMPLE",
+    }
+    .into()
+}
+
+fn pg_fk_action(value: String) -> String {
+    match value.as_str() {
+        "c" => "CASCADE",
+        "r" => "RESTRICT",
+        "n" => "SET NULL",
+        "d" => "SET DEFAULT",
+        _ => "NO ACTION",
+    }
+    .into()
+}
+
+fn column_definition_fragment(
+    column: &crate::model::catalog_editor::ColumnDraft,
+) -> Result<String, CatalogMutationError> {
+    let name = column.name.value().trim();
+    let native_type = column.native_type.value().trim();
+    if name.is_empty() || native_type.is_empty() {
+        return Err(CatalogMutationError::InvalidDraft {
+            reason: "column name and type are required".into(),
+        });
+    }
+    if !column.generated_expression.value().trim().is_empty() {
+        return Err(CatalogMutationError::UnsupportedOperation {
+            object_type: CatalogObjectType::Catalog(CatalogKind::Column),
+        });
+    }
+    let mut result = format!("{} {}", quote_identifier(name), native_type);
+    if column.identity {
+        result.push_str(" GENERATED BY DEFAULT AS IDENTITY");
+    } else if !column.default_expression.value().trim().is_empty() {
+        result.push_str(" DEFAULT ");
+        result.push_str(column.default_expression.value().trim());
+    }
+    if !column.nullable {
+        result.push_str(" NOT NULL");
+    }
+    Ok(result)
+}
+
 fn postgres_qualified_name(
     entry: &CatalogEntry,
     kind: CatalogKind,
@@ -2966,6 +6043,59 @@ fn relation_name_for_drop(entry: &CatalogEntry) -> Result<String, CatalogDropErr
 
 pub fn quote_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
+}
+
+fn split_view_columns(value: &str) -> Result<Vec<String>, CatalogMutationError> {
+    let columns = value
+        .split(',')
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    Ok(columns)
+}
+
+fn view_options_clause(
+    draft: &crate::model::catalog_editor::ViewDraft,
+    version: i32,
+) -> Result<(String, String), CatalogMutationError> {
+    if draft.security_barrier.value.is_some() && version < 90_200
+        || draft.security_invoker.value.is_some() && version < 150_000
+        || draft.check_option.value.is_some() && version < 90_400
+    {
+        return Err(CatalogMutationError::UnsupportedOperation {
+            object_type: CatalogObjectType::Catalog(CatalogKind::View),
+        });
+    }
+    let mut options = Vec::new();
+    if let Some(value) = draft.security_barrier.value {
+        options.push(format!(
+            "security_barrier={}",
+            if value { "true" } else { "false" }
+        ));
+    }
+    if let Some(value) = draft.security_invoker.value {
+        options.push(format!(
+            "security_invoker={}",
+            if value { "true" } else { "false" }
+        ));
+    }
+    let mut check_suffix = String::new();
+    if let Some(value) = draft.check_option.value.as_deref() {
+        if !matches!(value, "LOCAL" | "CASCADED" | "NONE") {
+            return Err(CatalogMutationError::InvalidDraft {
+                reason: "check option must be LOCAL, CASCADED, or NONE".into(),
+            });
+        }
+        if value != "NONE" {
+            check_suffix = format!(" {value} CHECK OPTION");
+        }
+    }
+    if options.is_empty() {
+        Ok((String::new(), check_suffix))
+    } else {
+        Ok((format!(" WITH ({})", options.join(", ")), check_suffix))
+    }
 }
 
 fn pg_ssl_mode(mode: SslMode) -> PgSslMode {

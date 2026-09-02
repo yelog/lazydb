@@ -1,5 +1,6 @@
 pub mod catalog;
 pub mod catalog_drop;
+pub mod catalog_mutation;
 pub(crate) mod ddl;
 pub mod monitor;
 pub mod mutation;
@@ -26,6 +27,8 @@ use self::{
         CatalogSearchPage, CatalogSearchRequest, CatalogTarget, CatalogValidationError,
         RelationDdl,
     },
+    catalog_mutation::CatalogMutationCapabilities,
+    catalog_mutation::{CatalogObjectDefinition, CatalogObjectDefinitionRequest},
     mysql::MySqlAdapter,
     postgres::PostgresAdapter,
     query::QueryOutcome,
@@ -227,6 +230,14 @@ impl DatabaseConnection {
         }
     }
 
+    pub fn catalog_mutation_capabilities(&self) -> CatalogMutationCapabilities {
+        match self {
+            Self::Postgres(adapter) => adapter.mutation_capabilities(),
+            Self::MySql(_) => MySqlAdapter::catalog_mutation_capabilities(),
+            Self::Sqlite(_) => SqliteAdapter::catalog_mutation_capabilities(),
+        }
+    }
+
     pub fn plan_catalog_drop(
         &self,
         request: catalog_drop::CatalogDropRequest,
@@ -236,6 +247,36 @@ impl DatabaseConnection {
             Self::Postgres(_) => PostgresAdapter::plan_catalog_drop(request, entry),
             Self::MySql(_) => MySqlAdapter::plan_catalog_drop(request, entry),
             Self::Sqlite(_) => SqliteAdapter::plan_catalog_drop(request, entry),
+        }
+    }
+
+    pub fn plan_catalog_mutation(
+        &self,
+        request: catalog_mutation::CatalogMutationRequest,
+        draft: crate::model::catalog_editor::CatalogDraft,
+        baseline: Option<catalog_mutation::CatalogObjectDefinition>,
+    ) -> Result<catalog_mutation::CatalogMutationPlan, catalog_mutation::CatalogMutationError> {
+        match self {
+            Self::Postgres(adapter) => {
+                adapter.plan_catalog_mutation_for_adapter(request, draft, baseline)
+            }
+            Self::MySql(_) | Self::Sqlite(_) => Err(
+                catalog_mutation::CatalogMutationError::UnsupportedOperation {
+                    object_type: request.object_type,
+                },
+            ),
+        }
+    }
+
+    pub async fn execute_catalog_mutation(
+        &self,
+        plan: &catalog_mutation::CatalogMutationPlan,
+    ) -> Result<QueryOutcome, DatabaseError> {
+        match self {
+            Self::Postgres(adapter) => adapter.execute_catalog_mutation(plan).await,
+            Self::MySql(_) | Self::Sqlite(_) => Err(DatabaseError::configuration(
+                "catalog mutation is not supported for this database",
+            )),
         }
     }
 
@@ -272,6 +313,18 @@ impl DatabaseConnection {
             Self::Postgres(adapter) => adapter.load_catalog_page(request).await,
             Self::MySql(adapter) => adapter.load_catalog_page(request).await,
             Self::Sqlite(adapter) => adapter.load_catalog_page(request).await,
+        }
+    }
+
+    pub async fn load_catalog_object_definition(
+        &self,
+        request: &CatalogObjectDefinitionRequest,
+    ) -> Result<CatalogObjectDefinition, DatabaseError> {
+        match self {
+            Self::Postgres(adapter) => adapter.load_catalog_object_definition(request).await,
+            Self::MySql(_) | Self::Sqlite(_) => Err(DatabaseError::configuration(
+                "catalog object definition loading is not supported for this database",
+            )),
         }
     }
 

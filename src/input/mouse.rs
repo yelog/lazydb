@@ -57,7 +57,7 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                 ui.clear_click_tracker();
             }
             if let Some(overlay) = &app.overlay
-                && (overlay != &Overlay::ProfileManager
+                && (overlay != &Overlay::ProfileManager && overlay != &Overlay::CatalogEditor
                     || !matches!(
                         target,
                         HitTarget::ProfileField(_)
@@ -146,9 +146,10 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                 return None;
             }
             match ui.target_at(event.column, event.row)?.clone() {
-                HitTarget::ExplorerRow(crate::model::explorer::ExplorerNodeId::Profile(
-                    profile_id,
-                )) => Some(Action::ProfileStartEdit { profile_id }),
+                HitTarget::ExplorerRow(crate::model::explorer::ExplorerNodeId::Profile(_))
+                | HitTarget::ExplorerRow(crate::model::explorer::ExplorerNodeId::Catalog(_)) => {
+                    Some(Action::OpenCatalogEdit)
+                }
                 _ => None,
             }
         }

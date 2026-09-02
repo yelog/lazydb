@@ -15,6 +15,11 @@ Oracle MySQL, and SQLite.
 
 - **Database Explorer:** Browse databases, schemas, tables, views, indexes,
   foreign keys, triggers, routines, and types where supported by the driver.
+- **PostgreSQL catalog editor:** Capability-aware Explorer `a` creates supported
+  children and `e` edits directly selected objects. The implemented scope is
+  Schema, Table, Column, Index, Constraints, View, Materialized View, Sequence,
+  Database, and Role. The Role node is not present in Explorer, so existing
+  roles cannot currently be selected for editing.
 - **SQL workspace:** Work with multiple console tabs, Vim-style Normal/Insert
   modes, search, formatting, syntax highlighting, and catalog-aware completion.
 - **Safe execution:** Run the current statement or full buffer with scoped
@@ -41,7 +46,7 @@ Oracle MySQL, and SQLite.
 
 | Database | Requirement | Catalog support |
 | --- | --- | --- |
-| PostgreSQL | 12 or newer | Databases, schemas, tables, views, materialized views, sequences, functions, procedures, types |
+| PostgreSQL | 12 or newer | Databases, schemas, tables, columns, indexes, constraints, views, materialized views, sequences, functions, procedures, types; catalog editing also covers databases and roles |
 | Oracle MySQL | 8.0.13 or newer | Databases, tables, views, functions, procedures, triggers |
 | SQLite | Native SQLite schema support | Tables, views, indexes, foreign keys, and triggers |
 

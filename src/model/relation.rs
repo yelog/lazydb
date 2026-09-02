@@ -1,3 +1,5 @@
+#![allow(clippy::get_first)]
+
 use serde::{Deserialize, Serialize};
 use unicode_width::UnicodeWidthStr;
 use uuid::Uuid;
@@ -181,9 +183,39 @@ pub struct RelationTab {
     pub transaction_state: TransactionState,
     pub transaction_generation: u64,
     pub transaction_snapshot: Option<RelationEditSession>,
+    pub stale_native_identity: bool,
 }
 
 impl RelationTab {
+    pub fn invalidated_by_catalog_mutation(
+        &self,
+        impact: &crate::db::catalog_mutation::CatalogMutationImpact,
+    ) -> bool {
+        if self.descriptor.key.profile_id != impact.old_object_id.profile_id() {
+            return false;
+        }
+        if impact.owning_relation_id.as_ref() == Some(&self.descriptor.key.object_id)
+            || impact.old_object_id == self.descriptor.key.object_id
+        {
+            return true;
+        }
+        let name = &self.descriptor.qualified_name;
+        impact.namespace.schema.as_ref().is_some_and(|schema| {
+            schema.native_path.get(0) == name.database.as_ref()
+                && schema.native_path.get(1) == name.schema.as_ref()
+        }) || impact.namespace.schema.is_none()
+            && impact
+                .namespace
+                .database
+                .as_ref()
+                .is_some_and(|database| database.native_path.first() == name.database.as_ref())
+    }
+
+    pub fn invalidate_catalog_mutation(&mut self, native_identity_changed: bool) {
+        self.data = mutation_stale(std::mem::replace(&mut self.data, RelationLoad::Empty));
+        self.ddl = mutation_stale(std::mem::replace(&mut self.ddl, RelationLoad::Empty));
+        self.stale_native_identity |= native_identity_changed;
+    }
     pub fn provenance(
         &self,
         view: RelationView,
@@ -224,6 +256,20 @@ impl RelationTab {
         } else {
             Some(RelationSnapshotProvenance::OfflineSnapshot)
         }
+    }
+}
+
+fn mutation_stale<T>(load: RelationLoad<T>) -> RelationLoad<T> {
+    let previous = match load {
+        RelationLoad::Ready(snapshot) => Some(snapshot),
+        RelationLoad::Loading { previous, .. }
+        | RelationLoad::Failed { previous, .. }
+        | RelationLoad::Cancelled { previous } => previous,
+        RelationLoad::Empty => None,
+    };
+    RelationLoad::Failed {
+        message: "Catalog mutation invalidated this snapshot".into(),
+        previous,
     }
 }
 
@@ -281,6 +327,7 @@ impl RelationTab {
             transaction_state: TransactionState::Idle,
             transaction_generation: 0,
             transaction_snapshot: None,
+            stale_native_identity: false,
         }
     }
 

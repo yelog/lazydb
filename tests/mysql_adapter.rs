@@ -77,6 +77,14 @@ fn mysql_catalog_capabilities_are_truthful_before_lazy_pages() {
 }
 
 #[test]
+fn mysql_mutation_capabilities_are_empty() {
+    assert_eq!(
+        MySqlAdapter::catalog_mutation_capabilities(),
+        lazydb::db::catalog_mutation::CatalogMutationCapabilities::default()
+    );
+}
+
+#[test]
 fn quotes_mysql_identifiers_and_uses_information_schema() {
     assert_eq!(mysql::quote_identifier("odd`name"), "`odd``name`");
     assert!(mysql::CATALOG_TABLES_SQL.contains("information_schema.tables"));
