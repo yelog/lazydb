@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use directories::ProjectDirs;
+use directories::{BaseDirs, ProjectDirs};
 use thiserror::Error;
 
 #[derive(Clone, Debug)]
@@ -19,8 +19,9 @@ pub enum PathError {
 impl AppPaths {
     pub fn discover() -> Result<Self, PathError> {
         let dirs = ProjectDirs::from("dev", "lazydb", "lazydb").ok_or(PathError::Unavailable)?;
+        let base_dirs = BaseDirs::new().ok_or(PathError::Unavailable)?;
         Ok(Self {
-            config_dir: dirs.config_dir().to_owned(),
+            config_dir: config_dir(&base_dirs),
             data_dir: dirs.data_dir().to_owned(),
             state_dir: dirs
                 .state_dir()
@@ -51,5 +52,31 @@ impl AppPaths {
 
     pub fn workspace_sql_dir(&self) -> PathBuf {
         self.state_dir.join("sql")
+    }
+}
+
+fn config_dir(base_dirs: &BaseDirs) -> PathBuf {
+    if cfg!(target_os = "macos") {
+        base_dirs.home_dir().join("lazydb")
+    } else {
+        base_dirs.config_dir().join("lazydb")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::config_dir;
+    use directories::BaseDirs;
+
+    #[test]
+    fn config_directory_uses_cli_friendly_platform_path() {
+        let base_dirs = BaseDirs::new().expect("test environment has a home directory");
+        let path = config_dir(&base_dirs);
+
+        if cfg!(target_os = "macos") {
+            assert_eq!(path, base_dirs.home_dir().join("lazydb"));
+        } else {
+            assert_eq!(path, base_dirs.config_dir().join("lazydb"));
+        }
     }
 }
