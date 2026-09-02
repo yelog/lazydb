@@ -17,7 +17,9 @@ use lazydb::{
     model::{
         data_query::{DataQueryCandidate, DataQueryCompletion, DataQueryInput},
         execution_target::ExecutionTarget,
-        explorer::{CatalogGroupState, ExplorerLoadState, ExplorerNodeId, ExplorerOwnerId},
+        explorer::{
+            CatalogGroupState, ExplorerLoadState, ExplorerNodeId, ExplorerOwnerId, ProfilePlacement,
+        },
         profile_manager::{ProfileField, ProfileManagerPage, ProfileOperation},
         relation::RelationTab,
         tab::WorkspaceTab,
@@ -32,7 +34,11 @@ use lazydb::{
         icons::{IconMode, IconSet},
     },
 };
-use ratatui::{Terminal, backend::TestBackend, style::Color};
+use ratatui::{
+    Terminal,
+    backend::TestBackend,
+    style::{Color, Modifier},
+};
 
 fn fixture() -> App {
     let profile = import_connection_url("sqlite::memory:", Some("orbital-lab"))
@@ -380,6 +386,34 @@ fn render_with_icons(app: &App, width: u16, height: u16, icons: IconSet) -> (Str
         output.push('\n');
     }
     (output, state)
+}
+
+#[test]
+fn other_profiles_group_is_rendered_as_muted_secondary_content_without_an_icon() {
+    let current = import_connection_url("sqlite::memory:", Some("current"))
+        .unwrap()
+        .profile;
+    let other = import_connection_url("sqlite::memory:", Some("other"))
+        .unwrap()
+        .profile;
+    let other_id = other.id;
+    let mut app = App::new(vec![current, other]);
+    app.explorer
+        .normalized
+        .profiles
+        .get_mut(&other_id)
+        .unwrap()
+        .placement = ProfilePlacement::OtherProject;
+    let (buffer, _) = render_buffer_with_icons(&app, 100, 24, IconSet::new(IconMode::Ascii));
+    let (x, y) = find_text_cell(&buffer, "others").expect("others group");
+    let line = (0..100)
+        .map(|column| buffer[(column, y)].symbol())
+        .collect::<String>();
+
+    assert!(!line.contains("OTHERS"));
+    assert!(!line.contains("· others"));
+    assert!(buffer[(x, y)].modifier.contains(Modifier::DIM));
+    assert!(!buffer[(x, y)].modifier.contains(Modifier::BOLD));
 }
 
 #[test]

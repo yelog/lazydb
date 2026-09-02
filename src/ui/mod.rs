@@ -1210,6 +1210,7 @@ fn explorer_list_item(
     theme: Theme,
     icons: icons::IconSet,
 ) -> ListItem<'static> {
+    let is_others = matches!(visible.id, crate::model::explorer::ExplorerNodeId::Others);
     let expanded = explorer_node_is_expanded(&visible.id, visible.connection_status, app);
     let marker = if visible.expandable {
         if expanded { "▾" } else { "▸" }
@@ -1228,7 +1229,16 @@ fn explorer_list_item(
         Style::new()
             .fg(theme.accent)
             .bg(theme.selection)
-            .add_modifier(Modifier::BOLD)
+            .add_modifier(if is_others {
+                Modifier::empty()
+            } else {
+                Modifier::BOLD
+            })
+    } else if is_others {
+        Style::new()
+            .fg(theme.muted)
+            .bg(theme.surface)
+            .add_modifier(Modifier::DIM)
     } else {
         Style::new().fg(theme.text).bg(theme.surface)
     };
@@ -1243,7 +1253,7 @@ fn explorer_list_item(
                 theme.surface
             }),
         ));
-    } else {
+    } else if !is_others {
         spans.push(Span::styled(
             format!("{} ", icon),
             Style::new()

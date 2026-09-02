@@ -9,7 +9,7 @@ use lazydb::{
         },
     },
     model::{
-        explorer::{ExplorerConnectionStatus, ExplorerNodeId},
+        explorer::{ExplorerConnectionStatus, ExplorerNodeId, ProfilePlacement},
         profile_manager::{
             CatalogDiscoveryState, CatalogScopeMode, DiscoveryFingerprint, ProfileDraft,
             ProfileField, ProfileManagerPage, ProfileOperation,
@@ -104,6 +104,35 @@ fn profile_root_actions_target_exact_uuid_and_activation_never_disconnects() {
             .normalized
             .expanded
             .contains(&ExplorerNodeId::Profile(first_id))
+    );
+}
+
+#[test]
+fn other_profiles_group_opens_with_toggle_and_enter_actions() {
+    let profile = sqlite_profile("other");
+    let profile_id = profile.id;
+    let mut app = App::new(vec![profile]);
+    app.explorer
+        .normalized
+        .profiles
+        .get_mut(&profile_id)
+        .unwrap()
+        .placement = ProfilePlacement::OtherProject;
+    app.explorer.normalized.selected = Some(ExplorerNodeId::Others);
+
+    assert!(app.update(Action::ExplorerToggle).is_empty());
+    assert!(
+        app.explorer
+            .normalized
+            .expanded
+            .contains(&ExplorerNodeId::Others)
+    );
+    assert!(app.update(Action::ExplorerOpenSelected).is_empty());
+    assert!(
+        !app.explorer
+            .normalized
+            .expanded
+            .contains(&ExplorerNodeId::Others)
     );
 }
 

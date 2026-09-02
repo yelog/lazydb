@@ -918,7 +918,7 @@ impl ExplorerState {
                         false,
                     ),
                     ExplorerNodeId::Others => (
-                        "OTHERS".to_owned(),
+                        "others".to_owned(),
                         Some({
                             let count = self
                                 .normalized
@@ -1044,7 +1044,10 @@ impl ExplorerState {
         };
         if !matches!(
             id,
-            ExplorerNodeId::Profile(_) | ExplorerNodeId::Catalog(_) | ExplorerNodeId::Group { .. }
+            ExplorerNodeId::Others
+                | ExplorerNodeId::Profile(_)
+                | ExplorerNodeId::Catalog(_)
+                | ExplorerNodeId::Group { .. }
         ) {
             return false;
         }

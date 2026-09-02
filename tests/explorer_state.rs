@@ -10,6 +10,7 @@ use lazydb::{
         ExplorerOwnerId, ExplorerScrollAmount, ExplorerTreeState, ProfilePlacement,
         ProfileProvenance, StatusRowKind,
     },
+    model::workspace::ExplorerState,
 };
 use uuid::Uuid;
 
@@ -70,6 +71,36 @@ fn other_profiles_are_hidden_under_a_collapsed_group() {
         ]
     );
     assert_eq!(explorer.visible().last().unwrap().depth, 1);
+}
+
+#[test]
+fn other_profiles_group_toggles_like_other_expandable_nodes() {
+    let other = profile_id(2);
+    let mut explorer = ExplorerState::default();
+    explorer.normalized.add_profile_with_placement(
+        other,
+        "other".into(),
+        lazydb::profile::DatabaseKind::Sqlite,
+        String::new(),
+        ProfileProvenance::Saved,
+        ProfilePlacement::OtherProject,
+    );
+    explorer.normalized.select(ExplorerNodeId::Others);
+
+    assert!(explorer.toggle_selected());
+    assert!(
+        explorer
+            .normalized
+            .expanded
+            .contains(&ExplorerNodeId::Others)
+    );
+    assert!(!explorer.toggle_selected());
+    assert!(
+        !explorer
+            .normalized
+            .expanded
+            .contains(&ExplorerNodeId::Others)
+    );
 }
 
 #[test]
