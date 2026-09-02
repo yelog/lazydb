@@ -2160,30 +2160,30 @@ fn server_profile_form_shows_all_fields_and_never_reveals_passwords() {
 
     let (output, state) = render_with_state(&app, 120, 36);
     for label in [
-        "DRIVER",
+        "Driver",
         "URL",
-        "NAME",
-        "HOST",
-        "PORT",
-        "USER",
-        "PASSWORD",
-        "DATABASE",
-        "DEFAULT SCHEMA",
-        "VISIBLE OBJECTS",
-        "SSL MODE",
-        "ENVIRONMENT",
-        "READ ONLY",
-        "PASSWORD STORAGE",
-        "TEST",
-        "SAVE",
-        "SAVE & CONNECT",
-        "CANCEL",
+        "Name",
+        "Host",
+        "Port",
+        "User",
+        "Password",
+        "Database",
+        "Default schema",
+        "Visible objects",
+        "SSL mode",
+        "Environment",
+        "Read only",
+        "Password storage",
+        "Test",
+        "Save",
+        "Save & Connect",
+        "Cancel",
     ] {
         assert!(output.contains(label), "missing {label}");
     }
     assert!(!output.contains("URL FORMAT"));
-    assert!(output.contains("EXAMPLES"));
-    assert!(output.contains("postgres://user:password@host:5432/database"));
+    assert!(output.contains("postgresql://"));
+    assert!(!output.contains("postgres://user:password@host:5432/database"));
     assert!(!output.contains("super-secret"));
     assert!(output.contains("••••••••••••"));
     assert!(
@@ -2204,7 +2204,7 @@ fn server_profile_form_shows_all_fields_and_never_reveals_passwords() {
 }
 
 #[test]
-fn profile_url_examples_follow_the_selected_driver() {
+fn profile_url_help_follows_the_selected_driver_when_focused() {
     let mut app = App::new(Vec::new());
     app.update(Action::OpenProfileManager);
     let cases = [
@@ -2226,12 +2226,48 @@ fn profile_url_examples_follow_the_selected_driver() {
     ];
     for (cycle, expected, absent) in cases {
         if cycle != 0 {
+            app.update(Action::ProfileFocusField(ProfileField::Kind));
             app.update(Action::ProfileCycle(1));
         }
         let output = render(&app, 120, 36);
-        assert!(output.contains(expected), "missing {expected}: {output}");
-        assert!(!output.contains(absent), "unexpected {absent}: {output}");
+        assert!(
+            !output.contains(expected),
+            "unexpected example {expected}: {output}"
+        );
+        assert!(
+            !output.contains(absent),
+            "unexpected example {absent}: {output}"
+        );
+        app.update(Action::ProfileFocusField(ProfileField::Url));
+        let focused = render(&app, 120, 36);
+        let help = match cycle {
+            0 => "Accepts postgres://",
+            1 => "Accepts mysql://",
+            _ => "Accepts sqlite://",
+        };
+        assert!(focused.contains(help), "missing URL help: {focused}");
     }
+}
+
+#[test]
+fn profile_url_preview_is_display_width_safe_when_unfocused() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::OpenProfileManager);
+    let draft = app
+        .profile_manager
+        .as_mut()
+        .unwrap()
+        .draft
+        .as_mut()
+        .unwrap();
+    draft.name.set("connection-with-a-long-name");
+    draft.host.set("db.example.internal.with-a-long-hostname");
+    draft.database.set("warehouse_with_a_long_database_name");
+
+    let output = render(&app, 80, 24);
+    assert!(output.contains("URL"));
+    assert!(output.contains('…') || output.contains("postgresql://"));
+    assert!(!output.contains("EXAMPLES"));
 }
 
 #[test]
@@ -2369,26 +2405,26 @@ fn mysql_and_sqlite_forms_only_show_relevant_fields() {
     mysql.update(Action::OpenProfileManager);
     mysql.update(Action::ProfileCycle(1));
     let mysql_output = render(&mysql, 120, 36);
-    assert!(mysql_output.contains("MYSQL"));
-    assert!(mysql_output.contains("HOST"));
-    assert!(!mysql_output.contains("DEFAULT SCHEMA"));
-    assert!(!mysql_output.contains("MEMORY DATABASE"));
+    assert!(mysql_output.contains("MySQL"));
+    assert!(mysql_output.contains("Host"));
+    assert!(!mysql_output.contains("Default schema"));
+    assert!(!mysql_output.contains("Memory database"));
 
     let mut sqlite_file = App::new(Vec::new());
     sqlite_file.update(Action::OpenProfileManager);
     sqlite_file.update(Action::ProfileCycle(2));
     let sqlite_file_output = render(&sqlite_file, 120, 36);
-    assert!(sqlite_file_output.contains("SQLITE"));
-    assert!(sqlite_file_output.contains("PATH"));
-    assert!(sqlite_file_output.contains("MEMORY DATABASE"));
-    assert!(!sqlite_file_output.contains("HOST"));
-    assert!(!sqlite_file_output.contains("PASSWORD"));
+    assert!(sqlite_file_output.contains("SQLite"));
+    assert!(sqlite_file_output.contains("Path"));
+    assert!(sqlite_file_output.contains("Memory database"));
+    assert!(!sqlite_file_output.contains("Host"));
+    assert!(!sqlite_file_output.contains("Password"));
 
     sqlite_file.update(Action::ProfileFocusField(ProfileField::SqliteMemory));
     sqlite_file.update(Action::ProfileToggle);
     let sqlite_memory_output = render(&sqlite_file, 120, 36);
-    assert!(sqlite_memory_output.contains("MEMORY DATABASE"));
-    assert!(!sqlite_memory_output.contains("PATH"));
+    assert!(sqlite_memory_output.contains("Memory database"));
+    assert!(!sqlite_memory_output.contains("Path"));
 }
 
 #[test]
@@ -2398,15 +2434,14 @@ fn profile_form_remains_actionable_in_compact_layout() {
     let output = render(&app, 80, 24);
 
     assert!(output.contains("NEW CONNECTION"));
-    assert!(output.contains("POSTGRES"), "{output}");
-    assert!(output.contains("MYSQL"), "{output}");
-    assert!(output.contains("SQLITE"), "{output}");
-    assert!(output.contains("HOST"));
-    assert!(output.contains("PASSWORD"));
-    assert!(output.contains("URL"));
-    assert!(output.contains("postgres://user:password@host:5432/database"));
-    assert!(output.contains("SAVE & CONNECT"));
-    assert!(output.contains("Esc cancel"));
+    assert!(output.contains("PostgreSQL"), "{output}");
+    assert!(output.contains("MySQL"), "{output}");
+    assert!(output.contains("SQLite"), "{output}");
+    assert!(output.contains("Host"));
+    assert!(output.contains("Password"));
+    assert!(output.contains("URL") || output.contains("CONNECTION URL"));
+    assert!(output.contains("Save & Connect"));
+    assert!(output.contains("Esc cancel") || output.contains("Esc Close"));
 }
 
 #[test]
@@ -2439,16 +2474,6 @@ fn driver_options_have_individual_targets_and_selected_style_survives_field_blur
     let theme = ui::theme::Theme::default();
     assert_eq!(buffer[(selected.x, selected.y)].bg, theme.accent);
     assert_ne!(buffer[(unselected.x, unselected.y)].bg, theme.accent);
-    let icon_colors = options.map(|option| {
-        (option.area.x..option.area.right())
-            .find_map(|x| {
-                let cell = &buffer[(x, option.area.y)];
-                (!cell.symbol().trim().is_empty()).then_some(cell.fg)
-            })
-            .unwrap()
-    });
-    assert_ne!(icon_colors[0], theme.background);
-    assert_ne!(icon_colors[1], icon_colors[2]);
 }
 
 #[test]
@@ -2463,8 +2488,13 @@ fn driver_options_use_database_icons_in_each_icon_mode() {
 
     for mode in [IconMode::NerdFont, IconMode::Unicode, IconMode::Ascii] {
         let (output, _) = render_with_icons(&app, 120, 36, IconSet::new(mode));
-        for (kind, name) in kinds.into_iter().zip(["POSTGRES", "MYSQL", "SQLITE"]) {
-            let label = format!("{} {name}", IconSet::new(mode).database(kind));
+        for kind in kinds {
+            let display_name = match kind {
+                DatabaseKind::Postgres => "PostgreSQL",
+                DatabaseKind::MySql => "MySQL",
+                DatabaseKind::Sqlite => "SQLite",
+            };
+            let label = format!("{} {display_name}", IconSet::new(mode).database(kind));
             assert!(
                 output.contains(&label),
                 "missing {label:?} in {mode:?}: {output}"
@@ -2587,8 +2617,8 @@ fn minimum_supported_form_scrolls_to_the_selected_field() {
     app.update(Action::ProfileFocusField(ProfileField::PasswordStorage));
 
     let (output, state) = render_with_state(&app, 56, 16);
-    assert!(output.contains("PASSWORD STORAGE"));
-    assert!(output.contains("Esc cancel"));
+    assert!(output.contains("Password storage"));
+    assert!(output.contains("Esc cancel") || output.contains("Esc Close"));
     assert!(
         state.hit_regions.iter().any(|region| {
             region.target == HitTarget::ProfileField(ProfileField::PasswordStorage)

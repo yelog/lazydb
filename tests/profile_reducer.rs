@@ -771,7 +771,7 @@ fn profile_test_discovery_failure_is_success_with_a_warning_and_preserves_scope(
     let manager = app.profile_manager.as_ref().unwrap();
     assert_eq!(manager.operation, None);
     let message = manager.message.as_deref().unwrap();
-    assert!(message.contains("Connection succeeded"));
+    assert!(message.contains("Connection verified"));
     assert!(message.contains("catalog permission denied"));
     let draft = manager.draft.as_ref().unwrap();
     assert_eq!(draft.catalog_scope, scope);

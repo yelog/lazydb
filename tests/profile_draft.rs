@@ -702,15 +702,15 @@ fn visible_fields_follow_the_selected_driver_and_sqlite_mode() {
             ProfileField::Name,
             ProfileField::Host,
             ProfileField::Port,
-            ProfileField::User,
-            ProfileField::Password,
             ProfileField::Database,
             ProfileField::Schema,
             ProfileField::VisibleObjects,
+            ProfileField::User,
+            ProfileField::Password,
+            ProfileField::PasswordStorage,
             ProfileField::SslMode,
             ProfileField::Environment,
             ProfileField::ReadOnly,
-            ProfileField::PasswordStorage,
             ProfileField::Url,
             ProfileField::Test,
             ProfileField::Save,
@@ -737,7 +737,7 @@ fn visible_field_navigation_reaches_url_before_actions_without_url_format() {
     assert!(!fields.contains(&ProfileField::UrlFormat));
     assert_eq!(fields[fields.len() - 5], ProfileField::Url);
 
-    state.selected_field = ProfileField::PasswordStorage;
+    state.selected_field = ProfileField::ReadOnly;
     state.move_field(1);
     assert_eq!(state.selected_field, ProfileField::Url);
     state.move_field(1);

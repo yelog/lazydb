@@ -2445,10 +2445,10 @@ impl App {
                         "Connection test result ignored because the draft changed".into()
                     } else if let Some(warning) = warning {
                         format!(
-                            "Connection succeeded: {version} ({database}); catalog discovery warning: {warning}"
+                            "Connection verified: {version} ({database}); catalog discovery warning: {warning}"
                         )
                     } else {
-                        format!("Connection succeeded: {version} ({database})")
+                        format!("Connection verified: {version} ({database})")
                     });
                 }
                 Vec::new()
