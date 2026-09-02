@@ -53,6 +53,11 @@ read-only database role for read-only profiles. `--write-policy deny` is the
 default; `non-production` permits writable development/staging profiles; `all`
 is required before a production write can be attempted.
 
+Approving an MCP tool call only permits OpenCode to send the request. It does
+not override the LazyDB process policy. If the MCP command contains
+`--write-policy deny`, every `execute_change` and `execute_file` call is
+rejected after client approval and before database connection.
+
 ## Codex
 
 Create `.codex/config.toml`:
@@ -95,6 +100,33 @@ Create or merge the project `opencode.json`:
 }
 ```
 
+For an explicitly writable development or staging session, use this variant
+instead of the secure read-only example above:
+
+```jsonc
+{
+  "mcp": {
+    "lazydb": {
+      "type": "local",
+      "command": [
+        "lazydb", "mcp", "serve", "--project", ".",
+        "--write-policy", "non-production"
+      ],
+      "cwd": "."
+    }
+  },
+  "permission": {
+    "lazydb_execute_change": "ask",
+    "lazydb_execute_file": "ask"
+  }
+}
+```
+
+Keep both write tools set to `ask`; client approval is an additional
+confirmation layer and cannot override a read-only profile, production
+restrictions, or database grants. Use `all` for production only as part of an
+approved workflow.
+
 OpenCode merges global and project configuration. A project LazyDB MCP does not
 remove unrelated global database MCP servers; disable obsolete global servers
 if they expose duplicate query tools.
@@ -134,6 +166,26 @@ claude --strict-mcp-config --mcp-config ./.mcp.json -p "Inspect the schema"
 
 ## Troubleshooting
 
+`get_context` reports the MCP process policy and the selected connection's
+effective write capability:
+
+```json
+{
+  "server_write_policy": "deny",
+  "write_capability": {
+    "allowed": false,
+    "denial_reason": "server_policy",
+    "message": "the MCP server write policy is deny; restart it with --write-policy non-production for writable development or staging connections"
+  }
+}
+```
+
+| `denial_reason` | Cause | Correct action |
+| --- | --- | --- |
+| `server_policy` | MCP started with `deny` | Change to `non-production` for development/staging and restart OpenCode |
+| `profile_read_only` | LazyDB profile has `read_only = true` | Keep it read-only or deliberately edit the profile; MCP approval cannot override it |
+| `production_policy` | Production profile under `non-production` | Use an approved production workflow and explicitly start with `all` only when required |
+
 `connection_ambiguous` means multiple current-project or global profiles are
 visible. Retry with the exact profile name or UUID. `connection_not_found` also
 covers a profile assigned only to another project. `credential_failure` means
@@ -141,4 +193,6 @@ LazyDB could not resolve a password without interaction; Prompt profiles are
 not usable by headless agents.
 
 The MCP process loads profile metadata at startup. Restart the MCP session after
-changing profiles or credentials in the LazyDB TUI.
+changing profiles, credentials, or MCP command arguments. OpenCode also loads
+its configuration at startup, so fully quit and restart OpenCode after changing
+the MCP configuration.
