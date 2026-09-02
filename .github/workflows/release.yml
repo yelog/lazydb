@@ -92,6 +92,8 @@ jobs:
         run: cargo build --release --locked --target "${{ matrix.target }}"
       - name: Smoke test
         run: scripts/release/smoke-artifact.sh "target/${{ matrix.target }}/release/lazydb" "${{ needs.plan.outputs.version }}"
+      - name: Report binary size and dynamic dependencies
+        run: scripts/release/check-binary-size.sh "target/${{ matrix.target }}/release/lazydb"
       - name: Assemble archive
         env:
           TARGET: ${{ matrix.target }}

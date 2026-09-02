@@ -1123,7 +1123,9 @@ fn map_pending(pending: Pending, event: KeyEvent, app: &App) -> Option<Action> {
     match (pending, event.code) {
         (Pending::Leader, KeyCode::Char('c')) => Some(Action::Focus(Focus::Explorer)),
         (Pending::Leader, KeyCode::Char('n')) => Some(Action::NewConsole),
-        (Pending::Leader, KeyCode::Char('b')) => Some(Action::OpenDashboard),
+        (Pending::Leader, KeyCode::Char('b')) if app.dashboard_supported() => {
+            Some(Action::OpenDashboard)
+        }
         (Pending::Leader, KeyCode::Char('s')) => Some(Action::GotoSqlConsole),
         (Pending::Leader, KeyCode::Char('r')) => Some(Action::RunActiveSql),
         (Pending::Leader, KeyCode::Char('R')) => Some(Action::RunAllSql),

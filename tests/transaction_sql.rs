@@ -139,3 +139,21 @@ fn batch_controls_are_not_data() {
         ]
     );
 }
+
+#[test]
+fn sql_server_go_batches_are_separate_and_ddl_is_transactional() {
+    assert!(matches!(
+        classify_transaction_sql(
+            "SELECT 1\nGO\nUPDATE [dbo].[items] SET [id] = 2",
+            SqlDialect::SqlServer
+        ),
+        TransactionSqlClassification::Unsupported(TransactionSqlError::MultipleStatements)
+    ));
+    assert_eq!(
+        classify_transaction_sql("CREATE TABLE [dbo].[t] ([id] int)", SqlDialect::SqlServer),
+        TransactionSqlClassification::Data {
+            risk: SqlRisk::Ddl,
+            mysql_implicit_commit: false,
+        }
+    );
+}

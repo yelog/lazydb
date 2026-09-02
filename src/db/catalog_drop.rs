@@ -155,7 +155,15 @@ fn validate_sql(sql: &str) -> Result<(), CatalogDropError> {
     let mut token = String::new();
     let mut tokens = Vec::new();
     let mut quoted = None;
-    for character in sql.chars() {
+    let mut bracketed = false;
+    let mut characters = sql.chars().peekable();
+    while let Some(character) = characters.next() {
+        if bracketed {
+            if character == ']' && characters.next_if_eq(&']').is_none() {
+                bracketed = false;
+            }
+            continue;
+        }
         if let Some(delimiter) = quoted {
             if character == delimiter {
                 quoted = None;
@@ -164,6 +172,8 @@ fn validate_sql(sql: &str) -> Result<(), CatalogDropError> {
         }
         if matches!(character, '"' | '`') {
             quoted = Some(character);
+        } else if character == '[' {
+            bracketed = true;
         } else if character.is_ascii_alphanumeric() || character == '_' {
             token.push(character.to_ascii_uppercase());
         } else {

@@ -62,3 +62,24 @@ async fn searches_sqlite_catalog_with_target_identity() {
     assert_eq!(result.target.connection.name, "catalog");
     assert!(result.hits.iter().any(|hit| hit.name == "users"));
 }
+
+#[test]
+fn sql_server_profile_is_visible_to_generic_agent_catalog_service() {
+    let temp = TempDir::new().unwrap();
+    let profile = import_connection_url("sqlserver://db.example.test/app", Some("mssql"))
+        .unwrap()
+        .profile;
+    let service = AgentService::new(
+        AgentProjectContext::resolve(Some(temp.path())).unwrap(),
+        vec![profile],
+        CredentialResolver::new(
+            Arc::new(EmptySecrets),
+            LocalCredentialStore::new(temp.path().join("key"), "test"),
+        ),
+    );
+
+    assert_eq!(
+        service.connections()[0].kind,
+        lazydb::profile::DatabaseKind::SqlServer
+    );
+}

@@ -112,9 +112,10 @@ pub enum CatalogScopeMode {
     Explicit,
 }
 
-pub const DRIVER_ORDER: [DatabaseKind; 3] = [
+pub const DRIVER_ORDER: [DatabaseKind; 4] = [
     DatabaseKind::Postgres,
     DatabaseKind::MySql,
+    DatabaseKind::SqlServer,
     DatabaseKind::Sqlite,
 ];
 
@@ -344,6 +345,7 @@ impl ProfileDraft {
         let (host, port, schema, ssl_mode) = match kind {
             DatabaseKind::Postgres => ("localhost", "5432", "public", SslMode::Prefer),
             DatabaseKind::MySql => ("localhost", "3306", "", SslMode::Prefer),
+            DatabaseKind::SqlServer => ("localhost", "1433", "dbo", SslMode::Prefer),
             DatabaseKind::Sqlite => ("", "", "main", SslMode::Disable),
         };
 
@@ -471,19 +473,23 @@ impl ProfileDraft {
 
     pub fn url_cursor(&self) -> usize {
         let raw = self.url.expose_secret();
-        let (display, password_range) = redact_url_password(raw);
-        let Some((start, end)) = password_range else {
+        let (display, password_ranges) = redact_url_password(raw);
+        if password_ranges.is_empty() {
             return self.url_cursor.min(display.chars().count());
-        };
+        }
         let raw_cursor = self.url_cursor.min(raw.chars().count());
         let redacted_len = "[REDACTED]".chars().count();
-        if raw_cursor <= start {
-            raw_cursor
-        } else if raw_cursor <= end {
-            start + redacted_len
-        } else {
-            raw_cursor - (end - start) + redacted_len
+        let mut adjustment = 0_isize;
+        for (start, end) in password_ranges {
+            if raw_cursor <= start {
+                break;
+            }
+            if raw_cursor <= end {
+                return (start as isize + adjustment + redacted_len as isize) as usize;
+            }
+            adjustment += redacted_len as isize - (end - start) as isize;
         }
+        (raw_cursor as isize + adjustment) as usize
     }
 
     pub fn url_is_pending(&self) -> bool {
@@ -783,6 +789,7 @@ impl ProfileDraft {
         match (self.kind, self.sqlite_memory) {
             (DatabaseKind::Postgres, _) => &POSTGRES_FIELDS,
             (DatabaseKind::MySql, _) => &MYSQL_FIELDS,
+            (DatabaseKind::SqlServer, _) => &POSTGRES_FIELDS,
             (DatabaseKind::Sqlite, false) => &SQLITE_FILE_FIELDS,
             (DatabaseKind::Sqlite, true) => &SQLITE_MEMORY_FIELDS,
         }
@@ -829,7 +836,7 @@ impl ProfileDraft {
         }
 
         let (host, port, user, database, default_schema, sqlite_path, ssl_mode) = match self.kind {
-            DatabaseKind::Postgres | DatabaseKind::MySql => {
+            DatabaseKind::Postgres | DatabaseKind::MySql | DatabaseKind::SqlServer => {
                 let host = required(&self.host, ProfileField::Host, "host is required")?;
                 let port = self.port.value().trim().parse::<u16>().map_err(|_| {
                     ProfileValidationError::new(
@@ -854,7 +861,7 @@ impl ProfileDraft {
                     Some(port),
                     optional(&self.user),
                     Some(database),
-                    (self.kind == DatabaseKind::Postgres)
+                    matches!(self.kind, DatabaseKind::Postgres | DatabaseKind::SqlServer)
                         .then(|| optional(&self.schema))
                         .flatten(),
                     None,
@@ -965,7 +972,9 @@ impl ProfileDraft {
             return;
         }
         let (database, default_schema) = match self.kind {
-            DatabaseKind::Postgres => (self.database.value(), optional(&self.schema)),
+            DatabaseKind::Postgres | DatabaseKind::SqlServer => {
+                (self.database.value(), optional(&self.schema))
+            }
             DatabaseKind::MySql => (self.database.value(), None),
             DatabaseKind::Sqlite => (
                 if self.sqlite_memory {
@@ -1035,6 +1044,28 @@ impl ProfileDraft {
                     self.ssl_mode = SslMode::Prefer;
                 }
             }
+            DatabaseKind::SqlServer => {
+                if self.host.value().trim().is_empty() {
+                    self.host.set("localhost");
+                }
+                if self.port.value().trim().is_empty()
+                    || matches!(
+                        (previous, self.port.value()),
+                        (DatabaseKind::Postgres, "5432") | (DatabaseKind::MySql, "3306")
+                    )
+                {
+                    self.port.set("1433");
+                }
+                if self.schema.value().trim().is_empty()
+                    || self.schema.value() == "public"
+                    || self.schema.value() == "main"
+                {
+                    self.schema.set("dbo");
+                }
+                if previous == DatabaseKind::Sqlite && self.ssl_mode == SslMode::Disable {
+                    self.ssl_mode = SslMode::Prefer;
+                }
+            }
             DatabaseKind::Sqlite => self.ssl_mode = SslMode::Disable,
         }
         self.sync_derived_catalog_scope();
@@ -1064,7 +1095,7 @@ impl ProfileDraft {
 
     fn connection_profile_for_url(&self) -> Result<ConnectionProfile, ()> {
         let (host, port, user, database, default_schema, sqlite_path) = match self.kind {
-            DatabaseKind::Postgres | DatabaseKind::MySql => {
+            DatabaseKind::Postgres | DatabaseKind::MySql | DatabaseKind::SqlServer => {
                 let host = optional(&self.host).ok_or(())?;
                 let port = self.port.value().trim().parse::<u16>().map_err(|_| ())?;
                 if port == 0 {
@@ -1075,7 +1106,7 @@ impl ProfileDraft {
                     Some(port),
                     optional(&self.user),
                     optional(&self.database),
-                    (self.kind == DatabaseKind::Postgres)
+                    matches!(self.kind, DatabaseKind::Postgres | DatabaseKind::SqlServer)
                         .then(|| optional(&self.schema))
                         .flatten(),
                     None,
@@ -2016,9 +2047,54 @@ fn materialize_all_databases(
     );
 }
 
-fn redact_url_password(value: &str) -> (String, Option<(usize, usize)>) {
+fn redact_url_password(value: &str) -> (String, Vec<(usize, usize)>) {
+    if value
+        .get(..17)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("jdbc:sqlserver://"))
+    {
+        let lowercase = value.to_ascii_lowercase();
+        let mut byte_ranges = Vec::new();
+        let mut search_start = 0;
+        while let Some(relative_start) = lowercase[search_start..].find(";password=") {
+            let property_start = search_start + relative_start;
+            let password_start = property_start + ";password=".len();
+            let password_end = if value.as_bytes().get(password_start) == Some(&b'{') {
+                let mut cursor = password_start + 1;
+                loop {
+                    match value.as_bytes().get(cursor) {
+                        Some(b'}') if value.as_bytes().get(cursor + 1) == Some(&b'}') => {
+                            cursor += 2
+                        }
+                        Some(b'}') => break cursor + 1,
+                        Some(_) => cursor += value[cursor..].chars().next().unwrap().len_utf8(),
+                        None => break value.len(),
+                    }
+                }
+            } else {
+                value[password_start..]
+                    .find(';')
+                    .map_or(value.len(), |offset| password_start + offset)
+            };
+            byte_ranges.push((password_start, password_end));
+            search_start = password_end.max(password_start + 1);
+        }
+        if !byte_ranges.is_empty() {
+            let mut redacted = String::with_capacity(value.len());
+            let mut copied = 0;
+            let mut character_ranges = Vec::with_capacity(byte_ranges.len());
+            for (start, end) in byte_ranges {
+                redacted.push_str(&value[copied..start]);
+                redacted.push_str("[REDACTED]");
+                character_ranges
+                    .push((value[..start].chars().count(), value[..end].chars().count()));
+                copied = end;
+            }
+            redacted.push_str(&value[copied..]);
+            return (redacted, character_ranges);
+        }
+    }
     let Some(scheme_end) = value.find("://") else {
-        return (value.to_owned(), None);
+        return (value.to_owned(), Vec::new());
     };
     let authority_start = scheme_end + 3;
     let authority_end = value[authority_start..]
@@ -2026,10 +2102,10 @@ fn redact_url_password(value: &str) -> (String, Option<(usize, usize)>) {
         .map_or(value.len(), |offset| authority_start + offset);
     let authority = &value[authority_start..authority_end];
     let Some(at) = authority.rfind('@') else {
-        return (value.to_owned(), None);
+        return (value.to_owned(), Vec::new());
     };
     let Some(colon) = authority[..at].find(':') else {
-        return (value.to_owned(), None);
+        return (value.to_owned(), Vec::new());
     };
     let password_start = authority_start + colon + 1;
     let password_end = authority_start + at;
@@ -2043,7 +2119,7 @@ fn redact_url_password(value: &str) -> (String, Option<(usize, usize)>) {
             &value[..password_start],
             &value[password_end..]
         ),
-        Some(password_chars),
+        vec![password_chars],
     )
 }
 

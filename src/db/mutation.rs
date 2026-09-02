@@ -35,6 +35,7 @@ pub enum EditDisabledReason {
     MissingDdl,
     MissingPrimaryKey,
     MissingPrimaryKeyColumn(String),
+    GeneratedColumn(String),
     UnsupportedRowValue,
 }
 
@@ -98,6 +99,23 @@ pub fn editable_capability(
         return EditableRelationCapability::ReadOnly(EditDisabledReason::MissingDdl);
     };
     let fingerprint = metadata_fingerprint(ddl);
+    if let Some(column) = ddl.children.entries.iter().find_map(|entry| {
+        let super::catalog::CatalogMetadata::Column(metadata) = &entry.metadata else {
+            return None;
+        };
+        let generated = metadata.identity
+            == super::catalog::OptionalMetadata::Supported(Some(true))
+            || metadata.generated_expression.is_supported()
+                && matches!(
+                    &metadata.generated_expression,
+                    super::catalog::OptionalMetadata::Supported(Some(_))
+                )
+            || metadata.native_type.eq_ignore_ascii_case("rowversion")
+            || metadata.native_type.eq_ignore_ascii_case("timestamp");
+        generated.then(|| entry.qualified_name.object.clone())
+    }) {
+        return EditableRelationCapability::ReadOnly(EditDisabledReason::GeneratedColumn(column));
+    }
     if fingerprint.primary_key.is_empty() {
         return EditableRelationCapability::ReadOnly(EditDisabledReason::MissingPrimaryKey);
     }

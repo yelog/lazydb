@@ -2,6 +2,7 @@ pub mod catalog;
 pub mod catalog_drop;
 pub(crate) mod ddl;
 pub mod monitor;
+pub mod mssql;
 pub mod mutation;
 pub mod mysql;
 pub mod postgres;
@@ -26,6 +27,7 @@ use self::{
         CatalogSearchPage, CatalogSearchRequest, CatalogTarget, CatalogValidationError,
         RelationDdl,
     },
+    mssql::MsSqlAdapter,
     mysql::MySqlAdapter,
     postgres::PostgresAdapter,
     query::QueryOutcome,
@@ -134,6 +136,7 @@ pub enum DatabaseConnection {
     Postgres(PostgresAdapter),
     MySql(MySqlAdapter),
     Sqlite(SqliteAdapter),
+    SqlServer(MsSqlAdapter),
 }
 
 impl DatabaseConnection {
@@ -141,6 +144,7 @@ impl DatabaseConnection {
         match self {
             Self::Postgres(adapter) => adapter.load_monitor_snapshot().await,
             Self::MySql(adapter) => adapter.load_monitor_snapshot().await,
+            Self::SqlServer(adapter) => adapter.load_monitor_snapshot().await,
             Self::Sqlite(_) => Err(DatabaseError {
                 category: ErrorCategory::Unsupported,
                 code: Some("monitoring_unsupported".into()),
@@ -153,6 +157,7 @@ impl DatabaseConnection {
         match self {
             Self::Postgres(adapter) => adapter.load_monitor_metadata().await,
             Self::MySql(adapter) => adapter.load_monitor_metadata().await,
+            Self::SqlServer(adapter) => adapter.load_monitor_metadata().await,
             Self::Sqlite(_) => Ok(monitor::MonitorMetadata::default()),
         }
     }
@@ -161,6 +166,7 @@ impl DatabaseConnection {
         match self {
             Self::Postgres(adapter) => adapter.load_process_snapshot().await,
             Self::MySql(adapter) => adapter.load_process_snapshot().await,
+            Self::SqlServer(adapter) => adapter.load_process_snapshot().await,
             Self::Sqlite(_) => Err(DatabaseError {
                 category: ErrorCategory::Unsupported,
                 code: Some("process_list_unsupported".into()),
@@ -169,19 +175,35 @@ impl DatabaseConnection {
         }
     }
 
-    pub(crate) async fn start_transaction_worker(
+    pub(crate) async fn start_transaction_worker_with_forced_close(
         &self,
+        forced_close: crate::runtime::transaction::ForcedCloseHandle,
     ) -> Result<crate::runtime::transaction::TransactionWorkerHandle, DatabaseError> {
         match self {
-            Self::Postgres(adapter) => Ok(crate::runtime::transaction::spawn_transaction_worker(
-                adapter.transaction_backend().await?,
-            )),
-            Self::MySql(adapter) => Ok(crate::runtime::transaction::spawn_transaction_worker(
-                adapter.transaction_backend().await?,
-            )),
-            Self::Sqlite(adapter) => Ok(crate::runtime::transaction::spawn_transaction_worker(
-                adapter.transaction_backend().await?,
-            )),
+            Self::Postgres(adapter) => Ok(
+                crate::runtime::transaction::spawn_transaction_worker_with_forced_close(
+                    adapter.transaction_backend().await?,
+                    forced_close,
+                ),
+            ),
+            Self::MySql(adapter) => Ok(
+                crate::runtime::transaction::spawn_transaction_worker_with_forced_close(
+                    adapter.transaction_backend().await?,
+                    forced_close,
+                ),
+            ),
+            Self::Sqlite(adapter) => Ok(
+                crate::runtime::transaction::spawn_transaction_worker_with_forced_close(
+                    adapter.transaction_backend().await?,
+                    forced_close,
+                ),
+            ),
+            Self::SqlServer(adapter) => Ok(
+                crate::runtime::transaction::spawn_transaction_worker_with_forced_close(
+                    adapter.transaction_backend().await?,
+                    forced_close,
+                ),
+            ),
         }
     }
 
@@ -197,6 +219,9 @@ impl DatabaseConnection {
             DatabaseKind::MySql => MySqlAdapter::connect(profile, password)
                 .await
                 .map(Self::MySql),
+            DatabaseKind::SqlServer => MsSqlAdapter::connect(profile, password)
+                .await
+                .map(Self::SqlServer),
         }
     }
 
@@ -216,6 +241,7 @@ impl DatabaseConnection {
             Self::Postgres(_) => DatabaseKind::Postgres,
             Self::MySql(_) => DatabaseKind::MySql,
             Self::Sqlite(_) => DatabaseKind::Sqlite,
+            Self::SqlServer(_) => DatabaseKind::SqlServer,
         }
     }
 
@@ -224,6 +250,7 @@ impl DatabaseConnection {
             Self::Postgres(_) => PostgresAdapter::catalog_capabilities(),
             Self::MySql(_) => MySqlAdapter::catalog_capabilities(),
             Self::Sqlite(_) => SqliteAdapter::catalog_capabilities(),
+            Self::SqlServer(_) => MsSqlAdapter::catalog_capabilities(),
         }
     }
 
@@ -236,6 +263,7 @@ impl DatabaseConnection {
             Self::Postgres(_) => PostgresAdapter::plan_catalog_drop(request, entry),
             Self::MySql(_) => MySqlAdapter::plan_catalog_drop(request, entry),
             Self::Sqlite(_) => SqliteAdapter::plan_catalog_drop(request, entry),
+            Self::SqlServer(_) => MsSqlAdapter::plan_catalog_drop(request, entry),
         }
     }
 
@@ -244,6 +272,7 @@ impl DatabaseConnection {
             Self::Postgres(adapter) => adapter.probe().await,
             Self::MySql(adapter) => adapter.probe().await,
             Self::Sqlite(adapter) => adapter.probe().await,
+            Self::SqlServer(adapter) => adapter.probe().await,
         }
     }
 
@@ -252,6 +281,7 @@ impl DatabaseConnection {
             Self::Postgres(adapter) => adapter.discover_catalog_scope().await,
             Self::MySql(adapter) => adapter.discover_catalog_scope().await,
             Self::Sqlite(adapter) => adapter.discover_catalog_scope().await,
+            Self::SqlServer(adapter) => adapter.discover_catalog_scope().await,
         }
     }
 
@@ -260,7 +290,7 @@ impl DatabaseConnection {
     ) -> Result<Option<Vec<String>>, DatabaseError> {
         match self {
             Self::Postgres(adapter) => adapter.discoverable_databases().await.map(Some),
-            Self::MySql(_) | Self::Sqlite(_) => Ok(None),
+            Self::MySql(_) | Self::Sqlite(_) | Self::SqlServer(_) => Ok(None),
         }
     }
 
@@ -272,6 +302,7 @@ impl DatabaseConnection {
             Self::Postgres(adapter) => adapter.load_catalog_page(request).await,
             Self::MySql(adapter) => adapter.load_catalog_page(request).await,
             Self::Sqlite(adapter) => adapter.load_catalog_page(request).await,
+            Self::SqlServer(adapter) => adapter.load_catalog_page(request).await,
         }
     }
 
@@ -283,6 +314,7 @@ impl DatabaseConnection {
             Self::Postgres(adapter) => adapter.search_catalog(request).await,
             Self::MySql(adapter) => adapter.search_catalog(request).await,
             Self::Sqlite(adapter) => adapter.search_catalog(request).await,
+            Self::SqlServer(adapter) => adapter.search_catalog(request).await,
         }
     }
 
@@ -291,6 +323,7 @@ impl DatabaseConnection {
             Self::Postgres(adapter) => adapter.execute_pool(sql).await,
             Self::MySql(adapter) => adapter.execute_pool(sql).await,
             Self::Sqlite(adapter) => adapter.execute_pool(sql).await,
+            Self::SqlServer(adapter) => adapter.execute_pool(sql).await,
         }
     }
 
@@ -304,6 +337,7 @@ impl DatabaseConnection {
             Self::Postgres(adapter) => adapter.preview_relation(relation, options, page).await,
             Self::MySql(adapter) => adapter.preview_relation(relation, options, page).await,
             Self::Sqlite(adapter) => adapter.preview_relation(relation, options, page).await,
+            Self::SqlServer(adapter) => adapter.preview_relation(relation, options, page).await,
         }
     }
 
@@ -312,6 +346,7 @@ impl DatabaseConnection {
             Self::Postgres(adapter) => adapter.relation_ddl(relation).await,
             Self::MySql(adapter) => adapter.relation_ddl(relation).await,
             Self::Sqlite(adapter) => adapter.relation_ddl(relation).await,
+            Self::SqlServer(adapter) => adapter.relation_ddl(relation).await,
         }
     }
 
@@ -325,6 +360,7 @@ impl DatabaseConnection {
             Self::Postgres(adapter) => adapter.object_ddl(kind, schema, name).await,
             Self::MySql(adapter) => adapter.object_ddl(kind, schema, name).await,
             Self::Sqlite(adapter) => adapter.object_ddl(kind, schema, name).await,
+            Self::SqlServer(adapter) => adapter.object_ddl(kind, schema, name).await,
         }
     }
 
@@ -333,6 +369,7 @@ impl DatabaseConnection {
             Self::Postgres(_) => postgres::quote_identifier(value),
             Self::MySql(_) => mysql::quote_identifier(value),
             Self::Sqlite(adapter) => adapter.quote_identifier(value),
+            Self::SqlServer(adapter) => adapter.quote_identifier(value),
         }
     }
 
@@ -341,6 +378,7 @@ impl DatabaseConnection {
             Self::Postgres(adapter) => adapter.close().await,
             Self::MySql(adapter) => adapter.close().await,
             Self::Sqlite(adapter) => adapter.close().await,
+            Self::SqlServer(adapter) => adapter.close().await,
         }
     }
 }

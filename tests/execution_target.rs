@@ -43,6 +43,7 @@ fn profile_defaults_produce_backend_valid_targets() {
     for kind in [
         DatabaseKind::Postgres,
         DatabaseKind::MySql,
+        DatabaseKind::SqlServer,
         DatabaseKind::Sqlite,
     ] {
         let profile = profile(kind);
@@ -94,6 +95,38 @@ fn postgres_target_validation_enforces_database_and_schema_scope() {
     assert!(!target.is_valid(&profile));
     target.schema = Some("public".into());
     target.database = "other".into();
+    assert!(!target.is_valid(&profile));
+}
+
+#[test]
+fn sql_server_target_validation_and_override_match_postgres_namespaces() {
+    let mut profile = profile(DatabaseKind::SqlServer);
+    profile.default_schema = Some("dbo".into());
+    profile.catalog_scope = lazydb::profile::CatalogScope {
+        databases: lazydb::profile::CatalogSelection::Selected(vec![
+            lazydb::profile::DatabaseScope {
+                name: "app".into(),
+                schemas: lazydb::profile::CatalogSelection::Selected(vec!["dbo".into()]),
+            },
+            lazydb::profile::DatabaseScope {
+                name: "analytics".into(),
+                schemas: lazydb::profile::CatalogSelection::Selected(vec!["reporting".into()]),
+            },
+        ]),
+    };
+
+    let mut target = ExecutionTarget::from_profile(&profile);
+    assert_eq!(target.schema.as_deref(), Some("dbo"));
+    assert!(target.is_valid(&profile));
+    target.database = "analytics".into();
+    target.schema = Some("reporting".into());
+    assert!(target.is_valid(&profile));
+
+    let configured = target.apply_to_profile(&profile).unwrap();
+    assert_eq!(configured.database.as_deref(), Some("analytics"));
+    assert_eq!(configured.default_schema.as_deref(), Some("reporting"));
+
+    target.schema = Some("private".into());
     assert!(!target.is_valid(&profile));
 }
 

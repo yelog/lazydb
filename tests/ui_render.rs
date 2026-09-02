@@ -133,6 +133,30 @@ fn dashboard_renders_all_pages_without_database_io() {
 }
 
 #[test]
+fn sql_server_dashboard_entry_is_disabled_without_opening_a_tab() {
+    let profile = import_connection_url("sqlserver://db.example.test/app", Some("mssql"))
+        .unwrap()
+        .profile;
+    let mut app = App::new(vec![profile.clone()]);
+    app.connection.profile_id = Some(profile.id);
+    app.connection.server = Some(ServerInfo {
+        kind: DatabaseKind::SqlServer,
+        version: "16.0".into(),
+        database: "app".into(),
+    });
+    app.active_workspace_profile = Some(profile.id);
+
+    assert!(!app.dashboard_supported());
+    assert!(app.update(Action::OpenDashboard).is_empty());
+    assert!(
+        !app.tabs
+            .iter()
+            .any(|tab| matches!(tab, WorkspaceTab::Dashboard(_)))
+    );
+    assert!(render(&app, 120, 36).contains("Dashboard"));
+}
+
+#[test]
 fn dashboard_renders_real_chart_series_after_two_samples() {
     let mut app = App::new(Vec::new());
     app.tabs.clear();
@@ -2390,6 +2414,11 @@ fn profile_url_help_follows_the_selected_driver_when_focused() {
         ),
         (
             2,
+            "sqlserver://user:password@host:1433/database",
+            "sqlite:///path/to/database.db",
+        ),
+        (
+            3,
             "sqlite:///path/to/database.db",
             "postgres://user:password@host:5432/database",
         ),
@@ -2413,6 +2442,7 @@ fn profile_url_help_follows_the_selected_driver_when_focused() {
         let help = match cycle {
             0 => "Accepts postgres://",
             1 => "Accepts mysql://",
+            2 => "Accepts sqlserver://",
             _ => "Accepts sqlite://",
         };
         assert!(focused.contains(help), "missing URL help: {focused}");
@@ -2570,7 +2600,7 @@ fn stored_password_is_described_without_rendering_a_secret() {
 }
 
 #[test]
-fn mysql_and_sqlite_forms_only_show_relevant_fields() {
+fn server_and_sqlite_forms_only_show_relevant_fields() {
     let mut mysql = App::new(Vec::new());
     mysql.update(Action::OpenProfileManager);
     mysql.update(Action::ProfileCycle(1));
@@ -2580,9 +2610,18 @@ fn mysql_and_sqlite_forms_only_show_relevant_fields() {
     assert!(!mysql_output.contains("Default schema"));
     assert!(!mysql_output.contains("Memory database"));
 
+    let mut sql_server = App::new(Vec::new());
+    sql_server.update(Action::OpenProfileManager);
+    sql_server.update(Action::ProfileCycle(2));
+    let sql_server_output = render(&sql_server, 120, 36);
+    assert!(sql_server_output.contains("SQL Server"));
+    assert!(sql_server_output.contains("Default schema"));
+    assert!(sql_server_output.contains("dbo"));
+    assert!(sql_server_output.contains("sqlserver://"));
+
     let mut sqlite_file = App::new(Vec::new());
     sqlite_file.update(Action::OpenProfileManager);
-    sqlite_file.update(Action::ProfileCycle(2));
+    sqlite_file.update(Action::ProfileCycle(3));
     let sqlite_file_output = render(&sqlite_file, 120, 36);
     assert!(sqlite_file_output.contains("SQLite"));
     assert!(sqlite_file_output.contains("Path"));
@@ -2606,6 +2645,7 @@ fn profile_form_remains_actionable_in_compact_layout() {
     assert!(output.contains("NEW CONNECTION"));
     assert!(output.contains("PostgreSQL"), "{output}");
     assert!(output.contains("MySQL"), "{output}");
+    assert!(output.contains("SQL Server"), "{output}");
     assert!(output.contains("SQLite"), "{output}");
     assert!(output.contains("Host"));
     assert!(output.contains("Password"));
@@ -2625,6 +2665,7 @@ fn driver_options_have_individual_targets_and_selected_style_survives_field_blur
     let options = [
         DatabaseKind::Postgres,
         DatabaseKind::MySql,
+        DatabaseKind::SqlServer,
         DatabaseKind::Sqlite,
     ]
     .map(|kind| {
@@ -2653,6 +2694,7 @@ fn driver_options_use_database_icons_in_each_icon_mode() {
     let kinds = [
         DatabaseKind::Postgres,
         DatabaseKind::MySql,
+        DatabaseKind::SqlServer,
         DatabaseKind::Sqlite,
     ];
 
@@ -2662,6 +2704,7 @@ fn driver_options_use_database_icons_in_each_icon_mode() {
             let display_name = match kind {
                 DatabaseKind::Postgres => "PostgreSQL",
                 DatabaseKind::MySql => "MySQL",
+                DatabaseKind::SqlServer => "SQL Server",
                 DatabaseKind::Sqlite => "SQLite",
             };
             let label = format!("{} {display_name}", IconSet::new(mode).database(kind));

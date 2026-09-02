@@ -129,5 +129,6 @@ fn dialect(profile: &ConnectionProfile) -> SqlDialect {
         crate::profile::DatabaseKind::Postgres => SqlDialect::Postgres,
         crate::profile::DatabaseKind::MySql => SqlDialect::MySql,
         crate::profile::DatabaseKind::Sqlite => SqlDialect::Sqlite,
+        crate::profile::DatabaseKind::SqlServer => SqlDialect::SqlServer,
     }
 }

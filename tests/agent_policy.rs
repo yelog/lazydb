@@ -123,3 +123,21 @@ fn effective_write_capability_matches_profile_and_server_policy() {
         WriteCapability::Allowed
     );
 }
+
+#[test]
+fn sql_server_uses_sql_server_dialect_for_query_and_write_policy() {
+    let mut profile = import_connection_url("sqlserver://db.example.test/app", Some("mssql"))
+        .unwrap()
+        .profile;
+    profile.user = Some("sa".into());
+
+    assert_eq!(authorize_query(&profile, "SELECT TOP 1 1"), Ok(()));
+    assert_eq!(
+        authorize_write(
+            &profile,
+            WritePolicy::All,
+            "UPDATE [users] SET [name] = 'x'"
+        ),
+        Ok(())
+    );
+}

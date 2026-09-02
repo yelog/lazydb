@@ -212,7 +212,11 @@ fn statement_boundaries(text: &str, dialect: SqlDialect) -> Vec<(usize, usize)> 
                     state = State::Backtick;
                     index += 1;
                 }
-                b'[' if matches!(dialect, SqlDialect::Sqlite | SqlDialect::Generic) => {
+                b'[' if matches!(
+                    dialect,
+                    SqlDialect::SqlServer | SqlDialect::Sqlite | SqlDialect::Generic
+                ) =>
+                {
                     state = State::Bracket;
                     index += 1;
                 }

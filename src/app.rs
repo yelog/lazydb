@@ -415,6 +415,18 @@ impl App {
         self.active_workspace_profile.is_some() || self.profiles.is_empty()
     }
 
+    pub fn dashboard_supported(&self) -> bool {
+        self.active_profile().map_or_else(
+            || {
+                self.connection
+                    .server
+                    .as_ref()
+                    .is_none_or(|server| server.kind != DatabaseKind::SqlServer)
+            },
+            |profile| profile.kind != DatabaseKind::SqlServer,
+        )
+    }
+
     fn next_console_name(&self) -> String {
         let used = self
             .sql_editors
@@ -1617,6 +1629,13 @@ impl App {
         match action {
             Action::OpenDashboard => {
                 if !self.has_active_workspace() {
+                    return Vec::new();
+                }
+                if !self.dashboard_supported() {
+                    self.notify_warning(
+                        "Dashboard",
+                        crate::db::mssql::DASHBOARD_UNSUPPORTED_MESSAGE,
+                    );
                     return Vec::new();
                 }
                 if let Some(index) = self
@@ -6045,7 +6064,7 @@ impl App {
                 };
                 let schema = match profile.kind {
                     DatabaseKind::MySql => Some(database.clone()),
-                    DatabaseKind::Postgres | DatabaseKind::Sqlite => {
+                    DatabaseKind::Postgres | DatabaseKind::SqlServer | DatabaseKind::Sqlite => {
                         entry.qualified_name.schema.clone()
                     }
                 };
@@ -6442,6 +6461,7 @@ impl App {
             Some(DatabaseKind::Postgres) => SqlDialect::Postgres,
             Some(DatabaseKind::MySql) => SqlDialect::MySql,
             Some(DatabaseKind::Sqlite) => SqlDialect::Sqlite,
+            Some(DatabaseKind::SqlServer) => SqlDialect::SqlServer,
             None => SqlDialect::Generic,
         }
     }
@@ -9801,7 +9821,7 @@ fn add_explorer_profile(
             .map(|path| path.to_string_lossy().into_owned())
             .or_else(|| profile.database.clone())
             .unwrap_or_default(),
-        DatabaseKind::Postgres | DatabaseKind::MySql => {
+        DatabaseKind::Postgres | DatabaseKind::MySql | DatabaseKind::SqlServer => {
             let host = profile.host.as_deref().unwrap_or_default();
             profile
                 .port

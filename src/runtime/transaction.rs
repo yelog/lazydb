@@ -116,9 +116,18 @@ pub fn spawn_transaction_worker<B>(backend: B) -> TransactionWorkerHandle
 where
     B: TransactionBackend,
 {
+    spawn_transaction_worker_with_forced_close(backend, ForcedCloseHandle::new())
+}
+
+pub(crate) fn spawn_transaction_worker_with_forced_close<B>(
+    backend: B,
+    forced_close: ForcedCloseHandle,
+) -> TransactionWorkerHandle
+where
+    B: TransactionBackend,
+{
     let (requests, mut receiver) = mpsc::unbounded_channel();
     let (readiness_sender, readiness) = tokio::sync::oneshot::channel();
-    let forced_close = ForcedCloseHandle::new();
     let worker_for_task = forced_close.clone();
     let worker = tokio::spawn(async move {
         let mut guard = ArmedGuard::new(backend, worker_for_task);
@@ -145,6 +154,13 @@ where
                     } else {
                         if guard.backend_mut().cancel().await.is_err() {
                             return WorkerDisposition::Quarantine;
+                        }
+                        // Some backends cancel by closing the session. Their depth is already
+                        // zero and rollback would be an operation on a nonexistent client.
+                        if guard.backend_mut().depth() == 0 {
+                            guard.disarm();
+                            let _ = reply.send(Err(TransactionError("cancelled".to_owned())));
+                            return WorkerDisposition::CancelledAndRolledBack;
                         }
                         if guard.backend_mut().rollback().await.is_err()
                             || guard.backend_mut().depth() != 0
@@ -228,20 +244,23 @@ where
                     cancel,
                     reply,
                 } => {
-                    let mutation = guard.backend_mut().relation_mutation(request);
-                    tokio::pin!(mutation);
-                    tokio::select! {
-                        result = &mut mutation => {
-                            let _ = reply.send(result);
+                    let outcome =
+                        relation_mutation_or_cancel(guard.backend_mut(), request, cancel).await;
+                    let Some(result) = outcome else {
+                        let _ = reply.send(Err(TransactionError("cancelled".into())));
+                        let cancelled = guard.backend_mut().cancel().await;
+                        if cancelled.is_err() || guard.backend_mut().depth() == 0 {
+                            return WorkerDisposition::Quarantine;
                         }
-                        cancellation = cancel => {
-                            if cancellation.is_ok() {
-                                let _ = reply.send(Err(TransactionError("cancelled".into())));
-                                return WorkerDisposition::Quarantine;
-                            }
-                            let _ = reply.send(mutation.await);
+                        if guard.backend_mut().rollback().await.is_err()
+                            || guard.backend_mut().depth() != 0
+                        {
+                            return WorkerDisposition::Quarantine;
                         }
-                    }
+                        guard.disarm();
+                        return WorkerDisposition::CancelledAndRolledBack;
+                    };
+                    let _ = reply.send(result);
                 }
                 TransactionRequest::Commit { reply } => {
                     let result = guard.backend_mut().commit().await;
@@ -296,10 +315,29 @@ async fn execute_or_cancel<B: TransactionBackend>(
     let execute = backend.execute(sql);
     tokio::pin!(execute);
     tokio::select! {
+        biased;
         result = &mut execute => Some(result),
         cancellation = cancel => match cancellation {
             Ok(()) => None,
             Err(_) => Some((&mut execute).await),
+        },
+    }
+}
+
+async fn relation_mutation_or_cancel<B: TransactionBackend>(
+    backend: &mut B,
+    request: crate::db::mutation::RelationMutationRequest,
+    cancel: tokio::sync::oneshot::Receiver<()>,
+) -> Option<Result<crate::db::mutation::MutationResult, TransactionError>> {
+    let mutation = backend.relation_mutation(request);
+    tokio::pin!(mutation);
+    tokio::select! {
+        biased;
+        result = &mut mutation => Some(result),
+        cancellation = cancel => if cancellation.is_ok() {
+            None
+        } else {
+            Some(mutation.await)
         },
     }
 }
@@ -354,6 +392,7 @@ mod tests {
         depth: usize,
         begin_fails: bool,
         cancel_fails: bool,
+        cancel_closes: bool,
         commit_fails: bool,
         rollback_fails: bool,
     }
@@ -410,6 +449,9 @@ mod tests {
         }
         async fn cancel(&mut self) -> Result<(), TransactionError> {
             self.log.lock().unwrap().push("cancel".into());
+            if self.cancel_closes {
+                self.depth = 0;
+            }
             if self.cancel_fails {
                 Err(TransactionError("cancel".into()))
             } else {
@@ -603,6 +645,34 @@ mod tests {
         assert_eq!(worker.worker.await.unwrap(), WorkerDisposition::Quarantine);
         tokio::task::yield_now().await;
         assert!(worker.forced_close.requested());
+    }
+
+    #[tokio::test]
+    async fn cancellation_of_a_closed_session_does_not_attempt_rollback() {
+        let fake = Fake {
+            cancel_closes: true,
+            ..Fake::default()
+        };
+        let log = fake.log.clone();
+        let worker = spawn_transaction_worker(fake);
+        let (reply, result) = oneshot::channel();
+        let (cancel, cancellation) = oneshot::channel();
+        worker
+            .requests
+            .send(TransactionRequest::Execute {
+                query_generation: 1,
+                sql: "slow".into(),
+                cancel: cancellation,
+                reply,
+            })
+            .unwrap();
+        cancel.send(()).unwrap();
+        assert!(result.await.unwrap().is_err());
+        assert_eq!(
+            worker.worker.await.unwrap(),
+            WorkerDisposition::CancelledAndRolledBack
+        );
+        assert!(!log.lock().unwrap().iter().any(|entry| entry == "rollback"));
     }
 
     #[tokio::test]

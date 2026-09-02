@@ -163,3 +163,15 @@ fn dialect_specific_mysql_comments_and_unterminated_constructs_are_conservative(
         unterminated
     );
 }
+
+#[test]
+fn sql_server_scope_ignores_semicolons_in_bracketed_identifiers() {
+    let text = "SELECT [odd;name], N'value;still' FROM [dbo].[items]; SELECT @value;";
+    let ranges = scan_statements(text, SqlDialect::SqlServer);
+    assert_eq!(ranges.len(), 2);
+    assert_eq!(
+        &text[ranges[0].start..ranges[0].end],
+        "SELECT [odd;name], N'value;still' FROM [dbo].[items];"
+    );
+    assert_eq!(&text[ranges[1].start..ranges[1].end], "SELECT @value;");
+}

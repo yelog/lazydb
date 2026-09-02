@@ -5,6 +5,39 @@ use lazydb::profile::{
 use secrecy::ExposeSecret;
 
 #[test]
+fn sql_server_kind_and_url_formats_serialize_stably() {
+    #[derive(serde::Serialize)]
+    struct KindFixture {
+        kind: DatabaseKind,
+    }
+
+    assert_eq!(
+        toml::to_string(&KindFixture {
+            kind: DatabaseKind::SqlServer,
+        })
+        .unwrap()
+        .trim(),
+        "kind = \"sqlserver\""
+    );
+    assert_eq!(
+        ConnectionUrlFormat::default_for(DatabaseKind::SqlServer),
+        ConnectionUrlFormat::SqlServer
+    );
+    assert_eq!(
+        ConnectionUrlFormat::compatible_formats(DatabaseKind::SqlServer),
+        &[
+            ConnectionUrlFormat::SqlServer,
+            ConnectionUrlFormat::MsSql,
+            ConnectionUrlFormat::JdbcSqlServer,
+        ]
+    );
+    for format in ConnectionUrlFormat::compatible_formats(DatabaseKind::SqlServer) {
+        assert!(format.is_compatible(DatabaseKind::SqlServer));
+        assert!(!format.is_compatible(DatabaseKind::Postgres));
+    }
+}
+
+#[test]
 fn parses_all_server_formats_and_connection_settings() {
     let cases = [
         ("postgres://db/app", ConnectionUrlFormat::Postgres),
@@ -15,6 +48,8 @@ fn parses_all_server_formats_and_connection_settings() {
         ),
         ("mysql://db/app", ConnectionUrlFormat::MySql),
         ("jdbc:mysql://db/app", ConnectionUrlFormat::JdbcMySql),
+        ("sqlserver://db/app", ConnectionUrlFormat::SqlServer),
+        ("mssql://db/app", ConnectionUrlFormat::MsSql),
     ];
     for (url, format) in cases {
         assert_eq!(parse_connection_url(url).unwrap().format, format);
@@ -31,6 +66,92 @@ fn parses_all_server_formats_and_connection_settings() {
     assert_eq!(parsed.default_schema.as_deref(), Some("my schema"));
     assert_eq!(parsed.ssl_mode, SslMode::VerifyFull);
     assert!(parsed.read_only);
+}
+
+#[test]
+fn parses_sql_server_uri_settings_and_tls_modes() {
+    let parsed = parse_connection_url(
+        "sqlserver://sa:s%40cret@localhost:1444/app?schema=dbo&encrypt=true&trustServerCertificate=false&readOnly=true",
+    )
+    .unwrap();
+    assert_eq!(parsed.kind, DatabaseKind::SqlServer);
+    assert_eq!(parsed.format, ConnectionUrlFormat::SqlServer);
+    assert_eq!(parsed.host.as_deref(), Some("localhost"));
+    assert_eq!(parsed.port, Some(1444));
+    assert_eq!(parsed.user.as_deref(), Some("sa"));
+    assert_eq!(parsed.password.unwrap().expose_secret(), "s@cret");
+    assert_eq!(parsed.database.as_deref(), Some("app"));
+    assert_eq!(parsed.default_schema.as_deref(), Some("dbo"));
+    assert_eq!(parsed.ssl_mode, SslMode::VerifyFull);
+    assert!(parsed.read_only);
+
+    let parsed =
+        parse_connection_url("mssql://sa@localhost/app?currentSchema=sales&encrypt=false").unwrap();
+    assert_eq!(parsed.format, ConnectionUrlFormat::MsSql);
+    assert_eq!(parsed.port, Some(1433));
+    assert_eq!(parsed.default_schema.as_deref(), Some("sales"));
+    assert_eq!(parsed.ssl_mode, SslMode::Disable);
+    assert_eq!(
+        parse_connection_url("sqlserver://localhost/app?encrypt=true&trustServerCertificate=true")
+            .unwrap()
+            .ssl_mode,
+        SslMode::Require
+    );
+}
+
+#[test]
+fn parses_jdbc_sql_server_semicolon_properties_case_insensitively() {
+    let parsed = parse_connection_url(
+        "jdbc:SQLSERVER://localhost:1433;DatabaseName={app;archive};USER=sa;PASSWORD={s;ec}}ret};ENCRYPT=true;TrustServerCertificate=false;CurrentSchema=sales;ReadOnly=true",
+    )
+    .unwrap();
+
+    assert_eq!(parsed.kind, DatabaseKind::SqlServer);
+    assert_eq!(parsed.format, ConnectionUrlFormat::JdbcSqlServer);
+    assert_eq!(parsed.host.as_deref(), Some("localhost"));
+    assert_eq!(parsed.port, Some(1433));
+    assert_eq!(parsed.database.as_deref(), Some("app;archive"));
+    assert_eq!(parsed.user.as_deref(), Some("sa"));
+    assert_eq!(parsed.password.unwrap().expose_secret(), "s;ec}ret");
+    assert_eq!(parsed.default_schema.as_deref(), Some("sales"));
+    assert_eq!(parsed.ssl_mode, SslMode::VerifyFull);
+    assert!(parsed.read_only);
+}
+
+#[test]
+fn sql_server_rejects_duplicate_conflicting_unknown_and_unsupported_properties() {
+    for input in [
+        "sqlserver://db/app?schema=dbo&currentSchema=sales",
+        "sqlserver://db/app?encrypt=true&encrypt=false",
+        "jdbc:sqlserver://db;databaseName=one;DATABASENAME=two",
+        "jdbc:sqlserver://db;user=one;USER=two",
+        "sqlserver://db/app?trustServerCertificate=true",
+        "sqlserver://db/app?encrypt=false&trustServerCertificate=true",
+    ] {
+        assert!(matches!(
+            parse_connection_url(input).unwrap_err(),
+            ProfileError::ConflictingQueryParameter(_)
+        ));
+    }
+    assert!(matches!(
+        parse_connection_url("jdbc:sqlserver://db;applicationName=lazydb").unwrap_err(),
+        ProfileError::UnknownQueryParameter(_)
+    ));
+    for property in [
+        "integratedSecurity=true",
+        "authentication=ActiveDirectoryPassword",
+        "instanceName=SQLEXPRESS",
+        "accessToken=token",
+    ] {
+        let error = parse_connection_url(&format!("jdbc:sqlserver://db;{property}")).unwrap_err();
+        assert!(matches!(error, ProfileError::UnsupportedProperty(_)));
+        assert!(error.to_string().contains("username/password"));
+        assert!(error.to_string().contains("explicit TCP host and port"));
+    }
+    assert!(matches!(
+        parse_connection_url("jdbc:sqlserver://db\\SQLEXPRESS;databaseName=app").unwrap_err(),
+        ProfileError::UnsupportedProperty(_)
+    ));
 }
 
 #[test]
@@ -142,4 +263,50 @@ fn formatter_escapes_query_delimiters() {
             .as_deref(),
         Some("a&b=c+d")
     );
+}
+
+#[test]
+fn sql_server_formatter_preserves_uri_formats_and_round_trips_without_password() {
+    for input in [
+        "sqlserver://sa:secret@localhost:1433/app?schema=dbo&encrypt=true&trustServerCertificate=false&readOnly=true",
+        "mssql://sa:secret@localhost/app?schema=sales&encrypt=false",
+    ] {
+        let imported = import_connection_url(input, None).unwrap();
+        let formatted =
+            format_connection_url(&imported.profile, imported.profile.url_format).unwrap();
+        assert!(!formatted.contains("secret"));
+        let reparsed = parse_connection_url(&formatted).unwrap();
+        assert_eq!(reparsed.format, imported.profile.url_format);
+        assert_eq!(reparsed.host, imported.profile.host);
+        assert_eq!(reparsed.port, imported.profile.port);
+        assert_eq!(reparsed.user, imported.profile.user);
+        assert_eq!(reparsed.database, imported.profile.database);
+        assert_eq!(reparsed.default_schema, imported.profile.default_schema);
+        assert_eq!(reparsed.ssl_mode, imported.profile.ssl_mode);
+        assert_eq!(reparsed.read_only, imported.profile.read_only);
+    }
+}
+
+#[test]
+fn jdbc_sql_server_formatter_emits_semicolon_properties_and_round_trips() {
+    let imported = import_connection_url(
+        "jdbc:sqlserver://localhost:1433;databaseName={app;archive};user={domain;user};password={never;print};encrypt=true;trustServerCertificate=true;currentSchema={sales=west};readOnly=true",
+        None,
+    )
+    .unwrap();
+    let formatted = format_connection_url(&imported.profile, imported.profile.url_format).unwrap();
+    assert_eq!(
+        formatted,
+        "jdbc:sqlserver://localhost:1433;databaseName={app;archive};user={domain;user};currentSchema={sales=west};encrypt=true;trustServerCertificate=true;readOnly=true"
+    );
+    assert!(!formatted.contains("never"));
+
+    let reparsed = parse_connection_url(&formatted).unwrap();
+    assert_eq!(reparsed.format, ConnectionUrlFormat::JdbcSqlServer);
+    assert_eq!(reparsed.database, imported.profile.database);
+    assert_eq!(reparsed.user, imported.profile.user);
+    assert_eq!(reparsed.default_schema, imported.profile.default_schema);
+    assert_eq!(reparsed.ssl_mode, imported.profile.ssl_mode);
+    assert_eq!(reparsed.read_only, imported.profile.read_only);
+    assert!(reparsed.password.is_none());
 }

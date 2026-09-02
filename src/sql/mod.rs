@@ -4,6 +4,7 @@
 //! the editor, terminal, or runtime layers.
 
 mod analysis;
+mod batch;
 mod completion;
 mod derived_result;
 mod dialect;
@@ -18,6 +19,7 @@ mod scope;
 mod transaction;
 
 pub use analysis::{AnalysisKey, LineIndex};
+pub use batch::{SqlServerBatchError, split_sql_server_batches};
 pub use completion::{
     CompletionCandidate, CompletionContext, CompletionIndex, CompletionKind, CompletionScheduleKey,
     CompletionScore, complete, quote_identifier, relation_ids_for_completion,

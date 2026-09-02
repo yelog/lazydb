@@ -5,7 +5,7 @@
 LazyDB lets you browse schemas, write and run SQL, inspect relations, manage
 connection profiles, and expose project-scoped database access to coding agents
 without leaving your terminal. It is written in Rust and supports PostgreSQL,
-Oracle MySQL, and SQLite.
+Oracle MySQL, SQL Server, and SQLite.
 
 > **Project status:** LazyDB is currently in beta. The core database workspace,
 > connection management, SQL execution, and coding-agent interfaces are usable,
@@ -21,13 +21,13 @@ Oracle MySQL, and SQLite.
   execution, immutable previews, risk confirmation, cancellation, and read-only
   safeguards.
 - **Transactions:** Use per-console AUTO or MANUAL transactions on PostgreSQL,
-  MySQL, and SQLite sessions, including rollback on cancellation and unknown
-  outcome handling.
+  MySQL, SQL Server, and SQLite sessions, including rollback on cancellation and
+  unknown outcome handling.
 - **Relation workspaces:** Preview relation data with a bounded 500-row limit,
   switch between Data and DDL, and open DDL in a separate tab.
 - **Connection profiles:** Create, test, save, edit, delete, disconnect, and
-  switch PostgreSQL, MySQL, and SQLite profiles. Profiles can be saved, ad hoc,
-  or scoped to the current project.
+  switch PostgreSQL, MySQL, SQL Server, and SQLite profiles. Profiles can be
+  saved, ad hoc, or scoped to the current project.
 - **Credential protection:** Use local authenticated encryption by default, or
   macOS Login Keychain and Linux Secret Service when available.
 - **Coding-agent access:** Use project-aware JSON CLI commands or a local stdio
@@ -43,6 +43,7 @@ Oracle MySQL, and SQLite.
 | --- | --- | --- |
 | PostgreSQL | 12 or newer | Databases, schemas, tables, views, materialized views, sequences, functions, procedures, types |
 | Oracle MySQL | 8.0.13 or newer | Databases, tables, views, functions, procedures, triggers |
+| SQL Server | SQL Server 2012 or newer | Databases, schemas, tables, views, functions, procedures, sequences, triggers, indexes, keys, foreign keys, and column metadata |
 | SQLite | Native SQLite schema support | Tables, views, indexes, foreign keys, and triggers |
 
 MariaDB is not part of the current MySQL catalog contract. See the complete
@@ -193,10 +194,10 @@ lazydb
 ```
 
 On first launch, the Profile Manager opens automatically. Select PostgreSQL,
-MySQL, or SQLite; enter the connection details; test the connection; then save
-and connect. Saved profiles remain available the next time LazyDB starts, and
-passwords can use local encrypted storage or the native operating-system secret
-store when available.
+MySQL, SQL Server, or SQLite; enter the connection details; test the connection;
+then save and connect. Saved profiles remain available the next time LazyDB
+starts, and passwords can use local encrypted storage or the native
+operating-system secret store when available.
 
 ## Coding-Agent Access
 
@@ -287,6 +288,13 @@ The following capabilities are not available yet:
 - Query plans
 - SSH tunneling
 - Import and export
+
+SQL Server currently uses SQL username/password authentication over an explicit
+TCP host and port. Windows Integrated Authentication, Kerberos, Entra
+authentication, Named Instances and SQL Browser discovery are deferred. SQL
+Server Dashboard metrics, process metrics, and additional specialized type
+handling are also deferred. Cancelling SQL Server work closes the active session;
+if that session has an open transaction, SQL Server rolls it back.
 
 The project is evolving quickly during beta. See the issue tracker and release
 notes for current priorities and version-specific changes.
