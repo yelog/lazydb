@@ -2251,7 +2251,8 @@ fn sql_query_bar_is_inert_until_derived_execution_exists() {
 
 #[test]
 fn sql_data_before_first_execution_has_a_quiet_disabled_query_bar() {
-    let app = App::new(Vec::new());
+    let mut app = fixture();
+    app.active_console_mut().outcome = None;
     let (output, state) = render_with_state(&app, 120, 36);
 
     assert!(output.contains("WHERE"), "{output}");
@@ -2837,6 +2838,79 @@ fn disconnected_explorer_points_to_the_profile_manager() {
 }
 
 #[test]
+fn disconnected_workspace_without_profiles_renders_first_run_empty_state() {
+    let output = render(&App::new(Vec::new()), 120, 36);
+
+    assert!(output.contains("NO CONNECTIONS YET"), "{output}");
+    assert!(output.contains("Select NEW in Explorer"), "{output}");
+    assert!(output.contains("Enter"), "{output}");
+    assert!(!output.contains("no result"), "{output}");
+    assert!(!output.contains("DATA"), "{output}");
+    assert!(!output.contains("OUTPUT"), "{output}");
+}
+
+#[test]
+fn disconnected_workspace_with_profiles_prompts_for_connection() {
+    let profile = import_connection_url(":memory:", Some("local"))
+        .unwrap()
+        .profile;
+    let output = render(&App::new(vec![profile]), 120, 36);
+
+    assert!(output.contains("NO ACTIVE CONNECTION"), "{output}");
+    assert!(
+        output.contains("Select a connection in Explorer"),
+        "{output}"
+    );
+    assert!(output.contains("Enter"), "{output}");
+    assert!(!output.contains("NO CONNECTIONS YET"), "{output}");
+    assert!(!output.contains("no result"), "{output}");
+}
+
+#[test]
+fn disconnected_workspace_keeps_actionable_copy_at_compact_sizes() {
+    let no_profiles = App::new(Vec::new());
+    let no_profiles_output = render(&no_profiles, 80, 24);
+    assert!(
+        no_profiles_output.contains("NO CONNECTIONS YET"),
+        "{no_profiles_output}"
+    );
+    assert!(
+        no_profiles_output.contains("Select NEW in Explorer"),
+        "{no_profiles_output}"
+    );
+    assert!(
+        !no_profiles_output.contains("no result"),
+        "{no_profiles_output}"
+    );
+
+    let profile = import_connection_url(":memory:", Some("local"))
+        .unwrap()
+        .profile;
+    let with_profile_output = render(&App::new(vec![profile]), 80, 24);
+    assert!(
+        with_profile_output.contains("NO ACTIVE CONNECTION"),
+        "{with_profile_output}"
+    );
+    assert!(
+        with_profile_output.contains("Select a connection"),
+        "{with_profile_output}"
+    );
+    assert!(
+        !with_profile_output.contains("no result"),
+        "{with_profile_output}"
+    );
+}
+
+#[test]
+fn tiny_disconnected_terminal_keeps_the_global_size_fallback() {
+    let output = render(&App::new(Vec::new()), 40, 10);
+
+    assert!(output.contains("TERMINAL TOO SMALL"), "{output}");
+    assert!(!output.contains("NO CONNECTIONS YET"), "{output}");
+    assert!(!output.contains("NO ACTIVE CONNECTION"), "{output}");
+}
+
+#[test]
 fn explorer_root_projection_keeps_ordered_roots_visible() {
     let profiles = (0..7)
         .map(|index| {
@@ -2955,7 +3029,7 @@ fn editor_snapshot_projects_hostile_controls_to_inert_display_text() {
     let output = render(&app, 80, 24);
     assert!(!output.contains('\u{1b}'));
     assert!(!output.contains('\u{7}'));
-    assert!(output.contains("<ESC>"));
+    assert!(output.contains("NO CONNECTIONS YET"));
 }
 
 #[test]
