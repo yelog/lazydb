@@ -1242,10 +1242,19 @@ fn completion_candidate_label_aligns_with_identifier_start() {
     let identifier_x = (editor.y..popup.y)
         .find_map(|y| find_ascii_cells(&buffer, y, "sys_u"))
         .expect("SQL identifier");
-    let candidate_x = find_ascii_cells(&buffer, popup.y, "sys_user").expect("completion candidate");
+    let candidate_x =
+        find_ascii_cells(&buffer, popup.y + 1, "sys_user").expect("completion candidate");
 
     assert_eq!(popup.y, editor.y + 2);
     assert_eq!(candidate_x, identifier_x);
+    assert_eq!(buffer[(popup.x, popup.y)].symbol(), "╭");
+    assert_eq!(buffer[(popup.right() - 1, popup.y)].symbol(), "╮");
+    assert_eq!(buffer[(popup.x, popup.bottom() - 1)].symbol(), "╰");
+    assert_eq!(
+        buffer[(popup.right() - 1, popup.bottom() - 1)].symbol(),
+        "╯"
+    );
+    assert_eq!(buffer[(popup.x, popup.y)].fg, Color::Rgb(43, 66, 86));
     assert!(popup.right() <= editor.right());
     assert!(popup.bottom() <= editor.bottom());
 }
@@ -1294,8 +1303,116 @@ fn completion_candidate_labels_share_a_fixed_icon_column() {
     let popup = state.completion_popup.unwrap();
 
     assert_eq!(
-        find_ascii_cells(&buffer, popup.y, "sys_user"),
-        find_ascii_cells(&buffer, popup.y + 1, "RETURNING")
+        find_ascii_cells(&buffer, popup.y + 1, "sys_user"),
+        find_ascii_cells(&buffer, popup.y + 2, "RETURNING")
+    );
+}
+
+#[test]
+fn completion_candidate_label_highlights_an_ordinary_prefix() {
+    let app = completion_app("SELECT * FROM sys_u", TextRange::new(14, 19), "sys_user");
+    let (buffer, state) = render_buffer_with_icons(&app, 120, 36, IconSet::new(IconMode::Ascii));
+    let popup = state.completion_popup.unwrap();
+    let x = find_ascii_cells(&buffer, popup.y + 1, "sys_user").unwrap();
+
+    assert!(buffer[(x, popup.y + 1)].modifier.contains(Modifier::BOLD));
+    assert!(
+        buffer[(x + 4, popup.y + 1)]
+            .modifier
+            .contains(Modifier::BOLD)
+    );
+    assert!(
+        !buffer[(x + 5, popup.y + 1)]
+            .modifier
+            .contains(Modifier::BOLD)
+    );
+}
+
+#[test]
+fn completion_candidate_label_highlights_a_compact_prefix_without_the_separator() {
+    let app = completion_app("SELECT * FROM sysuser", TextRange::new(14, 20), "sys_user");
+    let (buffer, state) = render_buffer_with_icons(&app, 120, 36, IconSet::new(IconMode::Ascii));
+    let popup = state.completion_popup.unwrap();
+    let x = find_ascii_cells(&buffer, popup.y + 1, "sys_user").unwrap();
+
+    assert!(buffer[(x, popup.y + 1)].modifier.contains(Modifier::BOLD));
+    assert!(
+        buffer[(x + 2, popup.y + 1)]
+            .modifier
+            .contains(Modifier::BOLD)
+    );
+    assert!(
+        !buffer[(x + 3, popup.y + 1)]
+            .modifier
+            .contains(Modifier::BOLD)
+    );
+    assert!(
+        buffer[(x + 4, popup.y + 1)]
+            .modifier
+            .contains(Modifier::BOLD)
+    );
+}
+
+#[test]
+fn completion_candidate_label_highlighting_keeps_unicode_boundaries_intact() {
+    let app = completion_app("SELECT * FROM 界🙂", TextRange::new(14, 21), "界🙂table");
+    let (buffer, state) = render_buffer_with_icons(&app, 120, 36, IconSet::new(IconMode::Ascii));
+    let popup = state.completion_popup.unwrap();
+    let x = (0..buffer.area.width)
+        .find(|x| buffer[(*x, popup.y + 1)].symbol() == "界")
+        .unwrap();
+
+    assert!(buffer[(x, popup.y + 1)].modifier.contains(Modifier::BOLD));
+    assert!(
+        buffer[(x + 2, popup.y + 1)]
+            .modifier
+            .contains(Modifier::BOLD)
+    );
+    assert!(
+        !buffer[(x + 4, popup.y + 1)]
+            .modifier
+            .contains(Modifier::BOLD)
+    );
+}
+
+#[test]
+fn completion_candidate_label_highlight_preserves_selected_row_contrast() {
+    let mut app = completion_app("SELECT * FROM sys_u", TextRange::new(14, 19), "sys_user");
+    app.active_console_mut()
+        .completion
+        .as_mut()
+        .unwrap()
+        .candidates
+        .push(CompletionCandidate {
+            label: "other".into(),
+            insert_text: "other".into(),
+            kind: CompletionKind::Table,
+            detail: None,
+            replace: TextRange::new(14, 19),
+            score: CompletionScore {
+                context: 1,
+                name_match: 1,
+                schema: 0,
+            },
+        });
+    let (buffer, state) = render_buffer_with_icons(&app, 120, 36, IconSet::new(IconMode::Ascii));
+    let popup = state.completion_popup.unwrap();
+    let selected_x = find_ascii_cells(&buffer, popup.y + 1, "sys_user").unwrap();
+    let other_x = find_ascii_cells(&buffer, popup.y + 2, "other").unwrap();
+
+    assert_eq!(buffer[(selected_x, popup.y + 1)].fg, Color::Rgb(7, 11, 18));
+    assert_eq!(
+        buffer[(selected_x, popup.y + 1)].bg,
+        Color::Rgb(99, 230, 216)
+    );
+    assert_ne!(
+        buffer[(selected_x, popup.y + 1)].fg,
+        buffer[(other_x, popup.y + 2)].fg
+    );
+    assert!(
+        buffer[(selected_x, popup.y + 1)]
+            .modifier
+            .contains(Modifier::BOLD)
     );
 }
 
@@ -1320,7 +1437,7 @@ fn completion_popup_stays_fixed_while_typing() {
         let identifier = &sql[replace.start..replace.end];
         let source_needle = format!("FROM {identifier}");
         popup_xs.push(popup.x);
-        label_xs.push(find_ascii_cells(&buffer, popup.y, "sys_user").unwrap());
+        label_xs.push(find_ascii_cells(&buffer, popup.y + 1, "sys_user").unwrap());
         identifier_xs.push(
             (0..popup.y)
                 .find_map(|y| find_ascii_cells(&buffer, y, &source_needle))
@@ -1372,7 +1489,7 @@ fn completion_label_alignment_handles_multiline_tabs_and_wide_characters() {
         .find_map(|y| find_ascii_cells(&buffer, y, "FROM sys_u"))
         .map(|x| x + "FROM ".len() as u16)
         .unwrap();
-    let candidate_x = find_ascii_cells(&buffer, popup.y, "sys_user").unwrap();
+    let candidate_x = find_ascii_cells(&buffer, popup.y + 1, "sys_user").unwrap();
 
     assert_eq!(candidate_x, identifier_x);
 }
@@ -1392,7 +1509,7 @@ fn completion_popup_stays_in_editor_when_identifier_starts_at_column_zero() {
     let identifier_x = (editor.y..popup.y)
         .find_map(|y| find_ascii_cells(&buffer, y, "sys_u"))
         .unwrap();
-    let candidate_x = find_ascii_cells(&buffer, popup.y, "sys_user").unwrap();
+    let candidate_x = find_ascii_cells(&buffer, popup.y + 1, "sys_user").unwrap();
 
     assert_eq!(candidate_x, identifier_x);
     assert!(popup.x >= editor.x);
@@ -1416,7 +1533,7 @@ fn completion_label_alignment_supports_every_icon_mode() {
             .find_map(|y| find_ascii_cells(&buffer, y, "FROM sys_u"))
             .map(|x| x + "FROM ".len() as u16)
             .unwrap();
-        let candidate_x = find_ascii_cells(&buffer, popup.y, "sys_user").unwrap();
+        let candidate_x = find_ascii_cells(&buffer, popup.y + 1, "sys_user").unwrap();
 
         assert_eq!(candidate_x, identifier_x, "icon mode: {mode:?}");
     }
@@ -2048,6 +2165,15 @@ fn sql_result_query_completion_is_rendered_above_the_grid() {
     assert!(output.contains("active"), "{output}");
     assert!(output.contains("BOOLEAN"), "{output}");
     let popup = state.completion_popup.unwrap();
+    let (buffer, _) = render_buffer_with_icons(&app, 120, 36, IconSet::default());
+    assert_eq!(buffer[(popup.x, popup.y)].symbol(), "╭");
+    assert_eq!(buffer[(popup.right() - 1, popup.y)].symbol(), "╮");
+    assert_eq!(buffer[(popup.x, popup.bottom() - 1)].symbol(), "╰");
+    assert_eq!(
+        buffer[(popup.right() - 1, popup.bottom() - 1)].symbol(),
+        "╯"
+    );
+    assert_eq!(buffer[(popup.x, popup.y)].fg, Color::Rgb(43, 66, 86));
     assert!(popup.right() <= 120);
     assert!(popup.bottom() <= 36);
 }

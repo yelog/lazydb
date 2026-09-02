@@ -21,17 +21,27 @@ use tempfile::TempDir;
 use tokio::{sync::mpsc, time::timeout};
 
 #[test]
-fn typing_dismisses_stale_completion_and_updates_the_editor() {
+fn typing_refreshes_an_open_completion_without_flicker() {
     let mut app = App::new(Vec::new());
-    app.active_console_mut().completion = Some(CompletionPopup::default());
+    for character in ['s', 'e', 'l'] {
+        editor_key(&mut app, KeyCode::Char(character), KeyModifiers::NONE);
+    }
+    app.update(Action::CompletionExplicit);
+    assert!(app.active_console().completion.is_some());
 
-    app.update(Action::EditorKey(KeyEvent::new(
-        KeyCode::Char('s'),
+    let commands = app.update(Action::EditorKey(KeyEvent::new(
+        KeyCode::Char(' '),
         KeyModifiers::NONE,
     )));
 
-    assert_eq!(app.active_editor_text().unwrap(), "s");
-    assert!(app.active_console().completion.is_none());
+    let after = app.active_console().completion.as_ref().unwrap();
+    assert_eq!(app.active_editor_text().unwrap(), "sel ");
+    assert!(!after.candidates.is_empty());
+    assert!(
+        !commands
+            .iter()
+            .any(|command| { matches!(command, lazydb::action::Command::ScheduleCompletion(_)) })
+    );
 }
 
 #[test]
@@ -259,6 +269,80 @@ fn accepting_completion_places_cursor_after_inserted_text() {
     editor_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
     editor_key(&mut app, KeyCode::Char('u'), KeyModifiers::NONE);
     assert_eq!(app.active_editor_text().unwrap(), "sel");
+}
+
+#[test]
+fn typing_to_an_empty_result_closes_completion() {
+    let mut app = App::new(Vec::new());
+    for character in ['s', 'e', 'l'] {
+        editor_key(&mut app, KeyCode::Char(character), KeyModifiers::NONE);
+    }
+    app.update(Action::CompletionExplicit);
+    assert!(app.active_console().completion.is_some());
+
+    editor_key(&mut app, KeyCode::Char('x'), KeyModifiers::NONE);
+
+    assert_eq!(app.active_editor_text().unwrap(), "selx");
+    assert!(app.active_console().completion.is_none());
+}
+
+#[test]
+fn paste_refreshes_an_open_completion_immediately() {
+    let mut app = App::new(Vec::new());
+    for character in ['s', 'e', 'l'] {
+        editor_key(&mut app, KeyCode::Char(character), KeyModifiers::NONE);
+    }
+    app.update(Action::CompletionExplicit);
+    assert!(app.active_console().completion.is_some());
+
+    app.update(Action::EditorPaste("e".into()));
+
+    assert_eq!(app.active_editor_text().unwrap(), "sele");
+    assert!(app.active_console().completion.is_some());
+    assert_eq!(
+        app.active_console().completion.as_ref().unwrap().candidates[0].replace,
+        lazydb::sql::TextRange::new(0, 4)
+    );
+}
+
+#[test]
+fn accepting_after_refresh_uses_the_latest_replace_range() {
+    let mut app = App::new(Vec::new());
+    for character in ['s', 'e', 'l'] {
+        editor_key(&mut app, KeyCode::Char(character), KeyModifiers::NONE);
+    }
+    app.update(Action::CompletionExplicit);
+    editor_key(&mut app, KeyCode::Char('e'), KeyModifiers::NONE);
+
+    app.update(Action::CompletionAccept);
+
+    assert_eq!(app.active_editor_text().unwrap(), "SELECT ");
+    assert!(app.active_console().completion.is_none());
+}
+
+#[test]
+fn refresh_preserves_the_selected_candidate_identity() {
+    let mut app = App::new(Vec::new());
+    for character in "select ".chars() {
+        editor_key(&mut app, KeyCode::Char(character), KeyModifiers::NONE);
+    }
+    app.update(Action::CompletionExplicit);
+    let initial = app.active_console().completion.as_ref().unwrap();
+    assert!(
+        initial.candidates.len() > 1,
+        "expected multiple keyword candidates"
+    );
+    let selected = initial.candidates[1].clone();
+    app.update(Action::CompletionNext);
+
+    app.update(Action::EditorPaste(String::new()));
+
+    let popup = app.active_console().completion.as_ref().unwrap();
+    assert_eq!(popup.candidates[popup.selected].kind, selected.kind);
+    assert_eq!(
+        popup.candidates[popup.selected].insert_text,
+        selected.insert_text
+    );
 }
 
 #[test]

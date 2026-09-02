@@ -739,6 +739,9 @@ fn render_completion_popup(
     anchor: Option<CompletionAnchor>,
     icons: icons::IconSet,
 ) {
+    const POPUP_BORDER_WIDTH: u16 = 2;
+    const POPUP_BORDER_HEIGHT: u16 = 2;
+
     if app.active_editor_mode() != crate::model::editor::EditorMode::Insert {
         return;
     }
@@ -761,8 +764,8 @@ fn render_completion_popup(
         .max()
         .unwrap_or(0);
     let label_offset = icon_width.saturating_add(1);
-    let desired_height = popup.candidates.len().min(10) as u16;
-    let desired_width = popup
+    let visible_rows = popup.candidates.len().min(10) as u16;
+    let content_width = popup
         .candidates
         .iter()
         .map(|candidate| {
@@ -779,9 +782,11 @@ fn render_completion_popup(
         .max()
         .unwrap_or(4)
         .max(4);
+    let desired_width = content_width.saturating_add(POPUP_BORDER_WIDTH);
+    let desired_height = visible_rows.saturating_add(POPUP_BORDER_HEIGHT);
     let popup_x = anchor
         .replacement_start_x
-        .map(|label_x| label_x.saturating_sub(label_offset))
+        .map(|label_x| label_x.saturating_sub(label_offset.saturating_add(1)))
         .unwrap_or(anchor.cursor.x);
     let layout_anchor = CompletionAnchor {
         cursor: Position::new(popup_x, anchor.cursor.y),
@@ -791,11 +796,15 @@ fn render_completion_popup(
     let Some(area) = completion_popup_rect(layout_anchor, desired_width, desired_height) else {
         return;
     };
+    if area.width < 3 || area.height < 3 {
+        return;
+    }
     state.completion_popup = Some(area);
+    let editor_text = app.active_editor_text().ok();
     let items = popup
         .candidates
         .iter()
-        .take(10)
+        .take(usize::from(area.height.saturating_sub(POPUP_BORDER_HEIGHT)).min(10))
         .enumerate()
         .map(|(index, candidate)| {
             let detail = candidate.detail.as_deref().unwrap_or("");
@@ -807,26 +816,70 @@ fn render_completion_popup(
             } else {
                 Style::new().fg(theme.text).bg(theme.surface_raised)
             };
-            ListItem::new(Line::from(vec![
-                Span::styled(format!("{icon_padding}{icon} "), row_style),
-                Span::styled(candidate.label.clone(), row_style),
-                Span::styled(
-                    if detail.is_empty() {
-                        String::new()
-                    } else {
-                        format!("  {detail}")
-                    },
-                    row_style.fg(if index == popup.selected {
-                        theme.background
-                    } else {
-                        theme.muted
-                    }),
-                ),
-            ]))
+            let match_query = editor_text
+                .as_deref()
+                .and_then(|text| text.get(candidate.replace.start..candidate.replace.end));
+            let label_spans = match_query.map_or_else(
+                || vec![Span::styled(candidate.label.clone(), row_style)],
+                |query| completion_label_spans(&candidate.label, query, row_style),
+            );
+            let mut spans = vec![Span::styled(format!("{icon_padding}{icon} "), row_style)];
+            spans.extend(label_spans);
+            spans.push(Span::styled(
+                if detail.is_empty() {
+                    String::new()
+                } else {
+                    format!("  {detail}")
+                },
+                row_style.fg(if index == popup.selected {
+                    theme.background
+                } else {
+                    theme.muted
+                }),
+            ));
+            ListItem::new(Line::from(spans))
         })
         .collect::<Vec<_>>();
     frame.render_widget(Clear, area);
-    frame.render_widget(List::new(items), area);
+    frame.render_widget(List::new(items).block(completion_popup_block(theme)), area);
+}
+
+fn completion_label_spans(label: &str, query: &str, row_style: Style) -> Vec<Span<'static>> {
+    let Some(positions) = crate::sql::identifier_match_positions(label, query) else {
+        return vec![Span::styled(label.to_owned(), row_style)];
+    };
+    let matched = positions
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>();
+    let mut spans = Vec::new();
+    let mut segment_start = 0;
+    let mut segment_matched = None;
+    for (position, _) in label.char_indices() {
+        let is_matched = matched.contains(&position);
+        if segment_matched.is_some_and(|previous| previous != is_matched) {
+            spans.push(Span::styled(
+                label[segment_start..position].to_owned(),
+                if segment_matched.unwrap() {
+                    row_style.add_modifier(Modifier::BOLD)
+                } else {
+                    row_style
+                },
+            ));
+            segment_start = position;
+        }
+        segment_matched = Some(is_matched);
+    }
+    if segment_start < label.len() {
+        spans.push(Span::styled(
+            label[segment_start..].to_owned(),
+            if segment_matched.unwrap_or(false) {
+                row_style.add_modifier(Modifier::BOLD)
+            } else {
+                row_style
+            },
+        ));
+    }
+    spans
 }
 
 pub(crate) fn render_data_query_completion_popup(
@@ -836,11 +889,14 @@ pub(crate) fn render_data_query_completion_popup(
     state: &mut UiState,
     anchor: CompletionAnchor,
 ) {
+    const POPUP_BORDER_WIDTH: u16 = 2;
+    const POPUP_BORDER_HEIGHT: u16 = 2;
+
     if completion.candidates.is_empty() {
         return;
     }
-    let desired_height = completion.candidates.len().min(10) as u16;
-    let desired_width = completion
+    let visible_rows = completion.candidates.len().min(10) as u16;
+    let content_width = completion
         .candidates
         .iter()
         .map(|candidate| {
@@ -857,14 +913,19 @@ pub(crate) fn render_data_query_completion_popup(
         .max()
         .unwrap_or(4)
         .max(4);
+    let desired_width = content_width.saturating_add(POPUP_BORDER_WIDTH);
+    let desired_height = visible_rows.saturating_add(POPUP_BORDER_HEIGHT);
     let Some(area) = completion_popup_rect(anchor, desired_width, desired_height) else {
         return;
     };
+    if area.width < 3 || area.height < 3 {
+        return;
+    }
     state.completion_popup = Some(area);
     let items = completion
         .candidates
         .iter()
-        .take(10)
+        .take(usize::from(area.height.saturating_sub(POPUP_BORDER_HEIGHT)).min(10))
         .enumerate()
         .map(|(index, candidate)| {
             let selected = index == completion.selected;
@@ -898,7 +959,15 @@ pub(crate) fn render_data_query_completion_popup(
         })
         .collect::<Vec<_>>();
     frame.render_widget(Clear, area);
-    frame.render_widget(List::new(items), area);
+    frame.render_widget(List::new(items).block(completion_popup_block(theme)), area);
+}
+
+fn completion_popup_block(theme: Theme) -> Block<'static> {
+    Block::new()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(theme.border))
+        .style(Style::new().bg(theme.surface_raised))
 }
 
 fn completion_popup_rect(
@@ -3312,6 +3381,52 @@ mod completion_popup_tests {
         assert_eq!(
             completion_popup_rect(anchor, 20, 4),
             Some(Rect::new(10, 7, 20, 4))
+        );
+    }
+
+    #[test]
+    fn bordered_popup_reserves_two_rows_and_columns() {
+        let anchor = CompletionAnchor {
+            viewport: Rect::new(10, 5, 40, 10),
+            cursor: Position::new(12, 6),
+            replacement_start_x: None,
+        };
+
+        assert_eq!(
+            completion_popup_rect(anchor, 20 + 2, 4 + 2),
+            Some(Rect::new(12, 7, 22, 6))
+        );
+    }
+
+    #[test]
+    fn bordered_popup_geometry_reports_constrained_height_for_callers_to_reject() {
+        let anchor = CompletionAnchor {
+            viewport: Rect::new(10, 5, 40, 4),
+            cursor: Position::new(12, 6),
+            replacement_start_x: None,
+        };
+
+        assert_eq!(
+            completion_popup_rect(anchor, 12, 3),
+            Some(Rect::new(12, 7, 12, 2))
+        );
+        assert_eq!(
+            completion_popup_rect(anchor, 12, 3),
+            Some(Rect::new(12, 7, 12, 2))
+        );
+    }
+
+    #[test]
+    fn bordered_popup_shrinks_outer_width_without_moving_origin() {
+        let anchor = CompletionAnchor {
+            viewport: Rect::new(10, 5, 40, 10),
+            cursor: Position::new(48, 6),
+            replacement_start_x: None,
+        };
+
+        assert_eq!(
+            completion_popup_rect(anchor, 22, 6),
+            Some(Rect::new(48, 7, 2, 6))
         );
     }
 }
