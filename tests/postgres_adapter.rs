@@ -20,6 +20,33 @@ use lazydb::{
 use uuid::Uuid;
 
 #[test]
+fn monitoring_sql_aggregates_database_and_activity_stats_separately() {
+    let status = postgres::PostgresAdapter::MONITOR_STATUS_SQL;
+    assert!(status.contains("WITH db_stats AS"));
+    assert!(status.contains("activity_stats AS"));
+    assert!(status.contains("pg_stat_database"));
+    assert!(status.contains("pg_stat_activity"));
+    assert!(status.contains("pg_backend_pid()"));
+    assert!(status.contains("pg_postmaster_start_time()"));
+
+    let process = postgres::PostgresAdapter::PROCESS_LIST_SQL;
+    for field in [
+        "pid",
+        "user_name",
+        "database_name",
+        "client",
+        "application_name",
+        "state",
+        "wait",
+        "elapsed_seconds",
+        "query",
+    ] {
+        assert!(process.contains(field), "missing {field}");
+    }
+    assert!(process.contains("LIMIT 2001"));
+}
+
+#[test]
 fn postgres_catalog_capabilities_are_truthful_before_lazy_pages() {
     assert_eq!(
         PostgresAdapter::catalog_capabilities(),

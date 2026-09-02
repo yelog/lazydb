@@ -908,6 +908,42 @@ impl Keymap {
             app.tabs.get(app.active_tab),
             Some(crate::model::tab::WorkspaceTab::Relation(_))
         );
+        let dashboard_tab = matches!(
+            app.tabs.get(app.active_tab),
+            Some(crate::model::tab::WorkspaceTab::Dashboard(_))
+        );
+        if dashboard_tab && app.focus == Focus::Results {
+            if matches!(
+                app.tabs.get(app.active_tab),
+                Some(crate::model::tab::WorkspaceTab::Dashboard(tab))
+                    if tab.page == crate::model::dashboard::DashboardPage::Processes
+            ) {
+                if event.modifiers == KeyModifiers::CONTROL && event.code == KeyCode::Char('u') {
+                    return Some(Action::DashboardProcessFilterClear);
+                }
+                if event.modifiers.is_empty() {
+                    return match event.code {
+                        KeyCode::Backspace => Some(Action::DashboardProcessFilterBackspace),
+                        KeyCode::Char(value) => Some(Action::DashboardProcessFilterInsert(value)),
+                        _ => None,
+                    };
+                }
+            }
+            return match event.code {
+                KeyCode::Char('1') => Some(Action::DashboardSetPage(
+                    crate::model::dashboard::DashboardPage::Overview,
+                )),
+                KeyCode::Char('2') => Some(Action::DashboardSetPage(
+                    crate::model::dashboard::DashboardPage::Processes,
+                )),
+                KeyCode::Char('3') => Some(Action::DashboardSetPage(
+                    crate::model::dashboard::DashboardPage::Charts,
+                )),
+                KeyCode::Char('r') => Some(Action::DashboardRefresh),
+                KeyCode::Char('p') => Some(Action::DashboardTogglePolling),
+                _ => None,
+            };
+        }
         if relation_tab
             && app.focus == Focus::Results
             && matches!(event.code, KeyCode::Char('o' | 'p' | 'D' | 'r'))
@@ -1087,6 +1123,7 @@ fn map_pending(pending: Pending, event: KeyEvent, app: &App) -> Option<Action> {
     match (pending, event.code) {
         (Pending::Leader, KeyCode::Char('c')) => Some(Action::Focus(Focus::Explorer)),
         (Pending::Leader, KeyCode::Char('n')) => Some(Action::NewConsole),
+        (Pending::Leader, KeyCode::Char('b')) => Some(Action::OpenDashboard),
         (Pending::Leader, KeyCode::Char('s')) => Some(Action::GotoSqlConsole),
         (Pending::Leader, KeyCode::Char('r')) => Some(Action::RunActiveSql),
         (Pending::Leader, KeyCode::Char('R')) => Some(Action::RunAllSql),
@@ -1809,6 +1846,7 @@ fn active_data_query_has_focus(app: &App) -> bool {
     match app.tabs.get(app.active_tab) {
         Some(crate::model::tab::WorkspaceTab::Relation(tab)) => tab.query.focus.is_some(),
         Some(crate::model::tab::WorkspaceTab::Sql(tab)) => tab.query.focus.is_some(),
+        Some(crate::model::tab::WorkspaceTab::Dashboard(_)) => false,
         None => false,
     }
 }

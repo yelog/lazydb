@@ -8,6 +8,7 @@ use super::workspace::QueryStatus;
 use super::{transaction::TransactionMode, transaction::TransactionState};
 use crate::sql::ExecutionDraft;
 
+use super::dashboard::DashboardTab;
 use super::data_query::DataQueryOptions;
 use super::data_query::DataQueryState;
 use super::pagination::{PageRequest, PageSize, ResultPagination};
@@ -17,6 +18,7 @@ use super::relation::RelationTab;
 pub enum TabKind {
     Sql,
     Relation,
+    Dashboard,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -74,6 +76,7 @@ pub type GridState = DataGridState;
 pub enum WorkspaceTab {
     Sql(ConsoleTab),
     Relation(RelationTab),
+    Dashboard(DashboardTab),
 }
 
 impl WorkspaceTab {
@@ -81,6 +84,7 @@ impl WorkspaceTab {
         match self {
             Self::Sql(tab) => tab.id,
             Self::Relation(tab) => tab.id,
+            Self::Dashboard(tab) => tab.id,
         }
     }
 
@@ -88,6 +92,7 @@ impl WorkspaceTab {
         match self {
             Self::Sql(tab) => &tab.name,
             Self::Relation(tab) => tab.title(),
+            Self::Dashboard(_) => "Dashboard",
         }
     }
 
@@ -95,6 +100,7 @@ impl WorkspaceTab {
         match self {
             Self::Sql(_) => TabKind::Sql,
             Self::Relation(_) => TabKind::Relation,
+            Self::Dashboard(_) => TabKind::Dashboard,
         }
     }
 
@@ -102,6 +108,7 @@ impl WorkspaceTab {
         match self {
             Self::Sql(tab) => Some(tab),
             Self::Relation(_) => None,
+            Self::Dashboard(_) => None,
         }
     }
 
@@ -109,6 +116,7 @@ impl WorkspaceTab {
         match self {
             Self::Sql(tab) => Some(tab),
             Self::Relation(_) => None,
+            Self::Dashboard(_) => None,
         }
     }
 }

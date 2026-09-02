@@ -29,6 +29,15 @@ use crate::{
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
     NewConsole,
+    OpenDashboard,
+    DashboardSetPage(crate::model::dashboard::DashboardPage),
+    DashboardRefresh,
+    DashboardTogglePolling,
+    DashboardProcessFilterInsert(char),
+    DashboardProcessFilterBackspace,
+    DashboardProcessFilterClear,
+    DashboardMetricsDue,
+    DashboardProcessesDue,
     CloseActiveTab,
     CloseTab(Uuid),
     RequestDeleteActiveConsole,
@@ -473,6 +482,36 @@ pub enum Action {
         connection: ConnectionIdentity,
         outcome: QueryOutcome,
     },
+    DashboardMetricsLoaded {
+        tab_id: Uuid,
+        tab_generation: u64,
+        connection: ConnectionIdentity,
+        snapshot: crate::db::monitor::MonitorSnapshot,
+    },
+    DashboardMetricsFailed {
+        tab_id: Uuid,
+        tab_generation: u64,
+        connection: ConnectionIdentity,
+        message: String,
+    },
+    DashboardMetadataLoaded {
+        tab_id: Uuid,
+        tab_generation: u64,
+        connection: ConnectionIdentity,
+        metadata: crate::db::monitor::MonitorMetadata,
+    },
+    DashboardProcessesLoaded {
+        tab_id: Uuid,
+        tab_generation: u64,
+        connection: ConnectionIdentity,
+        snapshot: crate::db::monitor::ProcessSnapshot,
+    },
+    DashboardProcessesFailed {
+        tab_id: Uuid,
+        tab_generation: u64,
+        connection: ConnectionIdentity,
+        message: String,
+    },
     QueryFailed {
         tab_id: Uuid,
         generation: u64,
@@ -710,6 +749,25 @@ pub enum Command {
         tab_id: Uuid,
         generation: u64,
         sql: String,
+    },
+    LoadDashboardMetrics {
+        tab_id: Uuid,
+        tab_generation: u64,
+        connection: ConnectionIdentity,
+    },
+    LoadDashboardMetadata {
+        tab_id: Uuid,
+        tab_generation: u64,
+        connection: ConnectionIdentity,
+    },
+    LoadDashboardProcesses {
+        tab_id: Uuid,
+        tab_generation: u64,
+        connection: ConnectionIdentity,
+    },
+    CancelDashboardTasks {
+        tab_id: Uuid,
+        tab_generation: u64,
     },
     RunQueryPage {
         connection: ConnectionIdentity,

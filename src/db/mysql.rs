@@ -42,6 +42,7 @@ use super::{
     sanitize_terminal_text,
     value::CellValue,
 };
+use crate::model::dashboard::MetricKey;
 
 pub const CATALOG_TABLES_SQL: &str = r#"
 SELECT table_schema, table_name, table_type
@@ -209,6 +210,119 @@ impl MySqlSearchCandidate {
 }
 
 impl MySqlAdapter {
+    pub const MONITOR_STATUS_SQL: &str = "SHOW GLOBAL STATUS WHERE Variable_name IN ('Queries','Com_commit','Com_rollback','Com_select','Com_insert','Com_update','Com_delete','Threads_connected','Threads_running','Innodb_buffer_pool_read_requests','Innodb_buffer_pool_reads','Created_tmp_files','Bytes_received','Bytes_sent','Connections','Aborted_clients','Aborted_connects','Uptime')";
+    pub const MONITOR_METADATA_SQL: &str =
+        "SHOW GLOBAL VARIABLES WHERE Variable_name IN ('version','max_connections')";
+    pub const PROCESS_LIST_SQL: &str = "SHOW FULL PROCESSLIST";
+
+    pub async fn load_monitor_snapshot(
+        &self,
+    ) -> Result<crate::db::monitor::MonitorSnapshot, DatabaseError> {
+        let rows = sqlx::query(Self::MONITOR_STATUS_SQL)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Sql))?;
+        let mut values = std::collections::BTreeMap::new();
+        for row in rows {
+            let name: String = row.try_get("Variable_name").map_err(decode_error)?;
+            let value: String = row.try_get("Value").map_err(decode_error)?;
+            let Some(value) = crate::db::monitor::status_value(&value) else {
+                continue;
+            };
+            let key = match name.to_ascii_lowercase().as_str() {
+                "queries" => MetricKey::Queries,
+                "com_commit" => MetricKey::Commits,
+                "com_rollback" => MetricKey::Rollbacks,
+                "com_select" => MetricKey::Selects,
+                "com_insert" => MetricKey::Inserts,
+                "com_update" => MetricKey::Updates,
+                "com_delete" => MetricKey::Deletes,
+                "threads_connected" => MetricKey::Connections,
+                "threads_running" => MetricKey::ActiveConnections,
+                "innodb_buffer_pool_read_requests" => MetricKey::BlockHits,
+                "innodb_buffer_pool_reads" => MetricKey::BlockReads,
+                "created_tmp_files" => MetricKey::TempFiles,
+                "bytes_received" => MetricKey::BytesRead,
+                "bytes_sent" => MetricKey::BytesWritten,
+                "connections" => MetricKey::Connections,
+                "aborted_clients" => MetricKey::AbortedClients,
+                "aborted_connects" => MetricKey::AbortedConnections,
+                "uptime" => MetricKey::ServerUptime,
+                _ => continue,
+            };
+            values.insert(key, value);
+        }
+        let commits = values.get(&MetricKey::Commits).copied().unwrap_or_default();
+        let rollbacks = values
+            .get(&MetricKey::Rollbacks)
+            .copied()
+            .unwrap_or_default();
+        values.insert(MetricKey::Transactions, commits + rollbacks);
+        Ok(crate::db::monitor::MonitorSnapshot {
+            server_time_millis: chrono::Utc::now().timestamp_millis() as u64,
+            // Uptime is sampled for reset detection, not used as a generation because it changes every poll.
+            server_generation: 1,
+            values,
+        })
+    }
+
+    pub async fn load_monitor_metadata(
+        &self,
+    ) -> Result<crate::db::monitor::MonitorMetadata, DatabaseError> {
+        let rows = sqlx::query(Self::MONITOR_METADATA_SQL)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Sql))?;
+        let mut metadata = crate::db::monitor::MonitorMetadata::default();
+        for row in rows {
+            let name: String = row.try_get("Variable_name").map_err(decode_error)?;
+            let value: String = row.try_get("Value").map_err(decode_error)?;
+            match name.to_ascii_lowercase().as_str() {
+                "version" => metadata.version = Some(sanitize_terminal_text(&value)),
+                "max_connections" => metadata.max_connections = value.parse().ok(),
+                _ => {}
+            }
+        }
+        Ok(metadata)
+    }
+
+    pub async fn load_process_snapshot(
+        &self,
+    ) -> Result<crate::db::monitor::ProcessSnapshot, DatabaseError> {
+        let rows = sqlx::query(Self::PROCESS_LIST_SQL)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Sql))?;
+        let truncated = rows.len() > crate::db::monitor::MAX_PROCESS_ROWS;
+        let rows = rows
+            .into_iter()
+            .take(crate::db::monitor::MAX_PROCESS_ROWS)
+            .map(|row| {
+                let query = row
+                    .try_get::<Option<String>, _>("Info")
+                    .map_err(decode_error)?;
+                Ok(crate::model::dashboard::ProcessRow {
+                    id: row.try_get("Id").map_err(decode_error)?,
+                    user: sanitize_terminal_text(
+                        &row.try_get::<String, _>("User").map_err(decode_error)?,
+                    ),
+                    database: row.try_get("db").map_err(decode_error)?,
+                    client: row.try_get("Host").map_err(decode_error)?,
+                    application: row.try_get("Command").map_err(decode_error)?,
+                    state: row.try_get("State").map_err(decode_error)?,
+                    wait: None,
+                    elapsed: Duration::from_secs(row.try_get("Time").map_err(decode_error)?),
+                    query: query.map(|value| sanitize_terminal_text(&value)),
+                })
+            })
+            .collect::<Result<Vec<_>, DatabaseError>>()?;
+        Ok(crate::db::monitor::ProcessSnapshot {
+            rows,
+            truncated,
+            visibility: crate::db::monitor::MonitorVisibility::Unknown,
+        })
+    }
+
     pub fn plan_catalog_drop(
         request: CatalogDropRequest,
         entry: &CatalogEntry,

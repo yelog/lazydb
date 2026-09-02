@@ -1,4 +1,5 @@
 pub mod animation;
+pub(crate) mod dashboard;
 pub mod data_grid;
 pub mod icons;
 pub mod layout;
@@ -371,7 +372,11 @@ pub fn render_with_state_using_icons_and_sequence(
         app.tabs.get(app.active_tab),
         Some(WorkspaceTab::Relation(_))
     );
-    let layout = AppLayout::calculate(area, app.focus, is_relation, app.pane_sizes);
+    let is_dashboard = matches!(
+        app.tabs.get(app.active_tab),
+        Some(WorkspaceTab::Dashboard(_))
+    );
+    let layout = AppLayout::calculate(area, app.focus, is_relation || is_dashboard, app.pane_sizes);
     state.pane_layout = layout.pane_metrics;
     state.hit_regions.clear();
     state.editor_viewport = None;
@@ -393,7 +398,15 @@ pub fn render_with_state_using_icons_and_sequence(
     if let Some(area) = layout.tabs {
         render_tabs(frame, area, app, theme, state, icons);
     }
-    if is_relation {
+    if is_dashboard {
+        if let Some(area) = layout.explorer {
+            render_explorer(frame, area, app, theme, state, icons);
+        }
+        if let Some(area) = layout.relation {
+            dashboard::render(frame, area, app, theme);
+        }
+        render_footer(frame, layout.footer, app, theme, sequence);
+    } else if is_relation {
         if let Some(area) = layout.explorer {
             state.hit_regions.push(HitRegion {
                 area,
@@ -667,6 +680,7 @@ fn animation_observation(app: &App) -> animation::AnimationObservation {
                     .insert(animation::LoadIdentity::Relation(request.clone()));
             }
         }
+        WorkspaceTab::Dashboard(_) => {}
     }
     observation
 }
@@ -1100,6 +1114,7 @@ fn render_tabs(
             .collect::<String>();
         let icon = match tab {
             WorkspaceTab::Relation(tab) => icons.catalog(tab.descriptor.kind),
+            WorkspaceTab::Dashboard(_) => icons.database(crate::profile::DatabaseKind::Postgres),
             WorkspaceTab::Sql(tab) => tab
                 .execution_target
                 .as_ref()

@@ -12,7 +12,7 @@ use crate::db::catalog::{CatalogId, CatalogKind, QualifiedName};
 use crate::model::relation::RelationView;
 use crate::model::{execution_target::ExecutionTarget, transaction::TransactionMode};
 
-const WORKSPACE_VERSION: u16 = 3;
+const WORKSPACE_VERSION: u16 = 4;
 
 #[derive(Debug, Error)]
 pub enum WorkspaceError {
@@ -67,8 +67,17 @@ pub struct PersistedProfileWorkspace {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PersistedTab {
-    Console { console_id: Uuid },
+    Console {
+        console_id: Uuid,
+    },
     Relation(PersistedRelationTab),
+    Dashboard {
+        dashboard_id: Uuid,
+        #[serde(default)]
+        page: crate::model::dashboard::DashboardPage,
+        #[serde(default = "default_dashboard_refresh")]
+        refresh_enabled: bool,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -82,6 +91,10 @@ pub struct PersistedRelationTab {
 }
 
 fn default_open() -> bool {
+    true
+}
+
+fn default_dashboard_refresh() -> bool {
     true
 }
 
@@ -147,7 +160,8 @@ impl WorkspaceStore {
             .and_then(toml::Value::as_integer)
             .and_then(|version| u16::try_from(version).ok())
             .ok_or_else(|| WorkspaceError::Invalid("workspace version is missing".into()))?;
-        let (active_profile, active_console, profiles) = if version == WORKSPACE_VERSION {
+        let (active_profile, active_console, profiles) = if matches!(version, 3 | WORKSPACE_VERSION)
+        {
             let file: WorkspaceFile = toml::from_str(&contents)?;
             (file.active_profile, Uuid::nil(), file.profiles)
         } else if matches!(version, 1 | 2) {
@@ -312,6 +326,16 @@ pub fn validate_snapshot(snapshot: &WorkspaceSnapshot) -> Result<(), WorkspaceEr
                         ));
                     }
                 }
+                PersistedTab::Dashboard { dashboard_id, .. } => {
+                    if !relation_ids.insert(*dashboard_id) {
+                        return Err(WorkspaceError::Invalid("duplicate tab ID".into()));
+                    }
+                    if console_ids.contains(dashboard_id) {
+                        return Err(WorkspaceError::Invalid(
+                            "dashboard duplicates a console ID".into(),
+                        ));
+                    }
+                }
             }
         }
     }
@@ -341,5 +365,6 @@ fn tab_id(tab: &PersistedTab) -> Uuid {
     match tab {
         PersistedTab::Console { console_id } => *console_id,
         PersistedTab::Relation(relation) => relation.id,
+        PersistedTab::Dashboard { dashboard_id, .. } => *dashboard_id,
     }
 }

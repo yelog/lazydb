@@ -70,6 +70,23 @@ from display strings.
 
 ## Explorer
 
+## Database Dashboard
+
+Open the connection dashboard with `Space b` from Explorer or Results. The
+dashboard is read-only in the current release and does not issue cancel or
+terminate commands.
+
+| Keys | Behavior |
+| --- | --- |
+| `Space b` | Open or focus the connection dashboard |
+| `1` / `2` / `3` | Overview / Processes / Charts |
+| `r` | Refresh metrics and the visible process list |
+| `p` | Pause or resume dashboard polling |
+| Printable text / `Backspace` / `Ctrl-U` on Processes | Filter visible processes |
+
+The process list is bounded and may be incomplete when database privileges do
+not expose every session. Filtering applies to the bounded visible snapshot.
+
 | Keys | Behavior |
 | --- | --- |
 | `j/k`, Up/Down | Move selection |

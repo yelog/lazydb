@@ -235,6 +235,34 @@ enum CompletionAfterEdit {
 }
 
 impl App {
+    pub fn dashboard_refresh_commands(&mut self, now_millis: u64) -> Vec<Command> {
+        let Some(connection) = self.connection.active_identity() else {
+            return Vec::new();
+        };
+        let Some(WorkspaceTab::Dashboard(tab)) = self.tabs.get_mut(self.active_tab) else {
+            return Vec::new();
+        };
+        if !tab.refresh_enabled || tab.loading || now_millis < tab.next_refresh_millis {
+            return Vec::new();
+        }
+        tab.loading = true;
+        tab.next_refresh_millis = now_millis.saturating_add(2_000);
+        let mut commands = vec![Command::LoadDashboardMetrics {
+            tab_id: tab.id,
+            tab_generation: tab.generation,
+            connection,
+        }];
+        if tab.page == crate::model::dashboard::DashboardPage::Processes && !tab.process_loading {
+            tab.process_loading = true;
+            commands.push(Command::LoadDashboardProcesses {
+                tab_id: tab.id,
+                tab_generation: tab.generation,
+                connection,
+            });
+        }
+        commands
+    }
+
     pub(crate) fn deferred_transaction_prompts(
         &self,
     ) -> impl Iterator<Item = &DeferredTransactionPrompt> {
@@ -476,6 +504,7 @@ impl App {
                     },
                 )),
                 WorkspaceTab::Sql(_) => None,
+                WorkspaceTab::Dashboard(_) => None,
             })
             .collect::<Vec<_>>();
         for (id, text) in relation_sessions {
@@ -662,6 +691,7 @@ impl App {
         match self.tabs.get(self.active_tab) {
             Some(WorkspaceTab::Sql(tab)) => tab.grid.selected_column,
             Some(WorkspaceTab::Relation(tab)) => tab.grid.selected_column,
+            Some(WorkspaceTab::Dashboard(_)) => 0,
             None => 0,
         }
     }
@@ -879,6 +909,11 @@ impl App {
                         view: tab.view,
                     })
                 }
+                WorkspaceTab::Dashboard(tab) => PersistedTab::Dashboard {
+                    dashboard_id: tab.id,
+                    page: tab.page,
+                    refresh_enabled: tab.refresh_enabled,
+                },
             })
             .collect();
         PersistedProfileWorkspace {
@@ -1060,6 +1095,17 @@ impl App {
                         relation.view,
                     );
                     tabs.push(WorkspaceTab::Relation(tab));
+                }
+                PersistedTab::Dashboard {
+                    dashboard_id,
+                    page,
+                    refresh_enabled,
+                } => {
+                    let mut tab = crate::model::dashboard::DashboardTab::new();
+                    tab.id = *dashboard_id;
+                    tab.page = *page;
+                    tab.refresh_enabled = *refresh_enabled;
+                    tabs.push(WorkspaceTab::Dashboard(tab));
                 }
             }
         }
@@ -1490,6 +1536,20 @@ impl App {
                         | Action::CatalogDropClear
                         | Action::CatalogDropConfirm
                         | Action::CatalogDropCancel
+                        | Action::OpenDashboard
+                        | Action::DashboardSetPage(_)
+                        | Action::DashboardRefresh
+                        | Action::DashboardTogglePolling
+                        | Action::DashboardProcessFilterInsert(_)
+                        | Action::DashboardProcessFilterBackspace
+                        | Action::DashboardProcessFilterClear
+                        | Action::DashboardMetricsDue
+                        | Action::DashboardProcessesDue
+                        | Action::DashboardMetricsLoaded { .. }
+                        | Action::DashboardMetricsFailed { .. }
+                        | Action::DashboardMetadataLoaded { .. }
+                        | Action::DashboardProcessesLoaded { .. }
+                        | Action::DashboardProcessesFailed { .. }
                 ))
             && matches!(
                 action,
@@ -1555,6 +1615,192 @@ impl App {
             return Vec::new();
         }
         match action {
+            Action::OpenDashboard => {
+                if !self.has_active_workspace() {
+                    return Vec::new();
+                }
+                if let Some(index) = self
+                    .tabs
+                    .iter()
+                    .position(|tab| matches!(tab, WorkspaceTab::Dashboard(_)))
+                {
+                    self.active_tab = index;
+                } else {
+                    self.tabs.push(WorkspaceTab::Dashboard(
+                        crate::model::dashboard::DashboardTab::new(),
+                    ));
+                    self.active_tab = self.tabs.len() - 1;
+                }
+                self.focus = Focus::Results;
+                let mut commands = vec![self.persist_workspace_command()];
+                if let Some(connection) = self.connection.active_identity()
+                    && let Some(tab) = self.tabs.get_mut(self.active_tab)
+                    && let WorkspaceTab::Dashboard(tab) = tab
+                {
+                    tab.loading = true;
+                    commands.push(Command::LoadDashboardMetrics {
+                        tab_id: tab.id,
+                        tab_generation: tab.generation,
+                        connection,
+                    });
+                    commands.push(Command::LoadDashboardMetadata {
+                        tab_id: tab.id,
+                        tab_generation: tab.generation,
+                        connection,
+                    });
+                }
+                commands
+            }
+            Action::DashboardSetPage(page) => {
+                let Some(WorkspaceTab::Dashboard(tab)) = self.tabs.get_mut(self.active_tab) else {
+                    return Vec::new();
+                };
+                tab.page = page;
+                if page == crate::model::dashboard::DashboardPage::Processes {
+                    tab.process_loading = true;
+                    if let Some(connection) = self.connection.active_identity() {
+                        return vec![Command::LoadDashboardProcesses {
+                            tab_id: tab.id,
+                            tab_generation: tab.generation,
+                            connection,
+                        }];
+                    }
+                }
+                Vec::new()
+            }
+            Action::DashboardRefresh => {
+                let Some(WorkspaceTab::Dashboard(tab)) = self.tabs.get_mut(self.active_tab) else {
+                    return Vec::new();
+                };
+                let Some(connection) = self.connection.active_identity() else {
+                    return Vec::new();
+                };
+                tab.loading = true;
+                vec![Command::LoadDashboardMetrics {
+                    tab_id: tab.id,
+                    tab_generation: tab.generation,
+                    connection,
+                }]
+            }
+            Action::DashboardTogglePolling => {
+                if let Some(WorkspaceTab::Dashboard(tab)) = self.tabs.get_mut(self.active_tab) {
+                    tab.refresh_enabled = !tab.refresh_enabled;
+                }
+                Vec::new()
+            }
+            Action::DashboardProcessFilterInsert(value) => {
+                if let Some(WorkspaceTab::Dashboard(tab)) = self.tabs.get_mut(self.active_tab) {
+                    tab.process_filter.push(value);
+                }
+                Vec::new()
+            }
+            Action::DashboardProcessFilterBackspace => {
+                if let Some(WorkspaceTab::Dashboard(tab)) = self.tabs.get_mut(self.active_tab) {
+                    tab.process_filter.pop();
+                }
+                Vec::new()
+            }
+            Action::DashboardProcessFilterClear => {
+                if let Some(WorkspaceTab::Dashboard(tab)) = self.tabs.get_mut(self.active_tab) {
+                    tab.process_filter.clear();
+                }
+                Vec::new()
+            }
+            Action::DashboardMetricsLoaded {
+                tab_id,
+                tab_generation,
+                connection,
+                snapshot,
+            } => {
+                let Some(WorkspaceTab::Dashboard(tab)) =
+                    self.tabs.iter_mut().find(|tab| tab.id() == tab_id)
+                else {
+                    return Vec::new();
+                };
+                if tab.generation != tab_generation
+                    || self.connection.active_identity() != Some(connection)
+                {
+                    return Vec::new();
+                }
+                let raw = crate::model::dashboard::RawSample {
+                    at_millis: snapshot.server_time_millis,
+                    server_generation: snapshot.server_generation,
+                    values: snapshot.values,
+                };
+                tab.history.push(raw.clone());
+                tab.latest = Some(raw);
+                tab.loading = false;
+                tab.error = None;
+                tab.last_refresh_millis = Some(snapshot.server_time_millis);
+                Vec::new()
+            }
+            Action::DashboardMetricsFailed {
+                tab_id,
+                tab_generation,
+                connection,
+                message,
+            } => {
+                if let Some(WorkspaceTab::Dashboard(tab)) =
+                    self.tabs.iter_mut().find(|tab| tab.id() == tab_id)
+                    && tab.generation == tab_generation
+                    && self.connection.active_identity() == Some(connection)
+                {
+                    tab.loading = false;
+                    tab.error = Some(message);
+                }
+                Vec::new()
+            }
+            Action::DashboardMetadataLoaded {
+                tab_id,
+                tab_generation,
+                connection,
+                metadata,
+            } => {
+                if let Some(WorkspaceTab::Dashboard(tab)) =
+                    self.tabs.iter_mut().find(|tab| tab.id() == tab_id)
+                    && tab.generation == tab_generation
+                    && self.connection.active_identity() == Some(connection)
+                {
+                    tab.metadata = metadata;
+                }
+                Vec::new()
+            }
+            Action::DashboardProcessesLoaded {
+                tab_id,
+                tab_generation,
+                connection,
+                snapshot,
+            } => {
+                if let Some(WorkspaceTab::Dashboard(tab)) =
+                    self.tabs.iter_mut().find(|tab| tab.id() == tab_id)
+                    && tab.generation == tab_generation
+                    && self.connection.active_identity() == Some(connection)
+                {
+                    tab.processes = snapshot.rows;
+                    tab.process_truncated = snapshot.truncated;
+                    tab.visibility = snapshot.visibility;
+                    tab.process_loading = false;
+                    tab.process_error = None;
+                }
+                Vec::new()
+            }
+            Action::DashboardProcessesFailed {
+                tab_id,
+                tab_generation,
+                connection,
+                message,
+            } => {
+                if let Some(WorkspaceTab::Dashboard(tab)) =
+                    self.tabs.iter_mut().find(|tab| tab.id() == tab_id)
+                    && tab.generation == tab_generation
+                    && self.connection.active_identity() == Some(connection)
+                {
+                    tab.process_loading = false;
+                    tab.process_error = Some(message);
+                }
+                Vec::new()
+            }
+            Action::DashboardMetricsDue | Action::DashboardProcessesDue => Vec::new(),
             Action::NewConsole => {
                 if !self.profiles.is_empty()
                     && self.connection.active_identity().is_none()
@@ -5066,6 +5312,13 @@ impl App {
             }
             _ => Vec::new(),
         };
+        let dashboard_cancel = match self.tabs.get(index) {
+            Some(WorkspaceTab::Dashboard(tab)) => Some(Command::CancelDashboardTasks {
+                tab_id: tab.id,
+                tab_generation: tab.generation,
+            }),
+            _ => None,
+        };
         self.tabs.remove(index);
         if was_console
             && let Some(record) = self.sql_editors.iter_mut().find(|record| record.id == id)
@@ -5078,6 +5331,9 @@ impl App {
         self.active_tab = self.active_tab.min(self.tabs.len().saturating_sub(1));
         self.normalize_focus();
         let mut commands = cancel;
+        if let Some(command) = dashboard_cancel {
+            commands.push(command);
+        }
         if self.tabs.is_empty() {
             if let Some(replacement_id) = self
                 .sql_editors
@@ -10628,6 +10884,7 @@ mod tests {
         let relation = match &app.tabs[app.active_tab] {
             WorkspaceTab::Relation(tab) => tab.descriptor.key.clone(),
             WorkspaceTab::Sql(_) => unreachable!(),
+            WorkspaceTab::Dashboard(_) => unreachable!(),
         };
         let scope = app.profiles[0].catalog_scope.clone();
         let request = RelationRequest {

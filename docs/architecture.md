@@ -15,9 +15,16 @@ Crossterm input / DB events
         Runtime
            |
 DatabaseConnection enum
-  |          |          |
+   |          |          |
 Postgres   MySQL      SQLite
 ```
+
+The monitoring dashboard is a separate workspace tab. Its native read-only
+queries live in the concrete PostgreSQL/MySQL adapters, while the dashboard
+model owns typed snapshots, elapsed-time counter rates, time-bounded history,
+and process filtering. Runtime schedules single-flight metric and process
+loads and tags every result with the dashboard tab generation and active
+connection identity, so stale results cannot update a switched or closed tab.
 
 ## Reducer Boundary
 
