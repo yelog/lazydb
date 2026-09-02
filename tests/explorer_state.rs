@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use lazydb::{
     db::catalog::{
         CatalogCompleteness, CatalogCount, CatalogCursor, CatalogEntry, CatalogId, CatalogKind,
@@ -8,7 +10,7 @@ use lazydb::{
         CatalogGroupState, CatalogTree, CatalogTreeError, ExplorerConnectionStatus,
         ExplorerLoadState, ExplorerNodeAlignment, ExplorerNodeId, ExplorerNodeTarget,
         ExplorerOwnerId, ExplorerScrollAmount, ExplorerTreeState, ProfilePlacement,
-        ProfileProvenance, StatusRowKind,
+        ProfileProvenance, ProfileRegion, StatusRowKind,
     },
     model::workspace::ExplorerState,
 };
@@ -71,6 +73,28 @@ fn other_profiles_are_hidden_under_a_collapsed_group() {
         ]
     );
     assert_eq!(explorer.visible().last().unwrap().depth, 1);
+}
+
+#[test]
+fn empty_connection_groups_are_visible_in_the_primary_region() {
+    let group_id = Uuid::from_u128(3);
+    let mut explorer = ExplorerTreeState::default();
+    explorer.sync_organization(
+        vec![lazydb::profile::ConnectionGroup {
+            id: group_id,
+            name: "Production".into(),
+        }],
+        Vec::new(),
+        &HashMap::new(),
+    );
+
+    assert_eq!(
+        visible_ids(&explorer),
+        vec![ExplorerNodeId::ConnectionGroup {
+            group_id,
+            region: ProfileRegion::Primary,
+        }]
+    );
 }
 
 #[test]

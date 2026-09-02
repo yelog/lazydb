@@ -1338,7 +1338,7 @@ impl ExplorerTreeState {
                     })
                 })
                 .collect::<Vec<_>>();
-            if members.is_empty() {
+            if members.is_empty() && region == ProfileRegion::Others {
                 continue;
             }
             let node = ExplorerNodeId::ConnectionGroup {
@@ -1772,21 +1772,13 @@ impl ExplorerTreeState {
             ExplorerNodeId::ConnectionGroup { group_id, region } => {
                 self.groups.iter().any(|group| {
                     group.id == *group_id
-                        && self.profile_order.iter().any(|profile_id| {
-                            self.profiles.get(profile_id).is_some_and(|profile| {
-                                profile.group_id == Some(*group_id)
-                                    && match region {
-                                        ProfileRegion::Primary => matches!(
-                                            profile.placement,
-                                            ProfilePlacement::CurrentProject
-                                                | ProfilePlacement::Global
-                                        ),
-                                        ProfileRegion::Others => {
-                                            profile.placement == ProfilePlacement::OtherProject
-                                        }
-                                    }
-                            })
-                        })
+                        && (region == &ProfileRegion::Primary
+                            || self.profile_order.iter().any(|profile_id| {
+                                self.profiles.get(profile_id).is_some_and(|profile| {
+                                    profile.group_id == Some(*group_id)
+                                        && profile.placement == ProfilePlacement::OtherProject
+                                })
+                            }))
                 })
             }
             ExplorerNodeId::Status { owner, kind } => self
