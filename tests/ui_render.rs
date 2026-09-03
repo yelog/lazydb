@@ -1438,6 +1438,21 @@ fn find_text_cell(buffer: &ratatui::buffer::Buffer, text: &str) -> Option<(u16, 
     (0..buffer.area.height).find_map(|y| find_ascii_cells(buffer, y, text).map(|x| (x, y)))
 }
 
+fn find_text_cell_on_line(
+    buffer: &ratatui::buffer::Buffer,
+    text: &str,
+    line_marker: &str,
+) -> Option<(u16, u16)> {
+    (0..buffer.area.height).find_map(|y| {
+        let line = (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect::<String>();
+        line.contains(line_marker)
+            .then(|| find_ascii_cells(buffer, y, text).map(|x| (x, y)))
+            .flatten()
+    })
+}
+
 fn completion_app(sql: &str, replace: TextRange, label: &str) -> App {
     let mut app = fixture();
     app.focus = Focus::Editor;
@@ -2787,7 +2802,7 @@ fn relation_help_documents_transaction_control_panel() {
 }
 
 #[test]
-fn quit_panel_lists_all_pending_transactions() {
+fn quit_panel_uses_compact_transaction_summary_layout() {
     let mut app = fixture();
     app.active_console_mut().transaction_mode = lazydb::model::transaction::TransactionMode::Manual;
     app.active_console_mut().transaction_state =
@@ -2800,11 +2815,233 @@ fn quit_panel_lists_all_pending_transactions() {
     assert!(app.update(Action::Quit).is_empty());
     let output = render(&app, 100, 30);
 
-    assert!(output.contains("PENDING TRANSACTIONS"));
-    assert!(output.contains("Active"));
-    assert!(output.contains("Aborted"));
-    assert!(output.contains("Commit"));
-    assert!(output.contains("Rollback"));
+    assert_eq!(
+        output.matches("PENDING TRANSACTIONS").count(),
+        1,
+        "{output}"
+    );
+    assert!(output.contains("TRANSACTION SUMMARY"), "{output}");
+    assert!(output.contains("ACTIVE"), "{output}");
+    assert!(output.contains("ABORTED"), "{output}");
+    assert!(!output.contains("Active"), "{output}");
+    assert!(!output.contains("Aborted"), "{output}");
+    assert!(output.contains("Commit"), "{output}");
+    assert!(output.contains("Rollback"), "{output}");
+    assert!(output.contains("Esc cancel"), "{output}");
+    assert!(!output.contains("Rollback is the default"), "{output}");
+}
+
+#[test]
+fn quit_panel_highlights_rollback_as_the_default_action() {
+    let mut app = fixture();
+    app.active_console_mut().transaction_mode = TransactionMode::Manual;
+    app.active_console_mut().transaction_state =
+        lazydb::model::transaction::TransactionState::Active;
+    assert!(app.update(Action::Quit).is_empty());
+
+    let (buffer, _) = render_buffer_with_icons(&app, 100, 30, IconSet::new(IconMode::Ascii));
+    let (rollback_x, rollback_y) = find_text_cell(&buffer, "Rollback").expect("rollback action");
+    let (commit_x, commit_y) = find_text_cell(&buffer, "Commit").expect("commit action");
+
+    assert_eq!(
+        buffer[(rollback_x, rollback_y)].bg,
+        Color::Rgb(99, 230, 216)
+    );
+    assert!(
+        buffer[(rollback_x, rollback_y)]
+            .modifier
+            .contains(Modifier::BOLD)
+    );
+    assert_ne!(
+        buffer[(commit_x, commit_y)].bg,
+        buffer[(rollback_x, rollback_y)].bg
+    );
+}
+
+#[test]
+fn transaction_panel_keeps_the_title_out_of_the_body() {
+    let mut app = fixture();
+    app.active_console_mut().transaction_mode = TransactionMode::Manual;
+    app.active_console_mut().transaction_state =
+        lazydb::model::transaction::TransactionState::Active;
+    app.update(Action::OpenTransactionControl);
+
+    let output = render(&app, 100, 30);
+    let title_line = output
+        .lines()
+        .find(|line| line.contains(" TRANSACTION "))
+        .expect("transaction border title");
+
+    assert!(title_line.contains('─'), "{output}");
+    assert!(output.contains("TRANSACTION SUMMARY"), "{output}");
+    assert_eq!(
+        output
+            .lines()
+            .filter(|line| line.trim() == "TRANSACTION")
+            .count(),
+        0,
+        "{output}"
+    );
+}
+
+#[test]
+fn quit_panel_marks_the_current_transaction_and_colors_states() {
+    let mut app = fixture();
+    app.active_console_mut().transaction_mode = TransactionMode::Manual;
+    app.active_console_mut().transaction_state =
+        lazydb::model::transaction::TransactionState::Active;
+    app.update(Action::NewConsole);
+    app.active_console_mut().transaction_mode = TransactionMode::Manual;
+    app.active_console_mut().transaction_state =
+        lazydb::model::transaction::TransactionState::Aborted;
+    assert!(app.update(Action::Quit).is_empty());
+
+    let (buffer, _) = render_buffer_with_icons(&app, 100, 30, IconSet::new(IconMode::Ascii));
+    let (active_x, active_y) =
+        find_text_cell_on_line(&buffer, "ACTIVE", "›").expect("active state");
+    let (aborted_x, aborted_y) =
+        find_text_cell_on_line(&buffer, "ABORTED", "  console").expect("aborted state");
+    let marker_x = (0..active_x)
+        .rev()
+        .find(|x| buffer[(*x, active_y)].symbol() == "›")
+        .expect("current transaction marker");
+
+    assert_ne!(
+        buffer[(active_x, active_y)].fg,
+        buffer[(aborted_x, aborted_y)].fg
+    );
+    assert_ne!(
+        buffer[(marker_x, active_y)].fg,
+        buffer[(active_x, active_y)].fg
+    );
+}
+
+#[test]
+fn quit_panel_disables_commit_for_an_aborted_transaction() {
+    let mut app = fixture();
+    app.active_console_mut().transaction_mode = TransactionMode::Manual;
+    app.active_console_mut().transaction_state =
+        lazydb::model::transaction::TransactionState::Aborted;
+    assert!(app.update(Action::Quit).is_empty());
+
+    let (buffer, _) = render_buffer_with_icons(&app, 100, 30, IconSet::new(IconMode::Ascii));
+    let (commit_x, commit_y) =
+        find_text_cell_on_line(&buffer, "Commit", "[ Commit ]").expect("commit action");
+    let (rollback_x, rollback_y) =
+        find_text_cell_on_line(&buffer, "Rollback", "[ Rollback ]").expect("rollback action");
+
+    assert_ne!(buffer[(commit_x, commit_y)].bg, Color::Rgb(99, 230, 216));
+    assert_eq!(
+        buffer[(rollback_x, rollback_y)].bg,
+        Color::Rgb(99, 230, 216)
+    );
+}
+
+#[test]
+fn quit_panel_moves_selection_style_to_commit() {
+    let mut app = fixture();
+    app.active_console_mut().transaction_mode = TransactionMode::Manual;
+    app.active_console_mut().transaction_state =
+        lazydb::model::transaction::TransactionState::Active;
+    assert!(app.update(Action::Quit).is_empty());
+    app.update(Action::ToggleTransactionExitChoice);
+
+    let (buffer, _) = render_buffer_with_icons(&app, 100, 30, IconSet::new(IconMode::Ascii));
+    let (commit_x, commit_y) =
+        find_text_cell_on_line(&buffer, "Commit", "[ Commit ]").expect("commit action");
+    let (rollback_x, rollback_y) =
+        find_text_cell_on_line(&buffer, "Rollback", "[ Rollback ]").expect("rollback action");
+
+    assert_eq!(buffer[(commit_x, commit_y)].bg, Color::Rgb(99, 230, 216));
+    assert_ne!(
+        buffer[(rollback_x, rollback_y)].bg,
+        Color::Rgb(99, 230, 216)
+    );
+}
+
+#[test]
+fn quit_panel_replaces_transaction_actions_while_query_is_running() {
+    let mut app = fixture();
+    app.active_console_mut().transaction_mode = TransactionMode::Manual;
+    app.active_console_mut().transaction_state =
+        lazydb::model::transaction::TransactionState::Active;
+    app.active_console_mut().query_status = QueryStatus::Running;
+    let (console_id, transaction_generation) = {
+        let console = app.active_console();
+        (console.id, console.transaction_generation)
+    };
+    app.overlay = Some(Overlay::TransactionExitConfirm {
+        prompt: lazydb::model::transaction::DeferredTransactionPrompt {
+            console_id,
+            transaction_generation,
+            intent: lazydb::model::transaction::DeferredIntent::Quit,
+        },
+        choice: lazydb::model::transaction::TransactionExitChoice::Rollback,
+    });
+
+    let output = render(&app, 100, 30);
+
+    assert!(output.contains("QUERY IN PROGRESS"), "{output}");
+    assert!(output.contains("wait or Ctrl-C to cancel"), "{output}");
+    assert!(!output.contains("[ Commit ]"), "{output}");
+    assert!(!output.contains("[ Rollback ]"), "{output}");
+    assert!(output.contains("Esc return"), "{output}");
+}
+
+#[test]
+fn quit_panel_isolates_unknown_outcome_actions() {
+    let mut app = fixture();
+    app.active_console_mut().transaction_mode = TransactionMode::Manual;
+    app.active_console_mut().transaction_state =
+        lazydb::model::transaction::TransactionState::OutcomeUnknown;
+    let (console_id, transaction_generation) = {
+        let console = app.active_console();
+        (console.id, console.transaction_generation)
+    };
+    app.overlay = Some(Overlay::TransactionExitConfirm {
+        prompt: lazydb::model::transaction::DeferredTransactionPrompt {
+            console_id,
+            transaction_generation,
+            intent: lazydb::model::transaction::DeferredIntent::Quit,
+        },
+        choice: lazydb::model::transaction::TransactionExitChoice::Abandon,
+    });
+
+    let output = render(&app, 100, 30);
+
+    assert!(output.contains("OUTCOME UNKNOWN"), "{output}");
+    assert!(output.contains("Abandon local state"), "{output}");
+    assert!(!output.contains("[ Commit ]"), "{output}");
+    assert!(!output.contains("[ Rollback ]"), "{output}");
+    assert!(output.contains("A abandon"), "{output}");
+    assert!(output.contains("Esc cancel"), "{output}");
+}
+
+#[test]
+fn quit_panel_remains_readable_at_minimum_terminal_size() {
+    let mut app = fixture();
+    app.active_console_mut().transaction_mode = TransactionMode::Manual;
+    app.active_console_mut().transaction_state =
+        lazydb::model::transaction::TransactionState::Active;
+    app.active_console_mut().name =
+        "a-very-long-console-name-that-must-not-overwrite-the-state".into();
+    assert!(app.update(Action::Quit).is_empty());
+
+    let output = render(&app, 56, 16);
+
+    assert_eq!(
+        output.matches("PENDING TRANSACTIONS").count(),
+        1,
+        "{output}"
+    );
+    assert!(output.contains("TRANSACTION SUMMARY"), "{output}");
+    assert!(output.contains("ACTIVE"), "{output}");
+    assert!(output.contains("Rollback"), "{output}");
+    assert!(output.contains("Esc cancel"), "{output}");
+    assert!(output.contains('╭'), "{output}");
+    assert!(output.contains('╮'), "{output}");
+    assert!(output.contains('╰'), "{output}");
+    assert!(output.contains('╯'), "{output}");
 }
 
 #[test]
