@@ -10,8 +10,8 @@ The built-in configuration selects this complete contract with
 The current release supports the Vim preset as a whole rather than arbitrary
 per-command rebinding. The global command bindings listed in
 `[keybindings.commands]` are the current exception and accept single key
-events. `keybindings.sequence_timeout_ms` configures the timeout for adjacent-
-key sequences used by this preset.
+events or space-separated key sequences. `keybindings.sequence_timeout_ms`
+configures the timeout for adjacent-key sequences used by this preset.
 
 ## Conventions
 

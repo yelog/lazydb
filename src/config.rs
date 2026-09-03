@@ -110,6 +110,12 @@ impl KeyBindings {
             .is_some_and(|sequences| sequences.iter().any(|sequence| sequence == &[event]))
     }
 
+    pub fn matches_sequence(&self, command: &str, events: &[KeyEvent]) -> bool {
+        self.commands
+            .get(command)
+            .is_some_and(|sequences| sequences.iter().any(|sequence| sequence == events))
+    }
+
     pub fn has_sequence_prefix(&self, command: &str, events: &[KeyEvent]) -> bool {
         self.commands.get(command).is_some_and(|sequences| {
             sequences
@@ -138,18 +144,20 @@ impl KeybindingConfig {
             let sequences = keys
                 .iter()
                 .map(|key| {
-                    if key.split_whitespace().count() != 1 {
+                    if key.split_whitespace().next().is_none() {
                         return Err(ConfigError::InvalidKeybinding {
                             command: command.clone(),
                             key: key.clone(),
                         });
                     }
-                    Ok(vec![parse_key(key).ok_or_else(|| {
-                        ConfigError::InvalidKeybinding {
-                            command: command.clone(),
-                            key: key.clone(),
-                        }
-                    })?])
+                    key.split_whitespace()
+                        .map(|part| {
+                            parse_key(part).ok_or_else(|| ConfigError::InvalidKeybinding {
+                                command: command.clone(),
+                                key: key.clone(),
+                            })
+                        })
+                        .collect()
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             commands.insert(command.clone(), sequences);
@@ -157,12 +165,10 @@ impl KeybindingConfig {
         let entries = commands.iter().collect::<Vec<_>>();
         for (index, (first_command, first_sequences)) in entries.iter().enumerate() {
             for (second_command, second_sequences) in entries.iter().skip(index + 1) {
-                if first_sequences.iter().flatten().any(|first| {
-                    second_sequences
-                        .iter()
-                        .flatten()
-                        .any(|second| first == second)
-                }) {
+                if first_sequences
+                    .iter()
+                    .any(|first| second_sequences.iter().any(|second| first == second))
+                {
                     let key = self
                         .commands
                         .get(*first_command)
@@ -494,6 +500,13 @@ mod tests {
         assert!(bindings.matches(
             "next-tab",
             KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL)
+        ));
+        assert!(bindings.matches_sequence(
+            "next-tab",
+            &[
+                KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+                KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+            ]
         ));
     }
 

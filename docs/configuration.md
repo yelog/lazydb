@@ -95,8 +95,9 @@ keys and modalkit's core Vim editing operations are intentionally not separate
 application settings. The commands currently accepted in
 `[keybindings.commands]` are `help`, `quit`, `notification-history`,
 `focus-next-pane`, `focus-previous-pane`, `run-statement`, `run-buffer`,
-`next-tab`, `previous-tab`, and `close-tab`. Each value is a list of single
-key events such as `F2`, `Ctrl-c`, or `Shift-Tab`; empty lists unbind a command.
+`next-tab`, `previous-tab`, and `close-tab`. Each value is a list of key
+events or space-separated key sequences such as `F2`, `Ctrl-c`, `Shift-Tab`,
+or `g t`; empty lists unbind a command.
 A key sequence remains active for 750 milliseconds by default, and
 `sequence_timeout_ms` must be at least `1`.
 

@@ -775,7 +775,7 @@ impl Keymap {
                 self.sequence_selected = 0;
                 return Some(Action::EditorKey(event));
             }
-            if let Some(action) = map_pending(pending, event, app) {
+            if let Some(action) = map_pending(pending, event, app, &self.bindings) {
                 return Some(action);
             }
             self.continue_pending(
@@ -1401,7 +1401,12 @@ fn pending_display(pending: Pending) -> Option<(crate::help::ShortcutPrefix, Str
     }
 }
 
-fn map_pending(pending: Pending, event: KeyEvent, app: &App) -> Option<Action> {
+fn map_pending(
+    pending: Pending,
+    event: KeyEvent,
+    app: &App,
+    bindings: &crate::config::KeyBindings,
+) -> Option<Action> {
     let valid_modifiers = event.modifiers.is_empty()
         || (pending == Pending::Leader
             && event.modifiers == KeyModifiers::SHIFT
@@ -1468,10 +1473,19 @@ fn map_pending(pending: Pending, event: KeyEvent, app: &App) -> Option<Action> {
         (Pending::Goto, KeyCode::Char('g')) if is_grid_navigation_focus(app) => Some(
             Action::GridSelectRow(crate::model::tab::GridRowTarget::First),
         ),
-        (Pending::Goto, KeyCode::Char('t')) => Some(Action::NextTab),
-        (Pending::Goto, KeyCode::Char('T')) => Some(Action::PreviousTab),
         (Pending::Goto, KeyCode::Char('m')) if app.focus == Focus::Explorer => {
             Some(Action::ProfileGroupOpen)
+        }
+        (Pending::Goto, code) => {
+            let prefix = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE);
+            let event = KeyEvent::new(code, KeyModifiers::NONE);
+            if bindings.matches_sequence("next-tab", &[prefix, event]) {
+                Some(Action::NextTab)
+            } else if bindings.matches_sequence("previous-tab", &[prefix, event]) {
+                Some(Action::PreviousTab)
+            } else {
+                None
+            }
         }
         (Pending::Previous, KeyCode::Char('t')) => Some(Action::PreviousTab),
         (Pending::Next, KeyCode::Char('t')) => Some(Action::NextTab),
@@ -3029,6 +3043,26 @@ mod tests {
 
         assert_eq!(keymap.map(key(KeyCode::F(2)), &app), Some(Action::ShowHelp));
         assert_eq!(keymap.map(key(KeyCode::F(1)), &app), None);
+    }
+
+    #[test]
+    fn configured_tab_sequence_replaces_the_default_goto_mapping() {
+        let mut config = crate::config::AppConfig::default();
+        config
+            .keybindings
+            .commands
+            .insert("next-tab".into(), vec!["g t".into()]);
+        let bindings = config.keybindings.key_bindings().unwrap();
+        let mut keymap =
+            Keymap::with_sequence_timeout_and_bindings(Duration::from_millis(750), bindings);
+        let mut app = App::new(Vec::new());
+        app.focus = Focus::Results;
+
+        assert_eq!(keymap.map(key(KeyCode::Char('g')), &app), None);
+        assert_eq!(
+            keymap.map(key(KeyCode::Char('t')), &app),
+            Some(Action::NextTab)
+        );
     }
 
     #[test]
