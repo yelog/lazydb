@@ -163,6 +163,31 @@ async fn next_action(receiver: &mut mpsc::UnboundedReceiver<Action>) -> Action {
         .expect("runtime action channel closed")
 }
 
+async fn next_connection_result(
+    app: &mut App,
+    runtime: &mut Runtime,
+    receiver: &mut mpsc::UnboundedReceiver<Action>,
+    profile_id: Uuid,
+) -> Action {
+    loop {
+        let action = next_action(receiver).await;
+        match &action {
+            Action::ConnectionSucceeded {
+                profile_id: result_id,
+                ..
+            }
+            | Action::ConnectionFailed {
+                profile_id: result_id,
+                ..
+            } if *result_id == profile_id => return action,
+            Action::CatalogPageLoaded(_) | Action::CatalogPageFailed { .. } => {
+                dispatch(app, runtime, action);
+            }
+            action => panic!("unexpected action while waiting for connection result: {action:?}"),
+        }
+    }
+}
+
 async fn connect(
     app: &mut App,
     runtime: &mut Runtime,
@@ -1089,7 +1114,7 @@ async fn late_disconnect_cannot_close_a_new_generation_of_the_same_profile() {
         [Command::Connect { generation, .. }] => *generation,
         commands => panic!("unexpected commands: {commands:?}"),
     };
-    let connected = next_action(&mut receiver).await;
+    let connected = next_connection_result(&mut app, &mut runtime, &mut receiver, profile_id).await;
     assert!(matches!(
         connected,
         Action::ConnectionSucceeded {
@@ -1252,7 +1277,7 @@ async fn failed_switch_restores_the_previous_database() {
     connect(&mut app, &mut runtime, &mut receiver, first_id).await;
 
     dispatch(&mut app, &mut runtime, Action::RequestConnect(failing_id));
-    let failure = next_action(&mut receiver).await;
+    let failure = next_connection_result(&mut app, &mut runtime, &mut receiver, failing_id).await;
     assert!(matches!(
         failure,
         Action::ConnectionFailed {

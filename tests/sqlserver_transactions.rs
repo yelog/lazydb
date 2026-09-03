@@ -216,7 +216,7 @@ async fn sql_server_relation_mutations_use_output_and_atomic_optimistic_batches(
                 original: vec![
                     CellValue::Integer(id),
                     CellValue::Text("after".into()),
-                    inserted_row_value(&updated, 2),
+                    updated_row_value(&updated, 2),
                 ],
             },
         ])))
@@ -235,5 +235,12 @@ fn inserted_row_value(result: &MutationResult, index: usize) -> CellValue {
     match result {
         MutationResult::Inserted { row } => row[index].clone(),
         _ => panic!("expected inserted row"),
+    }
+}
+
+fn updated_row_value(result: &MutationResult, index: usize) -> CellValue {
+    match result {
+        MutationResult::Updated { row } => row[index].clone(),
+        _ => panic!("expected updated row"),
     }
 }
