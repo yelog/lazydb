@@ -1434,6 +1434,21 @@ fn find_text_cell(buffer: &ratatui::buffer::Buffer, text: &str) -> Option<(u16, 
     (0..buffer.area.height).find_map(|y| find_ascii_cells(buffer, y, text).map(|x| (x, y)))
 }
 
+fn find_text_cell_on_line(
+    buffer: &ratatui::buffer::Buffer,
+    text: &str,
+    line_marker: &str,
+) -> Option<(u16, u16)> {
+    (0..buffer.area.height).find_map(|y| {
+        let line = (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect::<String>();
+        line.contains(line_marker)
+            .then(|| find_ascii_cells(buffer, y, text).map(|x| (x, y)))
+            .flatten()
+    })
+}
+
 fn completion_app(sql: &str, replace: TextRange, label: &str) -> App {
     let mut app = fixture();
     app.focus = Focus::Editor;
@@ -2802,14 +2817,10 @@ fn quit_panel_uses_compact_transaction_summary_layout() {
         "{output}"
     );
     assert!(output.contains("TRANSACTION SUMMARY"), "{output}");
-    assert!(
-        output.contains("Active") || output.contains("ACTIVE"),
-        "{output}"
-    );
-    assert!(
-        output.contains("Aborted") || output.contains("ABORTED"),
-        "{output}"
-    );
+    assert!(output.contains("ACTIVE"), "{output}");
+    assert!(output.contains("ABORTED"), "{output}");
+    assert!(!output.contains("Active"), "{output}");
+    assert!(!output.contains("Aborted"), "{output}");
     assert!(output.contains("Commit"), "{output}");
     assert!(output.contains("Rollback"), "{output}");
     assert!(output.contains("Esc cancel"), "{output}");
@@ -2866,6 +2877,81 @@ fn transaction_panel_keeps_the_title_out_of_the_body() {
             .count(),
         0,
         "{output}"
+    );
+}
+
+#[test]
+fn quit_panel_marks_the_current_transaction_and_colors_states() {
+    let mut app = fixture();
+    app.active_console_mut().transaction_mode = TransactionMode::Manual;
+    app.active_console_mut().transaction_state =
+        lazydb::model::transaction::TransactionState::Active;
+    app.update(Action::NewConsole);
+    app.active_console_mut().transaction_mode = TransactionMode::Manual;
+    app.active_console_mut().transaction_state =
+        lazydb::model::transaction::TransactionState::Aborted;
+    assert!(app.update(Action::Quit).is_empty());
+
+    let (buffer, _) = render_buffer_with_icons(&app, 100, 30, IconSet::new(IconMode::Ascii));
+    let (active_x, active_y) =
+        find_text_cell_on_line(&buffer, "ACTIVE", "›").expect("active state");
+    let (aborted_x, aborted_y) =
+        find_text_cell_on_line(&buffer, "ABORTED", "  console").expect("aborted state");
+    let marker_x = (0..active_x)
+        .rev()
+        .find(|x| buffer[(*x, active_y)].symbol() == "›")
+        .expect("current transaction marker");
+
+    assert_ne!(
+        buffer[(active_x, active_y)].fg,
+        buffer[(aborted_x, aborted_y)].fg
+    );
+    assert_ne!(
+        buffer[(marker_x, active_y)].fg,
+        buffer[(active_x, active_y)].fg
+    );
+}
+
+#[test]
+fn quit_panel_disables_commit_for_an_aborted_transaction() {
+    let mut app = fixture();
+    app.active_console_mut().transaction_mode = TransactionMode::Manual;
+    app.active_console_mut().transaction_state =
+        lazydb::model::transaction::TransactionState::Aborted;
+    assert!(app.update(Action::Quit).is_empty());
+
+    let (buffer, _) = render_buffer_with_icons(&app, 100, 30, IconSet::new(IconMode::Ascii));
+    let (commit_x, commit_y) =
+        find_text_cell_on_line(&buffer, "Commit", "[ Commit ]").expect("commit action");
+    let (rollback_x, rollback_y) =
+        find_text_cell_on_line(&buffer, "Rollback", "[ Rollback ]").expect("rollback action");
+
+    assert_ne!(buffer[(commit_x, commit_y)].bg, Color::Rgb(99, 230, 216));
+    assert_eq!(
+        buffer[(rollback_x, rollback_y)].bg,
+        Color::Rgb(99, 230, 216)
+    );
+}
+
+#[test]
+fn quit_panel_moves_selection_style_to_commit() {
+    let mut app = fixture();
+    app.active_console_mut().transaction_mode = TransactionMode::Manual;
+    app.active_console_mut().transaction_state =
+        lazydb::model::transaction::TransactionState::Active;
+    assert!(app.update(Action::Quit).is_empty());
+    app.update(Action::ToggleTransactionExitChoice);
+
+    let (buffer, _) = render_buffer_with_icons(&app, 100, 30, IconSet::new(IconMode::Ascii));
+    let (commit_x, commit_y) =
+        find_text_cell_on_line(&buffer, "Commit", "[ Commit ]").expect("commit action");
+    let (rollback_x, rollback_y) =
+        find_text_cell_on_line(&buffer, "Rollback", "[ Rollback ]").expect("rollback action");
+
+    assert_eq!(buffer[(commit_x, commit_y)].bg, Color::Rgb(99, 230, 216));
+    assert_ne!(
+        buffer[(rollback_x, rollback_y)].bg,
+        Color::Rgb(99, 230, 216)
     );
 }
 
