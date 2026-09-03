@@ -3242,6 +3242,10 @@ impl App {
             }
             Action::CatalogEditorFieldNext => {
                 if let Some(draft) = self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut()) {
+                    if matches!(draft, crate::model::catalog_editor::CatalogDraft::Table(_)) {
+                        draft.move_field(1);
+                        return Vec::new();
+                    }
                     if matches!(
                         draft,
                         crate::model::catalog_editor::CatalogDraft::Sequence(_)
@@ -3285,6 +3289,10 @@ impl App {
             }
             Action::CatalogEditorFieldPrevious => {
                 if let Some(draft) = self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut()) {
+                    if matches!(draft, crate::model::catalog_editor::CatalogDraft::Table(_)) {
+                        draft.move_field(-1);
+                        return Vec::new();
+                    }
                     if matches!(
                         draft,
                         crate::model::catalog_editor::CatalogDraft::Sequence(_)
@@ -3337,8 +3345,84 @@ impl App {
                 }
                 Vec::new()
             }
+            Action::CatalogEditorFocusTableField(field) => {
+                if let Some(crate::model::catalog_editor::CatalogDraft::Table(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.selected_field = field;
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorSelectTableColumn(index) => {
+                if let Some(crate::model::catalog_editor::CatalogDraft::Table(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.selected_column = index.min(draft.columns.len().saturating_sub(1));
+                    draft.selected_field =
+                        crate::model::catalog_editor::TableEditorField::ColumnList;
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorMoveTableColumn(delta) => {
+                if let Some(crate::model::catalog_editor::CatalogDraft::Table(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.move_column(delta);
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorAddTableColumn => {
+                if let Some(crate::model::catalog_editor::CatalogDraft::Table(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.add_column();
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorRemoveTableColumn => {
+                if let Some(crate::model::catalog_editor::CatalogDraft::Table(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.remove_selected_column();
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorToggleTableColumnNullable => {
+                if let Some(crate::model::catalog_editor::CatalogDraft::Table(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.toggle_selected_column_nullable();
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorToggleTableColumnIdentity => {
+                if let Some(crate::model::catalog_editor::CatalogDraft::Table(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.toggle_selected_column_identity();
+                }
+                Vec::new()
+            }
             Action::CatalogEditorInsert(character) => {
                 if let Some(draft) = self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut()) {
+                    if matches!(draft, crate::model::catalog_editor::CatalogDraft::Table(_)) {
+                        draft.insert(character);
+                        return Vec::new();
+                    }
                     if matches!(
                         draft,
                         crate::model::catalog_editor::CatalogDraft::Sequence(_)
@@ -3380,6 +3464,12 @@ impl App {
                 Vec::new()
             }
             Action::CatalogEditorBackspace => {
+                if let Some(draft) = self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut())
+                    && matches!(draft, crate::model::catalog_editor::CatalogDraft::Table(_))
+                {
+                    draft.backspace();
+                    return Vec::new();
+                }
                 if let Some(crate::model::catalog_editor::CatalogDraft::Sequence(draft)) =
                     self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut())
                 {
@@ -3421,6 +3511,12 @@ impl App {
                 Vec::new()
             }
             Action::CatalogEditorDeletePreviousWord => {
+                if let Some(draft) = self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut())
+                    && matches!(draft, crate::model::catalog_editor::CatalogDraft::Table(_))
+                {
+                    draft.delete_previous_word();
+                    return Vec::new();
+                }
                 if let Some(crate::model::catalog_editor::CatalogDraft::Sequence(draft)) =
                     self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut())
                 {
@@ -3462,6 +3558,12 @@ impl App {
                 Vec::new()
             }
             Action::CatalogEditorDeleteToStart => {
+                if let Some(draft) = self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut())
+                    && matches!(draft, crate::model::catalog_editor::CatalogDraft::Table(_))
+                {
+                    draft.delete_to_start();
+                    return Vec::new();
+                }
                 if let Some(crate::model::catalog_editor::CatalogDraft::Sequence(draft)) =
                     self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut())
                 {
@@ -3503,6 +3605,12 @@ impl App {
                 Vec::new()
             }
             Action::CatalogEditorDelete => {
+                if let Some(draft) = self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut())
+                    && matches!(draft, crate::model::catalog_editor::CatalogDraft::Table(_))
+                {
+                    draft.delete();
+                    return Vec::new();
+                }
                 if let Some(crate::model::catalog_editor::CatalogDraft::Sequence(draft)) =
                     self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut())
                 {
@@ -3544,6 +3652,12 @@ impl App {
                 Vec::new()
             }
             Action::CatalogEditorMoveLeft => {
+                if let Some(draft) = self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut())
+                    && matches!(draft, crate::model::catalog_editor::CatalogDraft::Table(_))
+                {
+                    draft.move_left();
+                    return Vec::new();
+                }
                 if let Some(crate::model::catalog_editor::CatalogDraft::Sequence(draft)) =
                     self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut())
                 {
@@ -3585,6 +3699,12 @@ impl App {
                 Vec::new()
             }
             Action::CatalogEditorMoveRight => {
+                if let Some(draft) = self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut())
+                    && matches!(draft, crate::model::catalog_editor::CatalogDraft::Table(_))
+                {
+                    draft.move_right();
+                    return Vec::new();
+                }
                 if let Some(crate::model::catalog_editor::CatalogDraft::Sequence(draft)) =
                     self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut())
                 {
@@ -3626,6 +3746,12 @@ impl App {
                 Vec::new()
             }
             Action::CatalogEditorMoveHome => {
+                if let Some(draft) = self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut())
+                    && matches!(draft, crate::model::catalog_editor::CatalogDraft::Table(_))
+                {
+                    draft.move_home();
+                    return Vec::new();
+                }
                 if let Some(crate::model::catalog_editor::CatalogDraft::Sequence(draft)) =
                     self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut())
                 {
@@ -3667,6 +3793,12 @@ impl App {
                 Vec::new()
             }
             Action::CatalogEditorMoveEnd => {
+                if let Some(draft) = self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut())
+                    && matches!(draft, crate::model::catalog_editor::CatalogDraft::Table(_))
+                {
+                    draft.move_end();
+                    return Vec::new();
+                }
                 if let Some(crate::model::catalog_editor::CatalogDraft::Sequence(draft)) =
                     self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut())
                 {
@@ -3749,7 +3881,18 @@ impl App {
                     crate::model::catalog_editor::CatalogDraft::Role(draft) => draft.validate(),
                 } {
                     if let Some(editor) = self.catalog_editor.as_mut() {
-                        editor.set_validation_error(error.to_string());
+                        if let crate::model::catalog_editor::CatalogDraft::Table(table) =
+                            editor.draft.as_mut().expect("draft was cloned above")
+                            && let Some((column, field, message)) = table.validation_focus()
+                        {
+                            if let Some(column) = column {
+                                table.selected_column = column;
+                            }
+                            table.selected_field = field;
+                            editor.set_validation_error(message);
+                        } else {
+                            editor.set_validation_error(error.to_string());
+                        }
                     }
                     return Vec::new();
                 }

@@ -1182,6 +1182,7 @@ fn table_draft(name: &str, columns: Vec<ColumnDraft>) -> CatalogDraft {
         columns,
         selected_section: lazydb::model::catalog_editor::CatalogEditorSection::Columns,
         selected_column: 0,
+        selected_field: lazydb::model::catalog_editor::TableEditorField::Name,
         indexes: vec![],
         constraints: vec![],
     })

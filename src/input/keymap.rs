@@ -1476,6 +1476,13 @@ fn map_catalog_editor(event: KeyEvent, app: &App) -> Option<Action> {
             _ => None,
         },
         crate::model::catalog_editor::CatalogEditorPage::Form => match event.code {
+            _ if matches!(
+                editor.draft.as_ref(),
+                Some(crate::model::catalog_editor::CatalogDraft::Table(_))
+            ) =>
+            {
+                map_table_editor(event, editor)
+            }
             KeyCode::Esc => Some(Action::CatalogEditorCancel),
             KeyCode::Tab | KeyCode::Down => Some(Action::CatalogEditorFieldNext),
             KeyCode::BackTab | KeyCode::Up => Some(Action::CatalogEditorFieldPrevious),
@@ -1519,6 +1526,98 @@ fn map_catalog_editor(event: KeyEvent, app: &App) -> Option<Action> {
         crate::model::catalog_editor::CatalogEditorPage::Loading => {
             (event.code == KeyCode::Esc).then_some(Action::CatalogEditorCancel)
         }
+    }
+}
+
+fn map_table_editor(
+    event: KeyEvent,
+    editor: &crate::model::catalog_editor::CatalogEditorState,
+) -> Option<Action> {
+    use crate::model::catalog_editor::TableEditorField;
+    let field = match editor.draft.as_ref() {
+        Some(crate::model::catalog_editor::CatalogDraft::Table(draft)) => draft.selected_field,
+        _ => return None,
+    };
+    if event.modifiers == KeyModifiers::CONTROL {
+        return match event.code {
+            KeyCode::Char('w') => Some(Action::CatalogEditorDeletePreviousWord),
+            KeyCode::Char('u') => Some(Action::CatalogEditorDeleteToStart),
+            KeyCode::Char('a') => Some(Action::CatalogEditorMoveHome),
+            KeyCode::Char('e') => Some(Action::CatalogEditorMoveEnd),
+            KeyCode::Enter if field == TableEditorField::Review => {
+                Some(Action::CatalogEditorPreview)
+            }
+            _ => None,
+        };
+    }
+    if event.modifiers != KeyModifiers::NONE && event.modifiers != KeyModifiers::SHIFT {
+        return None;
+    }
+    if matches!(
+        field,
+        TableEditorField::Name
+            | TableEditorField::Schema
+            | TableEditorField::Owner
+            | TableEditorField::Comment
+            | TableEditorField::ColumnName
+            | TableEditorField::ColumnType
+            | TableEditorField::ColumnDefault
+            | TableEditorField::ColumnComment
+    ) {
+        return match event.code {
+            KeyCode::Tab if event.modifiers.contains(KeyModifiers::SHIFT) => {
+                Some(Action::CatalogEditorFieldPrevious)
+            }
+            KeyCode::Tab => Some(Action::CatalogEditorFieldNext),
+            KeyCode::BackTab => Some(Action::CatalogEditorFieldPrevious),
+            KeyCode::Up => Some(Action::CatalogEditorFieldPrevious),
+            KeyCode::Down => Some(Action::CatalogEditorFieldNext),
+            KeyCode::Char(c) => Some(Action::CatalogEditorInsert(c)),
+            KeyCode::Backspace => Some(Action::CatalogEditorBackspace),
+            KeyCode::Delete => Some(Action::CatalogEditorDelete),
+            KeyCode::Left => Some(Action::CatalogEditorMoveLeft),
+            KeyCode::Right => Some(Action::CatalogEditorMoveRight),
+            KeyCode::Home => Some(Action::CatalogEditorMoveHome),
+            KeyCode::End => Some(Action::CatalogEditorMoveEnd),
+            KeyCode::Esc => Some(Action::CatalogEditorCancel),
+            _ => None,
+        };
+    }
+    match (field, event.code) {
+        (_, KeyCode::Tab) if event.modifiers.contains(KeyModifiers::SHIFT) => {
+            Some(Action::CatalogEditorFieldPrevious)
+        }
+        (_, KeyCode::Tab | KeyCode::BackTab) => Some(Action::CatalogEditorFieldNext),
+        (TableEditorField::ColumnList, KeyCode::Up) => {
+            Some(Action::CatalogEditorMoveTableColumn(-1))
+        }
+        (TableEditorField::ColumnList, KeyCode::Down) => {
+            Some(Action::CatalogEditorMoveTableColumn(1))
+        }
+        (TableEditorField::ColumnNullable, KeyCode::Enter | KeyCode::Char(' ')) => {
+            Some(Action::CatalogEditorToggleTableColumnNullable)
+        }
+        (TableEditorField::ColumnIdentity, KeyCode::Enter | KeyCode::Char(' ')) => {
+            Some(Action::CatalogEditorToggleTableColumnIdentity)
+        }
+        (TableEditorField::AddColumn, KeyCode::Enter | KeyCode::Char(' ')) => {
+            Some(Action::CatalogEditorAddTableColumn)
+        }
+        (TableEditorField::RemoveColumn, KeyCode::Enter | KeyCode::Char(' ')) => {
+            Some(Action::CatalogEditorRemoveTableColumn)
+        }
+        (TableEditorField::Review, KeyCode::Enter | KeyCode::Char(' ')) => {
+            Some(Action::CatalogEditorPreview)
+        }
+        (TableEditorField::Cancel, KeyCode::Enter | KeyCode::Char(' ')) => {
+            Some(Action::CatalogEditorCancel)
+        }
+        (_, KeyCode::Up) => Some(Action::CatalogEditorFieldPrevious),
+        (_, KeyCode::Down) => Some(Action::CatalogEditorFieldNext),
+        (TableEditorField::Review, KeyCode::Esc) | (TableEditorField::Cancel, KeyCode::Esc) => {
+            Some(Action::CatalogEditorCancel)
+        }
+        _ => None,
     }
 }
 

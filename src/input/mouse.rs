@@ -70,6 +70,12 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                             | HitTarget::ProfileGroupCancel
                             | HitTarget::ExplorerAddOption(_)
                             | HitTarget::CatalogEditorField(_)
+                            | HitTarget::CatalogEditorTableField(_)
+                            | HitTarget::CatalogEditorTableColumn(_)
+                            | HitTarget::CatalogEditorAddTableColumn
+                            | HitTarget::CatalogEditorRemoveTableColumn
+                            | HitTarget::CatalogEditorReview
+                            | HitTarget::CatalogEditorCancel
                     ))
             {
                 return None;
@@ -142,6 +148,18 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                 HitTarget::CatalogEditorField(index) => {
                     Some(Action::CatalogEditorFocusField(index))
                 }
+                HitTarget::CatalogEditorTableField(field) => {
+                    Some(Action::CatalogEditorFocusTableField(field))
+                }
+                HitTarget::CatalogEditorTableColumn(index) => {
+                    Some(Action::CatalogEditorSelectTableColumn(index))
+                }
+                HitTarget::CatalogEditorAddTableColumn => Some(Action::CatalogEditorAddTableColumn),
+                HitTarget::CatalogEditorRemoveTableColumn => {
+                    Some(Action::CatalogEditorRemoveTableColumn)
+                }
+                HitTarget::CatalogEditorReview => Some(Action::CatalogEditorPreview),
+                HitTarget::CatalogEditorCancel => Some(Action::CatalogEditorCancel),
                 HitTarget::RelationFirstPage => Some(Action::RelationFirstPage),
                 HitTarget::RelationPreviousPage => Some(Action::RelationPreviousPage),
                 HitTarget::RelationPageSize => {
@@ -286,7 +304,13 @@ fn focus_at(ui: &UiState, column: u16, row: u16) -> Option<Focus> {
         | HitTarget::ProfileGroupConfirm
         | HitTarget::ProfileGroupCancel
         | HitTarget::ExplorerAddOption(_)
-        | HitTarget::CatalogEditorField(_) => None,
+        | HitTarget::CatalogEditorField(_)
+        | HitTarget::CatalogEditorTableField(_)
+        | HitTarget::CatalogEditorTableColumn(_)
+        | HitTarget::CatalogEditorAddTableColumn
+        | HitTarget::CatalogEditorRemoveTableColumn
+        | HitTarget::CatalogEditorReview
+        | HitTarget::CatalogEditorCancel => None,
         HitTarget::RelationFirstPage
         | HitTarget::RelationPreviousPage
         | HitTarget::RelationPageSize
