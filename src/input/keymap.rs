@@ -699,9 +699,11 @@ impl Keymap {
             }
             if pending == Pending::LeaderTransaction
                 && event.modifiers.is_empty()
-                && event.code == KeyCode::Char('c')
+                && event.code == KeyCode::Char('t')
             {
-                return Some(Action::OpenTransactionControl);
+                self.pending = None;
+                self.sequence_selected = 0;
+                return Some(Action::EditorKey(event));
             }
             if let Some(action) = map_pending(pending, event, app) {
                 return Some(action);
