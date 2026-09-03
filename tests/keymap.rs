@@ -527,6 +527,164 @@ fn explorer_catalog_shortcuts_are_not_advertised_for_synthetic_rows() {
     assert_eq!(keymap.map(key(KeyCode::Char('a')), &app), None);
 }
 
+fn owner_choice(name: &str, is_current: bool) -> lazydb::db::catalog_mutation::CatalogOwnerChoice {
+    lazydb::db::catalog_mutation::CatalogOwnerChoice {
+        name: name.into(),
+        can_login: true,
+        selectable: true,
+        is_current,
+    }
+}
+
+/// Connected postgres profile with a discovered owner list and a schema form on the name row.
+fn schema_editor_with_owner_choices() -> App {
+    let profile_id = Uuid::from_u128(0x5c8e);
+    let mut app = App::new(Vec::new());
+    app.connection.profile_id = Some(profile_id);
+    app.connection.generation = 1;
+    app.connection.status = lazydb::model::workspace::ConnectionStatus::Connected;
+    app.connection.owner_context = lazydb::model::workspace::CatalogOwnerContextState::Loaded {
+        connection: lazydb::model::workspace::ConnectionIdentity {
+            profile_id,
+            generation: 1,
+        },
+        context: lazydb::db::catalog_mutation::CatalogOwnerContext {
+            current_user: "postgres".into(),
+            choices: vec![
+                owner_choice("app_owner", false),
+                owner_choice("postgres", true),
+            ],
+        },
+    };
+    app.catalog_editor = Some(lazydb::model::catalog_editor::CatalogEditorState {
+        mode: lazydb::db::catalog_mutation::CatalogMutationMode::Create,
+        anchor: lazydb::db::catalog_mutation::CatalogMutationAnchor::Profile { profile_id },
+        object_type: Some(lazydb::db::catalog_mutation::CatalogObjectType::Catalog(
+            lazydb::db::catalog::CatalogKind::Schema,
+        )),
+        page: lazydb::model::catalog_editor::CatalogEditorPage::Form,
+        operation: None,
+        catalog_epoch: 0,
+        options: vec![],
+        selected_option: 0,
+        baseline: None,
+        plan: None,
+        error: None,
+        owner_picker: Default::default(),
+        draft: Some(lazydb::model::catalog_editor::CatalogDraft::Schema(
+            lazydb::model::catalog_editor::SchemaDraft {
+                name: "sales".into(),
+                owner: "postgres".into(),
+                comment: "".into(),
+                selected_field: 0,
+            },
+        )),
+    });
+    app.overlay = Some(Overlay::CatalogEditor);
+    app
+}
+
+fn schema_draft(app: &App) -> &lazydb::model::catalog_editor::SchemaDraft {
+    match app
+        .catalog_editor
+        .as_ref()
+        .and_then(|editor| editor.draft.as_ref())
+    {
+        Some(lazydb::model::catalog_editor::CatalogDraft::Schema(draft)) => draft,
+        _ => panic!("schema draft expected"),
+    }
+}
+
+#[test]
+fn schema_owner_picker_hands_navigation_back_to_the_form() {
+    let mut app = schema_editor_with_owner_choices();
+    let mut keymap = Keymap::default();
+
+    let action = keymap.map(key(KeyCode::Tab), &app).expect("tab into owner");
+    assert_eq!(action, Action::CatalogEditorFieldNext);
+    app.update(action);
+    assert!(
+        app.catalog_editor
+            .as_ref()
+            .expect("editor")
+            .owner_picker_active()
+    );
+
+    let action = keymap.map(key(KeyCode::Down), &app).expect("select role");
+    assert_eq!(action, Action::CatalogOwnerPickerMove(1));
+    app.update(action);
+    let action = keymap.map(key(KeyCode::Enter), &app).expect("accept role");
+    assert_eq!(action, Action::CatalogOwnerPickerAccept);
+    app.update(action);
+    assert_eq!(schema_draft(&app).owner.value(), "app_owner");
+    assert!(
+        !app.catalog_editor
+            .as_ref()
+            .expect("editor")
+            .owner_picker
+            .open
+    );
+
+    // Accepting a role must not swallow field navigation.
+    let action = keymap
+        .map(key(KeyCode::Tab), &app)
+        .expect("tab after accepting a role");
+    assert_eq!(action, Action::CatalogEditorFieldNext);
+    app.update(action);
+    assert_eq!(schema_draft(&app).selected_field, 2);
+
+    let action = keymap
+        .map(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT), &app)
+        .expect("shift-tab back to owner");
+    assert_eq!(action, Action::CatalogEditorFieldPrevious);
+    app.update(action);
+    assert!(
+        app.catalog_editor
+            .as_ref()
+            .expect("editor")
+            .owner_picker_active()
+    );
+
+    let action = keymap.map(key(KeyCode::Esc), &app).expect("close the list");
+    assert_eq!(action, Action::CatalogOwnerPickerClose);
+    app.update(action);
+    assert_eq!(
+        keymap.map(key(KeyCode::Esc), &app),
+        Some(Action::CatalogEditorCancel)
+    );
+}
+
+#[test]
+fn leaving_the_owner_row_releases_the_owner_list() {
+    let mut app = schema_editor_with_owner_choices();
+    let mut keymap = Keymap::default();
+
+    app.update(Action::CatalogEditorFocusField(1));
+    assert!(
+        app.catalog_editor
+            .as_ref()
+            .expect("editor")
+            .owner_picker_active()
+    );
+
+    app.update(Action::CatalogEditorFocusField(2));
+    assert!(
+        !app.catalog_editor
+            .as_ref()
+            .expect("editor")
+            .owner_picker
+            .open
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Enter), &app),
+        Some(Action::CatalogEditorPreview)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('x')), &app),
+        Some(Action::CatalogEditorInsert('x'))
+    );
+}
+
 #[test]
 fn view_editor_form_owns_navigation_and_preview_keys() {
     let mut app = App::new(Vec::new());

@@ -13,8 +13,8 @@ use crate::{
     cli::ConfirmationPolicy,
     clipboard::{ClipboardPayload, copy_cell, copy_row_tsv},
     db::catalog_mutation::{
-        CatalogMutationAnchor, CatalogMutationMode, CatalogObjectType, CatalogOwnerContextRequest,
-        CatalogSelectionHint,
+        CatalogMutationAnchor, CatalogMutationMode, CatalogObjectType, CatalogOwnerChoice,
+        CatalogOwnerContextRequest, CatalogSelectionHint,
     },
     db::{
         ErrorCategory,
@@ -277,6 +277,15 @@ fn selection_target_contains(target: &CatalogTarget, selection: &CatalogSelectio
                 && object.native_path.len() == relation.native_path.len() + 1
         }
     }
+}
+
+/// True when the draft is a schema form sitting on the owner row, which the picker owns.
+fn schema_owner_field_focused(draft: &crate::model::catalog_editor::CatalogDraft) -> bool {
+    matches!(
+        draft,
+        crate::model::catalog_editor::CatalogDraft::Schema(schema)
+            if schema.selected_field == crate::model::catalog_editor::SCHEMA_OWNER_FIELD
+    )
 }
 
 fn definition_matches_request(
@@ -3155,28 +3164,7 @@ impl App {
                 }
                 Vec::new()
             }
-            Action::CatalogOwnerPickerOpen => {
-                let Some(connection) = self.database_command_identity() else {
-                    return Vec::new();
-                };
-                let Some(context) = self
-                    .connection
-                    .owner_context
-                    .context_for(connection)
-                    .cloned()
-                else {
-                    return Vec::new();
-                };
-                if let Some(editor) = self.catalog_editor.as_mut()
-                    && let Some(crate::model::catalog_editor::CatalogDraft::Schema(draft)) =
-                        editor.draft.as_ref()
-                {
-                    editor
-                        .owner_picker
-                        .open(draft.owner.value(), &context.choices);
-                }
-                Vec::new()
-            }
+            Action::CatalogOwnerPickerOpen => self.open_catalog_owner_picker(),
             Action::CatalogOwnerPickerClose => {
                 if let Some(editor) = self.catalog_editor.as_mut() {
                     editor.owner_picker.close();
@@ -3184,15 +3172,7 @@ impl App {
                 Vec::new()
             }
             Action::CatalogOwnerPickerMove(delta) => {
-                let Some(connection) = self.database_command_identity() else {
-                    return Vec::new();
-                };
-                let Some(choices) = self
-                    .connection
-                    .owner_context
-                    .context_for(connection)
-                    .map(|context| context.choices.clone())
-                else {
+                let Some(choices) = self.catalog_owner_choices().map(<[_]>::to_vec) else {
                     return Vec::new();
                 };
                 if let Some(editor) = self.catalog_editor.as_mut() {
@@ -3201,15 +3181,7 @@ impl App {
                 Vec::new()
             }
             Action::CatalogOwnerPickerInsert(character) => {
-                let Some(connection) = self.database_command_identity() else {
-                    return Vec::new();
-                };
-                let Some(choices) = self
-                    .connection
-                    .owner_context
-                    .context_for(connection)
-                    .map(|context| context.choices.clone())
-                else {
+                let Some(choices) = self.catalog_owner_choices().map(<[_]>::to_vec) else {
                     return Vec::new();
                 };
                 if let Some(editor) = self.catalog_editor.as_mut() {
@@ -3224,15 +3196,7 @@ impl App {
                 Vec::new()
             }
             Action::CatalogOwnerPickerBackspace => {
-                let Some(connection) = self.database_command_identity() else {
-                    return Vec::new();
-                };
-                let Some(choices) = self
-                    .connection
-                    .owner_context
-                    .context_for(connection)
-                    .map(|context| context.choices.clone())
-                else {
+                let Some(choices) = self.catalog_owner_choices().map(<[_]>::to_vec) else {
                     return Vec::new();
                 };
                 if let Some(editor) = self.catalog_editor.as_mut() {
@@ -3242,15 +3206,7 @@ impl App {
             }
             Action::CatalogOwnerPickerDeletePreviousWord
             | Action::CatalogOwnerPickerDeleteToStart => {
-                let Some(connection) = self.database_command_identity() else {
-                    return Vec::new();
-                };
-                let Some(choices) = self
-                    .connection
-                    .owner_context
-                    .context_for(connection)
-                    .map(|context| context.choices.clone())
-                else {
+                let Some(choices) = self.catalog_owner_choices().map(<[_]>::to_vec) else {
                     return Vec::new();
                 };
                 if let Some(editor) = self.catalog_editor.as_mut() {
@@ -3263,15 +3219,7 @@ impl App {
                 Vec::new()
             }
             Action::CatalogOwnerPickerAccept => {
-                let Some(connection) = self.database_command_identity() else {
-                    return Vec::new();
-                };
-                let Some(choices) = self
-                    .connection
-                    .owner_context
-                    .context_for(connection)
-                    .map(|context| context.choices.clone())
-                else {
+                let Some(choices) = self.catalog_owner_choices().map(<[_]>::to_vec) else {
                     return Vec::new();
                 };
                 if let Some(editor) = self.catalog_editor.as_mut()
@@ -3440,8 +3388,7 @@ impl App {
                             | crate::model::catalog_editor::CatalogDraft::Schema(_)
                     ) {
                         draft.move_field(1);
-                        let should_open = matches!(draft, crate::model::catalog_editor::CatalogDraft::Schema(draft) if draft.selected_field == 1);
-                        if should_open {
+                        if schema_owner_field_focused(draft) {
                             return self.open_catalog_owner_picker();
                         }
                         return Vec::new();
@@ -3496,6 +3443,9 @@ impl App {
                             | crate::model::catalog_editor::CatalogDraft::Schema(_)
                     ) {
                         draft.move_field(-1);
+                        if schema_owner_field_focused(draft) {
+                            return self.open_catalog_owner_picker();
+                        }
                         return Vec::new();
                     }
                     if matches!(
@@ -3540,8 +3490,11 @@ impl App {
                 {
                     draft.selected_field = index;
                 }
-                if index == 1 {
+                if index == crate::model::catalog_editor::SCHEMA_OWNER_FIELD {
                     return self.open_catalog_owner_picker();
+                }
+                if let Some(editor) = self.catalog_editor.as_mut() {
+                    editor.owner_picker.close();
                 }
                 Vec::new()
             }
@@ -8373,6 +8326,18 @@ impl App {
             .to_owned()
     }
 
+    /// Owner roles discovered for the connection that catalog mutations would run on.
+    /// `None` while the list is missing, empty, or bound to another connection, which is
+    /// what makes the owner field fall back to a plain text field.
+    pub fn catalog_owner_choices(&self) -> Option<&[CatalogOwnerChoice]> {
+        let connection = self.database_command_identity()?;
+        self.connection
+            .owner_context
+            .context_for(connection)
+            .map(|context| context.choices.as_slice())
+            .filter(|choices| !choices.is_empty())
+    }
+
     fn ensure_catalog_owner_context(&mut self) -> Vec<Command> {
         let Some(connection) = self.database_command_identity() else {
             return Vec::new();
@@ -8419,24 +8384,14 @@ impl App {
     }
 
     fn open_catalog_owner_picker(&mut self) -> Vec<Command> {
-        let Some(connection) = self.database_command_identity() else {
-            return Vec::new();
-        };
-        let Some(context) = self
-            .connection
-            .owner_context
-            .context_for(connection)
-            .cloned()
-        else {
+        let Some(choices) = self.catalog_owner_choices().map(<[_]>::to_vec) else {
             return Vec::new();
         };
         if let Some(editor) = self.catalog_editor.as_mut()
             && let Some(crate::model::catalog_editor::CatalogDraft::Schema(draft)) =
                 editor.draft.as_ref()
         {
-            editor
-                .owner_picker
-                .open(draft.owner.value(), &context.choices);
+            editor.owner_picker.open(draft.owner.value(), &choices);
         }
         Vec::new()
     }

@@ -218,11 +218,7 @@ fn form(
     } else if let Some(CatalogDraft::Role(draft)) = editor.draft.as_ref() {
         render_role(frame, chunks[1], draft, theme);
     } else if let Some(CatalogDraft::Schema(draft)) = editor.draft.as_ref() {
-        let owner_choices = app
-            .connection
-            .active_identity()
-            .and_then(|connection| app.connection.owner_context.context_for(connection))
-            .map(|context| context.choices.as_slice());
+        let owner_choices = app.catalog_owner_choices();
         render_schema(
             frame,
             chunks[1],
@@ -266,10 +262,20 @@ fn form(
         {
             hints.push(ShortcutHint::new("Space", "toggle data"));
         }
-        hints.extend([
-            ShortcutHint::new("Enter", "preview"),
-            ShortcutHint::new("Esc", "cancel"),
-        ]);
+        if editor.owner_picker_active() {
+            hints.extend([
+                ShortcutHint::new("Up/Down", "role"),
+                ShortcutHint::new("Enter", "choose owner"),
+                ShortcutHint::new("Esc", "close list"),
+            ]);
+        } else {
+            if editor.owner_field_focused() && app.catalog_owner_choices().is_some() {
+                hints.push(ShortcutHint::new("Enter", "owner list"));
+            } else {
+                hints.push(ShortcutHint::new("Enter", "preview"));
+            }
+            hints.push(ShortcutHint::new("Esc", "cancel"));
+        }
         frame.render_widget(
             Paragraph::new(shortcut_hints::line(
                 &hints,
@@ -345,7 +351,7 @@ fn render_schema(
             );
         }
     }
-    if draft.selected_field == 1 && picker.open {
+    if draft.selected_field == crate::model::catalog_editor::SCHEMA_OWNER_FIELD && picker.open {
         let Some(choices) = owner_choices else {
             return;
         };
@@ -355,13 +361,27 @@ fn render_schema(
             .iter()
             .filter(|choice| choice.name.to_lowercase().contains(&filter.to_lowercase()))
             .take(usize::from(area.height.saturating_sub(5)));
+        let mut header = vec![Span::styled(
+            "OWNER ROLE",
+            Style::new()
+                .fg(theme.muted)
+                .bg(theme.surface)
+                .add_modifier(Modifier::BOLD),
+        )];
+        if !filter.is_empty() {
+            header.push(Span::styled(
+                format!("  /{}", sanitize_terminal_text(filter)),
+                Style::new().fg(theme.action).bg(theme.surface),
+            ));
+        }
+        if let Some(message) = picker.message.as_deref() {
+            header.push(Span::styled(
+                format!("  {}", sanitize_terminal_text(message)),
+                Style::new().fg(theme.warning).bg(theme.surface),
+            ));
+        }
         frame.render_widget(
-            Paragraph::new("OWNER ROLE").style(
-                Style::new()
-                    .fg(theme.muted)
-                    .bg(theme.surface)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            Paragraph::new(Line::from(header)).style(Style::new().bg(theme.surface)),
             Rect::new(area.x, picker_y, area.width, 1),
         );
         for (offset, choice) in visible.enumerate() {
@@ -411,7 +431,7 @@ fn render_schema(
                 row,
             );
         }
-    } else if draft.selected_field == 1
+    } else if draft.selected_field == crate::model::catalog_editor::SCHEMA_OWNER_FIELD
         && let crate::model::workspace::CatalogOwnerContextState::Failed { message, .. } =
             owner_context
     {

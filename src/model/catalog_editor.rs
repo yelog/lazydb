@@ -182,6 +182,9 @@ pub struct CatalogMutationOption {
     pub label: String,
 }
 
+/// Row index of the owner field inside the schema form.
+pub const SCHEMA_OWNER_FIELD: usize = 1;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SchemaDraft {
     pub name: TextInput,
@@ -1695,6 +1698,19 @@ impl CatalogEditorState {
 
     pub fn is_busy(&self) -> bool {
         self.operation.is_some()
+    }
+
+    /// True when the schema form focuses the owner field, which the owner picker owns.
+    pub fn owner_field_focused(&self) -> bool {
+        matches!(
+            self.draft.as_ref(),
+            Some(CatalogDraft::Schema(draft)) if draft.selected_field == SCHEMA_OWNER_FIELD
+        )
+    }
+
+    /// True when the owner role list is on screen, so it owns list keys instead of the form.
+    pub fn owner_picker_active(&self) -> bool {
+        self.owner_picker.open && self.owner_field_focused()
     }
 
     pub fn select_option(&mut self, selected: usize) -> bool {

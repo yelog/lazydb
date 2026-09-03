@@ -53,8 +53,9 @@ presentation.
 
 ## Schema Owner Picker
 
-When the New Schema Owner field has loaded PostgreSQL roles, it opens the
-contextual owner picker on `Enter`, typing, or focus. These keys are handled by
+When the New Schema Owner field has loaded PostgreSQL roles, the contextual
+owner picker opens on `Enter`, on typing, and whenever the Owner field takes
+focus through `Tab`, `Shift-Tab`, or a mouse click. These keys are handled by
 the catalog editor and are not global configurable bindings.
 
 | Keys | Behavior |
@@ -65,6 +66,13 @@ the catalog editor and are not global configurable bindings.
 | `Esc` | Close the owner picker without closing the editor |
 | `Tab` | Close picker and move to Comment |
 | `Shift-Tab` | Close picker and move to Name |
+
+Choosing a role closes the list and keeps focus on the Owner field. Every key the
+picker does not own falls through to the catalog editor form, so Owner still
+answers `Tab` / `Shift-Tab` field navigation, `Enter` to reopen the role list,
+and `Esc` to cancel the editor. Moving focus off the Owner row releases the list
+as well, and the list header echoes the active filter plus any message about a
+role this session cannot assume.
 
 ## Pane Navigation and Resize
 
