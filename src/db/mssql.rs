@@ -714,7 +714,7 @@ impl MsSqlAdapter {
         let mut memberships: HashMap<String, Vec<ConstraintMembership>> = HashMap::new();
 
         let index_sql = format!(
-            "SELECT i.[name], i.[index_id], i.[is_unique], ic.[key_ordinal], ic.[is_included_column], c.[name] AS [column_name] FROM {q}.sys.indexes i JOIN {q}.sys.index_columns ic ON ic.[object_id] = i.[object_id] AND ic.[index_id] = i.[index_id] JOIN {q}.sys.columns c ON c.[object_id] = ic.[object_id] AND c.[column_id] = ic.[column_id] WHERE i.[object_id] = {object_id} AND i.[index_id] > 0 AND i.[is_hypothetical] = 0 ORDER BY i.[index_id], ic.[is_included_column], ic.[key_ordinal], ic.[index_column_id]"
+            "SELECT i.[name], i.[index_id], CONVERT(bit, i.[is_unique]) AS [is_unique], ic.[key_ordinal], ic.[is_included_column], c.[name] AS [column_name] FROM {q}.sys.indexes i JOIN {q}.sys.index_columns ic ON ic.[object_id] = i.[object_id] AND ic.[index_id] = i.[index_id] JOIN {q}.sys.columns c ON c.[object_id] = ic.[object_id] AND c.[column_id] = ic.[column_id] WHERE i.[object_id] = {object_id} AND i.[index_id] > 0 AND i.[is_hypothetical] = 0 ORDER BY i.[index_id], ic.[is_included_column], ic.[key_ordinal], ic.[index_column_id]"
         );
         let mut indexes: HashMap<i32, (String, bool, Vec<String>)> = HashMap::new();
         for row in query_rows(&pool, &index_sql).await? {
@@ -864,7 +864,7 @@ impl MsSqlAdapter {
         }
 
         let column_sql = format!(
-            "SELECT c.[column_id], c.[name], t.[name] AS [type_name], c.[is_nullable], c.[is_identity], c.[is_computed], dc.[definition] AS [default_expression], cc.[definition] AS [computed_expression], CASE WHEN t.[name] IN ('rowversion','timestamp') THEN 1 ELSE 0 END AS [rowversion], (SELECT CAST(ep.[value] AS nvarchar(4000)) FROM {q}.sys.extended_properties ep WHERE ep.[class] = 1 AND ep.[major_id] = c.[object_id] AND ep.[minor_id] = c.[column_id] AND ep.[name] = N'MS_Description') AS [comment] FROM {q}.sys.columns c JOIN {q}.sys.types t ON t.[user_type_id] = c.[user_type_id] LEFT JOIN {q}.sys.default_constraints dc ON dc.[parent_object_id] = c.[object_id] AND dc.[parent_column_id] = c.[column_id] LEFT JOIN {q}.sys.computed_columns cc ON cc.[object_id] = c.[object_id] AND cc.[column_id] = c.[column_id] WHERE c.[object_id] = {object_id} ORDER BY c.[column_id]"
+            "SELECT c.[column_id], c.[name], t.[name] AS [type_name], CONVERT(bit, c.[is_nullable]) AS [is_nullable], CONVERT(bit, c.[is_identity]) AS [is_identity], CONVERT(bit, c.[is_computed]) AS [is_computed], dc.[definition] AS [default_expression], cc.[definition] AS [computed_expression], CONVERT(bit, CASE WHEN t.[name] IN ('rowversion','timestamp') THEN 1 ELSE 0 END) AS [rowversion], (SELECT CAST(ep.[value] AS nvarchar(4000)) FROM {q}.sys.extended_properties ep WHERE ep.[class] = 1 AND ep.[major_id] = c.[object_id] AND ep.[minor_id] = c.[column_id] AND ep.[name] = N'MS_Description') AS [comment] FROM {q}.sys.columns c JOIN {q}.sys.types t ON t.[user_type_id] = c.[user_type_id] LEFT JOIN {q}.sys.default_constraints dc ON dc.[parent_object_id] = c.[object_id] AND dc.[parent_column_id] = c.[column_id] LEFT JOIN {q}.sys.computed_columns cc ON cc.[object_id] = c.[object_id] AND cc.[column_id] = c.[column_id] WHERE c.[object_id] = {object_id} ORDER BY c.[column_id]"
         );
         for row in query_rows(&pool, &column_sql).await? {
             let ordinal = row
