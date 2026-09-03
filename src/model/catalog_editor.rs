@@ -88,6 +88,7 @@ impl RoleDraft {
             _ => None,
         }
     }
+
     pub fn insert(&mut self, c: char) {
         if let Some(i) = self.input() {
             i.insert(c)
@@ -121,59 +122,37 @@ pub enum CatalogEditorOperation {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CatalogEditorSection {
-    General,
-    Columns,
-    Indexes,
-    Constraints,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TableEditorField {
+pub enum TableGeneralField {
     Name,
     Schema,
     Owner,
     Comment,
-    ColumnList,
-    ColumnName,
-    ColumnType,
-    ColumnNullable,
-    ColumnDefault,
-    ColumnIdentity,
-    ColumnComment,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TableColumnField {
+    Name,
+    Type,
+    Default,
+    Comment,
+    Nullable,
+    Identity,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TableActionField {
     AddColumn,
     RemoveColumn,
     Review,
     Cancel,
 }
 
-impl TableEditorField {
-    const ALL: [Self; 15] = [
-        Self::Name,
-        Self::Schema,
-        Self::Owner,
-        Self::Comment,
-        Self::ColumnList,
-        Self::ColumnName,
-        Self::ColumnType,
-        Self::ColumnNullable,
-        Self::ColumnDefault,
-        Self::ColumnIdentity,
-        Self::ColumnComment,
-        Self::AddColumn,
-        Self::RemoveColumn,
-        Self::Review,
-        Self::Cancel,
-    ];
-
-    fn move_by(self, delta: isize) -> Self {
-        let index = Self::ALL
-            .iter()
-            .position(|field| *field == self)
-            .unwrap_or_default();
-        let index = (index as isize + delta).rem_euclid(Self::ALL.len() as isize) as usize;
-        Self::ALL[index]
-    }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TableEditorFocus {
+    General(TableGeneralField),
+    Columns,
+    ColumnDetails(TableColumnField),
+    Action(TableActionField),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -395,9 +374,8 @@ pub struct TableDraft {
     pub owner: TextInput,
     pub comment: TextInput,
     pub columns: Vec<ColumnDraft>,
-    pub selected_section: CatalogEditorSection,
     pub selected_column: usize,
-    pub selected_field: TableEditorField,
+    pub focus: TableEditorFocus,
     pub indexes: Vec<String>,
     pub constraints: Vec<String>,
 }
@@ -1074,9 +1052,8 @@ impl TableDraft {
             owner: TextInput::default(),
             comment: TextInput::default(),
             columns: vec![ColumnDraft::new_added()],
-            selected_section: CatalogEditorSection::General,
             selected_column: 0,
-            selected_field: TableEditorField::Name,
+            focus: TableEditorFocus::General(TableGeneralField::Name),
             indexes: Vec::new(),
             constraints: Vec::new(),
         }
@@ -1093,9 +1070,8 @@ impl TableDraft {
                 .iter()
                 .map(ColumnDraft::from_definition)
                 .collect(),
-            selected_section: CatalogEditorSection::General,
             selected_column: 0,
-            selected_field: TableEditorField::Name,
+            focus: TableEditorFocus::General(TableGeneralField::Name),
             indexes: definition.indexes.clone(),
             constraints: definition.constraints.clone(),
         }
@@ -1138,18 +1114,18 @@ impl TableDraft {
         Ok(())
     }
 
-    pub fn validation_focus(&self) -> Option<(Option<usize>, TableEditorField, String)> {
+    pub fn validation_focus(&self) -> Option<(Option<usize>, TableEditorFocus, String)> {
         if self.name.value().trim().is_empty() {
             return Some((
                 None,
-                TableEditorField::Name,
+                TableEditorFocus::General(TableGeneralField::Name),
                 "table name is required".into(),
             ));
         }
         if self.schema.value().trim().is_empty() {
             return Some((
                 None,
-                TableEditorField::Schema,
+                TableEditorFocus::General(TableGeneralField::Schema),
                 "table schema is required".into(),
             ));
         }
@@ -1163,28 +1139,28 @@ impl TableDraft {
             if column.name.value().trim().is_empty() {
                 return Some((
                     Some(index),
-                    TableEditorField::ColumnName,
+                    TableEditorFocus::ColumnDetails(TableColumnField::Name),
                     format!("column {} name is required", index + 1),
                 ));
             }
             if column.native_type.value().trim().is_empty() {
                 return Some((
                     Some(index),
-                    TableEditorField::ColumnType,
+                    TableEditorFocus::ColumnDetails(TableColumnField::Type),
                     format!("column {} type is required", index + 1),
                 ));
             }
             if !names.insert(column.name.value().trim()) {
                 return Some((
                     Some(index),
-                    TableEditorField::ColumnName,
+                    TableEditorFocus::ColumnDetails(TableColumnField::Name),
                     "column names must be unique".into(),
                 ));
             }
             if column.identity && !column.default_expression.value().trim().is_empty() {
                 return Some((
                     Some(index),
-                    TableEditorField::ColumnIdentity,
+                    TableEditorFocus::ColumnDetails(TableColumnField::Identity),
                     format!("column {} identity cannot have a default", index + 1),
                 ));
             }
@@ -1192,20 +1168,10 @@ impl TableDraft {
         (count == 0).then(|| {
             (
                 None,
-                TableEditorField::ColumnList,
+                TableEditorFocus::Columns,
                 "a table requires at least one column".into(),
             )
         })
-    }
-
-    pub fn select_section(&mut self, delta: isize) {
-        let current = self.selected_section as isize;
-        self.selected_section = match (current + delta).clamp(0, 3) {
-            0 => CatalogEditorSection::General,
-            1 => CatalogEditorSection::Columns,
-            2 => CatalogEditorSection::Indexes,
-            _ => CatalogEditorSection::Constraints,
-        };
     }
 
     pub fn move_column(&mut self, delta: isize) {
@@ -1213,8 +1179,130 @@ impl TableDraft {
         self.selected_column = (self.selected_column as isize + delta).clamp(0, last) as usize;
     }
 
+    pub fn focus_next(&mut self) {
+        self.focus = match self.focus {
+            TableEditorFocus::General(TableGeneralField::Name) => {
+                TableEditorFocus::General(TableGeneralField::Schema)
+            }
+            TableEditorFocus::General(TableGeneralField::Schema) => {
+                TableEditorFocus::General(TableGeneralField::Owner)
+            }
+            TableEditorFocus::General(TableGeneralField::Owner) => {
+                TableEditorFocus::General(TableGeneralField::Comment)
+            }
+            TableEditorFocus::General(TableGeneralField::Comment) => TableEditorFocus::Columns,
+            TableEditorFocus::Columns => {
+                if self.selected_column + 1 < self.columns.len() {
+                    self.selected_column += 1;
+                    TableEditorFocus::Columns
+                } else {
+                    TableEditorFocus::Action(TableActionField::AddColumn)
+                }
+            }
+            TableEditorFocus::ColumnDetails(TableColumnField::Name) => {
+                TableEditorFocus::ColumnDetails(TableColumnField::Type)
+            }
+            TableEditorFocus::ColumnDetails(TableColumnField::Type) => {
+                TableEditorFocus::ColumnDetails(TableColumnField::Default)
+            }
+            TableEditorFocus::ColumnDetails(TableColumnField::Default) => {
+                TableEditorFocus::ColumnDetails(TableColumnField::Comment)
+            }
+            TableEditorFocus::ColumnDetails(TableColumnField::Comment) => {
+                TableEditorFocus::ColumnDetails(TableColumnField::Nullable)
+            }
+            TableEditorFocus::ColumnDetails(TableColumnField::Nullable) => {
+                TableEditorFocus::ColumnDetails(TableColumnField::Identity)
+            }
+            TableEditorFocus::ColumnDetails(TableColumnField::Identity) => {
+                TableEditorFocus::Columns
+            }
+            TableEditorFocus::Action(TableActionField::AddColumn) => {
+                TableEditorFocus::Action(TableActionField::RemoveColumn)
+            }
+            TableEditorFocus::Action(TableActionField::RemoveColumn) => {
+                TableEditorFocus::Action(TableActionField::Review)
+            }
+            TableEditorFocus::Action(TableActionField::Review) => {
+                TableEditorFocus::Action(TableActionField::Cancel)
+            }
+            TableEditorFocus::Action(TableActionField::Cancel) => self.focus,
+        };
+    }
+
+    pub fn focus_previous(&mut self) {
+        self.focus = match self.focus {
+            TableEditorFocus::General(TableGeneralField::Name) => self.focus,
+            TableEditorFocus::General(TableGeneralField::Schema) => {
+                TableEditorFocus::General(TableGeneralField::Name)
+            }
+            TableEditorFocus::General(TableGeneralField::Owner) => {
+                TableEditorFocus::General(TableGeneralField::Schema)
+            }
+            TableEditorFocus::General(TableGeneralField::Comment) => {
+                TableEditorFocus::General(TableGeneralField::Owner)
+            }
+            TableEditorFocus::Columns => {
+                if self.selected_column > 0 {
+                    self.selected_column -= 1;
+                    TableEditorFocus::Columns
+                } else {
+                    TableEditorFocus::General(TableGeneralField::Comment)
+                }
+            }
+            TableEditorFocus::ColumnDetails(TableColumnField::Name) => TableEditorFocus::Columns,
+            TableEditorFocus::ColumnDetails(TableColumnField::Type) => {
+                TableEditorFocus::ColumnDetails(TableColumnField::Name)
+            }
+            TableEditorFocus::ColumnDetails(TableColumnField::Default) => {
+                TableEditorFocus::ColumnDetails(TableColumnField::Type)
+            }
+            TableEditorFocus::ColumnDetails(TableColumnField::Comment) => {
+                TableEditorFocus::ColumnDetails(TableColumnField::Default)
+            }
+            TableEditorFocus::ColumnDetails(TableColumnField::Nullable) => {
+                TableEditorFocus::ColumnDetails(TableColumnField::Comment)
+            }
+            TableEditorFocus::ColumnDetails(TableColumnField::Identity) => {
+                TableEditorFocus::ColumnDetails(TableColumnField::Nullable)
+            }
+            TableEditorFocus::Action(TableActionField::AddColumn) => TableEditorFocus::Columns,
+            TableEditorFocus::Action(TableActionField::RemoveColumn) => {
+                TableEditorFocus::Action(TableActionField::AddColumn)
+            }
+            TableEditorFocus::Action(TableActionField::Review) => {
+                TableEditorFocus::Action(TableActionField::RemoveColumn)
+            }
+            TableEditorFocus::Action(TableActionField::Cancel) => {
+                TableEditorFocus::Action(TableActionField::Review)
+            }
+        };
+    }
+
+    pub fn enter_column_details(&mut self) {
+        if self.selected_column().is_some() {
+            self.focus = TableEditorFocus::ColumnDetails(TableColumnField::Name);
+        }
+    }
+
+    pub fn leave_column_details(&mut self) {
+        if self.is_editing_column_details() {
+            self.focus = TableEditorFocus::Columns;
+        }
+    }
+
+    pub fn is_editing_column_details(&self) -> bool {
+        matches!(self.focus, TableEditorFocus::ColumnDetails(_))
+    }
+
     pub fn move_field(&mut self, delta: isize) {
-        self.selected_field = self.selected_field.move_by(delta);
+        for _ in 0..delta.unsigned_abs() {
+            if delta < 0 {
+                self.focus_previous();
+            } else {
+                self.focus_next();
+            }
+        }
     }
 
     pub fn selected_column(&self) -> Option<&ColumnDraft> {
@@ -1225,19 +1313,30 @@ impl TableDraft {
         self.columns.get_mut(self.selected_column)
     }
 
-    pub fn add_column(&mut self) {
-        let mut column = ColumnDraft::new_added();
-        column.ordinal_position = self.columns.len() as u32 + 1;
-        self.columns.push(column);
-        self.selected_column = self.columns.len() - 1;
-        self.selected_field = TableEditorField::ColumnName;
+    pub fn add_column_below(&mut self) {
+        let column = ColumnDraft::new_added();
+        let insert_at = self
+            .selected_column
+            .min(self.columns.len().saturating_sub(1));
+        let ordinal_position = self
+            .columns
+            .iter()
+            .map(|column| column.ordinal_position)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        let mut column = column;
+        column.ordinal_position = ordinal_position;
+        self.columns.insert(insert_at + 1, column);
+        self.selected_column = insert_at + 1;
+        self.focus = TableEditorFocus::ColumnDetails(TableColumnField::Name);
     }
 
     pub fn remove_selected_column(&mut self) {
         if self.columns.len() == 1 {
             self.columns[0] = ColumnDraft::new_added();
             self.selected_column = 0;
-            self.selected_field = TableEditorField::ColumnName;
+            self.focus = TableEditorFocus::ColumnDetails(TableColumnField::Name);
             return;
         }
         if matches!(
@@ -1253,7 +1352,7 @@ impl TableDraft {
             column.state = DraftRowState::Removed { id: id.clone() };
         }
         self.selected_column = self.selected_column.min(self.columns.len() - 1);
-        self.selected_field = TableEditorField::ColumnList;
+        self.focus = TableEditorFocus::Columns;
     }
 
     pub fn toggle_selected_column_nullable(&mut self) {
@@ -1272,24 +1371,24 @@ impl TableDraft {
     }
 
     fn selected_text_input_mut(&mut self) -> Option<&mut TextInput> {
-        match self.selected_field {
-            TableEditorField::Name => Some(&mut self.name),
-            TableEditorField::Schema => Some(&mut self.schema),
-            TableEditorField::Owner => Some(&mut self.owner),
-            TableEditorField::Comment => Some(&mut self.comment),
-            TableEditorField::ColumnName => self
+        match self.focus {
+            TableEditorFocus::General(TableGeneralField::Name) => Some(&mut self.name),
+            TableEditorFocus::General(TableGeneralField::Schema) => Some(&mut self.schema),
+            TableEditorFocus::General(TableGeneralField::Owner) => Some(&mut self.owner),
+            TableEditorFocus::General(TableGeneralField::Comment) => Some(&mut self.comment),
+            TableEditorFocus::ColumnDetails(TableColumnField::Name) => self
                 .columns
                 .get_mut(self.selected_column)
                 .map(|column| &mut column.name),
-            TableEditorField::ColumnType => self
+            TableEditorFocus::ColumnDetails(TableColumnField::Type) => self
                 .columns
                 .get_mut(self.selected_column)
                 .map(|column| &mut column.native_type),
-            TableEditorField::ColumnDefault => self
+            TableEditorFocus::ColumnDetails(TableColumnField::Default) => self
                 .columns
                 .get_mut(self.selected_column)
                 .map(|column| &mut column.default_expression),
-            TableEditorField::ColumnComment => self
+            TableEditorFocus::ColumnDetails(TableColumnField::Comment) => self
                 .columns
                 .get_mut(self.selected_column)
                 .map(|column| &mut column.comment),
@@ -1356,7 +1455,7 @@ impl ColumnDraft {
     pub fn new_added() -> Self {
         Self {
             row_id: Uuid::new_v4(),
-            ordinal_position: 0,
+            ordinal_position: 1,
             existing_name: None,
             name: TextInput::default(),
             native_type: "text".into(),
@@ -1979,7 +2078,18 @@ impl CatalogEditorState {
         {
             return false;
         }
+        self.error = None;
         self.operation = Some(CatalogEditorOperation::Applying { request_id });
+        true
+    }
+
+    pub fn apply_failed(&mut self, request_id: u64, message: impl Into<String>) -> bool {
+        if self.operation != Some(CatalogEditorOperation::Applying { request_id }) {
+            return false;
+        }
+        self.operation = None;
+        self.error = Some(message.into());
+        self.page = CatalogEditorPage::SqlPreview;
         true
     }
 

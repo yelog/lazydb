@@ -1,13 +1,15 @@
 use lazydb::{
+    action::Action,
     db::catalog_mutation::{
         CatalogMutationAnchor, CatalogMutationExecutionMode, CatalogMutationMode,
-        CatalogMutationRequest, CatalogObjectType, CatalogSelectionHint,
+        CatalogMutationRequest, CatalogMutationTarget, CatalogObjectType, CatalogSelectionHint,
     },
     identity::ConnectionIdentity,
     model::catalog_editor::{
-        CatalogDraft, CatalogEditorOperation, CatalogEditorPage, CatalogEditorSection,
-        CatalogEditorState, CatalogMutationOption, CatalogMutationPlan, DatabaseDraft,
-        DraftRowState, MaterializedViewDraft, SchemaDraft, TableDraft, TableEditorField,
+        CatalogDraft, CatalogEditorOperation, CatalogEditorPage, CatalogEditorState,
+        CatalogMutationOption, CatalogMutationPlan, DatabaseDraft, DraftRowState,
+        MaterializedViewDraft, SchemaDraft, TableActionField, TableColumnField, TableDraft,
+        TableEditorFocus, TableGeneralField,
     },
     model::text_input::TextInput,
 };
@@ -106,30 +108,267 @@ fn select_schema_create(object_type: CatalogObjectType) -> CatalogEditorState {
 #[test]
 fn new_table_starts_with_one_editable_column() {
     let draft = TableDraft::new("public");
-    assert_eq!(draft.selected_field, TableEditorField::Name);
+    assert_eq!(
+        draft.focus,
+        TableEditorFocus::General(TableGeneralField::Name)
+    );
     assert_eq!(draft.selected_column, 0);
     assert_eq!(draft.columns.len(), 1);
+    assert_eq!(draft.columns[0].ordinal_position, 1);
     assert_eq!(draft.columns[0].native_type.value(), "text");
     assert!(draft.columns[0].nullable);
     assert!(matches!(draft.columns[0].state, DraftRowState::Added));
 }
 
 #[test]
-fn table_focus_moves_through_general_and_column_fields() {
+fn table_focus_moves_between_general_and_columns() {
     let mut draft = TableDraft::new("public");
-    draft.move_field(1);
-    assert_eq!(draft.selected_field, TableEditorField::Schema);
-    draft.move_field(-1);
-    assert_eq!(draft.selected_field, TableEditorField::Name);
+    draft.focus_previous();
+    assert_eq!(
+        draft.focus,
+        TableEditorFocus::General(TableGeneralField::Name)
+    );
+    draft.focus_next();
+    assert_eq!(
+        draft.focus,
+        TableEditorFocus::General(TableGeneralField::Schema)
+    );
+    draft.focus_next();
+    assert_eq!(
+        draft.focus,
+        TableEditorFocus::General(TableGeneralField::Owner)
+    );
+    draft.focus_next();
+    assert_eq!(
+        draft.focus,
+        TableEditorFocus::General(TableGeneralField::Comment)
+    );
+    draft.focus_next();
+    assert_eq!(draft.focus, TableEditorFocus::Columns);
+    draft.focus_previous();
+    assert_eq!(
+        draft.focus,
+        TableEditorFocus::General(TableGeneralField::Comment)
+    );
 }
 
 #[test]
-fn table_focus_wraps_between_first_and_last_fields() {
+fn table_full_general_navigation_is_reversible() {
     let mut draft = TableDraft::new("public");
-    draft.move_field(-1);
-    assert_eq!(draft.selected_field, TableEditorField::Cancel);
-    draft.move_field(1);
-    assert_eq!(draft.selected_field, TableEditorField::Name);
+    draft.focus = TableEditorFocus::General(TableGeneralField::Comment);
+    draft.focus_previous();
+    assert_eq!(
+        draft.focus,
+        TableEditorFocus::General(TableGeneralField::Owner)
+    );
+    draft.focus_previous();
+    assert_eq!(
+        draft.focus,
+        TableEditorFocus::General(TableGeneralField::Schema)
+    );
+    draft.focus_previous();
+    assert_eq!(
+        draft.focus,
+        TableEditorFocus::General(TableGeneralField::Name)
+    );
+}
+
+#[test]
+fn table_column_navigation_crosses_region_boundaries() {
+    let mut draft = TableDraft::new("public");
+    draft.add_column_below();
+    draft.focus = TableEditorFocus::Columns;
+    draft.selected_column = 0;
+    draft.focus_next();
+    assert_eq!(draft.selected_column, 1);
+    assert_eq!(draft.focus, TableEditorFocus::Columns);
+    draft.focus_next();
+    assert_eq!(
+        draft.focus,
+        TableEditorFocus::Action(TableActionField::AddColumn)
+    );
+    draft.focus_previous();
+    assert_eq!(draft.focus, TableEditorFocus::Columns);
+    assert_eq!(draft.selected_column, 1);
+}
+
+#[test]
+fn table_columns_move_between_existing_columns_before_general_or_add() {
+    let mut draft = TableDraft::new("public");
+    draft.add_column_below();
+    draft.focus = TableEditorFocus::Columns;
+
+    draft.focus_previous();
+    assert_eq!(draft.selected_column, 0);
+    assert_eq!(draft.focus, TableEditorFocus::Columns);
+    draft.focus_previous();
+    assert_eq!(
+        draft.focus,
+        TableEditorFocus::General(TableGeneralField::Comment)
+    );
+
+    draft.focus = TableEditorFocus::Columns;
+    draft.selected_column = 0;
+    draft.focus_next();
+    assert_eq!(draft.selected_column, 1);
+    assert_eq!(draft.focus, TableEditorFocus::Columns);
+    draft.focus_next();
+    assert_eq!(
+        draft.focus,
+        TableEditorFocus::Action(TableActionField::AddColumn)
+    );
+}
+
+#[test]
+fn table_action_navigation_moves_both_directions_and_form_clamps_at_ends() {
+    let mut draft = TableDraft::new("public");
+    draft.focus_previous();
+    assert_eq!(
+        draft.focus,
+        TableEditorFocus::General(TableGeneralField::Name)
+    );
+    draft.focus = TableEditorFocus::Action(TableActionField::AddColumn);
+
+    draft.focus_previous();
+    assert_eq!(draft.focus, TableEditorFocus::Columns);
+    draft.focus = TableEditorFocus::Action(TableActionField::AddColumn);
+    draft.focus_next();
+    assert_eq!(
+        draft.focus,
+        TableEditorFocus::Action(TableActionField::RemoveColumn)
+    );
+    draft.focus_next();
+    assert_eq!(
+        draft.focus,
+        TableEditorFocus::Action(TableActionField::Review)
+    );
+    draft.focus_next();
+    assert_eq!(
+        draft.focus,
+        TableEditorFocus::Action(TableActionField::Cancel)
+    );
+    draft.focus_next();
+    assert_eq!(
+        draft.focus,
+        TableEditorFocus::Action(TableActionField::Cancel)
+    );
+
+    draft.focus_previous();
+    assert_eq!(
+        draft.focus,
+        TableEditorFocus::Action(TableActionField::Review)
+    );
+    draft.focus_previous();
+    assert_eq!(
+        draft.focus,
+        TableEditorFocus::Action(TableActionField::RemoveColumn)
+    );
+    draft.focus_previous();
+    assert_eq!(
+        draft.focus,
+        TableEditorFocus::Action(TableActionField::AddColumn)
+    );
+    draft.focus_previous();
+    assert_eq!(draft.focus, TableEditorFocus::Columns);
+}
+
+#[test]
+fn table_column_details_navigation_is_clamped_and_preserves_column_on_leave() {
+    let mut draft = TableDraft::new("public");
+    draft.enter_column_details();
+    assert_eq!(
+        draft.focus,
+        TableEditorFocus::ColumnDetails(TableColumnField::Name)
+    );
+    draft.focus_previous();
+    assert_eq!(draft.focus, TableEditorFocus::Columns);
+    draft.enter_column_details();
+    for _ in 0..5 {
+        draft.focus_next();
+    }
+    assert_eq!(
+        draft.focus,
+        TableEditorFocus::ColumnDetails(TableColumnField::Identity)
+    );
+    draft.leave_column_details();
+    assert_eq!(draft.focus, TableEditorFocus::Columns);
+    assert_eq!(draft.selected_column, 0);
+}
+
+#[test]
+fn table_column_details_navigation_is_continuous_at_both_boundaries() {
+    let mut draft = TableDraft::new("public");
+    draft.enter_column_details();
+
+    draft.focus_previous();
+    assert_eq!(draft.focus, TableEditorFocus::Columns);
+    draft.enter_column_details();
+    for _ in 0..5 {
+        draft.focus_next();
+    }
+    draft.focus_next();
+    assert_eq!(draft.focus, TableEditorFocus::Columns);
+}
+
+#[test]
+fn table_navigation_uses_one_complete_state_machine_for_compact_action_chain() {
+    let mut draft = TableDraft::new("public");
+    draft.focus = TableEditorFocus::Columns;
+    draft.focus_previous();
+    assert_eq!(
+        draft.focus,
+        TableEditorFocus::General(TableGeneralField::Comment)
+    );
+    draft.focus_next();
+    assert_eq!(draft.focus, TableEditorFocus::Columns);
+    draft.focus_next();
+    assert_eq!(
+        draft.focus,
+        TableEditorFocus::Action(TableActionField::AddColumn)
+    );
+    draft.focus_next();
+    draft.focus_next();
+    draft.focus_next();
+    assert_eq!(
+        draft.focus,
+        TableEditorFocus::Action(TableActionField::Cancel)
+    );
+    draft.focus_previous();
+    draft.focus_previous();
+    draft.focus_previous();
+    assert_eq!(
+        draft.focus,
+        TableEditorFocus::Action(TableActionField::AddColumn)
+    );
+}
+
+#[test]
+fn table_column_details_full_navigation_remains_available_to_full_mode() {
+    let mut draft = TableDraft::new("public");
+    draft.enter_column_details();
+    for _ in 0..5 {
+        draft.focus_next();
+    }
+    assert_eq!(
+        draft.focus,
+        TableEditorFocus::ColumnDetails(TableColumnField::Identity)
+    );
+    draft.focus_next();
+    assert_eq!(draft.focus, TableEditorFocus::Columns);
+}
+
+#[test]
+fn table_enter_column_details_requires_a_valid_selected_column() {
+    let mut draft = TableDraft::new("public");
+    draft.focus = TableEditorFocus::General(TableGeneralField::Owner);
+    draft.selected_column = 1;
+
+    draft.enter_column_details();
+
+    assert_eq!(
+        draft.focus,
+        TableEditorFocus::General(TableGeneralField::Owner)
+    );
 }
 
 #[test]
@@ -137,7 +376,10 @@ fn table_draft_delegates_text_edits_to_general_and_column_inputs() {
     let mut draft = CatalogDraft::Table(TableDraft::new("public"));
     draft.insert('e');
     draft.insert('v');
-    draft.move_field(5);
+    let CatalogDraft::Table(table) = &mut draft else {
+        unreachable!();
+    };
+    table.focus = TableEditorFocus::ColumnDetails(TableColumnField::Name);
     draft.insert('i');
     draft.insert('d');
     draft.move_home();
@@ -149,6 +391,31 @@ fn table_draft_delegates_text_edits_to_general_and_column_inputs() {
     };
     assert_eq!(draft.name.value(), "ev");
     assert_eq!(draft.columns[0].name.value(), "i");
+}
+
+#[test]
+fn table_draft_routes_text_input_to_all_general_and_column_detail_fields() {
+    let mut draft = TableDraft::new("");
+
+    draft.focus = TableEditorFocus::General(TableGeneralField::Schema);
+    draft.insert('s');
+    draft.focus = TableEditorFocus::General(TableGeneralField::Owner);
+    draft.insert('o');
+    draft.focus = TableEditorFocus::General(TableGeneralField::Comment);
+    draft.insert('g');
+    draft.focus = TableEditorFocus::ColumnDetails(TableColumnField::Type);
+    draft.insert('y');
+    draft.focus = TableEditorFocus::ColumnDetails(TableColumnField::Default);
+    draft.insert('d');
+    draft.focus = TableEditorFocus::ColumnDetails(TableColumnField::Comment);
+    draft.insert('c');
+
+    assert_eq!(draft.schema.value(), "s");
+    assert_eq!(draft.owner.value(), "o");
+    assert_eq!(draft.comment.value(), "g");
+    assert_eq!(draft.columns[0].native_type.value(), "texty");
+    assert_eq!(draft.columns[0].default_expression.value(), "d");
+    assert_eq!(draft.columns[0].comment.value(), "c");
 }
 
 #[test]
@@ -172,14 +439,166 @@ fn table_draft_supports_shared_deletion_commands() {
 fn table_draft_adds_selects_and_toggles_columns() {
     let mut draft = TableDraft::new("public");
     draft.columns[0].name = "id".into();
-    draft.add_column();
+    draft.add_column_below();
     assert_eq!(draft.selected_column, 1);
-    assert_eq!(draft.selected_field, TableEditorField::ColumnName);
+    assert_eq!(
+        draft.focus,
+        TableEditorFocus::ColumnDetails(TableColumnField::Name)
+    );
     draft.toggle_selected_column_nullable();
     draft.toggle_selected_column_identity();
     assert!(!draft.columns[1].nullable);
     assert!(draft.columns[1].identity);
     assert_eq!(draft.columns[1].default_expression.value(), "");
+}
+
+#[test]
+fn table_draft_adds_column_below_current_column_and_enters_its_details() {
+    let mut draft = TableDraft::new("public");
+    draft.columns[0].name = "id".into();
+    draft.add_column_below();
+
+    assert_eq!(draft.columns.len(), 2);
+    assert_eq!(draft.columns[0].name.value(), "id");
+    assert_eq!(draft.selected_column, 1);
+    assert_eq!(
+        draft.focus,
+        TableEditorFocus::ColumnDetails(TableColumnField::Name)
+    );
+}
+
+#[test]
+fn table_draft_inserts_below_middle_column_and_preserves_order() {
+    let mut draft = TableDraft::new("public");
+    draft.columns[0].name = "id".into();
+    draft.add_column_below();
+    draft.columns[1].name = "name".into();
+    draft.selected_column = 0;
+
+    draft.add_column_below();
+
+    assert_eq!(
+        draft
+            .columns
+            .iter()
+            .map(|column| column.name.value())
+            .collect::<Vec<_>>(),
+        vec!["id", "", "name"]
+    );
+    assert_eq!(draft.selected_column, 1);
+    assert_eq!(draft.columns[0].ordinal_position, 1);
+    assert_eq!(draft.columns[1].ordinal_position, 3);
+    assert_eq!(draft.columns[2].ordinal_position, 2);
+}
+
+#[test]
+fn table_draft_insertion_preserves_existing_column_identity_and_state() {
+    let definition = lazydb::db::catalog_mutation::TableDefinition {
+        database: "app".into(),
+        schema: "public".into(),
+        name: "events".into(),
+        owner: "postgres".into(),
+        comment: lazydb::db::catalog::OptionalMetadata::Supported(None),
+        columns: vec![
+            lazydb::db::catalog_mutation::ColumnDefinition {
+                name: "id".into(),
+                ordinal_position: 1,
+                native_type: "integer".into(),
+                nullable: false,
+                default_expression: lazydb::db::catalog::OptionalMetadata::Supported(None),
+                identity: lazydb::db::catalog::OptionalMetadata::Supported(None),
+                generated_expression: lazydb::db::catalog::OptionalMetadata::Supported(None),
+                collation: lazydb::db::catalog::OptionalMetadata::Supported(None),
+                comment: lazydb::db::catalog::OptionalMetadata::Supported(None),
+            },
+            lazydb::db::catalog_mutation::ColumnDefinition {
+                name: "name".into(),
+                ordinal_position: 2,
+                native_type: "text".into(),
+                nullable: true,
+                default_expression: lazydb::db::catalog::OptionalMetadata::Supported(None),
+                identity: lazydb::db::catalog::OptionalMetadata::Supported(None),
+                generated_expression: lazydb::db::catalog::OptionalMetadata::Supported(None),
+                collation: lazydb::db::catalog::OptionalMetadata::Supported(None),
+                comment: lazydb::db::catalog::OptionalMetadata::Supported(None),
+            },
+        ],
+        indexes: vec![],
+        constraints: vec![],
+        baseline_fingerprint: "sha256:table".into(),
+    };
+    let mut draft = TableDraft::from_definition(&definition);
+    let existing = draft.columns[1].clone();
+    draft.selected_column = 0;
+
+    draft.add_column_below();
+
+    assert_eq!(draft.columns[0].existing_name.as_deref(), Some("id"));
+    assert!(matches!(
+        draft.columns[0].state,
+        DraftRowState::Existing { .. }
+    ));
+    assert_eq!(draft.columns[2].existing_name.as_deref(), Some("name"));
+    assert_eq!(draft.columns[2].row_id, existing.row_id);
+    assert_eq!(draft.columns[2].state, existing.state);
+}
+
+#[test]
+fn table_draft_inserts_new_column_after_max_ordinal_without_reordering_existing_columns() {
+    let definition = lazydb::db::catalog_mutation::TableDefinition {
+        database: "app".into(),
+        schema: "public".into(),
+        name: "events".into(),
+        owner: "postgres".into(),
+        comment: lazydb::db::catalog::OptionalMetadata::Supported(None),
+        columns: vec![
+            lazydb::db::catalog_mutation::ColumnDefinition {
+                name: "first".into(),
+                ordinal_position: 1,
+                native_type: "integer".into(),
+                nullable: true,
+                default_expression: lazydb::db::catalog::OptionalMetadata::Supported(None),
+                identity: lazydb::db::catalog::OptionalMetadata::Supported(None),
+                generated_expression: lazydb::db::catalog::OptionalMetadata::Supported(None),
+                collation: lazydb::db::catalog::OptionalMetadata::Supported(None),
+                comment: lazydb::db::catalog::OptionalMetadata::Supported(None),
+            },
+            lazydb::db::catalog_mutation::ColumnDefinition {
+                name: "third".into(),
+                ordinal_position: 3,
+                native_type: "text".into(),
+                nullable: true,
+                default_expression: lazydb::db::catalog::OptionalMetadata::Supported(None),
+                identity: lazydb::db::catalog::OptionalMetadata::Supported(None),
+                generated_expression: lazydb::db::catalog::OptionalMetadata::Supported(None),
+                collation: lazydb::db::catalog::OptionalMetadata::Supported(None),
+                comment: lazydb::db::catalog::OptionalMetadata::Supported(None),
+            },
+        ],
+        indexes: vec![],
+        constraints: vec![],
+        baseline_fingerprint: "sha256:table".into(),
+    };
+    let mut draft = TableDraft::from_definition(&definition);
+    draft.selected_column = 0;
+
+    draft.add_column_below();
+
+    assert_eq!(draft.columns[0].ordinal_position, 1);
+    assert_eq!(draft.columns[1].ordinal_position, 4);
+    assert_eq!(draft.columns[2].ordinal_position, 3);
+}
+
+#[test]
+fn table_column_edit_and_leave_actions_are_explicit() {
+    assert!(matches!(
+        Action::CatalogEditorEditTableColumn,
+        Action::CatalogEditorEditTableColumn
+    ));
+    assert!(matches!(
+        Action::CatalogEditorLeaveTableColumnDetails,
+        Action::CatalogEditorLeaveTableColumnDetails
+    ));
 }
 
 #[test]
@@ -207,7 +626,10 @@ fn schema_table_create_selection_initializes_table_draft() {
     assert!(draft.name.value().is_empty());
     assert_eq!(draft.columns.len(), 1);
     assert_eq!(draft.columns[0].native_type.value(), "text");
-    assert_eq!(draft.selected_field, TableEditorField::Name);
+    assert_eq!(
+        draft.focus,
+        TableEditorFocus::General(TableGeneralField::Name)
+    );
 }
 
 #[test]
@@ -460,6 +882,12 @@ fn form_preview_apply_and_cancel_transitions() {
         request,
         CatalogObjectType::Catalog(lazydb::db::catalog::CatalogKind::Schema),
         CatalogMutationExecutionMode::Transactional,
+        CatalogMutationTarget::database_target(lazydb::model::execution_target::ExecutionTarget {
+            profile_id: connection.profile_id,
+            database: "app".into(),
+            schema: Some("public".into()),
+        })
+        .unwrap(),
         vec![lazydb::db::catalog::CatalogTarget::Databases],
         CatalogSelectionHint::Parent(lazydb::db::catalog::CatalogTarget::Databases),
         None,
@@ -476,6 +904,59 @@ fn form_preview_apply_and_cancel_transitions() {
 
     let editor = state();
     assert!(editor.cancel());
+}
+
+#[test]
+fn apply_failure_only_finishes_matching_request_and_begin_apply_clears_error() {
+    let mut editor = state();
+    editor.select_option(0);
+    editor.draft = Some(CatalogDraft::Schema(SchemaDraft {
+        name: TextInput::from("events"),
+        owner: TextInput::from("postgres"),
+        comment: TextInput::default(),
+        selected_field: 0,
+    }));
+    assert!(editor.begin_planning(2));
+    let connection = ConnectionIdentity {
+        profile_id: profile(),
+        generation: 3,
+    };
+    let request = CatalogMutationRequest::new(
+        connection,
+        2,
+        7,
+        CatalogMutationMode::Create,
+        editor.anchor.clone(),
+        CatalogObjectType::Catalog(lazydb::db::catalog::CatalogKind::Schema),
+    )
+    .unwrap();
+    let plan = CatalogMutationPlan::new(
+        request,
+        CatalogObjectType::Catalog(lazydb::db::catalog::CatalogKind::Schema),
+        CatalogMutationExecutionMode::Transactional,
+        CatalogMutationTarget::database_target(lazydb::model::execution_target::ExecutionTarget {
+            profile_id: connection.profile_id,
+            database: "app".into(),
+            schema: Some("public".into()),
+        })
+        .unwrap(),
+        vec![lazydb::db::catalog::CatalogTarget::Databases],
+        CatalogSelectionHint::Parent(lazydb::db::catalog::CatalogTarget::Databases),
+        None,
+        Vec::new(),
+        vec!["CREATE SCHEMA events".into()],
+    )
+    .unwrap();
+    assert!(editor.plan_ready(2, plan));
+    editor.error = Some("old error".into());
+    assert!(editor.begin_apply(2));
+    assert_eq!(editor.error, None);
+    assert!(!editor.apply_failed(3, "stale"));
+    assert!(editor.is_busy());
+    assert!(editor.apply_failed(2, "new error"));
+    assert!(!editor.is_busy());
+    assert_eq!(editor.page, CatalogEditorPage::SqlPreview);
+    assert_eq!(editor.error.as_deref(), Some("new error"));
 }
 
 #[test]
@@ -506,6 +987,12 @@ fn stale_responses_and_validation_preserve_form() {
         request,
         CatalogObjectType::Catalog(lazydb::db::catalog::CatalogKind::Schema),
         CatalogMutationExecutionMode::Transactional,
+        CatalogMutationTarget::database_target(lazydb::model::execution_target::ExecutionTarget {
+            profile_id: connection.profile_id,
+            database: "app".into(),
+            schema: Some("public".into()),
+        })
+        .unwrap(),
         vec![lazydb::db::catalog::CatalogTarget::Databases],
         CatalogSelectionHint::Parent(lazydb::db::catalog::CatalogTarget::Databases),
         None,
@@ -552,11 +1039,37 @@ fn table_draft_keeps_stable_row_ids_and_focuses_columns() {
     };
     let mut draft = TableDraft::from_definition(&definition);
     let row_id = draft.columns[0].row_id;
-    assert_eq!(draft.selected_section, CatalogEditorSection::General);
-    draft.select_section(1);
+    assert_eq!(
+        draft.focus,
+        TableEditorFocus::General(TableGeneralField::Name)
+    );
+    draft.focus = TableEditorFocus::Columns;
     draft.selected_column = 0;
-    assert_eq!(draft.selected_section, CatalogEditorSection::Columns);
+    assert_eq!(draft.focus, TableEditorFocus::Columns);
     assert_eq!(draft.columns[0].row_id, row_id);
+}
+
+#[test]
+fn table_validation_focus_targets_general_and_column_details() {
+    let mut draft = TableDraft::new("public");
+    assert_eq!(
+        draft.validation_focus(),
+        Some((
+            None,
+            TableEditorFocus::General(TableGeneralField::Name),
+            "table name is required".into(),
+        ))
+    );
+
+    draft.name = "events".into();
+    assert_eq!(
+        draft.validation_focus(),
+        Some((
+            Some(0),
+            TableEditorFocus::ColumnDetails(TableColumnField::Name),
+            "column 1 name is required".into(),
+        ))
+    );
 }
 
 #[test]

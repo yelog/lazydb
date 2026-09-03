@@ -216,7 +216,7 @@ async fn sql_server_relation_mutations_use_output_and_atomic_optimistic_batches(
                 original: vec![
                     CellValue::Integer(id),
                     CellValue::Text("after".into()),
-                    inserted_row_value(&inserted, 2),
+                    inserted_row_value(&updated, 2),
                 ],
             },
         ])))

@@ -27,6 +27,7 @@ use crate::model::dashboard::MetricKey;
 use crate::{
     identity::ConnectionIdentity,
     model::catalog_editor::CatalogDraft,
+    model::execution_target::ExecutionTarget,
     profile::{CatalogScope, CatalogSelection, ConnectionProfile, DatabaseKind, SslMode},
     security::sanitize_terminal_text,
 };
@@ -910,23 +911,25 @@ LIMIT 2001
             CatalogKind::Database,
             ["__role__", name],
         );
+        let maintenance_database = request
+            .current_database
+            .clone()
+            .unwrap_or_else(|| "postgres".into());
+        let execution_target =
+            crate::db::catalog_mutation::CatalogMutationTarget::maintenance(maintenance_database)?;
         let plan = CatalogMutationPlan::new(
             request,
             object_type,
             CatalogMutationExecutionMode::Transactional,
+            execution_target,
             vec![CatalogTarget::Databases],
             CatalogSelectionHint::Parent(CatalogTarget::Databases),
             old.as_ref().map(|r| r.baseline_fingerprint.clone()),
             Vec::new(),
             statements,
         )?;
-        Ok(plan
-            .with_execution_target(
-                crate::db::catalog_mutation::CatalogMutationTarget::maintenance("postgres")
-                    .unwrap(),
-            )
-            .with_execution_secret_opt(secret)
-            .with_impact(crate::db::catalog_mutation::CatalogMutationImpact {
+        Ok(plan.with_execution_secret_opt(secret).with_impact(
+            crate::db::catalog_mutation::CatalogMutationImpact {
                 old_object_id: id,
                 owning_relation_id: None,
                 namespace: crate::db::catalog_mutation::CatalogMutationNamespace {
@@ -934,7 +937,8 @@ LIMIT 2001
                     schema: None,
                 },
                 native_identity_changed: false,
-            }))
+            },
+        ))
     }
 
     fn plan_database_mutation(
@@ -1064,10 +1068,15 @@ LIMIT 2001
             CatalogKind::Database,
             [old_name.clone().unwrap_or_else(|| name.to_owned())],
         );
+        let maintenance_database = request
+            .current_database
+            .clone()
+            .unwrap_or_else(|| "postgres".into());
         CatalogMutationPlan::new(
             request,
             CatalogObjectType::Catalog(CatalogKind::Database),
             CatalogMutationExecutionMode::Autocommit,
+            crate::db::catalog_mutation::CatalogMutationTarget::maintenance(maintenance_database)?,
             vec![CatalogTarget::Databases],
             CatalogSelectionHint::Object(id.clone()),
             fingerprint,
@@ -1075,18 +1084,7 @@ LIMIT 2001
             statements,
         )
         .map(|plan| {
-            let maintenance_database = plan
-                .request
-                .current_database
-                .clone()
-                .unwrap_or_else(|| "postgres".into());
-            plan.with_execution_target(
-                crate::db::catalog_mutation::CatalogMutationTarget::maintenance(
-                    maintenance_database,
-                )
-                .unwrap(),
-            )
-            .with_impact(crate::db::catalog_mutation::CatalogMutationImpact {
+            plan.with_impact(crate::db::catalog_mutation::CatalogMutationImpact {
                 old_object_id: old_id,
                 owning_relation_id: None,
                 namespace: crate::db::catalog_mutation::CatalogMutationNamespace {
@@ -1228,6 +1226,13 @@ LIMIT 2001
                 request,
                 CatalogObjectType::Catalog(CatalogKind::Column),
                 CatalogMutationExecutionMode::Transactional,
+                crate::db::catalog_mutation::CatalogMutationTarget::database_target(
+                    ExecutionTarget {
+                        profile_id: table_id.profile_id(),
+                        database: table.database.clone(),
+                        schema: Some(table.schema.clone()),
+                    },
+                )?,
                 vec![CatalogTarget::RelationChildren {
                     relation: table_id.clone(),
                 }],
@@ -1404,6 +1409,11 @@ LIMIT 2001
             request.clone(),
             CatalogObjectType::Catalog(CatalogKind::Schema),
             CatalogMutationExecutionMode::Transactional,
+            crate::db::catalog_mutation::CatalogMutationTarget::database_target(ExecutionTarget {
+                profile_id: request.connection.profile_id,
+                database: database.clone(),
+                schema: None,
+            })?,
             vec![CatalogTarget::Schemas {
                 database: database_id.clone(),
             }],
@@ -1568,6 +1578,11 @@ LIMIT 2001
             request.clone(),
             CatalogObjectType::Catalog(CatalogKind::Sequence),
             CatalogMutationExecutionMode::Transactional,
+            crate::db::catalog_mutation::CatalogMutationTarget::database_target(ExecutionTarget {
+                profile_id: request.connection.profile_id,
+                database: database.clone(),
+                schema: Some(schema.to_owned()),
+            })?,
             vec![CatalogTarget::Objects {
                 schema: schema_id.clone(),
                 group: ObjectGroup::Sequences,
@@ -1759,6 +1774,11 @@ LIMIT 2001
             request.clone(),
             CatalogObjectType::Catalog(CatalogKind::View),
             CatalogMutationExecutionMode::Transactional,
+            crate::db::catalog_mutation::CatalogMutationTarget::database_target(ExecutionTarget {
+                profile_id: request.connection.profile_id,
+                database: database.clone(),
+                schema: Some(schema.to_owned()),
+            })?,
             vec![CatalogTarget::Objects {
                 schema: schema_id.clone(),
                 group: ObjectGroup::Views,
@@ -1964,6 +1984,11 @@ LIMIT 2001
             request.clone(),
             CatalogObjectType::Catalog(CatalogKind::MaterializedView),
             CatalogMutationExecutionMode::Transactional,
+            crate::db::catalog_mutation::CatalogMutationTarget::database_target(ExecutionTarget {
+                profile_id: request.connection.profile_id,
+                database: database.clone(),
+                schema: Some(schema.to_owned()),
+            })?,
             vec![CatalogTarget::Objects {
                 schema: schema_id.clone(),
                 group: ObjectGroup::MaterializedViews,
@@ -2267,6 +2292,11 @@ LIMIT 2001
             request.clone(),
             request.object_type,
             CatalogMutationExecutionMode::Transactional,
+            crate::db::catalog_mutation::CatalogMutationTarget::database_target(ExecutionTarget {
+                profile_id: request.connection.profile_id,
+                database: draft.database.value().trim().to_owned(),
+                schema: Some(draft.schema.value().trim().to_owned()),
+            })?,
             vec![CatalogTarget::RelationChildren {
                 relation: relation_id.clone(),
             }],
@@ -2610,6 +2640,11 @@ LIMIT 2001
             request,
             CatalogObjectType::Catalog(CatalogKind::Table),
             CatalogMutationExecutionMode::Transactional,
+            crate::db::catalog_mutation::CatalogMutationTarget::database_target(ExecutionTarget {
+                profile_id: old_id.profile_id(),
+                database: database.clone(),
+                schema: Some(schema.to_owned()),
+            })?,
             vec![
                 CatalogTarget::Objects {
                     schema: old_schema_id.clone(),
@@ -2865,6 +2900,11 @@ LIMIT 2001
             request.clone(),
             CatalogObjectType::Catalog(CatalogKind::Index),
             CatalogMutationExecutionMode::Transactional,
+            crate::db::catalog_mutation::CatalogMutationTarget::database_target(ExecutionTarget {
+                profile_id: request.connection.profile_id,
+                database: database.clone(),
+                schema: Some(schema.to_owned()),
+            })?,
             vec![CatalogTarget::RelationChildren {
                 relation: relation_id.clone(),
             }],

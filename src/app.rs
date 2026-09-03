@@ -1,6 +1,7 @@
 #![allow(clippy::collapsible_if)]
 
 use std::{
+    cell::Cell,
     collections::{BTreeSet, HashMap, HashSet},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
@@ -219,6 +220,8 @@ pub struct App {
     pub overlay: Option<Overlay>,
     pub profile_manager: Option<ProfileManagerState>,
     pub catalog_editor: Option<CatalogEditorState>,
+    pub catalog_editor_details_visible: Cell<bool>,
+    pub catalog_editor_compact: Cell<bool>,
     pub system_credential_availability: crate::persistence::secrets::SecretStoreAvailability,
     pub should_quit: bool,
     connection_request_generation: u64,
@@ -576,6 +579,8 @@ impl App {
             overlay: None,
             profile_manager: None,
             catalog_editor: None,
+            catalog_editor_details_visible: Cell::new(true),
+            catalog_editor_compact: Cell::new(false),
             system_credential_availability:
                 crate::persistence::secrets::SecretStoreAvailability::Unavailable,
             should_quit: false,
@@ -3289,7 +3294,7 @@ impl App {
                                 if request.object.kind == crate::db::catalog::CatalogKind::Column {
                                     if let Some(column) = request.object.native_path.get(4) {
                                         if let Ok(ordinal) = column.parse::<usize>() {
-                                            draft.selected_section = crate::model::catalog_editor::CatalogEditorSection::Columns;
+                                            draft.focus = crate::model::catalog_editor::TableEditorFocus::Columns;
                                             draft.selected_column = draft
                                                 .columns
                                                 .iter()
@@ -3417,13 +3422,6 @@ impl App {
                     draft.move_field(1);
                     return Vec::new();
                 }
-                if let Some(crate::model::catalog_editor::CatalogDraft::Table(draft)) = self
-                    .catalog_editor
-                    .as_mut()
-                    .and_then(|editor| editor.draft.as_mut())
-                {
-                    draft.select_section(1);
-                }
                 Vec::new()
             }
             Action::CatalogEditorFieldPrevious => {
@@ -3472,13 +3470,6 @@ impl App {
                     draft.move_field(-1);
                     return Vec::new();
                 }
-                if let Some(crate::model::catalog_editor::CatalogDraft::Table(draft)) = self
-                    .catalog_editor
-                    .as_mut()
-                    .and_then(|editor| editor.draft.as_mut())
-                {
-                    draft.select_section(-1);
-                }
                 Vec::new()
             }
             Action::CatalogEditorFocusField(index) => {
@@ -3504,7 +3495,7 @@ impl App {
                     .as_mut()
                     .and_then(|editor| editor.draft.as_mut())
                 {
-                    draft.selected_field = field;
+                    draft.focus = field;
                 }
                 Vec::new()
             }
@@ -3515,8 +3506,27 @@ impl App {
                     .and_then(|editor| editor.draft.as_mut())
                 {
                     draft.selected_column = index.min(draft.columns.len().saturating_sub(1));
-                    draft.selected_field =
-                        crate::model::catalog_editor::TableEditorField::ColumnList;
+                    draft.focus = crate::model::catalog_editor::TableEditorFocus::Columns;
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorEditTableColumn => {
+                if let Some(crate::model::catalog_editor::CatalogDraft::Table(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.enter_column_details();
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorLeaveTableColumnDetails => {
+                if let Some(crate::model::catalog_editor::CatalogDraft::Table(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.leave_column_details();
                 }
                 Vec::new()
             }
@@ -3536,7 +3546,7 @@ impl App {
                     .as_mut()
                     .and_then(|editor| editor.draft.as_mut())
                 {
-                    draft.add_column();
+                    draft.add_column_below();
                 }
                 Vec::new()
             }
@@ -4041,7 +4051,7 @@ impl App {
                             if let Some(column) = column {
                                 table.selected_column = column;
                             }
-                            table.selected_field = field;
+                            table.focus = field;
                             editor.set_validation_error(message);
                         } else {
                             editor.set_validation_error(error.to_string());
@@ -4209,12 +4219,24 @@ impl App {
                 self.explorer.refresh_frontend_search();
                 self.commands_for_catalog_targets(profile_id, &plan.refresh)
             }
-            Action::CatalogMutationFailed { plan: _, message } => {
-                if let Some(editor) = self.catalog_editor.as_mut() {
-                    editor.operation = None;
-                    editor.error = Some(message.clone());
+            Action::CatalogMutationFailed { plan, message } => {
+                let identity_matches =
+                    self.connection.active_identity() == Some(plan.request.connection);
+                let epoch_matches = self
+                    .explorer
+                    .normalized
+                    .profiles
+                    .get(&plan.request.connection.profile_id)
+                    .is_some_and(|state| state.catalog_epoch == plan.request.catalog_epoch);
+                let applied = identity_matches
+                    && epoch_matches
+                    && self.catalog_editor.as_mut().is_some_and(|editor| {
+                        editor.plan.as_ref() == Some(&plan)
+                            && editor.apply_failed(plan.request.request_id, message.clone())
+                    });
+                if applied {
+                    self.notify_error("Catalog", message);
                 }
-                self.notify_error("Catalog", message);
                 Vec::new()
             }
             Action::ProfileRequestDelete { profile_id } => {
