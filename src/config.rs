@@ -1,5 +1,6 @@
-use std::{fs, path::PathBuf};
+use std::{collections::BTreeMap, fs, path::PathBuf};
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -12,6 +13,13 @@ pub const CONFIG_VERSION: u16 = 1;
 pub const DEFAULT_CONFIG_TOML: &str = include_str!("../config/default.toml");
 const MIN_DASHBOARD_REFRESH_INTERVAL_SECONDS: u64 = 1;
 const MIN_KEY_SEQUENCE_TIMEOUT_MS: u64 = 1;
+const SUPPORTED_COMMANDS: &[&str] = &[
+    "help",
+    "quit",
+    "notification-history",
+    "focus-next-pane",
+    "focus-previous-pane",
+];
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -29,9 +37,11 @@ pub enum ConfigError {
     InvalidDashboardRefreshInterval,
     #[error("keybindings.sequence_timeout_ms must be at least {MIN_KEY_SEQUENCE_TIMEOUT_MS}")]
     InvalidKeySequenceTimeout,
+    #[error("invalid keybinding for `{command}`: `{key}`")]
+    InvalidKeybinding { command: String, key: String },
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct AppConfig {
     pub version: u16,
@@ -42,7 +52,7 @@ pub struct AppConfig {
     pub keybindings: KeybindingConfig,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct TerminalConfig {
     pub mouse: MouseMode,
@@ -68,11 +78,73 @@ pub struct DashboardConfig {
     pub refresh_interval_seconds: u64,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct KeybindingConfig {
     pub preset: KeybindingPreset,
     pub sequence_timeout_ms: u64,
+    #[serde(default)]
+    pub commands: BTreeMap<String, Vec<String>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct KeyBindings {
+    commands: BTreeMap<String, Vec<Vec<KeyEvent>>>,
+}
+
+impl KeyBindings {
+    pub fn matches(&self, command: &str, event: KeyEvent) -> bool {
+        self.commands
+            .get(command)
+            .is_some_and(|sequences| sequences.iter().any(|sequence| sequence == &[event]))
+    }
+
+    pub fn has_sequence_prefix(&self, command: &str, events: &[KeyEvent]) -> bool {
+        self.commands.get(command).is_some_and(|sequences| {
+            sequences
+                .iter()
+                .any(|sequence| sequence.starts_with(events))
+        })
+    }
+
+    pub fn sequence_for(&self, command: &str) -> Option<&[KeyEvent]> {
+        self.commands
+            .get(command)
+            .and_then(|sequences| sequences.first().map(Vec::as_slice))
+    }
+}
+
+impl KeybindingConfig {
+    pub fn key_bindings(&self) -> Result<KeyBindings, ConfigError> {
+        let mut commands = BTreeMap::new();
+        for (command, keys) in &self.commands {
+            if !SUPPORTED_COMMANDS.contains(&command.as_str()) {
+                return Err(ConfigError::InvalidKeybinding {
+                    command: command.clone(),
+                    key: "unknown command".to_owned(),
+                });
+            }
+            let sequences = keys
+                .iter()
+                .map(|key| {
+                    if key.split_whitespace().count() != 1 {
+                        return Err(ConfigError::InvalidKeybinding {
+                            command: command.clone(),
+                            key: key.clone(),
+                        });
+                    }
+                    Ok(vec![parse_key(key).ok_or_else(|| {
+                        ConfigError::InvalidKeybinding {
+                            command: command.clone(),
+                            key: key.clone(),
+                        }
+                    })?])
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            commands.insert(command.clone(), sequences);
+        }
+        Ok(KeyBindings { commands })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
@@ -138,13 +210,21 @@ impl AppConfig {
         }
     }
 
-    pub const fn dashboard_refresh_interval_millis(self) -> u64 {
+    pub const fn dashboard_refresh_interval_millis(&self) -> u64 {
         self.dashboard
             .refresh_interval_seconds
             .saturating_mul(1_000)
     }
 
-    fn validate(self) -> Result<(), ConfigError> {
+    pub fn keybindings_for(&self, command: &str) -> &[String] {
+        self.keybindings
+            .commands
+            .get(command)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    fn validate(&self) -> Result<(), ConfigError> {
         if self.version != CONFIG_VERSION {
             return Err(ConfigError::UnsupportedVersion {
                 found: self.version,
@@ -157,8 +237,55 @@ impl AppConfig {
         if self.keybindings.sequence_timeout_ms < MIN_KEY_SEQUENCE_TIMEOUT_MS {
             return Err(ConfigError::InvalidKeySequenceTimeout);
         }
+        self.keybindings.key_bindings()?;
         Ok(())
     }
+}
+
+fn parse_key(value: &str) -> Option<KeyEvent> {
+    let mut modifiers = KeyModifiers::NONE;
+    let mut key = value;
+    if let Some((prefix, rest)) = value.rsplit_once('-') {
+        key = rest;
+        for modifier in prefix.split('-') {
+            match modifier.to_ascii_lowercase().as_str() {
+                "ctrl" | "control" => modifiers |= KeyModifiers::CONTROL,
+                "shift" => modifiers |= KeyModifiers::SHIFT,
+                "alt" => modifiers |= KeyModifiers::ALT,
+                _ => return None,
+            }
+        }
+    }
+    let key_name = key.to_ascii_lowercase();
+    let code = match key_name.as_str() {
+        "f1" => KeyCode::F(1),
+        "f2" => KeyCode::F(2),
+        "f3" => KeyCode::F(3),
+        "f4" => KeyCode::F(4),
+        "f5" => KeyCode::F(5),
+        "f6" => KeyCode::F(6),
+        "f7" => KeyCode::F(7),
+        "f8" => KeyCode::F(8),
+        "f9" => KeyCode::F(9),
+        "f10" => KeyCode::F(10),
+        "f11" => KeyCode::F(11),
+        "f12" => KeyCode::F(12),
+        "space" => KeyCode::Char(' '),
+        "esc" | "escape" => KeyCode::Esc,
+        "enter" => KeyCode::Enter,
+        "tab" if modifiers.contains(KeyModifiers::SHIFT) => KeyCode::BackTab,
+        "tab" => KeyCode::Tab,
+        "backspace" => KeyCode::Backspace,
+        _ => {
+            let mut chars = key.chars();
+            let character = chars.next()?;
+            if chars.next().is_some() {
+                return None;
+            }
+            KeyCode::Char(character)
+        }
+    };
+    Some(KeyEvent::new(code, modifiers))
 }
 
 fn merge_values(base: &mut toml::Value, overrides: toml::Value) {
@@ -178,6 +305,7 @@ fn merge_values(base: &mut toml::Value, overrides: toml::Value) {
 
 #[cfg(test)]
 mod tests {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use std::fs;
 
     use tempfile::TempDir;
@@ -271,6 +399,55 @@ mod tests {
         assert!(matches!(
             AppConfig::load(path),
             Err(ConfigError::InvalidKeySequenceTimeout)
+        ));
+    }
+
+    #[test]
+    fn invalid_keybinding_is_rejected() {
+        let error = AppConfig::from_toml(
+            r#"
+            version = 1
+            [terminal]
+            mouse = "auto"
+            color = "auto"
+            [ui]
+            icons = "nerd-font"
+            motion = "full"
+            [execution]
+            confirmation = "risky"
+            [dashboard]
+            refresh_interval_seconds = 5
+            [keybindings]
+            preset = "vim"
+            sequence_timeout_ms = 750
+            [keybindings.commands]
+            help = ["F99"]
+            "#,
+        )
+        .unwrap_err();
+        assert!(matches!(error, ConfigError::InvalidKeybinding { .. }));
+    }
+
+    #[test]
+    fn default_bindings_match_the_declared_events() {
+        let bindings = AppConfig::default().keybindings.key_bindings().unwrap();
+
+        assert!(bindings.matches("help", KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE)));
+        assert!(bindings.matches(
+            "quit",
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+        ));
+        assert!(bindings.matches(
+            "focus-previous-pane",
+            KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)
+        ));
+        assert!(bindings.matches(
+            "help",
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE)
+        ));
+        assert!(!bindings.matches(
+            "quit",
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)
         ));
     }
 }

@@ -21,8 +21,15 @@ confirmation = "risky"
 refresh_interval_seconds = 5
 
 [keybindings]
-# LazyDB currently ships the Vim command and editing preset documented in
-# docs/keybindings.md. Command-level rebinding will extend this table without
-# changing the configuration file location or precedence rules.
+# The preset covers the complete Vim editing contract documented in
+# docs/keybindings.md. The command table below is the first configurable slice;
+# additional context-sensitive commands will be migrated here incrementally.
 preset = "vim"
 sequence_timeout_ms = 750
+
+[keybindings.commands]
+help = ["F1", "?"]
+quit = ["Ctrl-c"]
+notification-history = ["F8"]
+focus-next-pane = ["Tab"]
+focus-previous-pane = ["Shift-Tab"]

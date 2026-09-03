@@ -92,8 +92,12 @@ The complete schema and current values are best read directly in
 Only the `vim` keybinding preset is currently supported. It denotes the full
 command and editor contract in [Keyboard Reference](keybindings.md); text-entry
 keys and modalkit's core Vim editing operations are intentionally not separate
-application settings. A key sequence remains active for 750 milliseconds by
-default, and `sequence_timeout_ms` must be at least `1`.
+application settings. The commands currently accepted in
+`[keybindings.commands]` are `help`, `quit`, `notification-history`,
+`focus-next-pane`, and `focus-previous-pane`. Each value is a list of single
+key events such as `F2`, `Ctrl-c`, or `Shift-Tab`; empty lists unbind a command.
+A key sequence remains active for 750 milliseconds by default, and
+`sequence_timeout_ms` must be at least `1`.
 
 | Option | Values / argument | Default | Description |
 | --- | --- | --- | --- |

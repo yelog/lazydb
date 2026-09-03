@@ -3754,9 +3754,13 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
     let icons = crate::ui::icons::IconSet::new(settings.ui.icons);
     let theme = crate::ui::theme::Theme::for_color_mode(settings.terminal.color);
     let mut terminal_events = EventStream::new();
-    let mut keymap = Keymap::with_sequence_timeout(Duration::from_millis(
-        settings.keybindings.sequence_timeout_ms,
-    ));
+    let mut keymap = Keymap::with_sequence_timeout_and_bindings(
+        Duration::from_millis(settings.keybindings.sequence_timeout_ms),
+        settings
+            .keybindings
+            .key_bindings()
+            .context("failed to parse application keybindings")?,
+    );
     let mut ui_state = UiState::with_motion(settings.ui.motion);
     let mut rendered_sequence: Option<crate::input::keymap::KeySequenceState> = None;
     let mut ticker = interval(Duration::from_millis(33));

@@ -59,6 +59,7 @@ pub struct Keymap {
     generation: u64,
     sequence_selected: usize,
     sequence_timeout: Duration,
+    bindings: crate::config::KeyBindings,
 }
 
 impl Default for Keymap {
@@ -73,12 +74,26 @@ impl Default for Keymap {
 
 impl Keymap {
     pub fn with_sequence_timeout(sequence_timeout: Duration) -> Self {
+        Self::with_sequence_timeout_and_bindings(
+            sequence_timeout,
+            crate::config::AppConfig::default()
+                .keybindings
+                .key_bindings()
+                .unwrap(),
+        )
+    }
+
+    pub fn with_sequence_timeout_and_bindings(
+        sequence_timeout: Duration,
+        bindings: crate::config::KeyBindings,
+    ) -> Self {
         Self {
             pending: None,
             observed: None,
             generation: 0,
             sequence_selected: 0,
             sequence_timeout,
+            bindings,
         }
     }
 
@@ -95,12 +110,18 @@ impl Keymap {
             self.sequence_selected = 0;
             return None;
         }
-        if event.modifiers == KeyModifiers::CONTROL && event.code == KeyCode::Char('c') {
+        if self.bindings.matches("quit", event) {
             return Some(Action::Quit);
         }
-        if event.modifiers.is_empty() && event.code == KeyCode::F(8) && app.overlay.is_none() {
+        if self.bindings.matches("notification-history", event) && app.overlay.is_none() {
             self.pending = None;
             return Some(Action::OpenNotificationHistory);
+        }
+        if self.bindings.matches("focus-next-pane", event) {
+            return Some(Action::FocusNext);
+        }
+        if self.bindings.matches("focus-previous-pane", event) {
+            return Some(Action::FocusPrevious);
         }
         if app
             .overlay
@@ -551,7 +572,7 @@ impl Keymap {
 
         if app.focus == Focus::Editor && app.active_editor_mode() == EditorMode::Normal {
             match event.code {
-                KeyCode::Char('?') => return Some(Action::ShowHelp),
+                _ if self.bindings.matches("help", event) => return Some(Action::ShowHelp),
                 KeyCode::Tab => return Some(Action::FocusNext),
                 KeyCode::BackTab => return Some(Action::FocusPrevious),
                 KeyCode::Char('g') => {
@@ -1004,17 +1025,17 @@ impl Keymap {
                 Some(Action::RunActiveSql)
             };
         }
-        if event.code == KeyCode::F(1) {
+        if self.bindings.matches("help", event) {
             return Some(Action::ShowHelp);
         }
         if app.focus == Focus::Editor {
             return Some(Action::EditorKey(event));
         }
 
-        if event.code == KeyCode::Tab {
+        if self.bindings.matches("focus-next-pane", event) {
             return Some(Action::FocusNext);
         }
-        if event.code == KeyCode::BackTab {
+        if self.bindings.matches("focus-previous-pane", event) {
             return Some(Action::FocusPrevious);
         }
 
@@ -2965,6 +2986,23 @@ mod tests {
             keymap.map(key(KeyCode::Char('m')), &app),
             Some(Action::OpenNotificationHistory)
         );
+    }
+
+    #[test]
+    fn configured_global_binding_replaces_its_default() {
+        let mut config = crate::config::AppConfig::default();
+        config
+            .keybindings
+            .commands
+            .insert("help".into(), vec!["F2".into()]);
+        let bindings = config.keybindings.key_bindings().unwrap();
+        let mut keymap =
+            Keymap::with_sequence_timeout_and_bindings(Duration::from_millis(750), bindings);
+        let mut app = App::new(Vec::new());
+        app.focus = Focus::Results;
+
+        assert_eq!(keymap.map(key(KeyCode::F(2)), &app), Some(Action::ShowHelp));
+        assert_eq!(keymap.map(key(KeyCode::F(1)), &app), None);
     }
 
     #[test]
