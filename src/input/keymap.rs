@@ -820,6 +820,33 @@ impl Keymap {
                     return command;
                 }
             }
+            if pending == Pending::GridAlign {
+                let sequence = [KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE), event];
+                if self
+                    .bindings
+                    .matches_sequence("results-align-middle", &sequence)
+                {
+                    return Some(Action::GridAlignSelectedRow(
+                        crate::model::tab::GridRowAlignment::Middle,
+                    ));
+                }
+                if self
+                    .bindings
+                    .matches_sequence("results-align-top", &sequence)
+                {
+                    return Some(Action::GridAlignSelectedRow(
+                        crate::model::tab::GridRowAlignment::Top,
+                    ));
+                }
+                if self
+                    .bindings
+                    .matches_sequence("results-align-bottom", &sequence)
+                {
+                    return Some(Action::GridAlignSelectedRow(
+                        crate::model::tab::GridRowAlignment::Bottom,
+                    ));
+                }
+            }
             if let Some(action) = map_pending(pending, event, app, &self.bindings) {
                 return Some(action);
             }
@@ -1371,7 +1398,34 @@ fn map_configured_navigation(
             return Some(Action::ExplorerCollapse);
         }
     }
-    if app.focus == Focus::Results {
+    if app.focus == Focus::Results && !app.is_active_relation_tab() {
+        if bindings.matches("results-open-record", event)
+            && app.active_grid_dimensions_for_input().0 > 0
+            && app.active_grid_dimensions_for_input().1 > 0
+        {
+            return Some(Action::OpenRecordView);
+        }
+        if bindings.matches("results-copy-cell", event) {
+            return Some(Action::CopyGridCell);
+        }
+        if bindings.matches("results-copy-row", event) {
+            return Some(Action::CopyGridRow {
+                include_headers: false,
+            });
+        }
+        if bindings.matches("results-toggle-view", event) {
+            return Some(Action::ToggleResultView);
+        }
+        if bindings.matches("results-first-column", event) {
+            return Some(Action::GridSelectColumn(
+                crate::model::tab::GridColumnTarget::First,
+            ));
+        }
+        if bindings.matches("results-last-column", event) {
+            return Some(Action::GridSelectColumn(
+                crate::model::tab::GridColumnTarget::Last,
+            ));
+        }
         if bindings.matches("results-move-left", event) {
             return Some(Action::GridMove {
                 rows: 0,
@@ -1605,15 +1659,6 @@ fn map_pending(
         (Pending::RelationTransaction, KeyCode::Char('t')) => Some(Action::OpenTransactionControl),
         (Pending::RelationDelete, KeyCode::Char('d')) => Some(Action::RelationDeleteCurrent),
         (Pending::RecordViewGoto, KeyCode::Char('g')) => Some(Action::RecordViewJumpFirstField),
-        (Pending::GridAlign, KeyCode::Char('z')) => Some(Action::GridAlignSelectedRow(
-            crate::model::tab::GridRowAlignment::Middle,
-        )),
-        (Pending::GridAlign, KeyCode::Char('t')) => Some(Action::GridAlignSelectedRow(
-            crate::model::tab::GridRowAlignment::Top,
-        )),
-        (Pending::GridAlign, KeyCode::Char('b')) => Some(Action::GridAlignSelectedRow(
-            crate::model::tab::GridRowAlignment::Bottom,
-        )),
         (Pending::ExplorerAlign, KeyCode::Char('z')) => Some(Action::ExplorerAlignSelected(
             crate::model::explorer::ExplorerNodeAlignment::Middle,
         )),
@@ -1635,6 +1680,9 @@ fn configured_command_action(command: &str, app: &App) -> Option<Action> {
         "run-leader-statement" => Some(Action::RunActiveSql),
         "run-leader-buffer" => Some(Action::RunAllSql),
         "open-target-selector" => Some(Action::OpenTargetSelector),
+        "results-copy-row-headers" if is_grid_navigation_focus(app) => Some(Action::CopyGridRow {
+            include_headers: true,
+        }),
         _ => None,
     }
 }
@@ -2194,7 +2242,7 @@ fn is_read_only_editor_key(event: KeyEvent) -> bool {
     }
 }
 
-fn map_results(code: KeyCode, app: &App) -> Option<Action> {
+fn map_results(code: KeyCode, _app: &App) -> Option<Action> {
     match code {
         KeyCode::Char('P') => Some(Action::OpenPageSizeSelector { relation: false }),
         KeyCode::Char('0' | '^') => Some(Action::GridSelectColumn(
@@ -2206,12 +2254,23 @@ fn map_results(code: KeyCode, app: &App) -> Option<Action> {
         KeyCode::Char('[') => Some(Action::GridResizeColumn(-1)),
         KeyCode::Char(']') => Some(Action::GridResizeColumn(1)),
         KeyCode::Char('=') => Some(Action::GridResetColumnWidth),
-        KeyCode::Char('v')
-            if app.active_grid_dimensions_for_input().0 > 0
-                && app.active_grid_dimensions_for_input().1 > 0 =>
-        {
-            Some(Action::OpenRecordView)
-        }
+        KeyCode::Char('v') => Some(Action::OpenRecordView),
+        KeyCode::Char('h') => Some(Action::GridMove {
+            rows: 0,
+            columns: -1,
+        }),
+        KeyCode::Char('j') => Some(Action::GridMove {
+            rows: 1,
+            columns: 0,
+        }),
+        KeyCode::Char('k') => Some(Action::GridMove {
+            rows: -1,
+            columns: 0,
+        }),
+        KeyCode::Char('l') => Some(Action::GridMove {
+            rows: 0,
+            columns: 1,
+        }),
         KeyCode::Left => Some(Action::GridMove {
             rows: 0,
             columns: -1,
@@ -2240,7 +2299,7 @@ fn map_results(code: KeyCode, app: &App) -> Option<Action> {
         KeyCode::Char('L') => Some(Action::GridSelectRow(
             crate::model::tab::GridRowTarget::ViewBottom,
         )),
-        KeyCode::Char('o') => match app.tabs.get(app.active_tab) {
+        KeyCode::Char('o') => match _app.tabs.get(_app.active_tab) {
             Some(crate::model::tab::WorkspaceTab::Relation(tab)) => {
                 Some(Action::SetRelationView(match tab.view {
                     crate::model::relation::RelationView::Data => {

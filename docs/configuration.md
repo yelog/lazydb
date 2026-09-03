@@ -111,6 +111,11 @@ The remaining basic Explorer commands currently configurable are
 `explorer-new-profile`, `explorer-refresh`, and `explorer-toggle`.
 The Results navigation commands are `results-move-left`, `results-move-down`,
 `results-move-up`, and `results-move-right`.
+Additional Results commands are `results-open-record`, `results-copy-cell`,
+`results-copy-row`, `results-copy-row-headers`, `results-toggle-view`,
+`results-first-column`, and `results-last-column`.
+Results row alignment is configured by `results-align-middle`,
+`results-align-top`, and `results-align-bottom`.
 A key sequence remains active for 750 milliseconds by default, and
 `sequence_timeout_ms` must be at least `1`.
 
