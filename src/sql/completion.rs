@@ -382,7 +382,7 @@ pub fn relation_ids_for_completion(
 
 fn completion_detail(entry: &CatalogEntry) -> Option<String> {
     match &entry.metadata {
-        CatalogMetadata::Column(column) => Some(column.native_type.clone()),
+        CatalogMetadata::Column(column) => Some(super::short_type_name(&column.native_type)),
         CatalogMetadata::None | CatalogMetadata::Index(_) | CatalogMetadata::Constraint(_) => None,
     }
 }

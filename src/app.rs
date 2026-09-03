@@ -10157,7 +10157,13 @@ impl App {
             .into_iter()
             .filter_map(|(name, type_name)| {
                 let quality = sql::identifier_match(&name, &prefix)?;
-                Some((quality, DataQueryCandidate { name, type_name }))
+                Some((
+                    quality,
+                    DataQueryCandidate {
+                        name,
+                        type_name: type_name.as_deref().map(sql::short_type_name),
+                    },
+                ))
             })
             .collect::<Vec<_>>();
         let mut seen = std::collections::HashSet::new();

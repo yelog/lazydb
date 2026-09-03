@@ -940,6 +940,118 @@ pub(crate) struct CompletionAnchor {
     pub(crate) replacement_start_x: Option<u16>,
 }
 
+const COMPLETION_DETAIL_GAP: u16 = 2;
+const COMPLETION_ROW_RIGHT_PADDING: u16 = 1;
+const COMPLETION_DETAIL_MAX_CELLS: u16 = 24;
+const COMPLETION_DETAIL_MIN_CELLS: u16 = 4;
+
+/// Column widths for a completion popup row: icon, label and type detail.
+///
+/// `detail == 0` means the type column is hidden because the popup is too
+/// narrow to carry it.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct CompletionColumns {
+    icon: u16,
+    label: u16,
+    detail: u16,
+}
+
+impl CompletionColumns {
+    /// Measures `(icon cells, label, detail)` over every candidate, not just the
+    /// visible ones, so a clipped popup does not shift its columns.
+    fn measure<'a>(rows: impl Iterator<Item = (u16, &'a str, &'a str)>) -> Self {
+        let mut columns = Self::default();
+        for (icon, label, detail) in rows {
+            columns.icon = columns.icon.max(icon);
+            columns.label = columns.label.max(label.cell_width());
+            columns.detail = columns.detail.max(detail.cell_width());
+        }
+        columns.detail = columns.detail.min(COMPLETION_DETAIL_MAX_CELLS);
+        columns
+    }
+
+    /// Start of the label column. The popup anchor is derived from this, so it
+    /// must stay `icon + 1`.
+    fn label_offset(self) -> u16 {
+        self.icon.saturating_add(1)
+    }
+
+    fn content_width(self) -> u16 {
+        self.label_offset()
+            .saturating_add(self.label)
+            .saturating_add(if self.detail == 0 {
+                0
+            } else {
+                COMPLETION_DETAIL_GAP.saturating_add(self.detail)
+            })
+            .saturating_add(COMPLETION_ROW_RIGHT_PADDING)
+            .max(4)
+    }
+
+    /// Re-converges the columns against the clamped popup width: labels keep
+    /// their space first, the type column takes what is left and disappears
+    /// entirely once it would be too narrow to read.
+    fn fit(self, inner_width: u16) -> Self {
+        let label = self
+            .label
+            .min(inner_width.saturating_sub(self.label_offset()));
+        let detail = self.detail.min(
+            inner_width
+                .saturating_sub(self.label_offset())
+                .saturating_sub(label)
+                .saturating_sub(COMPLETION_DETAIL_GAP)
+                .saturating_sub(COMPLETION_ROW_RIGHT_PADDING),
+        );
+        Self {
+            icon: self.icon,
+            label,
+            detail: if detail >= COMPLETION_DETAIL_MIN_CELLS {
+                detail
+            } else {
+                0
+            },
+        }
+    }
+}
+
+/// Builds one popup row: icon, left-aligned label, right-aligned type detail
+/// and trailing padding so a selected row highlights as a full-width bar.
+fn completion_row(
+    columns: CompletionColumns,
+    inner_width: u16,
+    icon: &str,
+    label_spans: Vec<Span<'static>>,
+    detail: &str,
+    row_style: Style,
+    detail_style: Style,
+) -> ListItem<'static> {
+    let label_cells = label_spans.iter().fold(0u16, |total, span| {
+        total.saturating_add(span.content.as_ref().cell_width())
+    });
+    let icon_padding = " ".repeat(usize::from(columns.icon.saturating_sub(icon.cell_width())));
+    let mut spans = Vec::with_capacity(label_spans.len() + 3);
+    spans.push(Span::styled(format!("{icon_padding}{icon} "), row_style));
+    spans.extend(label_spans);
+    let mut used = columns.label_offset().saturating_add(label_cells);
+    if columns.detail > 0 && !detail.is_empty() {
+        let detail = truncate_to_cell_width(detail, columns.detail);
+        let detail_cells = detail.as_str().cell_width();
+        let padding = columns
+            .label
+            .saturating_sub(label_cells)
+            .saturating_add(COMPLETION_DETAIL_GAP)
+            .saturating_add(columns.detail.saturating_sub(detail_cells));
+        spans.push(Span::styled(" ".repeat(usize::from(padding)), row_style));
+        spans.push(Span::styled(detail, detail_style));
+        used = used.saturating_add(padding).saturating_add(detail_cells);
+    }
+    let trailing = inner_width.saturating_sub(used);
+    if trailing > 0 {
+        spans.push(Span::styled(" ".repeat(usize::from(trailing)), row_style));
+    }
+    ListItem::new(Line::from(spans))
+}
+
 fn render_completion_popup(
     frame: &mut Frame<'_>,
     app: &App,
@@ -966,36 +1078,19 @@ fn render_completion_popup(
     if popup.candidates.is_empty() {
         return;
     }
-    let icon_width = popup
-        .candidates
-        .iter()
-        .map(|candidate| icons.completion(candidate.kind).cell_width())
-        .max()
-        .unwrap_or(0);
-    let label_offset = icon_width.saturating_add(1);
+    let columns = CompletionColumns::measure(popup.candidates.iter().map(|candidate| {
+        (
+            icons.completion(candidate.kind).cell_width(),
+            candidate.label.as_str(),
+            candidate.detail.as_deref().unwrap_or(""),
+        )
+    }));
     let visible_rows = popup.candidates.len().min(10) as u16;
-    let content_width = popup
-        .candidates
-        .iter()
-        .map(|candidate| {
-            let detail = candidate.detail.as_deref().unwrap_or("");
-            label_offset
-                .saturating_add(candidate.label.as_str().cell_width())
-                .saturating_add(if detail.is_empty() {
-                    0
-                } else {
-                    2u16.saturating_add(detail.cell_width())
-                })
-                .saturating_add(1)
-        })
-        .max()
-        .unwrap_or(4)
-        .max(4);
-    let desired_width = content_width.saturating_add(POPUP_BORDER_WIDTH);
+    let desired_width = columns.content_width().saturating_add(POPUP_BORDER_WIDTH);
     let desired_height = visible_rows.saturating_add(POPUP_BORDER_HEIGHT);
     let popup_x = anchor
         .replacement_start_x
-        .map(|label_x| label_x.saturating_sub(label_offset.saturating_add(1)))
+        .map(|label_x| label_x.saturating_sub(columns.label_offset().saturating_add(1)))
         .unwrap_or(anchor.cursor.x);
     let layout_anchor = CompletionAnchor {
         cursor: Position::new(popup_x, anchor.cursor.y),
@@ -1009,6 +1104,8 @@ fn render_completion_popup(
         return;
     }
     state.completion_popup = Some(area);
+    let inner_width = area.width.saturating_sub(POPUP_BORDER_WIDTH);
+    let columns = columns.fit(inner_width);
     let editor_text = app.active_editor_text().ok();
     let items = popup
         .candidates
@@ -1016,10 +1113,6 @@ fn render_completion_popup(
         .take(usize::from(area.height.saturating_sub(POPUP_BORDER_HEIGHT)).min(10))
         .enumerate()
         .map(|(index, candidate)| {
-            let detail = candidate.detail.as_deref().unwrap_or("");
-            let icon = icons.completion(candidate.kind);
-            let icon_padding =
-                " ".repeat(usize::from(icon_width.saturating_sub(icon.cell_width())));
             let row_style = if index == popup.selected {
                 Style::new().fg(theme.background).bg(theme.accent)
             } else {
@@ -1032,21 +1125,19 @@ fn render_completion_popup(
                 || vec![Span::styled(candidate.label.clone(), row_style)],
                 |query| completion_label_spans(&candidate.label, query, row_style),
             );
-            let mut spans = vec![Span::styled(format!("{icon_padding}{icon} "), row_style)];
-            spans.extend(label_spans);
-            spans.push(Span::styled(
-                if detail.is_empty() {
-                    String::new()
-                } else {
-                    format!("  {detail}")
-                },
+            completion_row(
+                columns,
+                inner_width,
+                icons.completion(candidate.kind),
+                label_spans,
+                candidate.detail.as_deref().unwrap_or(""),
+                row_style,
                 row_style.fg(if index == popup.selected {
                     theme.background
                 } else {
                     theme.muted
                 }),
-            ));
-            ListItem::new(Line::from(spans))
+            )
         })
         .collect::<Vec<_>>();
     frame.render_widget(Clear, area);
@@ -1101,28 +1192,33 @@ pub(crate) fn render_data_query_completion_popup(
     const POPUP_BORDER_WIDTH: u16 = 2;
     const POPUP_BORDER_HEIGHT: u16 = 2;
 
+    const ICON: &str = "CL";
+
     if completion.candidates.is_empty() {
         return;
     }
-    let visible_rows = completion.candidates.len().min(10) as u16;
-    let content_width = completion
+    // Sanitize once up front: both the column measurement and the rows below
+    // read the display text, and it must never reach the terminal raw.
+    let rows = completion
         .candidates
         .iter()
         .map(|candidate| {
-            format!(
-                "CL {}  {}",
+            (
                 crate::security::sanitize_terminal_text(&candidate.name),
-                crate::security::sanitize_terminal_text(
-                    candidate.type_name.as_deref().unwrap_or_default()
-                )
+                candidate
+                    .type_name
+                    .as_deref()
+                    .map(crate::security::sanitize_terminal_text)
+                    .unwrap_or_default(),
             )
-            .cell_width()
-            .saturating_add(1)
         })
-        .max()
-        .unwrap_or(4)
-        .max(4);
-    let desired_width = content_width.saturating_add(POPUP_BORDER_WIDTH);
+        .collect::<Vec<_>>();
+    let columns = CompletionColumns::measure(
+        rows.iter()
+            .map(|(name, detail)| (ICON.cell_width(), name.as_str(), detail.as_str())),
+    );
+    let visible_rows = rows.len().min(10) as u16;
+    let desired_width = columns.content_width().saturating_add(POPUP_BORDER_WIDTH);
     let desired_height = visible_rows.saturating_add(POPUP_BORDER_HEIGHT);
     let Some(area) = completion_popup_rect(anchor, desired_width, desired_height) else {
         return;
@@ -1131,40 +1227,32 @@ pub(crate) fn render_data_query_completion_popup(
         return;
     }
     state.completion_popup = Some(area);
-    let items = completion
-        .candidates
+    let inner_width = area.width.saturating_sub(POPUP_BORDER_WIDTH);
+    let columns = columns.fit(inner_width);
+    let items = rows
         .iter()
         .take(usize::from(area.height.saturating_sub(POPUP_BORDER_HEIGHT)).min(10))
         .enumerate()
-        .map(|(index, candidate)| {
+        .map(|(index, (name, detail))| {
             let selected = index == completion.selected;
             let row_style = if selected {
                 Style::new().fg(theme.background).bg(theme.accent)
             } else {
                 Style::new().fg(theme.text).bg(theme.surface_raised)
             };
-            let name = crate::security::sanitize_terminal_text(&candidate.name);
-            let detail = candidate
-                .type_name
-                .as_deref()
-                .map(crate::security::sanitize_terminal_text)
-                .unwrap_or_default();
-            ListItem::new(Line::from(vec![
-                Span::styled("CL ", row_style),
-                Span::styled(name, row_style),
-                Span::styled(
-                    if detail.is_empty() {
-                        String::new()
-                    } else {
-                        format!("  {detail}")
-                    },
-                    row_style.fg(if selected {
-                        theme.background
-                    } else {
-                        theme.muted
-                    }),
-                ),
-            ]))
+            completion_row(
+                columns,
+                inner_width,
+                ICON,
+                vec![Span::styled(name.clone(), row_style)],
+                detail,
+                row_style,
+                row_style.fg(if selected {
+                    theme.background
+                } else {
+                    theme.muted
+                }),
+            )
         })
         .collect::<Vec<_>>();
     frame.render_widget(Clear, area);
@@ -4215,6 +4303,36 @@ mod tab_viewport_tests {
 #[cfg(test)]
 mod completion_popup_tests {
     use super::*;
+
+    #[test]
+    fn completion_columns_prefer_labels_over_details_when_space_is_tight() {
+        let columns = CompletionColumns::measure(
+            [(2u16, "create_time", "timestamp"), (2, "id", "bigint")].into_iter(),
+        );
+
+        assert_eq!(columns.label_offset(), 3);
+        assert_eq!(columns.label, 11);
+        assert_eq!(columns.detail, 9);
+        assert_eq!(columns.content_width(), 26);
+        assert_eq!(columns.fit(26), columns);
+
+        let clipped = columns.fit(24);
+        assert_eq!(clipped.label, 11);
+        assert_eq!(clipped.detail, 7);
+
+        let tight = columns.fit(20);
+        assert_eq!(tight.label, 11);
+        assert_eq!(tight.detail, 0);
+    }
+
+    #[test]
+    fn completion_columns_cap_overlong_details() {
+        let columns = CompletionColumns::measure(
+            [(2u16, "code", "a_very_long_user_defined_type_name")].into_iter(),
+        );
+
+        assert_eq!(columns.detail, COMPLETION_DETAIL_MAX_CELLS);
+    }
 
     #[test]
     fn replacement_start_uses_display_cells() {

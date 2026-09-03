@@ -17,6 +17,7 @@ mod relation_filter;
 mod risk;
 mod scope;
 mod transaction;
+mod type_name;
 
 pub use analysis::{AnalysisKey, LineIndex};
 pub use batch::{SqlServerBatchError, split_sql_server_batches};
@@ -46,3 +47,4 @@ pub use transaction::{
     classify_transaction_batch, classify_transaction_sql, savepoint_requires_active_manual,
     validate_transaction_control,
 };
+pub use type_name::short_type_name;

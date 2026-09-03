@@ -1091,6 +1091,50 @@ fn alias_column_completion_uses_relation_columns_and_native_type() {
 }
 
 #[test]
+fn column_completion_detail_uses_short_type_spelling() {
+    let mut entries = fixture();
+    let connection = entries[0].id.profile_id();
+    let table = entries[2].id.clone();
+    for (name, native_type) in [
+        ("code", "character varying(30)"),
+        ("created_at", "timestamp without time zone"),
+    ] {
+        entries.push(
+            CatalogEntry::relation_child(
+                CatalogId::new(
+                    connection,
+                    CatalogKind::Column,
+                    ["app", "public", "users", name],
+                ),
+                table.clone(),
+                qualified("app", Some("public"), name),
+                "column",
+                OptionalMetadata::Unsupported,
+                CatalogMetadata::Column(ColumnMetadata::new(2, native_type, true)),
+            )
+            .unwrap(),
+        );
+    }
+    let index = CompletionIndex::new(&entries);
+    let candidates = complete(
+        "select c from users",
+        8,
+        SqlDialect::Postgres,
+        &index,
+        CompletionContext::default(),
+    );
+
+    let detail = |label: &str| {
+        candidates
+            .iter()
+            .find(|candidate| candidate.label == label)
+            .and_then(|candidate| candidate.detail.clone())
+    };
+    assert_eq!(detail("code").as_deref(), Some("varchar(30)"));
+    assert_eq!(detail("created_at").as_deref(), Some("timestamp"));
+}
+
+#[test]
 fn unqualified_columns_are_limited_to_relations_in_current_statement() {
     let mut entries = fixture();
     let connection = entries[0].id.profile_id();

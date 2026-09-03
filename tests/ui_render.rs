@@ -1444,6 +1444,29 @@ fn completion_app(sql: &str, replace: TextRange, label: &str) -> App {
     app
 }
 
+fn completion_app_with_details(sql: &str, replace: TextRange, rows: &[(&str, &str)]) -> App {
+    let mut app = completion_app(sql, replace, rows[0].0);
+    app.active_console_mut().completion = Some(CompletionPopup {
+        candidates: rows
+            .iter()
+            .map(|(label, detail)| CompletionCandidate {
+                label: (*label).into(),
+                insert_text: (*label).into(),
+                kind: CompletionKind::Column,
+                detail: (!detail.is_empty()).then(|| (*detail).to_owned()),
+                replace,
+                score: CompletionScore {
+                    context: 3,
+                    name_match: 2,
+                    schema: 1,
+                },
+            })
+            .collect(),
+        selected: 0,
+    });
+    app
+}
+
 #[test]
 fn workspace_tabs_use_content_icons_instead_of_sequence_numbers() {
     let mut app = fixture();
@@ -2310,6 +2333,76 @@ fn completion_candidate_label_highlight_preserves_selected_row_contrast() {
 }
 
 #[test]
+fn completion_detail_column_is_right_aligned() {
+    // The rows deliberately differ in `label + detail` width: a shared right
+    // edge can only come from a real detail column, not from ragged text.
+    let app = completion_app_with_details(
+        "SELECT * FROM sys_u",
+        TextRange::new(14, 19),
+        &[("id", "bigint"), ("sys_user", "varchar(200)")],
+    );
+    let (buffer, state) = render_buffer_with_icons(&app, 120, 36, IconSet::new(IconMode::Ascii));
+    let popup = state.completion_popup.unwrap();
+    let short = find_ascii_cells(&buffer, popup.y + 1, "bigint").expect("short detail");
+    let long = find_ascii_cells(&buffer, popup.y + 2, "varchar(200)").expect("long detail");
+    let label = find_ascii_cells(&buffer, popup.y + 2, "sys_user").expect("long label");
+
+    let short_end = short + "bigint".len() as u16;
+    let long_end = long + "varchar(200)".len() as u16;
+    assert_eq!(short_end, long_end, "detail column must be right aligned");
+    // 右边框 1 格 + 行尾留白 1 格。
+    assert_eq!(long_end, popup.right() - 2);
+    // 最长 label 与类型列之间保留最小间距。
+    assert!(long >= label + "sys_user".len() as u16 + 2);
+}
+
+#[test]
+fn completion_selected_row_highlight_spans_the_popup_width() {
+    let app = completion_app_with_details(
+        "SELECT * FROM sys_u",
+        TextRange::new(14, 19),
+        // The selected row is the narrow one, so a text-width highlight leaves
+        // an obvious gap.
+        &[("id", "bigint"), ("sys_user", "varchar(200)")],
+    );
+    let (buffer, state) = render_buffer_with_icons(&app, 120, 36, IconSet::new(IconMode::Ascii));
+    let popup = state.completion_popup.unwrap();
+
+    for x in popup.x + 1..popup.right() - 1 {
+        assert_eq!(
+            buffer[(x, popup.y + 1)].bg,
+            Color::Rgb(99, 230, 216),
+            "selected row must be a full-width bar at x={x}"
+        );
+    }
+}
+
+#[test]
+fn completion_detail_is_dropped_when_the_popup_cannot_fit_it() {
+    let app = completion_app_with_details(
+        "SELECT * FROM sys_u",
+        TextRange::new(14, 19),
+        &[("sys_user_created_at_index_name", "varchar(200)")],
+    );
+    // 56 格是弹框仍会渲染的最窄视口；此时内宽只够 icon 列与 label。
+    let (buffer, state) = render_buffer_with_icons(&app, 56, 24, IconSet::new(IconMode::Ascii));
+    let popup = state.completion_popup.unwrap();
+    let label = find_ascii_cells(&buffer, popup.y + 1, "sys_user_created_at_index_name")
+        .expect("full label");
+
+    assert!(popup.right() <= 56);
+    assert!(find_ascii_cells(&buffer, popup.y + 1, "varchar").is_none());
+    // 类型列整列消失，而不是被边框裁成半截。
+    for x in label + "sys_user_created_at_index_name".len() as u16..popup.right() - 1 {
+        assert_eq!(
+            buffer[(x, popup.y + 1)].symbol(),
+            " ",
+            "detail column must disappear entirely at x={x}"
+        );
+    }
+}
+
+#[test]
 fn completion_popup_stays_fixed_while_typing() {
     let cases = [
         ("SELECT * FROM s", TextRange::new(14, 15)),
@@ -3046,7 +3139,9 @@ fn sql_result_query_completion_is_rendered_above_the_grid() {
     let (output, state) = render_with_state(&app, 120, 36);
 
     assert!(output.contains("active"), "{output}");
-    assert!(output.contains("BOOLEAN"), "{output}");
+    // The fixture column is `BOOLEAN`; the popup shows the compact spelling.
+    assert!(output.contains("active  bool"), "{output}");
+    assert!(!output.contains("BOOLEAN"), "{output}");
     let popup = state.completion_popup.unwrap();
     let (buffer, _) = render_buffer_with_icons(&app, 120, 36, IconSet::default());
     assert_eq!(buffer[(popup.x, popup.y)].symbol(), "╭");

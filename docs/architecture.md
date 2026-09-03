@@ -188,7 +188,9 @@ Database text passes through terminal-control sanitization before it reaches
 diagnostic state or display-only editor/SQL-preview projections. Raw SQL remains
 unchanged when sent to the database. Completion labels/details and prompt text
 are sanitized only for display; their raw insertion/request values remain
-separate.
+separate. Completion detail column types are additionally normalized to compact
+display spellings; catalog `native_type` and result-set column types keep their
+original text because cell-edit value parsing depends on them.
 
 Workspace tabs are heterogeneous: SQL consoles and relation tabs share identity,
 titles, and tab navigation but not behavior. Their tab bar is rendered above the
