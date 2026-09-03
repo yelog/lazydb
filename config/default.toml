@@ -22,55 +22,118 @@ refresh_interval_seconds = 5
 
 [keybindings]
 # The preset covers the complete Vim editing contract documented in
-# docs/keybindings.md. The command table below is the first configurable slice;
-# additional context-sensitive commands will be migrated here incrementally.
+# docs/keybindings.md. The grouped tables below follow the panel where each
+# application shortcut is active.
 preset = "vim"
 sequence_timeout_ms = 750
 
-[keybindings.commands]
+[keybindings.global]
+# F1 opens contextual Help.
+# ? opens contextual Help outside editor input states.
 help = ["F1", "?"]
+# Ctrl-C exits the application outside cancellation handling.
 quit = ["Ctrl-c"]
+# F8 opens notification history.
 notification-history = ["F8"]
+# Tab focuses the next pane.
+# Shift-Tab focuses the previous pane.
 focus-next-pane = ["Tab"]
 focus-previous-pane = ["Shift-Tab"]
+# F5 runs the current statement.
 run-statement = ["F5"]
+# Shift-F5 runs the complete SQL buffer.
 run-buffer = ["Shift-F5"]
+# Ctrl-N selects the next tab.
+# g-t and ]-t are next-tab aliases.
 next-tab = ["Ctrl-n", "g t", "] t"]
+# Ctrl-P selects the previous tab.
+# g-T and [-t are previous-tab aliases.
 previous-tab = ["Ctrl-p", "g T", "[ t"]
+# Ctrl-Q closes the active tab.
 close-tab = ["Ctrl-q"]
+
+[keybindings.leader]
+# Space-b opens the Dashboard when the active profile supports it.
 open-dashboard = ["Space b"]
+# Space-c focuses the connection Explorer.
 open-explorer = ["Space c"]
+# Space-s opens the SQL console manager.
 open-editors = ["Space s"]
+# Space-r/R run the current statement or complete buffer.
 run-leader-statement = ["Space r"]
 run-leader-buffer = ["Space R"]
+# Space-d opens the execution target selector.
 open-target-selector = ["Space d"]
+
+[keybindings.panes]
+# Ctrl-w h focuses the left pane.
 focus-pane-left = ["Ctrl-w h"]
+# Ctrl-w j focuses the pane below.
 focus-pane-down = ["Ctrl-w j"]
+# Ctrl-w k focuses the pane above.
 focus-pane-up = ["Ctrl-w k"]
+# Ctrl-w l focuses the right pane.
 focus-pane-right = ["Ctrl-w l"]
+# Ctrl-w f maximizes the focused pane.
 toggle-pane-maximized = ["Ctrl-w f"]
+# Ctrl-w = restores the default pane sizes.
 reset-pane-sizes = ["Ctrl-w ="]
-explorer-move-down = ["j"]
-explorer-move-up = ["k"]
-explorer-expand = ["l"]
-explorer-collapse = ["h"]
-results-move-left = ["h"]
-results-move-down = ["j"]
-results-move-up = ["k"]
-results-move-right = ["l"]
-results-open-record = ["v"]
-results-copy-cell = ["y"]
-results-copy-row = ["Y"]
-results-copy-row-headers = ["Space Y"]
-results-toggle-view = ["o"]
-results-first-column = ["0", "^"]
-results-last-column = ["$"]
-results-align-middle = ["z z"]
-results-align-top = ["z t"]
-results-align-bottom = ["z b"]
-explorer-copy-selection = ["y"]
-explorer-find = ["/"]
-explorer-search = ["f"]
-explorer-new-profile = ["n"]
-explorer-refresh = ["r"]
-explorer-toggle = ["o"]
+
+[keybindings.explorer]
+# j moves down through Explorer entries.
+move-down = ["j"]
+# k moves up through Explorer entries.
+move-up = ["k"]
+# l expands the selected Explorer entry.
+expand = ["l"]
+# h collapses the selected Explorer entry.
+collapse = ["h"]
+# y copies the selected Explorer name.
+copy-selection = ["y"]
+# / opens visible-node find.
+find = ["/"]
+# f opens catalog search.
+search = ["f"]
+# n creates a new connection profile.
+new-profile = ["n"]
+# r refreshes the Explorer catalog.
+refresh = ["r"]
+# o toggles expansion of the selected entry.
+toggle = ["o"]
+
+[keybindings.results]
+# h moves left through the result grid.
+move-left = ["h"]
+# j moves down through the result grid.
+move-down = ["j"]
+# k moves up through the result grid.
+move-up = ["k"]
+# l moves right through the result grid.
+move-right = ["l"]
+# v opens Record View.
+open-record = ["v"]
+# y copies the selected cell.
+copy-cell = ["y"]
+# Y copies the selected row.
+copy-row = ["Y"]
+# Space-Y copies the selected row including column headers.
+copy-row-headers = ["Space Y"]
+# o toggles between result views.
+toggle-view = ["o"]
+# 0 and ^ select the first column.
+first-column = ["0", "^"]
+# $ selects the last column.
+last-column = ["$"]
+# z-z centers the selected row in the viewport.
+align-middle = ["z z"]
+# z-t aligns the selected row to the top.
+align-top = ["z t"]
+# z-b aligns the selected row to the bottom.
+align-bottom = ["z b"]
+
+[keybindings.editor]
+# Editor-owned Vim and modalkit keys are intentionally documented here as a
+# preset, but are not individually remapped by the application mapper yet.
+
+[keybindings.overlays]
+# Overlay-specific text-entry and confirmation keys remain context-owned.

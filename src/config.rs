@@ -131,7 +131,19 @@ pub struct KeybindingConfig {
     pub preset: KeybindingPreset,
     pub sequence_timeout_ms: u64,
     #[serde(default)]
-    pub commands: BTreeMap<String, Vec<String>>,
+    pub global: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub leader: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub panes: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub explorer: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub results: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub editor: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub overlays: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -194,34 +206,52 @@ impl KeyBindings {
 
 impl KeybindingConfig {
     pub fn key_bindings(&self) -> Result<KeyBindings, ConfigError> {
+        let groups = [
+            ("", &self.global),
+            ("", &self.leader),
+            ("", &self.panes),
+            ("explorer-", &self.explorer),
+            ("results-", &self.results),
+            ("", &self.editor),
+            ("", &self.overlays),
+        ];
         let mut commands = BTreeMap::new();
-        for (command, keys) in &self.commands {
-            if !SUPPORTED_COMMANDS.contains(&command.as_str()) {
-                return Err(ConfigError::InvalidKeybinding {
-                    command: command.clone(),
-                    key: "unknown command".to_owned(),
-                });
-            }
-            let sequences = keys
-                .iter()
-                .map(|key| {
-                    if key.split_whitespace().next().is_none() {
-                        return Err(ConfigError::InvalidKeybinding {
-                            command: command.clone(),
-                            key: key.clone(),
-                        });
-                    }
-                    key.split_whitespace()
-                        .map(|part| {
-                            parse_key(part).ok_or_else(|| ConfigError::InvalidKeybinding {
+        let mut display = BTreeMap::new();
+        for (prefix, group) in groups {
+            for (name, keys) in group {
+                let command = if prefix.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{prefix}{name}")
+                };
+                if !SUPPORTED_COMMANDS.contains(&command.as_str()) {
+                    return Err(ConfigError::InvalidKeybinding {
+                        command: command.clone(),
+                        key: "unknown command".to_owned(),
+                    });
+                }
+                let sequences = keys
+                    .iter()
+                    .map(|key| {
+                        if key.split_whitespace().next().is_none() {
+                            return Err(ConfigError::InvalidKeybinding {
                                 command: command.clone(),
                                 key: key.clone(),
+                            });
+                        }
+                        key.split_whitespace()
+                            .map(|part| {
+                                parse_key(part).ok_or_else(|| ConfigError::InvalidKeybinding {
+                                    command: command.clone(),
+                                    key: key.clone(),
+                                })
                             })
-                        })
-                        .collect()
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            commands.insert(command.clone(), sequences);
+                            .collect()
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                commands.insert(command.clone(), sequences);
+                display.insert(command, keys.clone());
+            }
         }
         let entries = commands.iter().collect::<Vec<_>>();
         for (index, (first_command, first_sequences)) in entries.iter().enumerate() {
@@ -231,8 +261,7 @@ impl KeybindingConfig {
                         .iter()
                         .any(|first| second_sequences.iter().any(|second| first == second))
                 {
-                    let key = self
-                        .commands
+                    let key = display
                         .get(*first_command)
                         .and_then(|keys| keys.first())
                         .cloned()
@@ -245,10 +274,7 @@ impl KeybindingConfig {
                 }
             }
         }
-        Ok(KeyBindings {
-            commands,
-            display: self.commands.clone(),
-        })
+        Ok(KeyBindings { commands, display })
     }
 }
 
@@ -335,11 +361,24 @@ impl AppConfig {
     }
 
     pub fn keybindings_for(&self, command: &str) -> &[String] {
-        self.keybindings
-            .commands
-            .get(command)
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
+        let (group, name) = if let Some(name) = command.strip_prefix("explorer-") {
+            (&self.keybindings.explorer, name)
+        } else if let Some(name) = command.strip_prefix("results-") {
+            (&self.keybindings.results, name)
+        } else {
+            let groups = [
+                &self.keybindings.global,
+                &self.keybindings.leader,
+                &self.keybindings.panes,
+                &self.keybindings.editor,
+                &self.keybindings.overlays,
+            ];
+            return groups
+                .into_iter()
+                .find_map(|group| group.get(command).map(Vec::as_slice))
+                .unwrap_or(&[]);
+        };
+        group.get(name).map(Vec::as_slice).unwrap_or(&[])
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
@@ -541,7 +580,7 @@ mod tests {
             [keybindings]
             preset = "vim"
             sequence_timeout_ms = 750
-            [keybindings.commands]
+            [keybindings.global]
             help = ["F99"]
             "#,
         )
@@ -624,7 +663,7 @@ mod tests {
             [keybindings]
             preset = "vim"
             sequence_timeout_ms = 750
-            [keybindings.commands]
+            [keybindings.global]
             help = ["F2"]
             quit = ["F2"]
             "#,
@@ -652,12 +691,31 @@ mod tests {
             [keybindings]
             preset = "vim"
             sequence_timeout_ms = 750
-            [keybindings.commands]
-            explorer-move-down = ["j"]
-            results-move-down = ["j"]
+            [keybindings.explorer]
+            move-down = ["j"]
+            [keybindings.results]
+            move-down = ["j"]
             "#,
         );
 
         assert!(config.is_ok());
+    }
+
+    #[test]
+    fn default_keybindings_are_grouped_by_panel() {
+        for section in [
+            "[keybindings.global]",
+            "[keybindings.leader]",
+            "[keybindings.panes]",
+            "[keybindings.explorer]",
+            "[keybindings.results]",
+            "[keybindings.editor]",
+            "[keybindings.overlays]",
+        ] {
+            assert!(
+                DEFAULT_CONFIG_TOML.contains(section),
+                "missing default keybinding section: {section}"
+            );
+        }
     }
 }

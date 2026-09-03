@@ -9,8 +9,10 @@ The built-in configuration selects this complete contract with
 `keybindings.preset = "vim"` in [`config/default.toml`](../config/default.toml).
 The current release supports the Vim preset as a whole rather than arbitrary
 per-command rebinding. The global command bindings listed in
-`[keybindings.commands]` are the current exception and accept single key
-events or space-separated key sequences. `keybindings.sequence_timeout_ms`
+The grouped keybinding tables are the current exception and accept single key
+events or space-separated key sequences. They are organized as `global`,
+`leader`, `panes`, `explorer`, `results`, `editor`, and `overlays` according to
+the active panel. `keybindings.sequence_timeout_ms`
 configures the timeout for adjacent-key sequences used by this preset.
 
 The navigation commands for Explorer and SQL Results are also configurable.

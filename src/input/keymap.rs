@@ -3213,7 +3213,7 @@ mod tests {
         let mut config = crate::config::AppConfig::default();
         config
             .keybindings
-            .commands
+            .global
             .insert("help".into(), vec!["F2".into()]);
         let bindings = config.keybindings.key_bindings().unwrap();
         let mut keymap =
@@ -3230,7 +3230,7 @@ mod tests {
         let mut config = crate::config::AppConfig::default();
         config
             .keybindings
-            .commands
+            .global
             .insert("next-tab".into(), vec!["g t".into()]);
         let bindings = config.keybindings.key_bindings().unwrap();
         let mut keymap =

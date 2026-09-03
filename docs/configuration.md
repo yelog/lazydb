@@ -87,13 +87,13 @@ The complete schema and current values are best read directly in
 | `ui` | `icons`, `motion` |
 | `execution` | `confirmation` |
 | `dashboard` | `refresh_interval_seconds` |
-| `keybindings` | `preset`, `sequence_timeout_ms` |
+| `keybindings` | `preset`, `sequence_timeout_ms`, and grouped `global`, `leader`, `panes`, `explorer`, `results`, `editor`, `overlays` tables |
 
 Only the `vim` keybinding preset is currently supported. It denotes the full
 command and editor contract in [Keyboard Reference](keybindings.md); text-entry
 keys and modalkit's core Vim editing operations are intentionally not separate
-application settings. The commands currently accepted in
-`[keybindings.commands]` are `help`, `quit`, `notification-history`,
+application settings. The grouped keybinding tables contain `help`,
+`quit`, `notification-history`,
 `focus-next-pane`, `focus-previous-pane`, `run-statement`, `run-buffer`,
 `next-tab`, `previous-tab`, and `close-tab`. Each value is a list of key
 events or space-separated key sequences such as `F2`, `Ctrl-c`, `Shift-Tab`,
@@ -109,8 +109,6 @@ The Explorer navigation commands are `explorer-move-down`, `explorer-move-up`,
 The remaining basic Explorer commands currently configurable are
 `explorer-copy-selection`, `explorer-find`, `explorer-search`,
 `explorer-new-profile`, `explorer-refresh`, and `explorer-toggle`.
-The Results navigation commands are `results-move-left`, `results-move-down`,
-`results-move-up`, and `results-move-right`.
 Additional Results commands are `results-open-record`, `results-copy-cell`,
 `results-copy-row`, `results-copy-row-headers`, `results-toggle-view`,
 `results-first-column`, and `results-last-column`.
