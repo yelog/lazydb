@@ -110,6 +110,27 @@ fn insert_control_keys_keep_vim_semantics() {
 }
 
 #[test]
+fn normal_mode_ctrl_w_ctrl_w_emits_focus_next_effect() {
+    let (mut workspace, id) = fixture("alpha");
+    workspace.press(id, EditorKey::Escape).unwrap();
+    workspace.press(id, EditorKey::Control('w')).unwrap();
+    workspace.press(id, EditorKey::Control('w')).unwrap();
+
+    assert_eq!(workspace.drain_effects(), vec![EditorEffect::FocusNext]);
+}
+
+#[test]
+fn visual_mode_ctrl_w_ctrl_w_emits_focus_next_effect() {
+    let (mut workspace, id) = fixture("alpha");
+    workspace.press(id, EditorKey::Escape).unwrap();
+    workspace.press(id, EditorKey::Character('v')).unwrap();
+    workspace.press(id, EditorKey::Control('w')).unwrap();
+    workspace.press(id, EditorKey::Control('w')).unwrap();
+
+    assert_eq!(workspace.drain_effects(), vec![EditorEffect::FocusNext]);
+}
+
+#[test]
 fn normal_mode_counted_window_resize_emits_shared_effect() {
     let (mut workspace, id) = fixture("alpha");
     workspace.press(id, EditorKey::Escape).unwrap();

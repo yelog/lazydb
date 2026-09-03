@@ -59,6 +59,10 @@ focused split. `Ctrl-w =` restores default pane sizes. Unsupported directions
 are not advertised. Counts are accepted before `Ctrl-w`, for example
 `10 Ctrl-w +`.
 
+`Ctrl-w Ctrl-w` cycles clockwise through panes that exist in the active layout.
+SQL uses `Explorer -> Editor -> Results -> Explorer`; Relation and Dashboard
+use `Explorer -> Results -> Explorer`.
+
 ## Prefixes
 
 The catalog records prefixes explicitly; this reference does not infer them
@@ -68,6 +72,7 @@ from display strings.
 | --- | --- |
 | Application `Space` (Explorer/Results) | `c`, `n`, `s`, `r`, `R`, `d`, `q`, `x`, `e`, and `Y` when grid navigation is active; run actions require an active SQL console |
 | Editor `Space` or `\` (`EditorLeader`) | `f`, `y`, `Y`, `d`, `?`, plus editor-owned `r`, `R`, `n`, `s`, `q`, `x`, `e`, and `t` transaction sequences |
+| `Ctrl-w` (pane prefix) | `h/j/k/l` direction, `Ctrl-w` clockwise focus cycle, `f` maximize, `=`, and pane resize operators |
 | `g` | `g` first item, `t`/`T` next/previous tab |
 | `z` in Explorer | `z`/`t`/`b` middle/top/bottom alignment |
 | `z` in grid | `z`/`t`/`b` middle/top/bottom row alignment |

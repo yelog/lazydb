@@ -241,6 +241,7 @@ pub enum HelpShortcutId {
     FocusResultsFromL,
     FocusEditorFromK,
     FocusEditorFromL,
+    CyclePaneFocus,
     TogglePaneMaximized,
     ResizeHeightIncrease,
     ResizeHeightDecrease,
@@ -786,6 +787,26 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
         Window,
         "l",
         sql_pane
+    ),
+    row!(
+        CyclePaneFocus,
+        [
+            Explorer,
+            EditorNormal,
+            EditorVisual,
+            SqlResultsData,
+            SqlOutput,
+            RelationDataBrowse,
+            RelationDataVisual,
+            RelationDataBusy,
+            RelationDdl,
+            Dashboard
+        ],
+        "Ctrl-w Ctrl-w",
+        "cycle pane focus clockwise",
+        Window,
+        "Ctrl-w",
+        always
     ),
     row!(
         TogglePaneMaximized,
@@ -2544,12 +2565,13 @@ fn prefix_rank(prefix: ShortcutPrefix, id: HelpShortcutId) -> Option<u8> {
             Id::FocusExplorer => 1,
             Id::FocusResults | Id::FocusResultsFromL => 2,
             Id::FocusEditorFromK | Id::FocusEditorFromL => 3,
-            Id::TogglePaneMaximized => 4,
-            Id::ResizeHeightIncrease => 5,
-            Id::ResizeHeightDecrease => 6,
-            Id::ResizeWidthIncrease => 7,
-            Id::ResizeWidthDecrease => 8,
-            Id::ResetPaneSizes => 9,
+            Id::CyclePaneFocus => 4,
+            Id::TogglePaneMaximized => 5,
+            Id::ResizeHeightIncrease => 6,
+            Id::ResizeHeightDecrease => 7,
+            Id::ResizeWidthIncrease => 8,
+            Id::ResizeWidthDecrease => 9,
+            Id::ResetPaneSizes => 10,
             _ => return None,
         },
         ShortcutPrefix::Goto => match id {
@@ -4085,6 +4107,7 @@ mod tests {
             vec![
                 HelpShortcutId::FocusExplorer,
                 HelpShortcutId::FocusResults,
+                HelpShortcutId::CyclePaneFocus,
                 HelpShortcutId::TogglePaneMaximized,
                 HelpShortcutId::ResizeHeightIncrease,
                 HelpShortcutId::ResizeHeightDecrease,
@@ -4106,6 +4129,7 @@ mod tests {
             vec![
                 HelpShortcutId::FocusExplorer,
                 HelpShortcutId::FocusEditorFromK,
+                HelpShortcutId::CyclePaneFocus,
                 HelpShortcutId::TogglePaneMaximized,
                 HelpShortcutId::ResizeHeightIncrease,
                 HelpShortcutId::ResizeHeightDecrease,
