@@ -1624,7 +1624,9 @@ fn explorer_list_item(
         " "
     };
     let icon = match &visible.id {
-        crate::model::explorer::ExplorerNodeId::ConnectionGroup { .. } => "▰",
+        crate::model::explorer::ExplorerNodeId::ConnectionGroup { .. } => {
+            icons.group(crate::db::catalog::ObjectGroup::Tables, expanded)
+        }
         crate::model::explorer::ExplorerNodeId::Group { group, .. } => {
             icons.group(*group, expanded)
         }

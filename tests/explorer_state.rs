@@ -137,6 +137,31 @@ fn connection_groups_toggle_like_other_expandable_nodes() {
 }
 
 #[test]
+fn organization_sync_selects_a_collapsed_connection_group() {
+    let profile = profile_id(1);
+    let group_id = Uuid::from_u128(4);
+    let mut explorer = ExplorerTreeState::default();
+    explorer.add_profile(profile);
+
+    explorer.sync_organization(
+        vec![lazydb::profile::ConnectionGroup {
+            id: group_id,
+            name: "Production".into(),
+        }],
+        vec![profile],
+        &HashMap::from([(profile, Some(group_id))]),
+    );
+
+    assert_eq!(
+        explorer.selected,
+        Some(ExplorerNodeId::ConnectionGroup {
+            group_id,
+            region: ProfileRegion::Primary,
+        })
+    );
+}
+
+#[test]
 fn other_profiles_group_toggles_like_other_expandable_nodes() {
     let other = profile_id(2);
     let mut explorer = ExplorerState::default();

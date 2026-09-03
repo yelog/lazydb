@@ -1873,8 +1873,22 @@ impl ExplorerTreeState {
             },
             ExplorerNodeId::EmptyProfiles
             | ExplorerNodeId::Others
-            | ExplorerNodeId::Profile(_)
             | ExplorerNodeId::ConnectionGroup { .. } => {}
+            ExplorerNodeId::Profile(profile_id) => {
+                if let Some(profile) = self.profiles.get(profile_id)
+                    && let Some(group_id) = profile.group_id
+                {
+                    chain.push(ExplorerNodeId::ConnectionGroup {
+                        group_id,
+                        region: match profile.placement {
+                            ProfilePlacement::OtherProject => ProfileRegion::Others,
+                            ProfilePlacement::CurrentProject | ProfilePlacement::Global => {
+                                ProfileRegion::Primary
+                            }
+                        },
+                    });
+                }
+            }
         }
         chain
     }
@@ -1896,6 +1910,31 @@ impl ExplorerTreeState {
 
     fn reconcile_after_catalog_change(&mut self, fallback: Vec<ExplorerNodeId>) {
         self.retain_existing_expansion();
+        let visible = self.visible();
+        if visible
+            .iter()
+            .any(|row| self.selected.as_ref() == Some(&row.id))
+        {
+            return;
+        }
+        if let Some(ExplorerNodeId::Profile(profile_id)) = self.selected.as_ref()
+            && let Some(profile) = self.profiles.get(profile_id)
+            && let Some(group_id) = profile.group_id
+        {
+            let group = ExplorerNodeId::ConnectionGroup {
+                group_id,
+                region: match profile.placement {
+                    ProfilePlacement::OtherProject => ProfileRegion::Others,
+                    ProfilePlacement::CurrentProject | ProfilePlacement::Global => {
+                        ProfileRegion::Primary
+                    }
+                },
+            };
+            if visible.iter().any(|row| row.id == group) {
+                self.selected = Some(group);
+                return;
+            }
+        }
         if self
             .selected
             .as_ref()
