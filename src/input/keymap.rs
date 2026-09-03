@@ -1029,12 +1029,18 @@ impl Keymap {
                 Some(Action::RunActiveSql)
             };
         }
+        if self.bindings.matches("help", event)
+            && !(app.focus == Focus::Editor
+                && matches!(
+                    app.active_editor_mode(),
+                    EditorMode::Insert | EditorMode::Replace
+                )
+                && matches!(event.code, KeyCode::Char(_)))
+        {
+            return Some(Action::ShowHelp);
+        }
         if app.focus == Focus::Editor {
             return Some(Action::EditorKey(event));
-        }
-
-        if self.bindings.matches("help", event) {
-            return Some(Action::ShowHelp);
         }
 
         if self.bindings.matches("focus-next-pane", event) {
