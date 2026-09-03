@@ -547,7 +547,7 @@ impl MsSqlAdapter {
         let mut warnings = Vec::new();
 
         for database in databases {
-            let schemas = match self.pool_for_database_unchecked(&database).await {
+            let mut schemas = match self.pool_for_database_unchecked(&database).await {
                 Ok(pool) => {
                     let sql = format!(
                         "SELECT [name] FROM {}.sys.schemas WHERE [name] NOT IN ('guest', 'INFORMATION_SCHEMA', 'sys') ORDER BY [name]",
@@ -566,6 +566,7 @@ impl MsSqlAdapter {
                     Vec::new()
                 }
             };
+            schemas.sort();
             discovered.push(DiscoveredDatabase {
                 name: database,
                 schemas,
@@ -2104,7 +2105,12 @@ async fn execute_one_batch(
 ) -> Result<QueryOutcome, DatabaseError> {
     let started = std::time::Instant::now();
     let affected_rows_column = format!("__lazydb_affected_rows_{}", Uuid::new_v4().simple());
-    let batch = format!("{sql}\n;SELECT CONVERT(bigint, @@ROWCOUNT) AS [{affected_rows_column}]");
+    // SQL Server requires these CREATE statements to be the only statement in a batch.
+    let batch = if requires_standalone_batch(sql) {
+        sql.to_owned()
+    } else {
+        format!("{sql}\n;SELECT CONVERT(bigint, @@ROWCOUNT) AS [{affected_rows_column}]")
+    };
     let mut stream = client
         .simple_query(batch)
         .await
@@ -2150,8 +2156,7 @@ async fn execute_one_batch(
     if let Some(result_set) = current {
         result_sets.push(result_set);
     }
-    let affected_rows = affected_rows
-        .ok_or_else(|| decode_error("SQL Server did not return the internal affected-row count"))?;
+    let affected_rows = affected_rows.unwrap_or(0);
     let has_tabular_result = result_sets.iter().any(|result| !result.columns.is_empty());
     if result_sets.is_empty() {
         result_sets.push(ResultSet::default());
@@ -2174,6 +2179,14 @@ async fn execute_one_batch(
         result_sets,
         stats: QueryStats::new(execution, total.saturating_sub(execution), row_count),
     })
+}
+
+fn requires_standalone_batch(sql: &str) -> bool {
+    let keyword = sql.split_whitespace().take(2).collect::<Vec<_>>().join(" ");
+    keyword.eq_ignore_ascii_case("CREATE VIEW")
+        || keyword.eq_ignore_ascii_case("CREATE FUNCTION")
+        || keyword.eq_ignore_ascii_case("CREATE PROCEDURE")
+        || keyword.eq_ignore_ascii_case("CREATE TRIGGER")
 }
 
 pub struct MsSqlTransactionBackend {
