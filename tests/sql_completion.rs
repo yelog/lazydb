@@ -1868,6 +1868,7 @@ fn app_completion_prefers_the_active_console_target_schema() {
             version: "16.4".into(),
             database: "app".into(),
         },
+        mutation_capabilities: Default::default(),
     });
     app.active_console_mut()
         .execution_target
