@@ -2997,93 +2997,7 @@ fn render_overlay(
             );
         }
         Overlay::TransactionExitConfirm { prompt, choice } => {
-            use crate::model::transaction::TransactionExitChoice;
-            let pending = std::iter::once(prompt.console_id)
-                .chain(
-                    app.deferred_transaction_prompts()
-                        .filter(|queued| queued.intent == prompt.intent)
-                        .map(|queued| queued.console_id),
-                )
-                .collect::<Vec<_>>();
-            let popup = centered(area, 78, (pending.len() as u16).saturating_add(7));
-            frame.render_widget(Clear, popup);
-            let tab = app.tabs.iter().find(|tab| tab.id() == prompt.console_id);
-            let state = tab
-                .and_then(|tab| tab.as_console())
-                .map(|tab| format!("{:?}", tab.transaction_state))
-                .unwrap_or_else(|| "gone".into());
-            let running = tab.is_some_and(|tab| {
-                tab.as_console()
-                    .is_some_and(|tab| tab.query_status == QueryStatus::Running)
-            });
-            let commit_disabled = tab.is_some_and(|tab| {
-                tab.as_console().is_some_and(|tab| {
-                    tab.transaction_state == crate::model::transaction::TransactionState::Aborted
-                })
-            });
-            let outcome_unknown = tab.is_some_and(|tab| {
-                tab.as_console().is_some_and(|tab| {
-                    tab.transaction_state
-                        == crate::model::transaction::TransactionState::OutcomeUnknown
-                })
-            });
-            let buttons = if running {
-                "Query running: wait or Ctrl-C to cancel"
-            } else if outcome_unknown {
-                "[Abandon local state]   Cancel"
-            } else {
-                &format!(
-                    "{}   {}   {}",
-                    if *choice == TransactionExitChoice::Commit && !commit_disabled {
-                        "[Commit]"
-                    } else {
-                        " Commit "
-                    },
-                    if *choice == TransactionExitChoice::Rollback {
-                        "[Rollback]"
-                    } else {
-                        " Rollback "
-                    },
-                    " Cancel "
-                )
-            };
-            let title = if prompt.intent == crate::model::transaction::DeferredIntent::Quit {
-                " PENDING TRANSACTIONS "
-            } else {
-                " TRANSACTION "
-            };
-            let mut lines = vec![Line::from(Span::styled(title, theme.title(true)))];
-            if pending.len() > 1 {
-                for (index, id) in pending.iter().enumerate() {
-                    let pending_tab = app.tabs.iter().find(|tab| tab.id() == *id);
-                    let marker = if index == 0 { ">" } else { " " };
-                    let pending_state = pending_tab
-                        .and_then(|tab| tab.as_console())
-                        .map(|tab| format!("{:?}", tab.transaction_state))
-                        .unwrap_or_else(|| "gone".into());
-                    lines.push(Line::raw(format!(
-                        "{marker} {}   {pending_state}",
-                        pending_tab.map(|tab| tab.title()).unwrap_or("unknown")
-                    )));
-                }
-            } else {
-                lines.push(Line::raw(format!(
-                    "console: {}   state: {state}",
-                    tab.map(|tab| tab.title()).unwrap_or("unknown")
-                )));
-            }
-            lines.push(Line::raw(buttons));
-            lines.push(Line::raw(if outcome_unknown {
-                "Enter or 'a' abandons local state; Esc cancels"
-            } else {
-                "Rollback is the default. Tab/Left/Right choose; Enter confirms; Esc cancels"
-            }));
-            frame.render_widget(
-                Paragraph::new(lines)
-                    .block(panel_block(title, true, theme))
-                    .style(Style::new().fg(theme.text).bg(theme.surface_raised)),
-                popup,
-            );
+            render_transaction_exit_overlay(frame, area, app, prompt, *choice, theme);
         }
         Overlay::RelationTransactionConfirm { tab_id, choice } => {
             use crate::model::transaction::TransactionExitChoice;
@@ -3364,6 +3278,209 @@ fn render_explorer_add(
             .style(Style::new().fg(theme.muted).bg(theme.surface))
             .alignment(Alignment::Center),
         Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
+    );
+}
+
+fn render_transaction_exit_overlay(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    prompt: &crate::model::transaction::DeferredTransactionPrompt,
+    choice: crate::model::transaction::TransactionExitChoice,
+    theme: Theme,
+) {
+    use crate::model::transaction::{DeferredIntent, TransactionState};
+
+    let pending = std::iter::once(prompt.console_id)
+        .chain(
+            app.deferred_transaction_prompts()
+                .filter(|queued| queued.intent == prompt.intent)
+                .map(|queued| queued.console_id),
+        )
+        .collect::<Vec<_>>();
+    let popup = centered(area, 68, (pending.len() as u16).saturating_add(7).max(9));
+    frame.render_widget(Clear, popup);
+
+    let title = if prompt.intent == DeferredIntent::Quit {
+        " PENDING TRANSACTIONS "
+    } else {
+        " TRANSACTION "
+    };
+    let block = panel_block(title, true, theme);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    frame.render_widget(
+        Paragraph::new("TRANSACTION SUMMARY").style(
+            Style::new()
+                .fg(theme.muted)
+                .bg(theme.surface)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+
+    let row_start = inner.y.saturating_add(2);
+    for (index, id) in pending.iter().enumerate() {
+        let y = row_start.saturating_add(index as u16);
+        if y >= inner.bottom().saturating_sub(2) {
+            break;
+        }
+        let tab = app.tabs.iter().find(|tab| tab.id() == *id);
+        let transaction_state = tab
+            .and_then(|tab| tab.as_console())
+            .map(|console| console.transaction_state);
+        render_transaction_summary_row(
+            frame,
+            Rect::new(inner.x, y, inner.width, 1),
+            index == 0,
+            tab.map_or("unknown", |tab| tab.title()),
+            transaction_state,
+            theme,
+        );
+    }
+
+    let current = app.tabs.iter().find(|tab| tab.id() == prompt.console_id);
+    let commit_enabled = !current
+        .and_then(|tab| tab.as_console())
+        .is_some_and(|console| console.transaction_state == TransactionState::Aborted);
+    render_transaction_exit_actions(
+        frame,
+        Rect::new(inner.x, inner.bottom().saturating_sub(2), inner.width, 1),
+        choice,
+        commit_enabled,
+        theme,
+    );
+    frame.render_widget(
+        Paragraph::new("Tab/←/→ select   Enter confirm   Esc cancel")
+            .style(Style::new().fg(theme.muted).bg(theme.surface))
+            .alignment(Alignment::Center),
+        Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
+    );
+}
+
+fn render_transaction_summary_row(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    current: bool,
+    title: &str,
+    state: Option<crate::model::transaction::TransactionState>,
+    theme: Theme,
+) {
+    let (state_label, state_color) = transaction_state_display(state, theme);
+    let marker = if current { "› " } else { "  " };
+    let state_width = state_label.cell_width();
+    let title_width = area
+        .width
+        .saturating_sub(marker.cell_width())
+        .saturating_sub(state_width)
+        .saturating_sub(2);
+    let sanitized_title = sanitize_terminal_text(title);
+    let title = truncate_to_cell_width(&sanitized_title, title_width);
+    let padding = " ".repeat(usize::from(title_width.saturating_sub(title.cell_width())) + 2);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                marker,
+                Style::new()
+                    .fg(if current { theme.action } else { theme.muted })
+                    .bg(theme.surface)
+                    .add_modifier(if current {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
+            ),
+            Span::styled(
+                title,
+                Style::new()
+                    .fg(if current { theme.text } else { theme.muted })
+                    .bg(theme.surface),
+            ),
+            Span::styled(padding, Style::new().bg(theme.surface)),
+            Span::styled(
+                state_label,
+                Style::new()
+                    .fg(state_color)
+                    .bg(theme.surface)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])),
+        area,
+    );
+}
+
+fn transaction_state_display(
+    state: Option<crate::model::transaction::TransactionState>,
+    theme: Theme,
+) -> (&'static str, Color) {
+    use crate::model::transaction::TransactionState;
+
+    match state {
+        Some(TransactionState::Active) => ("ACTIVE", theme.warning),
+        Some(TransactionState::Aborted) => ("ABORTED", theme.error),
+        Some(TransactionState::Starting) => ("STARTING", theme.action),
+        Some(TransactionState::Committing) => ("COMMITTING", theme.action),
+        Some(TransactionState::RollingBack) => ("ROLLING BACK", theme.action),
+        Some(TransactionState::OutcomeUnknown) => ("OUTCOME UNKNOWN", theme.error),
+        Some(TransactionState::Idle) => ("IDLE", theme.muted),
+        None => ("GONE", theme.muted),
+    }
+}
+
+fn render_transaction_exit_actions(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    choice: crate::model::transaction::TransactionExitChoice,
+    commit_enabled: bool,
+    theme: Theme,
+) {
+    use crate::model::transaction::TransactionExitChoice;
+
+    let commit = "[ Commit ]";
+    let rollback = "[ Rollback ]";
+    let cancel = "Cancel";
+    let gap = 2;
+    let total_width = commit
+        .cell_width()
+        .saturating_add(rollback.cell_width())
+        .saturating_add(cancel.cell_width())
+        .saturating_add(gap * 2);
+    let mut x = area
+        .x
+        .saturating_add(area.width.saturating_sub(total_width) / 2);
+
+    let actions = [
+        (commit, TransactionExitChoice::Commit, commit_enabled),
+        (rollback, TransactionExitChoice::Rollback, true),
+    ];
+    for (label, action, enabled) in actions {
+        let width = label.cell_width();
+        let selected = enabled && choice == action;
+        let style = if selected {
+            Style::new()
+                .fg(theme.background)
+                .bg(theme.accent)
+                .add_modifier(Modifier::BOLD)
+        } else if enabled {
+            Style::new().fg(theme.text).bg(theme.surface)
+        } else {
+            Style::new().fg(theme.muted).bg(theme.surface)
+        };
+        frame.render_widget(
+            Paragraph::new(label).style(style),
+            Rect::new(x, area.y, width, 1),
+        );
+        x = x.saturating_add(width).saturating_add(gap);
+    }
+    frame.render_widget(
+        Paragraph::new(cancel).style(
+            Style::new()
+                .fg(theme.muted)
+                .bg(theme.surface)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Rect::new(x, area.y, cancel.cell_width(), 1),
     );
 }
 

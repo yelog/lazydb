@@ -2783,7 +2783,7 @@ fn relation_help_documents_transaction_control_panel() {
 }
 
 #[test]
-fn quit_panel_lists_all_pending_transactions() {
+fn quit_panel_uses_compact_transaction_summary_layout() {
     let mut app = fixture();
     app.active_console_mut().transaction_mode = lazydb::model::transaction::TransactionMode::Manual;
     app.active_console_mut().transaction_state =
@@ -2796,11 +2796,77 @@ fn quit_panel_lists_all_pending_transactions() {
     assert!(app.update(Action::Quit).is_empty());
     let output = render(&app, 100, 30);
 
-    assert!(output.contains("PENDING TRANSACTIONS"));
-    assert!(output.contains("Active"));
-    assert!(output.contains("Aborted"));
-    assert!(output.contains("Commit"));
-    assert!(output.contains("Rollback"));
+    assert_eq!(
+        output.matches("PENDING TRANSACTIONS").count(),
+        1,
+        "{output}"
+    );
+    assert!(output.contains("TRANSACTION SUMMARY"), "{output}");
+    assert!(
+        output.contains("Active") || output.contains("ACTIVE"),
+        "{output}"
+    );
+    assert!(
+        output.contains("Aborted") || output.contains("ABORTED"),
+        "{output}"
+    );
+    assert!(output.contains("Commit"), "{output}");
+    assert!(output.contains("Rollback"), "{output}");
+    assert!(output.contains("Esc cancel"), "{output}");
+    assert!(!output.contains("Rollback is the default"), "{output}");
+}
+
+#[test]
+fn quit_panel_highlights_rollback_as_the_default_action() {
+    let mut app = fixture();
+    app.active_console_mut().transaction_mode = TransactionMode::Manual;
+    app.active_console_mut().transaction_state =
+        lazydb::model::transaction::TransactionState::Active;
+    assert!(app.update(Action::Quit).is_empty());
+
+    let (buffer, _) = render_buffer_with_icons(&app, 100, 30, IconSet::new(IconMode::Ascii));
+    let (rollback_x, rollback_y) = find_text_cell(&buffer, "Rollback").expect("rollback action");
+    let (commit_x, commit_y) = find_text_cell(&buffer, "Commit").expect("commit action");
+
+    assert_eq!(
+        buffer[(rollback_x, rollback_y)].bg,
+        Color::Rgb(99, 230, 216)
+    );
+    assert!(
+        buffer[(rollback_x, rollback_y)]
+            .modifier
+            .contains(Modifier::BOLD)
+    );
+    assert_ne!(
+        buffer[(commit_x, commit_y)].bg,
+        buffer[(rollback_x, rollback_y)].bg
+    );
+}
+
+#[test]
+fn transaction_panel_keeps_the_title_out_of_the_body() {
+    let mut app = fixture();
+    app.active_console_mut().transaction_mode = TransactionMode::Manual;
+    app.active_console_mut().transaction_state =
+        lazydb::model::transaction::TransactionState::Active;
+    app.update(Action::OpenTransactionControl);
+
+    let output = render(&app, 100, 30);
+    let title_line = output
+        .lines()
+        .find(|line| line.contains(" TRANSACTION "))
+        .expect("transaction border title");
+
+    assert!(title_line.contains('─'), "{output}");
+    assert!(output.contains("TRANSACTION SUMMARY"), "{output}");
+    assert_eq!(
+        output
+            .lines()
+            .filter(|line| line.trim() == "TRANSACTION")
+            .count(),
+        0,
+        "{output}"
+    );
 }
 
 #[test]
