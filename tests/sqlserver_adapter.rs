@@ -208,7 +208,7 @@ async fn executes_all_result_sets_and_decodes_sql_server_types_when_configured()
     assert!(matches!(temporal[4], CellValue::DateTime(_)));
     assert!(matches!(temporal[5], CellValue::DateTime(_)));
     assert!(matches!(temporal[6], CellValue::Timestamp(_)));
-    assert_eq!(temporal[7], CellValue::Text("<root />".to_owned()));
+    assert_eq!(temporal[7], CellValue::Text("<root/>".to_owned()));
     assert!(matches!(
         &temporal[8],
         CellValue::Unsupported { type_name, .. } if type_name == "money"
@@ -469,11 +469,11 @@ async fn sql_server_relation_children_expose_task10_metadata_when_configured() {
     let qc = mssql::quote_identifier(&child);
     let qdb = mssql::quote_identifier(&database_name);
     let setup = format!(
-        "CREATE SCHEMA {qa}; CREATE SCHEMA {qb}; \
-         CREATE TABLE {qb}.{qp} ([tenant_id] int NOT NULL, [parent_id] int NOT NULL, CONSTRAINT [{suffix}_parent_pk] PRIMARY KEY ([tenant_id], [parent_id])); \
-         CREATE TABLE {qa}.{qc} ([id] int IDENTITY(1,1) NOT NULL, [tenant_id] int NOT NULL, [parent_id] int NOT NULL, [code] nvarchar(40) NOT NULL CONSTRAINT [{suffix}_code_default] DEFAULT N'new', [code_upper] AS (UPPER([code])) PERSISTED, [version] rowversion NOT NULL, CONSTRAINT [{suffix}_child_pk] PRIMARY KEY ([tenant_id], [id]), CONSTRAINT [{suffix}_child_uq] UNIQUE ([tenant_id], [code]), CONSTRAINT [{suffix}_child_fk] FOREIGN KEY ([tenant_id], [parent_id]) REFERENCES {qb}.{qp} ([tenant_id], [parent_id]), CONSTRAINT [{suffix}_child_check] CHECK ([id] >= 0)); \
-         CREATE INDEX [{suffix}_child_idx] ON {qa}.{qc} ([code], [parent_id]); \
-         CREATE TRIGGER [{suffix}_child_trigger] ON {qa}.{qc} AFTER INSERT AS BEGIN SET NOCOUNT ON; END; \
+        "CREATE SCHEMA {qa};\nGO\nCREATE SCHEMA {qb};\nGO\n\
+         CREATE TABLE {qb}.{qp} ([tenant_id] int NOT NULL, [parent_id] int NOT NULL, CONSTRAINT [{suffix}_parent_pk] PRIMARY KEY ([tenant_id], [parent_id]));\nGO\n\
+         CREATE TABLE {qa}.{qc} ([id] int IDENTITY(1,1) NOT NULL, [tenant_id] int NOT NULL, [parent_id] int NOT NULL, [code] nvarchar(40) NOT NULL CONSTRAINT [{suffix}_code_default] DEFAULT N'new', [code_upper] AS (UPPER([code])) PERSISTED, [version] rowversion NOT NULL, CONSTRAINT [{suffix}_child_pk] PRIMARY KEY ([tenant_id], [id]), CONSTRAINT [{suffix}_child_uq] UNIQUE ([tenant_id], [code]), CONSTRAINT [{suffix}_child_fk] FOREIGN KEY ([tenant_id], [parent_id]) REFERENCES {qb}.{qp} ([tenant_id], [parent_id]), CONSTRAINT [{suffix}_child_check] CHECK ([id] >= 0));\nGO\n\
+         CREATE INDEX [{suffix}_child_idx] ON {qa}.{qc} ([code], [parent_id]);\nGO\n\
+         CREATE TRIGGER [{suffix}_child_trigger] ON {qa}.{qc} AFTER INSERT AS BEGIN SET NOCOUNT ON; END;\nGO\n\
          EXEC {qdb}.sys.sp_addextendedproperty @name=N'MS_Description', @value=N'child table comment', @level0type=N'SCHEMA', @level0name={schema_a_literal}, @level1type=N'TABLE', @level1name={child_literal}; \
          EXEC {qdb}.sys.sp_addextendedproperty @name=N'MS_Description', @value=N'code column comment', @level0type=N'SCHEMA', @level0name={schema_a_literal}, @level1type=N'TABLE', @level1name={child_literal}, @level2type=N'COLUMN', @level2name=N'code';",
         schema_a_literal = sqlserver_literal(&schema_a),
@@ -663,7 +663,7 @@ async fn sql_server_task12_ddl_golden_objects_when_configured() {
     let qp = mssql::quote_identifier(&procedure);
     let qtr = mssql::quote_identifier(&trigger);
     let setup = format!(
-        "CREATE TABLE [dbo].{qt} ([id] int NOT NULL, [label] nvarchar(32) NULL, CONSTRAINT {suffix}_pk PRIMARY KEY ([id])); CREATE INDEX {suffix}_idx ON [dbo].{qt} ([label]); CREATE VIEW [dbo].{qv} AS SELECT [id], [label] FROM [dbo].{qt}; GO CREATE FUNCTION [dbo].{qf} (@value int) RETURNS int AS BEGIN RETURN @value + 1; END; GO CREATE PROCEDURE [dbo].{qp} AS SELECT [id] FROM [dbo].{qt}; GO CREATE TRIGGER [dbo].{qtr} ON [dbo].{qt} AFTER INSERT AS BEGIN SET NOCOUNT ON; END;",
+        "CREATE TABLE [dbo].{qt} ([id] int NOT NULL, [label] nvarchar(32) NULL, CONSTRAINT [{suffix}_pk] PRIMARY KEY ([id]));\nGO\nCREATE INDEX [{suffix}_idx] ON [dbo].{qt} ([label]);\nGO\nCREATE VIEW [dbo].{qv} AS SELECT [id], [label] FROM [dbo].{qt};\nGO\nCREATE FUNCTION [dbo].{qf} (@value int) RETURNS int AS BEGIN RETURN @value + 1; END;\nGO\nCREATE PROCEDURE [dbo].{qp} AS SELECT [id] FROM [dbo].{qt};\nGO\nCREATE TRIGGER [dbo].{qtr} ON [dbo].{qt} AFTER INSERT AS BEGIN SET NOCOUNT ON; END;",
     );
     let cleanup = format!(
         "DROP TRIGGER IF EXISTS [dbo].{qtr}; DROP PROCEDURE IF EXISTS [dbo].{qp}; DROP FUNCTION IF EXISTS [dbo].{qf}; DROP VIEW IF EXISTS [dbo].{qv}; DROP TABLE IF EXISTS [dbo].{qt};"

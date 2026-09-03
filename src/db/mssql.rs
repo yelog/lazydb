@@ -1009,7 +1009,7 @@ impl MsSqlAdapter {
         let database = database_name(database_id, &request.key.target)?;
         let pool = self.pool_for_database(&database).await?;
         let sql = format!(
-            "SELECT [name] FROM {}.sys.schemas WHERE [name] NOT IN ('guest','INFORMATION_SCHEMA','sys') AND [is_ms_shipped] = 0 ORDER BY [name] COLLATE Latin1_General_100_BIN2",
+            "SELECT [name] FROM {}.sys.schemas WHERE [name] NOT IN ('guest','INFORMATION_SCHEMA','sys') ORDER BY [name] COLLATE Latin1_General_100_BIN2",
             quote_identifier(&database)
         );
         let database_parent = CatalogId::new(
@@ -3166,7 +3166,7 @@ fn format_search_candidates(database: &str, pattern: &str, query: &str) -> Strin
     );
     format!(
         "SELECT [kind], [schema], [name], [native_kind], [relation_kind], [relation_name], [relation_id], [object_id], {rank_expr} AS [rank] FROM (\
-         SELECT 'schema' AS [kind], s.[name] AS [schema], s.[name], 'schema' AS [native_kind], 'table' AS [relation_kind], s.[name] AS [relation_name], 0 AS [relation_id], s.[schema_id] AS [object_id] FROM {q}.sys.schemas s WHERE s.[name] NOT IN ('guest','INFORMATION_SCHEMA','sys') AND s.[is_ms_shipped]=0\
+          SELECT 'schema' AS [kind], s.[name] AS [schema], s.[name], 'schema' AS [native_kind], 'table' AS [relation_kind], s.[name] AS [relation_name], 0 AS [relation_id], s.[schema_id] AS [object_id] FROM {q}.sys.schemas s WHERE s.[name] NOT IN ('guest','INFORMATION_SCHEMA','sys')\
          UNION ALL SELECT CASE o.[type] WHEN 'U' THEN 'table' WHEN 'V' THEN 'view' WHEN 'P' THEN 'procedure' WHEN 'SO' THEN 'sequence' ELSE 'function' END, s.[name], o.[name], LOWER(o.[type_desc]), CASE WHEN o.[type]='V' THEN 'view' ELSE 'table' END, o.[name], o.[object_id], o.[object_id] FROM {q}.sys.objects o JOIN {q}.sys.schemas s ON s.[schema_id]=o.[schema_id] WHERE o.[type] IN ('U','V','P','SO','FN','IF','TF','FS','FT') AND o.[is_ms_shipped]=0\
          UNION ALL SELECT 'column', s.[name], c.[name], 'column', CASE WHEN o.[type]='V' THEN 'view' ELSE 'table' END, o.[name], c.[object_id], c.[column_id] FROM {q}.sys.columns c JOIN {q}.sys.objects o ON o.[object_id]=c.[object_id] JOIN {q}.sys.schemas s ON s.[schema_id]=o.[schema_id] WHERE o.[is_ms_shipped]=0\
          UNION ALL SELECT 'index', s.[name], i.[name], 'index', CASE WHEN o.[type]='V' THEN 'view' ELSE 'table' END, o.[name], i.[object_id], i.[index_id] FROM {q}.sys.indexes i JOIN {q}.sys.objects o ON o.[object_id]=i.[object_id] JOIN {q}.sys.schemas s ON s.[schema_id]=o.[schema_id] WHERE i.[index_id]>0 AND i.[is_hypothetical]=0\
