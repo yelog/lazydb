@@ -685,7 +685,7 @@ impl MsSqlAdapter {
         request: &CatalogRequest,
         relation: &CatalogId,
     ) -> Result<CatalogPage, DatabaseError> {
-        let (database, schema, relation_name, _object_id) = match relation.native_path.as_slice() {
+        let (database, schema, relation_name, object_id) = match relation.native_path.as_slice() {
             [database, schema, name, object_id] => (
                 database.clone(),
                 schema.clone(),
