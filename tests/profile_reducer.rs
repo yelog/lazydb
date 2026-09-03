@@ -234,7 +234,7 @@ fn profile_group_overlay_emits_rename_delete_and_reorder_commands() {
 }
 
 #[test]
-fn new_saved_profiles_default_to_the_current_project() {
+fn new_saved_profiles_default_to_global_access() {
     let mut app = App::new(Vec::new());
     app.update(Action::OpenProfileManager);
     let draft = app
@@ -253,12 +253,7 @@ fn new_saved_profiles_default_to_the_current_project() {
         panic!("expected a save command");
     };
 
-    assert_eq!(
-        submission.profile.access,
-        ProfileAccess::Projects {
-            roots: vec![app.project.root.clone()],
-        }
-    );
+    assert_eq!(submission.profile.access, ProfileAccess::Global);
 }
 
 #[test]

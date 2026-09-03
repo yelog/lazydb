@@ -95,6 +95,8 @@ pub struct AppConfig {
     pub terminal: TerminalConfig,
     pub ui: UiConfig,
     pub execution: ExecutionConfig,
+    #[serde(default)]
+    pub connections: ConnectionsConfig,
     pub dashboard: DashboardConfig,
     pub keybindings: KeybindingConfig,
 }
@@ -117,6 +119,25 @@ pub struct UiConfig {
 #[serde(deny_unknown_fields)]
 pub struct ExecutionConfig {
     pub confirmation: ConfirmationPolicy,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectionsConfig {
+    pub default_access: ConnectionAccessDefault,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionAccessDefault {
+    Global,
+    Project,
+}
+
+impl Default for ConnectionAccessDefault {
+    fn default() -> Self {
+        Self::Global
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
@@ -470,7 +491,7 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{AppConfig, ConfigError, DEFAULT_CONFIG_TOML};
+    use super::{AppConfig, ConfigError, ConnectionAccessDefault, DEFAULT_CONFIG_TOML};
     use crate::{cli::MotionMode, ui::icons::IconMode};
 
     #[test]
@@ -479,6 +500,10 @@ mod tests {
 
         assert_eq!(config.ui.icons, IconMode::NerdFont);
         assert_eq!(config.keybindings.sequence_timeout_ms, 750);
+        assert_eq!(
+            config.connections.default_access,
+            ConnectionAccessDefault::Global
+        );
     }
 
     #[test]
@@ -517,6 +542,8 @@ mod tests {
             motion = "off"
             [execution]
             confirmation = "always"
+            [connections]
+            default_access = "project"
             [dashboard]
             refresh_interval_seconds = 2
             [keybindings]
@@ -541,6 +568,10 @@ mod tests {
         assert_eq!(
             config.execution.confirmation,
             crate::cli::ConfirmationPolicy::RiskyOnly
+        );
+        assert_eq!(
+            config.connections.default_access,
+            ConnectionAccessDefault::Project
         );
         assert_eq!(config.dashboard.refresh_interval_seconds, 2);
     }

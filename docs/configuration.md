@@ -78,6 +78,17 @@ refresh_interval_seconds = 5
 The value must be at least one second. The setting controls both metric and
 process polling when the Dashboard is active.
 
+New connections are global by default. To restrict newly saved connections to
+the current project instead, set:
+
+```toml
+[connections]
+default_access = "project"
+```
+
+This setting only affects newly created connections. Editing an existing
+connection preserves its current access scope.
+
 The complete schema and current values are best read directly in
 [`config/default.toml`](../config/default.toml). Its sections are:
 
@@ -86,6 +97,7 @@ The complete schema and current values are best read directly in
 | `terminal` | `mouse`, `color` |
 | `ui` | `icons`, `motion` |
 | `execution` | `confirmation` |
+| `connections` | `default_access` |
 | `dashboard` | `refresh_interval_seconds` |
 | `keybindings` | `preset`, `sequence_timeout_ms`, and grouped `global`, `leader`, `panes`, `explorer`, `results`, `editor`, `overlays` tables |
 

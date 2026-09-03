@@ -233,6 +233,7 @@ pub struct App {
     workspaces: HashMap<Uuid, ConnectionWorkspace>,
     pub notifications: NotificationCenter,
     dashboard_refresh_interval_millis: u64,
+    default_connection_access: crate::config::ConnectionAccessDefault,
     pub(crate) key_bindings: crate::config::KeyBindings,
 }
 
@@ -582,6 +583,7 @@ impl App {
             notifications: NotificationCenter::default(),
             dashboard_refresh_interval_millis: crate::persistence::settings::AppSettings::default()
                 .dashboard_refresh_interval_millis(),
+            default_connection_access: crate::config::ConnectionAccessDefault::Global,
             key_bindings: crate::config::AppConfig::default()
                 .keybindings
                 .key_bindings()
@@ -595,6 +597,13 @@ impl App {
 
     pub fn set_dashboard_refresh_interval_millis(&mut self, interval_millis: u64) {
         self.dashboard_refresh_interval_millis = interval_millis.max(1_000);
+    }
+
+    pub(crate) fn set_default_connection_access(
+        &mut self,
+        access: crate::config::ConnectionAccessDefault,
+    ) {
+        self.default_connection_access = access;
     }
 
     pub fn dashboard_refresh_interval_seconds(&self) -> u64 {
@@ -7521,9 +7530,13 @@ impl App {
             .iter()
             .any(|profile| profile.id == submission.profile.id)
         {
-            submission.profile.access = ProfileAccess::Projects {
-                roots: vec![self.project.root.clone()],
-            };
+            if self.default_connection_access == crate::config::ConnectionAccessDefault::Project {
+                submission.profile.access = ProfileAccess::Projects {
+                    roots: vec![self.project.root.clone()],
+                };
+            } else {
+                submission.profile.access = ProfileAccess::Global;
+            }
         }
         let request_id = next_profile_request(manager);
         manager.operation = Some(if connect {

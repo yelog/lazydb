@@ -17,6 +17,9 @@ motion = "full"
 [execution]
 confirmation = "risky"
 
+[connections]
+default_access = "global"
+
 [dashboard]
 refresh_interval_seconds = 5
 

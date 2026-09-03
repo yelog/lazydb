@@ -3725,6 +3725,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
         settings.execution.confirmation,
         project,
     );
+    app.set_default_connection_access(settings.connections.default_access);
     app.connection_groups = startup.collection.groups.clone();
     app.explorer.normalized.sync_organization(
         startup.collection.groups.clone(),
