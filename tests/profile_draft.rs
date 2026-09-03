@@ -102,6 +102,7 @@ fn discovered_postgres_scope(selected_schemas: &[&str]) -> ProfileManagerState {
             kind: DatabaseKind::Postgres,
             version: "16".into(),
             database: "moss_biz".into(),
+            current_user: Some("postgres".into()),
         },
         capabilities: lazydb::db::catalog::CatalogCapabilities {
             namespace_model: lazydb::db::catalog::NamespaceModel::DatabaseAndSchema,
@@ -1036,6 +1037,7 @@ fn discovery_failure_warning_is_preserved_when_picker_reopens() {
             kind: DatabaseKind::Postgres,
             version: "16".into(),
             database: "db".into(),
+            current_user: Some("postgres".into()),
         },
         capabilities: lazydb::db::catalog::CatalogCapabilities {
             namespace_model: lazydb::db::catalog::NamespaceModel::DatabaseAndSchema,
@@ -1076,6 +1078,7 @@ fn discovered_and_saved_schema_rows_are_deduplicated() {
             kind: DatabaseKind::Postgres,
             version: "16".into(),
             database: "db".into(),
+            current_user: Some("postgres".into()),
         },
         capabilities: lazydb::db::catalog::CatalogCapabilities {
             namespace_model: lazydb::db::catalog::NamespaceModel::DatabaseAndSchema,

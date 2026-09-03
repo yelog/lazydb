@@ -231,6 +231,7 @@ impl SqliteAdapter {
             kind: DatabaseKind::Sqlite,
             version,
             database: self.database.clone(),
+            current_user: None,
         })
     }
 

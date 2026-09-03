@@ -65,6 +65,16 @@ unavailable, saved selections remain visible with a warning.
 
 ## Catalog Paging
 
+### PostgreSQL Schema Owners
+
+The New Schema form uses PostgreSQL's effective `current_user` as the initial
+owner. Its owner picker discovers both `LOGIN` users and `NOLOGIN` roles from
+`pg_roles`. Roles that are visible but cannot be assumed by the active user are
+shown as disabled rather than hidden. PostgreSQL 16 and newer use `SET ROLE`
+privilege checks, as required by `CREATE SCHEMA ... AUTHORIZATION`; this same
+check is used on older supported PostgreSQL versions. If role discovery is unavailable, the Owner field remains a
+manual text input and PostgreSQL remains authoritative when the mutation runs.
+
 Explorer pages are lazy, bounded to a maximum page size of 500, and use
 versioned keyset cursors rather than offsets. A request includes connection
 identity, catalog epoch, request id, target, cursor, and scope. Pages are

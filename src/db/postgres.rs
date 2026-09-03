@@ -49,10 +49,11 @@ use super::{
         CatalogMutationError, CatalogMutationExecutionMode, CatalogMutationMode,
         CatalogMutationOption, CatalogMutationPlan, CatalogMutationRequest,
         CatalogObjectDefinition, CatalogObjectDefinitionRequest, CatalogObjectType,
-        CatalogSelectionHint, ColumnDefinition, ConstraintDefinition, ConstraintDefinitionKind,
-        DatabaseDefinition, IndexColumnDefinition, IndexDefinition, MaterializedViewDefinition,
-        RoleDefinition, SchemaDefinition, TableDefinition, ViewDefinition,
-        ViewMutationCapabilities, ViewMutationOptionAvailability, ViewOption,
+        CatalogOwnerChoice, CatalogOwnerContext, CatalogOwnerContextRequest, CatalogSelectionHint,
+        ColumnDefinition, ConstraintDefinition, ConstraintDefinitionKind, DatabaseDefinition,
+        IndexColumnDefinition, IndexDefinition, MaterializedViewDefinition, RoleDefinition,
+        SchemaDefinition, TableDefinition, ViewDefinition, ViewMutationCapabilities,
+        ViewMutationOptionAvailability, ViewOption,
     },
     ddl::{DdlSection, assemble_ddl},
     mutation::{InputValue, MutationResult, RelationMutation, RelationMutationRequest},
@@ -314,6 +315,22 @@ struct PgSearchCandidate {
 }
 
 impl PostgresAdapter {
+    pub const OWNER_CONTEXT_SQL: &str = r#"
+        SELECT
+            role.rolname AS name,
+            role.rolcanlogin AS can_login,
+            role.rolname = current_user AS is_current,
+            current_user AS current_user,
+            role.rolname = current_user
+                OR pg_has_role(current_user, role.oid, $1) AS selectable
+        FROM pg_roles AS role
+        ORDER BY role.rolname = current_user DESC, role.rolname COLLATE "C"
+    "#;
+
+    pub const fn owner_role_privilege(_server_version_num: i32) -> &'static str {
+        "SET"
+    }
+
     pub const MONITOR_STATUS_SQL: &str = r#"
 WITH db_stats AS (
     SELECT coalesce(sum(xact_commit), 0)::double precision AS commits,
@@ -2971,8 +2988,11 @@ LIMIT 2001
         self.server_version_num
     }
 
+    pub const PROBE_SQL: &str =
+        "SELECT version() AS version, current_database() AS database, current_user AS current_user";
+
     pub async fn probe(&self) -> Result<ServerInfo, DatabaseError> {
-        let row = sqlx::query("SELECT version() AS version, current_database() AS database")
+        let row = sqlx::query(Self::PROBE_SQL)
             .fetch_one(&self.pool)
             .await
             .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Network))?;
@@ -2980,6 +3000,7 @@ LIMIT 2001
             kind: DatabaseKind::Postgres,
             version: row.try_get("version").map_err(decode_error)?,
             database: row.try_get("database").map_err(decode_error)?,
+            current_user: Some(row.try_get("current_user").map_err(decode_error)?),
         })
     }
 
@@ -3235,6 +3256,47 @@ LIMIT 2001
             return result.and(Err(error));
         }
         result
+    }
+
+    pub async fn load_catalog_owner_context(
+        &self,
+        request: &CatalogOwnerContextRequest,
+    ) -> Result<CatalogOwnerContext, DatabaseError> {
+        request
+            .validate()
+            .map_err(|error| DatabaseError::configuration(error.to_string()))?;
+        if request.connection.profile_id != self.connection_id {
+            return Err(DatabaseError::configuration(
+                "catalog owner context profile mismatch",
+            ));
+        }
+        let rows = sqlx::query(Self::OWNER_CONTEXT_SQL)
+            .bind(Self::owner_role_privilege(self.server_version_num))
+            .fetch_all(&self.pool)
+            .await
+            .map_err(sql_error)?;
+        let current_user = rows
+            .first()
+            .map(|row| row.try_get("current_user").map_err(decode_error))
+            .transpose()?
+            .ok_or_else(|| {
+                DatabaseError::configuration("PostgreSQL owner role query returned no rows")
+            })?;
+        let choices = rows
+            .into_iter()
+            .map(|row| {
+                Ok(CatalogOwnerChoice {
+                    name: row.try_get("name").map_err(decode_error)?,
+                    can_login: row.try_get("can_login").map_err(decode_error)?,
+                    selectable: row.try_get("selectable").map_err(decode_error)?,
+                    is_current: row.try_get("is_current").map_err(decode_error)?,
+                })
+            })
+            .collect::<Result<Vec<_>, DatabaseError>>()?;
+        Ok(CatalogOwnerContext {
+            current_user,
+            choices,
+        })
     }
 
     async fn load_database_definition_snapshot(

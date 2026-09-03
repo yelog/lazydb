@@ -1911,6 +1911,7 @@ fn app_completion_prefers_the_active_console_target_schema() {
             kind: DatabaseKind::Postgres,
             version: "16.4".into(),
             database: "app".into(),
+            current_user: None,
         },
         mutation_capabilities: Default::default(),
     });

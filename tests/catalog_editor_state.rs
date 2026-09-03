@@ -239,6 +239,47 @@ fn schema_draft_rejects_blank_name_and_owner() {
 }
 
 #[test]
+fn owner_picker_filters_and_preserves_role_selection() {
+    use lazydb::db::catalog_mutation::CatalogOwnerChoice;
+    use lazydb::model::catalog_editor::OwnerPickerState;
+
+    let choices = vec![
+        CatalogOwnerChoice {
+            name: "alice".into(),
+            can_login: true,
+            selectable: true,
+            is_current: true,
+        },
+        CatalogOwnerChoice {
+            name: "app_owner".into(),
+            can_login: false,
+            selectable: true,
+            is_current: false,
+        },
+        CatalogOwnerChoice {
+            name: "readonly".into(),
+            can_login: true,
+            selectable: false,
+            is_current: false,
+        },
+    ];
+    let mut picker = OwnerPickerState::default();
+    picker.open("alice", &choices);
+    picker.insert_filter('o', &choices);
+    assert_eq!(
+        picker
+            .visible(&choices)
+            .iter()
+            .map(|choice| choice.name.as_str())
+            .collect::<Vec<_>>(),
+        ["app_owner", "readonly"]
+    );
+    assert_eq!(picker.selected(&choices).unwrap().name, "app_owner");
+    picker.move_selection(1, &choices);
+    assert!(!picker.selected(&choices).unwrap().selectable);
+}
+
+#[test]
 fn schema_draft_edits_name_owner_and_comment() {
     let mut draft = CatalogDraft::Schema(SchemaDraft::new());
 

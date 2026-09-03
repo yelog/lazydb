@@ -536,6 +536,7 @@ impl MsSqlAdapter {
             kind: DatabaseKind::SqlServer,
             version,
             database,
+            current_user: None,
         })
     }
 

@@ -70,6 +70,7 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                             | HitTarget::ProfileGroupCancel
                             | HitTarget::ExplorerAddOption(_)
                             | HitTarget::CatalogEditorField(_)
+                            | HitTarget::CatalogOwnerChoice(_)
                     ))
             {
                 return None;
@@ -142,6 +143,7 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                 HitTarget::CatalogEditorField(index) => {
                     Some(Action::CatalogEditorFocusField(index))
                 }
+                HitTarget::CatalogOwnerChoice(name) => Some(Action::CatalogOwnerPickerChoose(name)),
                 HitTarget::RelationFirstPage => Some(Action::RelationFirstPage),
                 HitTarget::RelationPreviousPage => Some(Action::RelationPreviousPage),
                 HitTarget::RelationPageSize => {
@@ -287,6 +289,7 @@ fn focus_at(ui: &UiState, column: u16, row: u16) -> Option<Focus> {
         | HitTarget::ProfileGroupCancel
         | HitTarget::ExplorerAddOption(_)
         | HitTarget::CatalogEditorField(_) => None,
+        HitTarget::CatalogOwnerChoice(_) => None,
         HitTarget::RelationFirstPage
         | HitTarget::RelationPreviousPage
         | HitTarget::RelationPageSize

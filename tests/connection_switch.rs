@@ -78,6 +78,7 @@ fn server(database: &str) -> ServerInfo {
         kind: DatabaseKind::Sqlite,
         version: "3.50".into(),
         database: database.into(),
+        current_user: None,
     }
 }
 

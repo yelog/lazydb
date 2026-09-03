@@ -408,6 +408,7 @@ fn server() -> ServerInfo {
         kind: DatabaseKind::Postgres,
         version: "16.4".into(),
         database: "lazydb".into(),
+        current_user: Some("postgres".into()),
     }
 }
 
@@ -543,6 +544,7 @@ fn scope_discovery_response_preserves_scope_and_refresh_starts_new_request() {
             kind: DatabaseKind::Sqlite,
             version: "3.50".into(),
             database: ":memory:".into(),
+            current_user: None,
         },
         capabilities: capabilities(),
         discovery: discovery(":memory:", &["main", "temp"]),

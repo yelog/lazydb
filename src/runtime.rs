@@ -286,6 +286,7 @@ impl Runtime {
             Command::LoadCatalogObjectDefinition(request) => {
                 self.load_catalog_object_definition(request)
             }
+            Command::LoadCatalogOwnerContext(request) => self.load_catalog_owner_context(request),
             Command::SearchCatalog(request) => self.search_catalog(request),
             Command::CancelCatalogSearch => {
                 if let Some(task) = self.catalog_search_task.take() {
@@ -1200,6 +1201,55 @@ impl Runtime {
                 }
                 Err(error) => {
                     let _ = sender.send(Action::CatalogObjectDefinitionLoadFailed {
+                        request,
+                        message: sanitize_terminal_text(&error.to_string()),
+                    });
+                }
+            }
+            routed.close_if_owned().await;
+        }));
+    }
+
+    fn load_catalog_owner_context(
+        &mut self,
+        request: crate::db::catalog_mutation::CatalogOwnerContextRequest,
+    ) {
+        let sender = self.event_sender.clone();
+        let connection = Arc::clone(&self.connection);
+        let registry = Arc::clone(&self.registry);
+        let secret_store = Arc::clone(&self.secret_store);
+        let local_credential_store = self.local_credential_store.clone();
+        self.background_tasks.push(tokio::spawn(async move {
+            let routed = match resolve_catalog_mutation_connection(
+                Arc::clone(&connection),
+                request.connection,
+                crate::db::catalog_mutation::CatalogMutationTarget::Database(
+                    request.target.clone(),
+                ),
+                &registry,
+                &secret_store,
+                &local_credential_store,
+            )
+            .await
+            {
+                Ok(routed) => routed,
+                Err(message) => {
+                    let _ = sender.send(Action::CatalogOwnerContextLoadFailed { request, message });
+                    return;
+                }
+            };
+            match routed.database.load_catalog_owner_context(&request).await {
+                Ok(Some(context)) => {
+                    let _ = sender.send(Action::CatalogOwnerContextLoaded { request, context });
+                }
+                Ok(None) => {
+                    let _ = sender.send(Action::CatalogOwnerContextLoadFailed {
+                        request,
+                        message: "owner role discovery is not supported for this connection".into(),
+                    });
+                }
+                Err(error) => {
+                    let _ = sender.send(Action::CatalogOwnerContextLoadFailed {
                         request,
                         message: sanitize_terminal_text(&error.to_string()),
                     });

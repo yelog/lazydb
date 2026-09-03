@@ -30,6 +30,26 @@ use lazydb::{
 use uuid::Uuid;
 
 #[test]
+fn postgres_probe_requests_the_effective_database_user() {
+    assert!(PostgresAdapter::PROBE_SQL.contains("current_user AS current_user"));
+}
+
+#[test]
+fn owner_role_query_exposes_all_roles_and_checks_set_role() {
+    let sql = PostgresAdapter::OWNER_CONTEXT_SQL;
+    assert!(sql.contains("pg_roles"));
+    assert!(sql.contains("rolcanlogin"));
+    assert!(sql.contains("pg_has_role"));
+    assert!(sql.contains("current_user"));
+}
+
+#[test]
+fn owner_role_privilege_name_is_version_aware() {
+    assert_eq!(PostgresAdapter::owner_role_privilege(150_000), "SET");
+    assert_eq!(PostgresAdapter::owner_role_privilege(160_000), "SET");
+}
+
+#[test]
 fn monitoring_sql_aggregates_database_and_activity_stats_separately() {
     let status = postgres::PostgresAdapter::MONITOR_STATUS_SQL;
     assert!(status.contains("WITH db_stats AS"));

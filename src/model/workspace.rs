@@ -5,7 +5,9 @@ use uuid::Uuid;
 pub use crate::identity::ConnectionIdentity;
 
 use crate::db::catalog::{CatalogSearchHit, CatalogSearchPage, search_text_matches};
-use crate::db::catalog_mutation::CatalogMutationCapabilities;
+use crate::db::catalog_mutation::{
+    CatalogMutationCapabilities, CatalogOwnerContext, CatalogOwnerContextRequest,
+};
 use crate::db::{
     ServerInfo,
     catalog::{CatalogEntry, CatalogId, CatalogKind, CatalogNode, CatalogTarget, OptionalMetadata},
@@ -205,6 +207,72 @@ pub enum ConnectionStatus {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum CatalogOwnerContextState {
+    #[default]
+    NotRequested,
+    Loading(CatalogOwnerContextRequest),
+    Loaded {
+        connection: ConnectionIdentity,
+        context: CatalogOwnerContext,
+    },
+    Failed {
+        connection: ConnectionIdentity,
+        message: String,
+    },
+}
+
+impl CatalogOwnerContextState {
+    pub fn context_for(&self, connection: ConnectionIdentity) -> Option<&CatalogOwnerContext> {
+        match self {
+            Self::Loaded {
+                connection: loaded,
+                context,
+            } if *loaded == connection => Some(context),
+            _ => None,
+        }
+    }
+
+    pub fn is_loading_for(&self, connection: ConnectionIdentity) -> bool {
+        matches!(self, Self::Loading(request) if request.connection == connection)
+    }
+
+    pub fn begin(&mut self, request: CatalogOwnerContextRequest) -> bool {
+        if self.is_loading_for(request.connection) || self.context_for(request.connection).is_some()
+        {
+            return false;
+        }
+        *self = Self::Loading(request);
+        true
+    }
+
+    pub fn finish(
+        &mut self,
+        request: &CatalogOwnerContextRequest,
+        context: CatalogOwnerContext,
+    ) -> bool {
+        if !matches!(self, Self::Loading(active) if active == request) {
+            return false;
+        }
+        *self = Self::Loaded {
+            connection: request.connection,
+            context,
+        };
+        true
+    }
+
+    pub fn fail(&mut self, request: &CatalogOwnerContextRequest, message: String) -> bool {
+        if !matches!(self, Self::Loading(active) if active == request) {
+            return false;
+        }
+        *self = Self::Failed {
+            connection: request.connection,
+            message,
+        };
+        true
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ConnectionState {
     pub profile_id: Option<Uuid>,
     pub generation: u64,
@@ -215,6 +283,7 @@ pub struct ConnectionState {
     pub status: ConnectionStatus,
     pub server: Option<ServerInfo>,
     pub mutation_capabilities: CatalogMutationCapabilities,
+    pub owner_context: CatalogOwnerContextState,
     pub error: Option<String>,
 }
 
@@ -1333,11 +1402,54 @@ fn catalog_count_label(count: crate::db::catalog::CatalogCount) -> Option<String
 
 #[cfg(test)]
 mod tests {
-    use super::{Focus, PaneResize, PaneSplit, entry_detail, pane_resize};
+    use super::{
+        CatalogOwnerContextState, Focus, PaneResize, PaneSplit, entry_detail, pane_resize,
+    };
     use crate::db::catalog::{
         CatalogEntry, CatalogId, CatalogKind, CatalogMetadata, ColumnMetadata, OptionalMetadata,
     };
+    use crate::db::catalog_mutation::{
+        CatalogOwnerChoice, CatalogOwnerContext, CatalogOwnerContextRequest,
+    };
+    use crate::model::execution_target::ExecutionTarget;
+    use crate::model::workspace::ConnectionIdentity;
     use uuid::Uuid;
+
+    #[test]
+    fn owner_context_requires_an_exact_request_and_deduplicates_loading() {
+        let identity = ConnectionIdentity {
+            profile_id: Uuid::from_u128(1),
+            generation: 2,
+        };
+        let request = CatalogOwnerContextRequest {
+            connection: identity,
+            request_id: 7,
+            target: ExecutionTarget {
+                profile_id: identity.profile_id,
+                database: "app".into(),
+                schema: None,
+            },
+        };
+        let mut state = CatalogOwnerContextState::default();
+        assert!(state.begin(request.clone()));
+        assert!(!state.begin(request.clone()));
+        assert!(!state.finish(
+            &CatalogOwnerContextRequest {
+                request_id: 8,
+                ..request.clone()
+            },
+            CatalogOwnerContext {
+                current_user: "alice".into(),
+                choices: vec![CatalogOwnerChoice {
+                    name: "alice".into(),
+                    can_login: true,
+                    selectable: true,
+                    is_current: true,
+                }],
+            },
+        ));
+        assert!(state.fail(&request, "failed".into()));
+    }
 
     #[test]
     fn pane_resize_maps_focused_operations_to_split_deltas() {

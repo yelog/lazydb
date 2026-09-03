@@ -257,6 +257,7 @@ fn relation_event_cannot_mutate_a_cached_inactive_workspace() {
             kind: DatabaseKind::Sqlite,
             version: "3".into(),
             database: "second".into(),
+            current_user: None,
         },
         mutation_capabilities: Default::default(),
     });

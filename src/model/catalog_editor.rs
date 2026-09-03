@@ -3,7 +3,9 @@ use uuid::Uuid;
 use crate::{
     db::{
         catalog::CatalogId,
-        catalog_mutation::{CatalogMutationAnchor, CatalogMutationMode, CatalogObjectType},
+        catalog_mutation::{
+            CatalogMutationAnchor, CatalogMutationMode, CatalogObjectType, CatalogOwnerChoice,
+        },
     },
     model::text_input::TextInput,
     security::RedactedSecret,
@@ -1247,6 +1249,96 @@ pub use crate::db::catalog_mutation::{
     SequenceDefinition, TableDefinition, ViewDefinition,
 };
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct OwnerPickerState {
+    pub open: bool,
+    pub filter: TextInput,
+    pub selected_name: Option<String>,
+    pub message: Option<String>,
+}
+
+impl OwnerPickerState {
+    pub fn open(&mut self, current_owner: &str, choices: &[CatalogOwnerChoice]) {
+        self.open = true;
+        self.filter.set("");
+        self.selected_name = choices
+            .iter()
+            .find(|choice| choice.name == current_owner)
+            .or_else(|| choices.first())
+            .map(|choice| choice.name.clone());
+        self.message = None;
+    }
+
+    pub fn close(&mut self) {
+        self.open = false;
+        self.filter.set("");
+        self.selected_name = None;
+        self.message = None;
+    }
+
+    pub fn visible<'a>(&self, choices: &'a [CatalogOwnerChoice]) -> Vec<&'a CatalogOwnerChoice> {
+        let filter = self.filter.value().to_lowercase();
+        choices
+            .iter()
+            .filter(|choice| choice.name.to_lowercase().contains(&filter))
+            .collect()
+    }
+
+    pub fn reconcile(&mut self, choices: &[CatalogOwnerChoice]) {
+        let visible = self.visible(choices);
+        if visible
+            .iter()
+            .any(|choice| Some(choice.name.as_str()) == self.selected_name.as_deref())
+        {
+            return;
+        }
+        self.selected_name = visible.first().map(|choice| choice.name.clone());
+    }
+
+    pub fn insert_filter(&mut self, character: char, choices: &[CatalogOwnerChoice]) {
+        self.filter.insert(character);
+        self.reconcile(choices);
+    }
+
+    pub fn backspace_filter(&mut self, choices: &[CatalogOwnerChoice]) {
+        self.filter.backspace();
+        self.reconcile(choices);
+    }
+
+    pub fn delete_previous_word(&mut self, choices: &[CatalogOwnerChoice]) {
+        self.filter.delete_previous_word();
+        self.reconcile(choices);
+    }
+
+    pub fn delete_to_start(&mut self, choices: &[CatalogOwnerChoice]) {
+        self.filter.delete_to_start();
+        self.reconcile(choices);
+    }
+
+    pub fn move_selection(&mut self, delta: isize, choices: &[CatalogOwnerChoice]) {
+        let visible = self.visible(choices);
+        if visible.is_empty() {
+            self.selected_name = None;
+            return;
+        }
+        let current = visible
+            .iter()
+            .position(|choice| Some(choice.name.as_str()) == self.selected_name.as_deref())
+            .unwrap_or(0);
+        let next = (current as isize + delta).rem_euclid(visible.len() as isize) as usize;
+        self.selected_name = Some(visible[next].name.clone());
+    }
+
+    pub fn selected<'a>(
+        &self,
+        choices: &'a [CatalogOwnerChoice],
+    ) -> Option<&'a CatalogOwnerChoice> {
+        self.visible(choices)
+            .into_iter()
+            .find(|choice| Some(choice.name.as_str()) == self.selected_name.as_deref())
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CatalogEditorState {
     pub mode: CatalogMutationMode,
@@ -1261,6 +1353,7 @@ pub struct CatalogEditorState {
     pub baseline: Option<CatalogObjectDefinition>,
     pub plan: Option<CatalogMutationPlan>,
     pub error: Option<String>,
+    pub owner_picker: OwnerPickerState,
 }
 
 impl CatalogEditorState {
@@ -1293,6 +1386,7 @@ impl CatalogEditorState {
             baseline: None,
             plan: None,
             error: None,
+            owner_picker: OwnerPickerState::default(),
         }
     }
 

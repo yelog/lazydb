@@ -347,6 +347,44 @@ pub struct CatalogObjectDefinitionRequest {
     pub target: ExecutionTarget,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CatalogOwnerChoice {
+    pub name: String,
+    pub can_login: bool,
+    pub selectable: bool,
+    pub is_current: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CatalogOwnerContext {
+    pub current_user: String,
+    pub choices: Vec<CatalogOwnerChoice>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CatalogOwnerContextRequest {
+    pub connection: ConnectionIdentity,
+    pub request_id: u64,
+    pub target: ExecutionTarget,
+}
+
+impl CatalogOwnerContextRequest {
+    pub fn validate(&self) -> Result<(), CatalogMutationError> {
+        if self.request_id == 0 || self.target.database.trim().is_empty() {
+            return Err(CatalogMutationError::InvalidAnchor {
+                reason: "owner context request is invalid",
+            });
+        }
+        if self.target.profile_id != self.connection.profile_id {
+            return Err(CatalogMutationError::ProfileMismatch {
+                object_profile_id: self.target.profile_id,
+                connection_profile_id: self.connection.profile_id,
+            });
+        }
+        Ok(())
+    }
+}
+
 impl CatalogObjectDefinitionRequest {
     pub fn is_role(&self) -> bool {
         self.object.kind == CatalogKind::Database

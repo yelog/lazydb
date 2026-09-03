@@ -25,6 +25,7 @@ fn connected_app(policy: ConfirmationPolicy) -> App {
             kind: lazydb::profile::DatabaseKind::Sqlite,
             version: "3.50".into(),
             database: ":memory:".into(),
+            current_user: None,
         },
         mutation_capabilities: Default::default(),
     });
