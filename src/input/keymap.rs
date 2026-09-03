@@ -574,11 +574,22 @@ impl Keymap {
             return Some(action);
         }
 
+        if self.bindings.matches("focus-next-pane", event) {
+            return Some(Action::FocusNext);
+        }
+        if self.bindings.matches("focus-previous-pane", event) {
+            return Some(Action::FocusPrevious);
+        }
+
         if app.focus == Focus::Editor && app.active_editor_mode() == EditorMode::Normal {
             match event.code {
                 _ if self.bindings.matches("help", event) => return Some(Action::ShowHelp),
-                KeyCode::Tab => return Some(Action::FocusNext),
-                KeyCode::BackTab => return Some(Action::FocusPrevious),
+                _ if self.bindings.matches("focus-next-pane", event) => {
+                    return Some(Action::FocusNext);
+                }
+                _ if self.bindings.matches("focus-previous-pane", event) => {
+                    return Some(Action::FocusPrevious);
+                }
                 KeyCode::Char('g') => {
                     self.set_pending(Pending::Goto, app);
                     return None;
@@ -613,10 +624,16 @@ impl Keymap {
             }
         }
 
+        if self.bindings.matches("next-tab", event) {
+            return Some(Action::NextTab);
+        }
+        if self.bindings.matches("previous-tab", event) {
+            return Some(Action::PreviousTab);
+        }
+        if self.bindings.matches("close-tab", event) {
+            return Some(Action::CloseActiveTab);
+        }
         match (event.modifiers, event.code) {
-            (KeyModifiers::CONTROL, KeyCode::Char('n')) => return Some(Action::NextTab),
-            (KeyModifiers::CONTROL, KeyCode::Char('p')) => return Some(Action::PreviousTab),
-            (KeyModifiers::CONTROL, KeyCode::Char('q')) => return Some(Action::CloseActiveTab),
             (modifiers, KeyCode::Char('q' | 'Q'))
                 if modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT) =>
             {
@@ -1022,12 +1039,11 @@ impl Keymap {
                 _ => None,
             };
         }
-        if event.code == KeyCode::F(5) {
-            return if event.modifiers.contains(KeyModifiers::SHIFT) {
-                Some(Action::RunAllSql)
-            } else {
-                Some(Action::RunActiveSql)
-            };
+        if self.bindings.matches("run-buffer", event) {
+            return Some(Action::RunAllSql);
+        }
+        if self.bindings.matches("run-statement", event) {
+            return Some(Action::RunActiveSql);
         }
         if self.bindings.matches("help", event)
             && !(app.focus == Focus::Editor
@@ -1041,13 +1057,6 @@ impl Keymap {
         }
         if app.focus == Focus::Editor {
             return Some(Action::EditorKey(event));
-        }
-
-        if self.bindings.matches("focus-next-pane", event) {
-            return Some(Action::FocusNext);
-        }
-        if self.bindings.matches("focus-previous-pane", event) {
-            return Some(Action::FocusPrevious);
         }
 
         match event.code {

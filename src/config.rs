@@ -19,6 +19,11 @@ const SUPPORTED_COMMANDS: &[&str] = &[
     "notification-history",
     "focus-next-pane",
     "focus-previous-pane",
+    "run-statement",
+    "run-buffer",
+    "next-tab",
+    "previous-tab",
+    "close-tab",
 ];
 
 #[derive(Debug, Error)]
@@ -39,6 +44,12 @@ pub enum ConfigError {
     InvalidKeySequenceTimeout,
     #[error("invalid keybinding for `{command}`: `{key}`")]
     InvalidKeybinding { command: String, key: String },
+    #[error("keybinding `{key}` is assigned to both `{first}` and `{second}`")]
+    ConflictingKeybindings {
+        key: String,
+        first: String,
+        second: String,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -142,6 +153,29 @@ impl KeybindingConfig {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             commands.insert(command.clone(), sequences);
+        }
+        let entries = commands.iter().collect::<Vec<_>>();
+        for (index, (first_command, first_sequences)) in entries.iter().enumerate() {
+            for (second_command, second_sequences) in entries.iter().skip(index + 1) {
+                if first_sequences.iter().flatten().any(|first| {
+                    second_sequences
+                        .iter()
+                        .flatten()
+                        .any(|second| first == second)
+                }) {
+                    let key = self
+                        .commands
+                        .get(*first_command)
+                        .and_then(|keys| keys.first())
+                        .cloned()
+                        .unwrap_or_default();
+                    return Err(ConfigError::ConflictingKeybindings {
+                        key,
+                        first: (*first_command).clone(),
+                        second: (*second_command).clone(),
+                    });
+                }
+            }
         }
         Ok(KeyBindings { commands })
     }
@@ -449,5 +483,45 @@ mod tests {
             "quit",
             KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)
         ));
+        assert!(bindings.matches(
+            "run-statement",
+            KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE)
+        ));
+        assert!(bindings.matches(
+            "run-buffer",
+            KeyEvent::new(KeyCode::F(5), KeyModifiers::SHIFT)
+        ));
+        assert!(bindings.matches(
+            "next-tab",
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL)
+        ));
+    }
+
+    #[test]
+    fn conflicting_bindings_are_rejected() {
+        let error = AppConfig::from_toml(
+            r#"
+            version = 1
+            [terminal]
+            mouse = "auto"
+            color = "auto"
+            [ui]
+            icons = "nerd-font"
+            motion = "full"
+            [execution]
+            confirmation = "risky"
+            [dashboard]
+            refresh_interval_seconds = 5
+            [keybindings]
+            preset = "vim"
+            sequence_timeout_ms = 750
+            [keybindings.commands]
+            help = ["F2"]
+            quit = ["F2"]
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, ConfigError::ConflictingKeybindings { .. }));
     }
 }
