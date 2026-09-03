@@ -88,6 +88,7 @@ pub enum Action {
     FocusNext,
     FocusPrevious,
     Focus(Focus),
+    TogglePaneMaximized,
     ResizePane(PaneResize),
     ResetPaneSizes,
     PaneLayoutChanged(PaneLayoutMetrics),

@@ -886,6 +886,35 @@ fn maps_counted_pane_resize_commands() {
 }
 
 #[test]
+fn maps_window_f_to_toggle_focused_pane_maximize() {
+    let mut app = App::new(Vec::new());
+
+    for focus in [Focus::Explorer, Focus::Results] {
+        app.focus = focus;
+        assert_eq!(window_action(&app, 'f'), Some(Action::TogglePaneMaximized));
+    }
+}
+
+#[test]
+fn pane_maximize_help_entry_executes_the_same_action() {
+    let mut app = App::new(Vec::new());
+    app.focus = Focus::Results;
+    app.update(Action::ShowHelp);
+    app.update(Action::HelpPaste("maximize or restore focused pane".into()));
+
+    assert_eq!(
+        app.help_selected_id(),
+        Some(lazydb::help::HelpShortcutId::TogglePaneMaximized)
+    );
+    app.update(Action::ExecuteHelpShortcut(
+        lazydb::help::HelpShortcutId::TogglePaneMaximized,
+    ));
+
+    assert!(app.pane_maximized);
+    assert_eq!(app.overlay, None);
+}
+
+#[test]
 fn maps_global_sequences_and_function_keys() {
     let mut keymap = Keymap::default();
     let mut app = App::new(Vec::new());

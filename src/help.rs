@@ -240,6 +240,7 @@ pub enum HelpShortcutId {
     FocusResultsFromL,
     FocusEditorFromK,
     FocusEditorFromL,
+    TogglePaneMaximized,
     ResizeHeightIncrease,
     ResizeHeightDecrease,
     ResizeWidthIncrease,
@@ -695,6 +696,12 @@ macro_rules! row {
             prefix: Some(ShortcutPrefix::Window), suffix: Some($suffix),
             requirement: ShortcutRequirement::RelationPaneDirection($suffix.as_bytes()[0] as char), executable: true }
     };
+    ($id:ident, [$($context:ident),+], $sequence:literal, $description:literal, Window, $suffix:literal, always) => {
+        Shortcut { id: HelpShortcutId::$id, contexts: &[$(ShortcutContext::$context),+],
+            sequence: $sequence, description: $description, footer_priority: footer_priority(HelpShortcutId::$id),
+            prefix: Some(ShortcutPrefix::Window), suffix: Some($suffix),
+            requirement: ShortcutRequirement::Always, executable: true }
+    };
     ($id:ident, [$($context:ident),+], $sequence:literal, $description:literal, Window, $suffix:literal, resize) => {
         Shortcut { id: HelpShortcutId::$id, contexts: &[$(ShortcutContext::$context),+],
             sequence: $sequence, description: $description, footer_priority: footer_priority(HelpShortcutId::$id),
@@ -777,6 +784,25 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
         Window,
         "l",
         sql_pane
+    ),
+    row!(
+        TogglePaneMaximized,
+        [
+            Explorer,
+            EditorNormal,
+            EditorVisual,
+            SqlResultsData,
+            SqlOutput,
+            Dashboard,
+            RelationDataBrowse,
+            RelationDataVisual,
+            RelationDdl
+        ],
+        "Ctrl-w f",
+        "maximize or restore focused pane",
+        Window,
+        "f",
+        always
     ),
     row!(
         PreviousTab,
@@ -2504,11 +2530,12 @@ fn prefix_rank(prefix: ShortcutPrefix, id: HelpShortcutId) -> Option<u8> {
             Id::FocusExplorer => 1,
             Id::FocusResults | Id::FocusResultsFromL => 2,
             Id::FocusEditorFromK | Id::FocusEditorFromL => 3,
-            Id::ResizeHeightIncrease => 4,
-            Id::ResizeHeightDecrease => 5,
-            Id::ResizeWidthIncrease => 6,
-            Id::ResizeWidthDecrease => 7,
-            Id::ResetPaneSizes => 8,
+            Id::TogglePaneMaximized => 4,
+            Id::ResizeHeightIncrease => 5,
+            Id::ResizeHeightDecrease => 6,
+            Id::ResizeWidthIncrease => 7,
+            Id::ResizeWidthDecrease => 8,
+            Id::ResetPaneSizes => 9,
             _ => return None,
         },
         ShortcutPrefix::Goto => match id {
@@ -4043,6 +4070,7 @@ mod tests {
             vec![
                 HelpShortcutId::FocusExplorer,
                 HelpShortcutId::FocusResults,
+                HelpShortcutId::TogglePaneMaximized,
                 HelpShortcutId::ResizeHeightIncrease,
                 HelpShortcutId::ResizeHeightDecrease,
                 HelpShortcutId::ResizeWidthIncrease,
@@ -4063,6 +4091,7 @@ mod tests {
             vec![
                 HelpShortcutId::FocusExplorer,
                 HelpShortcutId::FocusEditorFromK,
+                HelpShortcutId::TogglePaneMaximized,
                 HelpShortcutId::ResizeHeightIncrease,
                 HelpShortcutId::ResizeHeightDecrease,
                 HelpShortcutId::ResizeWidthIncrease,

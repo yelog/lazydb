@@ -209,6 +209,7 @@ pub struct App {
     pub sql_editors: Vec<ConsoleRecord>,
     pub active_tab: usize,
     pub focus: Focus,
+    pub pane_maximized: bool,
     pub pane_sizes: PaneSizePreferences,
     pane_layout: PaneLayoutMetrics,
     pub overlay: Option<Overlay>,
@@ -548,6 +549,7 @@ impl App {
             sql_editors,
             active_tab: 0,
             focus: Focus::Editor,
+            pane_maximized: false,
             pane_sizes: PaneSizePreferences::default(),
             pane_layout: PaneLayoutMetrics::default(),
             overlay: None,
@@ -1401,6 +1403,7 @@ impl App {
             Id::FocusExplorerLeader => vec![Action::Focus(Focus::Explorer)],
             Id::FocusResults | Id::FocusResultsFromL => vec![Action::Focus(Focus::Results)],
             Id::FocusEditorFromK | Id::FocusEditorFromL => vec![Action::Focus(Focus::Editor)],
+            Id::TogglePaneMaximized => vec![Action::TogglePaneMaximized],
             Id::PreviousTab => vec![Action::PreviousTab],
             Id::NextTab => vec![Action::NextTab],
             Id::PreviousTabAlias => vec![Action::PreviousTab],
@@ -2574,6 +2577,10 @@ impl App {
             Action::Focus(focus) => {
                 self.focus = focus;
                 self.normalize_focus();
+                Vec::new()
+            }
+            Action::TogglePaneMaximized => {
+                self.pane_maximized = !self.pane_maximized;
                 Vec::new()
             }
             Action::ResizePane(resize) => {
@@ -7959,6 +7966,7 @@ impl App {
                 EditorEffect::Yanked(text) => Action::CopyEditorYank(text),
                 EditorEffect::ResizePane(resize) => Action::ResizePane(resize),
                 EditorEffect::ResetPaneSizes => Action::ResetPaneSizes,
+                EditorEffect::TogglePaneMaximized => Action::TogglePaneMaximized,
                 EditorEffect::CopyStatement => Action::CopyEditorStatement,
                 EditorEffect::CopyBuffer => Action::CopyEditorBuffer,
                 EditorEffect::Message(_)
@@ -13805,6 +13813,25 @@ mod tests {
 
         app.update(Action::ResetPaneSizes);
         assert_eq!(app.pane_sizes, PaneSizePreferences::default());
+    }
+
+    #[test]
+    fn pane_maximize_toggles_without_changing_size_preferences() {
+        let mut app = App::new(Vec::new());
+        app.pane_sizes = PaneSizePreferences {
+            explorer_width: Some(45),
+            editor_height: Some(12),
+        };
+        let sizes = app.pane_sizes;
+
+        assert!(!app.pane_maximized);
+        assert!(app.update(Action::TogglePaneMaximized).is_empty());
+        assert!(app.pane_maximized);
+        assert_eq!(app.pane_sizes, sizes);
+
+        assert!(app.update(Action::TogglePaneMaximized).is_empty());
+        assert!(!app.pane_maximized);
+        assert_eq!(app.pane_sizes, sizes);
     }
 
     #[test]

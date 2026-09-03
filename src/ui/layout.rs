@@ -39,6 +39,7 @@ impl AppLayout {
         focus: Focus,
         is_relation: bool,
         preferences: PaneSizePreferences,
+        pane_maximized: bool,
     ) -> Self {
         if area.width < 56 || area.height < 16 {
             return Self {
@@ -68,7 +69,7 @@ impl AppLayout {
         let body = vertical[1];
         let footer = vertical[2];
 
-        if area.width < 100 {
+        if pane_maximized || area.width < 100 {
             return match focus {
                 Focus::Explorer => Self {
                     mode: LayoutMode::Focus,
@@ -227,6 +228,7 @@ mod tests {
             Focus::Editor,
             false,
             PaneSizePreferences::default(),
+            false,
         );
         let explorer = layout.explorer.unwrap();
         let tabs = layout.tabs.unwrap();
@@ -246,6 +248,7 @@ mod tests {
             Focus::Results,
             true,
             PaneSizePreferences::default(),
+            false,
         );
 
         assert_eq!(layout.relation.unwrap().y, layout.tabs.unwrap().bottom());
@@ -259,6 +262,7 @@ mod tests {
             Focus::Explorer,
             false,
             PaneSizePreferences::default(),
+            false,
         );
 
         assert_eq!(layout.tabs, None);
@@ -272,12 +276,14 @@ mod tests {
             Focus::Editor,
             false,
             PaneSizePreferences::default(),
+            false,
         );
         let results = AppLayout::calculate(
             Rect::new(0, 0, 90, 40),
             Focus::Results,
             false,
             PaneSizePreferences::default(),
+            false,
         );
 
         assert_eq!(editor.editor.unwrap().y, editor.tabs.unwrap().bottom());
@@ -297,6 +303,7 @@ mod tests {
                 explorer_width: Some(70),
                 editor_height: Some(20),
             },
+            false,
         );
 
         assert_eq!(layout.explorer.unwrap().width, 70);
@@ -315,6 +322,7 @@ mod tests {
                 explorer_width: Some(u16::MAX),
                 editor_height: Some(u16::MAX),
             },
+            false,
         );
 
         assert_eq!(layout.explorer.unwrap().width, 60);
@@ -332,10 +340,49 @@ mod tests {
                 explorer_width: Some(70),
                 editor_height: Some(20),
             },
+            false,
         );
 
         assert_eq!(layout.pane_metrics.explorer_width, Some(70));
         assert_eq!(layout.pane_metrics.editor_height, None);
         assert_eq!(layout.relation.unwrap().height, layout.body.height - 2);
+    }
+
+    #[test]
+    fn maximized_sql_layout_only_exposes_the_focused_pane() {
+        for focus in [Focus::Explorer, Focus::Editor, Focus::Results] {
+            let layout = AppLayout::calculate(
+                Rect::new(0, 0, 180, 50),
+                focus,
+                false,
+                PaneSizePreferences::default(),
+                true,
+            );
+
+            assert_eq!(layout.mode, LayoutMode::Focus);
+            assert_eq!(layout.explorer.is_some(), focus == Focus::Explorer);
+            assert_eq!(layout.editor.is_some(), focus == Focus::Editor);
+            assert_eq!(layout.results.is_some(), focus == Focus::Results);
+            assert_eq!(layout.pane_metrics, PaneLayoutMetrics::default());
+        }
+    }
+
+    #[test]
+    fn maximized_relation_layout_uses_results_as_the_main_pane() {
+        let layout = AppLayout::calculate(
+            Rect::new(0, 0, 180, 50),
+            Focus::Results,
+            true,
+            PaneSizePreferences::default(),
+            true,
+        );
+
+        assert_eq!(layout.mode, LayoutMode::Focus);
+        assert!(layout.explorer.is_none());
+        assert!(layout.editor.is_none());
+        assert!(layout.results.is_none());
+        assert!(layout.relation.is_some());
+        assert!(layout.tabs.is_some());
+        assert_eq!(layout.pane_metrics, PaneLayoutMetrics::default());
     }
 }

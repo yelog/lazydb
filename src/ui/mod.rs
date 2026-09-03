@@ -530,7 +530,13 @@ pub fn render_with_state_using_icons_and_sequence(
         app.tabs.get(app.active_tab),
         Some(WorkspaceTab::Dashboard(_))
     );
-    let layout = AppLayout::calculate(area, app.focus, is_relation || is_dashboard, app.pane_sizes);
+    let layout = AppLayout::calculate(
+        area,
+        app.focus,
+        is_relation || is_dashboard,
+        app.pane_sizes,
+        app.pane_maximized,
+    );
     state.pane_layout = layout.pane_metrics;
     state.hit_regions.clear();
     state.editor_viewport = None;

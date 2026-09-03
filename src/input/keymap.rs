@@ -1378,6 +1378,7 @@ fn map_pending(pending: Pending, event: KeyEvent, app: &App) -> Option<Action> {
             crate::model::workspace::pane_resize(app.focus, operator, count).map(Action::ResizePane)
         }
         (Pending::Window { .. }, KeyCode::Char('=')) => Some(Action::ResetPaneSizes),
+        (Pending::Window { .. }, KeyCode::Char('f')) => Some(Action::TogglePaneMaximized),
         (Pending::Goto, KeyCode::Char('g')) if app.focus == Focus::Explorer => Some(
             Action::ExplorerSelectTarget(crate::model::explorer::ExplorerNodeTarget::First),
         ),
