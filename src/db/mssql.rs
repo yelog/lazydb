@@ -2182,11 +2182,9 @@ async fn execute_one_batch(
 }
 
 fn requires_standalone_batch(sql: &str) -> bool {
-    let keyword = sql.split_whitespace().take(2).collect::<Vec<_>>().join(" ");
-    keyword.eq_ignore_ascii_case("CREATE VIEW")
-        || keyword.eq_ignore_ascii_case("CREATE FUNCTION")
-        || keyword.eq_ignore_ascii_case("CREATE PROCEDURE")
-        || keyword.eq_ignore_ascii_case("CREATE TRIGGER")
+    sql.split_whitespace()
+        .next()
+        .is_some_and(|keyword| keyword.eq_ignore_ascii_case("CREATE"))
 }
 
 pub struct MsSqlTransactionBackend {
