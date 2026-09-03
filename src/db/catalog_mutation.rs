@@ -207,6 +207,7 @@ impl CatalogMutationCapabilities {
                         CatalogObjectType::Catalog(CatalogKind::Table),
                         CatalogObjectType::Catalog(CatalogKind::View),
                         CatalogObjectType::Catalog(CatalogKind::MaterializedView),
+                        CatalogObjectType::Catalog(CatalogKind::Sequence),
                     ],
                     CatalogKind::Table => vec![
                         CatalogObjectType::Catalog(CatalogKind::Column),

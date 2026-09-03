@@ -571,11 +571,15 @@ LIMIT 2001
                 },
                 CatalogMutationOption {
                     object_type: CatalogObjectType::Catalog(CatalogKind::Column),
-                    availability: CatalogMutationAvailability::Available,
+                    availability: CatalogMutationAvailability::Unavailable {
+                        reason: "column creation form is not implemented",
+                    },
                 },
                 CatalogMutationOption {
                     object_type: CatalogObjectType::Catalog(CatalogKind::Index),
-                    availability: CatalogMutationAvailability::Available,
+                    availability: CatalogMutationAvailability::Unavailable {
+                        reason: "index creation form is not implemented",
+                    },
                 },
                 CatalogMutationOption {
                     object_type: CatalogObjectType::Catalog(CatalogKind::PrimaryKey),

@@ -85,6 +85,57 @@ fn constraint_create_selection_initializes_typed_draft_and_field_focus() {
     assert_eq!(draft.columns.value(), "x");
 }
 
+fn select_schema_create(object_type: CatalogObjectType) -> CatalogEditorState {
+    let mut editor = CatalogEditorState::new(
+        CatalogMutationMode::Create,
+        CatalogMutationAnchor::Catalog(lazydb::db::catalog::CatalogId::new(
+            profile(),
+            lazydb::db::catalog::CatalogKind::Schema,
+            ["app", "public"],
+        )),
+        1,
+        vec![CatalogMutationOption {
+            object_type,
+            label: object_type.display_label().into(),
+        }],
+    );
+    assert!(editor.select_option(0));
+    editor
+}
+
+#[test]
+fn schema_table_create_selection_initializes_table_draft() {
+    let editor = select_schema_create(CatalogObjectType::Catalog(
+        lazydb::db::catalog::CatalogKind::Table,
+    ));
+    let Some(CatalogDraft::Table(draft)) = editor.draft else {
+        panic!("table draft expected");
+    };
+    assert_eq!(draft.schema.value(), "public");
+    assert!(draft.name.value().is_empty());
+    assert!(draft.columns.is_empty());
+}
+
+#[test]
+fn database_schema_create_selection_initializes_schema_draft() {
+    let mut editor = CatalogEditorState::new(
+        CatalogMutationMode::Create,
+        CatalogMutationAnchor::Catalog(lazydb::db::catalog::CatalogId::new(
+            profile(),
+            lazydb::db::catalog::CatalogKind::Database,
+            ["app"],
+        )),
+        1,
+        vec![CatalogMutationOption {
+            object_type: CatalogObjectType::Catalog(lazydb::db::catalog::CatalogKind::Schema),
+            label: "Schema".into(),
+        }],
+    );
+
+    assert!(editor.select_option(0));
+    assert!(matches!(editor.draft, Some(CatalogDraft::Schema(_))));
+}
+
 #[test]
 fn picker_loading_and_form_transitions() {
     let mut editor = state();

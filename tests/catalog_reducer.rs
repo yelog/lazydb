@@ -493,6 +493,7 @@ fn request_and_epoch_overflow_never_wrap_or_emit_a_command() {
             profile_id: profile.id,
             generation,
             server: server(),
+            mutation_capabilities: Default::default(),
         })
         .is_empty()
     );
@@ -1100,6 +1101,7 @@ fn connected_app() -> (App, ConnectionProfile) {
         profile_id: profile.id,
         generation,
         server: server(),
+        mutation_capabilities: Default::default(),
     });
     assert!(
         commands

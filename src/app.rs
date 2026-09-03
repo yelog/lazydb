@@ -244,6 +244,12 @@ enum CatalogRequestIntent {
     Completion,
 }
 
+pub(crate) struct CatalogCreateSelection {
+    pub anchor: CatalogMutationAnchor,
+    pub catalog_epoch: u64,
+    pub options: Vec<CatalogObjectType>,
+}
+
 fn selection_target_contains(target: &CatalogTarget, selection: &CatalogSelectionHint) -> bool {
     let CatalogSelectionHint::Object(object) = selection else {
         return true;
@@ -2921,42 +2927,23 @@ impl App {
                 Vec::new()
             }
             Action::OpenCatalogCreate => {
-                if let Some(ExplorerMutationIntent::Create(anchor)) =
-                    self.resolve_explorer_mutation_intent(false)
-                {
-                    let entry = match &anchor {
-                        CatalogMutationAnchor::Catalog(id) => self
-                            .explorer
-                            .normalized
-                            .profiles
-                            .get(&id.profile_id())
-                            .and_then(|state| state.catalog.get(id)),
-                        CatalogMutationAnchor::Profile { .. }
-                        | CatalogMutationAnchor::Group { .. } => None,
-                    };
-                    let options =
-                        crate::db::postgres::PostgresAdapter::catalog_mutation_capabilities()
-                            .create_options(&anchor, entry)
-                            .unwrap_or_default()
-                            .into_iter()
-                            .map(|object_type| {
-                                crate::model::catalog_editor::CatalogMutationOption {
-                                    object_type,
-                                    label: object_type.display_label().into(),
-                                }
-                            })
-                            .collect::<Vec<_>>();
-                    let has_options = !options.is_empty();
+                if let Some(selection) = self.selected_catalog_create_options() {
+                    let options = selection
+                        .options
+                        .into_iter()
+                        .map(
+                            |object_type| crate::model::catalog_editor::CatalogMutationOption {
+                                object_type,
+                                label: object_type.display_label().into(),
+                            },
+                        )
+                        .collect();
                     self.catalog_editor = Some(CatalogEditorState::new(
                         CatalogMutationMode::Create,
-                        anchor.clone(),
-                        self.explorer.catalog_generation,
+                        selection.anchor,
+                        selection.catalog_epoch,
                         options,
                     ));
-                    if has_options {
-                        let editor = self.catalog_editor.as_mut().unwrap();
-                        editor.page = crate::model::catalog_editor::CatalogEditorPage::ObjectPicker;
-                    }
                     self.overlay = Some(Overlay::CatalogEditor);
                 }
                 Vec::new()
@@ -3220,9 +3207,32 @@ impl App {
                 Vec::new()
             }
             Action::CatalogEditorSelect => {
+                let view_capabilities = self.connection.mutation_capabilities.view_options;
                 if let Some(editor) = self.catalog_editor.as_mut() {
                     let selected = editor.selected_option;
                     editor.select_option(selected);
+                    if editor.object_type
+                        == Some(CatalogObjectType::Catalog(
+                            crate::db::catalog::CatalogKind::View,
+                        ))
+                    {
+                        if let Some(crate::model::catalog_editor::CatalogDraft::View(draft)) =
+                            editor.draft.as_mut()
+                        {
+                            draft.security_barrier = crate::db::catalog_mutation::ViewOption {
+                                availability: view_capabilities.security_barrier,
+                                value: None,
+                            };
+                            draft.security_invoker = crate::db::catalog_mutation::ViewOption {
+                                availability: view_capabilities.security_invoker,
+                                value: None,
+                            };
+                            draft.check_option = crate::db::catalog_mutation::ViewOption {
+                                availability: view_capabilities.check_option,
+                                value: None,
+                            };
+                        }
+                    }
                 }
                 Vec::new()
             }
@@ -4513,6 +4523,7 @@ impl App {
                     self.connection.profile_id = None;
                     self.connection.generation = 0;
                     self.connection.server = None;
+                    self.connection.mutation_capabilities = Default::default();
                     self.connection.target = None;
                     self.connection.error = None;
                     self.clear_active_catalog(profile_id);
@@ -5299,6 +5310,7 @@ impl App {
                 profile_id,
                 generation,
                 server,
+                mutation_capabilities,
             } => {
                 let active_generation = self
                     .connection
@@ -5360,6 +5372,7 @@ impl App {
                     ConnectionStatus::Connected
                 };
                 self.connection.server = Some(server);
+                self.connection.mutation_capabilities = mutation_capabilities;
                 self.connection.error = None;
                 let mut persist_target = false;
                 if pending_matches
@@ -5518,6 +5531,7 @@ impl App {
                 self.connection.profile_id = None;
                 self.connection.generation = 0;
                 self.connection.server = None;
+                self.connection.mutation_capabilities = Default::default();
                 self.connection.target = None;
                 self.connection.error = Some(message.clone());
                 self.notify_error("Connection", message.clone());
@@ -6578,6 +6592,79 @@ impl App {
             self.explorer.normalized.selected.as_ref(),
             edit,
         )
+    }
+
+    pub(crate) fn selected_catalog_create_options(&self) -> Option<CatalogCreateSelection> {
+        let ExplorerMutationIntent::Create(anchor) =
+            self.resolve_explorer_mutation_intent(false)?
+        else {
+            return None;
+        };
+        let selected = self.explorer.normalized.selected.as_ref()?;
+        let profile_id = selected.profile_id()?;
+        let profile = self
+            .profiles
+            .iter()
+            .find(|profile| profile.id == profile_id)?;
+        if profile.read_only {
+            return None;
+        }
+        if matches!(anchor, CatalogMutationAnchor::Profile { .. }) {
+            let capabilities = match profile.kind {
+                DatabaseKind::Postgres => {
+                    crate::db::postgres::PostgresAdapter::catalog_mutation_capabilities()
+                }
+                DatabaseKind::MySql => {
+                    crate::db::mysql::MySqlAdapter::catalog_mutation_capabilities()
+                }
+                DatabaseKind::Sqlite => {
+                    crate::db::sqlite::SqliteAdapter::catalog_mutation_capabilities()
+                }
+                DatabaseKind::SqlServer => {
+                    crate::db::mssql::MsSqlAdapter::catalog_mutation_capabilities()
+                }
+            };
+            let options = capabilities.create_options(&anchor, None).ok()?;
+            return (!options.is_empty()).then_some(CatalogCreateSelection {
+                anchor,
+                catalog_epoch: 0,
+                options,
+            });
+        }
+        let connection = self.database_command_identity()?;
+        if connection.profile_id != profile_id {
+            return None;
+        }
+        let target = self.connection.target.as_ref()?;
+        if !target.is_valid(profile) {
+            return None;
+        }
+        let anchor_database = match &anchor {
+            CatalogMutationAnchor::Catalog(id) => id.native_path.first(),
+            CatalogMutationAnchor::Group { schema, .. } => schema.native_path.first(),
+            CatalogMutationAnchor::Profile { .. } => None,
+        };
+        if anchor_database.is_some_and(|database| database != &target.database) {
+            return None;
+        }
+        let profile_state = self.explorer.normalized.profiles.get(&profile_id)?;
+        let entry = match &anchor {
+            CatalogMutationAnchor::Catalog(id) => {
+                let entry = profile_state.catalog.get(id)?;
+                if entry.id != *id || entry.kind != id.kind {
+                    return None;
+                }
+                Some(entry)
+            }
+            _ => None,
+        };
+        let capabilities = &self.connection.mutation_capabilities;
+        let options = capabilities.create_options(&anchor, entry).ok()?;
+        (!options.is_empty()).then_some(CatalogCreateSelection {
+            anchor,
+            catalog_epoch: profile_state.catalog_epoch,
+            options,
+        })
     }
 
     fn close_profile_manager(&mut self) {
@@ -7818,6 +7905,7 @@ impl App {
             self.connection.profile_id = None;
             self.connection.generation = 0;
             self.connection.server = None;
+            self.connection.mutation_capabilities = Default::default();
             self.connection.target = None;
             self.clear_active_catalog(profile_id);
             self.select_nearest_profile(profile_id);
@@ -14152,6 +14240,7 @@ mod tests {
                 version: "test".into(),
                 database: "memory".into(),
             },
+            mutation_capabilities: Default::default(),
         });
         app.update(Action::NewConsole);
         app.explorer
@@ -14273,6 +14362,7 @@ mod tests {
                 version: "test".into(),
                 database: "memory".into(),
             },
+            mutation_capabilities: Default::default(),
         });
         app.active_console_mut().transaction_mode = TransactionMode::Manual;
         app.active_console_mut().transaction_state = TransactionState::Active;

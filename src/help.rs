@@ -2367,41 +2367,37 @@ fn catalog_editor_capabilities(app: &App) -> (bool, bool, bool) {
     let Some(selected) = app.explorer.normalized.selected.as_ref() else {
         return (false, false, false);
     };
-    let Some(profile_id) = selected.profile_id() else {
-        return (false, false, false);
-    };
-    let Some(profile) = app.profiles.iter().find(|profile| profile.id == profile_id) else {
-        return (false, false, false);
-    };
     let profile_edit_available = matches!(selected, ExplorerNodeId::Profile(_));
-    if profile.kind != crate::profile::DatabaseKind::Postgres {
-        return (profile_edit_available, false, false);
-    }
-    let capabilities = crate::db::postgres::PostgresAdapter::catalog_mutation_capabilities();
-    let entry = match selected {
-        ExplorerNodeId::Catalog(id) => app
-            .explorer
-            .normalized
-            .profiles
-            .get(&profile_id)
-            .and_then(|state| state.catalog.get(id)),
-        _ => None,
+    let create = app.selected_catalog_create_options().is_some();
+    let edit = {
+        let Some(profile_id) = selected.profile_id() else {
+            return (profile_edit_available, create, false);
+        };
+        if !app.profiles.iter().any(|profile| profile.id == profile_id) {
+            return (profile_edit_available, create, false);
+        }
+        let entry = match selected {
+            ExplorerNodeId::Catalog(id) => app
+                .explorer
+                .normalized
+                .profiles
+                .get(&profile_id)
+                .and_then(|state| state.catalog.get(id)),
+            _ => None,
+        };
+        let anchor = match selected {
+            ExplorerNodeId::Catalog(id) => CatalogMutationAnchor::Catalog(id.clone()),
+            ExplorerNodeId::Profile(id) => CatalogMutationAnchor::Profile { profile_id: *id },
+            ExplorerNodeId::Group { parent, group } => CatalogMutationAnchor::Group {
+                schema: parent.clone(),
+                group: *group,
+            },
+            _ => return (profile_edit_available, create, false),
+        };
+        let capabilities = crate::db::postgres::PostgresAdapter::catalog_mutation_capabilities();
+        matches!(selected, ExplorerNodeId::Catalog(_))
+            && capabilities.can_edit(&anchor, entry).unwrap_or(false)
     };
-    let anchor = match selected {
-        ExplorerNodeId::Profile(id) => CatalogMutationAnchor::Profile { profile_id: *id },
-        ExplorerNodeId::Catalog(id) => CatalogMutationAnchor::Catalog(id.clone()),
-        ExplorerNodeId::Group { parent, group } => CatalogMutationAnchor::Group {
-            schema: parent.clone(),
-            group: *group,
-        },
-        _ => return (profile_edit_available, false, false),
-    };
-    let create = !matches!(selected, ExplorerNodeId::Profile(_))
-        && capabilities
-            .create_options(&anchor, entry)
-            .is_ok_and(|options| !options.is_empty());
-    let edit = matches!(selected, ExplorerNodeId::Catalog(_))
-        && capabilities.can_edit(&anchor, entry).unwrap_or(false);
     (profile_edit_available, create, edit)
 }
 

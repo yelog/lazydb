@@ -258,6 +258,7 @@ fn relation_event_cannot_mutate_a_cached_inactive_workspace() {
             version: "3".into(),
             database: "second".into(),
         },
+        mutation_capabilities: Default::default(),
     });
     let tab_id = request.tab_id;
     app.update(Action::RelationSucceeded {
