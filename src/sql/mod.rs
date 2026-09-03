@@ -21,9 +21,9 @@ mod transaction;
 pub use analysis::{AnalysisKey, LineIndex};
 pub use batch::{SqlServerBatchError, split_sql_server_batches};
 pub use completion::{
-    CompletionCandidate, CompletionContext, CompletionIndex, CompletionKind, CompletionScheduleKey,
-    CompletionScore, complete, quote_identifier, relation_ids_for_completion,
-    should_offer_completion,
+    CompletionCandidate, CompletionContext, CompletionDependencies, CompletionIndex,
+    CompletionKind, CompletionScheduleKey, CompletionScore, complete, completion_dependencies,
+    quote_identifier, relation_ids_for_completion, should_offer_completion,
 };
 pub use derived_result::{
     DerivedQueryError, PaginatedSql, bounded_query, build_derived_paginated_query,
