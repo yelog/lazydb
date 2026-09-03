@@ -876,6 +876,16 @@ fn maps_counted_pane_resize_commands() {
 }
 
 #[test]
+fn maps_window_f_to_toggle_focused_pane_maximize() {
+    let mut app = App::new(Vec::new());
+
+    for focus in [Focus::Explorer, Focus::Results] {
+        app.focus = focus;
+        assert_eq!(window_action(&app, 'f'), Some(Action::TogglePaneMaximized));
+    }
+}
+
+#[test]
 fn maps_global_sequences_and_function_keys() {
     let mut keymap = Keymap::default();
     let mut app = App::new(Vec::new());
