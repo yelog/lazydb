@@ -1375,27 +1375,7 @@ impl Runtime {
                 });
                 return;
             }
-            let target = match task_plan.execution_target.clone() {
-                Some(target) => target,
-                None => match task_plan.refresh.first() {
-                    Some(crate::db::catalog::CatalogTarget::Schemas { database }) => {
-                        crate::db::catalog_mutation::CatalogMutationTarget::Database(
-                            crate::model::execution_target::ExecutionTarget {
-                                profile_id: task_plan.request.connection.profile_id,
-                                database: database.native_path.first().cloned().unwrap_or_default(),
-                                schema: None,
-                            },
-                        )
-                    }
-                    _ => {
-                        let _ = sender.send(Action::CatalogMutationFailed {
-                            plan: task_plan,
-                            message: "Mutation has an invalid schema refresh target".into(),
-                        });
-                        return;
-                    }
-                },
-            };
+            let target = task_plan.execution_target.clone();
             let database = match resolve_catalog_mutation_connection(
                 Arc::clone(&connection),
                 task_plan.request.connection,

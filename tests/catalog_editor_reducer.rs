@@ -13,6 +13,71 @@ use lazydb::{
 };
 use uuid::Uuid;
 
+#[test]
+fn table_navigation_reaches_and_leaves_every_action() {
+    let mut app = App::new(Vec::new());
+    let mut editor = lazydb::model::catalog_editor::CatalogEditorState::new(
+        lazydb::db::catalog_mutation::CatalogMutationMode::Create,
+        lazydb::db::catalog_mutation::CatalogMutationAnchor::Group {
+            schema: CatalogId::new(Uuid::nil(), CatalogKind::Schema, ["app", "public"]),
+            group: lazydb::db::catalog::ObjectGroup::Tables,
+        },
+        0,
+        vec![lazydb::model::catalog_editor::CatalogMutationOption {
+            object_type: CatalogObjectType::Catalog(CatalogKind::Table),
+            label: "Table".into(),
+        }],
+    );
+    assert!(editor.select_object_type(CatalogObjectType::Catalog(CatalogKind::Table)));
+    app.catalog_editor = Some(editor);
+    app.catalog_editor_compact.set(true);
+
+    app.update(Action::CatalogEditorFieldNext);
+    assert!(matches!(
+        app.catalog_editor.as_ref().and_then(|editor| editor.draft.as_ref()),
+        Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft))
+            if draft.focus
+                == lazydb::model::catalog_editor::TableEditorFocus::General(
+                    lazydb::model::catalog_editor::TableGeneralField::Schema
+                )
+    ));
+    if let Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)) = app
+        .catalog_editor
+        .as_mut()
+        .and_then(|editor| editor.draft.as_mut())
+    {
+        draft.focus = lazydb::model::catalog_editor::TableEditorFocus::Columns;
+    }
+    for expected in [
+        lazydb::model::catalog_editor::TableActionField::AddColumn,
+        lazydb::model::catalog_editor::TableActionField::RemoveColumn,
+        lazydb::model::catalog_editor::TableActionField::Review,
+        lazydb::model::catalog_editor::TableActionField::Cancel,
+    ] {
+        app.update(Action::CatalogEditorFieldNext);
+        assert!(matches!(
+            app.catalog_editor.as_ref().and_then(|editor| editor.draft.as_ref()),
+            Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft))
+                if draft.focus == lazydb::model::catalog_editor::TableEditorFocus::Action(expected)
+        ));
+    }
+    for expected in [
+        lazydb::model::catalog_editor::TableActionField::Review,
+        lazydb::model::catalog_editor::TableActionField::RemoveColumn,
+        lazydb::model::catalog_editor::TableActionField::AddColumn,
+        lazydb::model::catalog_editor::TableActionField::AddColumn,
+    ] {
+        app.update(Action::CatalogEditorFieldPrevious);
+        assert!(matches!(
+            app.catalog_editor.as_ref().and_then(|editor| editor.draft.as_ref()),
+            Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft))
+                if draft.focus == lazydb::model::catalog_editor::TableEditorFocus::Action(expected)
+                    || expected == lazydb::model::catalog_editor::TableActionField::AddColumn
+                        && draft.focus == lazydb::model::catalog_editor::TableEditorFocus::Columns
+        ));
+    }
+}
+
 fn profile() -> ConnectionProfile {
     import_connection_url(":memory:", Some("test"))
         .unwrap()
@@ -316,6 +381,32 @@ fn opening_create_on_schema_uses_capability_ordered_options() {
         editor.draft,
         Some(lazydb::model::catalog_editor::CatalogDraft::Table(_))
     ));
+    app.update(Action::CatalogEditorEditTableColumn);
+    let Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)) = app
+        .catalog_editor
+        .as_ref()
+        .and_then(|editor| editor.draft.as_ref())
+    else {
+        panic!("table draft expected");
+    };
+    assert_eq!(
+        draft.focus,
+        lazydb::model::catalog_editor::TableEditorFocus::ColumnDetails(
+            lazydb::model::catalog_editor::TableColumnField::Name,
+        )
+    );
+    app.update(Action::CatalogEditorLeaveTableColumnDetails);
+    let Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)) = app
+        .catalog_editor
+        .as_ref()
+        .and_then(|editor| editor.draft.as_ref())
+    else {
+        panic!("table draft expected");
+    };
+    assert_eq!(
+        draft.focus,
+        lazydb::model::catalog_editor::TableEditorFocus::Columns
+    );
 
     app.update(Action::CatalogEditorCancel);
     app.explorer.normalized.selected = Some(lazydb::model::explorer::ExplorerNodeId::Catalog(
@@ -505,6 +596,141 @@ fn sequence_edit_is_allowed_from_a_direct_catalog_selection() {
         app.resolve_explorer_mutation_intent(true),
         Some(ExplorerMutationIntent::Edit(_))
     ));
+}
+
+#[test]
+fn table_column_selection_and_add_actions_sync_focus_and_details() {
+    let profile = profile();
+    let schema = CatalogId::new(profile.id, CatalogKind::Schema, ["app", "public"]);
+    let mut editor = lazydb::model::catalog_editor::CatalogEditorState::new(
+        lazydb::db::catalog_mutation::CatalogMutationMode::Create,
+        CatalogMutationAnchor::Group {
+            schema,
+            group: lazydb::db::catalog::ObjectGroup::Tables,
+        },
+        1,
+        Vec::new(),
+    );
+    assert!(editor.select_object_type(CatalogObjectType::Catalog(CatalogKind::Table)));
+    let mut app = App::new(vec![profile]);
+    app.catalog_editor = Some(editor);
+
+    app.update(Action::CatalogEditorSelectTableColumn(0));
+    let draft = app.catalog_editor.as_ref().unwrap().draft.as_ref().unwrap();
+    let lazydb::model::catalog_editor::CatalogDraft::Table(draft) = draft else {
+        panic!("table draft expected");
+    };
+    assert_eq!(draft.selected_column, 0);
+    assert_eq!(
+        draft.focus,
+        lazydb::model::catalog_editor::TableEditorFocus::Columns
+    );
+
+    draft_mut(&mut app).columns[0].name = "id".into();
+    app.update(Action::CatalogEditorAddTableColumn);
+    let draft = app.catalog_editor.as_ref().unwrap().draft.as_ref().unwrap();
+    let lazydb::model::catalog_editor::CatalogDraft::Table(draft) = draft else {
+        panic!("table draft expected");
+    };
+    assert_eq!(draft.columns[0].name.value(), "id");
+    assert_eq!(draft.selected_column, 1);
+    assert_eq!(
+        draft.focus,
+        lazydb::model::catalog_editor::TableEditorFocus::ColumnDetails(
+            lazydb::model::catalog_editor::TableColumnField::Name
+        )
+    );
+}
+
+#[test]
+fn catalog_mutation_failure_from_an_old_connection_is_ignored() {
+    let old_profile = profile();
+    let old_profile_id = old_profile.id;
+    let new_profile = import_connection_url(":memory:", Some("new"))
+        .unwrap()
+        .profile;
+    let old_connection = lazydb::identity::ConnectionIdentity {
+        profile_id: old_profile.id,
+        generation: 1,
+    };
+    let mut app = App::new(vec![old_profile, new_profile.clone()]);
+    app.update(Action::ConnectionSucceeded {
+        profile_id: new_profile.id,
+        generation: 1,
+        server: lazydb::db::ServerInfo {
+            kind: lazydb::profile::DatabaseKind::Sqlite,
+            version: "3.50.0".into(),
+            database: ":memory:".into(),
+            current_user: None,
+        },
+        mutation_capabilities: Default::default(),
+    });
+
+    let anchor = CatalogMutationAnchor::Catalog(CatalogId::new(
+        old_profile_id,
+        CatalogKind::Database,
+        ["app"],
+    ));
+    let request = lazydb::db::catalog_mutation::CatalogMutationRequest::new(
+        old_connection,
+        2,
+        0,
+        lazydb::db::catalog_mutation::CatalogMutationMode::Create,
+        anchor.clone(),
+        CatalogObjectType::Catalog(CatalogKind::Schema),
+    )
+    .unwrap();
+    let plan = lazydb::db::catalog_mutation::CatalogMutationPlan::new(
+        request,
+        CatalogObjectType::Catalog(CatalogKind::Schema),
+        lazydb::db::catalog_mutation::CatalogMutationExecutionMode::Transactional,
+        lazydb::db::catalog_mutation::CatalogMutationTarget::maintenance("postgres").unwrap(),
+        vec![lazydb::db::catalog::CatalogTarget::Databases],
+        lazydb::db::catalog_mutation::CatalogSelectionHint::Parent(
+            lazydb::db::catalog::CatalogTarget::Databases,
+        ),
+        None,
+        Vec::new(),
+        vec!["CREATE SCHEMA events".into()],
+    )
+    .unwrap();
+    app.catalog_editor = Some(lazydb::model::catalog_editor::CatalogEditorState {
+        mode: lazydb::db::catalog_mutation::CatalogMutationMode::Create,
+        anchor,
+        object_type: Some(CatalogObjectType::Catalog(CatalogKind::Schema)),
+        page: lazydb::model::catalog_editor::CatalogEditorPage::SqlPreview,
+        operation: Some(
+            lazydb::model::catalog_editor::CatalogEditorOperation::Applying { request_id: 2 },
+        ),
+        catalog_epoch: 0,
+        options: Vec::new(),
+        selected_option: 0,
+        draft: None,
+        baseline: None,
+        plan: Some(plan.clone()),
+        error: None,
+        owner_picker: Default::default(),
+    });
+
+    app.update(Action::CatalogMutationFailed {
+        plan,
+        message: "old connection failed".into(),
+    });
+
+    let editor = app.catalog_editor.as_ref().unwrap();
+    assert!(matches!(
+        editor.operation,
+        Some(lazydb::model::catalog_editor::CatalogEditorOperation::Applying { request_id: 2 })
+    ));
+    assert_eq!(editor.error, None);
+}
+
+fn draft_mut(app: &mut App) -> &mut lazydb::model::catalog_editor::TableDraft {
+    let draft = app.catalog_editor.as_mut().unwrap().draft.as_mut().unwrap();
+    let lazydb::model::catalog_editor::CatalogDraft::Table(draft) = draft else {
+        panic!("table draft expected");
+    };
+    draft
 }
 
 #[test]

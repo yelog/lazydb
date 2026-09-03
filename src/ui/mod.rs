@@ -129,7 +129,7 @@ pub enum HitTarget {
     ProfileGroupCancel,
     ExplorerAddOption(usize),
     CatalogEditorField(usize),
-    CatalogEditorTableField(crate::model::catalog_editor::TableEditorField),
+    CatalogEditorTableField(crate::model::catalog_editor::TableEditorFocus),
     CatalogEditorTableColumn(usize),
     CatalogEditorAddTableColumn,
     CatalogEditorRemoveTableColumn,
@@ -601,7 +601,9 @@ pub fn render_with_state_using_icons_sequence_and_theme(
                 render_results(frame, area, app, theme, state);
             }
         }
-        render_footer(frame, layout.footer, app, theme, sequence);
+        if !matches!(app.overlay, Some(Overlay::CatalogEditor)) {
+            render_footer(frame, layout.footer, app, theme, sequence);
+        }
         state.hit_regions.push(HitRegion {
             area: layout.footer,
             target: HitTarget::Help,

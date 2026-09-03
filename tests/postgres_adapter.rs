@@ -732,9 +732,8 @@ async fn serialized_postgres_catalog_mutations_round_trip_catalog_definitions() 
                         added_column("id", 1, "integer", false),
                         added_column("value", 2, "text", true),
                     ],
-                    selected_section: lazydb::model::catalog_editor::CatalogEditorSection::Columns,
                     selected_column: 0,
-                    selected_field: lazydb::model::catalog_editor::TableEditorField::Name,
+                    focus: lazydb::model::catalog_editor::TableEditorFocus::Columns,
                     indexes: vec![],
                     constraints: vec![],
                 }),
@@ -1075,6 +1074,18 @@ async fn apply_plan(
         None
     };
     let plan = PostgresAdapter::plan_catalog_mutation(request, draft, baseline).unwrap();
+    if plan.request.object_type == CatalogObjectType::Catalog(CatalogKind::Table)
+        && plan.request.mode == CatalogMutationMode::Create
+    {
+        assert!(matches!(
+            plan.execution_target,
+            lazydb::db::catalog_mutation::CatalogMutationTarget::Database(ExecutionTarget { .. })
+        ));
+        assert!(matches!(
+            plan.refresh.first(),
+            Some(CatalogTarget::Objects { .. })
+        ));
+    }
     database.execute_catalog_mutation(&plan).await.unwrap();
 }
 

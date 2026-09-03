@@ -41,7 +41,8 @@ fn postgres_role_create_redacts_password_and_plans_attributes_memberships_and_co
         },
         CatalogObjectType::LoginRole,
     )
-    .unwrap();
+    .unwrap()
+    .with_current_database("app");
     let mut draft = RoleDraft::new(true);
     draft.name = "alice".into();
     draft.superuser = true;
@@ -61,6 +62,8 @@ fn postgres_role_create_redacts_password_and_plans_attributes_memberships_and_co
     assert!(format!("{plan:?}").contains("<redacted>"));
     assert!(!format!("{plan:?}").contains("never-display-this"));
     assert!(plan.sql().contains("GRANT \"alice\" TO \"reporting\""));
+    assert_eq!(plan.execution_target.database(), "app");
+    assert_eq!(plan.execution_target.execution_target(profile).schema, None);
 }
 
 #[test]
@@ -712,6 +715,7 @@ fn mutation_protocol_validates_definition_requests_and_plans() {
         request,
         CatalogObjectType::Catalog(CatalogKind::Database),
         CatalogMutationExecutionMode::Transactional,
+        CatalogMutationTarget::maintenance("postgres").unwrap(),
         vec![CatalogTarget::Databases],
         CatalogSelectionHint::Object(id(profile, CatalogKind::Database, &["app"])),
         Some("baseline".into()),
@@ -727,6 +731,7 @@ fn mutation_protocol_validates_definition_requests_and_plans() {
         plan.request.clone(),
         plan.object_type,
         plan.execution_mode,
+        CatalogMutationTarget::maintenance("postgres").unwrap(),
         plan.refresh.clone(),
         plan.selection.clone(),
         None,
@@ -737,6 +742,64 @@ fn mutation_protocol_validates_definition_requests_and_plans() {
         empty,
         Err(CatalogMutationError::InvalidPlan { .. })
     ));
+}
+
+#[test]
+fn mutation_plan_validates_execution_target_invariants() {
+    let profile = Uuid::new_v4();
+    let request = CatalogMutationRequest::new(
+        ConnectionIdentity {
+            profile_id: profile,
+            generation: 1,
+        },
+        1,
+        1,
+        CatalogMutationMode::Create,
+        CatalogMutationAnchor::Profile {
+            profile_id: profile,
+        },
+        CatalogObjectType::Catalog(CatalogKind::Database),
+    )
+    .unwrap();
+    let target = |profile_id: Uuid, database: &str| {
+        CatalogMutationTarget::database_target(lazydb::model::execution_target::ExecutionTarget {
+            profile_id,
+            database: database.into(),
+            schema: None,
+        })
+    };
+    let make_plan = |target, refresh| {
+        CatalogMutationPlan::new(
+            request.clone(),
+            CatalogObjectType::Catalog(CatalogKind::Database),
+            CatalogMutationExecutionMode::Transactional,
+            target,
+            refresh,
+            CatalogSelectionHint::Parent(CatalogTarget::Databases),
+            None,
+            Vec::new(),
+            vec!["CREATE DATABASE app".into()],
+        )
+    };
+
+    assert!(matches!(
+        make_plan(
+            target(Uuid::new_v4(), "app").unwrap(),
+            vec![CatalogTarget::Databases]
+        ),
+        Err(CatalogMutationError::ProfileMismatch { .. })
+    ));
+    assert!(target(profile, "").is_err());
+    assert!(
+        make_plan(
+            target(profile, "app").unwrap(),
+            vec![CatalogTarget::Objects {
+                schema: id(profile, CatalogKind::Schema, &["app", "public"]),
+                group: ObjectGroup::Tables,
+            }]
+        )
+        .is_ok()
+    );
 }
 
 fn entry(id: CatalogId, parent_id: Option<CatalogId>) -> CatalogEntry {
@@ -972,6 +1035,7 @@ fn postgres_schema_create_quotes_identifiers_and_literals() {
         plan.selection,
         CatalogSelectionHint::Object(id(profile, CatalogKind::Schema, &["app", "odd\"schema"]))
     );
+    assert_eq!(plan.execution_target.execution_target(profile).schema, None);
 }
 
 #[test]
@@ -1002,6 +1066,7 @@ fn postgres_schema_edit_plans_rename_owner_and_comment_changes() {
         plan.sql(),
         "ALTER SCHEMA \"old\" RENAME TO \"new\"\nALTER SCHEMA \"new\" OWNER TO \"new_owner\"\nCOMMENT ON SCHEMA \"new\" IS 'new ''comment'''"
     );
+    assert_eq!(plan.execution_target.execution_target(profile).schema, None);
 }
 
 #[test]
@@ -1180,9 +1245,8 @@ fn table_draft(name: &str, columns: Vec<ColumnDraft>) -> CatalogDraft {
         owner: "owner".into(),
         comment: "table comment".into(),
         columns,
-        selected_section: lazydb::model::catalog_editor::CatalogEditorSection::Columns,
         selected_column: 0,
-        selected_field: lazydb::model::catalog_editor::TableEditorField::Name,
+        focus: lazydb::model::catalog_editor::TableEditorFocus::Columns,
         indexes: vec![],
         constraints: vec![],
     })

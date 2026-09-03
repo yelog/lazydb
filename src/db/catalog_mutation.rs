@@ -692,7 +692,7 @@ pub struct CatalogMutationPlan {
     pub warnings: Vec<String>,
     pub destructive: bool,
     pub impact: CatalogMutationImpact,
-    pub execution_target: Option<CatalogMutationTarget>,
+    pub execution_target: CatalogMutationTarget,
     statements: Vec<String>,
     #[allow(dead_code)]
     pub(crate) execution_secret: Option<crate::security::RedactedSecret>,
@@ -703,6 +703,7 @@ impl CatalogMutationPlan {
         request: CatalogMutationRequest,
         object_type: CatalogObjectType,
         execution_mode: CatalogMutationExecutionMode,
+        execution_target: CatalogMutationTarget,
         refresh: Vec<CatalogTarget>,
         selection: CatalogSelectionHint,
         baseline_fingerprint: Option<String>,
@@ -720,6 +721,7 @@ impl CatalogMutationPlan {
             request,
             object_type,
             execution_mode,
+            execution_target,
             refresh,
             selection,
             baseline_fingerprint,
@@ -734,7 +736,6 @@ impl CatalogMutationPlan {
                 },
                 native_identity_changed: false,
             },
-            execution_target: None,
             statements,
             execution_secret: None,
         };
@@ -761,6 +762,19 @@ impl CatalogMutationPlan {
         if self.refresh.is_empty() {
             return Err(CatalogMutationError::InvalidPlan {
                 reason: "plan must contain a refresh target".into(),
+            });
+        }
+        if self.execution_target.database().trim().is_empty() {
+            return Err(CatalogMutationError::InvalidPlan {
+                reason: "execution target database is empty".into(),
+            });
+        }
+        if let CatalogMutationTarget::Database(target) = &self.execution_target
+            && target.profile_id != self.request.connection.profile_id
+        {
+            return Err(CatalogMutationError::ProfileMismatch {
+                object_profile_id: target.profile_id,
+                connection_profile_id: self.request.connection.profile_id,
             });
         }
         for target in &self.refresh {
@@ -804,11 +818,6 @@ impl CatalogMutationPlan {
 
     pub fn with_destructive(mut self, destructive: bool) -> Self {
         self.destructive = destructive;
-        self
-    }
-
-    pub fn with_execution_target(mut self, target: CatalogMutationTarget) -> Self {
-        self.execution_target = Some(target);
         self
     }
 
