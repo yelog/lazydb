@@ -2956,6 +2956,64 @@ fn quit_panel_moves_selection_style_to_commit() {
 }
 
 #[test]
+fn quit_panel_replaces_transaction_actions_while_query_is_running() {
+    let mut app = fixture();
+    app.active_console_mut().transaction_mode = TransactionMode::Manual;
+    app.active_console_mut().transaction_state =
+        lazydb::model::transaction::TransactionState::Active;
+    app.active_console_mut().query_status = QueryStatus::Running;
+    let (console_id, transaction_generation) = {
+        let console = app.active_console();
+        (console.id, console.transaction_generation)
+    };
+    app.overlay = Some(Overlay::TransactionExitConfirm {
+        prompt: lazydb::model::transaction::DeferredTransactionPrompt {
+            console_id,
+            transaction_generation,
+            intent: lazydb::model::transaction::DeferredIntent::Quit,
+        },
+        choice: lazydb::model::transaction::TransactionExitChoice::Rollback,
+    });
+
+    let output = render(&app, 100, 30);
+
+    assert!(output.contains("QUERY IN PROGRESS"), "{output}");
+    assert!(output.contains("wait or Ctrl-C to cancel"), "{output}");
+    assert!(!output.contains("[ Commit ]"), "{output}");
+    assert!(!output.contains("[ Rollback ]"), "{output}");
+    assert!(output.contains("Esc return"), "{output}");
+}
+
+#[test]
+fn quit_panel_isolates_unknown_outcome_actions() {
+    let mut app = fixture();
+    app.active_console_mut().transaction_mode = TransactionMode::Manual;
+    app.active_console_mut().transaction_state =
+        lazydb::model::transaction::TransactionState::OutcomeUnknown;
+    let (console_id, transaction_generation) = {
+        let console = app.active_console();
+        (console.id, console.transaction_generation)
+    };
+    app.overlay = Some(Overlay::TransactionExitConfirm {
+        prompt: lazydb::model::transaction::DeferredTransactionPrompt {
+            console_id,
+            transaction_generation,
+            intent: lazydb::model::transaction::DeferredIntent::Quit,
+        },
+        choice: lazydb::model::transaction::TransactionExitChoice::Abandon,
+    });
+
+    let output = render(&app, 100, 30);
+
+    assert!(output.contains("OUTCOME UNKNOWN"), "{output}");
+    assert!(output.contains("Abandon local state"), "{output}");
+    assert!(!output.contains("[ Commit ]"), "{output}");
+    assert!(!output.contains("[ Rollback ]"), "{output}");
+    assert!(output.contains("A abandon"), "{output}");
+    assert!(output.contains("Esc cancel"), "{output}");
+}
+
+#[test]
 fn editor_context_keeps_transaction_visible_when_narrow() {
     let mut app = fixture();
     app.active_console_mut().transaction_mode = lazydb::model::transaction::TransactionMode::Manual;

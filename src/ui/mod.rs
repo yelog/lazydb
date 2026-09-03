@@ -3340,23 +3340,55 @@ fn render_transaction_exit_overlay(
         );
     }
 
-    let current = app.tabs.iter().find(|tab| tab.id() == prompt.console_id);
-    let commit_enabled = !current
-        .and_then(|tab| tab.as_console())
+    let current_console = app
+        .tabs
+        .iter()
+        .find(|tab| tab.id() == prompt.console_id)
+        .and_then(|tab| tab.as_console());
+    let running =
+        current_console.is_some_and(|console| console.query_status == QueryStatus::Running);
+    let outcome_unknown = current_console
+        .is_some_and(|console| console.transaction_state == TransactionState::OutcomeUnknown);
+    let commit_enabled = !current_console
         .is_some_and(|console| console.transaction_state == TransactionState::Aborted);
-    render_transaction_exit_actions(
-        frame,
-        Rect::new(inner.x, inner.bottom().saturating_sub(2), inner.width, 1),
-        choice,
-        commit_enabled,
-        theme,
-    );
-    frame.render_widget(
-        Paragraph::new("Tab/←/→ select   Enter confirm   Esc cancel")
-            .style(Style::new().fg(theme.muted).bg(theme.surface))
-            .alignment(Alignment::Center),
-        Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
-    );
+    let action_area = Rect::new(inner.x, inner.bottom().saturating_sub(2), inner.width, 1);
+    let footer_area = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
+
+    if running {
+        frame.render_widget(
+            Paragraph::new("QUERY IN PROGRESS  wait or Ctrl-C to cancel")
+                .style(
+                    Style::new()
+                        .fg(theme.warning)
+                        .bg(theme.surface)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .alignment(Alignment::Center),
+            action_area,
+        );
+        frame.render_widget(
+            Paragraph::new("Esc return")
+                .style(Style::new().fg(theme.muted).bg(theme.surface))
+                .alignment(Alignment::Center),
+            footer_area,
+        );
+    } else if outcome_unknown {
+        render_unknown_transaction_actions(frame, action_area, choice, theme);
+        frame.render_widget(
+            Paragraph::new("A abandon   Esc cancel")
+                .style(Style::new().fg(theme.muted).bg(theme.surface))
+                .alignment(Alignment::Center),
+            footer_area,
+        );
+    } else {
+        render_transaction_exit_actions(frame, action_area, choice, commit_enabled, theme);
+        frame.render_widget(
+            Paragraph::new("Tab/←/→ select   Enter confirm   Esc cancel")
+                .style(Style::new().fg(theme.muted).bg(theme.surface))
+                .alignment(Alignment::Center),
+            footer_area,
+        );
+    }
 }
 
 fn render_transaction_summary_row(
@@ -3481,6 +3513,51 @@ fn render_transaction_exit_actions(
                 .add_modifier(Modifier::BOLD),
         ),
         Rect::new(x, area.y, cancel.cell_width(), 1),
+    );
+}
+
+fn render_unknown_transaction_actions(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    choice: crate::model::transaction::TransactionExitChoice,
+    theme: Theme,
+) {
+    use crate::model::transaction::TransactionExitChoice;
+
+    let abandon = "[ Abandon local state ]";
+    let cancel = "Cancel";
+    let gap = 2;
+    let total_width = abandon
+        .cell_width()
+        .saturating_add(cancel.cell_width())
+        .saturating_add(gap);
+    let x = area
+        .x
+        .saturating_add(area.width.saturating_sub(total_width) / 2);
+    frame.render_widget(
+        Paragraph::new(abandon).style(if choice == TransactionExitChoice::Abandon {
+            Style::new()
+                .fg(theme.background)
+                .bg(theme.error)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().fg(theme.text).bg(theme.surface)
+        }),
+        Rect::new(x, area.y, abandon.cell_width(), 1),
+    );
+    frame.render_widget(
+        Paragraph::new(cancel).style(
+            Style::new()
+                .fg(theme.muted)
+                .bg(theme.surface)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Rect::new(
+            x.saturating_add(abandon.cell_width()).saturating_add(gap),
+            area.y,
+            cancel.cell_width(),
+            1,
+        ),
     );
 }
 
