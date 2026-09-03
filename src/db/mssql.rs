@@ -24,7 +24,6 @@ use super::mutation::{InputValue, MutationResult, RelationMutation, RelationMuta
 use super::transaction::{TransactionBackend, TransactionError};
 use super::{
     DatabaseError, ErrorCategory, RelationPreview, ServerInfo,
-    catalog_mutation::CatalogMutationCapabilities,
     catalog::{
         CatalogCapabilities, CatalogCount, CatalogDiscovery, CatalogEntry, CatalogGroupSummary,
         CatalogId, CatalogKind, CatalogMetadata, CatalogPage, CatalogRequest, CatalogRequestKey,
@@ -34,6 +33,7 @@ use super::{
         QualifiedName, RelationDdl, finalize_keyset_page,
     },
     catalog_drop::{CatalogDropError, CatalogDropPlan, CatalogDropRequest},
+    catalog_mutation::CatalogMutationCapabilities,
     ddl::{DdlSection, assemble_ddl},
     monitor::{MonitorMetadata, MonitorSnapshot, ProcessSnapshot},
     query::{ColumnMeta, QueryOutcome, QueryStats, RELATION_PREVIEW_LIMIT, ResultSet},

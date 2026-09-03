@@ -303,9 +303,9 @@ impl DatabaseConnection {
     ) -> Result<QueryOutcome, DatabaseError> {
         match self {
             Self::Postgres(adapter) => adapter.execute_catalog_mutation(plan).await,
-            Self::MySql(_) | Self::Sqlite(_) | Self::SqlServer(_) => Err(DatabaseError::configuration(
-                "catalog mutation is not supported for this database",
-            )),
+            Self::MySql(_) | Self::Sqlite(_) | Self::SqlServer(_) => Err(
+                DatabaseError::configuration("catalog mutation is not supported for this database"),
+            ),
         }
     }
 
@@ -354,9 +354,11 @@ impl DatabaseConnection {
     ) -> Result<CatalogObjectDefinition, DatabaseError> {
         match self {
             Self::Postgres(adapter) => adapter.load_catalog_object_definition(request).await,
-            Self::MySql(_) | Self::Sqlite(_) | Self::SqlServer(_) => Err(DatabaseError::configuration(
-                "catalog object definition loading is not supported for this database",
-            )),
+            Self::MySql(_) | Self::Sqlite(_) | Self::SqlServer(_) => {
+                Err(DatabaseError::configuration(
+                    "catalog object definition loading is not supported for this database",
+                ))
+            }
         }
     }
 
