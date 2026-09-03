@@ -1,7 +1,10 @@
 use lazydb::{
     action::Action,
     app::App,
-    db::{catalog::CatalogId, catalog_mutation::CatalogMutationAnchor},
+    db::{
+        catalog::{CatalogEntry, CatalogId, CatalogKind, OptionalMetadata, QualifiedName},
+        catalog_mutation::{CatalogMutationAnchor, CatalogObjectType},
+    },
     model::{
         explorer::{ExplorerMutationIntent, ExplorerNodeId, StatusRowKind},
         workspace::Overlay,
@@ -179,6 +182,111 @@ fn help_edit_shortcut_uses_direct_selection_resolution() {
 }
 
 #[test]
+fn opening_create_on_schema_uses_capability_ordered_options() {
+    let profile = import_connection_url("postgres://localhost/app", Some("postgres-test"))
+        .unwrap()
+        .profile;
+    let profile_id = profile.id;
+    let mut app = App::new(vec![profile]);
+    let generation = match app.update(Action::RequestConnect(profile_id)).as_slice() {
+        [lazydb::action::Command::Connect { generation, .. }] => *generation,
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+    app.update(Action::ConnectionSucceeded {
+        profile_id,
+        generation,
+        server: lazydb::db::ServerInfo {
+            kind: lazydb::profile::DatabaseKind::Postgres,
+            version: "PostgreSQL 15".into(),
+            database: "app".into(),
+        },
+        mutation_capabilities:
+            lazydb::db::postgres::PostgresAdapter::catalog_mutation_capabilities_for_version(
+                150_000,
+            ),
+    });
+    let database = CatalogId::new(profile_id, CatalogKind::Database, ["app"]);
+    let schema = CatalogId::new(profile_id, CatalogKind::Schema, ["app", "public"]);
+    let catalog = &mut app
+        .explorer
+        .normalized
+        .profiles
+        .get_mut(&profile_id)
+        .unwrap()
+        .catalog;
+    catalog
+        .insert(
+            CatalogEntry::database(
+                database.clone(),
+                QualifiedName {
+                    database: Some("app".into()),
+                    schema: None,
+                    object: "app".into(),
+                },
+                "database",
+                OptionalMetadata::Supported(None),
+                true,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    catalog
+        .insert(
+            CatalogEntry::schema(
+                schema.clone(),
+                database,
+                QualifiedName {
+                    database: Some("app".into()),
+                    schema: Some("public".into()),
+                    object: "public".into(),
+                },
+                "schema",
+                OptionalMetadata::Supported(None),
+                true,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    app.explorer.normalized.selected =
+        Some(lazydb::model::explorer::ExplorerNodeId::Catalog(schema));
+    let catalog_epoch = app
+        .explorer
+        .normalized
+        .profiles
+        .get(&profile_id)
+        .unwrap()
+        .catalog_epoch;
+
+    app.update(Action::OpenCatalogCreate);
+    let editor = app.catalog_editor.as_ref().expect("catalog editor");
+    assert_eq!(
+        editor
+            .options
+            .iter()
+            .map(|option| option.object_type)
+            .collect::<Vec<_>>(),
+        vec![
+            CatalogObjectType::Catalog(CatalogKind::Table),
+            CatalogObjectType::Catalog(CatalogKind::View),
+            CatalogObjectType::Catalog(CatalogKind::MaterializedView),
+            CatalogObjectType::Catalog(CatalogKind::Sequence),
+        ]
+    );
+    assert_eq!(editor.catalog_epoch, catalog_epoch);
+
+    app.update(Action::CatalogEditorMove(1));
+    app.update(Action::CatalogEditorSelect);
+    let Some(lazydb::model::catalog_editor::CatalogDraft::View(draft)) = app
+        .catalog_editor
+        .as_ref()
+        .and_then(|editor| editor.draft.as_ref())
+    else {
+        panic!("view draft expected");
+    };
+    assert!(draft.security_invoker.availability.is_available());
+}
+
+#[test]
 fn mutation_refresh_api_accepts_unique_targets_and_leaves_selection_for_reload() {
     let profile = profile();
     let profile_id = profile.id;
@@ -291,6 +399,10 @@ fn view_edit_dispatches_definition_load_and_accepts_matching_view_definition() {
             version: "PostgreSQL 15".into(),
             database: "app".into(),
         },
+        mutation_capabilities:
+            lazydb::db::postgres::PostgresAdapter::catalog_mutation_capabilities_for_version(
+                150_000,
+            ),
     });
     let id = CatalogId::new(
         profile.id,

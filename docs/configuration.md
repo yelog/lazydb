@@ -97,7 +97,11 @@ application settings. The commands currently accepted in
 `focus-next-pane`, `focus-previous-pane`, `run-statement`, `run-buffer`,
 `next-tab`, `previous-tab`, and `close-tab`. Each value is a list of key
 events or space-separated key sequences such as `F2`, `Ctrl-c`, `Shift-Tab`,
-or `g t`; empty lists unbind a command.
+or `g t`; empty lists unbind a command. The current Leader commands are
+`open-dashboard`, `open-explorer`, `open-editors`, `run-leader-statement`,
+`run-leader-buffer`, and `open-target-selector`.
+The pane commands are `focus-pane-left`, `focus-pane-down`, `focus-pane-up`,
+`focus-pane-right`, `toggle-pane-maximized`, and `reset-pane-sizes`.
 A key sequence remains active for 750 milliseconds by default, and
 `sequence_timeout_ms` must be at least `1`.
 

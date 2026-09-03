@@ -26,6 +26,7 @@ fn connected_app(policy: ConfirmationPolicy) -> App {
             version: "3.50".into(),
             database: ":memory:".into(),
         },
+        mutation_capabilities: Default::default(),
     });
     app.connection.target = app.active_console().execution_target.clone();
     app

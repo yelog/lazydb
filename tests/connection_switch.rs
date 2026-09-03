@@ -246,6 +246,7 @@ fn pending_switch_keeps_active_identity_and_rejects_new_queries() {
         profile_id: first_id,
         generation: first_generation,
         server: server("first"),
+        mutation_capabilities: Default::default(),
     });
     let active_server = app.connection.server.clone();
 
@@ -291,6 +292,7 @@ fn failed_switch_keeps_visible_workspace_and_editor_text_unchanged() {
         profile_id: first_id,
         generation: first_generation,
         server: server("first"),
+        mutation_capabilities: Default::default(),
     });
     app.update(Action::ReplaceEditor("SELECT first".into()));
     let first_tab = app.active_console().id;
@@ -329,6 +331,7 @@ fn successful_switch_caches_and_restores_profile_workspace_once() {
         profile_id: first_id,
         generation: first_generation,
         server: server("first"),
+        mutation_capabilities: Default::default(),
     });
     app.update(Action::ReplaceEditor("SELECT first".into()));
     let first_tab = app.active_console().id;
@@ -341,6 +344,7 @@ fn successful_switch_caches_and_restores_profile_workspace_once() {
         profile_id: second_id,
         generation: second_generation,
         server: server("second"),
+        mutation_capabilities: Default::default(),
     });
     assert_eq!(app.active_workspace_profile, Some(second_id));
     assert_eq!(app.tabs.len(), 1);
@@ -368,6 +372,7 @@ fn successful_switch_caches_and_restores_profile_workspace_once() {
         profile_id: first_id,
         generation: first_generation,
         server: server("first-again"),
+        mutation_capabilities: Default::default(),
     });
     assert_eq!(app.active_workspace_profile, Some(first_id));
     assert_eq!(app.active_console().id, first_tab);
@@ -472,6 +477,7 @@ fn target_selector_switches_only_after_matching_connection_success() {
         profile_id,
         generation,
         server: server(":memory:"),
+        mutation_capabilities: Default::default(),
     });
     assert_eq!(app.active_console().execution_target.as_ref(), Some(&alias));
     assert_eq!(app.connection.target.as_ref(), Some(&alias));
@@ -502,6 +508,7 @@ fn target_selector_requires_an_active_connection_and_blocks_manual_transactions(
         profile_id,
         generation: 2,
         server: server(":memory:"),
+        mutation_capabilities: Default::default(),
     });
     app.update(Action::OpenTargetSelector);
     app.active_console_mut().transaction_mode = lazydb::model::transaction::TransactionMode::Manual;
@@ -525,6 +532,7 @@ fn running_sql_blocks_connection_switch_without_changing_workspace() {
         profile_id: first_id,
         generation,
         server: server("first"),
+        mutation_capabilities: Default::default(),
     });
     let console_id = app.active_console().id;
     app.active_console_mut().query_status = QueryStatus::Running;
@@ -553,6 +561,7 @@ fn all_manual_console_transactions_are_deferred_and_cancel_keeps_connection() {
         profile_id: first_id,
         generation,
         server: server("first"),
+        mutation_capabilities: Default::default(),
     });
     let first_console = app.active_console().id;
     app.update(Action::NewConsole);
@@ -593,6 +602,7 @@ fn dirty_relation_edit_blocks_switch_and_quit_with_explicit_message() {
         profile_id,
         generation,
         server: server("profile"),
+        mutation_capabilities: Default::default(),
     });
     let mut relation = RelationTab::new("users");
     let mut edit = RelationEditSession::from_rows(vec![vec![]]);
@@ -637,6 +647,7 @@ fn profile_root_safe_switch_keeps_old_online_while_target_links_then_fails_local
         profile_id: first_id,
         generation: first_generation,
         server: server("first"),
+        mutation_capabilities: Default::default(),
     });
 
     let second_generation = match app
@@ -698,6 +709,7 @@ fn profile_root_successful_switch_clears_old_catalog_and_syncs_target() {
         profile_id: first_id,
         generation: first_generation,
         server: server("first"),
+        mutation_capabilities: Default::default(),
     });
     app.explorer
         .normalized
@@ -717,6 +729,7 @@ fn profile_root_successful_switch_clears_old_catalog_and_syncs_target() {
         profile_id: second_id,
         generation: second_generation,
         server: server("second"),
+        mutation_capabilities: Default::default(),
     });
 
     assert_eq!(
@@ -761,6 +774,7 @@ fn installed_connection_success_reconciles_without_clearing_a_newer_attempt() {
         profile_id: first_id,
         generation: old_generation,
         server: server("stale"),
+        mutation_capabilities: Default::default(),
     });
     app.update(Action::ConnectionFailed {
         profile_id: first_id,
@@ -822,6 +836,7 @@ fn disconnected_identity_cannot_be_resurrected_by_a_stale_success() {
         profile_id,
         generation,
         server: server("profile"),
+        mutation_capabilities: Default::default(),
     });
     app.update(Action::DisconnectCompleted { connection });
 
@@ -830,6 +845,7 @@ fn disconnected_identity_cannot_be_resurrected_by_a_stale_success() {
             profile_id,
             generation,
             server: server("stale"),
+            mutation_capabilities: Default::default(),
         })
         .is_empty()
     );
@@ -875,6 +891,7 @@ fn active_disconnect_caches_and_hides_workspace_until_reconnect() {
         profile_id,
         generation,
         server: server("profile"),
+        mutation_capabilities: Default::default(),
     });
     let console_id = app.active_console().id;
     app.update(Action::ReplaceEditor("SELECT cached".into()));
@@ -905,6 +922,7 @@ fn active_disconnect_caches_and_hides_workspace_until_reconnect() {
         profile_id,
         generation: reconnect_generation,
         server: server("profile-again"),
+        mutation_capabilities: Default::default(),
     });
     assert_eq!(app.active_console().id, console_id);
     assert_eq!(app.active_editor_text().unwrap(), "SELECT cached");
@@ -923,6 +941,7 @@ fn active_invalidation_caches_and_hides_workspace_but_stale_invalidation_is_igno
         profile_id,
         generation,
         server: server("profile"),
+        mutation_capabilities: Default::default(),
     });
     app.update(Action::ReplaceEditor("SELECT invalidated".into()));
     app.update(Action::ConnectionInvalidated {

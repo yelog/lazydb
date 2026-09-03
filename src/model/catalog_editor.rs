@@ -946,6 +946,20 @@ impl IndexDraft {
 }
 
 impl TableDraft {
+    pub fn new(schema: impl Into<String>) -> Self {
+        Self {
+            name: TextInput::default(),
+            schema: schema.into().into(),
+            owner: TextInput::default(),
+            comment: TextInput::default(),
+            columns: Vec::new(),
+            selected_section: CatalogEditorSection::General,
+            selected_column: 0,
+            indexes: Vec::new(),
+            constraints: Vec::new(),
+        }
+    }
+
     pub fn from_definition(definition: &crate::db::catalog_mutation::TableDefinition) -> Self {
         Self {
             name: definition.name.clone().into(),
@@ -1253,6 +1267,23 @@ impl CatalogEditorState {
             },
             self.object_type,
         ) {
+            if id.kind == crate::db::catalog::CatalogKind::Database
+                && object_type
+                    == CatalogObjectType::Catalog(crate::db::catalog::CatalogKind::Schema)
+            {
+                self.draft = Some(CatalogDraft::Schema(SchemaDraft {
+                    name: TextInput::default(),
+                    owner: TextInput::default(),
+                    comment: TextInput::default(),
+                }));
+            }
+            if id.kind == crate::db::catalog::CatalogKind::Schema
+                && object_type == CatalogObjectType::Catalog(crate::db::catalog::CatalogKind::Table)
+            {
+                self.draft = Some(CatalogDraft::Table(TableDraft::new(
+                    id.native_path.get(1).cloned().unwrap_or_default(),
+                )));
+            }
             if id.kind == crate::db::catalog::CatalogKind::Schema
                 && object_type
                     == CatalogObjectType::Catalog(crate::db::catalog::CatalogKind::Sequence)

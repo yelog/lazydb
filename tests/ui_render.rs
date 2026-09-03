@@ -55,6 +55,7 @@ fn fixture() -> App {
             version: "3.50.0".into(),
             database: ":memory:".into(),
         },
+        mutation_capabilities: Default::default(),
     });
     app.update(Action::ReplaceEditor(
         "SELECT id, name, active\nFROM users\nWHERE active = true;".into(),
@@ -267,10 +268,22 @@ fn catalog_editor_overlay_renders_picker_shell_and_context() {
             profile_id: uuid::Uuid::nil(),
         },
         0,
-        vec![lazydb::model::catalog_editor::CatalogMutationOption {
-            object_type: lazydb::db::catalog_mutation::CatalogObjectType::LoginRole,
-            label: "Login Role".into(),
-        }],
+        [
+            lazydb::db::catalog::CatalogKind::Table,
+            lazydb::db::catalog::CatalogKind::View,
+            lazydb::db::catalog::CatalogKind::MaterializedView,
+            lazydb::db::catalog::CatalogKind::Sequence,
+        ]
+        .into_iter()
+        .map(
+            |kind| lazydb::model::catalog_editor::CatalogMutationOption {
+                object_type: lazydb::db::catalog_mutation::CatalogObjectType::Catalog(kind),
+                label: lazydb::db::catalog_mutation::CatalogObjectType::Catalog(kind)
+                    .display_label()
+                    .into(),
+            },
+        )
+        .collect(),
     ));
     app.overlay = Some(Overlay::CatalogEditor);
 
@@ -278,7 +291,10 @@ fn catalog_editor_overlay_renders_picker_shell_and_context() {
 
     assert!(output.contains("CATALOG EDITOR // CREATE"), "{output}");
     assert!(output.contains("Choose an object type"), "{output}");
-    assert!(output.contains("Login Role"), "{output}");
+    assert!(output.contains("Table"), "{output}");
+    assert!(output.contains("View"), "{output}");
+    assert!(output.contains("Materialized View"), "{output}");
+    assert!(output.contains("Sequence"), "{output}");
 }
 
 #[test]
@@ -2110,6 +2126,7 @@ fn execution_confirmation_preview_is_sanitized_and_shows_scope() {
             version: "3.50.0".into(),
             database: ":memory:".into(),
         },
+        mutation_capabilities: Default::default(),
     });
     app.update(Action::ReplaceEditor("SELECT 1;\x1b]8;;bad\x07".into()));
     app.update(Action::RunAllSql);

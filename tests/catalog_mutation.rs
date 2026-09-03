@@ -219,7 +219,7 @@ fn catalog_mutation_target_rejects_empty_databases_and_preserves_target_kind() {
 }
 
 #[test]
-fn postgres_materialized_view_capability_only_offers_index_children() {
+fn postgres_materialized_view_capability_hides_incomplete_index_creation() {
     let profile = Uuid::new_v4();
     let object = id(
         profile,
@@ -229,10 +229,7 @@ fn postgres_materialized_view_capability_only_offers_index_children() {
     let options = lazydb::db::postgres::PostgresAdapter::catalog_mutation_capabilities()
         .create_options(&CatalogMutationAnchor::Catalog(object), None)
         .unwrap();
-    assert_eq!(
-        options,
-        vec![CatalogObjectType::Catalog(CatalogKind::Index)]
-    );
+    assert!(options.is_empty());
 }
 
 #[test]
@@ -515,13 +512,65 @@ fn postgres_index_capabilities_cover_table_and_materialized_view() {
         let options = caps
             .create_options(&CatalogMutationAnchor::Catalog(object), None)
             .unwrap();
-        assert!(options.contains(&CatalogObjectType::Catalog(CatalogKind::Index)));
-        if kind == CatalogKind::MaterializedView {
-            assert_eq!(
-                options,
-                vec![CatalogObjectType::Catalog(CatalogKind::Index)]
-            );
-        }
+        assert!(!options.contains(&CatalogObjectType::Catalog(CatalogKind::Index)));
+    }
+}
+
+#[test]
+fn postgres_schema_create_options_include_every_implemented_schema_object() {
+    let profile = Uuid::new_v4();
+    let schema = id(profile, CatalogKind::Schema, &["app", "public"]);
+    let capabilities = lazydb::db::postgres::PostgresAdapter::catalog_mutation_capabilities();
+    let options = capabilities
+        .create_options(&CatalogMutationAnchor::Catalog(schema.clone()), None)
+        .unwrap();
+
+    assert_eq!(
+        options,
+        vec![
+            CatalogObjectType::Catalog(CatalogKind::Table),
+            CatalogObjectType::Catalog(CatalogKind::View),
+            CatalogObjectType::Catalog(CatalogKind::MaterializedView),
+            CatalogObjectType::Catalog(CatalogKind::Sequence),
+        ]
+    );
+
+    for (group, kind) in [
+        (ObjectGroup::Tables, CatalogKind::Table),
+        (ObjectGroup::Views, CatalogKind::View),
+        (
+            ObjectGroup::MaterializedViews,
+            CatalogKind::MaterializedView,
+        ),
+        (ObjectGroup::Sequences, CatalogKind::Sequence),
+    ] {
+        assert_eq!(
+            capabilities
+                .create_options(
+                    &CatalogMutationAnchor::Group {
+                        schema: schema.clone(),
+                        group,
+                    },
+                    None,
+                )
+                .unwrap(),
+            vec![CatalogObjectType::Catalog(kind)]
+        );
+    }
+}
+
+#[test]
+fn postgres_create_capabilities_hide_incomplete_column_and_index_flows() {
+    let capabilities = lazydb::db::postgres::PostgresAdapter::catalog_mutation_capabilities();
+    for kind in [CatalogKind::Column, CatalogKind::Index] {
+        assert!(matches!(
+            capabilities.create_availability(CatalogObjectType::Catalog(kind)),
+            Some(CatalogMutationAvailability::Unavailable { .. })
+        ));
+        assert_eq!(
+            capabilities.edit_availability(CatalogObjectType::Catalog(kind)),
+            Some(CatalogMutationAvailability::Available)
+        );
     }
 }
 

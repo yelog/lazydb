@@ -1026,12 +1026,13 @@ impl Runtime {
                         return Err(error);
                     }
                 };
-                Ok::<_, crate::db::DatabaseError>((database, server))
+                let mutation_capabilities = database.catalog_mutation_capabilities();
+                Ok::<_, crate::db::DatabaseError>((database, server, mutation_capabilities))
             })
             .await
             .map_err(|_| DatabaseError::configuration("connection timed out after 10 seconds"));
             match candidate {
-                Ok(Ok((database, server))) => {
+                Ok(Ok((database, server, mutation_capabilities))) => {
                     let mutation_guard = mutation.lock().await;
                     if !profile_revision_is_current(&registry, &profile, profile_revision).await {
                         database.close().await;
@@ -1070,6 +1071,7 @@ impl Runtime {
                         profile_id,
                         generation,
                         server,
+                        mutation_capabilities,
                     });
                     drop(mutation_guard);
                     if let Some(previous) = previous
@@ -3736,6 +3738,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
         app.restore_workspace(workspace, startup.selected);
     }
     app.set_dashboard_refresh_interval_millis(settings.dashboard_refresh_interval_millis());
+    app.set_key_bindings(settings.keybindings.key_bindings()?);
     app.reveal_startup_profile(startup.selected);
     app.focus = crate::model::workspace::Focus::Explorer;
     let (event_sender, mut event_receiver) = mpsc::unbounded_channel();

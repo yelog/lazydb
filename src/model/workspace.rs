@@ -5,6 +5,7 @@ use uuid::Uuid;
 pub use crate::identity::ConnectionIdentity;
 
 use crate::db::catalog::{CatalogSearchHit, CatalogSearchPage, search_text_matches};
+use crate::db::catalog_mutation::CatalogMutationCapabilities;
 use crate::db::{
     ServerInfo,
     catalog::{CatalogEntry, CatalogId, CatalogKind, CatalogNode, CatalogTarget, OptionalMetadata},
@@ -213,6 +214,7 @@ pub struct ConnectionState {
     pub pending_target: Option<ExecutionTarget>,
     pub status: ConnectionStatus,
     pub server: Option<ServerInfo>,
+    pub mutation_capabilities: CatalogMutationCapabilities,
     pub error: Option<String>,
 }
 
