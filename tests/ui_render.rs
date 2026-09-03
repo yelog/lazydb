@@ -3014,6 +3014,33 @@ fn quit_panel_isolates_unknown_outcome_actions() {
 }
 
 #[test]
+fn quit_panel_remains_readable_at_minimum_terminal_size() {
+    let mut app = fixture();
+    app.active_console_mut().transaction_mode = TransactionMode::Manual;
+    app.active_console_mut().transaction_state =
+        lazydb::model::transaction::TransactionState::Active;
+    app.active_console_mut().name =
+        "a-very-long-console-name-that-must-not-overwrite-the-state".into();
+    assert!(app.update(Action::Quit).is_empty());
+
+    let output = render(&app, 56, 16);
+
+    assert_eq!(
+        output.matches("PENDING TRANSACTIONS").count(),
+        1,
+        "{output}"
+    );
+    assert!(output.contains("TRANSACTION SUMMARY"), "{output}");
+    assert!(output.contains("ACTIVE"), "{output}");
+    assert!(output.contains("Rollback"), "{output}");
+    assert!(output.contains("Esc cancel"), "{output}");
+    assert!(output.contains('╭'), "{output}");
+    assert!(output.contains('╮'), "{output}");
+    assert!(output.contains('╰'), "{output}");
+    assert!(output.contains('╯'), "{output}");
+}
+
+#[test]
 fn editor_context_keeps_transaction_visible_when_narrow() {
     let mut app = fixture();
     app.active_console_mut().transaction_mode = lazydb::model::transaction::TransactionMode::Manual;
