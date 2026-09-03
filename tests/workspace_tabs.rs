@@ -768,6 +768,7 @@ fn restored_relation_waits_for_catalog_before_loading() {
             version: "3".into(),
             database: ":memory:".into(),
         },
+        mutation_capabilities: Default::default(),
     });
     assert_eq!(
         commands
@@ -1043,6 +1044,7 @@ fn restored_relation_at_tables_request(
             version: "3".into(),
             database: ":memory:".into(),
         },
+        mutation_capabilities: Default::default(),
     });
     assert!(!commands.iter().any(|command| matches!(
         command,

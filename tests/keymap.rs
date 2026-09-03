@@ -1674,6 +1674,7 @@ fn editor_leader_opens_connection_target_selector() {
             version: "3.50".into(),
             database: ":memory:".into(),
         },
+        mutation_capabilities: Default::default(),
     });
     app.update(Action::EditorKey(key(KeyCode::Esc)));
     app.update(Action::EditorKey(key(KeyCode::Char(' '))));
@@ -2398,6 +2399,7 @@ fn profile_confirmation_and_paste_are_contextual_and_redacted() {
             version: "3.50".into(),
             database: ":memory:".into(),
         },
+        mutation_capabilities: Default::default(),
     });
     app.update(Action::OpenProfileManager);
     app.update(Action::ProfileRequestDelete {

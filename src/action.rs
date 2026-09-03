@@ -6,8 +6,8 @@ use crate::model::profile_organization::MoveDirection;
 use crate::profile::ProfileCollection;
 
 use crate::db::catalog_mutation::{
-    CatalogMutationPlan, CatalogMutationRequest, CatalogObjectDefinition,
-    CatalogObjectDefinitionRequest,
+    CatalogMutationCapabilities, CatalogMutationPlan, CatalogMutationRequest,
+    CatalogObjectDefinition, CatalogObjectDefinitionRequest,
 };
 use crate::db::{
     ErrorCategory, ServerInfo,
@@ -548,6 +548,7 @@ pub enum Action {
         profile_id: Uuid,
         generation: u64,
         server: ServerInfo,
+        mutation_capabilities: CatalogMutationCapabilities,
     },
     ConnectionFailed {
         profile_id: Uuid,

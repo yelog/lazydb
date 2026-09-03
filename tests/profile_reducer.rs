@@ -357,6 +357,7 @@ fn opening_an_offline_profile_expands_it_after_connection_succeeds() {
         profile_id,
         generation,
         server: server(),
+        mutation_capabilities: Default::default(),
     });
 
     assert!(
@@ -384,6 +385,7 @@ fn activating_an_offline_profile_expands_it_after_connection_succeeds() {
         profile_id,
         generation,
         server: server(),
+        mutation_capabilities: Default::default(),
     });
 
     assert!(
@@ -1414,6 +1416,7 @@ fn active_scope_only_save_keeps_connection_clears_completion_and_reloads_catalog
         profile_id,
         generation: 3,
         server: server(),
+        mutation_capabilities: Default::default(),
     });
     app.active_console_mut().completion = Some(Default::default());
     app.update(Action::ProfileStartEdit { profile_id });
@@ -1495,6 +1498,7 @@ fn query_started_while_save_is_in_flight_preserves_the_active_connection() {
         profile_id,
         generation: 3,
         server: server(),
+        mutation_capabilities: Default::default(),
     });
     app.update(Action::ProfileStartEdit { profile_id });
     let request_id = match app
@@ -1591,6 +1595,7 @@ fn running_queries_block_switching_active_profile_saves_and_deletion() {
         profile_id: active_id,
         generation: 1,
         server: server(),
+        mutation_capabilities: Default::default(),
     });
     app.active_console_mut().query_status = QueryStatus::Running;
     assert!(

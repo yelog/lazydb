@@ -1026,12 +1026,13 @@ impl Runtime {
                         return Err(error);
                     }
                 };
-                Ok::<_, crate::db::DatabaseError>((database, server))
+                let mutation_capabilities = database.catalog_mutation_capabilities();
+                Ok::<_, crate::db::DatabaseError>((database, server, mutation_capabilities))
             })
             .await
             .map_err(|_| DatabaseError::configuration("connection timed out after 10 seconds"));
             match candidate {
-                Ok(Ok((database, server))) => {
+                Ok(Ok((database, server, mutation_capabilities))) => {
                     let mutation_guard = mutation.lock().await;
                     if !profile_revision_is_current(&registry, &profile, profile_revision).await {
                         database.close().await;
@@ -1070,6 +1071,7 @@ impl Runtime {
                         profile_id,
                         generation,
                         server,
+                        mutation_capabilities,
                     });
                     drop(mutation_guard);
                     if let Some(previous) = previous
