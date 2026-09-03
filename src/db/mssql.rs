@@ -701,7 +701,7 @@ impl MsSqlAdapter {
         }
         let pool = self.pool_for_database(&database).await?;
         let relation_sql = format!(
-            "SELECT o.[type] FROM {}.sys.objects o JOIN {}.sys.schemas s ON s.[schema_id] = o.[schema_id] WHERE o.[object_id] = {object_id} AND s.[name] = {} AND o.[name] = {} AND o.[is_ms_shipped] = 0",
+            "SELECT o.[type] FROM {}.sys.objects o JOIN {}.sys.schemas s ON s.[schema_id] = o.[schema_id] WHERE s.[name] = {} AND o.[name] = {} AND o.[is_ms_shipped] = 0",
             quote_identifier(&database),
             quote_identifier(&database),
             quote_literal(&schema),
