@@ -917,6 +917,58 @@ fn maps_window_f_to_toggle_focused_pane_maximize() {
 }
 
 #[test]
+fn dashboard_results_focus_maps_window_f_to_toggle_focused_pane_maximize() {
+    let mut app = App::new(Vec::new());
+    app.tabs.clear();
+    app.tabs.push(WorkspaceTab::Dashboard(
+        lazydb::model::dashboard::DashboardTab::new(),
+    ));
+    app.active_tab = 0;
+    app.focus = Focus::Results;
+
+    assert_eq!(window_action(&app, 'f'), Some(Action::TogglePaneMaximized));
+}
+
+#[test]
+fn dashboard_results_focus_executes_window_f_to_toggle_focused_pane_maximize() {
+    let mut app = App::new(Vec::new());
+    app.tabs.clear();
+    app.tabs.push(WorkspaceTab::Dashboard(
+        lazydb::model::dashboard::DashboardTab::new(),
+    ));
+    app.active_tab = 0;
+    app.focus = Focus::Results;
+    let action = window_action(&app, 'f').expect("dashboard Ctrl-w f action");
+
+    app.update(action);
+
+    assert!(app.pane_maximized);
+}
+
+#[test]
+fn dashboard_window_f_works_on_each_page_and_focus() {
+    for page in [
+        lazydb::model::dashboard::DashboardPage::Overview,
+        lazydb::model::dashboard::DashboardPage::Processes,
+    ] {
+        for focus in [Focus::Explorer, Focus::Results] {
+            let mut app = App::new(Vec::new());
+            app.tabs.clear();
+            let mut dashboard = lazydb::model::dashboard::DashboardTab::new();
+            dashboard.page = page;
+            app.tabs.push(WorkspaceTab::Dashboard(dashboard));
+            app.active_tab = 0;
+            app.focus = focus;
+
+            let action = window_action(&app, 'f').expect("dashboard Ctrl-w f action");
+            app.update(action);
+
+            assert!(app.pane_maximized, "page={page:?} focus={focus:?}");
+        }
+    }
+}
+
+#[test]
 fn pane_maximize_help_entry_executes_the_same_action() {
     let mut app = App::new(Vec::new());
     app.focus = Focus::Results;

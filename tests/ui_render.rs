@@ -740,6 +740,34 @@ fn pane_maximize_hides_other_pane_hit_targets_and_restores_them() {
 }
 
 #[test]
+fn dashboard_maximize_hides_explorer_when_results_are_focused() {
+    let mut app = App::new(Vec::new());
+    app.tabs.clear();
+    app.tabs.push(WorkspaceTab::Dashboard(
+        lazydb::model::dashboard::DashboardTab::new(),
+    ));
+    app.active_tab = 0;
+    app.focus = Focus::Results;
+
+    let (_, normal) = render_with_state(&app, 160, 40);
+    assert!(normal
+        .hit_regions
+        .iter()
+        .any(|region| region.target == HitTarget::Focus(Focus::Explorer)));
+
+    app.update(Action::TogglePaneMaximized);
+    let (_, maximized) = render_with_state(&app, 160, 40);
+    assert!(!maximized
+        .hit_regions
+        .iter()
+        .any(|region| region.target == HitTarget::Focus(Focus::Explorer)));
+    assert!(maximized
+        .hit_regions
+        .iter()
+        .any(|region| region.target == HitTarget::Focus(Focus::Results)));
+}
+
+#[test]
 fn offline_profiles_render_as_collapsed_even_when_expansion_is_pending() {
     let profile = import_connection_url(":memory:", Some("offline-profile"))
         .unwrap()
