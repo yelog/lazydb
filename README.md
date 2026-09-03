@@ -301,9 +301,13 @@ export LAZYDB_CONFIG_HOME=$HOME/lazydb
 ```
 
 Windows continues to use `%APPDATA%\\lazydb\\`. The directory contains
-`connections.toml`, `credential.key`, `workspace.toml`, and the `sql/` directory
+`settings.toml`, `connections.toml`, `credential.key`, `workspace.toml`, and the `sql/` directory
 for persisted console text. Use `--config PATH` to select a different profile
 file for the current run; this does not relocate the key or workspace files.
+The complete built-in application defaults are in
+[`config/default.toml`](config/default.toml). This file is embedded into the
+binary and is the authoritative source of defaults; a user `settings.toml` only
+needs to contain overrides. Explicit command-line options take precedence.
 Common options include:
 
 ```bash
@@ -346,6 +350,7 @@ notes for current priorities and version-specific changes.
 
 | Topic | Document |
 | --- | --- |
+| Built-in default configuration | [`config/default.toml`](config/default.toml) |
 | Configuration and connection profiles | [`docs/configuration.md`](docs/configuration.md) |
 | Database capability matrix | [`docs/database-capabilities.md`](docs/database-capabilities.md) |
 | Keyboard reference | [`docs/keybindings.md`](docs/keybindings.md) |

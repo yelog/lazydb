@@ -43,6 +43,37 @@ impl Default for Theme {
 }
 
 impl Theme {
+    pub const fn for_color_mode(mode: crate::cli::ColorMode) -> Self {
+        match mode {
+            crate::cli::ColorMode::Auto | crate::cli::ColorMode::Always => Self::deep_space(),
+            crate::cli::ColorMode::Never => Self::plain(),
+        }
+    }
+
+    const fn plain() -> Self {
+        Self {
+            background: Color::Reset,
+            surface: Color::Reset,
+            surface_raised: Color::Reset,
+            border: Color::Reset,
+            grid_header: Color::Reset,
+            grid_header_text: Color::Reset,
+            grid_border: Color::Reset,
+            text: Color::Reset,
+            muted: Color::Reset,
+            accent: Color::Reset,
+            action: Color::Reset,
+            success: Color::Reset,
+            warning: Color::Reset,
+            error: Color::Reset,
+            selection: Color::Reset,
+            row_updated: Color::Reset,
+            row_deleted: Color::Reset,
+            row_deleted_background: Color::Reset,
+            row_inserted: Color::Reset,
+        }
+    }
+
     pub const fn deep_space() -> Self {
         Self {
             background: Color::Rgb(7, 11, 18),

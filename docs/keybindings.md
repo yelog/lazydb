@@ -5,6 +5,12 @@ width-aware summary, not a separate binding system. Help rows and footer rows
 come from the same shortcut catalog, while executable behavior remains in the
 input mapper and editor.
 
+The built-in configuration selects this complete contract with
+`keybindings.preset = "vim"` in [`config/default.toml`](../config/default.toml).
+The current release supports the Vim preset as a whole rather than arbitrary
+per-command rebinding. `keybindings.sequence_timeout_ms` configures the timeout
+for adjacent-key sequences used by this preset.
+
 ## Conventions
 
 `Ctrl-x` means hold Control while pressing `x`; `Shift-F5` means hold Shift

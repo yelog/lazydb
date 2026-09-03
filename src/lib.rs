@@ -3,6 +3,7 @@ pub mod agent;
 pub mod app;
 pub mod cli;
 pub mod clipboard;
+pub mod config;
 pub mod db;
 pub(crate) mod editor;
 pub mod help;

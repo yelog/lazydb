@@ -1,0 +1,28 @@
+# LazyDB built-in defaults.
+#
+# This file is embedded into the binary and is the authoritative source for
+# user-facing application defaults. Copy only the values you want to change to
+# ~/.config/lazydb/settings.toml. Explicit command-line options take precedence.
+
+version = 1
+
+[terminal]
+mouse = "auto"
+color = "auto"
+
+[ui]
+icons = "nerd-font"
+motion = "full"
+
+[execution]
+confirmation = "risky"
+
+[dashboard]
+refresh_interval_seconds = 5
+
+[keybindings]
+# LazyDB currently ships the Vim command and editing preset documented in
+# docs/keybindings.md. Command-level rebinding will extend this table without
+# changing the configuration file location or precedence rules.
+preset = "vim"
+sequence_timeout_ms = 750

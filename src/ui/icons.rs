@@ -1,5 +1,6 @@
 use clap::ValueEnum;
 use nerd_font_symbols::{dev, md};
+use serde::Deserialize;
 
 use crate::{
     db::catalog::{CatalogKind, ObjectGroup},
@@ -8,7 +9,8 @@ use crate::{
     sql::CompletionKind,
 };
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
 pub enum IconMode {
     #[default]
     NerdFont,

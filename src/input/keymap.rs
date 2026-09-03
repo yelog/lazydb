@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use uuid::Uuid;
@@ -49,17 +49,39 @@ struct PendingState {
     tab_id: Uuid,
     generation: u64,
     record_view_active: bool,
+    started_at: Instant,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Keymap {
     pending: Option<PendingState>,
     observed: Option<(Focus, EditorMode, Uuid)>,
     generation: u64,
     sequence_selected: usize,
+    sequence_timeout: Duration,
+}
+
+impl Default for Keymap {
+    fn default() -> Self {
+        Self::with_sequence_timeout(Duration::from_millis(
+            crate::config::AppConfig::default()
+                .keybindings
+                .sequence_timeout_ms,
+        ))
+    }
 }
 
 impl Keymap {
+    pub fn with_sequence_timeout(sequence_timeout: Duration) -> Self {
+        Self {
+            pending: None,
+            observed: None,
+            generation: 0,
+            sequence_selected: 0,
+            sequence_timeout,
+        }
+    }
+
     pub fn map(&mut self, event: KeyEvent, app: &App) -> Option<Action> {
         self.observe_state(app);
         if matches!(event.kind, KeyEventKind::Release) {
@@ -156,7 +178,13 @@ impl Keymap {
             return match event.code {
                 KeyCode::Char('g') => {
                     if let Some(pending) = pending
-                        && pending_is_valid(&pending, app, Instant::now(), self.generation)
+                        && pending_is_valid(
+                            &pending,
+                            app,
+                            Instant::now(),
+                            self.generation,
+                            self.sequence_timeout,
+                        )
                         && matches!(pending.pending, Pending::RecordViewGoto)
                     {
                         return Some(Action::RecordViewJumpFirstField);
@@ -1161,6 +1189,7 @@ impl Keymap {
             tab_id,
             generation: self.generation,
             record_view_active,
+            started_at: Instant::now(),
         });
     }
 
@@ -1189,7 +1218,7 @@ impl Keymap {
     pub fn sequence_state(&mut self, app: &App, now: Instant) -> Option<KeySequenceState> {
         self.observe_state(app);
         let pending = self.pending.as_ref()?;
-        if !pending_is_valid(pending, app, now, self.generation) {
+        if !pending_is_valid(pending, app, now, self.generation, self.sequence_timeout) {
             self.pending = None;
             return None;
         }
@@ -1207,7 +1236,7 @@ impl Keymap {
         let Some(pending) = self.pending.as_ref() else {
             return false;
         };
-        if pending_is_valid(pending, app, now, self.generation) {
+        if pending_is_valid(pending, app, now, self.generation, self.sequence_timeout) {
             return false;
         }
         let was_visible = pending_display(pending.pending).is_some();
@@ -1279,8 +1308,15 @@ fn map_catalog_editor(event: KeyEvent, app: &App) -> Option<Action> {
     }
 }
 
-fn pending_is_valid(pending: &PendingState, app: &App, _now: Instant, generation: u64) -> bool {
-    pending.focus == app.focus
+fn pending_is_valid(
+    pending: &PendingState,
+    app: &App,
+    now: Instant,
+    generation: u64,
+    sequence_timeout: Duration,
+) -> bool {
+    now.saturating_duration_since(pending.started_at) < sequence_timeout
+        && pending.focus == app.focus
         && pending.editor_mode == app.active_editor_mode()
         && pending.generation == generation
         && pending.record_view_active == matches!(app.overlay, Some(Overlay::RecordView(_)))
@@ -2307,9 +2343,10 @@ mod tests {
                 ..
             })
         ));
+        let started = keymap.pending.as_ref().unwrap().started_at;
         assert!(
             keymap
-                .sequence_state(&app, Instant::now() + Duration::from_secs(60))
+                .sequence_state(&app, started + Duration::from_millis(749))
                 .is_some()
         );
         assert_eq!(keymap.map(key(KeyCode::Char('x')), &app), None);
@@ -2446,19 +2483,20 @@ mod tests {
     }
 
     #[test]
-    fn sequence_state_persists_but_invalidates_on_focus_mode_and_tab_changes() {
+    fn sequence_state_expires_and_invalidates_on_focus_mode_and_tab_changes() {
         let mut app = App::new(Vec::new());
         app.focus = Focus::Results;
-        let mut keymap = Keymap::default();
+        let mut keymap = Keymap::with_sequence_timeout(Duration::from_millis(750));
         keymap.map(key(KeyCode::Char('g')), &app);
-        let started = Instant::now();
+        let started = keymap.pending.as_ref().unwrap().started_at;
         assert!(keymap.sequence_state(&app, started).is_some());
         assert!(
             keymap
-                .sequence_state(&app, started + Duration::from_secs(60))
+                .sequence_state(&app, started + Duration::from_millis(749))
                 .is_some()
         );
-        assert!(!keymap.expire_pending(&app, started + Duration::from_secs(60)));
+        assert!(keymap.expire_pending(&app, started + Duration::from_millis(750)));
+        assert!(keymap.sequence_state(&app, started).is_none());
 
         keymap.map(key(KeyCode::Char('g')), &app);
         app.focus = Focus::Explorer;

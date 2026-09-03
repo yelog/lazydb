@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::persistence::secrets::secret_store_diagnostic;
 use crate::ui::icons::IconMode;
@@ -28,35 +28,38 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub read_only: bool,
 
-    #[arg(long, global = true, value_enum, default_value_t = MouseMode::Auto)]
-    pub mouse: MouseMode,
+    #[arg(long, global = true, value_enum)]
+    pub mouse: Option<MouseMode>,
 
-    #[arg(long, global = true, value_enum, default_value_t = ColorMode::Auto)]
-    pub color: ColorMode,
+    #[arg(long, global = true, value_enum)]
+    pub color: Option<ColorMode>,
 
-    #[arg(long, global = true, value_enum, default_value_t = IconMode::NerdFont)]
-    pub icons: IconMode,
+    #[arg(long, global = true, value_enum)]
+    pub icons: Option<IconMode>,
 
-    #[arg(long, global = true, value_enum, default_value_t = MotionMode::Full)]
-    pub motion: MotionMode,
+    #[arg(long, global = true, value_enum)]
+    pub motion: Option<MotionMode>,
 
-    #[arg(long, global = true, value_enum, default_value_t = ConfirmationPolicy::RiskyOnly)]
-    pub confirm_execution: ConfirmationPolicy,
+    #[arg(long, global = true, value_enum)]
+    pub confirm_execution: Option<ConfirmationPolicy>,
 
     #[command(subcommand)]
     pub command: Option<Command>,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
 pub enum ConfirmationPolicy {
     #[default]
     #[value(name = "risky")]
+    #[serde(rename = "risky")]
     RiskyOnly,
     #[value(name = "always")]
     Always,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
 pub enum MouseMode {
     #[default]
     Auto,
@@ -64,7 +67,8 @@ pub enum MouseMode {
     Off,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
 pub enum ColorMode {
     #[default]
     Auto,
@@ -72,7 +76,8 @@ pub enum ColorMode {
     Never,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
 pub enum MotionMode {
     #[default]
     Full,
@@ -343,37 +348,31 @@ mod tests {
 
     #[test]
     fn parses_icon_modes() {
-        assert_eq!(
-            Cli::try_parse_from(["lazydb"]).unwrap().icons,
-            IconMode::NerdFont
-        );
+        assert_eq!(Cli::try_parse_from(["lazydb"]).unwrap().icons, None);
         assert_eq!(
             Cli::try_parse_from(["lazydb", "--icons", "unicode"])
                 .unwrap()
                 .icons,
-            IconMode::Unicode
+            Some(IconMode::Unicode)
         );
         assert_eq!(
             Cli::try_parse_from(["lazydb", "--icons", "ascii"])
                 .unwrap()
                 .icons,
-            IconMode::Ascii
+            Some(IconMode::Ascii)
         );
         assert_eq!(
             Cli::try_parse_from(["lazydb", "--icons", "nerd-font"])
                 .unwrap()
                 .icons,
-            IconMode::NerdFont
+            Some(IconMode::NerdFont)
         );
         assert!(Cli::try_parse_from(["lazydb", "--icons", "emoji"]).is_err());
     }
 
     #[test]
-    fn motion_defaults_to_full() {
-        assert_eq!(
-            Cli::try_parse_from(["lazydb"]).unwrap().motion,
-            MotionMode::Full
-        );
+    fn omitted_motion_does_not_override_configuration() {
+        assert_eq!(Cli::try_parse_from(["lazydb"]).unwrap().motion, None);
     }
 
     #[test]
@@ -387,7 +386,7 @@ mod tests {
                 Cli::try_parse_from(["lazydb", "--motion", value])
                     .unwrap()
                     .motion,
-                expected
+                Some(expected)
             );
         }
         assert!(Cli::try_parse_from(["lazydb", "--motion", "none"]).is_err());

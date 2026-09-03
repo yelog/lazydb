@@ -3706,14 +3706,21 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
         .context("failed to resolve current project")?;
     let startup = load_startup_profiles(&cli)?;
     let paths = AppPaths::discover()?;
-    let settings = crate::persistence::settings::AppSettings::load(paths.settings_file())
+    let mut settings = crate::persistence::settings::AppSettings::load(paths.settings_file())
         .context("failed to load application settings")?;
+    settings.apply_cli_overrides(
+        cli.mouse,
+        cli.color,
+        cli.icons,
+        cli.motion,
+        cli.confirm_execution,
+    );
     let workspace_store = WorkspaceStore::new(paths.workspace_file(), paths.workspace_sql_dir());
     let workspace = workspace_store.load().context("failed to load workspace")?;
     let mut app = App::with_startup_project(
         startup.profiles.clone(),
         startup.persisted.clone(),
-        cli.confirm_execution,
+        settings.execution.confirmation,
         project,
     );
     app.connection_groups = startup.collection.groups.clone();
@@ -3742,12 +3749,15 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
         event_sender,
     );
     runtime.set_workspace_store(workspace_store);
-    let mut terminal = TerminalSession::enter(cli.mouse != MouseMode::Off)
+    let mut terminal = TerminalSession::enter(settings.terminal.mouse != MouseMode::Off)
         .context("failed to initialize terminal")?;
-    let icons = crate::ui::icons::IconSet::new(cli.icons);
+    let icons = crate::ui::icons::IconSet::new(settings.ui.icons);
+    let theme = crate::ui::theme::Theme::for_color_mode(settings.terminal.color);
     let mut terminal_events = EventStream::new();
-    let mut keymap = Keymap::default();
-    let mut ui_state = UiState::with_motion(cli.motion);
+    let mut keymap = Keymap::with_sequence_timeout(Duration::from_millis(
+        settings.keybindings.sequence_timeout_ms,
+    ));
+    let mut ui_state = UiState::with_motion(settings.ui.motion);
     let mut rendered_sequence: Option<crate::input::keymap::KeySequenceState> = None;
     let mut ticker = interval(Duration::from_millis(33));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -3758,12 +3768,13 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
         let initial_sequence = keymap.sequence_state(&app, std::time::Instant::now());
         rendered_sequence = initial_sequence.clone();
         terminal.draw(|frame| {
-            ui::render_with_state_using_icons_and_sequence(
+            ui::render_with_state_using_icons_sequence_and_theme(
                 frame,
                 &app,
                 &mut ui_state,
                 icons,
                 initial_sequence.as_ref(),
+                theme,
             )
         })?;
         if let Some(style) = ui_state.cursor_style {
@@ -3858,12 +3869,13 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                 let sequence = keymap.sequence_state(&app, std::time::Instant::now());
                 rendered_sequence = sequence.clone();
                 terminal.draw(|frame| {
-                    ui::render_with_state_using_icons_and_sequence(
+                    ui::render_with_state_using_icons_sequence_and_theme(
                         frame,
                         &app,
                         &mut ui_state,
                         icons,
                         sequence.as_ref(),
+                        theme,
                     )
                 })?;
                 if let Some(style) = ui_state.cursor_style {

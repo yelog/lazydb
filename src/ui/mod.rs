@@ -517,7 +517,24 @@ pub fn render_with_state_using_icons_and_sequence(
     icons: icons::IconSet,
     sequence: Option<&crate::input::keymap::KeySequenceState>,
 ) {
-    let theme = Theme::default();
+    render_with_state_using_icons_sequence_and_theme(
+        frame,
+        app,
+        state,
+        icons,
+        sequence,
+        Theme::default(),
+    );
+}
+
+pub fn render_with_state_using_icons_sequence_and_theme(
+    frame: &mut Frame<'_>,
+    app: &App,
+    state: &mut UiState,
+    icons: icons::IconSet,
+    sequence: Option<&crate::input::keymap::KeySequenceState>,
+    theme: Theme,
+) {
     let area = frame.area();
     state.activity_icons = icons;
     state.observe_animations(app, Instant::now());

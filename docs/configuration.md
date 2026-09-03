@@ -1,8 +1,10 @@
 # Configuration
 
 This document is the reference for LazyDB's configuration surfaces. LazyDB has
-three kinds of settings:
+four kinds of settings:
 
+- **Application settings** are optional overrides in `settings.toml`. The
+  complete built-in values live in [`config/default.toml`](../config/default.toml).
 - **Command-line options** apply to the current process. Connection-selection
   options take precedence over saved-profile selection where stated below.
 - **Connection profiles** are persisted in `connections.toml` and describe how
@@ -12,6 +14,18 @@ three kinds of settings:
 
 Unknown TOML fields are rejected. This helps catch spelling mistakes instead of
 silently accepting a setting that LazyDB does not use.
+
+Application settings use the following precedence, from highest to lowest:
+
+1. Explicit command-line options
+2. Values present in the user's `settings.toml`
+3. The embedded [`config/default.toml`](../config/default.toml)
+
+Tables are merged recursively, so a user file should contain only values that
+depart from the defaults. Arrays, when introduced by a supported setting, are
+replaced as a whole. LazyDB does not copy the complete defaults into the user
+directory because doing so would prevent new defaults from being inherited on
+upgrade.
 
 ## Configuration Files
 
@@ -51,7 +65,10 @@ stored in `connections.toml`.
 ## Application Settings
 
 Application settings are stored in `settings.toml` beside `connections.toml`.
-Dashboard monitoring uses a five-second interval by default. Change it with:
+The file may omit `version` and any table it does not override; omitted values
+come from the embedded default configuration. The current schema version is
+`1`. Dashboard monitoring uses a five-second interval by default. Change it
+with:
 
 ```toml
 [dashboard]
@@ -60,6 +77,23 @@ refresh_interval_seconds = 5
 
 The value must be at least one second. The setting controls both metric and
 process polling when the Dashboard is active.
+
+The complete schema and current values are best read directly in
+[`config/default.toml`](../config/default.toml). Its sections are:
+
+| Section | Settings |
+| --- | --- |
+| `terminal` | `mouse`, `color` |
+| `ui` | `icons`, `motion` |
+| `execution` | `confirmation` |
+| `dashboard` | `refresh_interval_seconds` |
+| `keybindings` | `preset`, `sequence_timeout_ms` |
+
+Only the `vim` keybinding preset is currently supported. It denotes the full
+command and editor contract in [Keyboard Reference](keybindings.md); text-entry
+keys and modalkit's core Vim editing operations are intentionally not separate
+application settings. A key sequence remains active for 750 milliseconds by
+default, and `sequence_timeout_ms` must be at least `1`.
 
 | Option | Values / argument | Default | Description |
 | --- | --- | --- | --- |
@@ -73,8 +107,8 @@ process polling when the Dashboard is active.
 | `--motion MODE` | `full`, `reduced`, `off` | `full` | Select full loading animation, reduced animation, or no animation. |
 | `--confirm-execution POLICY` | `risky`, `always` | `risky` | Confirm only risky SQL statements, or confirm every execution. |
 
-`--color`, `--mouse`, `--icons`, `--motion`, and `--confirm-execution` affect
-only the current process. The `--config` option is also accepted by agent and
+`--color`, `--mouse`, `--icons`, `--motion`, and `--confirm-execution` override
+`settings.toml` for the current process. The `--config` option is also accepted by agent and
 MCP commands so they read the same profile set.
 
 Subcommand-specific options are not connection-file settings. They include

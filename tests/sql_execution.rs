@@ -118,8 +118,8 @@ fn cli_exposes_risky_and_always_execution_confirmation() {
         <Cli as clap::Parser>::try_parse_from(["lazydb", "--confirm-execution", "risky"]).unwrap();
     let always =
         <Cli as clap::Parser>::try_parse_from(["lazydb", "--confirm-execution", "always"]).unwrap();
-    assert_eq!(risky.confirm_execution, ConfirmationPolicy::RiskyOnly);
-    assert_eq!(always.confirm_execution, ConfirmationPolicy::Always);
+    assert_eq!(risky.confirm_execution, Some(ConfirmationPolicy::RiskyOnly));
+    assert_eq!(always.confirm_execution, Some(ConfirmationPolicy::Always));
 }
 
 #[test]
