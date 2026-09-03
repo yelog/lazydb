@@ -70,30 +70,31 @@ assets = {target: {'url': 'https://github.com/yelog/lazydb/releases/download/v1.
 json.dump({'schema': 1, 'product': 'lazydb', 'channel': 'beta', 'version': '1.2.3-beta.1', 'tag': 'v1.2.3-beta.1', 'prerelease': True, 'published_at': 'now', 'release_url': 'https://github.com/yelog/lazydb/releases/tag/v1.2.3-beta.1', 'assets': assets}, open(sys.argv[1], 'w'))
 PY
 export TMPDIR_TEST="$TMP" PATH="$TMP/bin:$PATH" LAZYDB_CHANNEL_BASE_URL=https://fixture/channels
+export LAZYDB_CONFIG_HOME="$TMP/home/config"
 # The fixture contains the host target; production manifests contain all four.
-if ! HOME="$TMP/home" XDG_DATA_HOME="$TMP/home/data" sh "$TMP/pages/install.sh" --install-dir "$TMP/install" >/dev/null; then
+if ! HOME="$TMP/home" sh "$TMP/pages/install.sh" --install-dir "$TMP/install" >/dev/null; then
     printf '%s\n' 'installer fixture failed' >&2
     exit 1
 fi
-[ -L "$TMP/home/data/lazydb/current" ]
+[ -L "$TMP/home/config/current" ]
 [ -L "$TMP/install/lazydb" ]
-[ -f "$TMP/home/data/lazydb/install.json" ]
-[ "$(python3 -c 'import json; print(json.load(open("'$TMP'/home/data/lazydb/install.json"))["channel"])')" = stable ]
+[ -f "$TMP/home/config/install.json" ]
+[ "$(python3 -c 'import json; print(json.load(open("'$TMP'/home/config/install.json"))["channel"])')" = stable ]
 [ -e "$TMP/install/lazydb" ]
-HOME="$TMP/home" XDG_DATA_HOME="$TMP/home/data" sh "$TMP/pages/install.sh" --install-dir "$TMP/install" >/dev/null
-[ -d "$TMP/home/data/lazydb/releases/1.2.3" ]
-if HOME="$TMP/home" XDG_DATA_HOME="$TMP/home/data" sh "$TMP/pages/install.sh" --channel invalid --install-dir "$TMP/install" >/dev/null 2>&1; then
+HOME="$TMP/home" sh "$TMP/pages/install.sh" --install-dir "$TMP/install" >/dev/null
+[ -d "$TMP/home/config/releases/1.2.3" ]
+if HOME="$TMP/home" sh "$TMP/pages/install.sh" --channel invalid --install-dir "$TMP/install" >/dev/null 2>&1; then
     printf '%s\n' 'invalid channel was accepted' >&2
     exit 1
 fi
-if HOME="$TMP/home" XDG_DATA_HOME="$TMP/home/data" sh "$TMP/pages/install.sh" --channel beta --install-dir "$TMP/install" >/dev/null 2>&1; then
+if HOME="$TMP/home" sh "$TMP/pages/install.sh" --channel beta --install-dir "$TMP/install" >/dev/null 2>&1; then
     printf '%s\n' 'stable entrypoint allowed beta channel' >&2
     exit 1
 fi
-beta_output=$(HOME="$TMP/beta-home" XDG_DATA_HOME="$TMP/beta-home/data" sh "$TMP/pages/install-beta.sh" --install-dir "$TMP/beta-install")
+beta_output=$(HOME="$TMP/beta-home" LAZYDB_CONFIG_HOME="$TMP/beta-home/config" sh "$TMP/pages/install-beta.sh" --install-dir "$TMP/beta-install")
 case "$beta_output" in
     *'LAZYDB BETA installer'*'lazydb 1.2.3-beta.1 installed (beta)'*) ;;
     *) printf 'unexpected beta output: %s\n' "$beta_output" >&2; exit 1 ;;
 esac
-[ "$(python3 -c 'import json; print(json.load(open("'$TMP'/beta-home/data/lazydb/install.json"))["channel"])')" = beta ]
+[ "$(python3 -c 'import json; print(json.load(open("'$TMP'/beta-home/config/install.json"))["channel"])')" = beta ]
 printf '%s\n' 'installer tests: ok'

@@ -30,9 +30,17 @@ impl AppPaths {
         let base_dirs = BaseDirs::new().ok_or(PathError::Unavailable)?;
         let config_dir = config_dir(&base_dirs);
         migrate_legacy_directory(dirs.config_dir(), &config_dir)?;
+        migrate_legacy_directory(dirs.data_dir(), &config_dir)?;
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        if let Some(home) = env::var_os("HOME") {
+            migrate_legacy_directory(
+                &PathBuf::from(home).join(".local/share/lazydb"),
+                &config_dir,
+            )?;
+        }
         Ok(Self {
             config_dir: config_dir.clone(),
-            data_dir: dirs.data_dir().to_owned(),
+            data_dir: config_dir.clone(),
             state_dir: config_dir,
         })
     }
@@ -88,13 +96,21 @@ fn config_dir(base_dirs: &BaseDirs) -> PathBuf {
 }
 
 fn migrate_legacy_directory(old_dir: &Path, new_dir: &Path) -> Result<(), std::io::Error> {
-    if !cfg!(target_os = "macos") || old_dir == new_dir || !old_dir.exists() {
+    if old_dir == new_dir || !old_dir.exists() {
         return Ok(());
     }
 
     fs::create_dir_all(new_dir)?;
     set_private_dir_permissions(new_dir)?;
-    for name in ["connections.toml", "credential.key", "workspace.toml"] {
+    for name in [
+        "connections.toml",
+        "credential.key",
+        "settings.toml",
+        "workspace.toml",
+        "install.json",
+        "current",
+        "releases",
+    ] {
         move_if_absent(&old_dir.join(name), &new_dir.join(name))?;
     }
 

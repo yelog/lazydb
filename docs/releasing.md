@@ -96,9 +96,10 @@ target. Every asset has an HTTPS GitHub Release download URL and a 64-character
 lowercase SHA-256 digest. The manifest is generated from the published
 `SHA256SUMS`; it does not duplicate archive data or call the GitHub API.
 
-The canonical native installer stores releases below
-`${XDG_DATA_HOME:-$HOME/.local/share}/lazydb`, activates a `current` symlink, and
-links the requested executable directory to that activation. It records channel,
+The canonical native installer stores configuration, installation state, and
+releases below `${LAZYDB_CONFIG_HOME:-$HOME/.config/lazydb}`, activates a
+`current` symlink, and links the requested executable directory to that
+activation. It records channel,
 target, version, and manager ownership in `install.json`. `--version` selects a
 specific version only when it matches the selected channel manifest; it does not
 permit an installer to bypass manifest validation. `LAZYDB_CHANNEL_BASE_URL` is

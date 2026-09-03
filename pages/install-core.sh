@@ -36,7 +36,7 @@ for tool in curl tar awk cat cp mkdir mv ln chmod; do command -v "$tool" >/dev/n
 command -v python3 >/dev/null 2>&1 || die 'python3 is required'
 if command -v sha256sum >/dev/null 2>&1; then HASH=sha256sum; else command -v shasum >/dev/null 2>&1 || die 'sha256sum or shasum is required'; HASH='shasum -a 256'; fi
 
-DATA_HOME=${XDG_DATA_HOME:-"$HOME/.local/share"}/lazydb
+DATA_HOME=${LAZYDB_CONFIG_HOME:-"$HOME/.config/lazydb"}
 RELEASES=$DATA_HOME/releases
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/lazydb-install.XXXXXX")
 cleanup() { rm -rf "$TMP"; }
