@@ -16,6 +16,7 @@ use lazydb::{
     persistence::{profiles::ProfileStore, secrets::NativeSecretStore},
     profile::import_connection_url,
     runtime::Runtime,
+    sql::{CompletionCandidate, CompletionKind, CompletionScore, TextRange},
 };
 use tempfile::TempDir;
 use tokio::{sync::mpsc, time::timeout};
@@ -269,6 +270,47 @@ fn accepting_completion_places_cursor_after_inserted_text() {
     editor_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
     editor_key(&mut app, KeyCode::Char('u'), KeyModifiers::NONE);
     assert_eq!(app.active_editor_text().unwrap(), "sel");
+}
+
+#[test]
+fn accepting_completion_does_not_add_space_before_ddl_punctuation() {
+    for (text, replacement, insert_text) in [
+        ("CREATE TABLE t (id IN)", TextRange::new(19, 21), "INTEGER"),
+        ("REFERENCES users (i)", TextRange::new(18, 19), "id"),
+        (
+            "CREATE INDEX ix ON users (e, id)",
+            TextRange::new(26, 27),
+            "email",
+        ),
+        ("DROP TABLE us;", TextRange::new(11, 13), "users"),
+    ] {
+        let mut app = App::new(Vec::new());
+        app.update(Action::ReplaceEditor(text.to_owned()));
+        editor_key(&mut app, KeyCode::Char('i'), KeyModifiers::NONE);
+        app.active_console_mut().completion = Some(CompletionPopup {
+            candidates: vec![CompletionCandidate {
+                label: insert_text.to_owned(),
+                insert_text: insert_text.to_owned(),
+                kind: CompletionKind::Keyword,
+                detail: None,
+                replace: replacement,
+                score: CompletionScore {
+                    context: 0,
+                    name_match: 0,
+                    schema: 0,
+                },
+            }],
+            selected: 0,
+        });
+        app.update(Action::CompletionAccept);
+        let expected = format!(
+            "{}{}{}",
+            &text[..replacement.start],
+            insert_text,
+            &text[replacement.end..]
+        );
+        assert_eq!(app.active_editor_text().unwrap(), expected);
+    }
 }
 
 #[test]

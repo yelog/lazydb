@@ -8134,7 +8134,7 @@ impl App {
                 .as_ref()
                 .and_then(|(_, schema)| schema.as_deref()),
         };
-        let relation_ids = sql::relation_ids_for_completion(
+        let dependencies = sql::completion_dependencies(
             &text,
             cursor,
             self.sql_dialect(),
@@ -8142,7 +8142,7 @@ impl App {
             completion_context,
         );
         let mut commands = Vec::new();
-        for relation in relation_ids {
+        for relation in dependencies.relation_children {
             let owner = crate::model::explorer::ExplorerOwnerId::Catalog(relation.clone());
             let loaded = self
                 .explorer
@@ -8205,12 +8205,19 @@ impl App {
             return Vec::new();
         };
         let mut insert_text = candidate.insert_text;
-        let has_separator = self.editor.text(id).ok().is_some_and(|text| {
-            text.get(candidate.replace.end..)
-                .and_then(|suffix| suffix.chars().next())
-                .is_some_and(char::is_whitespace)
+        let needs_space = self.editor.text(id).ok().is_none_or(|text| {
+            let Some(suffix) = text.get(candidate.replace.end..) else {
+                return true;
+            };
+            if suffix.chars().next().is_some_and(char::is_whitespace) {
+                return false;
+            }
+            !suffix
+                .chars()
+                .find(|character| !character.is_whitespace())
+                .is_some_and(|character| matches!(character, '.' | ',' | ')' | ';'))
         });
-        if !has_separator {
+        if needs_space {
             insert_text.push(' ');
         }
         let _ = self.editor.replace_range(
