@@ -700,21 +700,9 @@ impl MsSqlAdapter {
             return Err(catalog_target_not_found(&request.key.target));
         }
         let pool = self.pool_for_database(&database).await?;
-        let relation_sql = format!(
-            "SELECT o.[type] FROM {}.sys.objects o JOIN {}.sys.schemas s ON s.[schema_id] = o.[schema_id] WHERE s.[name] = {} AND o.[name] = {}",
-            quote_identifier(&database),
-            quote_identifier(&database),
-            quote_literal(&schema),
-            quote_literal(&relation_name)
-        );
-        let relation_type = query_rows(&pool, &relation_sql)
-            .await?
-            .first()
-            .map(|row| required_string(row, "type"))
-            .transpose()?;
-        let expected = match relation_type.as_deref() {
-            Some("U") => CatalogKind::Table,
-            Some("V") => CatalogKind::View,
+        let expected = match relation.kind {
+            CatalogKind::Table => CatalogKind::Table,
+            CatalogKind::View => CatalogKind::View,
             _ => return Err(catalog_target_not_found(&request.key.target)),
         };
         if relation.kind != expected {
