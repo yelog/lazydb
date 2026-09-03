@@ -1100,7 +1100,8 @@ impl ExplorerState {
         };
         if !matches!(
             id,
-            ExplorerNodeId::Others
+            ExplorerNodeId::ConnectionGroup { .. }
+                | ExplorerNodeId::Others
                 | ExplorerNodeId::Profile(_)
                 | ExplorerNodeId::Catalog(_)
                 | ExplorerNodeId::Group { .. }

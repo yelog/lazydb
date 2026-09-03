@@ -1420,9 +1420,10 @@ impl ExplorerTreeState {
                 .profiles
                 .get(&parent.profile_id())
                 .is_some_and(|profile| profile.catalog.group_state(parent, *group).is_some()),
-            ExplorerNodeId::ConnectionGroup { group_id, .. } => {
-                let _ = group_id;
-                true
+            ExplorerNodeId::ConnectionGroup { group_id, region } => {
+                self.groups.iter().any(|group| {
+                    group.id == *group_id && self.group_exists_in_region(*group_id, *region)
+                })
             }
             ExplorerNodeId::Others => true,
             ExplorerNodeId::EmptyProfiles
@@ -1431,6 +1432,24 @@ impl ExplorerTreeState {
             | ExplorerNodeId::Empty { .. } => false,
         };
         expandable && self.expanded.insert(selected)
+    }
+
+    fn group_exists_in_region(&self, group_id: Uuid, region: ProfileRegion) -> bool {
+        self.profile_order.iter().any(|profile_id| {
+            self.profiles.get(profile_id).is_some_and(|profile| {
+                profile.group_id == Some(group_id)
+                    && match region {
+                        ProfileRegion::Primary => matches!(
+                            profile.placement,
+                            ProfilePlacement::CurrentProject | ProfilePlacement::Global
+                        ),
+                        ProfileRegion::Others => {
+                            profile.placement == ProfilePlacement::OtherProject
+                        }
+                    }
+            })
+        }) || (region == ProfileRegion::Primary
+            && self.groups.iter().any(|group| group.id == group_id))
     }
 
     pub fn collapse(&mut self) -> bool {
@@ -1771,14 +1790,7 @@ impl ExplorerTreeState {
                 .is_some_and(|profile| profile.catalog.group_state(parent, *group).is_some()),
             ExplorerNodeId::ConnectionGroup { group_id, region } => {
                 self.groups.iter().any(|group| {
-                    group.id == *group_id
-                        && (region == &ProfileRegion::Primary
-                            || self.profile_order.iter().any(|profile_id| {
-                                self.profiles.get(profile_id).is_some_and(|profile| {
-                                    profile.group_id == Some(*group_id)
-                                        && profile.placement == ProfilePlacement::OtherProject
-                                })
-                            }))
+                    group.id == *group_id && self.group_exists_in_region(*group_id, *region)
                 })
             }
             ExplorerNodeId::Status { owner, kind } => self

@@ -98,6 +98,45 @@ fn empty_connection_groups_are_visible_in_the_primary_region() {
 }
 
 #[test]
+fn connection_groups_toggle_like_other_expandable_nodes() {
+    let group_id = Uuid::from_u128(4);
+    let mut explorer = ExplorerState::default();
+    explorer.normalized.sync_organization(
+        vec![lazydb::profile::ConnectionGroup {
+            id: group_id,
+            name: "Production".into(),
+        }],
+        Vec::new(),
+        &HashMap::new(),
+    );
+    explorer.normalized.selected = Some(ExplorerNodeId::ConnectionGroup {
+        group_id,
+        region: ProfileRegion::Primary,
+    });
+
+    assert!(explorer.toggle_selected());
+    assert!(
+        explorer
+            .normalized
+            .expanded
+            .contains(&ExplorerNodeId::ConnectionGroup {
+                group_id,
+                region: ProfileRegion::Primary,
+            })
+    );
+    assert!(!explorer.toggle_selected());
+    assert!(
+        !explorer
+            .normalized
+            .expanded
+            .contains(&ExplorerNodeId::ConnectionGroup {
+                group_id,
+                region: ProfileRegion::Primary,
+            })
+    );
+}
+
+#[test]
 fn other_profiles_group_toggles_like_other_expandable_nodes() {
     let other = profile_id(2);
     let mut explorer = ExplorerState::default();
