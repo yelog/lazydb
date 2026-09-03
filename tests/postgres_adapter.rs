@@ -667,6 +667,7 @@ async fn serialized_postgres_catalog_mutations_round_trip_catalog_definitions() 
                 name: schema_name.clone().into(),
                 owner: owner.clone().into(),
                 comment: "created".into(),
+                selected_field: 0,
             }),
         )
         .await;

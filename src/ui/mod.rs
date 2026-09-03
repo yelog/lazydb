@@ -2952,7 +2952,7 @@ fn render_overlay(
         Overlay::ProfileManager => {
             profiles::render_profile_manager(frame, area, app, state, theme, icons)
         }
-        Overlay::CatalogEditor => catalog_editor::render(frame, area, app, state, theme),
+        Overlay::CatalogEditor => catalog_editor::render(frame, area, app, state, theme, icons),
         Overlay::ProfileAccess {
             profile_id,
             selected,

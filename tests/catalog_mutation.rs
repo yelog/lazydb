@@ -929,6 +929,7 @@ fn schema_draft(name: &str, owner: &str, comment: &str) -> CatalogDraft {
         name: TextInput::from(name),
         owner: TextInput::from(owner),
         comment: TextInput::from(comment),
+        selected_field: 0,
     })
 }
 

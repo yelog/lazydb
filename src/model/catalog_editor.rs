@@ -136,6 +136,72 @@ pub struct SchemaDraft {
     pub name: TextInput,
     pub owner: TextInput,
     pub comment: TextInput,
+    pub selected_field: usize,
+}
+
+impl SchemaDraft {
+    pub fn new() -> Self {
+        Self {
+            name: TextInput::default(),
+            owner: TextInput::default(),
+            comment: TextInput::default(),
+            selected_field: 0,
+        }
+    }
+
+    pub fn move_field(&mut self, delta: isize) {
+        self.selected_field = (self.selected_field as isize + delta).rem_euclid(3) as usize;
+    }
+
+    fn selected_input_mut(&mut self) -> &mut TextInput {
+        match self.selected_field {
+            0 => &mut self.name,
+            1 => &mut self.owner,
+            _ => &mut self.comment,
+        }
+    }
+
+    pub fn insert(&mut self, character: char) {
+        self.selected_input_mut().insert(character);
+    }
+
+    pub fn backspace(&mut self) {
+        self.selected_input_mut().backspace();
+    }
+
+    pub fn delete(&mut self) {
+        self.selected_input_mut().delete();
+    }
+
+    pub fn delete_previous_word(&mut self) {
+        self.selected_input_mut().delete_previous_word();
+    }
+
+    pub fn delete_to_start(&mut self) {
+        self.selected_input_mut().delete_to_start();
+    }
+
+    pub fn move_left(&mut self) {
+        self.selected_input_mut().move_left();
+    }
+
+    pub fn move_right(&mut self) {
+        self.selected_input_mut().move_right();
+    }
+
+    pub fn move_home(&mut self) {
+        self.selected_input_mut().move_home();
+    }
+
+    pub fn move_end(&mut self) {
+        self.selected_input_mut().move_end();
+    }
+}
+
+impl Default for SchemaDraft {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1076,6 +1142,7 @@ pub enum CatalogDraft {
 impl CatalogDraft {
     pub fn move_field(&mut self, delta: isize) {
         match self {
+            Self::Schema(d) => d.move_field(delta),
             Self::View(d) => d.move_field(delta),
             Self::MaterializedView(d) => d.move_field(delta),
             Self::Sequence(d) => d.move_field(delta),
@@ -1086,6 +1153,7 @@ impl CatalogDraft {
     }
     pub fn insert(&mut self, c: char) {
         match self {
+            Self::Schema(d) => d.insert(c),
             Self::View(d) => d.insert(c),
             Self::MaterializedView(d) => d.insert(c),
             Self::Sequence(d) => d.insert(c),
@@ -1096,6 +1164,7 @@ impl CatalogDraft {
     }
     pub fn backspace(&mut self) {
         match self {
+            Self::Schema(d) => d.backspace(),
             Self::View(d) => d.backspace(),
             Self::MaterializedView(d) => d.backspace(),
             Self::Sequence(d) => d.backspace(),
@@ -1106,6 +1175,7 @@ impl CatalogDraft {
     }
     pub fn delete(&mut self) {
         match self {
+            Self::Schema(d) => d.delete(),
             Self::View(d) => d.delete(),
             Self::MaterializedView(d) => d.delete(),
             Self::Sequence(d) => d.delete(),
@@ -1116,6 +1186,7 @@ impl CatalogDraft {
     }
     pub fn delete_previous_word(&mut self) {
         match self {
+            Self::Schema(d) => d.delete_previous_word(),
             Self::View(d) => d.delete_previous_word(),
             Self::MaterializedView(d) => d.delete_previous_word(),
             Self::Sequence(d) => d.delete_previous_word(),
@@ -1124,6 +1195,7 @@ impl CatalogDraft {
     }
     pub fn delete_to_start(&mut self) {
         match self {
+            Self::Schema(d) => d.delete_to_start(),
             Self::View(d) => d.delete_to_start(),
             Self::MaterializedView(d) => d.delete_to_start(),
             Self::Sequence(d) => d.delete_to_start(),
@@ -1132,6 +1204,7 @@ impl CatalogDraft {
     }
     pub fn move_left(&mut self) {
         match self {
+            Self::Schema(d) => d.move_left(),
             Self::View(d) => d.move_left(),
             Self::MaterializedView(d) => d.move_left(),
             Self::Sequence(d) => d.move_left(),
@@ -1140,6 +1213,7 @@ impl CatalogDraft {
     }
     pub fn move_right(&mut self) {
         match self {
+            Self::Schema(d) => d.move_right(),
             Self::View(d) => d.move_right(),
             Self::MaterializedView(d) => d.move_right(),
             Self::Sequence(d) => d.move_right(),
@@ -1148,6 +1222,7 @@ impl CatalogDraft {
     }
     pub fn move_home(&mut self) {
         match self {
+            Self::Schema(d) => d.move_home(),
             Self::View(d) => d.move_home(),
             Self::MaterializedView(d) => d.move_home(),
             Self::Sequence(d) => d.move_home(),
@@ -1156,6 +1231,7 @@ impl CatalogDraft {
     }
     pub fn move_end(&mut self) {
         match self {
+            Self::Schema(d) => d.move_end(),
             Self::View(d) => d.move_end(),
             Self::MaterializedView(d) => d.move_end(),
             Self::Sequence(d) => d.move_end(),
@@ -1271,11 +1347,7 @@ impl CatalogEditorState {
                 && object_type
                     == CatalogObjectType::Catalog(crate::db::catalog::CatalogKind::Schema)
             {
-                self.draft = Some(CatalogDraft::Schema(SchemaDraft {
-                    name: TextInput::default(),
-                    owner: TextInput::default(),
-                    comment: TextInput::default(),
-                }));
+                self.draft = Some(CatalogDraft::Schema(SchemaDraft::new()));
             }
             if id.kind == crate::db::catalog::CatalogKind::Schema
                 && object_type == CatalogObjectType::Catalog(crate::db::catalog::CatalogKind::Table)

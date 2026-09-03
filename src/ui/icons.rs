@@ -3,7 +3,10 @@ use nerd_font_symbols::{dev, md};
 use serde::Deserialize;
 
 use crate::{
-    db::catalog::{CatalogKind, ObjectGroup},
+    db::{
+        catalog::{CatalogKind, ObjectGroup},
+        catalog_mutation::CatalogObjectType,
+    },
     model::notification::NotificationLevel,
     profile::DatabaseKind,
     sql::CompletionKind,
@@ -259,6 +262,14 @@ impl IconSet {
                 CatalogKind::Sequence => "SQ",
                 CatalogKind::Type => "TY",
             },
+        }
+    }
+
+    pub(crate) const fn catalog_object(self, object_type: CatalogObjectType) -> &'static str {
+        match object_type {
+            CatalogObjectType::Catalog(kind) => self.catalog(kind),
+            CatalogObjectType::LoginRole => self.explorer_add(ExplorerAddIcon::User),
+            CatalogObjectType::Role => self.explorer_add(ExplorerAddIcon::Role),
         }
     }
 

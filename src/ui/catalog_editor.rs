@@ -1,95 +1,140 @@
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Row, Table, Wrap},
+    widgets::{Clear, Paragraph, Row, Table, Wrap},
 };
 
 use crate::{
     app::App,
+    db::{catalog::CatalogKind, catalog_mutation::CatalogObjectType},
     model::catalog_editor::{
         CatalogDraft, CatalogEditorOperation, CatalogEditorPage, CatalogEditorSection,
         CatalogEditorState, ConstraintDraft, DatabaseDraft, IndexDraft, MaterializedViewDraft,
-        RoleDraft, SequenceDraft, TableDraft, ViewDraft,
+        RoleDraft, SchemaDraft, SequenceDraft, TableDraft, ViewDraft,
     },
     security::sanitize_terminal_text,
 };
 
-use super::{Theme, UiState, render_text_input};
+use super::{Theme, UiState, icons::IconSet, render_text_input};
 
-pub fn render(frame: &mut Frame<'_>, area: Rect, app: &App, ui: &mut UiState, theme: Theme) {
+pub fn render(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    ui: &mut UiState,
+    theme: Theme,
+    icons: IconSet,
+) {
     let Some(editor) = app.catalog_editor.as_ref() else {
         return;
     };
     let popup = super::centered(area, 92.min(area.width), 22.min(area.height));
     frame.render_widget(Clear, popup);
-    let inner = popup.inner(ratatui::layout::Margin {
-        vertical: 1,
-        horizontal: 1,
-    });
-    frame.render_widget(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(format!(" CATALOG EDITOR // {} ", mode_label(editor)))
-            .border_style(Style::new().fg(theme.accent)),
-        popup,
-    );
+    let title = panel_title(editor);
+    let block = super::panel_block(&title, true, theme);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
     match editor.page {
-        CatalogEditorPage::ObjectPicker => picker(frame, inner, editor, theme),
+        CatalogEditorPage::ObjectPicker => picker(frame, inner, editor, theme, icons),
         CatalogEditorPage::Loading => loading(frame, inner, editor, theme),
         CatalogEditorPage::Form => form(frame, inner, editor, ui, theme),
         CatalogEditorPage::SqlPreview => preview(frame, inner, editor, theme),
     }
 }
 
-fn mode_label(editor: &CatalogEditorState) -> &'static str {
-    match editor.mode {
-        crate::db::catalog_mutation::CatalogMutationMode::Create => "CREATE",
-        crate::db::catalog_mutation::CatalogMutationMode::Edit => "EDIT",
+fn panel_title(editor: &CatalogEditorState) -> String {
+    match editor.page {
+        CatalogEditorPage::ObjectPicker => " NEW CATALOG OBJECT ".into(),
+        CatalogEditorPage::Loading => " CATALOG EDITOR // LOADING ".into(),
+        CatalogEditorPage::Form => {
+            let verb = match editor.mode {
+                crate::db::catalog_mutation::CatalogMutationMode::Create => "NEW",
+                crate::db::catalog_mutation::CatalogMutationMode::Edit => "EDIT",
+            };
+            format!(
+                " {verb} {} ",
+                editor
+                    .object_type
+                    .map_or("OBJECT", |kind| kind.display_label())
+            )
+        }
+        CatalogEditorPage::SqlPreview => " REVIEW SQL ".into(),
     }
 }
 
-fn picker(frame: &mut Frame<'_>, area: Rect, editor: &CatalogEditorState, theme: Theme) {
-    let lines = vec![Line::from(Span::styled(
-        "Choose an object type",
-        Style::new().fg(theme.text).add_modifier(Modifier::BOLD),
-    ))];
+fn picker(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    editor: &CatalogEditorState,
+    theme: Theme,
+    icons: IconSet,
+) {
     frame.render_widget(
-        Paragraph::new(lines),
-        Rect::new(area.x, area.y, area.width, 2),
+        Paragraph::new(format!("TARGET  {}", target_label(editor)))
+            .style(Style::new().fg(theme.muted).bg(theme.surface)),
+        Rect::new(area.x, area.y, area.width, 1),
     );
-    let items = editor
-        .options
-        .iter()
-        .enumerate()
-        .map(|(index, option)| {
-            let selected = index == editor.selected_option;
-            ListItem::new(format!(
-                "{} {}",
-                if selected { ">" } else { " " },
-                sanitize_terminal_text(&option.label)
-            ))
-            .style(if selected {
-                Style::new().fg(theme.accent).bg(theme.selection)
-            } else {
-                Style::new().fg(theme.text)
-            })
-        })
-        .collect::<Vec<_>>();
-    frame.render_widget(
-        List::new(items),
-        Rect::new(
+    for (index, option) in editor.options.iter().enumerate() {
+        let row = Rect::new(
             area.x,
-            area.y.saturating_add(2),
+            area.y.saturating_add(2 + index as u16),
             area.width,
-            area.height.saturating_sub(3),
-        ),
-    );
+            1,
+        );
+        if row.y >= area.bottom().saturating_sub(1) {
+            break;
+        }
+        let selected = index == editor.selected_option;
+        let background = if selected {
+            theme.selection
+        } else {
+            theme.surface
+        };
+        let label_style = Style::new()
+            .fg(theme.text)
+            .bg(background)
+            .add_modifier(if selected {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            });
+        let icon = icons.catalog_object(option.object_type);
+        let icon_style = Style::new()
+            .fg(object_color(option.object_type, theme))
+            .bg(background);
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(if selected { "› " } else { "  " }, label_style),
+                Span::styled(format!("{icon} "), icon_style),
+                Span::styled(sanitize_terminal_text(&option.label), label_style),
+            ])),
+            row,
+        );
+    }
     frame.render_widget(
-        Paragraph::new("j/k or Up/Down select   Enter choose   Esc cancel"),
+        Paragraph::new("j/k · ↑/↓ select   Enter continue   Esc close")
+            .style(Style::new().fg(theme.muted).bg(theme.surface))
+            .alignment(ratatui::layout::Alignment::Center),
         Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
     );
+}
+
+fn object_color(object_type: CatalogObjectType, theme: Theme) -> Color {
+    match object_type {
+        CatalogObjectType::Catalog(CatalogKind::Database | CatalogKind::Schema) => theme.action,
+        CatalogObjectType::Catalog(
+            CatalogKind::Table | CatalogKind::View | CatalogKind::MaterializedView,
+        ) => theme.text,
+        CatalogObjectType::Catalog(CatalogKind::PrimaryKey | CatalogKind::UniqueConstraint) => {
+            theme.warning
+        }
+        CatalogObjectType::Catalog(CatalogKind::ForeignKey | CatalogKind::Trigger) => theme.accent,
+        CatalogObjectType::LoginRole => theme.success,
+        CatalogObjectType::Role => theme.warning,
+        CatalogObjectType::Catalog(_) => theme.muted,
+    }
 }
 
 fn loading(frame: &mut Frame<'_>, area: Rect, editor: &CatalogEditorState, theme: Theme) {
@@ -135,8 +180,22 @@ fn form(
         ])
         .split(area);
     frame.render_widget(
-        Paragraph::new(format!("{title}  //  target: {}", target_label(editor)))
-            .style(Style::new().fg(theme.muted)),
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                format!("{} DETAILS", title.to_uppercase()),
+                Style::new()
+                    .fg(theme.muted)
+                    .bg(theme.surface)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(
+                    "  TARGET  {}",
+                    sanitize_terminal_text(&target_label(editor))
+                ),
+                Style::new().fg(theme.muted).bg(theme.surface),
+            ),
+        ])),
         chunks[0],
     );
     if let Some(CatalogDraft::Database(draft)) = editor.draft.as_ref() {
@@ -144,14 +203,7 @@ fn form(
     } else if let Some(CatalogDraft::Role(draft)) = editor.draft.as_ref() {
         render_role(frame, chunks[1], draft, theme);
     } else if let Some(CatalogDraft::Schema(draft)) = editor.draft.as_ref() {
-        render_text_input(
-            frame,
-            chunks[1],
-            "Name: ",
-            &draft.name,
-            Style::new().fg(theme.text),
-            ui,
-        );
+        render_schema(frame, chunks[1], draft, ui, theme);
     } else if let Some(CatalogDraft::Table(draft)) = editor.draft.as_ref() {
         render_table(frame, chunks[1], draft, theme);
     } else if let Some(CatalogDraft::Index(draft)) = editor.draft.as_ref() {
@@ -173,7 +225,7 @@ fn form(
     let feedback = editor
         .error
         .as_deref()
-        .map(sanitize_terminal_text)
+        .map(|error| format!("× {}", sanitize_terminal_text(error)))
         .unwrap_or_else(|| {
             if matches!(
                 editor.draft.as_ref(),
@@ -190,6 +242,62 @@ fn form(
             .style(Style::new().fg(editor.error.as_ref().map_or(theme.muted, |_| theme.error))),
         chunks[2],
     );
+}
+
+fn render_schema(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    draft: &SchemaDraft,
+    ui: &mut UiState,
+    theme: Theme,
+) {
+    let rows = [
+        ("Name", &draft.name),
+        ("Owner", &draft.owner),
+        ("Comment", &draft.comment),
+    ];
+    for (index, (label, input)) in rows.into_iter().enumerate() {
+        let row = Rect::new(area.x, area.y.saturating_add(index as u16), area.width, 1);
+        let active = draft.selected_field == index;
+        let label_width = row.width.min(18);
+        frame.render_widget(
+            Paragraph::new(if active {
+                format!("› {label:<15}")
+            } else {
+                format!("  {label:<15}")
+            })
+            .style(
+                Style::new()
+                    .fg(if active { theme.action } else { theme.muted })
+                    .bg(theme.surface)
+                    .add_modifier(if active {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
+            ),
+            Rect::new(row.x, row.y, label_width, 1),
+        );
+        let value_area = Rect::new(
+            row.x.saturating_add(label_width),
+            row.y,
+            row.width.saturating_sub(label_width),
+            1,
+        );
+        let style = Style::new().fg(theme.text).bg(if active {
+            theme.selection
+        } else {
+            theme.surface
+        });
+        if active {
+            render_text_input(frame, value_area, "", input, style, ui);
+        } else {
+            frame.render_widget(
+                Paragraph::new(sanitize_terminal_text(input.value())).style(style),
+                value_area,
+            );
+        }
+    }
 }
 
 fn render_role(frame: &mut Frame<'_>, area: Rect, draft: &RoleDraft, theme: Theme) {

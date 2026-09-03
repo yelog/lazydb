@@ -288,10 +288,14 @@ fn catalog_editor_overlay_renders_picker_shell_and_context() {
     ));
     app.overlay = Some(Overlay::CatalogEditor);
 
-    let output = render(&app, 100, 30);
+    let output = render_with_icons(&app, 100, 30, IconSet::new(IconMode::Ascii)).0;
 
-    assert!(output.contains("CATALOG EDITOR // CREATE"), "{output}");
-    assert!(output.contains("Choose an object type"), "{output}");
+    assert!(output.contains("NEW CATALOG OBJECT"), "{output}");
+    assert!(output.contains("TARGET"), "{output}");
+    assert!(output.contains("TB Table"), "{output}");
+    assert!(output.contains("VW View"), "{output}");
+    assert!(output.contains("MV Materialized View"), "{output}");
+    assert!(output.contains("SQ Sequence"), "{output}");
     assert!(output.contains("Table"), "{output}");
     assert!(output.contains("View"), "{output}");
     assert!(output.contains("Materialized View"), "{output}");

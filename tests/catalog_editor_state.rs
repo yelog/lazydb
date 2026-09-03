@@ -225,6 +225,7 @@ fn schema_draft_rejects_blank_name_and_owner() {
         name: TextInput::from("  "),
         owner: TextInput::from("postgres"),
         comment: TextInput::default(),
+        selected_field: 0,
     };
     assert!(draft.validate().is_err());
 
@@ -232,8 +233,46 @@ fn schema_draft_rejects_blank_name_and_owner() {
         name: TextInput::from("events"),
         owner: TextInput::from("\t"),
         comment: TextInput::default(),
+        selected_field: 0,
     };
     assert!(draft.validate().is_err());
+}
+
+#[test]
+fn schema_draft_edits_name_owner_and_comment() {
+    let mut draft = CatalogDraft::Schema(SchemaDraft::new());
+
+    draft.insert('a');
+    draft.move_field(1);
+    draft.insert('o');
+    draft.move_field(1);
+    draft.insert('c');
+
+    let CatalogDraft::Schema(draft) = draft else {
+        unreachable!();
+    };
+    assert_eq!(draft.name.value(), "a");
+    assert_eq!(draft.owner.value(), "o");
+    assert_eq!(draft.comment.value(), "c");
+    assert_eq!(draft.selected_field, 2);
+}
+
+#[test]
+fn schema_draft_delegates_cursor_and_delete_commands() {
+    let mut draft = CatalogDraft::Schema(SchemaDraft::new());
+    for character in "owner".chars() {
+        draft.insert(character);
+    }
+    draft.move_home();
+    draft.move_right();
+    draft.delete();
+    draft.move_end();
+    draft.backspace();
+
+    let CatalogDraft::Schema(draft) = draft else {
+        unreachable!();
+    };
+    assert_eq!(draft.name.value(), "one");
 }
 
 #[test]
@@ -266,6 +305,7 @@ fn form_preview_apply_and_cancel_transitions() {
         name: TextInput::from("events"),
         owner: TextInput::from("postgres"),
         comment: TextInput::default(),
+        selected_field: 0,
     }));
     assert!(editor.begin_planning(2));
     let connection = ConnectionIdentity {
@@ -311,6 +351,7 @@ fn stale_responses_and_validation_preserve_form() {
         name: TextInput::from("kept"),
         owner: TextInput::from("postgres"),
         comment: TextInput::default(),
+        selected_field: 0,
     }));
     assert!(editor.begin_planning(4));
     let connection = ConnectionIdentity {

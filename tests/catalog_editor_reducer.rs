@@ -284,6 +284,87 @@ fn opening_create_on_schema_uses_capability_ordered_options() {
         panic!("view draft expected");
     };
     assert!(draft.security_invoker.availability.is_available());
+
+    app.update(Action::CatalogEditorCancel);
+    app.explorer.normalized.selected = Some(lazydb::model::explorer::ExplorerNodeId::Group {
+        parent: CatalogId::new(profile_id, CatalogKind::Schema, ["app", "public"]),
+        group: lazydb::db::catalog::ObjectGroup::Tables,
+    });
+    app.update(Action::OpenCatalogCreate);
+    let editor = app.catalog_editor.as_ref().expect("table editor");
+    assert_eq!(
+        editor.page,
+        lazydb::model::catalog_editor::CatalogEditorPage::Form
+    );
+    assert_eq!(
+        editor.object_type,
+        Some(CatalogObjectType::Catalog(CatalogKind::Table))
+    );
+    assert!(matches!(
+        editor.draft,
+        Some(lazydb::model::catalog_editor::CatalogDraft::Table(_))
+    ));
+
+    app.update(Action::CatalogEditorCancel);
+    app.explorer.normalized.selected = Some(lazydb::model::explorer::ExplorerNodeId::Catalog(
+        CatalogId::new(profile_id, CatalogKind::Database, ["app"]),
+    ));
+    app.update(Action::OpenCatalogCreate);
+    let editor = app.catalog_editor.as_ref().expect("schema editor");
+    assert_eq!(
+        editor.page,
+        lazydb::model::catalog_editor::CatalogEditorPage::Form
+    );
+    assert_eq!(
+        editor.object_type,
+        Some(CatalogObjectType::Catalog(CatalogKind::Schema))
+    );
+    assert!(matches!(
+        editor.draft,
+        Some(lazydb::model::catalog_editor::CatalogDraft::Schema(_))
+    ));
+}
+
+#[test]
+fn views_group_opens_view_form_with_connected_capabilities() {
+    let profile = import_connection_url("postgres://localhost/app", Some("postgres-test"))
+        .unwrap()
+        .profile;
+    let profile_id = profile.id;
+    let mut app = App::new(vec![profile]);
+    let generation = match app.update(Action::RequestConnect(profile_id)).as_slice() {
+        [lazydb::action::Command::Connect { generation, .. }] => *generation,
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+    app.update(Action::ConnectionSucceeded {
+        profile_id,
+        generation,
+        server: lazydb::db::ServerInfo {
+            kind: lazydb::profile::DatabaseKind::Postgres,
+            version: "PostgreSQL 15".into(),
+            database: "app".into(),
+        },
+        mutation_capabilities:
+            lazydb::db::postgres::PostgresAdapter::catalog_mutation_capabilities_for_version(
+                150_000,
+            ),
+    });
+    let schema = CatalogId::new(profile_id, CatalogKind::Schema, ["app", "public"]);
+    app.explorer.normalized.selected = Some(ExplorerNodeId::Group {
+        parent: schema,
+        group: lazydb::db::catalog::ObjectGroup::Views,
+    });
+
+    app.update(Action::OpenCatalogCreate);
+
+    let Some(lazydb::model::catalog_editor::CatalogDraft::View(draft)) = app
+        .catalog_editor
+        .as_ref()
+        .and_then(|editor| editor.draft.as_ref())
+    else {
+        panic!("view draft expected");
+    };
+    assert!(draft.security_invoker.availability.is_available());
 }
 
 #[test]
