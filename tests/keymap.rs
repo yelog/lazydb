@@ -1539,6 +1539,39 @@ fn normal_mode_global_keys_win_over_editor_and_completion() {
 }
 
 #[test]
+fn shift_tab_focuses_the_previous_pane_in_both_terminal_encodings() {
+    let mut keymap = Keymap::default();
+    let mut app = App::new(Vec::new());
+    app.update(Action::EditorKey(key(KeyCode::Esc)));
+    app.focus = Focus::Explorer;
+
+    assert_eq!(
+        keymap.map(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT), &app,),
+        Some(Action::FocusPrevious)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::BackTab), &app),
+        Some(Action::FocusPrevious)
+    );
+    assert_eq!(
+        keymap.map(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT), &app,),
+        Some(Action::FocusPrevious)
+    );
+}
+
+#[test]
+fn shift_tab_leaves_sql_insert_mode_and_focuses_the_previous_pane() {
+    let mut keymap = Keymap::default();
+    let app = App::new(Vec::new());
+    assert_eq!(app.active_editor_mode(), EditorMode::Insert);
+
+    assert_eq!(
+        keymap.map(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT), &app),
+        Some(Action::FocusPrevious)
+    );
+}
+
+#[test]
 fn insert_escape_bypasses_completion_dismiss() {
     let mut keymap = Keymap::default();
     let mut app = App::new(Vec::new());

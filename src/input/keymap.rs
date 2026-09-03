@@ -99,6 +99,7 @@ impl Keymap {
 
     pub fn map(&mut self, event: KeyEvent, app: &App) -> Option<Action> {
         self.observe_state(app);
+        let event = normalize_shift_tab(event);
         if matches!(event.kind, KeyEventKind::Release) {
             return None;
         }
@@ -572,6 +573,10 @@ impl Keymap {
             && let Some(action) = map_data_query(event, app)
         {
             return Some(action);
+        }
+
+        if app.focus == Focus::Editor && self.bindings.matches("focus-previous-pane", event) {
+            return Some(Action::FocusPrevious);
         }
 
         if app.focus == Focus::Editor && app.active_editor_mode() == EditorMode::Normal {
@@ -1923,6 +1928,16 @@ fn map_text_input_edit(event: KeyEvent) -> Option<TextInputEdit> {
         KeyCode::Char(character) => Some(TextInputEdit::Insert(character)),
         _ => None,
     }
+}
+
+fn normalize_shift_tab(mut event: KeyEvent) -> KeyEvent {
+    if matches!(event.code, KeyCode::Tab | KeyCode::BackTab)
+        && event.modifiers.contains(KeyModifiers::SHIFT)
+    {
+        event.code = KeyCode::BackTab;
+        event.modifiers.remove(KeyModifiers::SHIFT);
+    }
+    event
 }
 
 fn map_single_line_text_input_edit(event: KeyEvent) -> Option<TextInputEdit> {
