@@ -163,6 +163,7 @@ fn entry_in_scope(entry: &CatalogEntry, scope: &CatalogScope) -> bool {
 enum Context {
     Statement,
     Insert,
+    InsertColumns,
     Relation,
     Expression(ExpressionContext),
     Qualifier,
@@ -219,11 +220,18 @@ pub fn complete(
     let (statement, statement_cursor) = current_statement(text, replace.start, dialect);
     let tokens = completion_tokens(statement, dialect);
     let active_scopes = active_scope_starts(&tokens, statement_cursor);
-    let context = context_at(
-        &tokens,
-        statement_cursor,
-        active_scopes.last().copied().flatten(),
-    );
+    let current_scope = active_scopes.last().copied().flatten();
+    let insert_column_target = insert_column_target_at(&tokens, statement_cursor, current_scope);
+    let context = if insert_column_target.is_some() {
+        Context::InsertColumns
+    } else {
+        context_at(&tokens, statement_cursor, current_scope)
+    };
+    let insert_target_relations = insert_column_target
+        .as_ref()
+        .into_iter()
+        .flat_map(|binding| relation_ids(index, binding, completion_context))
+        .collect::<HashSet<_>>();
     let projection_complete = context == Context::Expression(ExpressionContext::Projection)
         && projection_is_complete(
             &tokens,
@@ -237,13 +245,21 @@ pub fn complete(
         .collect::<HashSet<_>>();
     let mut candidates = Vec::new();
     let folded_prefix = fold_identifier(&prefix);
-    let candidate_indexes = qualified_candidate_indices(
-        index,
-        &qualifiers,
-        &folded_prefix,
-        &bindings,
-        completion_context,
-    );
+    let candidate_indexes = if context == Context::InsertColumns {
+        if qualifiers.is_empty() {
+            relation_child_candidate_indices(index, &insert_target_relations)
+        } else {
+            Vec::new()
+        }
+    } else {
+        qualified_candidate_indices(
+            index,
+            &qualifiers,
+            &folded_prefix,
+            &bindings,
+            completion_context,
+        )
+    };
     for node_index in candidate_indexes {
         let entry = &index.entries[node_index];
         let Some(kind) = completion_kind(entry.kind) else {
@@ -326,7 +342,7 @@ pub fn complete(
                             (Context::Statement | Context::Insert, _, _) => 4,
                             (Context::Expression(_), _, _) => 2,
                             (Context::Relation | Context::Routine, _, _) => 1,
-                            (Context::Qualifier, _, _) => 0,
+                            (Context::Qualifier | Context::InsertColumns, _, _) => 0,
                         },
                         name_match: 2,
                         schema: 0,
@@ -504,6 +520,16 @@ fn candidate_indices(
     candidates
 }
 
+fn relation_child_candidate_indices(
+    index: &CompletionIndex,
+    relations: &HashSet<CatalogId>,
+) -> Vec<usize> {
+    relations
+        .iter()
+        .flat_map(|relation| index.children.get(relation).into_iter().flatten().copied())
+        .collect()
+}
+
 fn prefixed_indices<'a>(
     names: &'a BTreeMap<String, Vec<usize>>,
     prefix: &'a str,
@@ -530,6 +556,7 @@ fn completion_kind(kind: CatalogKind) -> Option<CompletionKind> {
 fn catalog_kind_allowed(context: Context, kind: CompletionKind) -> bool {
     match context {
         Context::Statement | Context::Insert => false,
+        Context::InsertColumns => kind == CompletionKind::Column,
         Context::Relation => matches!(
             kind,
             CompletionKind::Database
@@ -591,6 +618,35 @@ fn context_at(tokens: &[CompletionToken], cursor: usize, current_scope: Option<u
     } else {
         context
     }
+}
+
+fn insert_column_target_at(
+    tokens: &[CompletionToken],
+    cursor: usize,
+    current_scope: Option<usize>,
+) -> Option<RelationBinding> {
+    let opening_start = current_scope?;
+    let opening_index = tokens.iter().position(|token| {
+        token.start == opening_start
+            && token.start < cursor
+            && token.kind == CompletionTokenKind::LeftParen
+    })?;
+    let parent_scope = tokens[opening_index].scope_start;
+    let insert_index = tokens[..opening_index].iter().rposition(|token| {
+        token.scope_start == parent_scope
+            && token_word(Some(token)).is_some_and(|word| word.eq_ignore_ascii_case("insert"))
+    })?;
+    let into_index = tokens[insert_index + 1..opening_index]
+        .iter()
+        .position(|token| {
+            token.scope_start == parent_scope
+                && token_word(Some(token)).is_some_and(|word| word.eq_ignore_ascii_case("into"))
+        })?
+        + insert_index
+        + 1;
+    let (binding, next) = relation_binding_at(tokens, into_index + 1)?;
+
+    (binding.scope_start == parent_scope && next == opening_index).then_some(binding)
 }
 
 fn projection_is_complete(
@@ -947,6 +1003,11 @@ fn is_relation_boundary(word: &str) -> bool {
             | "union"
             | "intersect"
             | "except"
+            | "values"
+            | "select"
+            | "default"
+            | "overriding"
+            | "set"
     )
 }
 
@@ -1157,6 +1218,7 @@ fn keywords(
         Context::Expression(ExpressionContext::Returning) => &["CASE", "NULL", "TRUE", "FALSE"],
         Context::Relation => &["LATERAL"],
         Context::Qualifier | Context::Routine => &[],
+        Context::InsertColumns => &[],
     }
 }
 
