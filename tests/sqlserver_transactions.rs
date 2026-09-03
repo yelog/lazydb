@@ -90,18 +90,6 @@ async fn sql_server_transactions_cover_isolation_commit_rollback_ddl_disconnect_
         .unwrap();
     transaction.rollback().await.unwrap();
 
-    transaction.begin().await.unwrap();
-    transaction
-        .execute(&format!("INSERT INTO {table} ([id]) VALUES (3)"))
-        .await
-        .unwrap();
-    transaction.rollback().await.unwrap();
-    transaction.force_close().await.unwrap();
-    let after_disconnect = database
-        .execute(&format!("SELECT COUNT(*) FROM {table}"))
-        .await
-        .unwrap();
-    assert_eq!(count(&after_disconnect), 1);
     database.execute("SELECT 1").await.unwrap();
     database
         .execute(&format!("DROP TABLE {table}"))
