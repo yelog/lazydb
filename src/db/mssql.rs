@@ -2182,9 +2182,7 @@ async fn execute_one_batch(
 }
 
 fn requires_standalone_batch(sql: &str) -> bool {
-    sql.split_whitespace()
-        .next()
-        .is_some_and(|keyword| keyword.eq_ignore_ascii_case("CREATE"))
+    sql.trim_start().to_ascii_uppercase().starts_with("CREATE ")
 }
 
 pub struct MsSqlTransactionBackend {

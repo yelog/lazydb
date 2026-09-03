@@ -251,10 +251,12 @@ async fn executes_all_result_sets_and_decodes_sql_server_types_when_configured()
     );
 
     let table = format!("#lazydb_task6_{}", Uuid::new_v4().simple());
+    database
+        .execute(&format!("CREATE TABLE {table} ([value] int);"))
+        .await
+        .unwrap();
     let dml = database
-        .execute(&format!(
-            "CREATE TABLE {table} ([value] int); INSERT INTO {table} VALUES (1), (2), (3);"
-        ))
+        .execute(&format!("INSERT INTO {table} VALUES (1), (2), (3);"))
         .await
         .unwrap();
     assert_eq!(dml.result_sets.last().unwrap().affected_rows, 3);
