@@ -64,7 +64,7 @@ jobs:
           --health-timeout 5s
           --health-retries 10
       sqlserver:
-        image: mcr.microsoft.com/mssql/server:2022-latest
+        image: mcr.microsoft.com/mssql/server:2022-CU16-ubuntu-22.04
         env:
           ACCEPT_EULA: Y
           MSSQL_SA_PASSWORD: LazydbC1!SqlServer2022
