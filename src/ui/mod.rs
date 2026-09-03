@@ -2773,10 +2773,17 @@ fn render_footer(
     };
     let context = crate::help::shortcut_context(app);
     let capabilities = crate::help::shortcut_capabilities(app);
-    let hint_values = crate::help::footer_shortcuts(context, capabilities)
-        .into_iter()
-        .map(|shortcut| format!("{} {}", shortcut.sequence, shortcut.description))
-        .collect::<Vec<_>>();
+    let hint_values =
+        crate::help::footer_shortcuts_with_bindings(context, capabilities, Some(&app.key_bindings))
+            .into_iter()
+            .map(|shortcut| {
+                format!(
+                    "{} {}",
+                    crate::help::configured_sequence(&shortcut, Some(&app.key_bindings)),
+                    shortcut.description
+                )
+            })
+            .collect::<Vec<_>>();
     let mode_badge = format!(" {mode} ");
     let hints = pack_hints(&hint_values, footer_hint_width(&mode_badge, area.width));
     let line = Line::from(vec![
@@ -3886,8 +3893,12 @@ fn render_help(
         .border_style(Style::new().fg(theme.accent))
         .style(Style::new().bg(theme.surface_raised));
     frame.render_widget(block, popup);
-    let entries =
-        crate::help::filtered_shortcuts(help.context, help.capabilities, help.query.value());
+    let entries = crate::help::filtered_shortcuts_with_bindings(
+        help.context,
+        help.capabilities,
+        help.query.value(),
+        Some(&help.bindings),
+    );
     let inner = Block::default().borders(Borders::ALL).inner(popup);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -3922,7 +3933,10 @@ fn render_help(
             let marker = if index == help.selected { ">" } else { " " };
             Line::from(vec![
                 Span::styled(
-                    format!("{marker} {:<18}", shortcut.sequence),
+                    format!(
+                        "{marker} {:<18}",
+                        crate::help::configured_sequence(shortcut, Some(&help.bindings))
+                    ),
                     Style::new().fg(theme.action).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(shortcut.description, Style::new().fg(theme.text)),

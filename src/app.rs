@@ -233,6 +233,7 @@ pub struct App {
     workspaces: HashMap<Uuid, ConnectionWorkspace>,
     pub notifications: NotificationCenter,
     dashboard_refresh_interval_millis: u64,
+    pub(crate) key_bindings: crate::config::KeyBindings,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -575,7 +576,15 @@ impl App {
             notifications: NotificationCenter::default(),
             dashboard_refresh_interval_millis: crate::persistence::settings::AppSettings::default()
                 .dashboard_refresh_interval_millis(),
+            key_bindings: crate::config::AppConfig::default()
+                .keybindings
+                .key_bindings()
+                .expect("embedded default keybindings must be valid"),
         }
+    }
+
+    pub(crate) fn set_key_bindings(&mut self, bindings: crate::config::KeyBindings) {
+        self.key_bindings = bindings;
     }
 
     pub fn set_dashboard_refresh_interval_millis(&mut self, interval_millis: u64) {
@@ -2618,9 +2627,10 @@ impl App {
             Action::ShowHelp => {
                 let context = crate::help::shortcut_context(self);
                 let capabilities = crate::help::shortcut_capabilities(self);
-                self.overlay = Some(Overlay::Help(crate::help::HelpState::new(
+                self.overlay = Some(Overlay::Help(crate::help::HelpState::with_bindings(
                     context,
                     capabilities,
+                    self.key_bindings.clone(),
                 )));
                 Vec::new()
             }

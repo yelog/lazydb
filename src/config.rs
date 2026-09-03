@@ -24,6 +24,18 @@ const SUPPORTED_COMMANDS: &[&str] = &[
     "next-tab",
     "previous-tab",
     "close-tab",
+    "open-dashboard",
+    "open-explorer",
+    "open-editors",
+    "run-leader-statement",
+    "run-leader-buffer",
+    "open-target-selector",
+    "focus-pane-left",
+    "focus-pane-down",
+    "focus-pane-up",
+    "focus-pane-right",
+    "toggle-pane-maximized",
+    "reset-pane-sizes",
 ];
 
 #[derive(Debug, Error)]
@@ -98,9 +110,10 @@ pub struct KeybindingConfig {
     pub commands: BTreeMap<String, Vec<String>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct KeyBindings {
     commands: BTreeMap<String, Vec<Vec<KeyEvent>>>,
+    display: BTreeMap<String, Vec<String>>,
 }
 
 impl KeyBindings {
@@ -116,6 +129,26 @@ impl KeyBindings {
             .is_some_and(|sequences| sequences.iter().any(|sequence| sequence == events))
     }
 
+    pub fn matching_command(&self, events: &[KeyEvent]) -> Option<&str> {
+        self.commands.iter().find_map(|(command, sequences)| {
+            sequences
+                .iter()
+                .any(|sequence| sequence == events)
+                .then_some(command.as_str())
+        })
+    }
+
+    pub fn is_configured(&self, command: &str) -> bool {
+        self.commands.contains_key(command)
+    }
+
+    pub fn has_any_prefix(&self, events: &[KeyEvent]) -> bool {
+        self.commands
+            .values()
+            .flatten()
+            .any(|sequence| sequence.len() > events.len() && sequence.starts_with(events))
+    }
+
     pub fn has_sequence_prefix(&self, command: &str, events: &[KeyEvent]) -> bool {
         self.commands.get(command).is_some_and(|sequences| {
             sequences
@@ -128,6 +161,10 @@ impl KeyBindings {
         self.commands
             .get(command)
             .and_then(|sequences| sequences.first().map(Vec::as_slice))
+    }
+
+    pub fn display_for(&self, command: &str) -> Option<String> {
+        self.display.get(command).map(|keys| keys.join(", "))
     }
 }
 
@@ -183,7 +220,10 @@ impl KeybindingConfig {
                 }
             }
         }
-        Ok(KeyBindings { commands })
+        Ok(KeyBindings {
+            commands,
+            display: self.commands.clone(),
+        })
     }
 }
 
@@ -313,7 +353,10 @@ fn parse_key(value: &str) -> Option<KeyEvent> {
         "space" => KeyCode::Char(' '),
         "esc" | "escape" => KeyCode::Esc,
         "enter" => KeyCode::Enter,
-        "tab" if modifiers.contains(KeyModifiers::SHIFT) => KeyCode::BackTab,
+        "tab" if modifiers.contains(KeyModifiers::SHIFT) => {
+            modifiers.remove(KeyModifiers::SHIFT);
+            KeyCode::BackTab
+        }
         "tab" => KeyCode::Tab,
         "backspace" => KeyCode::Backspace,
         _ => {
@@ -479,7 +522,7 @@ mod tests {
         ));
         assert!(bindings.matches(
             "focus-previous-pane",
-            KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)
+            KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE)
         ));
         assert!(bindings.matches(
             "help",
@@ -506,6 +549,13 @@ mod tests {
             &[
                 KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
                 KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
+            ]
+        ));
+        assert!(bindings.matches_sequence(
+            "open-dashboard",
+            &[
+                KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+                KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE),
             ]
         ));
     }

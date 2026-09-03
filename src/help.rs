@@ -2484,6 +2484,15 @@ pub(crate) fn filtered_shortcuts(
     capabilities: ShortcutCapabilities,
     query: &str,
 ) -> Vec<Shortcut> {
+    filtered_shortcuts_with_bindings(context, capabilities, query, None)
+}
+
+pub(crate) fn filtered_shortcuts_with_bindings(
+    context: ShortcutContext,
+    capabilities: ShortcutCapabilities,
+    query: &str,
+    bindings: Option<&crate::config::KeyBindings>,
+) -> Vec<Shortcut> {
     let tokens = query
         .split_whitespace()
         .map(str::to_lowercase)
@@ -2491,10 +2500,33 @@ pub(crate) fn filtered_shortcuts(
     shortcuts(context, capabilities)
         .into_iter()
         .filter(|shortcut| {
-            let haystack = format!("{} {}", shortcut.sequence, shortcut.description).to_lowercase();
+            let sequence = configured_sequence(shortcut, bindings);
+            let haystack = format!("{} {}", sequence, shortcut.description).to_lowercase();
             tokens.iter().all(|token| haystack.contains(token))
         })
         .collect()
+}
+
+pub(crate) fn configured_sequence(
+    shortcut: &Shortcut,
+    bindings: Option<&crate::config::KeyBindings>,
+) -> String {
+    let command = match shortcut.id {
+        HelpShortcutId::Help => Some("help"),
+        HelpShortcutId::OpenDashboard => Some("open-dashboard"),
+        HelpShortcutId::FocusExplorerLeader => Some("open-explorer"),
+        HelpShortcutId::OpenSqlEditors => Some("open-editors"),
+        HelpShortcutId::RunSql => Some("run-leader-statement"),
+        HelpShortcutId::RunAllSql => Some("run-leader-buffer"),
+        HelpShortcutId::OpenTargetSelector => Some("open-target-selector"),
+        HelpShortcutId::NextTab => Some("next-tab"),
+        HelpShortcutId::PreviousTab => Some("previous-tab"),
+        HelpShortcutId::CloseTab => Some("close-tab"),
+        _ => None,
+    };
+    command
+        .and_then(|command| bindings.and_then(|bindings| bindings.display_for(command)))
+        .unwrap_or_else(|| shortcut.sequence.to_owned())
 }
 
 #[allow(dead_code)] // Consumed by pending-sequence rendering in Task 7.
@@ -2614,6 +2646,14 @@ fn prefix_rank(prefix: ShortcutPrefix, id: HelpShortcutId) -> Option<u8> {
 pub(crate) fn footer_shortcuts(
     context: ShortcutContext,
     capabilities: ShortcutCapabilities,
+) -> Vec<Shortcut> {
+    footer_shortcuts_with_bindings(context, capabilities, None)
+}
+
+pub(crate) fn footer_shortcuts_with_bindings(
+    context: ShortcutContext,
+    capabilities: ShortcutCapabilities,
+    _bindings: Option<&crate::config::KeyBindings>,
 ) -> Vec<Shortcut> {
     let mut indexed = shortcuts(context, capabilities)
         .into_iter()
@@ -2815,6 +2855,7 @@ pub struct HelpState {
     pub(crate) capabilities: ShortcutCapabilities,
     pub(crate) query: TextInput,
     pub(crate) selected: usize,
+    pub(crate) bindings: crate::config::KeyBindings,
 }
 
 impl HelpState {
@@ -2824,6 +2865,24 @@ impl HelpState {
             capabilities,
             query: TextInput::default(),
             selected: 0,
+            bindings: crate::config::AppConfig::default()
+                .keybindings
+                .key_bindings()
+                .expect("embedded default keybindings must be valid"),
+        }
+    }
+
+    pub fn with_bindings(
+        context: ShortcutContext,
+        capabilities: ShortcutCapabilities,
+        bindings: crate::config::KeyBindings,
+    ) -> Self {
+        Self {
+            context,
+            capabilities,
+            query: TextInput::default(),
+            selected: 0,
+            bindings,
         }
     }
     pub(crate) fn edit(&mut self, edit: TextInputEdit) {
@@ -2856,9 +2915,14 @@ impl HelpState {
         };
     }
     pub(crate) fn selected_id(&self) -> Option<HelpShortcutId> {
-        filtered_shortcuts(self.context, self.capabilities, self.query.value())
-            .get(self.selected)
-            .map(|shortcut| shortcut.id)
+        filtered_shortcuts_with_bindings(
+            self.context,
+            self.capabilities,
+            self.query.value(),
+            Some(&self.bindings),
+        )
+        .get(self.selected)
+        .map(|shortcut| shortcut.id)
     }
 }
 

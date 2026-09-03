@@ -574,13 +574,6 @@ impl Keymap {
             return Some(action);
         }
 
-        if self.bindings.matches("focus-next-pane", event) {
-            return Some(Action::FocusNext);
-        }
-        if self.bindings.matches("focus-previous-pane", event) {
-            return Some(Action::FocusPrevious);
-        }
-
         if app.focus == Focus::Editor && app.active_editor_mode() == EditorMode::Normal {
             match event.code {
                 _ if self.bindings.matches("help", event) => return Some(Action::ShowHelp),
@@ -622,6 +615,13 @@ impl Keymap {
             if completion_action.is_some() {
                 return completion_action;
             }
+        }
+
+        if app.focus != Focus::Editor && self.bindings.matches("focus-next-pane", event) {
+            return Some(Action::FocusNext);
+        }
+        if app.focus != Focus::Editor && self.bindings.matches("focus-previous-pane", event) {
+            return Some(Action::FocusPrevious);
         }
 
         if self.bindings.matches("next-tab", event) {
@@ -774,6 +774,51 @@ impl Keymap {
                 self.pending = None;
                 self.sequence_selected = 0;
                 return Some(Action::EditorKey(event));
+            }
+            if matches!(pending, Pending::Window { .. }) {
+                let sequence = [
+                    KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+                    event,
+                ];
+                let command = if self.bindings.matches_sequence("focus-pane-left", &sequence)
+                    && matches!(app.focus, Focus::Editor | Focus::Results)
+                {
+                    Some(Action::Focus(Focus::Explorer))
+                } else if self.bindings.matches_sequence("focus-pane-down", &sequence)
+                    && app.focus == Focus::Editor
+                {
+                    Some(Action::Focus(Focus::Results))
+                } else if self.bindings.matches_sequence("focus-pane-up", &sequence)
+                    && app.focus == Focus::Results
+                    && !app.is_active_relation_tab()
+                {
+                    Some(Action::Focus(Focus::Editor))
+                } else if self
+                    .bindings
+                    .matches_sequence("focus-pane-right", &sequence)
+                    && app.focus == Focus::Explorer
+                {
+                    Some(Action::Focus(if app.active_console_opt().is_none() {
+                        Focus::Results
+                    } else {
+                        Focus::Editor
+                    }))
+                } else if self
+                    .bindings
+                    .matches_sequence("toggle-pane-maximized", &sequence)
+                {
+                    Some(Action::TogglePaneMaximized)
+                } else if self
+                    .bindings
+                    .matches_sequence("reset-pane-sizes", &sequence)
+                {
+                    Some(Action::ResetPaneSizes)
+                } else {
+                    None
+                };
+                if command.is_some() {
+                    return command;
+                }
             }
             if let Some(action) = map_pending(pending, event, app, &self.bindings) {
                 return Some(action);
@@ -1415,18 +1460,19 @@ fn map_pending(
             && event.modifiers == KeyModifiers::SHIFT
             && event.code == KeyCode::Char('T'))
         || matches!(pending, Pending::Window { .. });
+    if pending == Pending::Leader {
+        let sequence = [KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE), event];
+        if let Some(command) = bindings.matching_command(&sequence) {
+            return configured_command_action(command, app);
+        }
+        if bindings.has_any_prefix(&sequence) {
+            return None;
+        }
+    }
     if !valid_modifiers {
         return None;
     }
     match (pending, event.code) {
-        (Pending::Leader, KeyCode::Char('c')) => Some(Action::Focus(Focus::Explorer)),
-        (Pending::Leader, KeyCode::Char('b')) if app.dashboard_supported() => {
-            Some(Action::OpenDashboard)
-        }
-        (Pending::Leader, KeyCode::Char('s')) => Some(Action::OpenSqlEditorList),
-        (Pending::Leader, KeyCode::Char('r')) => Some(Action::RunActiveSql),
-        (Pending::Leader, KeyCode::Char('R')) => Some(Action::RunAllSql),
-        (Pending::Leader, KeyCode::Char('d')) => Some(Action::OpenTargetSelector),
         (Pending::Leader, KeyCode::Char('q')) => Some(Action::CloseActiveTab),
         (Pending::Leader, KeyCode::Char('x')) => Some(Action::RequestDeleteActiveConsole),
         (Pending::Leader, KeyCode::Char('m')) => Some(Action::OpenNotificationHistory),
@@ -1445,33 +1491,10 @@ fn map_pending(
         {
             Some(Action::FocusNext)
         }
-        (Pending::Window { .. }, KeyCode::Char('j')) if app.focus == Focus::Editor => {
-            Some(Action::Focus(Focus::Results))
-        }
-        (Pending::Window { .. }, KeyCode::Char('k'))
-            if app.focus == Focus::Results && !app.is_active_relation_tab() =>
-        {
-            Some(Action::Focus(Focus::Editor))
-        }
-        (Pending::Window { .. }, KeyCode::Char('l')) if app.focus == Focus::Explorer => {
-            Some(Action::Focus(if app.active_console_opt().is_none() {
-                Focus::Results
-            } else {
-                Focus::Editor
-            }))
-        }
-        (Pending::Window { .. }, KeyCode::Char('h')) if app.focus == Focus::Editor => {
-            Some(Action::Focus(Focus::Explorer))
-        }
-        (Pending::Window { .. }, KeyCode::Char('h')) if app.focus == Focus::Results => {
-            Some(Action::Focus(Focus::Explorer))
-        }
         (Pending::Window { .. }, KeyCode::Char('j')) if app.focus == Focus::Explorer => None,
         (Pending::Window { count }, KeyCode::Char(operator @ ('+' | '-' | '>' | '<'))) => {
             crate::model::workspace::pane_resize(app.focus, operator, count).map(Action::ResizePane)
         }
-        (Pending::Window { .. }, KeyCode::Char('=')) => Some(Action::ResetPaneSizes),
-        (Pending::Window { .. }, KeyCode::Char('f')) => Some(Action::TogglePaneMaximized),
         (Pending::Goto, KeyCode::Char('g')) if app.focus == Focus::Explorer => Some(
             Action::ExplorerSelectTarget(crate::model::explorer::ExplorerNodeTarget::First),
         ),
@@ -1492,8 +1515,20 @@ fn map_pending(
                 None
             }
         }
-        (Pending::Previous, KeyCode::Char('t')) => Some(Action::PreviousTab),
-        (Pending::Next, KeyCode::Char('t')) => Some(Action::NextTab),
+        (Pending::Previous, code) => {
+            let prefix = KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE);
+            let event = KeyEvent::new(code, KeyModifiers::NONE);
+            bindings
+                .matches_sequence("previous-tab", &[prefix, event])
+                .then_some(Action::PreviousTab)
+        }
+        (Pending::Next, code) => {
+            let prefix = KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE);
+            let event = KeyEvent::new(code, KeyModifiers::NONE);
+            bindings
+                .matches_sequence("next-tab", &[prefix, event])
+                .then_some(Action::NextTab)
+        }
         (Pending::Leader, KeyCode::Char('t')) => None,
         (Pending::RelationTransactionChoice, KeyCode::Char('c' | 'r')) => {
             Some(Action::OpenTransactionControl)
@@ -1519,6 +1554,18 @@ fn map_pending(
         (Pending::ExplorerAlign, KeyCode::Char('b')) => Some(Action::ExplorerAlignSelected(
             crate::model::explorer::ExplorerNodeAlignment::Bottom,
         )),
+        _ => None,
+    }
+}
+
+fn configured_command_action(command: &str, app: &App) -> Option<Action> {
+    match command {
+        "open-dashboard" if app.dashboard_supported() => Some(Action::OpenDashboard),
+        "open-explorer" => Some(Action::Focus(Focus::Explorer)),
+        "open-editors" => Some(Action::OpenSqlEditorList),
+        "run-leader-statement" => Some(Action::RunActiveSql),
+        "run-leader-buffer" => Some(Action::RunAllSql),
+        "open-target-selector" => Some(Action::OpenTargetSelector),
         _ => None,
     }
 }
@@ -3068,6 +3115,51 @@ mod tests {
             keymap.map(key(KeyCode::Char('t')), &app),
             Some(Action::NextTab)
         );
+    }
+
+    #[test]
+    fn configured_leader_sequence_executes_its_command() {
+        let bindings = crate::config::AppConfig::default()
+            .keybindings
+            .key_bindings()
+            .unwrap();
+        let mut keymap =
+            Keymap::with_sequence_timeout_and_bindings(Duration::from_millis(750), bindings);
+        let mut app = App::new(Vec::new());
+        app.focus = Focus::Results;
+
+        assert_eq!(keymap.map(key(KeyCode::Char(' ')), &app), None);
+        assert_eq!(
+            keymap.map(key(KeyCode::Char('d')), &app),
+            Some(Action::OpenTargetSelector)
+        );
+    }
+
+    #[test]
+    fn configured_leader_commands_cover_the_default_sequences() {
+        let bindings = crate::config::AppConfig::default()
+            .keybindings
+            .key_bindings()
+            .unwrap();
+        let mut keymap =
+            Keymap::with_sequence_timeout_and_bindings(Duration::from_millis(750), bindings);
+        let mut app = App::new(Vec::new());
+        app.focus = Focus::Results;
+
+        for (binding_key, expected) in [
+            ('c', Action::Focus(Focus::Explorer)),
+            ('s', Action::OpenSqlEditorList),
+            ('r', Action::RunActiveSql),
+            ('R', Action::RunAllSql),
+            ('d', Action::OpenTargetSelector),
+        ] {
+            keymap.clear_pending();
+            assert_eq!(keymap.map(key(KeyCode::Char(' ')), &app), None);
+            assert_eq!(
+                keymap.map(key(KeyCode::Char(binding_key)), &app),
+                Some(expected)
+            );
+        }
     }
 
     #[test]
