@@ -8,8 +8,8 @@ use lazydb::{
     },
     profile::{CatalogScope, CatalogSelection, DatabaseKind, DatabaseScope, import_connection_url},
     sql::{
-        CompletionCandidate, CompletionContext, CompletionIndex, CompletionKind, SqlDialect,
-        complete, quote_identifier, relation_ids_for_completion, should_offer_completion,
+        CompletionContext, CompletionIndex, CompletionKind, SqlDialect, complete,
+        completion_dependencies, quote_identifier, should_offer_completion,
     },
 };
 use uuid::Uuid;
@@ -149,13 +149,6 @@ fn contextual_fixture() -> Vec<CatalogEntry> {
         }));
     }
     entries
-}
-
-fn labels(candidates: &[CompletionCandidate]) -> Vec<&str> {
-    candidates
-        .iter()
-        .map(|candidate| candidate.label.as_str())
-        .collect()
 }
 
 fn multi_relation_fixture() -> Vec<CatalogEntry> {
@@ -365,228 +358,770 @@ fn insert_context_does_not_leak_into_statement_or_relation_completion() {
 }
 
 #[test]
-fn insert_column_list_only_offers_target_columns() {
-    let index = CompletionIndex::new(&contextual_fixture());
-    let sql = "insert into sys_user(";
-    let candidates = complete(
-        sql,
-        sql.len(),
-        SqlDialect::Postgres,
-        &index,
-        CompletionContext {
-            database: Some("app"),
-            schema: Some("public"),
-        },
-    );
-
-    assert_eq!(
-        labels(&candidates),
-        [
-            "update_time",
-            "update_user",
-            "update_user_phone",
-            "user_type",
-            "username",
-        ]
-    );
-    assert!(
-        candidates
-            .iter()
-            .all(|candidate| candidate.kind == CompletionKind::Column)
-    );
+fn insert_space_triggers_completion() {
+    assert!(should_offer_completion("insert ", "insert ".len()));
+    assert!(should_offer_completion("INSERT ", "INSERT ".len()));
 }
 
 #[test]
-fn insert_column_list_filters_prefix_and_continues_after_comma() {
-    let index = CompletionIndex::new(&contextual_fixture());
-    let context = CompletionContext {
-        database: Some("app"),
-        schema: Some("public"),
-    };
-
-    let prefix_sql = "insert into sys_user(update_u";
-    let prefix = complete(
-        prefix_sql,
-        prefix_sql.len(),
-        SqlDialect::Postgres,
-        &index,
-        context,
-    );
-    assert_eq!(labels(&prefix), ["update_user", "update_user_phone"]);
-
-    let comma_sql = "insert into sys_user(update_time, user_";
-    let after_comma = complete(
-        comma_sql,
-        comma_sql.len(),
-        SqlDialect::Postgres,
-        &index,
-        context,
-    );
-    assert_eq!(labels(&after_comma), ["user_type", "username"]);
-}
-
-#[test]
-fn insert_column_list_discovers_target_relation_for_lazy_loading() {
-    let entries = contextual_fixture();
-    let expected = entries
-        .iter()
-        .find(|entry| entry.kind == CatalogKind::Table && entry.qualified_name.object == "sys_user")
-        .unwrap()
-        .id
-        .clone();
-    let index = CompletionIndex::new(&entries);
-    let sql = "insert into sys_user(";
-
-    let relations = relation_ids_for_completion(
-        sql,
-        sql.len(),
-        SqlDialect::Postgres,
-        &index,
-        CompletionContext {
-            database: Some("app"),
-            schema: Some("public"),
-        },
-    );
-
-    assert_eq!(relations.len(), 1);
-    assert!(relations.contains(&expected));
-}
-
-#[test]
-fn unrelated_parentheses_are_not_insert_column_lists() {
-    let index = CompletionIndex::new(&contextual_fixture());
-    let target_columns = [
-        "update_time",
-        "update_user",
-        "update_user_phone",
-        "user_type",
-        "username",
-    ];
-
+fn ddl_completion_trigger_matches_structural_context() {
     for sql in [
-        "select count(",
-        "select * from (",
-        "select * from sys_user where username in (",
-        "insert into sys_user (username) values (",
-        "insert into sys_user values (",
-        "insert into sys_user default values",
-        "insert into sys_user select (",
-        "insert into sys_user set username = (",
+        "CREATE ",
+        "ALTER ",
+        "DROP ",
+        "TRUNCATE TABLE ",
+        "CREATE INDEX ix ON ",
+        "ALTER TABLE users DROP COLUMN ",
     ] {
-        let candidates = complete(
-            sql,
-            sql.len(),
-            SqlDialect::Postgres,
-            &index,
-            CompletionContext {
-                database: Some("app"),
-                schema: Some("public"),
-            },
-        );
-        assert!(
-            candidates
-                .iter()
-                .any(|candidate| candidate.label == "DELETE")
-                || candidates.is_empty(),
-            "unexpected target-column context for {sql}: {candidates:?}"
-        );
-        assert!(!target_columns.iter().all(|column| {
-            candidates
-                .iter()
-                .any(|candidate| candidate.label == *column)
-        }));
+        assert!(should_offer_completion(sql, sql.len()), "{sql}");
+    }
+    for sql in [
+        "SELECT 'CREATE '",
+        "-- CREATE ",
+        "CREATE TABLE \"drop\" (id INTEGER)",
+    ] {
+        assert!(!should_offer_completion(sql, sql.len()), "{sql}");
     }
 }
 
 #[test]
-fn insert_column_list_uses_active_schema_for_duplicate_targets() {
-    let connection = Uuid::new_v4();
-    let mut entries = Vec::new();
-    for (schema_name, column) in [("public", "public_value"), ("audit", "audit_value")] {
-        let schema = CatalogId::new(connection, CatalogKind::Schema, ["app", schema_name]);
-        let table = CatalogId::new(
-            connection,
-            CatalogKind::Table,
-            ["app", schema_name, "events"],
-        );
-        entries.push(
-            CatalogEntry::relation(
-                table.clone(),
-                schema,
-                qualified("app", Some(schema_name), "events"),
-                "table",
-                OptionalMetadata::Supported(None),
-                true,
-            )
-            .unwrap(),
-        );
-        entries.push(
-            CatalogEntry::relation_child(
-                CatalogId::new(
-                    connection,
-                    CatalogKind::Column,
-                    ["app", schema_name, "events", column],
-                ),
-                table,
-                qualified("app", Some(schema_name), column),
-                "column",
-                OptionalMetadata::Unsupported,
-                CatalogMetadata::Column(ColumnMetadata::new(1, "text", true)),
-            )
-            .unwrap(),
-        );
-    }
-    let sql = "insert into events(";
-    let candidates = complete(
-        sql,
-        sql.len(),
-        SqlDialect::Postgres,
-        &CompletionIndex::new(&entries),
-        CompletionContext {
-            database: Some("app"),
-            schema: Some("audit"),
-        },
-    );
-
-    assert_eq!(labels(&candidates), ["audit_value"]);
-}
-
-#[test]
-fn insert_column_list_supports_qualified_and_quoted_targets() {
-    let index = CompletionIndex::new(&contextual_fixture());
+fn ddl_completion_handles_incomplete_input_without_global_leakage() {
+    let index = CompletionIndex::new(&fixture());
     for (sql, dialect) in [
-        ("insert into public.sys_user(", SqlDialect::Postgres),
-        ("insert into \"public\".\"sys_user\"(", SqlDialect::Postgres),
-        ("insert into `app`.`sys_user`(", SqlDialect::MySql),
+        ("CREATE", SqlDialect::Postgres),
+        ("CREATE TABLE", SqlDialect::Postgres),
+        ("CREATE TABLE users (", SqlDialect::Postgres),
+        ("CREATE TABLE users (id VARCHAR(", SqlDialect::Postgres),
+        ("ALTER TABLE users DROP", SqlDialect::Postgres),
+        ("REFERENCES users (", SqlDialect::Postgres),
+        ("DROP TABLE \"unterminated", SqlDialect::Postgres),
+        (
+            "CREATE TABLE users (label TEXT DEFAULT 'unterminated",
+            SqlDialect::Postgres,
+        ),
     ] {
         let candidates = complete(
             sql,
             sql.len(),
             dialect,
             &index,
-            CompletionContext {
-                database: Some("app"),
-                schema: Some("public"),
-            },
+            CompletionContext::default(),
         );
+        assert!(candidates.len() <= 10, "{sql}: {candidates:?}");
         assert!(
-            candidates
-                .iter()
-                .any(|candidate| candidate.label == "username")
-        );
-        assert!(
-            candidates
-                .iter()
-                .all(|candidate| candidate.kind == CompletionKind::Column),
-            "unexpected candidates for {sql}: {candidates:?}"
+            !candidates.iter().any(|candidate| {
+                matches!(
+                    candidate.kind,
+                    CompletionKind::Database | CompletionKind::Schema
+                )
+            }),
+            "incomplete DDL leaked namespace candidates for {sql}: {candidates:?}"
         );
     }
 }
 
 #[test]
-fn insert_space_triggers_completion() {
-    assert!(should_offer_completion("insert ", "insert ".len()));
-    assert!(should_offer_completion("INSERT ", "INSERT ".len()));
+fn ddl_completion_only_uses_the_statement_at_cursor() {
+    let index = CompletionIndex::new(&fixture());
+    let first = "SELECT * FROM users; DROP TABLE us";
+    let candidates = complete(
+        first,
+        first.len(),
+        SqlDialect::Postgres,
+        &index,
+        CompletionContext::default(),
+    );
+    assert!(
+        candidates
+            .iter()
+            .all(|candidate| candidate.kind == CompletionKind::Table)
+    );
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate.label == "users")
+    );
+
+    let second = "CREATE TABLE draft (id INTEGER); SELECT * FROM us";
+    let candidates = complete(
+        second,
+        second.len(),
+        SqlDialect::Postgres,
+        &index,
+        CompletionContext::default(),
+    );
+    assert!(candidates.iter().all(|candidate| {
+        candidate.kind == CompletionKind::Table || candidate.kind == CompletionKind::View
+    }));
+
+    let third = "CREATE VIEW draft AS SELECT * FROM users; ALTER TABLE us";
+    let candidates = complete(
+        third,
+        third.len(),
+        SqlDialect::Postgres,
+        &index,
+        CompletionContext::default(),
+    );
+    assert!(
+        candidates
+            .iter()
+            .all(|candidate| candidate.kind == CompletionKind::Table)
+    );
+}
+
+#[test]
+fn statement_completion_offers_ddl_commands() {
+    let index = CompletionIndex::default();
+    for (sql, expected) in [
+        ("cre", "CREATE"),
+        ("alt", "ALTER"),
+        ("dro", "DROP"),
+        ("tru", "TRUNCATE"),
+    ] {
+        let candidates = complete(
+            sql,
+            sql.len(),
+            SqlDialect::Postgres,
+            &index,
+            CompletionContext::default(),
+        );
+        assert_eq!(
+            candidates.first().map(|candidate| candidate.label.as_str()),
+            Some(expected)
+        );
+    }
+}
+
+#[test]
+fn ddl_object_and_type_keywords_follow_dialect_matrix() {
+    for (dialect, expected, rejected) in [
+        (
+            SqlDialect::Postgres,
+            &[
+                "TABLE",
+                "VIEW",
+                "MATERIALIZED VIEW",
+                "SEQUENCE",
+                "TYPE",
+                "TRIGGER",
+            ][..],
+            &["AUTOINCREMENT"][..],
+        ),
+        (
+            SqlDialect::MySql,
+            &["TABLE", "VIEW", "TRIGGER"][..],
+            &["MATERIALIZED VIEW", "SEQUENCE", "TYPE"][..],
+        ),
+        (
+            SqlDialect::SqlServer,
+            &["TABLE", "VIEW", "TRIGGER"][..],
+            &["MATERIALIZED VIEW", "TYPE"][..],
+        ),
+        (
+            SqlDialect::Sqlite,
+            &["TABLE", "VIEW", "TRIGGER"][..],
+            &["MATERIALIZED VIEW", "SEQUENCE", "TYPE"][..],
+        ),
+    ] {
+        for keyword in expected {
+            let sql = format!(
+                "CREATE {}",
+                &keyword[..keyword
+                    .char_indices()
+                    .nth(1)
+                    .map_or(keyword.len(), |(index, _)| index)]
+            );
+            let candidates = complete(
+                &sql,
+                sql.len(),
+                dialect,
+                &CompletionIndex::default(),
+                CompletionContext::default(),
+            );
+            assert!(
+                candidates
+                    .iter()
+                    .any(|candidate| candidate.label == *keyword),
+                "{dialect:?}: {keyword}: {candidates:?}"
+            );
+        }
+        for keyword in rejected {
+            let prefix = &keyword[..keyword
+                .char_indices()
+                .nth(1)
+                .map_or(keyword.len(), |(index, _)| index)];
+            let sql = format!("CREATE {prefix}");
+            let candidates = complete(
+                &sql,
+                sql.len(),
+                dialect,
+                &CompletionIndex::default(),
+                CompletionContext::default(),
+            );
+            assert!(
+                !candidates
+                    .iter()
+                    .any(|candidate| candidate.label == *keyword),
+                "{dialect:?}: {keyword}: {candidates:?}"
+            );
+        }
+    }
+
+    for (dialect, sql, expected, rejected) in [
+        (
+            SqlDialect::Postgres,
+            "CREATE TABLE t (id js",
+            "JSONB",
+            "JSON",
+        ),
+        (SqlDialect::MySql, "CREATE TABLE t (id js", "JSON", "JSONB"),
+        (
+            SqlDialect::SqlServer,
+            "CREATE TABLE t (id nv",
+            "NVARCHAR",
+            "JSONB",
+        ),
+        (
+            SqlDialect::Sqlite,
+            "CREATE TABLE t (id in",
+            "INTEGER",
+            "JSONB",
+        ),
+    ] {
+        let candidates = complete(
+            sql,
+            sql.len(),
+            dialect,
+            &CompletionIndex::default(),
+            CompletionContext::default(),
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.label == expected),
+            "{dialect:?}: {candidates:?}"
+        );
+        assert!(
+            !candidates
+                .iter()
+                .any(|candidate| candidate.label == rejected),
+            "{dialect:?}: {candidates:?}"
+        );
+    }
+}
+
+#[test]
+fn ddl_object_completion_filters_catalog_kind() {
+    let index = CompletionIndex::new(&fixture());
+    let candidates = complete(
+        "DROP TABLE us",
+        13,
+        SqlDialect::Postgres,
+        &index,
+        CompletionContext::default(),
+    );
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate.kind == CompletionKind::Table && candidate.label == "users"),
+        "{candidates:?}"
+    );
+    assert!(
+        candidates
+            .iter()
+            .all(|candidate| candidate.kind == CompletionKind::Table)
+    );
+}
+
+#[test]
+fn ddl_keywords_ignore_quoted_identifiers_and_literals() {
+    let index = CompletionIndex::default();
+    let quoted_sql = "CREATE TABLE t (\"drop\" INTEGER, na";
+    let quoted = complete(
+        quoted_sql,
+        quoted_sql.len(),
+        SqlDialect::Postgres,
+        &index,
+        CompletionContext::default(),
+    );
+    assert!(!quoted.iter().any(|candidate| candidate.label == "DROP"));
+    let literal = complete(
+        "SELECT 'create' WHERE cre",
+        26,
+        SqlDialect::Postgres,
+        &index,
+        CompletionContext::default(),
+    );
+    assert!(!literal.iter().any(|candidate| candidate.label == "CREATE"));
+}
+
+#[test]
+fn create_table_completion_offers_dialect_data_types() {
+    let index = CompletionIndex::default();
+    for (dialect, sql, expected, rejected) in [
+        (
+            SqlDialect::Postgres,
+            "CREATE TABLE t (id j",
+            "JSONB",
+            "JSON",
+        ),
+        (SqlDialect::MySql, "CREATE TABLE t (id j", "JSON", "JSONB"),
+        (
+            SqlDialect::SqlServer,
+            "CREATE TABLE t (id unique",
+            "UNIQUEIDENTIFIER",
+            "JSONB",
+        ),
+        (SqlDialect::Sqlite, "CREATE TABLE t (id var", "", "VARCHAR"),
+    ] {
+        let candidates = complete(
+            sql,
+            sql.len(),
+            dialect,
+            &index,
+            CompletionContext::default(),
+        );
+        if expected.is_empty() {
+            assert!(
+                candidates
+                    .iter()
+                    .all(|candidate| candidate.label != rejected)
+            );
+        } else {
+            assert!(
+                candidates.iter().any(|candidate| {
+                    candidate.kind == CompletionKind::DataType && candidate.label == expected
+                }),
+                "{dialect:?} {sql}: {candidates:?}"
+            );
+            assert!(
+                candidates
+                    .iter()
+                    .all(|candidate| candidate.label != rejected)
+            );
+        }
+    }
+}
+
+#[test]
+fn create_table_completion_offers_column_constraints_after_type() {
+    let index = CompletionIndex::default();
+    let sql = "CREATE TABLE t (id INTEGER n";
+    let candidates = complete(
+        sql,
+        sql.len(),
+        SqlDialect::Postgres,
+        &index,
+        CompletionContext::default(),
+    );
+    assert!(
+        candidates.iter().any(|candidate| {
+            candidate.kind == CompletionKind::Keyword && candidate.label == "NOT NULL"
+        }),
+        "{candidates:?}"
+    );
+    assert!(
+        candidates
+            .iter()
+            .all(|candidate| candidate.kind == CompletionKind::Keyword)
+    );
+}
+
+#[test]
+fn ddl_completion_covers_table_elements_alter_actions_and_children() {
+    let mut entries = fixture();
+    let users = entries[2].id.clone();
+    for (kind, name) in [
+        (CatalogKind::Column, "id"),
+        (CatalogKind::Column, "email"),
+        (CatalogKind::Index, "ix_users_email"),
+        (CatalogKind::PrimaryKey, "users_pkey"),
+        (CatalogKind::UniqueConstraint, "users_email_key"),
+        (CatalogKind::ForeignKey, "users_role_fkey"),
+        (CatalogKind::CheckConstraint, "users_email_check"),
+    ] {
+        let metadata = match kind {
+            CatalogKind::Column => CatalogMetadata::Column(ColumnMetadata::new(2, "text", true)),
+            CatalogKind::Index => CatalogMetadata::Index(lazydb::db::catalog::IndexMetadata {
+                columns: vec!["email".into()],
+                unique: false,
+            }),
+            CatalogKind::PrimaryKey => {
+                CatalogMetadata::Constraint(lazydb::db::catalog::ConstraintMetadata::PrimaryKey {
+                    columns: vec!["id".into()],
+                })
+            }
+            CatalogKind::UniqueConstraint => {
+                CatalogMetadata::Constraint(lazydb::db::catalog::ConstraintMetadata::Unique {
+                    columns: vec!["email".into()],
+                })
+            }
+            CatalogKind::ForeignKey => {
+                CatalogMetadata::Constraint(lazydb::db::catalog::ConstraintMetadata::ForeignKey {
+                    columns: vec!["id".into()],
+                    referenced_relation: qualified("app", Some("public"), "roles"),
+                    referenced_columns: vec!["id".into()],
+                })
+            }
+            CatalogKind::CheckConstraint => {
+                CatalogMetadata::Constraint(lazydb::db::catalog::ConstraintMetadata::Check {
+                    expression: "true".into(),
+                })
+            }
+            _ => unreachable!(),
+        };
+        entries.push(
+            CatalogEntry::relation_child(
+                CatalogId::new(users.profile_id(), kind, ["app", "public", "users", name]),
+                users.clone(),
+                qualified("app", Some("public"), name),
+                "child",
+                OptionalMetadata::Supported(None),
+                metadata,
+            )
+            .unwrap(),
+        );
+    }
+    let index = CompletionIndex::new(&entries);
+    let candidates = complete(
+        "ALTER TABLE users ",
+        "ALTER TABLE users ".len(),
+        SqlDialect::Postgres,
+        &index,
+        CompletionContext::default(),
+    );
+    assert!(candidates.iter().any(|candidate| candidate.label == "ADD"));
+    assert!(candidates.iter().any(|candidate| candidate.label == "DROP"));
+
+    for (sql, kind, expected) in [
+        (
+            "ALTER TABLE users DROP COLUMN e",
+            CompletionKind::Column,
+            "email",
+        ),
+        (
+            "ALTER TABLE users ALTER COLUMN i",
+            CompletionKind::Column,
+            "id",
+        ),
+        (
+            "ALTER TABLE users DROP CONSTRAINT users_",
+            CompletionKind::Constraint,
+            "users_email_key",
+        ),
+        (
+            "ALTER TABLE users DROP INDEX ix_",
+            CompletionKind::Index,
+            "ix_users_email",
+        ),
+    ] {
+        let candidates = complete(
+            sql,
+            sql.len(),
+            SqlDialect::Postgres,
+            &index,
+            CompletionContext::default(),
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.kind == kind && candidate.label == expected),
+            "{sql}: {candidates:?}"
+        );
+        assert!(candidates.iter().all(|candidate| candidate.kind == kind));
+    }
+}
+
+#[test]
+fn ddl_completion_reports_shared_relation_child_dependencies() {
+    let index = CompletionIndex::new(&fixture());
+    let users = index
+        .entries()
+        .iter()
+        .find(|entry| entry.kind == CatalogKind::Table)
+        .unwrap()
+        .id
+        .clone();
+    for sql in [
+        "SELECT u. FROM users u",
+        "ALTER TABLE users DROP COLUMN ",
+        "CREATE INDEX ix_users ON users (",
+        "REFERENCES users (",
+    ] {
+        let dependencies = completion_dependencies(
+            sql,
+            sql.len(),
+            SqlDialect::Postgres,
+            &index,
+            CompletionContext::default(),
+        );
+        assert_eq!(dependencies.relation_children, vec![users.clone()], "{sql}");
+    }
+    assert!(
+        completion_dependencies(
+            "DROP TABLE users",
+            "DROP TABLE users".len(),
+            SqlDialect::Postgres,
+            &index,
+            CompletionContext::default(),
+        )
+        .relation_children
+        .is_empty()
+    );
+}
+
+#[test]
+fn references_and_create_index_complete_target_columns() {
+    let index = CompletionIndex::new(&contextual_fixture());
+    for sql in [
+        "CREATE TABLE orders (user_id BIGINT REFERENCES users (u",
+        "CREATE INDEX ix_users ON users (u",
+    ] {
+        let candidates = complete(
+            sql,
+            sql.len(),
+            SqlDialect::Postgres,
+            &index,
+            CompletionContext::default(),
+        );
+        assert!(
+            candidates.iter().any(|candidate| {
+                candidate.kind == CompletionKind::Column && candidate.label == "username"
+            }),
+            "{sql}: {candidates:?}"
+        );
+        assert!(candidates.iter().all(|candidate| {
+            candidate.kind == CompletionKind::Column || candidate.kind == CompletionKind::Keyword
+        }));
+    }
+}
+
+#[test]
+fn ddl_existing_object_targets_are_strictly_filtered() {
+    let mut entries = fixture();
+    let connection = entries[0].id.profile_id();
+    let schema = entries[1].id.clone();
+    for (kind, name) in [
+        (CatalogKind::View, "report"),
+        (CatalogKind::Index, "ix_users"),
+        (CatalogKind::Sequence, "order_seq"),
+        (CatalogKind::Type, "status_type"),
+        (CatalogKind::Function, "format_user"),
+        (CatalogKind::Procedure, "refresh_users"),
+        (CatalogKind::Trigger, "users_trigger"),
+    ] {
+        let entry = if matches!(kind, CatalogKind::View | CatalogKind::MaterializedView) {
+            CatalogEntry::relation(
+                CatalogId::new(connection, kind, ["app", "public", name]),
+                schema.clone(),
+                qualified("app", Some("public"), name),
+                "view",
+                OptionalMetadata::Supported(None),
+                false,
+            )
+        } else if kind == CatalogKind::Trigger {
+            CatalogEntry::relation_object(
+                CatalogId::new(connection, kind, ["app", "public", name]),
+                schema.clone(),
+                entries[2].id.clone(),
+                qualified("app", Some("public"), name),
+                "trigger",
+                OptionalMetadata::Supported(None),
+            )
+        } else if kind == CatalogKind::Index {
+            CatalogEntry::relation_child(
+                CatalogId::new(connection, kind, ["app", "public", "users", name]),
+                entries[2].id.clone(),
+                qualified("app", Some("public"), name),
+                "index",
+                OptionalMetadata::Supported(None),
+                CatalogMetadata::Index(lazydb::db::catalog::IndexMetadata {
+                    columns: Vec::new(),
+                    unique: false,
+                }),
+            )
+        } else {
+            CatalogEntry::object(
+                CatalogId::new(connection, kind, ["app", "public", name]),
+                schema.clone(),
+                qualified("app", Some("public"), name),
+                "object",
+                OptionalMetadata::Supported(None),
+                false,
+            )
+        };
+        entries.push(entry.unwrap());
+    }
+    let index = CompletionIndex::new(&entries);
+    for (sql, kind, name) in [
+        ("DROP VIEW rep", CompletionKind::View, "report"),
+        ("DROP INDEX ix_", CompletionKind::Index, "ix_users"),
+        ("DROP SEQUENCE ord", CompletionKind::Sequence, "order_seq"),
+        ("DROP TYPE sta", CompletionKind::Type, "status_type"),
+        ("DROP FUNCTION for", CompletionKind::Function, "format_user"),
+        (
+            "DROP PROCEDURE ref",
+            CompletionKind::Procedure,
+            "refresh_users",
+        ),
+        ("DROP TRIGGER use", CompletionKind::Trigger, "users_trigger"),
+    ] {
+        let candidates = complete(
+            sql,
+            sql.len(),
+            SqlDialect::Postgres,
+            &index,
+            CompletionContext::default(),
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.kind == kind && candidate.label == name),
+            "{sql}: {candidates:?}"
+        );
+        assert!(
+            candidates.iter().all(|candidate| candidate.kind == kind),
+            "{sql}: {candidates:?}"
+        );
+    }
+}
+
+#[test]
+fn ddl_existing_objects_support_qualified_names() {
+    let mut entries = fixture();
+    let index_id = CatalogId::new(
+        entries[2].id.profile_id(),
+        CatalogKind::Index,
+        ["app", "public", "users", "ix_users"],
+    );
+    entries.push(
+        CatalogEntry::relation_child(
+            index_id,
+            entries[2].id.clone(),
+            qualified("app", Some("public"), "ix_users"),
+            "index",
+            OptionalMetadata::Supported(None),
+            CatalogMetadata::Index(lazydb::db::catalog::IndexMetadata {
+                columns: vec!["id".into()],
+                unique: false,
+            }),
+        )
+        .unwrap(),
+    );
+    let index = CompletionIndex::new(&entries);
+
+    let table = complete(
+        "DROP TABLE app.public.us",
+        "DROP TABLE app.public.us".len(),
+        SqlDialect::Postgres,
+        &index,
+        CompletionContext::default(),
+    );
+    assert!(
+        table.iter().any(|candidate| {
+            candidate.kind == CompletionKind::Table
+                && candidate.label == "users"
+                && candidate.insert_text == "\"users\""
+        }),
+        "{table:?}"
+    );
+    assert!(
+        table
+            .iter()
+            .all(|candidate| candidate.kind == CompletionKind::Table)
+    );
+
+    let object = complete(
+        "DROP INDEX app.public.ix_",
+        "DROP INDEX app.public.ix_".len(),
+        SqlDialect::Postgres,
+        &index,
+        CompletionContext::default(),
+    );
+    assert!(object.iter().any(|candidate| {
+        candidate.kind == CompletionKind::Index && candidate.label == "ix_users"
+    }));
+    assert!(
+        object
+            .iter()
+            .all(|candidate| candidate.kind == CompletionKind::Index)
+    );
+}
+
+#[test]
+fn create_index_and_view_handoff_complete_the_following_relation_or_query() {
+    let index = CompletionIndex::new(&fixture());
+    let create_index = "CREATE INDEX ix_users ON us";
+    let candidates = complete(
+        create_index,
+        create_index.len(),
+        SqlDialect::Postgres,
+        &index,
+        CompletionContext::default(),
+    );
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate.kind == CompletionKind::Table && candidate.label == "users")
+    );
+    assert!(
+        candidates
+            .iter()
+            .all(|candidate| candidate.kind == CompletionKind::Table)
+    );
+
+    let index = CompletionIndex::new(&contextual_fixture());
+    let view = "CREATE VIEW active_users AS sel";
+    let candidates = complete(
+        view,
+        view.len(),
+        SqlDialect::Postgres,
+        &index,
+        CompletionContext::default(),
+    );
+    assert_eq!(
+        candidates.first().map(|candidate| candidate.label.as_str()),
+        Some("SELECT")
+    );
+
+    let query = "CREATE VIEW active_users AS SELECT u FROM sys_user";
+    let candidates = complete(
+        query,
+        "CREATE VIEW active_users AS SELECT u".len(),
+        SqlDialect::Postgres,
+        &index,
+        CompletionContext::default(),
+    );
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate.kind == CompletionKind::Column
+                && candidate.label == "username"),
+        "{candidates:?}"
+    );
+}
+
+#[test]
+fn sql_server_drop_index_on_completes_relation() {
+    let index = CompletionIndex::new(&fixture());
+    let sql = "DROP INDEX ix_users ON us";
+    let candidates = complete(
+        sql,
+        sql.len(),
+        SqlDialect::SqlServer,
+        &index,
+        CompletionContext::default(),
+    );
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate.kind == CompletionKind::Table && candidate.label == "users")
+    );
+    assert!(
+        candidates
+            .iter()
+            .all(|candidate| candidate.kind == CompletionKind::Table)
+    );
 }
 
 #[test]
@@ -1286,6 +1821,14 @@ fn index_retains_only_completion_relevant_entries() {
             | CatalogKind::Column
             | CatalogKind::Function
             | CatalogKind::Procedure
+            | CatalogKind::Sequence
+            | CatalogKind::Type
+            | CatalogKind::Index
+            | CatalogKind::PrimaryKey
+            | CatalogKind::UniqueConstraint
+            | CatalogKind::ForeignKey
+            | CatalogKind::CheckConstraint
+            | CatalogKind::Trigger
     )));
 }
 
@@ -1369,10 +1912,7 @@ fn app_completion_prefers_the_active_console_target_schema() {
             version: "16.4".into(),
             database: "app".into(),
         },
-        mutation_capabilities:
-            lazydb::db::postgres::PostgresAdapter::catalog_mutation_capabilities_for_version(
-                150_000,
-            ),
+        mutation_capabilities: Default::default(),
     });
     app.active_console_mut()
         .execution_target

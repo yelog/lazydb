@@ -10,7 +10,8 @@ use lazydb::{
         ServerInfo,
         catalog::{
             CatalogCompleteness, CatalogCount, CatalogCursor, CatalogEntry, CatalogId, CatalogKind,
-            CatalogMetadata, ColumnMetadata, ObjectGroup, OptionalMetadata, QualifiedName,
+            CatalogMetadata, CatalogPage, CatalogRequestKey, CatalogTarget, ColumnMetadata,
+            DdlProvenance, ObjectGroup, OptionalMetadata, QualifiedName, RelationDdl,
         },
         query::{ColumnMeta, QueryOutcome, QueryStats, ResultSet},
         value::CellValue,
@@ -26,7 +27,7 @@ use lazydb::{
         tab::WorkspaceTab,
         tab::{CompletionPopup, ResultView},
         transaction::TransactionMode,
-        workspace::{ConnectionStatus, Focus, Overlay},
+        workspace::{ConnectionStatus, Focus, Overlay, QueryStatus},
     },
     persistence::secrets::keyring_ref,
     profile::{DatabaseKind, Environment, import_connection_url},
@@ -2027,6 +2028,111 @@ fn empty_relation_ddl_uses_the_ddl_panel_empty_state() {
     assert!(output.contains("No DDL available"), "{output}");
 }
 
+fn ready_relation_ddl_fixture() -> App {
+    let mut app = fixture();
+    let connection = app.connection.active_identity().unwrap();
+    let profile_id = connection.profile_id;
+    let schema_id = CatalogId::new(profile_id, CatalogKind::Schema, ["db", "main"]);
+    let relation_id = CatalogId::new(profile_id, CatalogKind::Table, ["db", "main", "users"]);
+    let relation_entry = CatalogEntry::relation(
+        relation_id.clone(),
+        schema_id,
+        QualifiedName {
+            database: Some("db".into()),
+            schema: Some("main".into()),
+            object: "users".into(),
+        },
+        "table",
+        OptionalMetadata::Unsupported,
+        false,
+    )
+    .unwrap();
+    let children = CatalogPage {
+        key: CatalogRequestKey {
+            connection,
+            catalog_epoch: 0,
+            request_id: 1,
+            target: CatalogTarget::RelationChildren {
+                relation: relation_id,
+            },
+            cursor: None,
+        },
+        entries: Vec::new(),
+        group_summaries: Vec::new(),
+        total_count: CatalogCount::Exact(0),
+        next_cursor: None,
+        completeness: CatalogCompleteness::Complete,
+    };
+    let mut relation = RelationTab::new("users");
+    relation.view = lazydb::model::relation::RelationView::Ddl;
+    relation.ddl =
+        lazydb::model::relation::RelationLoad::Ready(lazydb::model::relation::OwnedSnapshot::new(
+            RelationDdl {
+                relation: relation_entry,
+                children,
+                sql: "CREATE TABLE users (\n  id INTEGER PRIMARY KEY\n);".into(),
+                provenance: DdlProvenance::NativeCatalog,
+            },
+            connection,
+            app.active_profile().unwrap().catalog_scope.clone(),
+        ));
+    app.tabs.push(WorkspaceTab::Relation(relation));
+    app.active_tab = app.tabs.len() - 1;
+    app.focus = Focus::Results;
+    app
+}
+
+#[test]
+fn relation_ddl_context_is_rendered_on_the_panel_border() {
+    let app = ready_relation_ddl_fixture();
+    let (buffer, _) = render_buffer_with_icons(&app, 120, 36, IconSet::default());
+
+    let (_, title_y) = find_text_cell(&buffer, "RELATION DDL").expect("DDL title");
+    let (_, source_y) = find_text_cell(&buffer, "NATIVE CATALOG").expect("DDL source");
+    let (_, snapshot_y) = find_text_cell(&buffer, "LIVE").expect("snapshot provenance");
+
+    assert_eq!(source_y, title_y);
+    assert_eq!(snapshot_y, title_y);
+    let output = render(&app, 120, 36);
+    let footer = output.lines().last().unwrap();
+    assert!(!footer.contains("DDL:"), "{output}");
+    assert!(!footer.contains("Snapshot:"), "{output}");
+    assert!(output.contains("ROW 1"), "{output}");
+    assert!(output.contains("COL 1"), "{output}");
+}
+
+#[test]
+fn relation_ddl_offline_snapshot_remains_visible() {
+    let mut app = ready_relation_ddl_fixture();
+    let tab = match &mut app.tabs[app.active_tab] {
+        WorkspaceTab::Relation(tab) => tab,
+        _ => unreachable!(),
+    };
+    let snapshot = match &mut tab.ddl {
+        lazydb::model::relation::RelationLoad::Ready(snapshot) => snapshot,
+        _ => unreachable!(),
+    };
+    snapshot.attribution.connection.generation += 1;
+
+    let (buffer, _) = render_buffer_with_icons(&app, 120, 36, IconSet::default());
+    let (_, title_y) = find_text_cell(&buffer, "RELATION DDL").expect("DDL title");
+    let (_, snapshot_y) =
+        find_text_cell(&buffer, "OFFLINE SNAPSHOT").expect("offline snapshot provenance");
+
+    assert_eq!(snapshot_y, title_y);
+}
+
+#[test]
+fn relation_ddl_long_provenance_does_not_replace_the_title_when_narrow() {
+    let mut app = ready_relation_ddl_fixture();
+    app.profiles.clear();
+
+    let output = render(&app, 56, 24);
+
+    assert!(output.contains("RELATION DDL"), "{output}");
+    assert!(output.contains("PROFILE DELETED SNAPSHOT"), "{output}");
+}
+
 #[test]
 fn relation_page_renders_contextual_help_overlay() {
     let mut app = App::new(Vec::new());
@@ -2703,10 +2809,72 @@ fn editor_context_keeps_transaction_visible_when_narrow() {
     app.active_console_mut().transaction_mode = lazydb::model::transaction::TransactionMode::Manual;
     app.active_console_mut().transaction_state =
         lazydb::model::transaction::TransactionState::Active;
+    app.active_console_mut().query_status = QueryStatus::Running;
     for width in [120, 80, 56] {
         let output = render(&app, width, 24);
-        assert!(output.contains("TX MANUAL:ACTIVE"), "width={width}");
+        assert!(
+            output.contains("TX MANUAL:ACTIVE"),
+            "width={width}: {output}"
+        );
+        assert!(output.contains("QUERY RUNNING"), "width={width}: {output}");
     }
+}
+
+#[test]
+fn sql_editor_border_only_shows_non_idle_query_status() {
+    let cases = [
+        (QueryStatus::Idle, None),
+        (QueryStatus::Running, Some("QUERY RUNNING")),
+        (QueryStatus::Cancelled, Some("QUERY CANCELLED")),
+        (QueryStatus::Failed, Some("QUERY ERROR")),
+    ];
+
+    for (status, expected) in cases {
+        let mut app = fixture();
+        app.focus = Focus::Editor;
+        app.active_console_mut().query_status = status;
+        let output = render(&app, 120, 36);
+
+        if let Some(expected) = expected {
+            assert!(output.contains(expected), "status={status:?}: {output}");
+            assert_eq!(output.matches(expected).count(), 1, "{output}");
+        } else {
+            assert!(!output.contains("QUERY IDLE"), "{output}");
+            assert!(!output.contains("QUERY RUNNING"), "{output}");
+            assert!(!output.contains("QUERY CANCELLED"), "{output}");
+            assert!(!output.contains("QUERY ERROR"), "{output}");
+        }
+    }
+}
+
+#[test]
+fn running_query_status_is_rendered_on_the_editor_top_border() {
+    let mut app = fixture();
+    app.focus = Focus::Editor;
+    app.active_console_mut().query_status = QueryStatus::Running;
+
+    let (buffer, _) = render_buffer_with_icons(&app, 120, 36, IconSet::default());
+    let (_, editor_y) = find_text_cell(&buffer, "SQL EDITOR").expect("editor title");
+    let (status_x, status_y) = find_text_cell(&buffer, "QUERY RUNNING").expect("query status");
+
+    assert_eq!(status_y, editor_y);
+    assert_eq!(buffer[(status_x, status_y)].fg, Color::Rgb(101, 167, 255));
+}
+
+#[test]
+fn narrow_editor_preserves_title_cancelled_query_and_transaction() {
+    let mut app = fixture();
+    app.focus = Focus::Editor;
+    app.active_console_mut().transaction_mode = TransactionMode::Manual;
+    app.active_console_mut().transaction_state =
+        lazydb::model::transaction::TransactionState::Active;
+    app.active_console_mut().query_status = QueryStatus::Cancelled;
+
+    let output = render(&app, 56, 24);
+
+    assert!(output.contains("SQL EDITOR"), "{output}");
+    assert!(output.contains("QUERY CANCELLED"), "{output}");
+    assert!(output.contains("TX MANUAL:ACTIVE"), "{output}");
 }
 
 #[test]
@@ -2721,7 +2889,62 @@ fn standard_layout_shows_stable_workspace_regions() {
     assert!(output.contains("DATA"));
     assert!(output.contains("OUTPUT"));
     assert!(output.contains("Ada"));
-    assert!(output.contains("Ready"));
+    assert!(!output.contains("Ready"), "{output}");
+    assert!(!output.contains("QUERY IDLE"), "{output}");
+}
+
+#[test]
+fn workspace_header_and_footer_render_without_redundant_status_rows() {
+    let output = render(&fixture(), 120, 36);
+    let lines = output.lines().collect::<Vec<_>>();
+
+    assert!(lines[0].contains("LAZYDB"), "{output}");
+    assert!(lines[0].contains("orbital-lab"), "{output}");
+    assert!(!output.contains("ONLINE"), "{output}");
+    assert!(!output.contains("QUERY IDLE"), "{output}");
+    assert!(!output.contains("Ready"), "{output}");
+    assert!(
+        lines.last().unwrap().contains("NORMAL")
+            || lines.last().unwrap().contains("EXPLORE")
+            || lines.last().unwrap().contains("DATA"),
+        "{output}"
+    );
+}
+
+#[test]
+fn one_row_header_retains_only_transitional_and_failed_connection_status() {
+    let mut app = fixture();
+    app.connection.status = ConnectionStatus::Connecting;
+    let linking = render(&app, 80, 24);
+    assert!(
+        linking.lines().next().unwrap().contains("LINKING"),
+        "{linking}"
+    );
+
+    app.connection.status = ConnectionStatus::Failed;
+    let failed = render(&app, 80, 24);
+    assert!(
+        failed.lines().next().unwrap().contains("FAILED"),
+        "{failed}"
+    );
+
+    app.connection.status = ConnectionStatus::Connected;
+    assert!(!render(&app, 80, 24).contains("ONLINE"));
+}
+
+#[test]
+fn one_row_header_keeps_failure_status_after_long_context() {
+    let mut app = fixture();
+    app.profiles[0].name = "profile-name-that-is-much-wider-than-the-compact-header".into();
+    app.connection.server.as_mut().unwrap().database =
+        "database-name-that-would-otherwise-push-the-status-offscreen".into();
+    app.connection.status = ConnectionStatus::Failed;
+
+    let output = render(&app, 56, 24);
+    let header = output.lines().next().unwrap();
+
+    assert!(header.contains("LAZYDB"), "{output}");
+    assert!(header.ends_with(" FAILED "), "{output}");
 }
 
 #[test]

@@ -318,13 +318,19 @@ impl IconSet {
                 IconMode::Unicode => "·",
                 IconMode::Ascii => "KW",
             },
+            CompletionKind::DataType => self.catalog(CatalogKind::Type),
             CompletionKind::Database => self.catalog(CatalogKind::Database),
             CompletionKind::Schema => self.catalog(CatalogKind::Schema),
             CompletionKind::Table => self.catalog(CatalogKind::Table),
             CompletionKind::View => self.catalog(CatalogKind::View),
             CompletionKind::Column => self.catalog(CatalogKind::Column),
+            CompletionKind::Index => self.catalog(CatalogKind::Index),
+            CompletionKind::Constraint => self.catalog(CatalogKind::CheckConstraint),
             CompletionKind::Function => self.catalog(CatalogKind::Function),
             CompletionKind::Procedure => self.catalog(CatalogKind::Procedure),
+            CompletionKind::Trigger => self.catalog(CatalogKind::Trigger),
+            CompletionKind::Sequence => self.catalog(CatalogKind::Sequence),
+            CompletionKind::Type => self.catalog(CatalogKind::Type),
         }
     }
 }

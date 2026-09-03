@@ -1313,59 +1313,57 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, sta
         |server| header_text(&server.database),
     );
     let profile_width = profile.as_str().cell_width();
-    let connection = match app.connection.status {
-        ConnectionStatus::Disconnected => ("OFFLINE", theme.muted),
-        ConnectionStatus::Connecting => ("LINKING", theme.warning),
-        ConnectionStatus::Connected => ("ONLINE", theme.accent),
-        ConnectionStatus::Failed => ("FAILED", theme.error),
+    let status = match app.connection.status {
+        ConnectionStatus::Connecting => Some(("LINKING", theme.warning)),
+        ConnectionStatus::Failed => Some(("FAILED", theme.error)),
+        ConnectionStatus::Disconnected | ConnectionStatus::Connected => None,
     };
-    let query = match app.active_console_opt().map(|tab| tab.query_status) {
-        None => ("N/A", theme.muted),
-        Some(QueryStatus::Idle) => ("IDLE", theme.muted),
-        Some(QueryStatus::Running) => ("RUNNING", theme.action),
-        Some(QueryStatus::Cancelled) => ("CANCELLED", theme.warning),
-        Some(QueryStatus::Failed) => ("ERROR", theme.error),
-    };
-    let lines = vec![
-        Line::from(vec![
-            Span::styled(
-                " LAZYDB ",
-                Style::new()
-                    .fg(theme.background)
-                    .bg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  ", Style::new().bg(theme.surface)),
-            Span::styled(
-                profile,
-                Style::new()
-                    .fg(theme.text)
-                    .bg(theme.surface)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  /  ", Style::new().fg(theme.border).bg(theme.surface)),
-            Span::styled(database, Style::new().fg(theme.action).bg(theme.surface)),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                format!(" {status} ", status = connection.0),
-                Style::new()
-                    .fg(connection.1)
-                    .bg(theme.surface_raised)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!(" QUERY {} ", query.0),
-                Style::new().fg(query.1).bg(theme.surface),
-            ),
-        ]),
-    ];
-    frame.render_widget(
-        Paragraph::new(lines).style(Style::new().bg(theme.surface)),
-        area,
+    let status_width = status.map_or(0, |(status, _)| status.cell_width().saturating_add(2));
+    let main_area = Rect::new(
+        area.x,
+        area.y,
+        area.width.saturating_sub(status_width),
+        area.height,
     );
+    let spans = vec![
+        Span::styled(
+            " LAZYDB ",
+            Style::new()
+                .fg(theme.background)
+                .bg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  ", Style::new().bg(theme.surface)),
+        Span::styled(
+            profile,
+            Style::new()
+                .fg(theme.text)
+                .bg(theme.surface)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  /  ", Style::new().fg(theme.border).bg(theme.surface)),
+        Span::styled(database, Style::new().fg(theme.action).bg(theme.surface)),
+    ];
+    let line = Line::from(spans);
+    frame.render_widget(
+        Paragraph::new(line).style(Style::new().bg(theme.surface)),
+        main_area,
+    );
+    if let Some((status, color)) = status {
+        frame.render_widget(
+            Paragraph::new(format!(" {status} "))
+                .style(
+                    Style::new()
+                        .fg(color)
+                        .bg(theme.surface)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .alignment(Alignment::Right),
+            Rect::new(main_area.right(), area.y, status_width, area.height),
+        );
+    }
     let profile_x = area.x.saturating_add(10);
-    let profile_width = profile_width.min(area.right().saturating_sub(profile_x));
+    let profile_width = profile_width.min(main_area.right().saturating_sub(profile_x));
     if profile_width > 0 {
         state.hit_regions.push(HitRegion {
             area: Rect::new(profile_x, area.y, profile_width, 1),
@@ -2367,9 +2365,51 @@ fn render_editor(
         Some((_, _)) => "TX MANUAL:IDLE",
         None => "TX N/A",
     };
+    let full_left_title = format!(" SQL EDITOR  {mode} ");
+    let compact_left_title = " SQL EDITOR ";
+    let query_status = app
+        .active_console_opt()
+        .and_then(|tab| match tab.query_status {
+            QueryStatus::Idle => None,
+            QueryStatus::Running => Some(("QUERY RUNNING", theme.action)),
+            QueryStatus::Cancelled => Some(("QUERY CANCELLED", theme.warning)),
+            QueryStatus::Failed => Some(("QUERY ERROR", theme.error)),
+        });
+    let transaction_segment = format!(" {transaction} ");
+    let query_segment_width =
+        query_status.map_or(0, |(label, _)| format!(" {label} ").cell_width());
+    let available_width = area.width.saturating_sub(2);
+    let required_context_width =
+        query_segment_width.saturating_add(transaction_segment.cell_width());
+    let left_title = if full_left_title
+        .cell_width()
+        .saturating_add(required_context_width)
+        <= available_width
+    {
+        full_left_title
+    } else {
+        compact_left_title.to_owned()
+    };
+    let required_width = left_title
+        .cell_width()
+        .saturating_add(query_segment_width)
+        .saturating_add(transaction_segment.cell_width());
+    let target_segment = format!(" {target} ");
+    let show_target = required_width.saturating_add(target_segment.cell_width()) <= available_width;
+    let mut context = Vec::new();
+    if let Some((label, color)) = query_status {
+        context.push(Span::styled(
+            format!(" {label} "),
+            Style::new().fg(color).add_modifier(Modifier::BOLD),
+        ));
+    }
+    if show_target {
+        context.push(Span::raw(target_segment));
+    }
+    context.push(Span::raw(transaction_segment));
     let block = base_block
-        .title_top(Line::raw(format!(" SQL EDITOR  {mode} ")).left_aligned())
-        .title_top(Line::raw(format!(" {target}  {transaction} ")).right_aligned());
+        .title_top(Line::raw(left_title).left_aligned())
+        .title_top(Line::from(context).right_aligned());
     state.cursor_style = Some(if snapshot.prompt.is_some() {
         CursorStyle::Bar
     } else {
@@ -2888,50 +2928,8 @@ fn render_footer(
         ),
         Span::styled("", Style::new().bg(theme.surface)),
     ]);
-    let relation_context = app.tabs.get(app.active_tab).and_then(|tab| match tab {
-        WorkspaceTab::Relation(tab) if tab.view == crate::model::relation::RelationView::Ddl => {
-            let ddl_provenance = match &tab.ddl {
-                crate::model::relation::RelationLoad::Ready(snapshot)
-                | crate::model::relation::RelationLoad::Loading {
-                    previous: Some(snapshot),
-                    ..
-                }
-                | crate::model::relation::RelationLoad::Failed {
-                    previous: Some(snapshot),
-                    ..
-                }
-                | crate::model::relation::RelationLoad::Cancelled {
-                    previous: Some(snapshot),
-                } => format!("DDL: {:?}", snapshot.value.provenance),
-                _ => "DDL: NONE".to_owned(),
-            };
-            let snapshot = tab
-                .provenance(
-                    crate::model::relation::RelationView::Ddl,
-                    app.connection.active_identity(),
-                    app.active_profile(),
-                )
-                .map(crate::ui::relation::provenance_label)
-                .unwrap_or("UNKNOWN");
-            Some(format!(
-                "{ddl_provenance}  Rows: {}  Cols: {}  Snapshot: {snapshot}",
-                tab.ddl_viewport.row_offset.saturating_add(1),
-                tab.ddl_viewport.column_offset.saturating_add(1)
-            ))
-        }
-        _ => None,
-    });
-    let (second_text, second_color) = if let Some(context) = relation_context.as_deref() {
-        (context, theme.muted)
-    } else {
-        ("Ready", theme.muted)
-    };
-    let second = Line::from(Span::styled(
-        second_text,
-        Style::new().fg(second_color).bg(theme.surface),
-    ));
     frame.render_widget(
-        Paragraph::new(vec![line, second]).style(Style::new().bg(theme.surface)),
+        Paragraph::new(line).style(Style::new().bg(theme.surface)),
         area,
     );
 }
