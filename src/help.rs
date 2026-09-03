@@ -4174,6 +4174,7 @@ mod tests {
                 HelpShortcutId::ExplorerFirst,
                 HelpShortcutId::NextTab,
                 HelpShortcutId::PreviousTab,
+                HelpShortcutId::ExplorerMoveToGroup,
             ]
         );
         assert_eq!(

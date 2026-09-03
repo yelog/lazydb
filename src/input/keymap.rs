@@ -117,12 +117,6 @@ impl Keymap {
             self.pending = None;
             return Some(Action::OpenNotificationHistory);
         }
-        if self.bindings.matches("focus-next-pane", event) {
-            return Some(Action::FocusNext);
-        }
-        if self.bindings.matches("focus-previous-pane", event) {
-            return Some(Action::FocusPrevious);
-        }
         if app
             .overlay
             .as_ref()
@@ -1035,11 +1029,12 @@ impl Keymap {
                 Some(Action::RunActiveSql)
             };
         }
-        if self.bindings.matches("help", event) {
-            return Some(Action::ShowHelp);
-        }
         if app.focus == Focus::Editor {
             return Some(Action::EditorKey(event));
+        }
+
+        if self.bindings.matches("help", event) {
+            return Some(Action::ShowHelp);
         }
 
         if self.bindings.matches("focus-next-pane", event) {
