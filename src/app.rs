@@ -37,6 +37,9 @@ use crate::{
             CatalogGroupState, ExplorerConnectionStatus, ExplorerLoadState, ExplorerMutationIntent,
             ExplorerNodeId, ExplorerOwnerId, ProfileProvenance, owner_for_target,
         },
+        explorer_add::{
+            ExplorerAddAvailability, ExplorerAddKind, ExplorerAddMenu, ExplorerAddOption,
+        },
         notification::{NotificationCenter, NotificationLevel, NotificationSource},
         profile_manager::{
             ProfileCatalogDiscovery, ProfileField, ProfileManagerPage, ProfileManagerState,
@@ -1476,6 +1479,7 @@ impl App {
             Id::ExplorerToggle => vec![Action::ExplorerToggle],
             Id::ExplorerActivate => vec![Action::ExplorerOpenSelected],
             Id::ExplorerNewProfile => vec![Action::ProfileStartNew],
+            Id::ExplorerAddToConnection => vec![Action::OpenExplorerAdd],
             Id::ExplorerEditProfile => vec![Action::OpenCatalogEdit],
             Id::ExplorerDeleteProfile => self
                 .explorer
@@ -2896,93 +2900,52 @@ impl App {
                 }
                 Vec::new()
             }
+            Action::OpenExplorerAdd => self.open_explorer_add(),
+            Action::ExplorerAddMove(delta) => {
+                if let Some(Overlay::ExplorerAdd(menu)) = self.overlay.as_mut() {
+                    menu.move_selection(delta);
+                }
+                Vec::new()
+            }
+            Action::ExplorerAddSelect(index) => {
+                if let Some(Overlay::ExplorerAdd(menu)) = self.overlay.as_mut() {
+                    menu.select(index);
+                }
+                Vec::new()
+            }
+            Action::ExplorerAddConfirm => self.confirm_explorer_add(),
+            Action::ExplorerAddCancel => {
+                if matches!(self.overlay, Some(Overlay::ExplorerAdd(_))) {
+                    self.overlay = None;
+                }
+                Vec::new()
+            }
             Action::OpenCatalogCreate => {
                 if let Some(ExplorerMutationIntent::Create(anchor)) =
                     self.resolve_explorer_mutation_intent(false)
                 {
-                    let options = match &anchor {
-                        CatalogMutationAnchor::Profile { .. } => {
-                            vec![
-                                crate::model::catalog_editor::CatalogMutationOption {
-                                    object_type: CatalogObjectType::Catalog(
-                                        crate::db::catalog::CatalogKind::Database,
-                                    ),
-                                    label: "Database".into(),
-                                },
-                                crate::model::catalog_editor::CatalogMutationOption {
-                                    object_type: CatalogObjectType::LoginRole,
-                                    label: "Login Role".into(),
-                                },
-                                crate::model::catalog_editor::CatalogMutationOption {
-                                    object_type: CatalogObjectType::Role,
-                                    label: "Role".into(),
-                                },
-                            ]
-                        }
-                        CatalogMutationAnchor::Catalog(id)
-                            if id.kind == crate::db::catalog::CatalogKind::Table =>
-                        {
-                            [
-                                crate::db::catalog::CatalogKind::PrimaryKey,
-                                crate::db::catalog::CatalogKind::UniqueConstraint,
-                                crate::db::catalog::CatalogKind::ForeignKey,
-                                crate::db::catalog::CatalogKind::CheckConstraint,
-                            ]
-                            .into_iter()
-                            .map(|kind| crate::model::catalog_editor::CatalogMutationOption {
-                                object_type: CatalogObjectType::Catalog(kind),
-                                label: CatalogObjectType::Catalog(kind).display_label().into(),
-                            })
-                            .collect()
-                        }
-                        CatalogMutationAnchor::Catalog(id)
-                            if id.kind == crate::db::catalog::CatalogKind::Schema =>
-                        {
-                            vec![crate::model::catalog_editor::CatalogMutationOption {
-                                object_type: CatalogObjectType::Catalog(
-                                    crate::db::catalog::CatalogKind::View,
-                                ),
-                                label: "View".into(),
-                            }]
-                        }
-                        CatalogMutationAnchor::Group {
-                            group: crate::db::catalog::ObjectGroup::Sequences,
-                            ..
-                        } => vec![crate::model::catalog_editor::CatalogMutationOption {
-                            object_type: CatalogObjectType::Catalog(
-                                crate::db::catalog::CatalogKind::Sequence,
-                            ),
-                            label: "Sequence".into(),
-                        }],
-                        CatalogMutationAnchor::Catalog(id)
-                            if id.kind == crate::db::catalog::CatalogKind::Schema =>
-                        {
-                            vec![
-                                crate::model::catalog_editor::CatalogMutationOption {
-                                    object_type: CatalogObjectType::Catalog(
-                                        crate::db::catalog::CatalogKind::View,
-                                    ),
-                                    label: "View".into(),
-                                },
-                                crate::model::catalog_editor::CatalogMutationOption {
-                                    object_type: CatalogObjectType::Catalog(
-                                        crate::db::catalog::CatalogKind::Sequence,
-                                    ),
-                                    label: "Sequence".into(),
-                                },
-                            ]
-                        }
-                        CatalogMutationAnchor::Group {
-                            group: crate::db::catalog::ObjectGroup::Views,
-                            ..
-                        } => vec![crate::model::catalog_editor::CatalogMutationOption {
-                            object_type: CatalogObjectType::Catalog(
-                                crate::db::catalog::CatalogKind::View,
-                            ),
-                            label: "View".into(),
-                        }],
-                        _ => Vec::new(),
+                    let entry = match &anchor {
+                        CatalogMutationAnchor::Catalog(id) => self
+                            .explorer
+                            .normalized
+                            .profiles
+                            .get(&id.profile_id())
+                            .and_then(|state| state.catalog.get(id)),
+                        CatalogMutationAnchor::Profile { .. }
+                        | CatalogMutationAnchor::Group { .. } => None,
                     };
+                    let options =
+                        crate::db::postgres::PostgresAdapter::catalog_mutation_capabilities()
+                            .create_options(&anchor, entry)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|object_type| {
+                                crate::model::catalog_editor::CatalogMutationOption {
+                                    object_type,
+                                    label: object_type.display_label().into(),
+                                }
+                            })
+                            .collect::<Vec<_>>();
                     let has_options = !options.is_empty();
                     self.catalog_editor = Some(CatalogEditorState::new(
                         CatalogMutationMode::Create,
@@ -9351,6 +9314,133 @@ impl App {
         std::iter::once(None)
             .chain(self.connection_groups.iter().map(|group| Some(group.id)))
             .collect()
+    }
+
+    fn explorer_add_options(&self, profile_id: Uuid) -> Vec<ExplorerAddOption> {
+        let catalog_unavailability = self
+            .profiles
+            .iter()
+            .find(|profile| profile.id == profile_id)
+            .map_or(Some("Connection is unavailable"), |profile| {
+                if profile.kind != DatabaseKind::Postgres {
+                    Some("PostgreSQL only")
+                } else if profile.read_only {
+                    Some("Read-only connection")
+                } else if self.connection.active_identity().is_none() {
+                    Some("Connect this connection first")
+                } else if self
+                    .connection
+                    .active_identity()
+                    .is_some_and(|identity| identity.profile_id != profile_id)
+                {
+                    Some("Activate this connection first")
+                } else {
+                    None
+                }
+            });
+        let availability = |reason: Option<&'static str>| match reason {
+            Some(reason) => ExplorerAddAvailability::Unavailable(reason),
+            None => ExplorerAddAvailability::Available,
+        };
+        [
+            (ExplorerAddKind::Connection, None),
+            (ExplorerAddKind::ConnectionGroup, None),
+            (ExplorerAddKind::Database, catalog_unavailability),
+            (ExplorerAddKind::User, catalog_unavailability),
+            (ExplorerAddKind::Role, catalog_unavailability),
+        ]
+        .into_iter()
+        .map(|(kind, reason)| ExplorerAddOption {
+            kind,
+            availability: availability(reason),
+        })
+        .collect()
+    }
+
+    fn open_explorer_add(&mut self) -> Vec<Command> {
+        let Some(ExplorerNodeId::Profile(profile_id)) = self.explorer.selected_id().cloned() else {
+            return Vec::new();
+        };
+        if !self.profiles.iter().any(|profile| profile.id == profile_id) {
+            return Vec::new();
+        }
+        self.overlay = Some(Overlay::ExplorerAdd(ExplorerAddMenu::new(
+            profile_id,
+            self.explorer_add_options(profile_id),
+        )));
+        Vec::new()
+    }
+
+    fn confirm_explorer_add(&mut self) -> Vec<Command> {
+        let Some(Overlay::ExplorerAdd(menu)) = self.overlay.take() else {
+            return Vec::new();
+        };
+        let Some(kind) = menu.selected_kind() else {
+            self.overlay = Some(Overlay::ExplorerAdd(menu));
+            return Vec::new();
+        };
+        match kind {
+            ExplorerAddKind::Connection => self.update(Action::ProfileStartNew),
+            ExplorerAddKind::ConnectionGroup => self.update(Action::ProfileGroupCreate),
+            ExplorerAddKind::Database | ExplorerAddKind::User | ExplorerAddKind::Role => {
+                let object_type = match kind {
+                    ExplorerAddKind::Database => {
+                        CatalogObjectType::Catalog(crate::db::catalog::CatalogKind::Database)
+                    }
+                    ExplorerAddKind::User => CatalogObjectType::LoginRole,
+                    ExplorerAddKind::Role => CatalogObjectType::Role,
+                    ExplorerAddKind::Connection | ExplorerAddKind::ConnectionGroup => {
+                        unreachable!()
+                    }
+                };
+                self.open_profile_catalog_create(menu.profile_id, object_type)
+            }
+        }
+    }
+
+    fn open_profile_catalog_create(
+        &mut self,
+        profile_id: Uuid,
+        object_type: CatalogObjectType,
+    ) -> Vec<Command> {
+        let Some(profile) = self
+            .profiles
+            .iter()
+            .find(|profile| profile.id == profile_id)
+        else {
+            return Vec::new();
+        };
+        if profile.kind != DatabaseKind::Postgres
+            || profile.read_only
+            || self
+                .connection
+                .active_identity()
+                .is_none_or(|identity| identity.profile_id != profile_id)
+        {
+            self.notify_warning(
+                "Catalog",
+                "The selected connection cannot create catalog objects",
+            );
+            return Vec::new();
+        }
+        let catalog_epoch = self
+            .explorer
+            .normalized
+            .profiles
+            .get(&profile_id)
+            .map_or(0, |state| state.catalog_epoch);
+        let mut editor = CatalogEditorState::new(
+            CatalogMutationMode::Create,
+            CatalogMutationAnchor::Profile { profile_id },
+            catalog_epoch,
+            Vec::new(),
+        );
+        if !editor.select_object_type(object_type) {
+            return Vec::new();
+        }
+        self.catalog_editor = Some(editor);
+        self.overlay = Some(Overlay::CatalogEditor);
+        Vec::new()
     }
 
     fn open_profile_group(&mut self) -> Vec<Command> {

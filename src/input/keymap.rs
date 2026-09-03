@@ -122,6 +122,16 @@ impl Keymap {
                 _ => None,
             };
         }
+        if matches!(app.overlay, Some(Overlay::ExplorerAdd(_))) {
+            self.pending = None;
+            return match event.code {
+                KeyCode::Up | KeyCode::Char('k') => Some(Action::ExplorerAddMove(-1)),
+                KeyCode::Down | KeyCode::Char('j') => Some(Action::ExplorerAddMove(1)),
+                KeyCode::Enter => Some(Action::ExplorerAddConfirm),
+                KeyCode::Esc | KeyCode::Char('q') => Some(Action::ExplorerAddCancel),
+                _ => None,
+            };
+        }
         if let Some(Overlay::ProfileGroup(group)) = app.overlay.as_ref() {
             self.pending = None;
             return match group {
@@ -1858,7 +1868,13 @@ fn map_explorer(code: KeyCode, app: &App) -> Option<Action> {
         KeyCode::Char('a') => {
             if matches!(
                 app.explorer.normalized.selected,
-                Some(ExplorerNodeId::Profile(_) | ExplorerNodeId::ConnectionGroup { .. })
+                Some(ExplorerNodeId::Profile(_))
+            ) {
+                return Some(Action::OpenExplorerAdd);
+            }
+            if matches!(
+                app.explorer.normalized.selected,
+                Some(ExplorerNodeId::ConnectionGroup { .. })
             ) {
                 return Some(Action::ProfileGroupCreate);
             }

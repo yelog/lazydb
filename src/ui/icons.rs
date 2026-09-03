@@ -40,6 +40,14 @@ pub(crate) enum DashboardMetric {
     WriteRate,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ExplorerAddIcon {
+    Connection,
+    ConnectionGroup,
+    User,
+    Role,
+}
+
 impl IconSet {
     pub const fn new(mode: IconMode) -> Self {
         Self { mode }
@@ -248,6 +256,29 @@ impl IconSet {
                 CatalogKind::Trigger => "TG",
                 CatalogKind::Sequence => "SQ",
                 CatalogKind::Type => "TY",
+            },
+        }
+    }
+
+    pub(crate) const fn explorer_add(self, kind: ExplorerAddIcon) -> &'static str {
+        match self.mode {
+            IconMode::NerdFont => match kind {
+                ExplorerAddIcon::Connection => md::MD_CONNECTION,
+                ExplorerAddIcon::ConnectionGroup => md::MD_FOLDER_PLUS,
+                ExplorerAddIcon::User => md::MD_ACCOUNT_PLUS,
+                ExplorerAddIcon::Role => md::MD_SHIELD_ACCOUNT,
+            },
+            IconMode::Unicode => match kind {
+                ExplorerAddIcon::Connection => "⇄",
+                ExplorerAddIcon::ConnectionGroup => "▰",
+                ExplorerAddIcon::User => "●",
+                ExplorerAddIcon::Role => "◇",
+            },
+            IconMode::Ascii => match kind {
+                ExplorerAddIcon::Connection => "CN",
+                ExplorerAddIcon::ConnectionGroup => "GR",
+                ExplorerAddIcon::User => "US",
+                ExplorerAddIcon::Role => "RL",
             },
         }
     }

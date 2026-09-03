@@ -123,6 +123,11 @@ pub enum Action {
     ProfileStartEdit {
         profile_id: Uuid,
     },
+    OpenExplorerAdd,
+    ExplorerAddMove(isize),
+    ExplorerAddSelect(usize),
+    ExplorerAddConfirm,
+    ExplorerAddCancel,
     OpenCatalogCreate,
     OpenCatalogEdit,
     ProfileRequestDelete {

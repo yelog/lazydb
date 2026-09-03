@@ -151,6 +151,7 @@ fn shortcut_context_with_overlay(app: &App, include_help: bool) -> ShortcutConte
                 },
                 Overlay::ProfileAccess { .. } => ShortcutContext::ProfileAccess,
                 Overlay::ProfileGroup(_) => ShortcutContext::ProfileGroup,
+                Overlay::ExplorerAdd(_) => ShortcutContext::Explorer,
                 Overlay::Message { .. } => ShortcutContext::Message,
                 Overlay::SubstituteConfirm { .. } => ShortcutContext::SubstituteConfirmation,
                 Overlay::ExecutionConfirm { .. } => ShortcutContext::ExecutionConfirmation,
@@ -281,6 +282,7 @@ pub enum HelpShortcutId {
     ExplorerToggle,
     ExplorerActivate,
     ExplorerNewProfile,
+    ExplorerAddToConnection,
     ExplorerEditProfile,
     ExplorerCreateCatalog,
     ExplorerEditCatalog,
@@ -1041,6 +1043,14 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
         "open table preview / activate"
     ),
     row!(ExplorerNewProfile, [Explorer], "n", "new connection"),
+    row!(
+        ExplorerAddToConnection,
+        [Explorer],
+        "a",
+        "add to connection",
+        ProfileEditAvailable,
+        executable
+    ),
     row!(
         ExplorerEditProfile,
         [Explorer],
@@ -2385,9 +2395,10 @@ fn catalog_editor_capabilities(app: &App) -> (bool, bool, bool) {
         },
         _ => return (profile_edit_available, false, false),
     };
-    let create = capabilities
-        .create_options(&anchor, entry)
-        .is_ok_and(|options| !options.is_empty());
+    let create = !matches!(selected, ExplorerNodeId::Profile(_))
+        && capabilities
+            .create_options(&anchor, entry)
+            .is_ok_and(|options| !options.is_empty());
     let edit = matches!(selected, ExplorerNodeId::Catalog(_))
         && capabilities.can_edit(&anchor, entry).unwrap_or(false);
     (profile_edit_available, create, edit)

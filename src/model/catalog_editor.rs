@@ -1211,11 +1211,21 @@ impl CatalogEditorState {
     }
 
     pub fn select_option(&mut self, selected: usize) -> bool {
-        if self.is_busy() || selected >= self.options.len() {
+        if self.is_busy() {
             return false;
         }
+        let Some(object_type) = self.options.get(selected).map(|option| option.object_type) else {
+            return false;
+        };
         self.selected_option = selected;
-        self.object_type = Some(self.options[selected].object_type);
+        self.select_object_type(object_type)
+    }
+
+    pub fn select_object_type(&mut self, object_type: CatalogObjectType) -> bool {
+        if self.is_busy() || self.mode != CatalogMutationMode::Create {
+            return false;
+        }
+        self.object_type = Some(object_type);
         self.page = CatalogEditorPage::Form;
         if matches!(self.anchor, CatalogMutationAnchor::Profile { .. })
             && self.object_type

@@ -129,6 +129,46 @@ fn profile_role_picker_initializes_login_and_non_login_drafts() {
 }
 
 #[test]
+fn profile_object_type_selection_opens_database_form_directly() {
+    let mut editor = CatalogEditorState::new(
+        CatalogMutationMode::Create,
+        CatalogMutationAnchor::Profile {
+            profile_id: profile(),
+        },
+        1,
+        vec![],
+    );
+
+    assert!(editor.select_object_type(CatalogObjectType::Catalog(
+        lazydb::db::catalog::CatalogKind::Database,
+    )));
+    assert_eq!(editor.page, CatalogEditorPage::Form);
+    assert!(matches!(editor.draft, Some(CatalogDraft::Database(_))));
+}
+
+#[test]
+fn profile_object_type_selection_distinguishes_user_and_role() {
+    for (object_type, expected_login) in [
+        (CatalogObjectType::LoginRole, true),
+        (CatalogObjectType::Role, false),
+    ] {
+        let mut editor = CatalogEditorState::new(
+            CatalogMutationMode::Create,
+            CatalogMutationAnchor::Profile {
+                profile_id: profile(),
+            },
+            1,
+            vec![],
+        );
+        assert!(editor.select_object_type(object_type));
+        let Some(CatalogDraft::Role(draft)) = editor.draft else {
+            panic!("role draft expected");
+        };
+        assert_eq!(draft.login, expected_login);
+    }
+}
+
+#[test]
 fn schema_draft_rejects_blank_name_and_owner() {
     let draft = SchemaDraft {
         name: TextInput::from("  "),

@@ -178,6 +178,7 @@ pub enum HitTarget {
     ProfileGroupOption(usize),
     ProfileGroupConfirm,
     ProfileGroupCancel,
+    ExplorerAddOption(usize),
     DismissNotification(u64),
     RelationFirstPage,
     RelationPreviousPage,
@@ -768,6 +769,7 @@ fn overlay_key(overlay: &Overlay) -> u8 {
         Overlay::CatalogEditor => 18,
         Overlay::ProfileAccess { .. } => 4,
         Overlay::ProfileGroup(_) => 19,
+        Overlay::ExplorerAdd(_) => 20,
         Overlay::Message { .. } => 5,
         Overlay::SubstituteConfirm { .. } => 6,
         Overlay::ExecutionConfirm { .. } => 7,
@@ -3142,7 +3144,115 @@ fn render_overlay(
         Overlay::ProfileGroup(group) => {
             render_profile_group_overlay(frame, area, app, group, state, theme);
         }
+        Overlay::ExplorerAdd(menu) => {
+            render_explorer_add(frame, area, app, menu, state, theme, icons)
+        }
     }
+}
+
+fn render_explorer_add(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    menu: &crate::model::explorer_add::ExplorerAddMenu,
+    state: &mut UiState,
+    theme: Theme,
+    icons: icons::IconSet,
+) {
+    use crate::model::explorer_add::{ExplorerAddAvailability, ExplorerAddKind};
+
+    let popup = centered(area, 64.min(area.width), 14.min(area.height));
+    frame.render_widget(Clear, popup);
+    let block = panel_block(" ADD TO CONNECTION ", true, theme);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    let profile = app
+        .profiles
+        .iter()
+        .find(|profile| profile.id == menu.profile_id);
+    let target = profile.map_or_else(
+        || "TARGET  connection".to_owned(),
+        |profile| {
+            format!(
+                "TARGET  {} · {:?}",
+                sanitize_terminal_text(&profile.name),
+                profile.kind
+            )
+        },
+    );
+    frame.render_widget(
+        Paragraph::new(target).style(Style::new().fg(theme.muted).bg(theme.surface)),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+
+    let row_start = inner.y.saturating_add(2);
+    for (index, option) in menu.options.iter().enumerate() {
+        let y = row_start.saturating_add(index as u16);
+        if y >= inner.bottom().saturating_sub(1) {
+            break;
+        }
+        let selected = index == menu.selected;
+        let available = option.availability.is_available();
+        let icon = match option.kind {
+            ExplorerAddKind::Connection => icons.explorer_add(icons::ExplorerAddIcon::Connection),
+            ExplorerAddKind::ConnectionGroup => {
+                icons.explorer_add(icons::ExplorerAddIcon::ConnectionGroup)
+            }
+            ExplorerAddKind::Database => icons.catalog(crate::db::catalog::CatalogKind::Database),
+            ExplorerAddKind::User => icons.explorer_add(icons::ExplorerAddIcon::User),
+            ExplorerAddKind::Role => icons.explorer_add(icons::ExplorerAddIcon::Role),
+        };
+        let icon_color = match option.kind {
+            ExplorerAddKind::Connection => theme.action,
+            ExplorerAddKind::ConnectionGroup => theme.warning,
+            ExplorerAddKind::Database => theme.accent,
+            ExplorerAddKind::User => theme.success,
+            ExplorerAddKind::Role => theme.warning,
+        };
+        let detail = match option.availability {
+            ExplorerAddAvailability::Available => option.kind.description(),
+            ExplorerAddAvailability::Unavailable(reason) => reason,
+        };
+        let row = Rect::new(inner.x, y, inner.width, 1);
+        let background = if selected {
+            theme.selection
+        } else {
+            theme.surface
+        };
+        let label_style = Style::new()
+            .fg(if available { theme.text } else { theme.muted })
+            .bg(background)
+            .add_modifier(if selected && available {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            });
+        let icon_style = Style::new()
+            .fg(if available { icon_color } else { theme.muted })
+            .bg(background);
+        let detail_style = Style::new().fg(theme.muted).bg(background);
+        let mut spans = vec![
+            Span::styled(if selected { "› " } else { "  " }, label_style),
+            Span::styled(format!("{icon} "), icon_style),
+            Span::styled(format!("{:<19}", option.kind.label()), label_style),
+        ];
+        if inner.width >= 52 {
+            spans.push(Span::styled(detail, detail_style));
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), row);
+        if available {
+            state.hit_regions.push(HitRegion {
+                area: row,
+                target: HitTarget::ExplorerAddOption(index),
+            });
+        }
+    }
+    frame.render_widget(
+        Paragraph::new("j/k · ↑/↓ select   Enter continue   Esc close")
+            .style(Style::new().fg(theme.muted).bg(theme.surface))
+            .alignment(Alignment::Center),
+        Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
+    );
 }
 
 fn render_profile_group_overlay(

@@ -184,6 +184,20 @@ fn maps_profile_group_options_and_buttons_to_semantic_actions() {
 }
 
 #[test]
+fn maps_explorer_add_options_to_selection_actions() {
+    let app = App::new(Vec::new());
+    let mut ui = UiState::new();
+    ui.hit_regions.push(HitRegion {
+        area: Rect::new(2, 2, 20, 1),
+        target: HitTarget::ExplorerAddOption(3),
+    });
+    assert_eq!(
+        click_action(&ui, &app, &HitTarget::ExplorerAddOption(3)),
+        Action::ExplorerAddSelect(3)
+    );
+}
+
+#[test]
 fn relation_view_and_retry_hit_targets_emit_semantic_actions() {
     let mut app = App::new(Vec::new());
     app.tabs.push(lazydb::model::tab::WorkspaceTab::Relation(
