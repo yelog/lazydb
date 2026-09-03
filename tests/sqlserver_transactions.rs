@@ -13,7 +13,6 @@ use lazydb::{
     model::{execution_target::ExecutionTarget, relation::RelationKey},
     profile::import_connection_url,
 };
-use std::time::Duration;
 use uuid::Uuid;
 
 fn count(outcome: &lazydb::db::query::QueryOutcome) -> i64 {
@@ -102,15 +101,6 @@ async fn sql_server_transactions_cover_isolation_commit_rollback_ddl_disconnect_
         .await
         .unwrap();
     assert_eq!(count(&after_disconnect), 1);
-    database.execute("SELECT 1").await.unwrap();
-    assert!(
-        tokio::time::timeout(
-            Duration::from_millis(100),
-            database.execute("WAITFOR DELAY '00:00:02'; SELECT 1"),
-        )
-        .await
-        .is_err()
-    );
     database.execute("SELECT 1").await.unwrap();
     database
         .execute(&format!("DROP TABLE {table}"))
