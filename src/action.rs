@@ -7,7 +7,8 @@ use crate::profile::ProfileCollection;
 
 use crate::db::catalog_mutation::{
     CatalogMutationCapabilities, CatalogMutationPlan, CatalogMutationRequest,
-    CatalogObjectDefinition, CatalogObjectDefinitionRequest,
+    CatalogObjectDefinition, CatalogObjectDefinitionRequest, CatalogOwnerContext,
+    CatalogOwnerContextRequest,
 };
 use crate::db::{
     ErrorCategory, ServerInfo,
@@ -170,6 +171,14 @@ pub enum Action {
         request: CatalogObjectDefinitionRequest,
         message: String,
     },
+    CatalogOwnerContextLoaded {
+        request: CatalogOwnerContextRequest,
+        context: CatalogOwnerContext,
+    },
+    CatalogOwnerContextLoadFailed {
+        request: CatalogOwnerContextRequest,
+        message: String,
+    },
     CatalogDropInsert(char),
     CatalogDropBackspace,
     CatalogDropClear,
@@ -181,6 +190,15 @@ pub enum Action {
     CatalogEditorFieldNext,
     CatalogEditorFieldPrevious,
     CatalogEditorFocusField(usize),
+    CatalogOwnerPickerOpen,
+    CatalogOwnerPickerClose,
+    CatalogOwnerPickerMove(isize),
+    CatalogOwnerPickerInsert(char),
+    CatalogOwnerPickerBackspace,
+    CatalogOwnerPickerDeletePreviousWord,
+    CatalogOwnerPickerDeleteToStart,
+    CatalogOwnerPickerAccept,
+    CatalogOwnerPickerChoose(String),
     CatalogEditorInsert(char),
     CatalogEditorBackspace,
     CatalogEditorDeletePreviousWord,
@@ -852,6 +870,7 @@ pub enum Command {
     },
     LoadCatalogPage(CatalogRequest),
     LoadCatalogObjectDefinition(CatalogObjectDefinitionRequest),
+    LoadCatalogOwnerContext(CatalogOwnerContextRequest),
     SearchCatalog(CatalogSearchRequest),
     CancelCatalogSearch,
     PlanCatalogDrop(CatalogDropRequest),

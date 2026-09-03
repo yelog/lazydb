@@ -76,6 +76,7 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                             | HitTarget::CatalogEditorRemoveTableColumn
                             | HitTarget::CatalogEditorReview
                             | HitTarget::CatalogEditorCancel
+                            | HitTarget::CatalogOwnerChoice(_)
                     ))
             {
                 return None;
@@ -160,6 +161,7 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                 }
                 HitTarget::CatalogEditorReview => Some(Action::CatalogEditorPreview),
                 HitTarget::CatalogEditorCancel => Some(Action::CatalogEditorCancel),
+                HitTarget::CatalogOwnerChoice(name) => Some(Action::CatalogOwnerPickerChoose(name)),
                 HitTarget::RelationFirstPage => Some(Action::RelationFirstPage),
                 HitTarget::RelationPreviousPage => Some(Action::RelationPreviousPage),
                 HitTarget::RelationPageSize => {
@@ -310,7 +312,8 @@ fn focus_at(ui: &UiState, column: u16, row: u16) -> Option<Focus> {
         | HitTarget::CatalogEditorAddTableColumn
         | HitTarget::CatalogEditorRemoveTableColumn
         | HitTarget::CatalogEditorReview
-        | HitTarget::CatalogEditorCancel => None,
+        | HitTarget::CatalogEditorCancel
+        | HitTarget::CatalogOwnerChoice(_) => None,
         HitTarget::RelationFirstPage
         | HitTarget::RelationPreviousPage
         | HitTarget::RelationPageSize

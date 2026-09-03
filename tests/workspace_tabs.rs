@@ -767,6 +767,7 @@ fn restored_relation_waits_for_catalog_before_loading() {
             kind: lazydb::profile::DatabaseKind::Sqlite,
             version: "3".into(),
             database: ":memory:".into(),
+            current_user: None,
         },
         mutation_capabilities: Default::default(),
     });
@@ -1043,6 +1044,7 @@ fn restored_relation_at_tables_request(
             kind: lazydb::profile::DatabaseKind::Sqlite,
             version: "3".into(),
             database: ":memory:".into(),
+            current_user: None,
         },
         mutation_capabilities: Default::default(),
     });

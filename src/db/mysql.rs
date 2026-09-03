@@ -473,6 +473,7 @@ impl MySqlAdapter {
                 .try_get::<Option<String>, _>("current_database")
                 .map_err(decode_error)?
                 .unwrap_or_default(),
+            current_user: None,
         })
     }
 

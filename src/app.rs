@@ -13,7 +13,8 @@ use crate::{
     cli::ConfirmationPolicy,
     clipboard::{ClipboardPayload, copy_cell, copy_row_tsv},
     db::catalog_mutation::{
-        CatalogMutationAnchor, CatalogMutationMode, CatalogObjectType, CatalogSelectionHint,
+        CatalogMutationAnchor, CatalogMutationMode, CatalogObjectType, CatalogOwnerContextRequest,
+        CatalogSelectionHint,
     },
     db::{
         ErrorCategory,
@@ -2968,8 +2969,48 @@ impl App {
                         let view_capabilities = self.connection.mutation_capabilities.view_options;
                         Self::select_catalog_editor_option(&mut editor, 0, view_capabilities);
                     }
+                    if let Some(crate::model::catalog_editor::CatalogDraft::Schema(draft)) =
+                        editor.draft.as_mut()
+                    {
+                        draft.owner.set(self.default_schema_owner());
+                    }
                     self.catalog_editor = Some(editor);
                     self.overlay = Some(Overlay::CatalogEditor);
+                    if matches!(
+                        self.catalog_editor
+                            .as_ref()
+                            .and_then(|editor| editor.object_type),
+                        Some(CatalogObjectType::Catalog(
+                            crate::db::catalog::CatalogKind::Schema
+                        ))
+                    ) {
+                        return self.ensure_catalog_owner_context();
+                    }
+                }
+                Vec::new()
+            }
+            Action::CatalogOwnerContextLoaded { request, context } => {
+                if self.database_command_identity() == Some(request.connection) {
+                    self.connection.owner_context.finish(&request, context);
+                    let choices = self
+                        .connection
+                        .owner_context
+                        .context_for(request.connection)
+                        .map(|context| context.choices.clone());
+                    if let Some(choices) = choices
+                        && let Some(editor) = self.catalog_editor.as_mut()
+                        && let Some(crate::model::catalog_editor::CatalogDraft::Schema(draft)) =
+                            editor.draft.as_ref()
+                        && draft.selected_field == 1
+                    {
+                        editor.owner_picker.open(draft.owner.value(), &choices);
+                    }
+                }
+                Vec::new()
+            }
+            Action::CatalogOwnerContextLoadFailed { request, message } => {
+                if self.database_command_identity() == Some(request.connection) {
+                    self.connection.owner_context.fail(&request, message);
                 }
                 Vec::new()
             }
@@ -3114,6 +3155,148 @@ impl App {
                 }
                 Vec::new()
             }
+            Action::CatalogOwnerPickerOpen => {
+                let Some(connection) = self.database_command_identity() else {
+                    return Vec::new();
+                };
+                let Some(context) = self
+                    .connection
+                    .owner_context
+                    .context_for(connection)
+                    .cloned()
+                else {
+                    return Vec::new();
+                };
+                if let Some(editor) = self.catalog_editor.as_mut()
+                    && let Some(crate::model::catalog_editor::CatalogDraft::Schema(draft)) =
+                        editor.draft.as_ref()
+                {
+                    editor
+                        .owner_picker
+                        .open(draft.owner.value(), &context.choices);
+                }
+                Vec::new()
+            }
+            Action::CatalogOwnerPickerClose => {
+                if let Some(editor) = self.catalog_editor.as_mut() {
+                    editor.owner_picker.close();
+                }
+                Vec::new()
+            }
+            Action::CatalogOwnerPickerMove(delta) => {
+                let Some(connection) = self.database_command_identity() else {
+                    return Vec::new();
+                };
+                let Some(choices) = self
+                    .connection
+                    .owner_context
+                    .context_for(connection)
+                    .map(|context| context.choices.clone())
+                else {
+                    return Vec::new();
+                };
+                if let Some(editor) = self.catalog_editor.as_mut() {
+                    editor.owner_picker.move_selection(delta, &choices);
+                }
+                Vec::new()
+            }
+            Action::CatalogOwnerPickerInsert(character) => {
+                let Some(connection) = self.database_command_identity() else {
+                    return Vec::new();
+                };
+                let Some(choices) = self
+                    .connection
+                    .owner_context
+                    .context_for(connection)
+                    .map(|context| context.choices.clone())
+                else {
+                    return Vec::new();
+                };
+                if let Some(editor) = self.catalog_editor.as_mut() {
+                    if !editor.owner_picker.open
+                        && let Some(crate::model::catalog_editor::CatalogDraft::Schema(draft)) =
+                            editor.draft.as_ref()
+                    {
+                        editor.owner_picker.open(draft.owner.value(), &choices);
+                    }
+                    editor.owner_picker.insert_filter(character, &choices);
+                }
+                Vec::new()
+            }
+            Action::CatalogOwnerPickerBackspace => {
+                let Some(connection) = self.database_command_identity() else {
+                    return Vec::new();
+                };
+                let Some(choices) = self
+                    .connection
+                    .owner_context
+                    .context_for(connection)
+                    .map(|context| context.choices.clone())
+                else {
+                    return Vec::new();
+                };
+                if let Some(editor) = self.catalog_editor.as_mut() {
+                    editor.owner_picker.backspace_filter(&choices);
+                }
+                Vec::new()
+            }
+            Action::CatalogOwnerPickerDeletePreviousWord
+            | Action::CatalogOwnerPickerDeleteToStart => {
+                let Some(connection) = self.database_command_identity() else {
+                    return Vec::new();
+                };
+                let Some(choices) = self
+                    .connection
+                    .owner_context
+                    .context_for(connection)
+                    .map(|context| context.choices.clone())
+                else {
+                    return Vec::new();
+                };
+                if let Some(editor) = self.catalog_editor.as_mut() {
+                    if matches!(action, Action::CatalogOwnerPickerDeletePreviousWord) {
+                        editor.owner_picker.delete_previous_word(&choices);
+                    } else {
+                        editor.owner_picker.delete_to_start(&choices);
+                    }
+                }
+                Vec::new()
+            }
+            Action::CatalogOwnerPickerAccept => {
+                let Some(connection) = self.database_command_identity() else {
+                    return Vec::new();
+                };
+                let Some(choices) = self
+                    .connection
+                    .owner_context
+                    .context_for(connection)
+                    .map(|context| context.choices.clone())
+                else {
+                    return Vec::new();
+                };
+                if let Some(editor) = self.catalog_editor.as_mut()
+                    && let Some(choice) = editor.owner_picker.selected(&choices)
+                {
+                    if choice.selectable {
+                        if let Some(crate::model::catalog_editor::CatalogDraft::Schema(draft)) =
+                            editor.draft.as_mut()
+                        {
+                            draft.owner.set(choice.name.clone());
+                        }
+                        editor.owner_picker.close();
+                    } else {
+                        editor.owner_picker.message =
+                            Some(format!("Cannot SET ROLE to {}", choice.name));
+                    }
+                }
+                Vec::new()
+            }
+            Action::CatalogOwnerPickerChoose(name) => {
+                if let Some(editor) = self.catalog_editor.as_mut() {
+                    editor.owner_picker.selected_name = Some(name);
+                }
+                self.update(Action::CatalogOwnerPickerAccept)
+            }
             Action::CatalogObjectDefinitionLoaded {
                 request,
                 definition,
@@ -3241,6 +3424,11 @@ impl App {
                 Vec::new()
             }
             Action::CatalogEditorFieldNext => {
+                if let Some(editor) = self.catalog_editor.as_mut()
+                    && editor.owner_picker.open
+                {
+                    editor.owner_picker.close();
+                }
                 if let Some(draft) = self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut()) {
                     if matches!(draft, crate::model::catalog_editor::CatalogDraft::Table(_)) {
                         draft.move_field(1);
@@ -3252,6 +3440,10 @@ impl App {
                             | crate::model::catalog_editor::CatalogDraft::Schema(_)
                     ) {
                         draft.move_field(1);
+                        let should_open = matches!(draft, crate::model::catalog_editor::CatalogDraft::Schema(draft) if draft.selected_field == 1);
+                        if should_open {
+                            return self.open_catalog_owner_picker();
+                        }
                         return Vec::new();
                     }
                     if matches!(
@@ -3288,6 +3480,11 @@ impl App {
                 Vec::new()
             }
             Action::CatalogEditorFieldPrevious => {
+                if let Some(editor) = self.catalog_editor.as_mut()
+                    && editor.owner_picker.open
+                {
+                    editor.owner_picker.close();
+                }
                 if let Some(draft) = self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut()) {
                     if matches!(draft, crate::model::catalog_editor::CatalogDraft::Table(_)) {
                         draft.move_field(-1);
@@ -3342,6 +3539,9 @@ impl App {
                     && index < 3
                 {
                     draft.selected_field = index;
+                }
+                if index == 1 {
+                    return self.open_catalog_owner_picker();
                 }
                 Vec::new()
             }
@@ -4032,6 +4232,13 @@ impl App {
                     {
                         tab.invalidate_catalog_mutation(plan.impact.native_identity_changed);
                     }
+                }
+                if matches!(
+                    plan.request.object_type,
+                    crate::db::catalog_mutation::CatalogObjectType::LoginRole
+                        | crate::db::catalog_mutation::CatalogObjectType::Role
+                ) {
+                    self.connection.owner_context = Default::default();
                 }
                 self.catalog_editor = None;
                 self.overlay = None;
@@ -5533,6 +5740,7 @@ impl App {
                 };
                 self.connection.server = Some(server);
                 self.connection.mutation_capabilities = mutation_capabilities;
+                self.connection.owner_context = Default::default();
                 self.connection.error = None;
                 let mut persist_target = false;
                 if pending_matches
@@ -5692,6 +5900,7 @@ impl App {
                 self.connection.generation = 0;
                 self.connection.server = None;
                 self.connection.mutation_capabilities = Default::default();
+                self.connection.owner_context = Default::default();
                 self.connection.target = None;
                 self.connection.error = Some(message.clone());
                 self.notify_error("Connection", message.clone());
@@ -7963,6 +8172,7 @@ impl App {
         self.connection.pending_generation = Some(generation);
         self.connection.pending_target = Some(target.clone());
         self.connection.status = ConnectionStatus::Connecting;
+        self.connection.owner_context = Default::default();
         self.connection.error = None;
         let mut commands = self.cancel_relation_requests_for_connection(Some(ConnectionIdentity {
             profile_id,
@@ -8146,6 +8356,89 @@ impl App {
             return None;
         }
         self.connection.active_identity()
+    }
+
+    fn default_schema_owner(&self) -> String {
+        self.connection
+            .server
+            .as_ref()
+            .and_then(|server| server.current_user.as_deref())
+            .filter(|user| !user.trim().is_empty())
+            .or_else(|| {
+                self.active_profile()
+                    .and_then(|profile| profile.user.as_deref())
+                    .filter(|user| !user.trim().is_empty())
+            })
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    fn ensure_catalog_owner_context(&mut self) -> Vec<Command> {
+        let Some(connection) = self.database_command_identity() else {
+            return Vec::new();
+        };
+        let Some(profile) = self.active_profile() else {
+            return Vec::new();
+        };
+        if profile.kind != DatabaseKind::Postgres {
+            return Vec::new();
+        }
+        let Some(target) = self.connection.target.clone() else {
+            return Vec::new();
+        };
+        if self
+            .connection
+            .owner_context
+            .context_for(connection)
+            .is_some()
+            || self.connection.owner_context.is_loading_for(connection)
+        {
+            return Vec::new();
+        }
+        let Some(catalog_state) = self
+            .explorer
+            .normalized
+            .profiles
+            .get_mut(&connection.profile_id)
+        else {
+            return Vec::new();
+        };
+        let Some(request_id) = catalog_state.allocate_request_id() else {
+            self.notify_warning("Catalog", "Catalog request ID exhausted");
+            return Vec::new();
+        };
+        let request = CatalogOwnerContextRequest {
+            connection,
+            request_id,
+            target,
+        };
+        if !self.connection.owner_context.begin(request.clone()) {
+            return Vec::new();
+        }
+        vec![Command::LoadCatalogOwnerContext(request)]
+    }
+
+    fn open_catalog_owner_picker(&mut self) -> Vec<Command> {
+        let Some(connection) = self.database_command_identity() else {
+            return Vec::new();
+        };
+        let Some(context) = self
+            .connection
+            .owner_context
+            .context_for(connection)
+            .cloned()
+        else {
+            return Vec::new();
+        };
+        if let Some(editor) = self.catalog_editor.as_mut()
+            && let Some(crate::model::catalog_editor::CatalogDraft::Schema(draft)) =
+                editor.draft.as_ref()
+        {
+            editor
+                .owner_picker
+                .open(draft.owner.value(), &context.choices);
+        }
+        Vec::new()
     }
 
     fn profile_operation_blocks_database_commands(&self) -> bool {
@@ -14443,6 +14736,7 @@ mod tests {
                 kind: crate::profile::DatabaseKind::Sqlite,
                 version: "test".into(),
                 database: "memory".into(),
+                current_user: None,
             },
             mutation_capabilities: Default::default(),
         });
@@ -14565,6 +14859,7 @@ mod tests {
                 kind: crate::profile::DatabaseKind::Sqlite,
                 version: "test".into(),
                 database: "memory".into(),
+                current_user: None,
             },
             mutation_capabilities: Default::default(),
         });

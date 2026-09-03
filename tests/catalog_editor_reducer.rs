@@ -199,6 +199,7 @@ fn opening_create_on_schema_uses_capability_ordered_options() {
             kind: lazydb::profile::DatabaseKind::Postgres,
             version: "PostgreSQL 15".into(),
             database: "app".into(),
+            current_user: Some("effective_role".into()),
         },
         mutation_capabilities:
             lazydb::db::postgres::PostgresAdapter::catalog_mutation_capabilities_for_version(
@@ -258,6 +259,17 @@ fn opening_create_on_schema_uses_capability_ordered_options() {
         .catalog_epoch;
 
     app.update(Action::OpenCatalogCreate);
+    let owner_request = app
+        .update(Action::OpenCatalogCreate)
+        .into_iter()
+        .find_map(|command| match command {
+            lazydb::action::Command::LoadCatalogOwnerContext(request) => Some(request),
+            _ => None,
+        });
+    assert!(
+        owner_request.is_none(),
+        "owner request should be deduplicated"
+    );
     let editor = app.catalog_editor.as_ref().expect("catalog editor");
     assert_eq!(
         editor
@@ -323,6 +335,18 @@ fn opening_create_on_schema_uses_capability_ordered_options() {
         editor.draft,
         Some(lazydb::model::catalog_editor::CatalogDraft::Schema(_))
     ));
+    let Some(lazydb::model::catalog_editor::CatalogDraft::Schema(draft)) = editor.draft.as_ref()
+    else {
+        panic!("schema draft expected");
+    };
+    assert_eq!(draft.owner.value(), "effective_role");
+    if let Some(lazydb::model::catalog_editor::CatalogDraft::Schema(draft)) = app
+        .catalog_editor
+        .as_mut()
+        .and_then(|editor| editor.draft.as_mut())
+    {
+        draft.owner.set("");
+    }
 
     app.update(Action::CatalogEditorInsert('n'));
     app.update(Action::CatalogEditorFieldNext);
@@ -363,6 +387,7 @@ fn views_group_opens_view_form_with_connected_capabilities() {
             kind: lazydb::profile::DatabaseKind::Postgres,
             version: "PostgreSQL 15".into(),
             database: "app".into(),
+            current_user: Some("postgres".into()),
         },
         mutation_capabilities:
             lazydb::db::postgres::PostgresAdapter::catalog_mutation_capabilities_for_version(
@@ -499,6 +524,7 @@ fn view_edit_dispatches_definition_load_and_accepts_matching_view_definition() {
             kind: lazydb::profile::DatabaseKind::Postgres,
             version: "PostgreSQL 15".into(),
             database: "app".into(),
+            current_user: Some("postgres".into()),
         },
         mutation_capabilities:
             lazydb::db::postgres::PostgresAdapter::catalog_mutation_capabilities_for_version(

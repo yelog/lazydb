@@ -42,6 +42,8 @@ pub struct ServerInfo {
     pub kind: DatabaseKind,
     pub version: String,
     pub database: String,
+    #[serde(default)]
+    pub current_user: Option<String>,
 }
 
 pub use query::RELATION_PREVIEW_LIMIT;
@@ -359,6 +361,16 @@ impl DatabaseConnection {
                     "catalog object definition loading is not supported for this database",
                 ))
             }
+        }
+    }
+
+    pub async fn load_catalog_owner_context(
+        &self,
+        request: &catalog_mutation::CatalogOwnerContextRequest,
+    ) -> Result<Option<catalog_mutation::CatalogOwnerContext>, DatabaseError> {
+        match self {
+            Self::Postgres(adapter) => adapter.load_catalog_owner_context(request).await.map(Some),
+            Self::MySql(_) | Self::Sqlite(_) | Self::SqlServer(_) => Ok(None),
         }
     }
 

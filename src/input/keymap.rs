@@ -1475,6 +1475,46 @@ fn map_catalog_editor(event: KeyEvent, app: &App) -> Option<Action> {
             KeyCode::Esc | KeyCode::Char('q') => Some(Action::CatalogEditorCancel),
             _ => None,
         },
+        crate::model::catalog_editor::CatalogEditorPage::Form if editor.owner_picker.open => {
+            match event.code {
+                KeyCode::Esc => Some(Action::CatalogOwnerPickerClose),
+                KeyCode::Tab => Some(Action::CatalogEditorFieldNext),
+                KeyCode::BackTab => Some(Action::CatalogEditorFieldPrevious),
+                KeyCode::Up => Some(Action::CatalogOwnerPickerMove(-1)),
+                KeyCode::Down => Some(Action::CatalogOwnerPickerMove(1)),
+                KeyCode::Enter => Some(Action::CatalogOwnerPickerAccept),
+                KeyCode::Backspace => Some(Action::CatalogOwnerPickerBackspace),
+                KeyCode::Char('w') if event.modifiers == KeyModifiers::CONTROL => {
+                    Some(Action::CatalogOwnerPickerDeletePreviousWord)
+                }
+                KeyCode::Char('u') if event.modifiers == KeyModifiers::CONTROL => {
+                    Some(Action::CatalogOwnerPickerDeleteToStart)
+                }
+                KeyCode::Char(character) if event.modifiers.is_empty() => {
+                    Some(Action::CatalogOwnerPickerInsert(character))
+                }
+                _ => None,
+            }
+        }
+        crate::model::catalog_editor::CatalogEditorPage::Form
+            if matches!(
+                editor.draft.as_ref(),
+                Some(crate::model::catalog_editor::CatalogDraft::Schema(draft))
+                    if draft.selected_field == 1
+            ) && app
+                .connection
+                .active_identity()
+                .and_then(|connection| app.connection.owner_context.context_for(connection))
+                .is_some() =>
+        {
+            match event.code {
+                KeyCode::Enter => Some(Action::CatalogOwnerPickerOpen),
+                KeyCode::Char(character) if event.modifiers.is_empty() => {
+                    Some(Action::CatalogOwnerPickerInsert(character))
+                }
+                _ => None,
+            }
+        }
         crate::model::catalog_editor::CatalogEditorPage::Form => match event.code {
             _ if matches!(
                 editor.draft.as_ref(),

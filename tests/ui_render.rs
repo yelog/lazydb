@@ -55,6 +55,7 @@ fn fixture() -> App {
             kind: DatabaseKind::Sqlite,
             version: "3.50.0".into(),
             database: ":memory:".into(),
+            current_user: None,
         },
         mutation_capabilities: Default::default(),
     });
@@ -147,6 +148,7 @@ fn sql_server_dashboard_entry_is_disabled_without_opening_a_tab() {
         kind: DatabaseKind::SqlServer,
         version: "16.0".into(),
         database: "app".into(),
+        current_user: None,
     });
     app.active_workspace_profile = Some(profile.id);
 
@@ -404,6 +406,7 @@ fn role_editor_renders_secret_as_status_only() {
         baseline: None,
         plan: None,
         error: None,
+        owner_picker: Default::default(),
     });
     app.overlay = Some(Overlay::CatalogEditor);
     let output = render(&app, 100, 30);
@@ -430,6 +433,7 @@ fn table_editor_renders_general_and_columns_sections() {
         baseline: None,
         plan: None,
         error: None,
+        owner_picker: Default::default(),
         draft: Some(lazydb::model::catalog_editor::CatalogDraft::Table(
             lazydb::model::catalog_editor::TableDraft {
                 name: "events".into(),
@@ -474,6 +478,7 @@ fn constraint_editor_renders_typed_fields() {
         baseline: None,
         plan: None,
         error: None,
+        owner_picker: Default::default(),
         draft: Some(lazydb::model::catalog_editor::CatalogDraft::Constraint(
             lazydb::model::catalog_editor::ConstraintDraft::new(
                 lazydb::db::catalog_mutation::ConstraintDefinitionKind::Check {
@@ -510,6 +515,7 @@ fn view_editor_renders_query_and_output_columns() {
         baseline: None,
         plan: None,
         error: None,
+        owner_picker: Default::default(),
         draft: Some(lazydb::model::catalog_editor::CatalogDraft::View(
             lazydb::model::catalog_editor::ViewDraft {
                 name: "v".into(),
@@ -554,6 +560,7 @@ fn index_editor_renders_typed_fields() {
         baseline: None,
         plan: None,
         error: None,
+        owner_picker: Default::default(),
         draft: Some(lazydb::model::catalog_editor::CatalogDraft::Index(
             lazydb::model::catalog_editor::IndexDraft {
                 name: "idx".into(),
@@ -598,6 +605,7 @@ fn materialized_view_editor_renders_data_state_and_read_only_query() {
         baseline: None,
         plan: None,
         error: None,
+        owner_picker: Default::default(),
         draft: Some(
             lazydb::model::catalog_editor::CatalogDraft::MaterializedView(
                 lazydb::model::catalog_editor::MaterializedViewDraft {
@@ -2253,6 +2261,7 @@ fn execution_confirmation_preview_is_sanitized_and_shows_scope() {
             kind: DatabaseKind::Sqlite,
             version: "3.50.0".into(),
             database: ":memory:".into(),
+            current_user: None,
         },
         mutation_capabilities: Default::default(),
     });
@@ -3929,6 +3938,7 @@ fn visible_objects_scope_renders_partial_database_without_all_schemas_row() {
             kind: DatabaseKind::Postgres,
             version: "16".into(),
             database: "warehouse".into(),
+            current_user: None,
         },
         capabilities: lazydb::db::catalog::CatalogCapabilities {
             namespace_model: lazydb::db::catalog::NamespaceModel::DatabaseAndSchema,

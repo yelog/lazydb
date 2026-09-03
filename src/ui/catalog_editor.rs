@@ -44,7 +44,7 @@ pub fn render(
     match editor.page {
         CatalogEditorPage::ObjectPicker => picker(frame, inner, editor, theme, icons),
         CatalogEditorPage::Loading => loading(frame, inner, editor, theme),
-        CatalogEditorPage::Form => form(frame, inner, editor, ui, theme),
+        CatalogEditorPage::Form => form(frame, inner, app, editor, ui, theme),
         CatalogEditorPage::SqlPreview => preview(frame, inner, editor, theme),
     }
 }
@@ -177,6 +177,7 @@ fn loading(frame: &mut Frame<'_>, area: Rect, editor: &CatalogEditorState, theme
 fn form(
     frame: &mut Frame<'_>,
     area: Rect,
+    app: &App,
     editor: &CatalogEditorState,
     ui: &mut UiState,
     theme: Theme,
@@ -217,7 +218,21 @@ fn form(
     } else if let Some(CatalogDraft::Role(draft)) = editor.draft.as_ref() {
         render_role(frame, chunks[1], draft, theme);
     } else if let Some(CatalogDraft::Schema(draft)) = editor.draft.as_ref() {
-        render_schema(frame, chunks[1], draft, ui, theme);
+        let owner_choices = app
+            .connection
+            .active_identity()
+            .and_then(|connection| app.connection.owner_context.context_for(connection))
+            .map(|context| context.choices.as_slice());
+        render_schema(
+            frame,
+            chunks[1],
+            draft,
+            ui,
+            theme,
+            owner_choices,
+            &app.connection.owner_context,
+            &editor.owner_picker,
+        );
     } else if let Some(CatalogDraft::Table(draft)) = editor.draft.as_ref() {
         render_table(frame, chunks[1], draft, ui, theme);
     } else if let Some(CatalogDraft::Index(draft)) = editor.draft.as_ref() {
@@ -268,12 +283,16 @@ fn form(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_schema(
     frame: &mut Frame<'_>,
     area: Rect,
     draft: &SchemaDraft,
     ui: &mut UiState,
     theme: Theme,
+    owner_choices: Option<&[crate::db::catalog_mutation::CatalogOwnerChoice]>,
+    owner_context: &crate::model::workspace::CatalogOwnerContextState,
+    picker: &crate::model::catalog_editor::OwnerPickerState,
 ) {
     let rows = [
         ("Name", &draft.name),
@@ -325,6 +344,85 @@ fn render_schema(
                 value_area,
             );
         }
+    }
+    if draft.selected_field == 1 && picker.open {
+        let Some(choices) = owner_choices else {
+            return;
+        };
+        let picker_y = area.y.saturating_add(4);
+        let filter = picker.filter.value();
+        let visible = choices
+            .iter()
+            .filter(|choice| choice.name.to_lowercase().contains(&filter.to_lowercase()))
+            .take(usize::from(area.height.saturating_sub(5)));
+        frame.render_widget(
+            Paragraph::new("OWNER ROLE").style(
+                Style::new()
+                    .fg(theme.muted)
+                    .bg(theme.surface)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Rect::new(area.x, picker_y, area.width, 1),
+        );
+        for (offset, choice) in visible.enumerate() {
+            let row = Rect::new(
+                area.x,
+                picker_y.saturating_add(1 + offset as u16),
+                area.width,
+                1,
+            );
+            ui.hit_regions.push(HitRegion {
+                area: row,
+                target: HitTarget::CatalogOwnerChoice(choice.name.clone()),
+            });
+            let selected = Some(choice.name.as_str()) == picker.selected_name.as_deref();
+            let status = if choice.is_current {
+                "CURRENT"
+            } else if choice.can_login {
+                "LOGIN"
+            } else {
+                "ROLE"
+            };
+            let suffix = if choice.selectable {
+                status.to_owned()
+            } else {
+                format!("{status} - cannot SET ROLE")
+            };
+            frame.render_widget(
+                Paragraph::new(format!(
+                    "{}{}  {}",
+                    if selected { "› " } else { "  " },
+                    choice.name,
+                    suffix
+                ))
+                .style(
+                    Style::new()
+                        .fg(if choice.selectable {
+                            theme.text
+                        } else {
+                            theme.muted
+                        })
+                        .bg(if selected {
+                            theme.selection
+                        } else {
+                            theme.surface
+                        }),
+                ),
+                row,
+            );
+        }
+    } else if draft.selected_field == 1
+        && let crate::model::workspace::CatalogOwnerContextState::Failed { message, .. } =
+            owner_context
+    {
+        frame.render_widget(
+            Paragraph::new(format!(
+                "Owner roles unavailable: {}",
+                sanitize_terminal_text(message)
+            ))
+            .style(Style::new().fg(theme.warning).bg(theme.surface)),
+            Rect::new(area.x, area.y.saturating_add(4), area.width, 1),
+        );
     }
 }
 

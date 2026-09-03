@@ -1365,6 +1365,7 @@ fn server() -> ServerInfo {
         kind: DatabaseKind::Sqlite,
         version: "3.50".into(),
         database: "app".into(),
+        current_user: None,
     }
 }
 

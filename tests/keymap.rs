@@ -180,6 +180,7 @@ fn constraint_editor_maps_field_navigation_and_text_input() {
         baseline: None,
         plan: None,
         error: None,
+        owner_picker: Default::default(),
         draft: Some(lazydb::model::catalog_editor::CatalogDraft::Constraint(
             lazydb::model::catalog_editor::ConstraintDraft::new(
                 lazydb::db::catalog_mutation::ConstraintDefinitionKind::Check {
@@ -223,6 +224,7 @@ fn role_editor_uses_catalog_editor_field_keymap() {
         baseline: None,
         plan: None,
         error: None,
+        owner_picker: Default::default(),
     });
     app.overlay = Some(lazydb::model::workspace::Overlay::CatalogEditor);
     let mut keymap = Keymap::default();
@@ -544,6 +546,7 @@ fn view_editor_form_owns_navigation_and_preview_keys() {
         baseline: None,
         plan: None,
         error: None,
+        owner_picker: Default::default(),
         draft: Some(lazydb::model::catalog_editor::CatalogDraft::View(
             lazydb::model::catalog_editor::ViewDraft {
                 name: "v".into(),
@@ -1472,6 +1475,7 @@ fn materialized_view_create_form_maps_space_to_data_state_toggle() {
         baseline: None,
         plan: None,
         error: None,
+        owner_picker: Default::default(),
     });
     app.focus = lazydb::model::workspace::Focus::Explorer;
     app.overlay = Some(Overlay::CatalogEditor);
@@ -1706,6 +1710,7 @@ fn editor_leader_opens_connection_target_selector() {
             kind: lazydb::profile::DatabaseKind::Sqlite,
             version: "3.50".into(),
             database: ":memory:".into(),
+            current_user: None,
         },
         mutation_capabilities: Default::default(),
     });
@@ -2431,6 +2436,7 @@ fn profile_confirmation_and_paste_are_contextual_and_redacted() {
             kind: lazydb::profile::DatabaseKind::Sqlite,
             version: "3.50".into(),
             database: ":memory:".into(),
+            current_user: None,
         },
         mutation_capabilities: Default::default(),
     });
