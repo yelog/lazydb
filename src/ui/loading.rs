@@ -84,82 +84,58 @@ impl Widget for ActivityIndicator<'_> {
     }
 }
 
-pub(crate) struct TableSkeleton {
+pub(crate) struct LoadingViewport<'a> {
     pub mode: MotionMode,
     pub icons: IconSet,
     pub elapsed: Duration,
+    pub label: &'a str,
+    pub helper: Option<&'a str>,
+    pub cancellable: bool,
     pub theme: Theme,
     pub block: Block<'static>,
 }
 
-impl Widget for TableSkeleton {
+impl Widget for LoadingViewport<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let inner = self.block.inner(area);
         self.block.render(area, buf);
         if inner.width == 0 || inner.height == 0 {
             return;
         }
-        let status_height = 1;
-        let body = Rect::new(
-            inner.x,
-            inner.y.saturating_add(status_height),
-            inner.width,
-            inner.height.saturating_sub(status_height),
-        );
         ActivityIndicator {
             mode: self.mode,
             icons: self.icons,
             elapsed: self.elapsed,
-            label: "Executing query",
+            label: self.label,
             detail: None,
-            cancellable: true,
+            cancellable: self.cancellable,
             style: Style::new().fg(self.theme.action).bg(self.theme.surface),
         }
         .render(Rect::new(inner.x, inner.y, inner.width, 1), buf);
-        if body.height == 0 {
+        let Some(helper) = self.helper else {
+            return;
+        };
+        if inner.height < 3 {
             return;
         }
-        let columns: usize = if body.width >= 42 {
-            3
-        } else if body.width >= 20 {
-            2
-        } else {
-            1
-        };
-        let separator = columns.saturating_sub(1) as u16;
-        let width = usize::from(body.width.saturating_sub(separator)) / columns;
-        let band = if self.mode == MotionMode::Full {
-            (self.elapsed.as_millis() / 100) as usize
-        } else {
-            0
-        };
-        for row in 0..body.height {
-            let y = body.y.saturating_add(row);
-            for column in 0..columns {
-                let x = body.x.saturating_add(column as u16 * (width as u16 + 1));
-                let cell_width = (width as u16).min(body.right().saturating_sub(x));
-                let shade = if self.icons.activity_frames()[0].is_ascii() {
-                    '.'
-                } else if self.mode == MotionMode::Full
-                    && (column + row as usize + band).is_multiple_of(3)
-                {
-                    '▒'
-                } else {
-                    '░'
-                };
-                for offset in 0..cell_width {
-                    buf[(x.saturating_add(offset), y)].set_symbol(&shade.to_string());
-                    buf[(x.saturating_add(offset), y)]
-                        .set_style(Style::new().fg(self.theme.muted).bg(self.theme.surface));
-                }
-            }
-        }
+        let indent = inner.width.min(2);
+        Paragraph::new(helper)
+            .style(Style::new().fg(self.theme.muted).bg(self.theme.surface))
+            .render(
+                Rect::new(
+                    inner.x.saturating_add(indent),
+                    inner.y.saturating_add(2),
+                    inner.width.saturating_sub(indent),
+                    1,
+                ),
+                buf,
+            );
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ActivityIndicator, TableSkeleton, activity_text};
+    use super::{ActivityIndicator, LoadingViewport, activity_text};
     use crate::{
         cli::MotionMode,
         ui::{
@@ -202,17 +178,65 @@ mod tests {
     }
 
     #[test]
-    fn skeleton_is_bounded_and_ascii_safe() {
-        let mut buffer = Buffer::empty(Rect::new(0, 0, 20, 4));
-        TableSkeleton {
+    fn loading_viewport_never_renders_dense_shading() {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 80, 12));
+        LoadingViewport {
             mode: MotionMode::Off,
-            icons: IconSet::new(IconMode::Ascii),
-            elapsed: Duration::from_secs(1),
+            icons: IconSet::default(),
+            elapsed: Duration::from_secs(2),
+            label: "Executing query",
+            helper: Some("Waiting for the first result set..."),
+            cancellable: true,
             theme: Theme::default(),
             block: Block::new(),
         }
-        .render(Rect::new(0, 0, 20, 4), &mut buffer);
+        .render(Rect::new(0, 0, 80, 12), &mut buffer);
+        assert!(
+            buffer
+                .content()
+                .iter()
+                .all(|cell| { !matches!(cell.symbol(), "░" | "▒" | "▓" | "█") })
+        );
+    }
+
+    #[test]
+    fn loading_viewport_is_ascii_safe_in_ascii_mode() {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 40, 6));
+        LoadingViewport {
+            mode: MotionMode::Off,
+            icons: IconSet::new(IconMode::Ascii),
+            elapsed: Duration::from_secs(2),
+            label: "Executing query",
+            helper: Some("Waiting for the first result set..."),
+            cancellable: true,
+            theme: Theme::default(),
+            block: Block::new(),
+        }
+        .render(Rect::new(0, 0, 40, 6), &mut buffer);
         assert!(buffer.content().iter().all(|cell| cell.symbol().is_ascii()));
+    }
+
+    #[test]
+    fn loading_viewport_omits_helper_when_height_is_tight() {
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 40, 2));
+        LoadingViewport {
+            mode: MotionMode::Off,
+            icons: IconSet::new(IconMode::Ascii),
+            elapsed: Duration::from_secs(2),
+            label: "Executing query",
+            helper: Some("Waiting for the first result set..."),
+            cancellable: true,
+            theme: Theme::default(),
+            block: Block::new(),
+        }
+        .render(Rect::new(0, 0, 40, 2), &mut buffer);
+        let output = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(output.contains("Executing query"));
+        assert!(!output.contains("Waiting for the first result set..."));
     }
 
     #[test]

@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::{cli::MotionMode, model::relation::RelationRequest};
 
-pub(crate) const LOADING_DELAY: Duration = Duration::from_millis(150);
+pub(crate) const LOADING_DELAY: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum LoadIdentity {
@@ -49,7 +49,7 @@ pub(crate) fn spinner_frame(mode: MotionMode, elapsed: Duration, frames: usize) 
     (elapsed.as_millis() / frame_ms % frames as u128) as usize
 }
 
-pub(crate) fn show_skeleton(elapsed: Duration) -> bool {
+pub(crate) fn show_loading_helper(elapsed: Duration) -> bool {
     elapsed >= LOADING_DELAY
 }
 
@@ -227,7 +227,7 @@ mod tests {
 
     use super::{
         AnimationObservation, AnimationState, LOADING_DELAY, LoadIdentity, ResultIdentity,
-        show_skeleton, spinner_frame,
+        show_loading_helper, spinner_frame,
     };
     use crate::cli::MotionMode;
 
@@ -261,9 +261,9 @@ mod tests {
     }
 
     #[test]
-    fn skeleton_is_hidden_before_the_delay() {
-        assert!(!show_skeleton(Duration::from_millis(149)));
-        assert!(show_skeleton(LOADING_DELAY));
+    fn loading_helper_is_hidden_before_the_delay() {
+        assert!(!show_loading_helper(Duration::from_millis(249)));
+        assert!(show_loading_helper(LOADING_DELAY));
     }
 
     #[test]
