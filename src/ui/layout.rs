@@ -5,6 +5,8 @@ use crate::model::workspace::{Focus, PaneLayoutMetrics, PaneSizePreferences};
 const MIN_EXPLORER_WIDTH: u16 = 34;
 const MAX_DEFAULT_EXPLORER_WIDTH: u16 = 56;
 const MIN_RIGHT_WIDTH: u16 = 60;
+const HEADER_HEIGHT: u16 = 1;
+const FOOTER_HEIGHT: u16 = 1;
 const WORKSPACE_TABS_HEIGHT: u16 = 2;
 const RESULT_TABS_HEIGHT: u16 = 2;
 const MIN_EDITOR_HEIGHT: u16 = 1;
@@ -60,9 +62,9 @@ impl AppLayout {
         let vertical = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(2),
+                Constraint::Length(HEADER_HEIGHT),
                 Constraint::Min(8),
-                Constraint::Length(2),
+                Constraint::Length(FOOTER_HEIGHT),
             ])
             .split(area);
         let header = vertical[0];
@@ -222,6 +224,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn header_and_footer_each_use_one_row() {
+        let area = Rect::new(0, 0, 120, 36);
+        let layout = AppLayout::calculate(
+            area,
+            Focus::Editor,
+            false,
+            PaneSizePreferences::default(),
+            false,
+        );
+
+        assert_eq!(layout.header.height, 1);
+        assert_eq!(layout.footer.height, 1);
+        assert_eq!(layout.header.y, area.y);
+        assert_eq!(layout.body.y, area.y + 1);
+        assert_eq!(layout.footer.y, area.bottom() - 1);
+        assert_eq!(
+            layout.header.height + layout.body.height + layout.footer.height,
+            area.height
+        );
+    }
+
+    #[test]
     fn places_workspace_tabs_above_main_content() {
         let layout = AppLayout::calculate(
             Rect::new(0, 0, 180, 50),
@@ -326,7 +350,7 @@ mod tests {
         );
 
         assert_eq!(layout.explorer.unwrap().width, 60);
-        assert_eq!(layout.editor.unwrap().height, 15);
+        assert_eq!(layout.editor.unwrap().height, 17);
         assert_eq!(layout.results.unwrap().height, 7);
     }
 

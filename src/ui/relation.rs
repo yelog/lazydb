@@ -18,6 +18,7 @@ use ratatui::{
     text::Line,
     widgets::Paragraph,
 };
+use unicode_width::UnicodeWidthStr;
 
 pub(crate) fn render(
     frame: &mut Frame<'_>,
@@ -432,7 +433,58 @@ fn render_ddl(
         RelationLoad::Cancelled { .. } => Some(("Cancelled", true, false)),
         RelationLoad::Empty => Some(("No DDL available", false, false)),
     };
-    let block = panel_block(" RELATION DDL ", app.focus == Focus::Results, theme);
+    let mut block = panel_block(" RELATION DDL ", app.focus == Focus::Results, theme);
+    let snapshot = match &tab.ddl {
+        RelationLoad::Ready(snapshot)
+        | RelationLoad::Loading {
+            previous: Some(snapshot),
+            ..
+        }
+        | RelationLoad::Failed {
+            previous: Some(snapshot),
+            ..
+        }
+        | RelationLoad::Cancelled {
+            previous: Some(snapshot),
+        } => Some(snapshot),
+        _ => None,
+    };
+    if let Some(snapshot) = snapshot {
+        let source = match snapshot.value.provenance {
+            crate::db::catalog::DdlProvenance::NativeCatalog => "NATIVE CATALOG",
+            crate::db::catalog::DdlProvenance::AdapterGenerated => "GENERATED",
+        };
+        let provenance = tab
+            .provenance(
+                RelationView::Ddl,
+                app.connection.active_identity(),
+                app.active_profile(),
+            )
+            .map(provenance_label)
+            .unwrap_or("UNKNOWN");
+        let position = format!(
+            "ROW {}  COL {}",
+            tab.ddl_viewport.row_offset.saturating_add(1),
+            tab.ddl_viewport.column_offset.saturating_add(1)
+        );
+        let available = usize::from(area.width.saturating_sub(2));
+        let left_width = UnicodeWidthStr::width(" RELATION DDL ");
+        let retain_provenance = provenance != "LIVE";
+        let full_context = format!("{source}  {position}  {provenance}");
+        let source_and_provenance = format!("{source}  {provenance}");
+        let parts = if left_width + UnicodeWidthStr::width(full_context.as_str()) + 2 <= available {
+            full_context
+        } else if retain_provenance
+            && left_width + UnicodeWidthStr::width(source_and_provenance.as_str()) + 2 <= available
+        {
+            source_and_provenance
+        } else if retain_provenance {
+            provenance.to_owned()
+        } else {
+            source.to_owned()
+        };
+        block = block.title_top(Line::raw(format!(" {parts} ")).right_aligned());
+    }
     if let Some((message, retry, cancel)) = status {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
