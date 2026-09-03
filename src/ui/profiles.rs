@@ -3,7 +3,7 @@
 use ratatui::{
     Frame,
     buffer::CellWidth,
-    layout::{Position, Rect},
+    layout::{Alignment, Position, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
@@ -26,6 +26,7 @@ use super::{
     HitRegion, HitTarget, ProfileButton, Theme, UiState,
     icons::{IconSet, SelectionIcon},
     loading::ActivityIndicator,
+    shortcut_hints::{self, ShortcutHint},
 };
 
 const FORM_MAX_WIDTH: u16 = 106;
@@ -222,7 +223,7 @@ fn render_form(
     render_hint(
         frame,
         layout.hint,
-        form_hint(manager.selected_field, inner.width),
+        &form_hints(manager.selected_field, inner.width),
         theme,
     );
 }
@@ -278,7 +279,10 @@ fn render_confirmation(
     render_hint(
         frame,
         Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
-        "Enter confirm   Esc cancel",
+        &[
+            ShortcutHint::new("Enter", "confirm"),
+            ShortcutHint::new("Esc", "cancel"),
+        ],
         theme,
     );
 }
@@ -393,16 +397,39 @@ fn render_scope(
             Rect::new(inner.x, inner.bottom().saturating_sub(2), inner.width, 1),
         );
     }
-    render_hint(
-        frame,
-        Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
-        if loading {
-            "Loading...   Enter back   Esc back"
-        } else {
-            "Space toggle   r refresh   Enter back   Esc back"
-        },
-        theme,
-    );
+    let hint_area = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
+    let hints = if loading {
+        vec![
+            ShortcutHint::new("Enter", "back"),
+            ShortcutHint::new("Esc", "back"),
+        ]
+    } else {
+        vec![
+            ShortcutHint::new("Space", "toggle"),
+            ShortcutHint::new("r", "refresh"),
+            ShortcutHint::new("Enter", "back"),
+            ShortcutHint::new("Esc", "back"),
+        ]
+    };
+    if loading {
+        let line = Line::from(vec![Span::styled(
+            "Loading...   ",
+            Style::new().fg(theme.muted).bg(theme.surface),
+        )]);
+        let mut spans = line.spans;
+        spans.extend(
+            shortcut_hints::line(
+                &hints,
+                hint_area.width.saturating_sub(12),
+                theme,
+                theme.surface,
+            )
+            .spans,
+        );
+        frame.render_widget(Paragraph::new(Line::from(spans)), hint_area);
+    } else {
+        render_hint(frame, hint_area, &hints, theme);
+    }
 }
 
 fn render_panel(frame: &mut Frame<'_>, area: Rect, title: &str, theme: Theme) -> Rect {
@@ -734,18 +761,42 @@ fn render_buttons(
     }
 }
 
-fn form_hint(field: ProfileField, width: u16) -> &'static str {
+fn form_hints(field: ProfileField, width: u16) -> Vec<ShortcutHint<'static>> {
     if width < 70 {
-        return "^T Test  ^S Save  ^Enter Connect  Esc Close";
+        return vec![
+            ShortcutHint::new("^T", "Test"),
+            ShortcutHint::new("^S", "Save"),
+            ShortcutHint::new("^Enter", "Connect"),
+            ShortcutHint::new("Esc", "Close"),
+        ];
     }
     if is_text_field(field) {
-        "Tab/Shift+Tab move  Ctrl+W delete word  Ctrl+A/E start/end"
+        vec![
+            ShortcutHint::new("Tab/Shift+Tab", "move"),
+            ShortcutHint::new("Ctrl+W", "delete word"),
+            ShortcutHint::new("Ctrl+A/E", "start/end"),
+        ]
     } else if is_cycle_field(field) || field == ProfileField::Kind {
-        "Left/Right change  Tab move  Ctrl+T test  Esc cancel"
+        vec![
+            ShortcutHint::new("Left/Right", "change"),
+            ShortcutHint::new("Tab", "move"),
+            ShortcutHint::new("Ctrl+T", "test"),
+            ShortcutHint::new("Esc", "cancel"),
+        ]
     } else if is_button_field(field) {
-        "Ctrl+T test  Ctrl+S save  Ctrl+Enter save & connect  Esc cancel"
+        vec![
+            ShortcutHint::new("Ctrl+T", "test"),
+            ShortcutHint::new("Ctrl+S", "save"),
+            ShortcutHint::new("Ctrl+Enter", "save & connect"),
+            ShortcutHint::new("Esc", "cancel"),
+        ]
     } else {
-        "Enter/Space select  Tab move  Ctrl+T test  Esc cancel"
+        vec![
+            ShortcutHint::new("Enter/Space", "select"),
+            ShortcutHint::new("Tab", "move"),
+            ShortcutHint::new("Ctrl+T", "test"),
+            ShortcutHint::new("Esc", "cancel"),
+        ]
     }
 }
 
@@ -774,13 +825,8 @@ fn is_cycle_field(field: ProfileField) -> bool {
     )
 }
 
-fn render_hint(frame: &mut Frame<'_>, area: Rect, hint: &str, theme: Theme) {
-    frame.render_widget(
-        Paragraph::new(hint)
-            .style(Style::new().fg(theme.muted).bg(theme.surface))
-            .alignment(ratatui::layout::Alignment::Center),
-        area,
-    );
+fn render_hint(frame: &mut Frame<'_>, area: Rect, hints: &[ShortcutHint<'_>], theme: Theme) {
+    shortcut_hints::render(frame, area, hints, theme, theme.surface, Alignment::Center);
 }
 
 fn manager_panel(area: Rect, max_width: u16, max_height: u16) -> Rect {

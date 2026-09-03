@@ -17,7 +17,12 @@ use crate::{
     security::sanitize_terminal_text,
 };
 
-use super::{HitRegion, HitTarget, Theme, UiState, icons::IconSet, render_text_input};
+use super::{
+    HitRegion, HitTarget, Theme, UiState,
+    icons::IconSet,
+    render_text_input,
+    shortcut_hints::{self, ShortcutHint},
+};
 
 pub fn render(
     frame: &mut Frame<'_>,
@@ -114,9 +119,18 @@ fn picker(
         );
     }
     frame.render_widget(
-        Paragraph::new("j/k · ↑/↓ select   Enter continue   Esc close")
-            .style(Style::new().fg(theme.muted).bg(theme.surface))
-            .alignment(ratatui::layout::Alignment::Center),
+        Paragraph::new(shortcut_hints::line(
+            &[
+                ShortcutHint::new("j/k · ↑/↓", "select"),
+                ShortcutHint::new("Enter", "continue"),
+                ShortcutHint::new("Esc", "close"),
+            ],
+            area.width,
+            theme,
+            theme.surface,
+        ))
+        .style(Style::new().bg(theme.surface))
+        .alignment(ratatui::layout::Alignment::Center),
         Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
     );
 }
@@ -222,26 +236,36 @@ fn form(
             chunks[1],
         );
     }
-    let feedback = editor
-        .error
-        .as_deref()
-        .map(|error| format!("× {}", sanitize_terminal_text(error)))
-        .unwrap_or_else(|| {
-            if matches!(
-                editor.draft.as_ref(),
-                Some(CatalogDraft::MaterializedView(_))
-            ) && editor.mode == crate::db::catalog_mutation::CatalogMutationMode::Create
-            {
-                "Tab/Shift-Tab fields   Space toggle data   Enter preview   Esc cancel".into()
-            } else {
-                "Tab/Shift-Tab fields   Enter preview   Esc cancel".into()
-            }
-        });
-    frame.render_widget(
-        Paragraph::new(feedback)
-            .style(Style::new().fg(editor.error.as_ref().map_or(theme.muted, |_| theme.error))),
-        chunks[2],
-    );
+    if let Some(error) = editor.error.as_deref() {
+        frame.render_widget(
+            Paragraph::new(format!("× {}", sanitize_terminal_text(error)))
+                .style(Style::new().fg(theme.error).bg(theme.surface)),
+            chunks[2],
+        );
+    } else {
+        let mut hints = vec![ShortcutHint::new("Tab/Shift-Tab", "fields")];
+        if matches!(
+            editor.draft.as_ref(),
+            Some(CatalogDraft::MaterializedView(_))
+        ) && editor.mode == crate::db::catalog_mutation::CatalogMutationMode::Create
+        {
+            hints.push(ShortcutHint::new("Space", "toggle data"));
+        }
+        hints.extend([
+            ShortcutHint::new("Enter", "preview"),
+            ShortcutHint::new("Esc", "cancel"),
+        ]);
+        frame.render_widget(
+            Paragraph::new(shortcut_hints::line(
+                &hints,
+                chunks[2].width,
+                theme,
+                theme.surface,
+            ))
+            .style(Style::new().bg(theme.surface)),
+            chunks[2],
+        );
+    }
 }
 
 fn render_schema(
@@ -649,7 +673,15 @@ fn preview(frame: &mut Frame<'_>, area: Rect, editor: &CatalogEditorState, theme
             Line::raw(""),
             Line::raw(sql),
             Line::raw(""),
-            Line::raw("Enter apply   Esc return to form"),
+            shortcut_hints::line(
+                &[
+                    ShortcutHint::new("Enter", "apply"),
+                    ShortcutHint::new("Esc", "return to form"),
+                ],
+                area.width,
+                theme,
+                theme.surface,
+            ),
         ])
         .wrap(Wrap { trim: true }),
         area,
