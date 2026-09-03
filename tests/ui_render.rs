@@ -1888,8 +1888,50 @@ fn relation_loading_with_previous_snapshot_keeps_data_visible_and_exposes_cancel
     app.active_tab = 1;
     let (output, state) = render_with_state(&app, 120, 36);
     assert!(output.contains("RELATION DATA"), "{output}");
-    assert!(output.contains("Refreshing"), "{output}");
+    assert!(output.contains("Refreshing relation data"), "{output}");
+    assert!(output.contains("showing previous snapshot"), "{output}");
+    assert!(output.contains("Ada"), "{output}");
     assert_eq!(state.grid_viewport.unwrap().tab_id, app.tabs[1].id());
+}
+
+#[test]
+fn relation_first_load_uses_quiet_status_without_dense_skeleton() {
+    let mut app = fixture();
+    let mut relation = RelationTab::new("users");
+    relation.data = lazydb::model::relation::RelationLoad::Loading {
+        request: lazydb::model::relation::RelationRequest {
+            tab_id: relation.id,
+            tab_generation: relation.generation,
+            request_id: 1,
+            connection: lazydb::identity::ConnectionIdentity {
+                profile_id: uuid::Uuid::nil(),
+                generation: 0,
+            },
+            relation: relation.descriptor.key.clone(),
+            kind: lazydb::model::relation::RelationRequestKind::Preview,
+            scope: lazydb::profile::CatalogScope::for_profile(DatabaseKind::Sqlite, "db", None),
+            options: lazydb::model::relation::RelationPreviewOptions::default(),
+            page: lazydb::model::pagination::PageRequest::first(
+                lazydb::model::pagination::PageSize::default(),
+            ),
+        },
+        previous: None,
+    };
+    app.tabs.push(WorkspaceTab::Relation(relation));
+    app.active_tab = 1;
+    app.focus = Focus::Results;
+
+    let (output, state) = render_with_icons(&app, 120, 36, IconSet::new(IconMode::Ascii));
+
+    assert!(output.contains("Loading relation data"), "{output}");
+    assert!(!output.chars().any(|c| matches!(c, '░' | '▒' | '▓' | '█')));
+    assert!(state.grid_viewport.is_none());
+    assert!(
+        state
+            .hit_regions
+            .iter()
+            .any(|region| region.target == HitTarget::RelationCancel)
+    );
 }
 
 #[test]

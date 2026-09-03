@@ -90,9 +90,18 @@ fn render_data(
     };
     let (snapshot, status) = match &tab.data {
         RelationLoad::Ready(snapshot) => (Some(snapshot), None),
-        RelationLoad::Loading { previous, .. } => {
-            (previous.as_ref(), Some(("Refreshing", false, true)))
-        }
+        RelationLoad::Loading { previous, .. } => (
+            previous.as_ref(),
+            Some((
+                if previous.is_some() {
+                    "Refreshing relation data"
+                } else {
+                    "Loading relation data"
+                },
+                false,
+                true,
+            )),
+        ),
         RelationLoad::Failed { message, previous } => {
             (previous.as_ref(), Some((message.as_str(), true, false)))
         }
@@ -243,29 +252,24 @@ fn render_data(
         if cancel {
             let identity = relation_loading_identity(tab, RelationView::Data);
             let elapsed = state.animations.elapsed(&identity).unwrap_or_default();
-            if animation::show_skeleton(elapsed) {
-                frame.render_widget(
-                    loading::TableSkeleton {
-                        mode: state.animation_mode(),
-                        icons: state.activity_icons,
-                        elapsed,
-                        theme,
-                        block: ratatui::widgets::Block::default()
-                            .style(Style::new().bg(theme.surface)),
-                    },
-                    body[1],
-                );
-            } else {
-                render_loading_status(
-                    frame,
-                    body[1],
-                    message,
+            frame.render_widget(
+                loading::LoadingViewport {
+                    mode: state.animation_mode(),
+                    icons: state.activity_icons,
+                    elapsed,
+                    label: message,
+                    helper: animation::show_loading_helper(elapsed)
+                        .then_some("Waiting for the first result set..."),
+                    cancellable: true,
                     theme,
-                    state,
-                    tab,
-                    RelationView::Data,
-                );
-            }
+                    block: ratatui::widgets::Block::default().style(Style::new().bg(theme.surface)),
+                },
+                body[1],
+            );
+            state.hit_regions.push(HitRegion {
+                area: body[1],
+                target: HitTarget::RelationCancel,
+            });
         } else {
             render_status(frame, body[1], message, retry, cancel, theme, state);
         }

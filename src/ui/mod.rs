@@ -2704,27 +2704,18 @@ fn render_data(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, state
                 Block::default().style(Style::new().bg(theme.surface)),
                 state,
             );
-        } else if animation::show_skeleton(elapsed) {
-            frame.render_widget(
-                loading::TableSkeleton {
-                    mode: state.animation_mode(),
-                    icons: state.activity_icons,
-                    elapsed,
-                    theme,
-                    block: Block::default().style(Style::new().bg(theme.surface)),
-                },
-                result_area,
-            );
         } else {
             frame.render_widget(
-                loading::ActivityIndicator {
+                loading::LoadingViewport {
                     mode: state.animation_mode(),
                     icons: state.activity_icons,
                     elapsed,
                     label: "Executing query",
-                    detail: None,
+                    helper: animation::show_loading_helper(elapsed)
+                        .then_some("Waiting for the first result set..."),
                     cancellable: true,
-                    style: Style::new().fg(theme.action).bg(theme.surface),
+                    theme,
+                    block: Block::default().style(Style::new().bg(theme.surface)),
                 },
                 result_area,
             );
