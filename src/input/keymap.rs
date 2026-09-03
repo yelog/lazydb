@@ -1516,56 +1516,13 @@ fn map_catalog_editor(event: KeyEvent, app: &App) -> Option<Action> {
                     _ => {}
                 }
             }
-            map_catalog_editor_form(event, editor)
+            map_catalog_editor_form(
+                event,
+                editor,
+                app.catalog_editor_details_visible.get(),
+                app.catalog_editor_compact.get(),
+            )
         }
-        crate::model::catalog_editor::CatalogEditorPage::Form => match event.code {
-            _ if matches!(
-                editor.draft.as_ref(),
-                Some(crate::model::catalog_editor::CatalogDraft::Table(_))
-            ) =>
-            {
-                map_table_editor(
-                    event,
-                    editor,
-                    app.catalog_editor_details_visible.get(),
-                    app.catalog_editor_compact.get(),
-                )
-            }
-            KeyCode::Esc => Some(Action::CatalogEditorCancel),
-            KeyCode::Tab | KeyCode::Down => Some(Action::CatalogEditorFieldNext),
-            KeyCode::BackTab | KeyCode::Up => Some(Action::CatalogEditorFieldPrevious),
-            KeyCode::Enter => Some(Action::CatalogEditorPreview),
-            KeyCode::Char(' ') if event.modifiers.is_empty() => {
-                let toggle_data = editor.mode
-                    == crate::db::catalog_mutation::CatalogMutationMode::Create
-                    && matches!(
-                        editor.draft.as_ref(),
-                        Some(crate::model::catalog_editor::CatalogDraft::MaterializedView(draft))
-                            if draft.selected_field == 5
-                    );
-                Some(if toggle_data {
-                    Action::CatalogEditorToggleMaterializedViewData
-                } else {
-                    Action::CatalogEditorInsert(' ')
-                })
-            }
-            KeyCode::Char(character) if event.modifiers.is_empty() => {
-                Some(Action::CatalogEditorInsert(character))
-            }
-            KeyCode::Backspace => Some(Action::CatalogEditorBackspace),
-            KeyCode::Delete => Some(Action::CatalogEditorDelete),
-            KeyCode::Left => Some(Action::CatalogEditorMoveLeft),
-            KeyCode::Right => Some(Action::CatalogEditorMoveRight),
-            KeyCode::Home => Some(Action::CatalogEditorMoveHome),
-            KeyCode::End => Some(Action::CatalogEditorMoveEnd),
-            KeyCode::Char('w') if event.modifiers == KeyModifiers::CONTROL => {
-                Some(Action::CatalogEditorDeletePreviousWord)
-            }
-            KeyCode::Char('u') if event.modifiers == KeyModifiers::CONTROL => {
-                Some(Action::CatalogEditorDeleteToStart)
-            }
-            _ => None,
-        },
         crate::model::catalog_editor::CatalogEditorPage::SqlPreview => match event.code {
             KeyCode::Enter => Some(Action::CatalogEditorApply),
             KeyCode::Esc => Some(Action::CatalogEditorBack),
@@ -1580,12 +1537,14 @@ fn map_catalog_editor(event: KeyEvent, app: &App) -> Option<Action> {
 fn map_catalog_editor_form(
     event: KeyEvent,
     editor: &crate::model::catalog_editor::CatalogEditorState,
+    details_visible: bool,
+    compact: bool,
 ) -> Option<Action> {
     if matches!(
         editor.draft.as_ref(),
         Some(crate::model::catalog_editor::CatalogDraft::Table(_))
     ) {
-        return map_table_editor(event, editor);
+        return map_table_editor(event, editor, details_visible, compact);
     }
     match event.code {
         KeyCode::Esc => Some(Action::CatalogEditorCancel),
