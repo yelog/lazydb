@@ -8,8 +8,8 @@ use lazydb::{
     },
     profile::{CatalogScope, CatalogSelection, DatabaseKind, DatabaseScope, import_connection_url},
     sql::{
-        CompletionContext, CompletionIndex, CompletionKind, SqlDialect, complete, quote_identifier,
-        should_offer_completion,
+        CompletionCandidate, CompletionContext, CompletionIndex, CompletionKind, SqlDialect,
+        complete, quote_identifier, relation_ids_for_completion, should_offer_completion,
     },
 };
 use uuid::Uuid;
@@ -149,6 +149,13 @@ fn contextual_fixture() -> Vec<CatalogEntry> {
         }));
     }
     entries
+}
+
+fn labels(candidates: &[CompletionCandidate]) -> Vec<&str> {
+    candidates
+        .iter()
+        .map(|candidate| candidate.label.as_str())
+        .collect()
 }
 
 fn multi_relation_fixture() -> Vec<CatalogEntry> {
@@ -355,6 +362,225 @@ fn insert_context_does_not_leak_into_statement_or_relation_completion() {
     assert!(relation.iter().any(|candidate| {
         candidate.kind == CompletionKind::Table && candidate.label == "users"
     }));
+}
+
+#[test]
+fn insert_column_list_only_offers_target_columns() {
+    let index = CompletionIndex::new(&contextual_fixture());
+    let sql = "insert into sys_user(";
+    let candidates = complete(
+        sql,
+        sql.len(),
+        SqlDialect::Postgres,
+        &index,
+        CompletionContext {
+            database: Some("app"),
+            schema: Some("public"),
+        },
+    );
+
+    assert_eq!(
+        labels(&candidates),
+        [
+            "update_time",
+            "update_user",
+            "update_user_phone",
+            "user_type",
+            "username",
+        ]
+    );
+    assert!(
+        candidates
+            .iter()
+            .all(|candidate| candidate.kind == CompletionKind::Column)
+    );
+}
+
+#[test]
+fn insert_column_list_filters_prefix_and_continues_after_comma() {
+    let index = CompletionIndex::new(&contextual_fixture());
+    let context = CompletionContext {
+        database: Some("app"),
+        schema: Some("public"),
+    };
+
+    let prefix_sql = "insert into sys_user(update_u";
+    let prefix = complete(
+        prefix_sql,
+        prefix_sql.len(),
+        SqlDialect::Postgres,
+        &index,
+        context,
+    );
+    assert_eq!(labels(&prefix), ["update_user", "update_user_phone"]);
+
+    let comma_sql = "insert into sys_user(update_time, user_";
+    let after_comma = complete(
+        comma_sql,
+        comma_sql.len(),
+        SqlDialect::Postgres,
+        &index,
+        context,
+    );
+    assert_eq!(labels(&after_comma), ["user_type", "username"]);
+}
+
+#[test]
+fn insert_column_list_discovers_target_relation_for_lazy_loading() {
+    let entries = contextual_fixture();
+    let expected = entries
+        .iter()
+        .find(|entry| entry.kind == CatalogKind::Table && entry.qualified_name.object == "sys_user")
+        .unwrap()
+        .id
+        .clone();
+    let index = CompletionIndex::new(&entries);
+    let sql = "insert into sys_user(";
+
+    let relations = relation_ids_for_completion(
+        sql,
+        sql.len(),
+        SqlDialect::Postgres,
+        &index,
+        CompletionContext {
+            database: Some("app"),
+            schema: Some("public"),
+        },
+    );
+
+    assert_eq!(relations.len(), 1);
+    assert!(relations.contains(&expected));
+}
+
+#[test]
+fn unrelated_parentheses_are_not_insert_column_lists() {
+    let index = CompletionIndex::new(&contextual_fixture());
+    let target_columns = [
+        "update_time",
+        "update_user",
+        "update_user_phone",
+        "user_type",
+        "username",
+    ];
+
+    for sql in [
+        "select count(",
+        "select * from (",
+        "select * from sys_user where username in (",
+        "insert into sys_user (username) values (",
+        "insert into sys_user values (",
+        "insert into sys_user default values",
+        "insert into sys_user select (",
+        "insert into sys_user set username = (",
+    ] {
+        let candidates = complete(
+            sql,
+            sql.len(),
+            SqlDialect::Postgres,
+            &index,
+            CompletionContext {
+                database: Some("app"),
+                schema: Some("public"),
+            },
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.label == "DELETE")
+                || candidates.is_empty(),
+            "unexpected target-column context for {sql}: {candidates:?}"
+        );
+        assert!(!target_columns.iter().all(|column| {
+            candidates
+                .iter()
+                .any(|candidate| candidate.label == *column)
+        }));
+    }
+}
+
+#[test]
+fn insert_column_list_uses_active_schema_for_duplicate_targets() {
+    let connection = Uuid::new_v4();
+    let mut entries = Vec::new();
+    for (schema_name, column) in [("public", "public_value"), ("audit", "audit_value")] {
+        let schema = CatalogId::new(connection, CatalogKind::Schema, ["app", schema_name]);
+        let table = CatalogId::new(
+            connection,
+            CatalogKind::Table,
+            ["app", schema_name, "events"],
+        );
+        entries.push(
+            CatalogEntry::relation(
+                table.clone(),
+                schema,
+                qualified("app", Some(schema_name), "events"),
+                "table",
+                OptionalMetadata::Supported(None),
+                true,
+            )
+            .unwrap(),
+        );
+        entries.push(
+            CatalogEntry::relation_child(
+                CatalogId::new(
+                    connection,
+                    CatalogKind::Column,
+                    ["app", schema_name, "events", column],
+                ),
+                table,
+                qualified("app", Some(schema_name), column),
+                "column",
+                OptionalMetadata::Unsupported,
+                CatalogMetadata::Column(ColumnMetadata::new(1, "text", true)),
+            )
+            .unwrap(),
+        );
+    }
+    let sql = "insert into events(";
+    let candidates = complete(
+        sql,
+        sql.len(),
+        SqlDialect::Postgres,
+        &CompletionIndex::new(&entries),
+        CompletionContext {
+            database: Some("app"),
+            schema: Some("audit"),
+        },
+    );
+
+    assert_eq!(labels(&candidates), ["audit_value"]);
+}
+
+#[test]
+fn insert_column_list_supports_qualified_and_quoted_targets() {
+    let index = CompletionIndex::new(&contextual_fixture());
+    for (sql, dialect) in [
+        ("insert into public.sys_user(", SqlDialect::Postgres),
+        ("insert into \"public\".\"sys_user\"(", SqlDialect::Postgres),
+        ("insert into `app`.`sys_user`(", SqlDialect::MySql),
+    ] {
+        let candidates = complete(
+            sql,
+            sql.len(),
+            dialect,
+            &index,
+            CompletionContext {
+                database: Some("app"),
+                schema: Some("public"),
+            },
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.label == "username")
+        );
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.kind == CompletionKind::Column),
+            "unexpected candidates for {sql}: {candidates:?}"
+        );
+    }
 }
 
 #[test]
