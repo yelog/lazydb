@@ -11,6 +11,7 @@ pub mod profiles;
 pub mod query_bar;
 pub mod record_view;
 pub mod relation;
+mod shortcut_hints;
 pub mod theme;
 
 use ratatui::{
@@ -27,57 +28,8 @@ use std::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-fn pack_hints<S: AsRef<str>>(hints: &[S], width: u16) -> String {
-    let width = usize::from(width);
-    if width == 0 || hints.is_empty() {
-        return String::new();
-    }
-
-    // Select against the final omission count, not the provisional count for
-    // each item. This keeps the marker width accurate as items are added.
-    let mut selected = 0;
-    for count in (0..=hints.len()).rev() {
-        let visible = hints[..count]
-            .iter()
-            .map(|hint| hint.as_ref().to_owned())
-            .collect::<Vec<_>>();
-        let omitted = hints.len() - count;
-        let marker = (omitted > 0).then(|| format!("... (+{omitted})"));
-        let mut candidate = visible.join("   ");
-        if let Some(marker) = marker {
-            if !candidate.is_empty() {
-                candidate.push_str("   ");
-            }
-            candidate.push_str(&marker);
-        }
-        if usize::from(candidate.cell_width()) <= width {
-            selected = count;
-            break;
-        }
-    }
-
-    let visible = hints[..selected]
-        .iter()
-        .map(|hint| hint.as_ref().to_owned())
-        .collect::<Vec<_>>();
-    let omitted = hints.len() - selected;
-    let mut result = visible.join("   ");
-    if omitted > 0 {
-        let marker = format!("... (+{omitted})");
-        if !result.is_empty() {
-            result.push_str("   ");
-        }
-        let remaining = width.saturating_sub(usize::from(result.cell_width()));
-        if remaining >= 3 {
-            result.push_str(&truncate_to_cells(&marker, remaining));
-            if usize::from(result.cell_width()) > width {
-                result = truncate_to_cells(&result, width);
-            }
-        } else if result.is_empty() {
-            result = truncate_to_cells(&marker, width);
-        }
-    }
-    result
+fn footer_hint_width(mode_badge: &str, area_width: u16) -> u16 {
+    area_width.saturating_sub(mode_badge.cell_width().saturating_add(2))
 }
 
 fn truncate_to_cells(value: &str, width: usize) -> String {
@@ -94,10 +46,6 @@ fn truncate_to_cells(value: &str, width: usize) -> String {
             }
         })
         .collect()
-}
-
-fn footer_hint_width(mode_badge: &str, area_width: u16) -> u16 {
-    area_width.saturating_sub(mode_badge.cell_width().saturating_add(2))
 }
 use uuid::Uuid;
 
@@ -121,6 +69,7 @@ use crate::{
 
 use self::{
     layout::{AppLayout, LayoutMode},
+    shortcut_hints::ShortcutHint,
     theme::Theme,
 };
 
@@ -2906,16 +2855,20 @@ fn render_footer(
         crate::help::footer_shortcuts_with_bindings(context, capabilities, Some(&app.key_bindings))
             .into_iter()
             .map(|shortcut| {
-                format!(
-                    "{} {}",
+                ShortcutHint::new(
                     crate::help::configured_sequence(&shortcut, Some(&app.key_bindings)),
-                    shortcut.description
+                    shortcut.description,
                 )
             })
             .collect::<Vec<_>>();
     let mode_badge = format!(" {mode} ");
-    let hints = pack_hints(&hint_values, footer_hint_width(&mode_badge, area.width));
-    let line = Line::from(vec![
+    let hint_line = shortcut_hints::line(
+        &hint_values,
+        footer_hint_width(&mode_badge, area.width),
+        theme,
+        theme.surface,
+    );
+    let mut spans = vec![
         Span::styled(
             mode_badge,
             Style::new()
@@ -2923,12 +2876,13 @@ fn render_footer(
                 .bg(mode_color)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            format!("  {hints}"),
-            Style::new().fg(theme.muted).bg(theme.surface),
-        ),
+        Span::styled("  ", Style::new().bg(theme.surface)),
         Span::styled("", Style::new().bg(theme.surface)),
-    ]);
+    ];
+    spans.pop();
+    spans.extend(hint_line.spans);
+    spans.push(Span::styled("", Style::new().bg(theme.surface)));
+    let line = Line::from(spans);
     frame.render_widget(
         Paragraph::new(line).style(Style::new().bg(theme.surface)),
         area,
@@ -3275,9 +3229,18 @@ fn render_explorer_add(
         }
     }
     frame.render_widget(
-        Paragraph::new("j/k · ↑/↓ select   Enter continue   Esc close")
-            .style(Style::new().fg(theme.muted).bg(theme.surface))
-            .alignment(Alignment::Center),
+        Paragraph::new(shortcut_hints::line(
+            &[
+                ShortcutHint::new("j/k · ↑/↓", "select"),
+                ShortcutHint::new("Enter", "continue"),
+                ShortcutHint::new("Esc", "close"),
+            ],
+            inner.width,
+            theme,
+            theme.surface,
+        ))
+        .style(Style::new().bg(theme.surface))
+        .alignment(Alignment::Center),
         Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
     );
 }
@@ -3631,11 +3594,23 @@ fn render_profile_group_overlay(
             }
             frame.render_widget(
                 Paragraph::new(if *busy {
-                    "Updating group..."
+                    Line::from(Span::styled(
+                        "Updating group...",
+                        Style::new().fg(theme.muted).bg(theme.surface),
+                    ))
                 } else {
-                    "↑/↓ select   Enter apply   Esc cancel"
+                    shortcut_hints::line(
+                        &[
+                            ShortcutHint::new("↑/↓", "select"),
+                            ShortcutHint::new("Enter", "apply"),
+                            ShortcutHint::new("Esc", "cancel"),
+                        ],
+                        inner.width,
+                        theme,
+                        theme.surface,
+                    )
                 })
-                .style(Style::new().fg(theme.muted).bg(theme.surface))
+                .style(Style::new().bg(theme.surface))
                 .alignment(Alignment::Center),
                 Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
             );
@@ -3715,9 +3690,18 @@ fn render_profile_group_overlay(
                 theme,
             );
             frame.render_widget(
-                Paragraph::new("Enter save   Esc cancel   Ctrl-W/U/A/E edit")
-                    .style(Style::new().fg(theme.muted).bg(theme.surface))
-                    .alignment(Alignment::Center),
+                Paragraph::new(shortcut_hints::line(
+                    &[
+                        ShortcutHint::new("Enter", "save"),
+                        ShortcutHint::new("Esc", "cancel"),
+                        ShortcutHint::new("Ctrl-W/U/A/E", "edit"),
+                    ],
+                    inner.width,
+                    theme,
+                    theme.surface,
+                ))
+                .style(Style::new().bg(theme.surface))
+                .alignment(Alignment::Center),
                 Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
             );
         }
@@ -3751,9 +3735,17 @@ fn render_profile_group_overlay(
                 theme,
             );
             frame.render_widget(
-                Paragraph::new("Enter delete   Esc cancel")
-                    .style(Style::new().fg(theme.muted).bg(theme.surface))
-                    .alignment(Alignment::Center),
+                Paragraph::new(shortcut_hints::line(
+                    &[
+                        ShortcutHint::new("Enter", "delete"),
+                        ShortcutHint::new("Esc", "cancel"),
+                    ],
+                    inner.width,
+                    theme,
+                    theme.surface,
+                ))
+                .style(Style::new().bg(theme.surface))
+                .alignment(Alignment::Center),
                 Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
             );
         }
@@ -4416,37 +4408,6 @@ mod footer_tests {
         assert_eq!(footer_hint_width(" NORMAL ", 40), 30);
         assert_eq!(footer_hint_width(" VISUAL LINE ", 40), 25);
         assert_eq!(footer_hint_width(" NORMAL ", 4), 0);
-    }
-
-    #[test]
-    fn pack_hints_keeps_complete_units_and_reports_omissions() {
-        assert_eq!(
-            pack_hints(&["j/k move", "Enter open", "/ find"], 19),
-            "j/k move   ... (+2)"
-        );
-        assert_eq!(
-            pack_hints(&["j/k move", "Enter open", "/ find"], 40),
-            "j/k move   Enter open   / find"
-        );
-    }
-
-    #[test]
-    fn pack_hints_measures_terminal_cells_and_handles_no_fit() {
-        assert_eq!(
-            pack_hints(&["界 move", "Enter open"], 18),
-            "界 move   ... (+1)"
-        );
-        assert_eq!(pack_hints(&["long hint"], 3), "...");
-        assert_eq!(pack_hints::<&str>(&[], 20), "");
-        assert!(pack_hints(&["a", "b"], 0).is_empty());
-        assert!(pack_hints(&["a", "b"], 2).cell_width() <= 2);
-    }
-
-    #[test]
-    fn pack_hints_uses_the_final_omitted_count_before_selecting_units() {
-        let packed = pack_hints(&["aaaa", "bb", "cc"], 15);
-        assert_eq!(packed, "aaaa   bb   cc");
-        assert!(packed.cell_width() <= 15);
     }
 }
 
