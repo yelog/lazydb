@@ -747,6 +747,27 @@ fn editor_normal_space_exposes_editor_leader_candidates_without_consuming_next_k
 }
 
 #[test]
+fn editor_space_tt_reaches_editor_transaction_toggle_binding() {
+    let mut app = App::new(Vec::new());
+    app.focus = Focus::Editor;
+    app.update(Action::EditorKey(key(KeyCode::Esc)));
+    let mut keymap = Keymap::default();
+
+    assert!(matches!(
+        keymap.map(key(KeyCode::Char(' ')), &app),
+        Some(Action::EditorKey(_))
+    ));
+    assert!(matches!(
+        keymap.map(key(KeyCode::Char('t')), &app),
+        Some(Action::EditorKey(_))
+    ));
+    assert!(matches!(
+        keymap.map(key(KeyCode::Char('t')), &app),
+        Some(Action::EditorKey(_))
+    ));
+}
+
+#[test]
 fn editor_leader_followups_stay_on_the_editor_modalkit_path() {
     let mut app = App::new(Vec::new());
     app.focus = Focus::Editor;

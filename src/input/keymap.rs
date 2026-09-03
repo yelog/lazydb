@@ -572,11 +572,15 @@ impl Keymap {
             _ => {}
         }
 
-        if self
-            .pending
-            .as_ref()
-            .is_some_and(|pending| pending_is_valid(pending, app, Instant::now(), self.generation))
-        {
+        if self.pending.as_ref().is_some_and(|pending| {
+            pending_is_valid(
+                pending,
+                app,
+                Instant::now(),
+                self.generation,
+                self.sequence_timeout,
+            )
+        }) {
             let prefix = self
                 .pending
                 .as_ref()

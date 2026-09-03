@@ -1161,7 +1161,8 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
         [EditorNormal],
         "Space tt",
         "toggle AUTO / MANUAL transaction",
-        display
+        EditorLeader,
+        "tt"
     ),
     row!(
         TransactionControl,
@@ -2520,10 +2521,12 @@ fn prefix_rank(prefix: ShortcutPrefix, id: HelpShortcutId) -> Option<u8> {
             Id::EditorCopyStatement => 2,
             Id::EditorCopyBuffer => 3,
             Id::OpenTargetSelector => 4,
-            Id::CloseTab => 5,
-            Id::OpenSqlEditors => 6,
-            Id::FocusExplorerLeader => 7,
-            Id::OpenNotificationHistoryLeader => 8,
+            Id::ToggleTransaction => 5,
+            Id::TransactionControl => 6,
+            Id::CloseTab => 7,
+            Id::OpenSqlEditors => 8,
+            Id::FocusExplorerLeader => 9,
+            Id::OpenNotificationHistoryLeader => 10,
             _ => return None,
         },
         ShortcutPrefix::Window | ShortcutPrefix::WindowCount(_) => match id {
@@ -4053,6 +4056,7 @@ mod tests {
                 HelpShortcutId::EditorCopyStatement,
                 HelpShortcutId::EditorCopyBuffer,
                 HelpShortcutId::OpenTargetSelector,
+                HelpShortcutId::ToggleTransaction,
                 HelpShortcutId::TransactionControl,
             ]
         );
