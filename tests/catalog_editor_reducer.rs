@@ -323,6 +323,26 @@ fn opening_create_on_schema_uses_capability_ordered_options() {
         editor.draft,
         Some(lazydb::model::catalog_editor::CatalogDraft::Schema(_))
     ));
+
+    app.update(Action::CatalogEditorInsert('n'));
+    app.update(Action::CatalogEditorFieldNext);
+    app.update(Action::CatalogEditorInsert('o'));
+    app.update(Action::CatalogEditorFocusField(2));
+    app.update(Action::CatalogEditorInsert('c'));
+    app.update(Action::CatalogEditorFieldPrevious);
+    app.update(Action::CatalogEditorInsert('w'));
+    app.update(Action::CatalogEditorFocusField(2));
+    let Some(lazydb::model::catalog_editor::CatalogDraft::Schema(draft)) = app
+        .catalog_editor
+        .as_ref()
+        .and_then(|editor| editor.draft.as_ref())
+    else {
+        panic!("schema draft expected");
+    };
+    assert_eq!(draft.name.value(), "n");
+    assert_eq!(draft.owner.value(), "ow");
+    assert_eq!(draft.comment.value(), "c");
+    assert_eq!(draft.selected_field, 2);
 }
 
 #[test]

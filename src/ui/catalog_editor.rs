@@ -17,7 +17,7 @@ use crate::{
     security::sanitize_terminal_text,
 };
 
-use super::{Theme, UiState, icons::IconSet, render_text_input};
+use super::{HitRegion, HitTarget, Theme, UiState, icons::IconSet, render_text_input};
 
 pub fn render(
     frame: &mut Frame<'_>,
@@ -258,6 +258,10 @@ fn render_schema(
     ];
     for (index, (label, input)) in rows.into_iter().enumerate() {
         let row = Rect::new(area.x, area.y.saturating_add(index as u16), area.width, 1);
+        ui.hit_regions.push(HitRegion {
+            area: row,
+            target: HitTarget::CatalogEditorField(index),
+        });
         let active = draft.selected_field == index;
         let label_width = row.width.min(18);
         frame.render_widget(

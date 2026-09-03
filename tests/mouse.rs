@@ -23,6 +23,31 @@ use ratatui::{Terminal, backend::TestBackend, layout::Rect};
 use uuid::Uuid;
 
 #[test]
+fn maps_catalog_editor_field_clicks() {
+    let mut app = App::new(Vec::new());
+    app.overlay = Some(Overlay::CatalogEditor);
+    let mut ui = UiState::new();
+    ui.hit_regions.push(HitRegion {
+        area: Rect::new(10, 5, 20, 1),
+        target: HitTarget::CatalogEditorField(1),
+    });
+
+    assert_eq!(
+        map_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 12,
+                row: 5,
+                modifiers: KeyModifiers::NONE,
+            },
+            &ui,
+            &app,
+        ),
+        Some(Action::CatalogEditorFocusField(1))
+    );
+}
+
+#[test]
 fn maps_tabs_tree_rows_and_result_cells_from_rendered_hit_regions() {
     let mut app = App::new(Vec::new());
     app.update(Action::NewConsole);

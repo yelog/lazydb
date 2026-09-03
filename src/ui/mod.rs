@@ -179,6 +179,7 @@ pub enum HitTarget {
     ProfileGroupConfirm,
     ProfileGroupCancel,
     ExplorerAddOption(usize),
+    CatalogEditorField(usize),
     DismissNotification(u64),
     RelationFirstPage,
     RelationPreviousPage,

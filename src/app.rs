@@ -3236,6 +3236,7 @@ impl App {
                     if matches!(
                         draft,
                         crate::model::catalog_editor::CatalogDraft::Sequence(_)
+                            | crate::model::catalog_editor::CatalogDraft::Schema(_)
                     ) {
                         draft.move_field(1);
                         return Vec::new();
@@ -3278,6 +3279,7 @@ impl App {
                     if matches!(
                         draft,
                         crate::model::catalog_editor::CatalogDraft::Sequence(_)
+                            | crate::model::catalog_editor::CatalogDraft::Schema(_)
                     ) {
                         draft.move_field(-1);
                         return Vec::new();
@@ -3312,6 +3314,17 @@ impl App {
                     .and_then(|editor| editor.draft.as_mut())
                 {
                     draft.select_section(-1);
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorFocusField(index) => {
+                if let Some(crate::model::catalog_editor::CatalogDraft::Schema(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                    && index < 3
+                {
+                    draft.selected_field = index;
                 }
                 Vec::new()
             }
@@ -3353,7 +3366,7 @@ impl App {
                     .as_mut()
                     .and_then(|editor| editor.draft.as_mut())
                 {
-                    draft.name.insert(character);
+                    draft.insert(character);
                 }
                 Vec::new()
             }
@@ -3394,7 +3407,7 @@ impl App {
                     .as_mut()
                     .and_then(|editor| editor.draft.as_mut())
                 {
-                    draft.name.backspace();
+                    draft.backspace();
                 }
                 Vec::new()
             }
@@ -3435,7 +3448,7 @@ impl App {
                     .as_mut()
                     .and_then(|editor| editor.draft.as_mut())
                 {
-                    draft.name.delete_previous_word();
+                    draft.delete_previous_word();
                 }
                 Vec::new()
             }
@@ -3476,7 +3489,7 @@ impl App {
                     .as_mut()
                     .and_then(|editor| editor.draft.as_mut())
                 {
-                    draft.name.delete_to_start();
+                    draft.delete_to_start();
                 }
                 Vec::new()
             }
@@ -3517,7 +3530,7 @@ impl App {
                     .as_mut()
                     .and_then(|editor| editor.draft.as_mut())
                 {
-                    draft.name.delete();
+                    draft.delete();
                 }
                 Vec::new()
             }
@@ -3558,7 +3571,7 @@ impl App {
                     .as_mut()
                     .and_then(|editor| editor.draft.as_mut())
                 {
-                    draft.name.move_left();
+                    draft.move_left();
                 }
                 Vec::new()
             }
@@ -3599,7 +3612,7 @@ impl App {
                     .as_mut()
                     .and_then(|editor| editor.draft.as_mut())
                 {
-                    draft.name.move_right();
+                    draft.move_right();
                 }
                 Vec::new()
             }
@@ -3640,7 +3653,7 @@ impl App {
                     .as_mut()
                     .and_then(|editor| editor.draft.as_mut())
                 {
-                    draft.name.move_home();
+                    draft.move_home();
                 }
                 Vec::new()
             }
@@ -3681,7 +3694,7 @@ impl App {
                     .as_mut()
                     .and_then(|editor| editor.draft.as_mut())
                 {
-                    draft.name.move_end();
+                    draft.move_end();
                 }
                 Vec::new()
             }

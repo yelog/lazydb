@@ -180,6 +180,7 @@ pub enum Action {
     CatalogEditorSelect,
     CatalogEditorFieldNext,
     CatalogEditorFieldPrevious,
+    CatalogEditorFocusField(usize),
     CatalogEditorInsert(char),
     CatalogEditorBackspace,
     CatalogEditorDeletePreviousWord,
