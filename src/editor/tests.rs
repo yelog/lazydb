@@ -142,6 +142,19 @@ fn normal_mode_window_reset_emits_reset_effect() {
 }
 
 #[test]
+fn normal_mode_window_f_emits_toggle_maximize_effect() {
+    let (mut workspace, id) = fixture("alpha");
+    workspace.press(id, EditorKey::Escape).unwrap();
+    workspace.press(id, EditorKey::Control('w')).unwrap();
+    workspace.press(id, EditorKey::Character('f')).unwrap();
+
+    assert_eq!(
+        workspace.drain_effects(),
+        vec![EditorEffect::TogglePaneMaximized]
+    );
+}
+
+#[test]
 fn insert_control_u_deletes_only_to_the_current_unicode_line_start() {
     let (mut workspace, id) = fixture("select 1\n用户🙂");
     workspace.move_cursor_to_end(id).unwrap();

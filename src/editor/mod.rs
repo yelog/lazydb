@@ -51,6 +51,7 @@ pub(crate) enum EditorEffect {
     FocusPane(Focus),
     ResizePane(PaneResize),
     ResetPaneSizes,
+    TogglePaneMaximized,
     NextTab,
     PreviousTab,
     ShowHelp,
@@ -1324,6 +1325,9 @@ impl EditorWorkspace {
                     }
                 }
                 (PendingBinding::Window(_), '=') => self.effects.push(EditorEffect::ResetPaneSizes),
+                (PendingBinding::Window(_), 'f') => {
+                    self.effects.push(EditorEffect::TogglePaneMaximized)
+                }
                 (PendingBinding::Window(_), 'k' | 'l') => {}
                 (PendingBinding::Goto, 'g') => self.input_vim_key(id, EditorKey::Character('g'))?,
                 (PendingBinding::Goto, 't') => self.effects.push(EditorEffect::NextTab),

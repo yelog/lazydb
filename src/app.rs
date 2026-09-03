@@ -7977,6 +7977,7 @@ impl App {
                 EditorEffect::Yanked(text) => Action::CopyEditorYank(text),
                 EditorEffect::ResizePane(resize) => Action::ResizePane(resize),
                 EditorEffect::ResetPaneSizes => Action::ResetPaneSizes,
+                EditorEffect::TogglePaneMaximized => Action::TogglePaneMaximized,
                 EditorEffect::CopyStatement => Action::CopyEditorStatement,
                 EditorEffect::CopyBuffer => Action::CopyEditorBuffer,
                 EditorEffect::Message(_)
