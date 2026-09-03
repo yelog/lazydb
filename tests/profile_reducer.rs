@@ -15,6 +15,7 @@ use lazydb::{
             CatalogDiscoveryState, CatalogScopeMode, DiscoveryFingerprint, ProfileDraft,
             ProfileField, ProfileManagerPage, ProfileOperation,
         },
+        text_input::TextInputEdit,
         workspace::{ConnectionIdentity, ConnectionStatus, Overlay, QueryStatus},
     },
     persistence::secrets::SecretStoreAvailability,
@@ -111,6 +112,35 @@ fn profile_group_overlay_cancel_and_invalid_name_do_not_emit_commands() {
 }
 
 #[test]
+fn profile_group_editor_applies_shared_cursor_and_deletion_edits() {
+    let mut app = App::new(Vec::new());
+    app.overlay = Some(Overlay::ProfileGroup(ProfileGroupOverlay::Edit {
+        group_id: None,
+        name: "alpha beta".into(),
+        error: None,
+        busy: false,
+    }));
+
+    app.update(Action::ProfileGroupEdit(TextInputEdit::MoveHome));
+    app.update(Action::ProfileGroupEdit(TextInputEdit::MoveRight));
+    app.update(Action::ProfileGroupEdit(TextInputEdit::Insert('-')));
+    app.update(Action::ProfileGroupEdit(TextInputEdit::MoveEnd));
+    app.update(Action::ProfileGroupEdit(TextInputEdit::DeletePreviousWord));
+
+    let Some(Overlay::ProfileGroup(ProfileGroupOverlay::Edit { name, .. })) = &app.overlay else {
+        panic!("profile group editor should remain open");
+    };
+    assert_eq!(name.value(), "a-lpha ");
+
+    app.update(Action::ProfileGroupEdit(TextInputEdit::Clear));
+    let Some(Overlay::ProfileGroup(ProfileGroupOverlay::Edit { name, .. })) = &app.overlay else {
+        panic!("profile group editor should remain open");
+    };
+    assert_eq!(name.value(), "");
+    assert_eq!(name.cursor(), 0);
+}
+
+#[test]
 fn profile_group_picker_reaches_create_option_and_emits_create_command() {
     let profile = sqlite_profile("one");
     let profile_id = profile.id;
@@ -126,10 +156,9 @@ fn profile_group_picker_reaches_create_option_and_emits_create_command() {
             ..
         }))
     ));
-    app.update(Action::ProfileGroupInsert('P'));
-    app.update(Action::ProfileGroupInsert('r'));
-    app.update(Action::ProfileGroupInsert('o'));
-    app.update(Action::ProfileGroupInsert('d'));
+    for character in "Prod".chars() {
+        app.update(Action::ProfileGroupEdit(TextInputEdit::Insert(character)));
+    }
     assert!(matches!(
         app.update(Action::ProfileGroupConfirm).as_slice(),
         [Command::UpdateProfileOrganization {
@@ -137,6 +166,34 @@ fn profile_group_picker_reaches_create_option_and_emits_create_command() {
             ..
         }] if name == "Prod"
     ));
+}
+
+#[test]
+fn connection_group_o_and_enter_toggle_expansion() {
+    let profile = sqlite_profile("one");
+    let group_id = Uuid::from_u128(99);
+    let mut app = App::new(vec![profile.clone()]);
+    app.update(Action::ProfileOrganizationSaved {
+        request_id: 1,
+        collection: lazydb::profile::ProfileCollection {
+            groups: vec![lazydb::profile::ConnectionGroup {
+                id: group_id,
+                name: "Production".into(),
+            }],
+            profiles: vec![profile],
+        },
+    });
+    let group = ExplorerNodeId::ConnectionGroup {
+        group_id,
+        region: lazydb::model::explorer::ProfileRegion::Primary,
+    };
+    app.explorer.normalized.selected = Some(group.clone());
+
+    assert!(app.update(Action::ExplorerToggle).is_empty());
+    assert!(app.explorer.normalized.expanded.contains(&group));
+
+    assert!(app.update(Action::ExplorerOpenSelected).is_empty());
+    assert!(!app.explorer.normalized.expanded.contains(&group));
 }
 
 #[test]
