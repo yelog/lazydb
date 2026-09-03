@@ -1625,6 +1625,40 @@ fn explorer_a_on_a_profile_opens_connection_group_creation() {
 }
 
 #[test]
+fn explorer_g_prefix_lists_and_opens_move_to_group() {
+    let profile = lazydb::profile::import_connection_url(":memory:", Some("test"))
+        .unwrap()
+        .profile;
+    let mut app = App::new(vec![profile]);
+    app.focus = Focus::Explorer;
+    let mut keymap = Keymap::default();
+
+    assert_eq!(keymap.map(key(KeyCode::Char('g')), &app), None);
+    assert!(
+        keymap
+            .sequence_state(&app, std::time::Instant::now())
+            .is_some()
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('m')), &app),
+        Some(Action::ProfileGroupOpen)
+    );
+
+    for (suffix, expected) in [
+        (
+            'g',
+            Action::ExplorerSelectTarget(lazydb::model::explorer::ExplorerNodeTarget::First),
+        ),
+        ('t', Action::NextTab),
+        ('T', Action::PreviousTab),
+    ] {
+        let mut keymap = Keymap::default();
+        assert_eq!(keymap.map(key(KeyCode::Char('g')), &app), None);
+        assert_eq!(keymap.map(key(KeyCode::Char(suffix)), &app), Some(expected));
+    }
+}
+
+#[test]
 fn profile_group_editor_routes_j_and_k_to_group_name_input() {
     let mut app = App::new(Vec::new());
     app.overlay = Some(Overlay::ProfileGroup(

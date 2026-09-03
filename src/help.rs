@@ -1054,8 +1054,10 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
     row!(
         ExplorerMoveToGroup,
         [Explorer],
-        "g",
-        "move connection to group"
+        "gm",
+        "move connection to group",
+        Goto,
+        "m"
     ),
     row!(
         ExplorerDeleteGroup,
@@ -2513,6 +2515,7 @@ fn prefix_rank(prefix: ShortcutPrefix, id: HelpShortcutId) -> Option<u8> {
             Id::ExplorerFirst | Id::ResultsFirstRow | Id::RecordFirstField => 1,
             Id::NextTab => 2,
             Id::PreviousTab => 3,
+            Id::ExplorerMoveToGroup => 4,
             _ => return None,
         },
         ShortcutPrefix::ExplorerAlign | ShortcutPrefix::GridAlign => match id {
@@ -2974,6 +2977,20 @@ mod tests {
                 .count(),
             4
         );
+    }
+
+    #[test]
+    fn goto_prefix_lists_move_to_group() {
+        let rows = prefix_shortcuts(
+            ShortcutContext::Explorer,
+            ShortcutCapabilities::default(),
+            ShortcutPrefix::Goto,
+        );
+        assert!(rows.iter().any(|row| {
+            row.id == HelpShortcutId::ExplorerMoveToGroup
+                && row.sequence == "gm"
+                && row.suffix == Some("m")
+        }));
     }
 
     #[test]

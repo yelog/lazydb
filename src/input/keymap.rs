@@ -1281,7 +1281,9 @@ fn pending_is_valid(pending: &PendingState, app: &App, _now: Instant, generation
         && app
             .tabs
             .get(app.active_tab)
-            .is_some_and(|tab| pending.tab_id == tab.id())
+            .map_or(pending.tab_id == Uuid::nil(), |tab| {
+                pending.tab_id == tab.id()
+            })
 }
 
 fn pending_display(pending: Pending) -> Option<(crate::help::ShortcutPrefix, String)> {
@@ -1384,6 +1386,9 @@ fn map_pending(pending: Pending, event: KeyEvent, app: &App) -> Option<Action> {
         ),
         (Pending::Goto, KeyCode::Char('t')) => Some(Action::NextTab),
         (Pending::Goto, KeyCode::Char('T')) => Some(Action::PreviousTab),
+        (Pending::Goto, KeyCode::Char('m')) if app.focus == Focus::Explorer => {
+            Some(Action::ProfileGroupOpen)
+        }
         (Pending::Previous, KeyCode::Char('t')) => Some(Action::PreviousTab),
         (Pending::Next, KeyCode::Char('t')) => Some(Action::NextTab),
         (Pending::Leader, KeyCode::Char('t')) => None,

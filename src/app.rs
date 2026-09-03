@@ -1506,6 +1506,7 @@ impl App {
                 view: RelationView::Ddl,
             }],
             Id::ExplorerAccess => vec![Action::OpenProfileAccess],
+            Id::ExplorerMoveToGroup => vec![Action::ProfileGroupOpen],
             Id::EditorInsert => vec![editor_key(KeyCode::Char('i'))],
             Id::EditorNormal => vec![editor_key(KeyCode::Esc)],
             Id::EditorUndo => vec![editor_key(KeyCode::Char('u'))],
