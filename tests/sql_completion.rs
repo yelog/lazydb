@@ -9,6 +9,7 @@ use lazydb::{
     profile::{CatalogScope, CatalogSelection, DatabaseKind, DatabaseScope, import_connection_url},
     sql::{
         CompletionContext, CompletionIndex, CompletionKind, SqlDialect, complete, quote_identifier,
+        should_offer_completion,
     },
 };
 use uuid::Uuid;
@@ -299,6 +300,67 @@ fn statement_and_expression_keywords_are_contextual() {
             .iter()
             .any(|candidate| candidate.label == "UPDATE")
     );
+}
+
+#[test]
+fn insert_completion_offers_only_into_keyword() {
+    let index = CompletionIndex::new(&contextual_fixture());
+
+    for sql in ["insert ", "insert i"] {
+        let candidates = complete(
+            sql,
+            sql.len(),
+            SqlDialect::Postgres,
+            &index,
+            CompletionContext::default(),
+        );
+
+        assert_eq!(
+            candidates
+                .iter()
+                .filter(|candidate| candidate.kind == CompletionKind::Keyword)
+                .map(|candidate| candidate.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["INTO"],
+            "unexpected keyword candidates for {sql}: {candidates:?}"
+        );
+    }
+}
+
+#[test]
+fn insert_context_does_not_leak_into_statement_or_relation_completion() {
+    let index = CompletionIndex::new(&fixture());
+
+    let statement = complete(
+        "i",
+        1,
+        SqlDialect::Postgres,
+        &index,
+        CompletionContext::default(),
+    );
+    assert_eq!(
+        statement.first().map(|candidate| candidate.label.as_str()),
+        Some("INSERT")
+    );
+    assert!(statement.iter().all(|candidate| candidate.label != "INTO"));
+
+    let relation_sql = "insert into u";
+    let relation = complete(
+        relation_sql,
+        relation_sql.len(),
+        SqlDialect::Postgres,
+        &index,
+        CompletionContext::default(),
+    );
+    assert!(relation.iter().any(|candidate| {
+        candidate.kind == CompletionKind::Table && candidate.label == "users"
+    }));
+}
+
+#[test]
+fn insert_space_triggers_completion() {
+    assert!(should_offer_completion("insert ", "insert ".len()));
+    assert!(should_offer_completion("INSERT ", "INSERT ".len()));
 }
 
 #[test]

@@ -162,6 +162,7 @@ fn entry_in_scope(entry: &CatalogEntry, scope: &CatalogScope) -> bool {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Context {
     Statement,
+    Insert,
     Relation,
     Expression(ExpressionContext),
     Qualifier,
@@ -322,7 +323,7 @@ pub fn complete(
                     score: CompletionScore {
                         context: match (context, projection_complete, *keyword) {
                             (Context::Expression(ExpressionContext::Projection), true, "FROM") => 4,
-                            (Context::Statement, _, _) => 4,
+                            (Context::Statement | Context::Insert, _, _) => 4,
                             (Context::Expression(_), _, _) => 2,
                             (Context::Relation | Context::Routine, _, _) => 1,
                             (Context::Qualifier, _, _) => 0,
@@ -474,9 +475,11 @@ pub fn should_offer_completion(text: &str, cursor: usize) -> bool {
     }
     if previous.is_ascii_whitespace() {
         let before = text[..cursor].trim_end().to_ascii_lowercase();
-        return ["from", "join", "update", "into", "select", "where"]
-            .iter()
-            .any(|keyword| before.ends_with(keyword));
+        return [
+            "from", "join", "update", "insert", "into", "select", "where",
+        ]
+        .iter()
+        .any(|keyword| before.ends_with(keyword));
     }
     false
 }
@@ -526,7 +529,7 @@ fn completion_kind(kind: CatalogKind) -> Option<CompletionKind> {
 
 fn catalog_kind_allowed(context: Context, kind: CompletionKind) -> bool {
     match context {
-        Context::Statement => false,
+        Context::Statement | Context::Insert => false,
         Context::Relation => matches!(
             kind,
             CompletionKind::Database
@@ -558,6 +561,7 @@ fn context_at(tokens: &[CompletionToken], cursor: usize, current_scope: Option<u
             continue;
         };
         context = match word.to_ascii_lowercase().as_str() {
+            "insert" => Context::Insert,
             "from" | "join" | "update" | "into" => Context::Relation,
             "select" => Context::Expression(ExpressionContext::Projection),
             "where" | "on" | "having" => Context::Expression(ExpressionContext::Predicate),
@@ -1134,6 +1138,7 @@ fn keywords(
             SqlDialect::MySql => &["SELECT", "INSERT", "UPDATE", "DELETE"],
             _ => &["SELECT", "WITH", "INSERT", "UPDATE", "DELETE"],
         },
+        Context::Insert => &["INTO"],
         Context::Expression(ExpressionContext::Projection) if projection_complete => {
             &["FROM", "CASE", "NULL", "TRUE", "FALSE"]
         }
