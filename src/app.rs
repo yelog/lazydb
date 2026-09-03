@@ -1403,6 +1403,7 @@ impl App {
             Id::FocusExplorerLeader => vec![Action::Focus(Focus::Explorer)],
             Id::FocusResults | Id::FocusResultsFromL => vec![Action::Focus(Focus::Results)],
             Id::FocusEditorFromK | Id::FocusEditorFromL => vec![Action::Focus(Focus::Editor)],
+            Id::TogglePaneMaximized => vec![Action::TogglePaneMaximized],
             Id::PreviousTab => vec![Action::PreviousTab],
             Id::NextTab => vec![Action::NextTab],
             Id::PreviousTabAlias => vec![Action::PreviousTab],
