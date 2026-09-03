@@ -127,17 +127,12 @@ pub struct ConnectionsConfig {
     pub default_access: ConnectionAccessDefault,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum ConnectionAccessDefault {
+    #[default]
     Global,
     Project,
-}
-
-impl Default for ConnectionAccessDefault {
-    fn default() -> Self {
-        Self::Global
-    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
