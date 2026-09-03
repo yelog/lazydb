@@ -1415,6 +1415,11 @@ fn map_pending(pending: Pending, event: KeyEvent, app: &App) -> Option<Action> {
         (Pending::RelationTransaction, KeyCode::Char('q')) => Some(Action::CloseActiveTab),
         (Pending::RelationTransaction, KeyCode::Char('m')) => Some(Action::OpenNotificationHistory),
         (Pending::RelationYank, KeyCode::Char('y')) => Some(Action::RelationYank),
+        (Pending::Window { .. }, KeyCode::Char('w'))
+            if event.modifiers == KeyModifiers::CONTROL =>
+        {
+            Some(Action::FocusNext)
+        }
         (Pending::Window { .. }, KeyCode::Char('j')) if app.focus == Focus::Editor => {
             Some(Action::Focus(Focus::Results))
         }

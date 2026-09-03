@@ -49,6 +49,7 @@ pub(crate) enum EditorEffect {
     DeleteConsole,
     OpenSqlEditorList,
     FocusPane(Focus),
+    FocusNext,
     ResizePane(PaneResize),
     ResetPaneSizes,
     TogglePaneMaximized,
@@ -932,6 +933,18 @@ impl EditorWorkspace {
             return self.press_prompt(id, key);
         }
         let mode = self.mode(id)?;
+        if key == EditorKey::Control('w')
+            && self.sessions.get(&id).is_some_and(|session| {
+                matches!(session.pending_binding, Some(PendingBinding::Window(_)))
+            })
+        {
+            self.sessions
+                .get_mut(&id)
+                .ok_or(EditorError::MissingSession(id))?
+                .pending_binding = None;
+            self.effects.push(EditorEffect::FocusNext);
+            return Ok(());
+        }
         if mode == EditorMode::Normal {
             if self
                 .sessions
@@ -1020,7 +1033,13 @@ impl EditorWorkspace {
                     .pending_binding = Some(PendingBinding::Leader);
                 Ok(())
             }
-            (EditorMode::Normal, EditorKey::Control('w')) => {
+            (
+                EditorMode::Normal
+                | EditorMode::VisualChar
+                | EditorMode::VisualLine
+                | EditorMode::VisualBlock,
+                EditorKey::Control('w'),
+            ) => {
                 self.sessions
                     .get_mut(&id)
                     .ok_or(EditorError::MissingSession(id))?

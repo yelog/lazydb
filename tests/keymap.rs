@@ -647,6 +647,87 @@ fn window_action(app: &App, direction: char) -> Option<Action> {
     keymap.map(key(KeyCode::Char(direction)), app)
 }
 
+#[test]
+fn ctrl_w_ctrl_w_maps_to_focus_next_outside_editor() {
+    let mut app = App::new(Vec::new());
+
+    for focus in [Focus::Explorer, Focus::Results] {
+        app.focus = focus;
+        let mut keymap = Keymap::default();
+
+        assert_eq!(keymap.map(ctrl('w'), &app), None);
+        assert_eq!(keymap.map(ctrl('w'), &app), Some(Action::FocusNext));
+    }
+}
+
+#[test]
+fn ctrl_w_plain_w_does_not_cycle_focus() {
+    let mut app = App::new(Vec::new());
+    app.focus = Focus::Explorer;
+    let mut keymap = Keymap::default();
+
+    assert_eq!(keymap.map(ctrl('w'), &app), None);
+    assert_eq!(keymap.map(key(KeyCode::Char('w')), &app), None);
+}
+
+fn apply_key(keymap: &mut Keymap, app: &mut App, event: KeyEvent) {
+    if let Some(action) = keymap.map(event, app) {
+        app.update(action);
+    }
+}
+
+fn cycle_focus(keymap: &mut Keymap, app: &mut App) {
+    apply_key(keymap, app, ctrl('w'));
+    apply_key(keymap, app, ctrl('w'));
+}
+
+#[test]
+fn ctrl_w_ctrl_w_cycles_sql_panes_clockwise() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::EditorKey(key(KeyCode::Esc)));
+    app.focus = Focus::Explorer;
+    let mut keymap = Keymap::default();
+
+    cycle_focus(&mut keymap, &mut app);
+    assert_eq!(app.focus, Focus::Editor);
+    cycle_focus(&mut keymap, &mut app);
+    assert_eq!(app.focus, Focus::Results);
+    cycle_focus(&mut keymap, &mut app);
+    assert_eq!(app.focus, Focus::Explorer);
+}
+
+#[test]
+fn ctrl_w_ctrl_w_cycles_relation_panes_without_editor() {
+    let mut app = App::new(Vec::new());
+    app.tabs
+        .push(WorkspaceTab::Relation(RelationTab::new("users")));
+    app.active_tab = 1;
+    app.focus = Focus::Explorer;
+    let mut keymap = Keymap::default();
+
+    cycle_focus(&mut keymap, &mut app);
+    assert_eq!(app.focus, Focus::Results);
+    cycle_focus(&mut keymap, &mut app);
+    assert_eq!(app.focus, Focus::Explorer);
+}
+
+#[test]
+fn ctrl_w_ctrl_w_cycles_dashboard_panes_without_editor() {
+    let mut app = App::new(Vec::new());
+    app.tabs.clear();
+    app.tabs.push(WorkspaceTab::Dashboard(
+        lazydb::model::dashboard::DashboardTab::new(),
+    ));
+    app.active_tab = 0;
+    app.focus = Focus::Explorer;
+    let mut keymap = Keymap::default();
+
+    cycle_focus(&mut keymap, &mut app);
+    assert_eq!(app.focus, Focus::Results);
+    cycle_focus(&mut keymap, &mut app);
+    assert_eq!(app.focus, Focus::Explorer);
+}
+
 fn counted_window_action(app: &App, count: &str, operator: char) -> Option<Action> {
     let mut keymap = Keymap::default();
     for character in count.chars() {
@@ -984,6 +1065,25 @@ fn pane_maximize_help_entry_executes_the_same_action() {
     ));
 
     assert!(app.pane_maximized);
+    assert_eq!(app.overlay, None);
+}
+
+#[test]
+fn cycle_focus_help_entry_executes_the_same_action() {
+    let mut app = App::new(Vec::new());
+    app.focus = Focus::Explorer;
+    app.update(Action::ShowHelp);
+    app.update(Action::HelpPaste("cycle pane focus clockwise".into()));
+
+    assert_eq!(
+        app.help_selected_id(),
+        Some(lazydb::help::HelpShortcutId::CyclePaneFocus)
+    );
+    app.update(Action::ExecuteHelpShortcut(
+        lazydb::help::HelpShortcutId::CyclePaneFocus,
+    ));
+
+    assert_eq!(app.focus, Focus::Editor);
     assert_eq!(app.overlay, None);
 }
 
