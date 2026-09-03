@@ -2247,7 +2247,8 @@ impl TransactionBackend for MsSqlTransactionBackend {
                 for mutation in &rows {
                     validate_delete_mutation(mutation, columns.len())?;
                 }
-                let savepoint = format!("ldb_{}", Uuid::new_v4().simple());
+                let suffix = Uuid::new_v4().simple().to_string();
+                let savepoint = format!("ldb_{}", &suffix[..8]);
                 client
                     .simple_query(format!("SAVE TRANSACTION [{savepoint}]"))
                     .await
@@ -2349,7 +2350,8 @@ impl TransactionBackend for MsSqlTransactionBackend {
                 })
             }
             RelationMutation::UpdateCell(update) => {
-                let savepoint = format!("ldb_{}", Uuid::new_v4().simple());
+                let suffix = Uuid::new_v4().simple().to_string();
+                let savepoint = format!("ldb_{}", &suffix[..8]);
                 client
                     .simple_query(format!("SAVE TRANSACTION [{savepoint}]"))
                     .await
