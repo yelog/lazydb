@@ -2949,12 +2949,17 @@ impl App {
                             },
                         )
                         .collect();
-                    self.catalog_editor = Some(CatalogEditorState::new(
+                    let mut editor = CatalogEditorState::new(
                         CatalogMutationMode::Create,
                         selection.anchor,
                         selection.catalog_epoch,
                         options,
-                    ));
+                    );
+                    if editor.options.len() == 1 {
+                        let view_capabilities = self.connection.mutation_capabilities.view_options;
+                        Self::select_catalog_editor_option(&mut editor, 0, view_capabilities);
+                    }
+                    self.catalog_editor = Some(editor);
                     self.overlay = Some(Overlay::CatalogEditor);
                 }
                 Vec::new()
@@ -3123,16 +3128,17 @@ impl App {
                              crate::db::catalog_mutation::CatalogObjectDefinition::Schema(
                                 schema,
                             ) => crate::model::catalog_editor::CatalogDraft::Schema(
-                                crate::model::catalog_editor::SchemaDraft {
-                                    name: schema.name.into(),
-                                    owner: schema.owner.into(),
-                                    comment: match schema.comment {
+                                 crate::model::catalog_editor::SchemaDraft {
+                                     name: schema.name.into(),
+                                     owner: schema.owner.into(),
+                                     comment: match schema.comment {
                                         crate::db::catalog::OptionalMetadata::Supported(Some(
                                             comment,
                                         )) => comment.into(),
-                                        _ => String::new().into(),
-                                    },
-                                },
+                                         _ => String::new().into(),
+                                     },
+                                     selected_field: 0,
+                                 },
                              ),
                              crate::db::catalog_mutation::CatalogObjectDefinition::Database(database) => crate::model::catalog_editor::CatalogDraft::Database(crate::model::catalog_editor::DatabaseDraft::from_definition(&database)),
                             crate::db::catalog_mutation::CatalogObjectDefinition::Table(table) => {
@@ -3221,29 +3227,7 @@ impl App {
                 let view_capabilities = self.connection.mutation_capabilities.view_options;
                 if let Some(editor) = self.catalog_editor.as_mut() {
                     let selected = editor.selected_option;
-                    editor.select_option(selected);
-                    if editor.object_type
-                        == Some(CatalogObjectType::Catalog(
-                            crate::db::catalog::CatalogKind::View,
-                        ))
-                    {
-                        if let Some(crate::model::catalog_editor::CatalogDraft::View(draft)) =
-                            editor.draft.as_mut()
-                        {
-                            draft.security_barrier = crate::db::catalog_mutation::ViewOption {
-                                availability: view_capabilities.security_barrier,
-                                value: None,
-                            };
-                            draft.security_invoker = crate::db::catalog_mutation::ViewOption {
-                                availability: view_capabilities.security_invoker,
-                                value: None,
-                            };
-                            draft.check_option = crate::db::catalog_mutation::ViewOption {
-                                availability: view_capabilities.check_option,
-                                value: None,
-                            };
-                        }
-                    }
+                    Self::select_catalog_editor_option(editor, selected, view_capabilities);
                 }
                 Vec::new()
             }
@@ -6676,6 +6660,32 @@ impl App {
             catalog_epoch: profile_state.catalog_epoch,
             options,
         })
+    }
+
+    fn select_catalog_editor_option(
+        editor: &mut CatalogEditorState,
+        selected: usize,
+        view_capabilities: crate::db::catalog_mutation::ViewMutationCapabilities,
+    ) -> bool {
+        if !editor.select_option(selected) {
+            return false;
+        }
+        if let Some(crate::model::catalog_editor::CatalogDraft::View(draft)) = editor.draft.as_mut()
+        {
+            draft.security_barrier = crate::db::catalog_mutation::ViewOption {
+                availability: view_capabilities.security_barrier,
+                value: None,
+            };
+            draft.security_invoker = crate::db::catalog_mutation::ViewOption {
+                availability: view_capabilities.security_invoker,
+                value: None,
+            };
+            draft.check_option = crate::db::catalog_mutation::ViewOption {
+                availability: view_capabilities.check_option,
+                value: None,
+            };
+        }
+        true
     }
 
     fn close_profile_manager(&mut self) {
