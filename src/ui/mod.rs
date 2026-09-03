@@ -3134,77 +3134,259 @@ fn render_overlay(
             render_catalog_mutation_confirm(frame, area, plan, input, theme);
         }
         Overlay::ProfileGroup(group) => {
-            let popup = centered(area, 56, 10);
+            render_profile_group_overlay(frame, area, app, group, state, theme);
+        }
+    }
+}
+
+fn render_profile_group_overlay(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    group: &crate::model::profile_group::ProfileGroupOverlay,
+    state: &mut UiState,
+    theme: Theme,
+) {
+    use crate::model::profile_group::ProfileGroupOverlay;
+
+    match group {
+        ProfileGroupOverlay::Picker { selected, busy, .. } => {
+            let option_count = app.connection_groups.len() + 2;
+            let height = (option_count as u16 + 5).clamp(8, 22);
+            let popup = centered(area, 64, height);
             frame.render_widget(Clear, popup);
-            let text = match group {
-                crate::model::profile_group::ProfileGroupOverlay::Picker { selected, .. } => {
-                    let mut lines = vec!["Connection group".to_owned(), "Ungrouped".to_owned()];
-                    lines.extend(app.connection_groups.iter().map(|group| group.name.clone()));
-                    lines.push("+ Create group...".to_owned());
-                    lines.push(format!(
-                        "Selected: {}  Enter select  Esc cancel",
-                        selected + 1
-                    ));
-                    lines.join("\n")
-                }
-                crate::model::profile_group::ProfileGroupOverlay::Edit { name, error, .. } => {
-                    format!(
-                        "Edit group\nName: {}\n{}\nEnter save  Esc cancel",
-                        name.value(),
-                        error.as_deref().unwrap_or("")
-                    )
-                }
-                crate::model::profile_group::ProfileGroupOverlay::DeleteConfirm {
-                    member_count,
-                    ..
-                } => {
-                    format!(
-                        "Delete group?\n{} connection(s) will be ungrouped.\nEnter delete  Esc cancel",
-                        member_count
-                    )
-                }
-            };
+            let block = panel_block(" SELECT CONNECTION GROUP ", true, theme);
+            let inner = block.inner(popup);
+            frame.render_widget(block, popup);
+
             frame.render_widget(
-                Paragraph::new(text).block(panel_block(" CONNECTION GROUP ", true, theme)),
-                popup,
+                Paragraph::new("ASSIGN CONNECTION").style(
+                    Style::new()
+                        .fg(theme.muted)
+                        .bg(theme.surface)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Rect::new(inner.x, inner.y, inner.width, 1),
             );
-            match group {
-                crate::model::profile_group::ProfileGroupOverlay::Picker { .. } => {
-                    let options = app.connection_groups.len() + 2;
-                    for index in 0..options {
-                        state.hit_regions.push(HitRegion {
-                            area: Rect::new(
-                                popup.x + 1,
-                                popup.y + 2 + index as u16,
-                                popup.width.saturating_sub(2),
-                                1,
-                            ),
-                            target: HitTarget::ProfileGroupOption(index),
-                        });
-                    }
+            let names = std::iter::once("Ungrouped".to_owned())
+                .chain(app.connection_groups.iter().map(|group| group.name.clone()))
+                .chain(std::iter::once("+ Create group...".to_owned()));
+            for (index, name) in names.enumerate() {
+                let row = Rect::new(
+                    inner.x,
+                    inner.y.saturating_add(1 + index as u16),
+                    inner.width,
+                    1,
+                );
+                if row.y >= inner.bottom().saturating_sub(1) {
+                    break;
                 }
-                _ => {
+                let active = index == *selected;
+                frame.render_widget(
+                    Paragraph::new(format!("{} {name}", if active { "›" } else { " " })).style(
+                        Style::new()
+                            .fg(if active { theme.text } else { theme.muted })
+                            .bg(if active {
+                                theme.selection
+                            } else {
+                                theme.surface
+                            })
+                            .add_modifier(if active {
+                                Modifier::BOLD
+                            } else {
+                                Modifier::empty()
+                            }),
+                    ),
+                    row,
+                );
+                if !busy {
                     state.hit_regions.push(HitRegion {
-                        area: Rect::new(
-                            popup.x + 1,
-                            popup.bottom().saturating_sub(2),
-                            popup.width / 2,
-                            1,
-                        ),
-                        target: HitTarget::ProfileGroupConfirm,
-                    });
-                    state.hit_regions.push(HitRegion {
-                        area: Rect::new(
-                            popup.x + popup.width / 2,
-                            popup.bottom().saturating_sub(2),
-                            popup.width / 2,
-                            1,
-                        ),
-                        target: HitTarget::ProfileGroupCancel,
+                        area: row,
+                        target: HitTarget::ProfileGroupOption(index),
                     });
                 }
             }
+            frame.render_widget(
+                Paragraph::new(if *busy {
+                    "Updating group..."
+                } else {
+                    "↑/↓ select   Enter apply   Esc cancel"
+                })
+                .style(Style::new().fg(theme.muted).bg(theme.surface))
+                .alignment(Alignment::Center),
+                Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
+            );
         }
+        ProfileGroupOverlay::Edit {
+            group_id,
+            name,
+            error,
+            busy,
+        } => {
+            let title = if group_id.is_some() {
+                " EDIT CONNECTION GROUP "
+            } else {
+                " NEW CONNECTION GROUP "
+            };
+            let popup = centered(area, 64, 8);
+            frame.render_widget(Clear, popup);
+            let block = panel_block(title, true, theme);
+            let inner = block.inner(popup);
+            frame.render_widget(block, popup);
+
+            frame.render_widget(
+                Paragraph::new(if *busy {
+                    "BUSY // SAVING GROUP"
+                } else {
+                    "GROUP DETAILS"
+                })
+                .style(
+                    Style::new()
+                        .fg(if *busy { theme.warning } else { theme.muted })
+                        .bg(theme.surface)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Rect::new(inner.x, inner.y, inner.width, 1),
+            );
+
+            let field_y = inner.y.saturating_add(2);
+            let label_width = inner.width.min(16);
+            let label_area = Rect::new(inner.x, field_y, label_width, 1);
+            let input_area = Rect::new(
+                inner.x.saturating_add(label_width),
+                field_y,
+                inner.width.saturating_sub(label_width),
+                1,
+            );
+            frame.render_widget(
+                Paragraph::new("› Group name").style(
+                    Style::new()
+                        .fg(theme.action)
+                        .bg(theme.surface)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                label_area,
+            );
+            let input_style = Style::new()
+                .fg(if *busy { theme.muted } else { theme.text })
+                .bg(theme.selection);
+            if *busy {
+                frame.render_widget(Paragraph::new(name.value()).style(input_style), input_area);
+            } else {
+                render_text_input(frame, input_area, "", name, input_style, state);
+            }
+
+            if let Some(error) = error {
+                frame.render_widget(
+                    Paragraph::new(format!("× {}", sanitize_terminal_text(error)))
+                        .style(Style::new().fg(theme.error).bg(theme.surface)),
+                    Rect::new(inner.x, field_y.saturating_add(1), inner.width, 1),
+                );
+            }
+            render_profile_group_actions(
+                frame,
+                Rect::new(inner.x, inner.bottom().saturating_sub(2), inner.width, 1),
+                if *busy { "Saving..." } else { "Save group" },
+                !busy,
+                state,
+                theme,
+            );
+            frame.render_widget(
+                Paragraph::new("Enter save   Esc cancel   Ctrl-W/U/A/E edit")
+                    .style(Style::new().fg(theme.muted).bg(theme.surface))
+                    .alignment(Alignment::Center),
+                Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
+            );
+        }
+        ProfileGroupOverlay::DeleteConfirm {
+            member_count, busy, ..
+        } => {
+            let popup = centered(area, 64, 8);
+            frame.render_widget(Clear, popup);
+            let block = panel_block(" DELETE CONNECTION GROUP ", true, theme);
+            let inner = block.inner(popup);
+            frame.render_widget(block, popup);
+            frame.render_widget(
+                Paragraph::new(format!(
+                    "Delete this group?\n\n{member_count} connection(s) will move to Ungrouped."
+                ))
+                .style(Style::new().fg(theme.text).bg(theme.surface))
+                .alignment(Alignment::Center),
+                Rect::new(
+                    inner.x,
+                    inner.y,
+                    inner.width,
+                    inner.height.saturating_sub(2),
+                ),
+            );
+            render_profile_group_actions(
+                frame,
+                Rect::new(inner.x, inner.bottom().saturating_sub(2), inner.width, 1),
+                if *busy { "Deleting..." } else { "Delete group" },
+                !busy,
+                state,
+                theme,
+            );
+            frame.render_widget(
+                Paragraph::new("Enter delete   Esc cancel")
+                    .style(Style::new().fg(theme.muted).bg(theme.surface))
+                    .alignment(Alignment::Center),
+                Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
+            );
+        }
+    }
+}
+
+fn render_profile_group_actions(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    confirm_label: &str,
+    enabled: bool,
+    state: &mut UiState,
+    theme: Theme,
+) {
+    let confirm = format!("[ {confirm_label} ]");
+    let cancel = "[ Cancel ]";
+    let total_width = confirm.cell_width() + cancel.cell_width() + 1;
+    let x = area
+        .x
+        .saturating_add(area.width.saturating_sub(total_width) / 2);
+    let confirm_area = Rect::new(x, area.y, confirm.cell_width(), 1);
+    let cancel_area = Rect::new(
+        confirm_area.right().saturating_add(1),
+        area.y,
+        cancel.cell_width(),
+        1,
+    );
+    frame.render_widget(
+        Paragraph::new(confirm).style(if enabled {
+            Style::new()
+                .fg(theme.background)
+                .bg(theme.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().fg(theme.muted).bg(theme.surface_raised)
+        }),
+        confirm_area,
+    );
+    frame.render_widget(
+        Paragraph::new(cancel).style(
+            Style::new()
+                .fg(theme.muted)
+                .bg(theme.surface)
+                .add_modifier(Modifier::BOLD),
+        ),
+        cancel_area,
+    );
+    if enabled {
+        state.hit_regions.push(HitRegion {
+            area: confirm_area,
+            target: HitTarget::ProfileGroupConfirm,
+        });
+        state.hit_regions.push(HitRegion {
+            area: cancel_area,
+            target: HitTarget::ProfileGroupCancel,
+        });
     }
 }
 
@@ -3569,7 +3751,8 @@ fn render_help(
         .border_style(Style::new().fg(theme.accent))
         .style(Style::new().bg(theme.surface_raised));
     frame.render_widget(block, popup);
-    let entries = crate::help::filtered_shortcuts(help.context, help.capabilities, &help.query);
+    let entries =
+        crate::help::filtered_shortcuts(help.context, help.capabilities, help.query.value());
     let inner = Block::default().borders(Borders::ALL).inner(popup);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -3580,10 +3763,13 @@ fn render_help(
             Constraint::Length(1),
         ])
         .split(inner);
-    frame.render_widget(
-        Paragraph::new(format!("Search {query}", query = help.query))
-            .style(Style::new().fg(theme.accent).bg(theme.surface_raised)),
+    render_text_input(
+        frame,
         chunks[0],
+        "Search ",
+        &help.query,
+        Style::new().fg(theme.accent).bg(theme.surface_raised),
+        state,
     );
     let visible_height = chunks[2].height as usize;
     let start = if visible_height == 0 {
@@ -3623,17 +3809,10 @@ fn render_help(
         chunks[2],
     );
     frame.render_widget(
-        Paragraph::new("Up/Down select   Enter run   Esc close   Ctrl-u clear")
+        Paragraph::new("Up/Down select   Enter run   Esc close   Ctrl-W/U/A/E edit")
             .style(Style::new().fg(theme.muted).bg(theme.surface_raised)),
         chunks[3],
     );
-    state.cursor_style = Some(CursorStyle::Bar);
-    let cursor_x = chunks[0]
-        .x
-        .saturating_add("Search ".cell_width())
-        .saturating_add(help.query.cell_width())
-        .min(chunks[0].right().saturating_sub(1));
-    frame.set_cursor_position(Position::new(cursor_x, chunks[0].y));
 }
 
 fn render_message(frame: &mut Frame<'_>, area: Rect, title: &str, body: &str, theme: Theme) {

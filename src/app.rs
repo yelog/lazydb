@@ -2668,9 +2668,9 @@ impl App {
                 }
                 Vec::new()
             }
-            Action::HelpInsert(character) => {
+            Action::HelpEdit(edit) => {
                 if let Some(Overlay::Help(help)) = self.overlay.as_mut() {
-                    help.insert(character);
+                    help.edit(edit);
                 }
                 Vec::new()
             }
@@ -2680,24 +2680,12 @@ impl App {
                 }
                 Vec::new()
             }
-            Action::HelpBackspace => {
-                if let Some(Overlay::Help(help)) = self.overlay.as_mut() {
-                    help.backspace();
-                }
-                Vec::new()
-            }
-            Action::HelpClear => {
-                if let Some(Overlay::Help(help)) = self.overlay.as_mut() {
-                    help.clear();
-                }
-                Vec::new()
-            }
             Action::HelpMove(delta) => {
                 if let Some(Overlay::Help(help)) = self.overlay.as_mut() {
                     let count = crate::help::filtered_shortcuts(
                         help.context,
                         help.capabilities,
-                        &help.query,
+                        help.query.value(),
                     )
                     .len();
                     help.move_selection(delta, count);
@@ -4472,8 +4460,7 @@ impl App {
             }
             Action::ProfileGroupMove(delta) => self.move_profile_group(delta),
             Action::ProfileGroupSelect(index) => self.select_profile_group(index),
-            Action::ProfileGroupInsert(character) => self.profile_group_insert(character),
-            Action::ProfileGroupBackspace => self.profile_group_backspace(),
+            Action::ProfileGroupEdit(edit) => self.profile_group_edit(edit),
             Action::ProfileGroupConfirm => self.confirm_profile_group(),
             Action::ProfileGroupCancel => {
                 self.overlay = None;
@@ -9486,22 +9473,15 @@ impl App {
         Vec::new()
     }
 
-    fn profile_group_insert(&mut self, character: char) -> Vec<Command> {
+    fn profile_group_edit(
+        &mut self,
+        edit: crate::model::text_input::TextInputEdit,
+    ) -> Vec<Command> {
         if let Some(Overlay::ProfileGroup(
             crate::model::profile_group::ProfileGroupOverlay::Edit { name, .. },
         )) = self.overlay.as_mut()
         {
-            name.insert(character);
-        }
-        Vec::new()
-    }
-
-    fn profile_group_backspace(&mut self) -> Vec<Command> {
-        if let Some(Overlay::ProfileGroup(
-            crate::model::profile_group::ProfileGroupOverlay::Edit { name, .. },
-        )) = self.overlay.as_mut()
-        {
-            name.backspace();
+            name.apply(edit);
         }
         Vec::new()
     }

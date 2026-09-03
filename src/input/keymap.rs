@@ -10,6 +10,7 @@ use crate::{
         editor::EditorMode,
         explorer::ExplorerNodeId,
         profile_manager::{ProfileField, ProfileInput, ProfileManagerPage},
+        text_input::TextInputEdit,
         workspace::{Focus, Overlay},
     },
 };
@@ -50,19 +51,6 @@ struct PendingState {
     record_view_active: bool,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum TextInputEdit {
-    Insert(char),
-    Backspace,
-    DeletePreviousWord,
-    DeleteToStart,
-    Delete,
-    MoveLeft,
-    MoveRight,
-    MoveHome,
-    MoveEnd,
-}
-
 #[derive(Debug, Default)]
 pub struct Keymap {
     pending: Option<PendingState>,
@@ -98,19 +86,17 @@ impl Keymap {
             .is_some_and(|overlay| matches!(overlay, Overlay::Help(_)))
         {
             self.pending = None;
+            if let Some(edit) = map_single_line_text_input_edit(event) {
+                return Some(Action::HelpEdit(edit));
+            }
             if event.modifiers == KeyModifiers::NONE {
                 return match event.code {
-                    KeyCode::Char(character) => Some(Action::HelpInsert(character)),
-                    KeyCode::Backspace => Some(Action::HelpBackspace),
                     KeyCode::Up => Some(Action::HelpMove(-1)),
                     KeyCode::Down => Some(Action::HelpMove(1)),
                     KeyCode::Enter => app.help_selected_id().map(Action::ExecuteHelpShortcut),
                     KeyCode::Esc => Some(Action::DismissOverlay),
                     _ => None,
                 };
-            }
-            if event.modifiers == KeyModifiers::CONTROL && event.code == KeyCode::Char('u') {
-                return Some(Action::HelpClear);
             }
             return None;
         }
@@ -147,13 +133,13 @@ impl Keymap {
                     KeyCode::Down | KeyCode::Char('j') => Some(Action::ProfileGroupMove(1)),
                     _ => None,
                 },
-                crate::model::profile_group::ProfileGroupOverlay::Edit { .. } => match event.code {
-                    KeyCode::Enter => Some(Action::ProfileGroupConfirm),
-                    KeyCode::Esc => Some(Action::ProfileGroupCancel),
-                    KeyCode::Backspace => Some(Action::ProfileGroupBackspace),
-                    KeyCode::Char(character) => Some(Action::ProfileGroupInsert(character)),
-                    _ => None,
-                },
+                crate::model::profile_group::ProfileGroupOverlay::Edit { .. } => {
+                    match (event.modifiers, event.code) {
+                        (KeyModifiers::NONE, KeyCode::Enter) => Some(Action::ProfileGroupConfirm),
+                        (KeyModifiers::NONE, KeyCode::Esc) => Some(Action::ProfileGroupCancel),
+                        _ => map_single_line_text_input_edit(event).map(Action::ProfileGroupEdit),
+                    }
+                }
                 crate::model::profile_group::ProfileGroupOverlay::DeleteConfirm { .. } => {
                     match event.code {
                         KeyCode::Enter | KeyCode::Char('y') => Some(Action::ProfileGroupConfirm),
@@ -1066,6 +1052,7 @@ impl Keymap {
                             Action::DashboardProcessFilterDeletePreviousWord
                         }
                         TextInputEdit::DeleteToStart => Action::DashboardProcessFilterDeleteToStart,
+                        TextInputEdit::Clear => Action::DashboardProcessFilterDeleteToStart,
                         TextInputEdit::Delete => Action::DashboardProcessFilterDelete,
                         TextInputEdit::MoveLeft => Action::DashboardProcessFilterMoveLeft,
                         TextInputEdit::MoveRight => Action::DashboardProcessFilterMoveRight,
@@ -1589,6 +1576,7 @@ fn map_relation_data(event: KeyEvent, app: &App) -> Option<Action> {
                 TextInputEdit::Backspace => Action::RelationEditBackspace,
                 TextInputEdit::DeletePreviousWord => Action::RelationEditDeletePreviousWord,
                 TextInputEdit::DeleteToStart => Action::RelationEditDeleteToStart,
+                TextInputEdit::Clear => Action::RelationEditDeleteToStart,
                 TextInputEdit::Delete => Action::RelationEditDelete,
                 TextInputEdit::MoveLeft => Action::RelationEditMoveLeft,
                 TextInputEdit::MoveRight => Action::RelationEditMoveRight,
@@ -1644,6 +1632,8 @@ fn map_text_input_edit(event: KeyEvent) -> Option<TextInputEdit> {
         return match event.code {
             KeyCode::Char('w') => Some(TextInputEdit::DeletePreviousWord),
             KeyCode::Char('u') => Some(TextInputEdit::DeleteToStart),
+            KeyCode::Char('a') => Some(TextInputEdit::MoveHome),
+            KeyCode::Char('e') => Some(TextInputEdit::MoveEnd),
             KeyCode::Char('h') => Some(TextInputEdit::Backspace),
             _ => None,
         };
@@ -1661,6 +1651,13 @@ fn map_text_input_edit(event: KeyEvent) -> Option<TextInputEdit> {
         KeyCode::Char(character) => Some(TextInputEdit::Insert(character)),
         _ => None,
     }
+}
+
+fn map_single_line_text_input_edit(event: KeyEvent) -> Option<TextInputEdit> {
+    map_text_input_edit(event).map(|edit| match edit {
+        TextInputEdit::DeleteToStart => TextInputEdit::Clear,
+        edit => edit,
+    })
 }
 
 fn map_profile_manager(event: KeyEvent, app: &App) -> Option<Action> {
@@ -2112,6 +2109,7 @@ fn map_data_query(event: KeyEvent, app: &App) -> Option<Action> {
                 TextInputEdit::Backspace => Action::DataQueryBackspace,
                 TextInputEdit::DeletePreviousWord => Action::DataQueryDeletePreviousWord,
                 TextInputEdit::DeleteToStart => Action::DataQueryDeleteToStart,
+                TextInputEdit::Clear => Action::DataQueryDeleteToStart,
                 TextInputEdit::Delete => Action::DataQueryDelete,
                 TextInputEdit::MoveLeft => Action::DataQueryMoveLeft,
                 TextInputEdit::MoveRight => Action::DataQueryMoveRight,

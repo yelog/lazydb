@@ -1,3 +1,4 @@
+use crate::model::text_input::{TextInput, TextInputEdit};
 use crate::{
     app::App,
     model::{
@@ -2746,7 +2747,7 @@ pub(crate) fn context_name(context: ShortcutContext) -> &'static str {
 pub struct HelpState {
     pub(crate) context: ShortcutContext,
     pub(crate) capabilities: ShortcutCapabilities,
-    pub(crate) query: String,
+    pub(crate) query: TextInput,
     pub(crate) selected: usize,
 }
 
@@ -2755,17 +2756,17 @@ impl HelpState {
         Self {
             context,
             capabilities,
-            query: String::new(),
+            query: TextInput::default(),
             selected: 0,
         }
     }
-    pub(crate) fn insert(&mut self, character: char) {
-        self.query.push(character);
+    pub(crate) fn edit(&mut self, edit: TextInputEdit) {
+        self.query.apply(edit);
         self.selected = 0;
     }
     pub(crate) fn paste(&mut self, value: &str) {
-        self.query.push_str(
-            &value
+        self.query.paste(
+            value
                 .chars()
                 .map(|character| match character {
                     '\r' | '\n' | '\t' => ' ',
@@ -2773,14 +2774,6 @@ impl HelpState {
                 })
                 .collect::<String>(),
         );
-        self.selected = 0;
-    }
-    pub(crate) fn backspace(&mut self) {
-        self.query.pop();
-        self.selected = 0;
-    }
-    pub(crate) fn clear(&mut self) {
-        self.query.clear();
         self.selected = 0;
     }
     pub(crate) fn move_selection(&mut self, delta: isize, count: usize) {
@@ -2797,7 +2790,7 @@ impl HelpState {
         };
     }
     pub(crate) fn selected_id(&self) -> Option<HelpShortcutId> {
-        filtered_shortcuts(self.context, self.capabilities, &self.query)
+        filtered_shortcuts(self.context, self.capabilities, self.query.value())
             .get(self.selected)
             .map(|shortcut| shortcut.id)
     }
@@ -2817,6 +2810,27 @@ mod tests {
     };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use std::collections::HashSet;
+
+    #[test]
+    fn help_search_applies_shared_cursor_and_deletion_edits() {
+        let mut help = HelpState::new(ShortcutContext::Explorer, ShortcutCapabilities::default());
+        help.paste("alpha beta");
+
+        help.edit(TextInputEdit::MoveHome);
+        help.edit(TextInputEdit::MoveRight);
+        help.edit(TextInputEdit::Insert('-'));
+        help.edit(TextInputEdit::MoveEnd);
+        help.edit(TextInputEdit::DeletePreviousWord);
+
+        assert_eq!(help.query.value(), "a-lpha ");
+        assert_eq!(help.query.cursor(), 7);
+
+        help.edit(TextInputEdit::MoveHome);
+        help.edit(TextInputEdit::MoveRight);
+        help.edit(TextInputEdit::Clear);
+        assert_eq!(help.query.value(), "");
+        assert_eq!(help.query.cursor(), 0);
+    }
 
     #[test]
     fn catalog_is_single_complete_globally_unique_declaration() {
@@ -3099,7 +3113,7 @@ mod tests {
     fn filtering_and_non_first_selection_use_stable_ids() {
         let mut help = HelpState::new(ShortcutContext::Explorer, ShortcutCapabilities::default());
         help.paste("move selection");
-        let rows = filtered_shortcuts(help.context, help.capabilities, &help.query);
+        let rows = filtered_shortcuts(help.context, help.capabilities, help.query.value());
         assert!(rows.len() > 1);
         help.move_selection(1, rows.len());
         assert_eq!(help.selected_id(), Some(HelpShortcutId::ExplorerMoveUp));

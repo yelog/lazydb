@@ -1,3 +1,17 @@
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TextInputEdit {
+    Insert(char),
+    Backspace,
+    DeletePreviousWord,
+    DeleteToStart,
+    Clear,
+    Delete,
+    MoveLeft,
+    MoveRight,
+    MoveHome,
+    MoveEnd,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TextInput {
     value: String,
@@ -5,6 +19,21 @@ pub struct TextInput {
 }
 
 impl TextInput {
+    pub fn apply(&mut self, edit: TextInputEdit) {
+        match edit {
+            TextInputEdit::Insert(character) => self.insert(character),
+            TextInputEdit::Backspace => self.backspace(),
+            TextInputEdit::DeletePreviousWord => self.delete_previous_word(),
+            TextInputEdit::DeleteToStart => self.delete_to_start(),
+            TextInputEdit::Clear => self.set(""),
+            TextInputEdit::Delete => self.delete(),
+            TextInputEdit::MoveLeft => self.move_left(),
+            TextInputEdit::MoveRight => self.move_right(),
+            TextInputEdit::MoveHome => self.move_home(),
+            TextInputEdit::MoveEnd => self.move_end(),
+        }
+    }
+
     pub fn value(&self) -> &str {
         &self.value
     }
@@ -129,7 +158,21 @@ impl From<String> for TextInput {
 
 #[cfg(test)]
 mod tests {
-    use super::TextInput;
+    use super::{TextInput, TextInputEdit};
+
+    #[test]
+    fn applies_shared_edit_commands() {
+        let mut input = TextInput::from("alpha beta");
+
+        input.apply(TextInputEdit::MoveHome);
+        input.apply(TextInputEdit::MoveRight);
+        input.apply(TextInputEdit::Insert('-'));
+        input.apply(TextInputEdit::MoveEnd);
+        input.apply(TextInputEdit::DeletePreviousWord);
+
+        assert_eq!(input.value(), "a-lpha ");
+        assert_eq!(input.cursor(), 7);
+    }
 
     #[test]
     fn deletes_previous_word_and_leading_whitespace() {

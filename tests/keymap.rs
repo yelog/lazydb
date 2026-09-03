@@ -1,4 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use lazydb::model::text_input::TextInputEdit;
 use lazydb::{
     action::Action,
     app::App,
@@ -300,16 +301,25 @@ fn help_overlay_owns_text_selection_and_execution_keys() {
 
     assert_eq!(
         keymap.map(key(KeyCode::Char('q')), &app),
-        Some(Action::HelpInsert('q'))
+        Some(Action::HelpEdit(TextInputEdit::Insert('q')))
     );
-    app.update(Action::HelpInsert('q'));
+    app.update(Action::HelpEdit(TextInputEdit::Insert('q')));
     assert_eq!(
         keymap.map(key(KeyCode::Backspace), &app),
-        Some(Action::HelpBackspace)
+        Some(Action::HelpEdit(TextInputEdit::Backspace))
     );
-    app.update(Action::HelpBackspace);
-    assert_eq!(keymap.map(ctrl('u'), &app), Some(Action::HelpClear));
-    app.update(Action::HelpClear);
+    app.update(Action::HelpEdit(TextInputEdit::Backspace));
+    for (character, edit) in [
+        ('w', TextInputEdit::DeletePreviousWord),
+        ('u', TextInputEdit::Clear),
+        ('a', TextInputEdit::MoveHome),
+        ('e', TextInputEdit::MoveEnd),
+    ] {
+        assert_eq!(
+            keymap.map(ctrl(character), &app),
+            Some(Action::HelpEdit(edit))
+        );
+    }
     assert_eq!(
         keymap.map(key(KeyCode::Down), &app),
         Some(Action::HelpMove(1))
@@ -1629,12 +1639,23 @@ fn profile_group_editor_routes_j_and_k_to_group_name_input() {
 
     assert_eq!(
         keymap.map(key(KeyCode::Char('j')), &app),
-        Some(Action::ProfileGroupInsert('j'))
+        Some(Action::ProfileGroupEdit(TextInputEdit::Insert('j')))
     );
     assert_eq!(
         keymap.map(key(KeyCode::Char('k')), &app),
-        Some(Action::ProfileGroupInsert('k'))
+        Some(Action::ProfileGroupEdit(TextInputEdit::Insert('k')))
     );
+    for (character, edit) in [
+        ('w', TextInputEdit::DeletePreviousWord),
+        ('u', TextInputEdit::Clear),
+        ('a', TextInputEdit::MoveHome),
+        ('e', TextInputEdit::MoveEnd),
+    ] {
+        assert_eq!(
+            keymap.map(ctrl(character), &app),
+            Some(Action::ProfileGroupEdit(edit))
+        );
+    }
 }
 
 #[test]
@@ -1914,11 +1935,11 @@ fn profile_form_overlay_routes_before_generic_dismissal() {
     )));
     assert_eq!(
         keymap.map(key(KeyCode::Char('?')), &app),
-        Some(Action::HelpInsert('?'))
+        Some(Action::HelpEdit(TextInputEdit::Insert('?')))
     );
     assert_eq!(
         keymap.map(key(KeyCode::Char('q')), &app),
-        Some(Action::HelpInsert('q'))
+        Some(Action::HelpEdit(TextInputEdit::Insert('q')))
     );
     assert_eq!(
         keymap.map(

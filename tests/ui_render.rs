@@ -1036,14 +1036,47 @@ fn profile_group_overlay_renders_options_and_editor_content() {
         busy: false,
     }));
     let (editor, editor_state) = render_with_state(&app, 80, 30);
+    assert!(editor.contains("NEW CONNECTION GROUP"), "{editor}");
+    assert!(editor.contains("GROUP DETAILS"), "{editor}");
     assert!(editor.contains("Production"));
     assert!(editor.contains("duplicate"));
+    assert!(editor.contains("[ Save group ]"), "{editor}");
+    assert!(editor.contains("[ Cancel ]"), "{editor}");
+    assert!(editor_state.cursor_style.is_some(), "{editor}");
     assert!(
         editor_state
             .hit_regions
             .iter()
             .any(|region| region.target == HitTarget::ProfileGroupConfirm)
     );
+    assert!(
+        editor_state
+            .hit_regions
+            .iter()
+            .any(|region| region.target == HitTarget::ProfileGroupCancel)
+    );
+}
+
+#[test]
+fn busy_profile_group_editor_disables_actions_and_cursor() {
+    let mut app = App::new(Vec::new());
+    app.overlay = Some(Overlay::ProfileGroup(ProfileGroupOverlay::Edit {
+        group_id: Some(uuid::Uuid::from_u128(1)),
+        name: "Production".into(),
+        error: None,
+        busy: true,
+    }));
+
+    let (editor, state) = render_with_state(&app, 80, 24);
+
+    assert!(editor.contains("EDIT CONNECTION GROUP"), "{editor}");
+    assert!(editor.contains("BUSY // SAVING GROUP"), "{editor}");
+    assert!(editor.contains("[ Saving... ]"), "{editor}");
+    assert!(state.cursor_style.is_none(), "{editor}");
+    assert!(!state.hit_regions.iter().any(|region| matches!(
+        region.target,
+        HitTarget::ProfileGroupConfirm | HitTarget::ProfileGroupCancel
+    )));
 }
 
 fn record_view_field_background(app: &App, field: &str) -> Color {
