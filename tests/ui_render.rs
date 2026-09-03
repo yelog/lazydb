@@ -750,21 +750,27 @@ fn dashboard_maximize_hides_explorer_when_results_are_focused() {
     app.focus = Focus::Results;
 
     let (_, normal) = render_with_state(&app, 160, 40);
-    assert!(normal
-        .hit_regions
-        .iter()
-        .any(|region| region.target == HitTarget::Focus(Focus::Explorer)));
+    assert!(
+        normal
+            .hit_regions
+            .iter()
+            .any(|region| region.target == HitTarget::Focus(Focus::Explorer))
+    );
 
     app.update(Action::TogglePaneMaximized);
     let (_, maximized) = render_with_state(&app, 160, 40);
-    assert!(!maximized
-        .hit_regions
-        .iter()
-        .any(|region| region.target == HitTarget::Focus(Focus::Explorer)));
-    assert!(maximized
-        .hit_regions
-        .iter()
-        .any(|region| region.target == HitTarget::Focus(Focus::Results)));
+    assert!(
+        !maximized
+            .hit_regions
+            .iter()
+            .any(|region| region.target == HitTarget::Focus(Focus::Explorer))
+    );
+    assert!(
+        maximized
+            .hit_regions
+            .iter()
+            .any(|region| region.target == HitTarget::Focus(Focus::Results))
+    );
 }
 
 #[test]
