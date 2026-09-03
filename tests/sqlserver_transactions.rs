@@ -95,6 +95,7 @@ async fn sql_server_transactions_cover_isolation_commit_rollback_ddl_disconnect_
         .execute(&format!("INSERT INTO {table} ([id]) VALUES (3)"))
         .await
         .unwrap();
+    transaction.rollback().await.unwrap();
     transaction.force_close().await.unwrap();
     let after_disconnect = database
         .execute(&format!("SELECT COUNT(*) FROM {table}"))
