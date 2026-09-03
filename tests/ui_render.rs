@@ -670,6 +670,76 @@ fn workspace_tab_viewport_recalculates_after_resize() {
 }
 
 #[test]
+fn pane_maximize_hides_other_pane_hit_targets_and_restores_them() {
+    let mut app = fixture();
+    app.focus = Focus::Editor;
+    let mut terminal = Terminal::new(TestBackend::new(160, 40)).unwrap();
+    let mut state = UiState::new();
+
+    terminal
+        .draw(|frame| ui::render_with_state(frame, &app, &mut state))
+        .unwrap();
+    assert!(
+        state
+            .hit_regions
+            .iter()
+            .any(|region| region.target == HitTarget::Focus(Focus::Explorer))
+    );
+    assert!(
+        state
+            .hit_regions
+            .iter()
+            .any(|region| region.target == HitTarget::Focus(Focus::Editor))
+    );
+    assert!(
+        state
+            .hit_regions
+            .iter()
+            .any(|region| region.target == HitTarget::Focus(Focus::Results))
+    );
+
+    app.update(Action::TogglePaneMaximized);
+    terminal
+        .draw(|frame| ui::render_with_state(frame, &app, &mut state))
+        .unwrap();
+    assert!(
+        !state
+            .hit_regions
+            .iter()
+            .any(|region| region.target == HitTarget::Focus(Focus::Explorer))
+    );
+    assert!(
+        state
+            .hit_regions
+            .iter()
+            .any(|region| region.target == HitTarget::Focus(Focus::Editor))
+    );
+    assert!(
+        !state
+            .hit_regions
+            .iter()
+            .any(|region| region.target == HitTarget::Focus(Focus::Results))
+    );
+
+    app.update(Action::TogglePaneMaximized);
+    terminal
+        .draw(|frame| ui::render_with_state(frame, &app, &mut state))
+        .unwrap();
+    assert!(
+        state
+            .hit_regions
+            .iter()
+            .any(|region| region.target == HitTarget::Focus(Focus::Explorer))
+    );
+    assert!(
+        state
+            .hit_regions
+            .iter()
+            .any(|region| region.target == HitTarget::Focus(Focus::Results))
+    );
+}
+
+#[test]
 fn offline_profiles_render_as_collapsed_even_when_expansion_is_pending() {
     let profile = import_connection_url(":memory:", Some("offline-profile"))
         .unwrap()
