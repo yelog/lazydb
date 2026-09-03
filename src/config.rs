@@ -36,6 +36,20 @@ const SUPPORTED_COMMANDS: &[&str] = &[
     "focus-pane-right",
     "toggle-pane-maximized",
     "reset-pane-sizes",
+    "explorer-move-down",
+    "explorer-move-up",
+    "explorer-expand",
+    "explorer-collapse",
+    "results-move-left",
+    "results-move-down",
+    "results-move-up",
+    "results-move-right",
+    "explorer-copy-selection",
+    "explorer-find",
+    "explorer-search",
+    "explorer-new-profile",
+    "explorer-refresh",
+    "explorer-toggle",
 ];
 
 #[derive(Debug, Error)]
@@ -202,9 +216,10 @@ impl KeybindingConfig {
         let entries = commands.iter().collect::<Vec<_>>();
         for (index, (first_command, first_sequences)) in entries.iter().enumerate() {
             for (second_command, second_sequences) in entries.iter().skip(index + 1) {
-                if first_sequences
-                    .iter()
-                    .any(|first| second_sequences.iter().any(|second| first == second))
+                if commands_share_context(first_command, second_command)
+                    && first_sequences
+                        .iter()
+                        .any(|first| second_sequences.iter().any(|second| first == second))
                 {
                     let key = self
                         .commands
@@ -225,6 +240,19 @@ impl KeybindingConfig {
             display: self.commands.clone(),
         })
     }
+}
+
+fn commands_share_context(first: &str, second: &str) -> bool {
+    let context = |command: &str| {
+        if command.starts_with("explorer-") {
+            Some("explorer")
+        } else if command.starts_with("results-") {
+            Some("results")
+        } else {
+            None
+        }
+    };
+    context(first) == context(second)
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
@@ -551,6 +579,14 @@ mod tests {
                 KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE),
             ]
         ));
+        assert!(bindings.matches(
+            "explorer-move-down",
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)
+        ));
+        assert!(bindings.matches(
+            "results-move-right",
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)
+        ));
         assert!(bindings.matches_sequence(
             "open-dashboard",
             &[
@@ -586,5 +622,32 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(error, ConfigError::ConflictingKeybindings { .. }));
+    }
+
+    #[test]
+    fn bindings_in_different_contexts_may_reuse_a_key() {
+        let config = AppConfig::from_toml(
+            r#"
+            version = 1
+            [terminal]
+            mouse = "auto"
+            color = "auto"
+            [ui]
+            icons = "nerd-font"
+            motion = "full"
+            [execution]
+            confirmation = "risky"
+            [dashboard]
+            refresh_interval_seconds = 5
+            [keybindings]
+            preset = "vim"
+            sequence_timeout_ms = 750
+            [keybindings.commands]
+            explorer-move-down = ["j"]
+            results-move-down = ["j"]
+            "#,
+        );
+
+        assert!(config.is_ok());
     }
 }

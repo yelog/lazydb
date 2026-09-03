@@ -13,6 +13,10 @@ per-command rebinding. The global command bindings listed in
 events or space-separated key sequences. `keybindings.sequence_timeout_ms`
 configures the timeout for adjacent-key sequences used by this preset.
 
+The navigation commands for Explorer and SQL Results are also configurable.
+Their default `j/k/h/l` bindings are scoped to their respective context, so
+the same key can safely mean different movements in different views.
+
 The configurable Leader commands currently include `Space b` (Dashboard),
 `Space c` (Explorer), `Space s` (console manager), `Space r/R` (run the current
 statement or complete buffer), and `Space d` (execution target selector).

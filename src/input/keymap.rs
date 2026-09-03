@@ -1240,6 +1240,9 @@ impl Keymap {
                 event,
             });
         }
+        if let Some(action) = map_configured_navigation(event, app, &self.bindings) {
+            return Some(action);
+        }
         match app.focus {
             Focus::Explorer => map_explorer(event.code, app),
             Focus::Editor => None,
@@ -1329,6 +1332,72 @@ impl Keymap {
         self.pending = None;
         was_visible
     }
+}
+
+fn map_configured_navigation(
+    event: KeyEvent,
+    app: &App,
+    bindings: &crate::config::KeyBindings,
+) -> Option<Action> {
+    if app.focus == Focus::Explorer {
+        if bindings.matches("explorer-copy-selection", event) {
+            return Some(Action::CopyExplorerSelection);
+        }
+        if bindings.matches("explorer-find", event) {
+            return Some(Action::ExplorerFindOpen);
+        }
+        if bindings.matches("explorer-search", event) {
+            return Some(Action::ExplorerSearchOpen);
+        }
+        if bindings.matches("explorer-new-profile", event) {
+            return Some(Action::ProfileStartNew);
+        }
+        if bindings.matches("explorer-refresh", event) {
+            return Some(Action::ExplorerRefresh);
+        }
+        if bindings.matches("explorer-toggle", event) {
+            return Some(Action::ExplorerToggle);
+        }
+        if bindings.matches("explorer-move-down", event) {
+            return Some(Action::ExplorerMove(1));
+        }
+        if bindings.matches("explorer-move-up", event) {
+            return Some(Action::ExplorerMove(-1));
+        }
+        if bindings.matches("explorer-expand", event) {
+            return Some(Action::ExplorerExpand);
+        }
+        if bindings.matches("explorer-collapse", event) {
+            return Some(Action::ExplorerCollapse);
+        }
+    }
+    if app.focus == Focus::Results {
+        if bindings.matches("results-move-left", event) {
+            return Some(Action::GridMove {
+                rows: 0,
+                columns: -1,
+            });
+        }
+        if bindings.matches("results-move-down", event) {
+            return Some(Action::GridMove {
+                rows: 1,
+                columns: 0,
+            });
+        }
+        if bindings.matches("results-move-up", event) {
+            return Some(Action::GridMove {
+                rows: -1,
+                columns: 0,
+            });
+        }
+        if bindings.matches("results-move-right", event) {
+            return Some(Action::GridMove {
+                rows: 0,
+                columns: 1,
+            });
+        }
+    }
+    None
 }
 
 fn map_catalog_editor(event: KeyEvent, app: &App) -> Option<Action> {
@@ -2073,8 +2142,8 @@ fn map_explorer(code: KeyCode, app: &App) -> Option<Action> {
         _ => {}
     }
     match code {
-        KeyCode::Char('j') | KeyCode::Down => Some(Action::ExplorerMove(1)),
-        KeyCode::Char('k') | KeyCode::Up => Some(Action::ExplorerMove(-1)),
+        KeyCode::Down => Some(Action::ExplorerMove(1)),
+        KeyCode::Up => Some(Action::ExplorerMove(-1)),
         KeyCode::Char('J') => Some(Action::ProfileGroupMove(1)),
         KeyCode::Char('K') => Some(Action::ProfileGroupMove(-1)),
         KeyCode::Char('G') => Some(Action::ExplorerSelectTarget(
@@ -2089,8 +2158,8 @@ fn map_explorer(code: KeyCode, app: &App) -> Option<Action> {
         KeyCode::Char('L') => Some(Action::ExplorerSelectTarget(
             crate::model::explorer::ExplorerNodeTarget::ViewBottom,
         )),
-        KeyCode::Char('l') | KeyCode::Right => Some(Action::ExplorerExpand),
-        KeyCode::Char('h') | KeyCode::Left => Some(Action::ExplorerCollapse),
+        KeyCode::Right => Some(Action::ExplorerExpand),
+        KeyCode::Left => Some(Action::ExplorerCollapse),
         KeyCode::Enter => Some(Action::ExplorerOpenSelected),
         KeyCode::Char('o') => Some(Action::ExplorerToggle),
         KeyCode::Char('r') => Some(Action::ExplorerRefresh),
@@ -2143,19 +2212,19 @@ fn map_results(code: KeyCode, app: &App) -> Option<Action> {
         {
             Some(Action::OpenRecordView)
         }
-        KeyCode::Char('h') | KeyCode::Left => Some(Action::GridMove {
+        KeyCode::Left => Some(Action::GridMove {
             rows: 0,
             columns: -1,
         }),
-        KeyCode::Char('j') | KeyCode::Down => Some(Action::GridMove {
+        KeyCode::Down => Some(Action::GridMove {
             rows: 1,
             columns: 0,
         }),
-        KeyCode::Char('k') | KeyCode::Up => Some(Action::GridMove {
+        KeyCode::Up => Some(Action::GridMove {
             rows: -1,
             columns: 0,
         }),
-        KeyCode::Char('l') | KeyCode::Right => Some(Action::GridMove {
+        KeyCode::Right => Some(Action::GridMove {
             rows: 0,
             columns: 1,
         }),

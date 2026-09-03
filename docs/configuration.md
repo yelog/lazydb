@@ -102,6 +102,15 @@ or `g t`; empty lists unbind a command. The current Leader commands are
 `run-leader-buffer`, and `open-target-selector`.
 The pane commands are `focus-pane-left`, `focus-pane-down`, `focus-pane-up`,
 `focus-pane-right`, `toggle-pane-maximized`, and `reset-pane-sizes`.
+The Explorer navigation commands are `explorer-move-down`, `explorer-move-up`,
+`explorer-expand`, and `explorer-collapse`. The SQL Results grid commands are
+`results-move-left`, `results-move-down`, `results-move-up`, and
+`results-move-right`.
+The remaining basic Explorer commands currently configurable are
+`explorer-copy-selection`, `explorer-find`, `explorer-search`,
+`explorer-new-profile`, `explorer-refresh`, and `explorer-toggle`.
+The Results navigation commands are `results-move-left`, `results-move-down`,
+`results-move-up`, and `results-move-right`.
 A key sequence remains active for 750 milliseconds by default, and
 `sequence_timeout_ms` must be at least `1`.
 
