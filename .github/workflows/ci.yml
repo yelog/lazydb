@@ -85,4 +85,11 @@ jobs:
         with: { persist-credentials: false }
       - run: rustup toolchain install 1.94.0 --profile minimal --no-self-update
       - run: rustup default 1.94.0
-      - run: cargo test --locked --test postgres_adapter --test mysql_adapter --test sqlserver_adapter --test sqlserver_transactions -- --nocapture --test-threads=1
+      - name: PostgreSQL adapter tests
+        run: timeout 10m cargo test --locked --test postgres_adapter -- --nocapture --test-threads=1
+      - name: MySQL adapter tests
+        run: timeout 10m cargo test --locked --test mysql_adapter -- --nocapture --test-threads=1
+      - name: SQL Server adapter tests
+        run: timeout 10m cargo test --locked --test sqlserver_adapter -- --nocapture --test-threads=1
+      - name: SQL Server transaction tests
+        run: timeout 10m cargo test --locked --test sqlserver_transactions -- --nocapture --test-threads=1
