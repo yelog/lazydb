@@ -512,7 +512,7 @@ fn explorer_catalog_shortcuts_are_not_advertised_for_synthetic_rows() {
     let mut keymap = Keymap::default();
     assert_eq!(
         keymap.map(key(KeyCode::Char('a')), &app),
-        Some(Action::ProfileGroupCreate)
+        Some(Action::OpenExplorerAdd)
     );
     assert_eq!(
         keymap.map(key(KeyCode::Char('e')), &app),
@@ -1722,8 +1722,49 @@ fn explorer_a_on_a_profile_opens_connection_group_creation() {
 
     assert_eq!(
         keymap.map(key(KeyCode::Char('a')), &app),
-        Some(Action::ProfileGroupCreate)
+        Some(Action::OpenExplorerAdd)
     );
+}
+
+#[test]
+fn explorer_add_overlay_owns_navigation_and_cancel_keys() {
+    let profile = lazydb::profile::import_connection_url(":memory:", Some("test"))
+        .unwrap()
+        .profile;
+    let mut app = App::new(vec![profile]);
+    app.focus = Focus::Explorer;
+    app.update(Action::OpenExplorerAdd);
+    let mut keymap = Keymap::default();
+
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('j')), &app),
+        Some(Action::ExplorerAddMove(1))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Down), &app),
+        Some(Action::ExplorerAddMove(1))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('k')), &app),
+        Some(Action::ExplorerAddMove(-1))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Up), &app),
+        Some(Action::ExplorerAddMove(-1))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Enter), &app),
+        Some(Action::ExplorerAddConfirm)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Esc), &app),
+        Some(Action::ExplorerAddCancel)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('q')), &app),
+        Some(Action::ExplorerAddCancel)
+    );
+    assert_eq!(keymap.map(key(KeyCode::Char('a')), &app), None);
 }
 
 #[test]

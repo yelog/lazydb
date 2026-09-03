@@ -282,6 +282,62 @@ fn catalog_editor_overlay_renders_picker_shell_and_context() {
 }
 
 #[test]
+fn explorer_add_overlay_renders_all_connection_actions() {
+    let profile = import_connection_url(":memory:", Some("local"))
+        .unwrap()
+        .profile;
+    let profile_id = profile.id;
+    let mut app = App::new(vec![profile]);
+    app.focus = Focus::Explorer;
+    app.explorer.normalized.selected = Some(ExplorerNodeId::Profile(profile_id));
+    app.update(Action::OpenExplorerAdd);
+
+    let output = render(&app, 80, 24);
+    assert!(output.contains("ADD TO CONNECTION"), "{output}");
+    assert!(output.contains("local"), "{output}");
+    assert!(output.contains("Connection"), "{output}");
+    assert!(output.contains("Connection Group"), "{output}");
+    assert!(output.contains("Database"), "{output}");
+    assert!(output.contains("User"), "{output}");
+    assert!(output.contains("Role"), "{output}");
+    assert!(output.contains("j/k"), "{output}");
+    assert!(output.contains("Enter"), "{output}");
+    assert!(output.contains("Esc"), "{output}");
+    assert!(output.contains("PostgreSQL only"), "{output}");
+}
+
+#[test]
+fn explorer_add_overlay_uses_ascii_icons() {
+    let profile = import_connection_url(":memory:", Some("local"))
+        .unwrap()
+        .profile;
+    let profile_id = profile.id;
+    let mut app = App::new(vec![profile]);
+    app.focus = Focus::Explorer;
+    app.explorer.normalized.selected = Some(ExplorerNodeId::Profile(profile_id));
+    app.update(Action::OpenExplorerAdd);
+    let mut state = UiState::new();
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| {
+            ui::render_with_state_using_icons(
+                frame,
+                &app,
+                &mut state,
+                IconSet::new(IconMode::Ascii),
+            )
+        })
+        .unwrap();
+    let output = terminal.backend().to_string();
+    assert!(output.contains("CN"), "{output}");
+    assert!(output.contains("GR"), "{output}");
+    assert!(output.contains("DB"), "{output}");
+    assert!(output.contains("US"), "{output}");
+    assert!(output.contains("RL"), "{output}");
+}
+
+#[test]
 fn catalog_editor_busy_renders_real_cancel_control() {
     let profile = import_connection_url("postgresql://localhost/db", Some("busy"))
         .unwrap()

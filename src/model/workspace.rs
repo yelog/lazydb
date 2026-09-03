@@ -112,6 +112,7 @@ pub enum Overlay {
         options: Vec<ProfileAccessOption>,
     },
     ProfileGroup(crate::model::profile_group::ProfileGroupOverlay),
+    ExplorerAdd(crate::model::explorer_add::ExplorerAddMenu),
     Message {
         title: String,
         body: String,

@@ -4,6 +4,7 @@ pub mod data_query;
 pub mod editor;
 pub mod execution_target;
 pub mod explorer;
+pub mod explorer_add;
 pub mod notification;
 pub mod pagination;
 pub mod profile_group;
