@@ -436,9 +436,10 @@ fn table_editor_renders_general_and_columns_sections() {
                 schema: "public".into(),
                 owner: "postgres".into(),
                 comment: "".into(),
-                columns: vec![],
+                columns: vec![lazydb::model::catalog_editor::ColumnDraft::new_added()],
                 selected_section: lazydb::model::catalog_editor::CatalogEditorSection::Columns,
                 selected_column: 0,
+                selected_field: lazydb::model::catalog_editor::TableEditorField::Name,
                 indexes: vec![],
                 constraints: vec![],
             },
@@ -446,10 +447,12 @@ fn table_editor_renders_general_and_columns_sections() {
     });
     app.overlay = Some(Overlay::CatalogEditor);
     let output = render(&app, 100, 30);
-    assert!(output.contains("General"), "{output}");
-    assert!(output.contains("Columns"), "{output}");
-    assert!(output.contains("Indexes"), "{output}");
-    assert!(output.contains("Constraints"), "{output}");
+    assert!(output.contains("GENERAL"), "{output}");
+    assert!(output.contains("COLUMNS"), "{output}");
+    assert!(output.contains("COLUMN DETAILS"), "{output}");
+    assert!(output.contains("Review SQL"), "{output}");
+    assert!(!output.contains("Indexes"), "{output}");
+    assert!(!output.contains("Constraints"), "{output}");
 }
 
 #[test]

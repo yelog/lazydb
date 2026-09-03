@@ -73,6 +73,7 @@ impl RoleDraft {
         }
         Ok(())
     }
+
     pub fn move_field(&mut self, delta: isize) {
         self.selected_field = (self.selected_field as isize + delta).rem_euclid(11) as usize;
     }
@@ -123,6 +124,54 @@ pub enum CatalogEditorSection {
     Columns,
     Indexes,
     Constraints,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TableEditorField {
+    Name,
+    Schema,
+    Owner,
+    Comment,
+    ColumnList,
+    ColumnName,
+    ColumnType,
+    ColumnNullable,
+    ColumnDefault,
+    ColumnIdentity,
+    ColumnComment,
+    AddColumn,
+    RemoveColumn,
+    Review,
+    Cancel,
+}
+
+impl TableEditorField {
+    const ALL: [Self; 15] = [
+        Self::Name,
+        Self::Schema,
+        Self::Owner,
+        Self::Comment,
+        Self::ColumnList,
+        Self::ColumnName,
+        Self::ColumnType,
+        Self::ColumnNullable,
+        Self::ColumnDefault,
+        Self::ColumnIdentity,
+        Self::ColumnComment,
+        Self::AddColumn,
+        Self::RemoveColumn,
+        Self::Review,
+        Self::Cancel,
+    ];
+
+    fn move_by(self, delta: isize) -> Self {
+        let index = Self::ALL
+            .iter()
+            .position(|field| *field == self)
+            .unwrap_or_default();
+        let index = (index as isize + delta).rem_euclid(Self::ALL.len() as isize) as usize;
+        Self::ALL[index]
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -343,6 +392,7 @@ pub struct TableDraft {
     pub columns: Vec<ColumnDraft>,
     pub selected_section: CatalogEditorSection,
     pub selected_column: usize,
+    pub selected_field: TableEditorField,
     pub indexes: Vec<String>,
     pub constraints: Vec<String>,
 }
@@ -1018,9 +1068,10 @@ impl TableDraft {
             schema: schema.into().into(),
             owner: TextInput::default(),
             comment: TextInput::default(),
-            columns: Vec::new(),
+            columns: vec![ColumnDraft::new_added()],
             selected_section: CatalogEditorSection::General,
             selected_column: 0,
+            selected_field: TableEditorField::Name,
             indexes: Vec::new(),
             constraints: Vec::new(),
         }
@@ -1039,6 +1090,7 @@ impl TableDraft {
                 .collect(),
             selected_section: CatalogEditorSection::General,
             selected_column: 0,
+            selected_field: TableEditorField::Name,
             indexes: definition.indexes.clone(),
             constraints: definition.constraints.clone(),
         }
@@ -1052,7 +1104,93 @@ impl TableDraft {
                 },
             );
         }
+        let mut names = std::collections::HashSet::new();
+        let mut column_count = 0;
+        for (index, column) in self.columns.iter().enumerate() {
+            if matches!(column.state, DraftRowState::Removed { .. }) {
+                continue;
+            }
+            column_count += 1;
+            if column.name.value().trim().is_empty() {
+                return Err(invalid(&format!("column {} name is required", index + 1)));
+            }
+            if column.native_type.value().trim().is_empty() {
+                return Err(invalid(&format!("column {} type is required", index + 1)));
+            }
+            if !names.insert(column.name.value().trim().to_owned()) {
+                return Err(invalid("column names must be unique"));
+            }
+            if column.identity && !column.default_expression.value().trim().is_empty() {
+                return Err(invalid(&format!(
+                    "column {} identity cannot have a default",
+                    index + 1
+                )));
+            }
+        }
+        if column_count == 0 {
+            return Err(invalid("a table requires at least one column"));
+        }
         Ok(())
+    }
+
+    pub fn validation_focus(&self) -> Option<(Option<usize>, TableEditorField, String)> {
+        if self.name.value().trim().is_empty() {
+            return Some((
+                None,
+                TableEditorField::Name,
+                "table name is required".into(),
+            ));
+        }
+        if self.schema.value().trim().is_empty() {
+            return Some((
+                None,
+                TableEditorField::Schema,
+                "table schema is required".into(),
+            ));
+        }
+        let mut names = std::collections::HashSet::new();
+        let mut count = 0;
+        for (index, column) in self.columns.iter().enumerate() {
+            if matches!(column.state, DraftRowState::Removed { .. }) {
+                continue;
+            }
+            count += 1;
+            if column.name.value().trim().is_empty() {
+                return Some((
+                    Some(index),
+                    TableEditorField::ColumnName,
+                    format!("column {} name is required", index + 1),
+                ));
+            }
+            if column.native_type.value().trim().is_empty() {
+                return Some((
+                    Some(index),
+                    TableEditorField::ColumnType,
+                    format!("column {} type is required", index + 1),
+                ));
+            }
+            if !names.insert(column.name.value().trim()) {
+                return Some((
+                    Some(index),
+                    TableEditorField::ColumnName,
+                    "column names must be unique".into(),
+                ));
+            }
+            if column.identity && !column.default_expression.value().trim().is_empty() {
+                return Some((
+                    Some(index),
+                    TableEditorField::ColumnIdentity,
+                    format!("column {} identity cannot have a default", index + 1),
+                ));
+            }
+        }
+        (count == 0).then(|| {
+            (
+                None,
+                TableEditorField::ColumnList,
+                "a table requires at least one column".into(),
+            )
+        })
     }
 
     pub fn select_section(&mut self, delta: isize) {
@@ -1069,9 +1207,164 @@ impl TableDraft {
         let last = self.columns.len().saturating_sub(1) as isize;
         self.selected_column = (self.selected_column as isize + delta).clamp(0, last) as usize;
     }
+
+    pub fn move_field(&mut self, delta: isize) {
+        self.selected_field = self.selected_field.move_by(delta);
+    }
+
+    pub fn selected_column(&self) -> Option<&ColumnDraft> {
+        self.columns.get(self.selected_column)
+    }
+
+    pub fn selected_column_mut(&mut self) -> Option<&mut ColumnDraft> {
+        self.columns.get_mut(self.selected_column)
+    }
+
+    pub fn add_column(&mut self) {
+        let mut column = ColumnDraft::new_added();
+        column.ordinal_position = self.columns.len() as u32 + 1;
+        self.columns.push(column);
+        self.selected_column = self.columns.len() - 1;
+        self.selected_field = TableEditorField::ColumnName;
+    }
+
+    pub fn remove_selected_column(&mut self) {
+        if self.columns.len() == 1 {
+            self.columns[0] = ColumnDraft::new_added();
+            self.selected_column = 0;
+            self.selected_field = TableEditorField::ColumnName;
+            return;
+        }
+        if matches!(
+            self.columns
+                .get(self.selected_column)
+                .map(|column| &column.state),
+            Some(DraftRowState::Added)
+        ) {
+            self.columns.remove(self.selected_column);
+        } else if let Some(column) = self.selected_column_mut()
+            && let DraftRowState::Existing { id } = &column.state
+        {
+            column.state = DraftRowState::Removed { id: id.clone() };
+        }
+        self.selected_column = self.selected_column.min(self.columns.len() - 1);
+        self.selected_field = TableEditorField::ColumnList;
+    }
+
+    pub fn toggle_selected_column_nullable(&mut self) {
+        if let Some(column) = self.selected_column_mut() {
+            column.nullable = !column.nullable;
+        }
+    }
+
+    pub fn toggle_selected_column_identity(&mut self) {
+        if let Some(column) = self.selected_column_mut() {
+            column.identity = !column.identity;
+            if column.identity {
+                column.default_expression.set("");
+            }
+        }
+    }
+
+    fn selected_text_input_mut(&mut self) -> Option<&mut TextInput> {
+        match self.selected_field {
+            TableEditorField::Name => Some(&mut self.name),
+            TableEditorField::Schema => Some(&mut self.schema),
+            TableEditorField::Owner => Some(&mut self.owner),
+            TableEditorField::Comment => Some(&mut self.comment),
+            TableEditorField::ColumnName => self
+                .columns
+                .get_mut(self.selected_column)
+                .map(|column| &mut column.name),
+            TableEditorField::ColumnType => self
+                .columns
+                .get_mut(self.selected_column)
+                .map(|column| &mut column.native_type),
+            TableEditorField::ColumnDefault => self
+                .columns
+                .get_mut(self.selected_column)
+                .map(|column| &mut column.default_expression),
+            TableEditorField::ColumnComment => self
+                .columns
+                .get_mut(self.selected_column)
+                .map(|column| &mut column.comment),
+            _ => None,
+        }
+    }
+
+    pub fn insert(&mut self, character: char) {
+        if let Some(input) = self.selected_text_input_mut() {
+            input.insert(character);
+        }
+    }
+
+    pub fn backspace(&mut self) {
+        if let Some(input) = self.selected_text_input_mut() {
+            input.backspace();
+        }
+    }
+
+    pub fn delete(&mut self) {
+        if let Some(input) = self.selected_text_input_mut() {
+            input.delete();
+        }
+    }
+
+    pub fn delete_previous_word(&mut self) {
+        if let Some(input) = self.selected_text_input_mut() {
+            input.delete_previous_word();
+        }
+    }
+
+    pub fn delete_to_start(&mut self) {
+        if let Some(input) = self.selected_text_input_mut() {
+            input.delete_to_start();
+        }
+    }
+
+    pub fn move_left(&mut self) {
+        if let Some(input) = self.selected_text_input_mut() {
+            input.move_left();
+        }
+    }
+
+    pub fn move_right(&mut self) {
+        if let Some(input) = self.selected_text_input_mut() {
+            input.move_right();
+        }
+    }
+
+    pub fn move_home(&mut self) {
+        if let Some(input) = self.selected_text_input_mut() {
+            input.move_home();
+        }
+    }
+
+    pub fn move_end(&mut self) {
+        if let Some(input) = self.selected_text_input_mut() {
+            input.move_end();
+        }
+    }
 }
 
 impl ColumnDraft {
+    pub fn new_added() -> Self {
+        Self {
+            row_id: Uuid::new_v4(),
+            ordinal_position: 0,
+            existing_name: None,
+            name: TextInput::default(),
+            native_type: "text".into(),
+            nullable: true,
+            default_expression: TextInput::default(),
+            identity: false,
+            generated_expression: TextInput::default(),
+            collation: TextInput::default(),
+            comment: TextInput::default(),
+            state: DraftRowState::Added,
+        }
+    }
+
     fn from_definition(definition: &crate::db::catalog_mutation::ColumnDefinition) -> Self {
         Self {
             row_id: Uuid::new_v4(),
@@ -1142,6 +1435,7 @@ pub enum CatalogDraft {
 impl CatalogDraft {
     pub fn move_field(&mut self, delta: isize) {
         match self {
+            Self::Table(d) => d.move_field(delta),
             Self::Schema(d) => d.move_field(delta),
             Self::View(d) => d.move_field(delta),
             Self::MaterializedView(d) => d.move_field(delta),
@@ -1153,6 +1447,7 @@ impl CatalogDraft {
     }
     pub fn insert(&mut self, c: char) {
         match self {
+            Self::Table(d) => d.insert(c),
             Self::Schema(d) => d.insert(c),
             Self::View(d) => d.insert(c),
             Self::MaterializedView(d) => d.insert(c),
@@ -1164,6 +1459,7 @@ impl CatalogDraft {
     }
     pub fn backspace(&mut self) {
         match self {
+            Self::Table(d) => d.backspace(),
             Self::Schema(d) => d.backspace(),
             Self::View(d) => d.backspace(),
             Self::MaterializedView(d) => d.backspace(),
@@ -1175,6 +1471,7 @@ impl CatalogDraft {
     }
     pub fn delete(&mut self) {
         match self {
+            Self::Table(d) => d.delete(),
             Self::Schema(d) => d.delete(),
             Self::View(d) => d.delete(),
             Self::MaterializedView(d) => d.delete(),
@@ -1186,6 +1483,7 @@ impl CatalogDraft {
     }
     pub fn delete_previous_word(&mut self) {
         match self {
+            Self::Table(d) => d.delete_previous_word(),
             Self::Schema(d) => d.delete_previous_word(),
             Self::View(d) => d.delete_previous_word(),
             Self::MaterializedView(d) => d.delete_previous_word(),
@@ -1195,6 +1493,7 @@ impl CatalogDraft {
     }
     pub fn delete_to_start(&mut self) {
         match self {
+            Self::Table(d) => d.delete_to_start(),
             Self::Schema(d) => d.delete_to_start(),
             Self::View(d) => d.delete_to_start(),
             Self::MaterializedView(d) => d.delete_to_start(),
@@ -1204,6 +1503,7 @@ impl CatalogDraft {
     }
     pub fn move_left(&mut self) {
         match self {
+            Self::Table(d) => d.move_left(),
             Self::Schema(d) => d.move_left(),
             Self::View(d) => d.move_left(),
             Self::MaterializedView(d) => d.move_left(),
@@ -1213,6 +1513,7 @@ impl CatalogDraft {
     }
     pub fn move_right(&mut self) {
         match self {
+            Self::Table(d) => d.move_right(),
             Self::Schema(d) => d.move_right(),
             Self::View(d) => d.move_right(),
             Self::MaterializedView(d) => d.move_right(),
@@ -1222,6 +1523,7 @@ impl CatalogDraft {
     }
     pub fn move_home(&mut self) {
         match self {
+            Self::Table(d) => d.move_home(),
             Self::Schema(d) => d.move_home(),
             Self::View(d) => d.move_home(),
             Self::MaterializedView(d) => d.move_home(),
@@ -1231,6 +1533,7 @@ impl CatalogDraft {
     }
     pub fn move_end(&mut self) {
         match self {
+            Self::Table(d) => d.move_end(),
             Self::Schema(d) => d.move_end(),
             Self::View(d) => d.move_end(),
             Self::MaterializedView(d) => d.move_end(),

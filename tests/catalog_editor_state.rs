@@ -7,7 +7,7 @@ use lazydb::{
     model::catalog_editor::{
         CatalogDraft, CatalogEditorOperation, CatalogEditorPage, CatalogEditorSection,
         CatalogEditorState, CatalogMutationOption, CatalogMutationPlan, DatabaseDraft,
-        MaterializedViewDraft, SchemaDraft, TableDraft,
+        DraftRowState, MaterializedViewDraft, SchemaDraft, TableDraft, TableEditorField,
     },
     model::text_input::TextInput,
 };
@@ -104,6 +104,98 @@ fn select_schema_create(object_type: CatalogObjectType) -> CatalogEditorState {
 }
 
 #[test]
+fn new_table_starts_with_one_editable_column() {
+    let draft = TableDraft::new("public");
+    assert_eq!(draft.selected_field, TableEditorField::Name);
+    assert_eq!(draft.selected_column, 0);
+    assert_eq!(draft.columns.len(), 1);
+    assert_eq!(draft.columns[0].native_type.value(), "text");
+    assert!(draft.columns[0].nullable);
+    assert!(matches!(draft.columns[0].state, DraftRowState::Added));
+}
+
+#[test]
+fn table_focus_moves_through_general_and_column_fields() {
+    let mut draft = TableDraft::new("public");
+    draft.move_field(1);
+    assert_eq!(draft.selected_field, TableEditorField::Schema);
+    draft.move_field(-1);
+    assert_eq!(draft.selected_field, TableEditorField::Name);
+}
+
+#[test]
+fn table_focus_wraps_between_first_and_last_fields() {
+    let mut draft = TableDraft::new("public");
+    draft.move_field(-1);
+    assert_eq!(draft.selected_field, TableEditorField::Cancel);
+    draft.move_field(1);
+    assert_eq!(draft.selected_field, TableEditorField::Name);
+}
+
+#[test]
+fn table_draft_delegates_text_edits_to_general_and_column_inputs() {
+    let mut draft = CatalogDraft::Table(TableDraft::new("public"));
+    draft.insert('e');
+    draft.insert('v');
+    draft.move_field(5);
+    draft.insert('i');
+    draft.insert('d');
+    draft.move_home();
+    draft.move_right();
+    draft.delete();
+
+    let CatalogDraft::Table(draft) = draft else {
+        unreachable!();
+    };
+    assert_eq!(draft.name.value(), "ev");
+    assert_eq!(draft.columns[0].name.value(), "i");
+}
+
+#[test]
+fn table_draft_supports_shared_deletion_commands() {
+    let mut draft = CatalogDraft::Table(TableDraft::new("public"));
+    for character in "table name".chars() {
+        draft.insert(character);
+    }
+    draft.delete_previous_word();
+    draft.move_home();
+    draft.move_end();
+    draft.delete_to_start();
+
+    let CatalogDraft::Table(draft) = draft else {
+        unreachable!();
+    };
+    assert_eq!(draft.name.value(), "");
+}
+
+#[test]
+fn table_draft_adds_selects_and_toggles_columns() {
+    let mut draft = TableDraft::new("public");
+    draft.columns[0].name = "id".into();
+    draft.add_column();
+    assert_eq!(draft.selected_column, 1);
+    assert_eq!(draft.selected_field, TableEditorField::ColumnName);
+    draft.toggle_selected_column_nullable();
+    draft.toggle_selected_column_identity();
+    assert!(!draft.columns[1].nullable);
+    assert!(draft.columns[1].identity);
+    assert_eq!(draft.columns[1].default_expression.value(), "");
+}
+
+#[test]
+fn table_draft_validates_columns_and_keeps_one_row_on_remove() {
+    let mut draft = TableDraft::new("public");
+    draft.name = "events".into();
+    assert!(draft.validate().is_err());
+    draft.columns[0].name = "id".into();
+    assert!(draft.validate().is_ok());
+    draft.remove_selected_column();
+    assert_eq!(draft.columns.len(), 1);
+    assert_eq!(draft.columns[0].name.value(), "");
+    assert!(draft.validate().is_err());
+}
+
+#[test]
 fn schema_table_create_selection_initializes_table_draft() {
     let editor = select_schema_create(CatalogObjectType::Catalog(
         lazydb::db::catalog::CatalogKind::Table,
@@ -113,7 +205,9 @@ fn schema_table_create_selection_initializes_table_draft() {
     };
     assert_eq!(draft.schema.value(), "public");
     assert!(draft.name.value().is_empty());
-    assert!(draft.columns.is_empty());
+    assert_eq!(draft.columns.len(), 1);
+    assert_eq!(draft.columns[0].native_type.value(), "text");
+    assert_eq!(draft.selected_field, TableEditorField::Name);
 }
 
 #[test]
