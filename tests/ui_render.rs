@@ -585,11 +585,27 @@ fn table_editor_focus_drives_sections_details_actions_and_context_hints() {
     let (general, general_state) = render_with_state(&app, 100, 30);
     assert!(general.contains("GENERAL"), "{general}");
     assert!(general.contains("COLUMNS"), "{general}");
+    assert!(general.contains("events"), "{general}");
+    assert!(general.contains("[ Review SQL ]"), "{general}");
+    assert!(general.contains("[ Cancel ]"), "{general}");
     assert!(
         general.contains("Tab/Shift-Tab/Up/Down move focus"),
         "{general}"
     );
     assert!(general_state.hit_regions.iter().any(|region| {
+        region.target
+            == HitTarget::CatalogEditorTableField(
+                lazydb::model::catalog_editor::TableEditorFocus::General(
+                    lazydb::model::catalog_editor::TableGeneralField::Name,
+                ),
+            )
+    }));
+
+    let (compact, compact_state) = render_with_state(&app, 56, 16);
+    assert!(compact.contains("events"), "{compact}");
+    assert!(compact.contains("[ SQL ]"), "{compact}");
+    assert!(compact.contains("[ Cancel ]"), "{compact}");
+    assert!(compact_state.hit_regions.iter().any(|region| {
         region.target
             == HitTarget::CatalogEditorTableField(
                 lazydb::model::catalog_editor::TableEditorFocus::General(

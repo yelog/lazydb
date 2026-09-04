@@ -15,6 +15,7 @@ use crate::{
         SequenceDraft, TableActionField, TableColumnField, TableDraft, TableEditorFocus,
         TableGeneralField, ViewDraft,
     },
+    model::text_input::TextInput,
     security::sanitize_terminal_text,
 };
 
@@ -740,15 +741,15 @@ fn render_table(
     // column list of its selected row.
     let full_list_capacity = area.height.saturating_sub(16);
     let compact = area.height <= 10 || full_list_capacity == 0;
-    let heading = Line::from(vec![
-        Span::styled("GENERAL", section_style(general_focus, theme)),
-        Span::raw("    "),
-        Span::styled("COLUMNS", section_style(columns_focus, theme)),
-    ]);
-    frame.render_widget(
-        Paragraph::new(heading),
-        Rect::new(area.x, area.y, area.width, 1),
+    let general_heading = Rect::new(area.x, area.y, area.width / 2, 1);
+    let columns_heading = Rect::new(
+        general_heading.right(),
+        area.y,
+        area.width.saturating_sub(general_heading.width),
+        1,
     );
+    render_catalog_section_heading(frame, general_heading, "GENERAL", general_focus, theme);
+    render_catalog_section_heading(frame, columns_heading, "COLUMNS", columns_focus, theme);
     ui.hit_regions.push(HitRegion {
         area: Rect::new(area.x, area.y, area.width / 2, 1),
         target: HitTarget::CatalogEditorTableField(TableEditorFocus::General(
@@ -825,9 +826,12 @@ fn render_table(
         area.y.saturating_add(7)
     };
     if columns_y < content_bottom {
-        frame.render_widget(
-            Paragraph::new(Span::styled("COLUMNS", section_style(columns_focus, theme))),
+        render_catalog_section_heading(
+            frame,
             Rect::new(area.x, columns_y, area.width, 1),
+            "COLUMNS",
+            columns_focus,
+            theme,
         );
     }
     let list_start = columns_y.saturating_add(1);
@@ -933,26 +937,16 @@ fn render_table(
         if action_area.width == 0 {
             continue;
         }
-        frame.render_widget(
-            Paragraph::new(label).style(
-                Style::new()
-                    .fg(if draft.focus == field {
-                        theme.background
-                    } else {
-                        theme.action
-                    })
-                    .bg(if draft.focus == field {
-                        theme.accent
-                    } else {
-                        theme.surface
-                    }),
-            ),
+        render_catalog_action(
+            frame,
             action_area,
-        );
-        ui.hit_regions.push(HitRegion {
-            area: action_area,
+            label,
+            draft.focus == field,
+            true,
             target,
-        });
+            ui,
+            theme,
+        );
         x = x.saturating_add(width + 3);
     }
     let hints = if draft.column_editor.is_some() {
@@ -1135,6 +1129,220 @@ impl EmptyText for String {
     }
 }
 
+const CATALOG_FIELD_LABEL_WIDTH: u16 = 18;
+
+fn catalog_field_areas(area: Rect) -> (Rect, Rect) {
+    let label_width = area.width.min(CATALOG_FIELD_LABEL_WIDTH);
+    (
+        Rect::new(area.x, area.y, label_width, area.height),
+        Rect::new(
+            area.x.saturating_add(label_width),
+            area.y,
+            area.width.saturating_sub(label_width),
+            area.height,
+        ),
+    )
+}
+
+fn render_catalog_field_label(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    label: &str,
+    active: bool,
+    enabled: bool,
+    theme: Theme,
+) {
+    let active = active && enabled;
+    frame.render_widget(
+        Paragraph::new(format!(
+            "{} {:<15}",
+            if active { "›" } else { " " },
+            sanitize_terminal_text(label)
+        ))
+        .style(
+            Style::new()
+                .fg(if active { theme.action } else { theme.muted })
+                .add_modifier(Modifier::BOLD),
+        ),
+        area,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_catalog_text_field(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    label: &str,
+    input: &TextInput,
+    active: bool,
+    enabled: bool,
+    target: HitTarget,
+    ui: &mut UiState,
+    theme: Theme,
+) {
+    let (label_area, value_area) = catalog_field_areas(area);
+    render_catalog_field_label(frame, label_area, label, active, enabled, theme);
+    if enabled {
+        ui.hit_regions.push(HitRegion { area, target });
+    }
+    if active && enabled {
+        render_text_input(
+            frame,
+            value_area,
+            "",
+            input,
+            Style::new().fg(theme.text).bg(theme.selection),
+            ui,
+        );
+    } else {
+        let value = sanitize_terminal_text(input.value());
+        let value = if enabled {
+            value
+        } else {
+            format!("{value}  READ ONLY")
+        };
+        frame.render_widget(
+            Paragraph::new(value).style(
+                Style::new()
+                    .fg(if enabled { theme.text } else { theme.muted })
+                    .bg(theme.surface),
+            ),
+            value_area,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments, dead_code)]
+fn render_catalog_choice_field(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    label: &str,
+    value: &str,
+    active: bool,
+    enabled: bool,
+    target: HitTarget,
+    ui: &mut UiState,
+    theme: Theme,
+) {
+    let (label_area, value_area) = catalog_field_areas(area);
+    render_catalog_field_label(frame, label_area, label, active, enabled, theme);
+    let value = sanitize_terminal_text(value);
+    let value = if enabled {
+        format!("‹ {value} ›")
+    } else {
+        format!("{value}  DISABLED")
+    };
+    frame.render_widget(
+        Paragraph::new(value).style(
+            Style::new()
+                .fg(if enabled { theme.text } else { theme.muted })
+                .bg(if active && enabled {
+                    theme.selection
+                } else {
+                    theme.surface
+                }),
+        ),
+        value_area,
+    );
+    if enabled {
+        ui.hit_regions.push(HitRegion { area, target });
+    }
+}
+
+#[allow(clippy::too_many_arguments, dead_code)]
+fn render_catalog_toggle_field(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    label: &str,
+    value: bool,
+    enabled_label: &str,
+    disabled_label: &str,
+    active: bool,
+    enabled: bool,
+    target: HitTarget,
+    ui: &mut UiState,
+    theme: Theme,
+) {
+    let (label_area, value_area) = catalog_field_areas(area);
+    render_catalog_field_label(frame, label_area, label, active, enabled, theme);
+    let state_label = sanitize_terminal_text(if value {
+        enabled_label
+    } else {
+        disabled_label
+    });
+    let value = format!("[{}] {state_label}", if value { "x" } else { " " });
+    let value = if enabled {
+        value
+    } else {
+        format!("{value}  DISABLED")
+    };
+    frame.render_widget(
+        Paragraph::new(value).style(
+            Style::new()
+                .fg(if enabled { theme.text } else { theme.muted })
+                .bg(if active && enabled {
+                    theme.selection
+                } else {
+                    theme.surface
+                }),
+        ),
+        value_area,
+    );
+    if enabled {
+        ui.hit_regions.push(HitRegion { area, target });
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_catalog_action(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    label: &str,
+    active: bool,
+    enabled: bool,
+    target: HitTarget,
+    ui: &mut UiState,
+    theme: Theme,
+) {
+    frame.render_widget(
+        Paragraph::new(sanitize_terminal_text(label)).style(
+            Style::new()
+                .fg(if !enabled {
+                    theme.muted
+                } else if active {
+                    theme.background
+                } else {
+                    theme.action
+                })
+                .bg(if active && enabled {
+                    theme.accent
+                } else {
+                    theme.surface
+                }),
+        ),
+        area,
+    );
+    if enabled {
+        ui.hit_regions.push(HitRegion { area, target });
+    }
+}
+
+fn render_catalog_section_heading(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    label: &str,
+    active: bool,
+    theme: Theme,
+) {
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            sanitize_terminal_text(label),
+            section_style(active, theme),
+        )),
+        area,
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_table_text_field(
     frame: &mut Frame<'_>,
@@ -1146,42 +1354,17 @@ fn render_table_text_field(
     ui: &mut UiState,
     theme: Theme,
 ) {
-    let active = field == selected;
-    let label_width = area.width.min(18);
-    let value_area = Rect::new(
-        area.x + label_width,
-        area.y,
-        area.width.saturating_sub(label_width),
-        1,
-    );
-    frame.render_widget(
-        Paragraph::new(format!("{} {:<15}", if active { "›" } else { " " }, label)).style(
-            Style::new()
-                .fg(if active { theme.action } else { theme.muted })
-                .add_modifier(Modifier::BOLD),
-        ),
-        Rect::new(area.x, area.y, label_width, 1),
-    );
-    ui.hit_regions.push(HitRegion {
+    render_catalog_text_field(
+        frame,
         area,
-        target: HitTarget::CatalogEditorTableField(field),
-    });
-    if active {
-        render_text_input(
-            frame,
-            value_area,
-            "",
-            input,
-            Style::new().fg(theme.text).bg(theme.selection),
-            ui,
-        );
-    } else {
-        frame.render_widget(
-            Paragraph::new(sanitize_terminal_text(input.value()))
-                .style(Style::new().fg(theme.text).bg(theme.surface)),
-            value_area,
-        );
-    }
+        label,
+        input,
+        field == selected,
+        true,
+        HitTarget::CatalogEditorTableField(field),
+        ui,
+        theme,
+    );
 }
 
 fn section_style(selected: bool, theme: Theme) -> Style {
