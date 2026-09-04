@@ -1078,6 +1078,76 @@ fn compact_view_editor_keeps_focused_security_invoker_visible() {
     assert!(output.contains("[ Cancel ]"), "{output}");
 }
 
+#[test]
+fn catalog_form_footer_hints_follow_focus_kind_without_moving_actions() {
+    let mut app = view_editor_fixture();
+    for (focus, hint) in [
+        (
+            lazydb::model::catalog_editor::CatalogFormFocus::Name,
+            "Type edit",
+        ),
+        (
+            lazydb::model::catalog_editor::CatalogFormFocus::SecurityBarrier,
+            "Space cycle",
+        ),
+        (
+            lazydb::model::catalog_editor::CatalogFormFocus::Review,
+            "Enter/Space activate",
+        ),
+    ] {
+        if let Some(lazydb::model::catalog_editor::CatalogDraft::View(draft)) = app
+            .catalog_editor
+            .as_mut()
+            .and_then(|editor| editor.draft.as_mut())
+        {
+            draft.focus = focus;
+        }
+        let (output, state) = render_with_state(&app, 100, 30);
+        assert!(output.contains(hint), "{output}");
+        let action_rows: Vec<_> = state
+            .hit_regions
+            .iter()
+            .filter(|region| {
+                matches!(
+                    region.target,
+                    HitTarget::CatalogEditorReview | HitTarget::CatalogEditorCancel
+                )
+            })
+            .map(|region| region.area.y)
+            .collect();
+        assert_eq!(action_rows.len(), 2, "{output}");
+        assert!(
+            action_rows.windows(2).all(|rows| rows[0] == rows[1]),
+            "{output}"
+        );
+    }
+}
+
+#[test]
+fn materialized_view_footer_does_not_advertise_space_globally() {
+    let mut app = view_editor_fixture();
+    app.catalog_editor.as_mut().unwrap().object_type =
+        Some(CatalogObjectType::Catalog(CatalogKind::MaterializedView));
+    app.catalog_editor.as_mut().unwrap().draft = Some(
+        lazydb::model::catalog_editor::CatalogDraft::MaterializedView(
+            lazydb::model::catalog_editor::MaterializedViewDraft {
+                name: "mv".into(),
+                schema: "public".into(),
+                owner: "postgres".into(),
+                comment: "".into(),
+                query: "SELECT 1".into(),
+                tablespace: "fast".into(),
+                with_data: true,
+                focus: lazydb::model::catalog_editor::CatalogFormFocus::Tablespace,
+                query_editable: true,
+            },
+        ),
+    );
+    let output = render(&app, 100, 30);
+    assert!(!output.contains("Space toggle data"), "{output}");
+    assert!(output.contains("Type edit"), "{output}");
+}
+
 fn view_editor_fixture() -> App {
     let mut app = App::new(Vec::new());
     app.catalog_editor = Some(lazydb::model::catalog_editor::CatalogEditorState {

@@ -307,12 +307,34 @@ fn form(
         );
     } else {
         let mut hints = vec![ShortcutHint::new("Tab/Shift-Tab", "fields")];
-        if matches!(
-            editor.draft.as_ref(),
-            Some(CatalogDraft::MaterializedView(_))
-        ) && editor.mode == crate::db::catalog_mutation::CatalogMutationMode::Create
+        if let Some(
+            draft @ (CatalogDraft::View(_)
+            | CatalogDraft::MaterializedView(_)
+            | CatalogDraft::Sequence(_)),
+        ) = editor.draft.as_ref()
         {
-            hints.push(ShortcutHint::new("Space", "toggle data"));
+            match draft
+                .focus_kind(editor.mode == crate::db::catalog_mutation::CatalogMutationMode::Create)
+            {
+                crate::model::catalog_editor::CatalogFormFocusKind::Text => {
+                    hints.push(ShortcutHint::new("Type", "edit"));
+                }
+                crate::model::catalog_editor::CatalogFormFocusKind::Choice => {
+                    hints.push(ShortcutHint::new("Space", "cycle"));
+                }
+                crate::model::catalog_editor::CatalogFormFocusKind::Toggle => {
+                    hints.push(ShortcutHint::new("Space", "toggle"));
+                }
+                crate::model::catalog_editor::CatalogFormFocusKind::Action => {
+                    hints.push(ShortcutHint::new("Enter/Space", "activate"));
+                }
+                crate::model::catalog_editor::CatalogFormFocusKind::Disabled => {
+                    hints.push(ShortcutHint::new("Unavailable", "field"));
+                }
+                crate::model::catalog_editor::CatalogFormFocusKind::ReadOnly => {
+                    hints.push(ShortcutHint::new("Read only", "field"));
+                }
+            }
         }
         if editor.owner_picker_active() {
             hints.extend([

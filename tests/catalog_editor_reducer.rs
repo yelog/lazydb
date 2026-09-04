@@ -214,6 +214,118 @@ fn materialized_view_edit_skips_and_does_not_edit_query() {
 }
 
 #[test]
+fn catalog_preview_focuses_the_first_invalid_view_field() {
+    let mut app = simple_catalog_editor(
+        CatalogMutationMode::Create,
+        CatalogDraft::View(ViewDraft {
+            name: "".into(),
+            schema: "public".into(),
+            owner: "postgres".into(),
+            comment: "".into(),
+            query: "SELECT 1".into(),
+            output_columns: "".into(),
+            security_barrier: ViewOption::available(None),
+            security_invoker: ViewOption::available(None),
+            check_option: ViewOption::available(None),
+            focus: CatalogFormFocus::Review,
+        }),
+    );
+    app.update(Action::CatalogEditorPreview);
+    assert_eq!(view_focus(&app), CatalogFormFocus::Name);
+
+    view_draft_mut(&mut app).name = "v".into();
+    view_draft_mut(&mut app).query = "".into();
+    app.update(Action::CatalogEditorPreview);
+    assert_eq!(view_focus(&app), CatalogFormFocus::Query);
+}
+
+#[test]
+fn catalog_preview_focuses_invalid_materialized_view_query() {
+    let mut app = materialized_view_editor(CatalogMutationMode::Create, CatalogFormFocus::Review);
+    materialized_view_draft_mut(&mut app).query = "".into();
+    app.update(Action::CatalogEditorPreview);
+    assert_eq!(materialized_view_draft(&app).focus, CatalogFormFocus::Query);
+}
+
+#[test]
+fn catalog_preview_focuses_each_invalid_sequence_field() {
+    for focus in [
+        CatalogFormFocus::Increment,
+        CatalogFormFocus::MinValue,
+        CatalogFormFocus::OwnedBy,
+    ] {
+        let mut app = simple_catalog_editor(
+            CatalogMutationMode::Create,
+            CatalogDraft::Sequence(SequenceDraft {
+                name: "seq".into(),
+                schema: "public".into(),
+                owner: "postgres".into(),
+                comment: "".into(),
+                data_type: "bigint".into(),
+                increment: "1".into(),
+                min_value: SequenceBound::Unset.into(),
+                max_value: SequenceBound::Unset.into(),
+                start_value: "1".into(),
+                restart_value: "".into(),
+                cache: "1".into(),
+                cycle: false,
+                owned_by: "NONE".into(),
+                focus: CatalogFormFocus::Review,
+            }),
+        );
+        let draft = sequence_draft_mut(&mut app);
+        match focus {
+            CatalogFormFocus::Increment => draft.increment = "bad".into(),
+            CatalogFormFocus::MinValue => {
+                draft.min_value = lazydb::model::catalog_editor::SequenceBoundDraft {
+                    kind: lazydb::model::catalog_editor::SequenceBoundKind::Custom,
+                    value: "bad".into(),
+                };
+            }
+            CatalogFormFocus::OwnedBy => draft.owned_by = "public.table".into(),
+            _ => unreachable!(),
+        }
+        app.update(Action::CatalogEditorPreview);
+        assert_eq!(sequence_focus(&app), focus);
+    }
+}
+
+fn view_focus(app: &App) -> CatalogFormFocus {
+    match app.catalog_editor.as_ref().unwrap().draft.as_ref().unwrap() {
+        CatalogDraft::View(draft) => draft.focus,
+        _ => panic!("view draft expected"),
+    }
+}
+
+fn view_draft_mut(app: &mut App) -> &mut ViewDraft {
+    match app.catalog_editor.as_mut().unwrap().draft.as_mut().unwrap() {
+        CatalogDraft::View(draft) => draft,
+        _ => panic!("view draft expected"),
+    }
+}
+
+fn materialized_view_draft_mut(app: &mut App) -> &mut MaterializedViewDraft {
+    match app.catalog_editor.as_mut().unwrap().draft.as_mut().unwrap() {
+        CatalogDraft::MaterializedView(draft) => draft,
+        _ => panic!("materialized view draft expected"),
+    }
+}
+
+fn sequence_draft_mut(app: &mut App) -> &mut SequenceDraft {
+    match app.catalog_editor.as_mut().unwrap().draft.as_mut().unwrap() {
+        CatalogDraft::Sequence(draft) => draft,
+        _ => panic!("sequence draft expected"),
+    }
+}
+
+fn sequence_focus(app: &App) -> CatalogFormFocus {
+    match app.catalog_editor.as_ref().unwrap().draft.as_ref().unwrap() {
+        CatalogDraft::Sequence(draft) => draft.focus,
+        _ => panic!("sequence draft expected"),
+    }
+}
+
+#[test]
 fn typed_form_focus_delegates_to_view_materialized_view_and_sequence_drafts() {
     let mut view = simple_catalog_editor(
         CatalogMutationMode::Create,

@@ -181,6 +181,16 @@ pub enum CatalogFormFocus {
     Cancel,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CatalogFormFocusKind {
+    Text,
+    Choice,
+    Toggle,
+    Action,
+    Disabled,
+    ReadOnly,
+}
+
 const VIEW_FOCUS_ORDER: &[CatalogFormFocus] = &[
     CatalogFormFocus::Name,
     CatalogFormFocus::Schema,
@@ -644,6 +654,45 @@ impl SequenceDraft {
         }
         Ok(())
     }
+
+    pub fn validation_focus(&self) -> Option<CatalogFormFocus> {
+        if self.name.value().trim().is_empty() {
+            return Some(CatalogFormFocus::Name);
+        }
+        if self.schema.value().trim().is_empty() {
+            return Some(CatalogFormFocus::Schema);
+        }
+        if self.data_type.value().trim().is_empty() {
+            return Some(CatalogFormFocus::DataType);
+        }
+        for (focus, value) in [
+            (CatalogFormFocus::Increment, &self.increment),
+            (CatalogFormFocus::StartValue, &self.start_value),
+            (CatalogFormFocus::RestartValue, &self.restart_value),
+            (CatalogFormFocus::Cache, &self.cache),
+        ] {
+            if !value.value().trim().is_empty() && value.value().trim().parse::<i128>().is_err() {
+                return Some(focus);
+            }
+        }
+        for (focus, bound) in [
+            (CatalogFormFocus::MinValue, &self.min_value),
+            (CatalogFormFocus::MaxValue, &self.max_value),
+        ] {
+            if bound.kind == SequenceBoundKind::Custom
+                && bound.value.value().trim().parse::<i128>().is_err()
+            {
+                return Some(focus);
+            }
+        }
+        if !self.owned_by.value().trim().is_empty()
+            && self.owned_by.value().trim() != "NONE"
+            && self.owned_by.value().split('.').count() != 3
+        {
+            return Some(CatalogFormFocus::OwnedBy);
+        }
+        None
+    }
     pub fn focus_enabled(&self, focus: CatalogFormFocus) -> bool {
         SEQUENCE_FOCUS_ORDER.contains(&focus)
     }
@@ -788,6 +837,20 @@ impl MaterializedViewDraft {
         Ok(())
     }
 
+    pub fn validation_focus(&self) -> Option<CatalogFormFocus> {
+        if self.name.value().trim().is_empty() || self.schema.value().trim().is_empty() {
+            Some(if self.name.value().trim().is_empty() {
+                CatalogFormFocus::Name
+            } else {
+                CatalogFormFocus::Schema
+            })
+        } else if self.query_editable && self.query.value().trim().is_empty() {
+            Some(CatalogFormFocus::Query)
+        } else {
+            None
+        }
+    }
+
     pub fn focus_enabled(&self, focus: CatalogFormFocus, allow_with_data: bool) -> bool {
         MATERIALIZED_VIEW_FOCUS_ORDER.contains(&focus)
             && (focus != CatalogFormFocus::Query || self.query_editable)
@@ -910,6 +973,24 @@ impl ViewDraft {
             return Err(invalid("view definition must contain exactly one query"));
         }
         Ok(())
+    }
+
+    pub fn validation_focus(&self) -> Option<CatalogFormFocus> {
+        if self.name.value().trim().is_empty() || self.schema.value().trim().is_empty() {
+            Some(if self.name.value().trim().is_empty() {
+                CatalogFormFocus::Name
+            } else {
+                CatalogFormFocus::Schema
+            })
+        } else if self.query.value().trim().is_empty()
+            || crate::sql::scan_statements(self.query.value(), crate::sql::SqlDialect::Postgres)
+                .len()
+                != 1
+        {
+            Some(CatalogFormFocus::Query)
+        } else {
+            None
+        }
     }
 
     pub fn focus_enabled(&self, focus: CatalogFormFocus) -> bool {
@@ -1942,6 +2023,45 @@ pub enum CatalogDraft {
 }
 
 impl CatalogDraft {
+    pub fn validation_focus(&self) -> Option<CatalogFormFocus> {
+        match self {
+            Self::View(draft) => draft.validation_focus(),
+            Self::MaterializedView(draft) => draft.validation_focus(),
+            Self::Sequence(draft) => draft.validation_focus(),
+            _ => None,
+        }
+    }
+
+    pub fn focus_kind(&self, create_mode: bool) -> CatalogFormFocusKind {
+        if self.focused_action().is_some() {
+            return CatalogFormFocusKind::Action;
+        }
+        if self.focus_is_toggle(create_mode) {
+            return CatalogFormFocusKind::Toggle;
+        }
+        if self.focus_is_choice() {
+            return CatalogFormFocusKind::Choice;
+        }
+        if !self.focus_accepts_text() {
+            return match self {
+                Self::MaterializedView(draft) if draft.focus == CatalogFormFocus::Query => {
+                    CatalogFormFocusKind::ReadOnly
+                }
+                Self::View(draft)
+                    if matches!(
+                        draft.focus,
+                        CatalogFormFocus::SecurityBarrier
+                            | CatalogFormFocus::SecurityInvoker
+                            | CatalogFormFocus::CheckOption
+                    ) =>
+                {
+                    CatalogFormFocusKind::Disabled
+                }
+                _ => CatalogFormFocusKind::ReadOnly,
+            };
+        }
+        CatalogFormFocusKind::Text
+    }
     pub fn owner(&self) -> Option<&TextInput> {
         match self {
             Self::Schema(draft) => Some(&draft.owner),

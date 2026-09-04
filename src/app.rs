@@ -4165,6 +4165,24 @@ impl App {
                             table.focus = field;
                             editor.set_validation_error(message);
                         } else {
+                            if let Some(focus) = draft.validation_focus()
+                                && let Some(current) = editor.draft.as_mut()
+                            {
+                                match current {
+                                    crate::model::catalog_editor::CatalogDraft::View(draft) => {
+                                        draft.focus(focus);
+                                    }
+                                    crate::model::catalog_editor::CatalogDraft::MaterializedView(
+                                        draft,
+                                    ) => {
+                                        draft.focus(focus, mode == crate::db::catalog_mutation::CatalogMutationMode::Create);
+                                    }
+                                    crate::model::catalog_editor::CatalogDraft::Sequence(draft) => {
+                                        draft.focus(focus);
+                                    }
+                                    _ => {}
+                                }
+                            }
                             editor.set_validation_error(error.to_string());
                         }
                     }
