@@ -2475,6 +2475,10 @@ pub(crate) fn editor_syntax_color(kind: EditorHighlightKind) -> theme::SyntaxCol
     match kind {
         EditorHighlightKind::Keyword => theme::SyntaxColor::Keyword,
         EditorHighlightKind::Identifier => theme::SyntaxColor::Identifier,
+        EditorHighlightKind::Relation => theme::SyntaxColor::Relation,
+        EditorHighlightKind::RelationAlias => theme::SyntaxColor::RelationAlias,
+        EditorHighlightKind::Column => theme::SyntaxColor::Column,
+        EditorHighlightKind::Function => theme::SyntaxColor::Function,
         EditorHighlightKind::String => theme::SyntaxColor::String,
         EditorHighlightKind::Number => theme::SyntaxColor::Number,
         EditorHighlightKind::Comment => theme::SyntaxColor::Comment,
