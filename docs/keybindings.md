@@ -477,4 +477,13 @@ Left click focuses panels, activates tabs, selects Explorer rows and grid cells,
 and toggles view selectors. Wheel scrolling affects the panel under the pointer.
 Relation DDL scrolls vertically; Relation Data scrolls the grid. Mouse/paste/
 resize/focus events clear pending key sequences. Use `--mouse off` for terminal
-native selection behavior.
+ native selection behavior.
+
+## Update Center
+
+`F9` opens the Update Center from normal workspace contexts. `Enter` confirms the
+focused action, `Tab` or Left/Right changes focus, and `Esc`/`q` closes it. `r`
+retries a failed check. A native update is installed without interrupting the
+current session; `Restart now` activates it after running SQL, relation edits, and
+manual transactions have been safely resolved. `Later` keeps the current process
+running.

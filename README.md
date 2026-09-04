@@ -192,6 +192,14 @@ receive an explicit manager command instead. npm-managed installations are
 detected and protected, but official npm distribution is currently unavailable;
 use the Pages installer or Homebrew instead.
 
+Inside the TUI, the header shows the running version. Press `F9` or click the
+version/update badge to open the Update Center. Startup checks run asynchronously
+after the first frame and are cached for 24 hours by default. A native update can
+be installed without interrupting the current session; the current process keeps
+running until `Restart now` is selected. `Later` leaves the session untouched.
+Package-manager and source installations are never overwritten and instead show
+the appropriate upgrade guidance.
+
 Start LazyDB:
 
 ```bash

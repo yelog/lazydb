@@ -57,7 +57,9 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                 ui.clear_click_tracker();
             }
             if let Some(overlay) = &app.overlay
-                && (overlay != &Overlay::ProfileManager && overlay != &Overlay::CatalogEditor
+                && (overlay != &Overlay::ProfileManager
+                    && overlay != &Overlay::CatalogEditor
+                    && !matches!(overlay, Overlay::Update(_))
                     || !matches!(
                         target,
                         HitTarget::ProfileField(_)
@@ -77,6 +79,7 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                             | HitTarget::CatalogEditorReview
                             | HitTarget::CatalogEditorCancel
                             | HitTarget::CatalogOwnerChoice(_)
+                            | HitTarget::UpdateButton { .. }
                     ))
             {
                 return None;
@@ -98,6 +101,14 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                 }
                 HitTarget::ResultCell { row, column } => Some(Action::GridSelect { row, column }),
                 HitTarget::Help => Some(Action::ShowHelp),
+                HitTarget::UpdateCenter => Some(Action::OpenUpdateCenter),
+                HitTarget::UpdateButton { primary } => {
+                    if primary {
+                        Some(Action::UpdateOverlayConfirm)
+                    } else {
+                        Some(Action::DismissOverlay)
+                    }
+                }
                 HitTarget::ToggleResultView => Some(Action::ToggleResultView),
                 HitTarget::ResultView(view) => Some(Action::SetResultView(view)),
                 HitTarget::RelationView(view) => Some(Action::SetRelationView(view)),
@@ -296,6 +307,8 @@ fn focus_at(ui: &UiState, column: u16, row: u16) -> Option<Focus> {
         | HitTarget::CloseTab(_)
         | HitTarget::DismissNotification(_)
         | HitTarget::Help
+        | HitTarget::UpdateCenter
+        | HitTarget::UpdateButton { .. }
         | HitTarget::HeaderProfile
         | HitTarget::ProfileField(_)
         | HitTarget::ProfileDriver(_)

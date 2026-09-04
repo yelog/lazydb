@@ -111,6 +111,18 @@ impl Keymap {
         {
             return (event.code == KeyCode::Esc).then_some(Action::CatalogEditorCancel);
         }
+        if matches!(app.overlay, Some(Overlay::Update(_))) {
+            self.pending = None;
+            return match event.code {
+                KeyCode::Esc | KeyCode::Char('q') => Some(Action::DismissOverlay),
+                KeyCode::Tab | KeyCode::Left | KeyCode::Right => {
+                    Some(Action::UpdateOverlayToggleFocus)
+                }
+                KeyCode::Enter => Some(Action::UpdateOverlayConfirm),
+                KeyCode::Char('r') => Some(Action::StartUpdateCheck { automatic: false }),
+                _ => None,
+            };
+        }
         if self.pending.is_some()
             && (event.code == KeyCode::Esc
                 || event.modifiers == KeyModifiers::CONTROL && event.code == KeyCode::Char('c'))
@@ -121,6 +133,10 @@ impl Keymap {
         }
         if self.bindings.matches("quit", event) {
             return Some(Action::Quit);
+        }
+        if self.bindings.matches("update", event) && app.overlay.is_none() {
+            self.pending = None;
+            return Some(Action::OpenUpdateCenter);
         }
         if self.bindings.matches("notification-history", event) && app.overlay.is_none() {
             self.pending = None;

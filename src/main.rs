@@ -27,5 +27,15 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    lazydb::runtime::run_tui(cli).await
+    match lazydb::runtime::run_tui(cli).await? {
+        lazydb::runtime::RunOutcome::Exit => Ok(()),
+        lazydb::runtime::RunOutcome::Restart { executable } => {
+            use std::os::unix::process::CommandExt;
+
+            let error = std::process::Command::new(executable)
+                .args(std::env::args_os().skip(1))
+                .exec();
+            Err(error.into())
+        }
+    }
 }

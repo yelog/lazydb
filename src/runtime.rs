@@ -126,12 +126,21 @@ pub struct Runtime {
     dashboard_process_tasks: HashMap<(Uuid, u64), JoinHandle<()>>,
     known_relations: Arc<StdMutex<HashSet<(ConnectionIdentity, crate::db::catalog::CatalogId)>>>,
     background_tasks: Vec<JoinHandle<()>>,
+    update_check_task: Option<JoinHandle<()>>,
+    update_install_task: Option<JoinHandle<()>>,
+    update_startup_task: Option<JoinHandle<()>>,
     profile_tasks: Vec<JoinHandle<()>>,
     completion_tasks: HashMap<Uuid, JoinHandle<()>>,
     catalog_search_task: Option<JoinHandle<()>>,
     manual_transactions: HashMap<Uuid, ManualTransactionEntry>,
     relation_transactions: HashMap<Uuid, ManualTransactionEntry>,
     relation_mutation_blocked: Arc<StdMutex<HashSet<(Uuid, ConnectionIdentity)>>>,
+}
+
+#[derive(Debug)]
+pub enum RunOutcome {
+    Exit,
+    Restart { executable: std::path::PathBuf },
 }
 
 impl Runtime {
@@ -213,6 +222,9 @@ impl Runtime {
             dashboard_process_tasks: HashMap::new(),
             known_relations: Arc::new(StdMutex::new(HashSet::new())),
             background_tasks: Vec::new(),
+            update_check_task: None,
+            update_install_task: None,
+            update_startup_task: None,
             profile_tasks: Vec::new(),
             completion_tasks: HashMap::new(),
             catalog_search_task: None,
@@ -494,6 +506,79 @@ impl Runtime {
                     let _ = sender.send(Action::CompletionDue(key));
                 });
                 self.completion_tasks.insert(key.console_id, task);
+            }
+            Command::CheckForUpdate {
+                request_id,
+                automatic,
+            } => {
+                if self
+                    .update_check_task
+                    .as_ref()
+                    .is_some_and(|task| !task.is_finished())
+                {
+                    return;
+                }
+                let sender = self.event_sender.clone();
+                self.update_check_task = Some(tokio::spawn(async move {
+                    match crate::update::inspect_current_installation(None, false).await {
+                        Ok(inspection) => {
+                            let _ = sender.send(Action::UpdateCheckCompleted {
+                                request_id,
+                                inspection,
+                            });
+                        }
+                        Err(error) => {
+                            let _ = sender.send(Action::UpdateCheckFailed {
+                                request_id,
+                                automatic,
+                                message: error.to_string(),
+                            });
+                        }
+                    }
+                }));
+            }
+            Command::InstallUpdate {
+                request_id,
+                channel,
+            } => {
+                if self
+                    .update_install_task
+                    .as_ref()
+                    .is_some_and(|task| !task.is_finished())
+                {
+                    return;
+                }
+                let sender = self.event_sender.clone();
+                self.update_install_task = Some(tokio::spawn(async move {
+                    match crate::update::install_current_native(Some(channel), false).await {
+                        Ok(inspection) => {
+                            let _ = sender.send(Action::UpdateInstalled {
+                                request_id,
+                                inspection,
+                            });
+                        }
+                        Err(error) => {
+                            let _ = sender.send(Action::UpdateInstallFailed {
+                                request_id,
+                                message: error.to_string(),
+                            });
+                        }
+                    }
+                }));
+            }
+            Command::ScheduleUpdateCheck { delay_ms } => {
+                if self
+                    .update_startup_task
+                    .as_ref()
+                    .is_some_and(|task| !task.is_finished())
+                {
+                    return;
+                }
+                let sender = self.event_sender.clone();
+                self.update_startup_task = Some(tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    let _ = sender.send(Action::StartUpdateCheck { automatic: true });
+                }));
             }
             Command::PersistWorkspace(snapshot) => {
                 if let Some(store) = self.workspace_store.clone() {
@@ -2925,6 +3010,18 @@ impl Runtime {
     }
 
     pub async fn shutdown(mut self) {
+        if let Some(task) = self.update_startup_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        if let Some(task) = self.update_check_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        if let Some(task) = self.update_install_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
         for (_, task) in self.relation_tasks.drain() {
             task.abort();
             let _ = task.await;
@@ -3733,7 +3830,7 @@ async fn handle_quarantined_connection(
     });
 }
 
-pub async fn run_tui(cli: Cli) -> Result<()> {
+pub async fn run_tui(cli: Cli) -> Result<RunOutcome> {
     let project = crate::project::ProjectContext::resolve_current()
         .context("failed to resolve current project")?;
     let startup = load_startup_profiles(&cli)?;
@@ -3800,7 +3897,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
     let mut ticker = interval(Duration::from_millis(33));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
-    let result: Result<()> = async {
+    let result: Result<Option<std::path::PathBuf>> = async {
         apply_startup_action_with_runtime(&mut app, &mut runtime, startup.selected);
         runtime.dispatch(Command::CheckSecretStoreAvailability);
         let initial_sequence = keymap.sequence_state(&app, std::time::Instant::now());
@@ -3815,6 +3912,17 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                 theme,
             )
         })?;
+        let startup_check_due =
+            crate::persistence::update_check::UpdateCheckCache::read(&paths.update_check_file())
+                .is_none_or(|cache| {
+                    !cache.is_fresh(
+                        std::time::SystemTime::now(),
+                        Duration::from_secs(settings.update_check_interval_hours() * 60 * 60),
+                    )
+                });
+        if settings.updates.check_on_startup && startup_check_due {
+            runtime.dispatch(Command::ScheduleUpdateCheck { delay_ms: 1_500 });
+        }
         if let Some(style) = ui_state.cursor_style {
             terminal.set_cursor_style(style)?;
         }
@@ -3928,12 +4036,16 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
             }
         }
 
-        Ok(())
+        Ok(app.restart_path.take())
     }
     .await;
 
     runtime.shutdown().await;
-    result
+    drop(terminal);
+    result.map(|restart_path| match restart_path {
+        Some(executable) => RunOutcome::Restart { executable },
+        None => RunOutcome::Exit,
+    })
 }
 
 pub fn apply_startup_action(app: &mut App, selected: Option<Uuid>) {
