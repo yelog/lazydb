@@ -257,9 +257,16 @@ fn form(
     } else if let Some(CatalogDraft::View(draft)) = editor.draft.as_ref() {
         render_view(frame, chunks[1], draft, ui, theme);
     } else if let Some(CatalogDraft::MaterializedView(draft)) = editor.draft.as_ref() {
-        render_materialized_view(frame, chunks[1], draft, theme);
+        render_materialized_view(
+            frame,
+            chunks[1],
+            draft,
+            editor.mode == crate::db::catalog_mutation::CatalogMutationMode::Create,
+            ui,
+            theme,
+        );
     } else if let Some(CatalogDraft::Sequence(draft)) = editor.draft.as_ref() {
-        render_sequence(frame, chunks[1], draft, theme);
+        render_sequence(frame, chunks[1], draft, ui, theme);
     } else {
         frame.render_widget(
             Paragraph::new("Definition form is ready for the selected object type."),
@@ -548,67 +555,427 @@ fn render_database(frame: &mut Frame<'_>, area: Rect, draft: &DatabaseDraft, the
     );
 }
 
-fn render_sequence(frame: &mut Frame<'_>, area: Rect, draft: &SequenceDraft, theme: Theme) {
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::raw(format!(
-                "Name: {}  Schema: {}  Owner: {}",
-                draft.name.value(),
-                draft.schema.value(),
-                draft.owner.value()
-            )),
-            Line::raw(format!("Comment: {}", draft.comment.value())),
-            Line::raw(format!(
-                "Type: {}  Increment: {}  Start: {}  Restart: {}",
-                draft.data_type.value(),
-                draft.increment.value(),
-                draft.start_value.value(),
-                draft.restart_value.value()
-            )),
-            Line::raw(format!(
-                "Min: {:?}  Max: {:?}  Cache: {}  Cycle: {}",
-                draft.min_value,
-                draft.max_value,
-                draft.cache.value(),
-                draft.cycle
-            )),
-            Line::raw(format!("Owned by: {}", draft.owned_by.value())),
-        ])
-        .style(Style::new().fg(theme.text))
-        .wrap(Wrap { trim: true }),
-        area,
+fn render_sequence(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    draft: &SequenceDraft,
+    ui: &mut UiState,
+    theme: Theme,
+) {
+    let bottom = area.bottom().saturating_sub(2);
+    let compact = area.height < 18;
+    render_catalog_section_heading(
+        frame,
+        Rect::new(area.x, area.y, area.width, 1),
+        "GENERAL",
+        matches!(
+            draft.focus,
+            CatalogFormFocus::Name
+                | CatalogFormFocus::Schema
+                | CatalogFormFocus::Owner
+                | CatalogFormFocus::Comment
+        ),
+        theme,
     );
+    let general = [
+        (CatalogFormFocus::Name, "Name", &draft.name),
+        (CatalogFormFocus::Schema, "Schema", &draft.schema),
+        (CatalogFormFocus::Owner, "Owner", &draft.owner),
+        (CatalogFormFocus::Comment, "Comment", &draft.comment),
+    ];
+    render_sequence_fields(
+        frame,
+        area,
+        bottom,
+        1,
+        &general,
+        draft.focus,
+        compact,
+        ui,
+        theme,
+    );
+    let values_y = area.y + if compact { 3 } else { 5 };
+    if values_y < bottom {
+        render_catalog_section_heading(
+            frame,
+            Rect::new(area.x, values_y, area.width, 1),
+            "VALUES",
+            !matches!(
+                draft.focus,
+                CatalogFormFocus::Name
+                    | CatalogFormFocus::Schema
+                    | CatalogFormFocus::Owner
+                    | CatalogFormFocus::Comment
+                    | CatalogFormFocus::OwnedBy
+            ),
+            theme,
+        );
+        let values = [
+            (CatalogFormFocus::DataType, "Data type", &draft.data_type),
+            (CatalogFormFocus::Increment, "Increment", &draft.increment),
+            (CatalogFormFocus::StartValue, "Start", &draft.start_value),
+            (
+                CatalogFormFocus::RestartValue,
+                "Restart",
+                &draft.restart_value,
+            ),
+            (CatalogFormFocus::Cache, "Cache", &draft.cache),
+        ];
+        render_sequence_fields(
+            frame,
+            area,
+            bottom,
+            values_y + 1 - area.y,
+            &values,
+            draft.focus,
+            compact,
+            ui,
+            theme,
+        );
+        let min_y = if compact
+            && matches!(
+                draft.focus,
+                CatalogFormFocus::MinValue | CatalogFormFocus::MaxValue
+            ) {
+            bottom.saturating_sub(3)
+        } else {
+            values_y + if compact { 1 } else { 6 }
+        };
+        if min_y < bottom {
+            render_sequence_bound(
+                frame,
+                Rect::new(area.x, min_y, area.width, 1),
+                "Minimum",
+                &draft.min_value,
+                CatalogFormFocus::MinValue,
+                draft.focus,
+                ui,
+                theme,
+                "No min value",
+            );
+            let max_y = min_y
+                + if draft.min_value.kind == crate::model::catalog_editor::SequenceBoundKind::Custom
+                {
+                    2
+                } else {
+                    1
+                };
+            if max_y < bottom {
+                render_sequence_bound(
+                    frame,
+                    Rect::new(area.x, max_y, area.width, 1),
+                    "Maximum",
+                    &draft.max_value,
+                    CatalogFormFocus::MaxValue,
+                    draft.focus,
+                    ui,
+                    theme,
+                    "No max value",
+                );
+            }
+        }
+    }
+    let ownership_y = if compact {
+        if matches!(
+            draft.focus,
+            CatalogFormFocus::Cycle | CatalogFormFocus::OwnedBy
+        ) {
+            bottom.saturating_sub(4)
+        } else {
+            bottom
+        }
+    } else {
+        area.y + 16
+    };
+    if ownership_y < bottom {
+        render_catalog_section_heading(
+            frame,
+            Rect::new(area.x, ownership_y, area.width, 1),
+            "OWNERSHIP",
+            matches!(
+                draft.focus,
+                CatalogFormFocus::Cycle | CatalogFormFocus::OwnedBy
+            ),
+            theme,
+        );
+        if ownership_y + 1 < bottom {
+            render_catalog_toggle_field(
+                frame,
+                Rect::new(area.x, ownership_y + 1, area.width, 1),
+                "Cycle",
+                draft.cycle,
+                "On",
+                "Off",
+                draft.focus == CatalogFormFocus::Cycle,
+                true,
+                HitTarget::CatalogEditorFormField(CatalogFormFocus::Cycle),
+                ui,
+                theme,
+            );
+        }
+        if ownership_y + 2 < bottom {
+            render_catalog_text_field(
+                frame,
+                Rect::new(area.x, ownership_y + 2, area.width, 1),
+                "Owned by",
+                &draft.owned_by,
+                draft.focus == CatalogFormFocus::OwnedBy,
+                true,
+                HitTarget::CatalogEditorFormField(CatalogFormFocus::OwnedBy),
+                ui,
+                theme,
+            );
+        }
+    }
+    render_catalog_actions(frame, area, draft.focus, ui, theme);
 }
 
 fn render_materialized_view(
     frame: &mut Frame<'_>,
     area: Rect,
     draft: &MaterializedViewDraft,
+    query_editable: bool,
+    ui: &mut UiState,
     theme: Theme,
 ) {
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::raw(format!("Name: {}", draft.name.value())),
-            Line::raw(format!(
-                "Schema: {}   Owner: {}",
-                draft.schema.value(),
-                draft.owner.value()
-            )),
-            Line::raw(format!("Comment: {}", draft.comment.value())),
-            Line::raw(format!("Tablespace: {}", draft.tablespace.value())),
-            Line::raw(format!(
-                "Query (read-only on edit): {}",
-                draft.query.value()
-            )),
-            Line::raw(format!(
-                "WITH {}DATA",
-                if draft.with_data { "" } else { "NO " }
-            )),
-        ])
-        .style(Style::new().fg(theme.text))
-        .wrap(Wrap { trim: true }),
-        area,
+    let bottom = area.bottom().saturating_sub(2);
+    let compact = area.height < 16;
+    render_catalog_section_heading(
+        frame,
+        Rect::new(area.x, area.y, area.width, 1),
+        "GENERAL",
+        matches!(
+            draft.focus,
+            CatalogFormFocus::Name
+                | CatalogFormFocus::Schema
+                | CatalogFormFocus::Owner
+                | CatalogFormFocus::Comment
+        ),
+        theme,
     );
+    let general = [
+        (CatalogFormFocus::Name, "Name", &draft.name),
+        (CatalogFormFocus::Schema, "Schema", &draft.schema),
+        (CatalogFormFocus::Owner, "Owner", &draft.owner),
+        (CatalogFormFocus::Comment, "Comment", &draft.comment),
+    ];
+    render_sequence_fields(
+        frame,
+        area,
+        bottom,
+        1,
+        &general,
+        draft.focus,
+        compact,
+        ui,
+        theme,
+    );
+    let definition_y = if compact && draft.focus == CatalogFormFocus::Query {
+        bottom.saturating_sub(2)
+    } else {
+        area.y + if compact { 3 } else { 5 }
+    };
+    if definition_y < bottom {
+        render_catalog_section_heading(
+            frame,
+            Rect::new(area.x, definition_y, area.width, 1),
+            "DEFINITION",
+            matches!(draft.focus, CatalogFormFocus::Query),
+            theme,
+        );
+        let query_y = if compact && draft.focus == CatalogFormFocus::Query {
+            bottom.saturating_sub(1)
+        } else {
+            definition_y + 1
+        };
+        if query_y < bottom {
+            render_catalog_text_field(
+                frame,
+                Rect::new(area.x, query_y, area.width, 1),
+                "Query",
+                &draft.query,
+                draft.focus == CatalogFormFocus::Query,
+                query_editable,
+                HitTarget::CatalogEditorFormField(CatalogFormFocus::Query),
+                ui,
+                theme,
+            );
+        }
+    }
+    let storage_y = if compact && draft.focus == CatalogFormFocus::Query {
+        bottom
+    } else if compact {
+        bottom.saturating_sub(2)
+    } else {
+        area.y + 8
+    };
+    if storage_y < bottom {
+        render_catalog_section_heading(
+            frame,
+            Rect::new(area.x, storage_y, area.width, 1),
+            "STORAGE",
+            matches!(
+                draft.focus,
+                CatalogFormFocus::Tablespace | CatalogFormFocus::WithData
+            ),
+            theme,
+        );
+        if storage_y + 1 < bottom {
+            render_catalog_text_field(
+                frame,
+                Rect::new(area.x, storage_y + 1, area.width, 1),
+                "Tablespace",
+                &draft.tablespace,
+                draft.focus == CatalogFormFocus::Tablespace,
+                true,
+                HitTarget::CatalogEditorFormField(CatalogFormFocus::Tablespace),
+                ui,
+                theme,
+            );
+        }
+        if storage_y + 2 < bottom || (compact && draft.focus == CatalogFormFocus::WithData) {
+            let toggle_y = if compact && draft.focus == CatalogFormFocus::WithData {
+                bottom.saturating_sub(1)
+            } else {
+                storage_y + 2
+            };
+            render_catalog_toggle_field(
+                frame,
+                Rect::new(area.x, toggle_y, area.width, 1),
+                "With data",
+                draft.with_data,
+                "WITH DATA",
+                "WITH NO DATA",
+                draft.focus == CatalogFormFocus::WithData,
+                query_editable,
+                HitTarget::CatalogEditorFormField(CatalogFormFocus::WithData),
+                ui,
+                theme,
+            );
+        }
+    }
+    render_catalog_actions(frame, area, draft.focus, ui, theme);
+}
+
+fn render_sequence_fields(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    bottom: u16,
+    start: u16,
+    fields: &[(CatalogFormFocus, &str, &TextInput)],
+    focus: CatalogFormFocus,
+    compact: bool,
+    ui: &mut UiState,
+    theme: Theme,
+) {
+    for (offset, (field, label, input)) in fields.iter().enumerate() {
+        if compact && focus != *field {
+            continue;
+        }
+        let y = area.y + start + offset as u16;
+        if y < bottom {
+            render_catalog_text_field(
+                frame,
+                Rect::new(area.x, y, area.width, 1),
+                label,
+                input,
+                focus == *field,
+                true,
+                HitTarget::CatalogEditorFormField(*field),
+                ui,
+                theme,
+            );
+        }
+    }
+}
+
+fn render_sequence_bound(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    label: &str,
+    bound: &crate::model::catalog_editor::SequenceBoundDraft,
+    field: CatalogFormFocus,
+    focus: CatalogFormFocus,
+    ui: &mut UiState,
+    theme: Theme,
+    no_limit: &str,
+) {
+    use crate::model::catalog_editor::SequenceBoundKind;
+    let value = match bound.kind {
+        SequenceBoundKind::Default => "Default",
+        SequenceBoundKind::NoLimit => no_limit,
+        SequenceBoundKind::Custom => "Custom",
+    };
+    render_catalog_choice_field(
+        frame,
+        area,
+        label,
+        value,
+        focus == field,
+        true,
+        HitTarget::CatalogEditorFormField(field),
+        ui,
+        theme,
+    );
+    if bound.kind == SequenceBoundKind::Custom && area.y + 1 < frame.area().bottom() {
+        let input_area = Rect::new(area.x, area.y + 1, area.width, 1);
+        render_text_input(
+            frame,
+            catalog_field_areas(input_area).1,
+            "",
+            &bound.value,
+            Style::new().fg(theme.text).bg(if focus == field {
+                theme.selection
+            } else {
+                theme.surface
+            }),
+            ui,
+        );
+    }
+}
+
+fn render_catalog_actions(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    focus: CatalogFormFocus,
+    ui: &mut UiState,
+    theme: Theme,
+) {
+    let y = area.bottom().saturating_sub(2);
+    let review = if area.width < 70 {
+        "[ SQL ]"
+    } else {
+        "[ Review SQL ]"
+    };
+    let actions = [
+        (
+            review,
+            CatalogFormFocus::Review,
+            HitTarget::CatalogEditorReview,
+        ),
+        (
+            "[ Cancel ]",
+            CatalogFormFocus::Cancel,
+            HitTarget::CatalogEditorCancel,
+        ),
+    ];
+    let mut x = area.x;
+    for (label, field, target) in actions {
+        let width = (label.len() as u16).min(area.right().saturating_sub(x));
+        if width > 0 {
+            render_catalog_action(
+                frame,
+                Rect::new(x, y, width, 1),
+                label,
+                focus == field,
+                true,
+                target,
+                ui,
+                theme,
+            );
+            x = x.saturating_add(width + 3);
+        }
+    }
 }
 
 fn render_view(

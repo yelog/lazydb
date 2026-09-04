@@ -1201,11 +1201,160 @@ fn materialized_view_editor_renders_data_state_and_read_only_query() {
     });
     app.overlay = Some(Overlay::CatalogEditor);
     let output = render(&app, 100, 30);
+    for label in [
+        "GENERAL",
+        "DEFINITION",
+        "STORAGE",
+        "Name",
+        "Schema",
+        "Owner",
+        "Comment",
+        "Query",
+        "Tablespace",
+        "With data",
+    ] {
+        assert!(output.contains(label), "missing {label}: {output}");
+    }
     assert!(output.contains("WITH NO DATA"), "{output}");
-    assert!(
-        output.contains("Query (read-only on edit): SELECT id FROM items"),
-        "{output}"
-    );
+    assert!(output.contains("READ ONLY"), "{output}");
+    assert!(output.contains("[ Review SQL ]"), "{output}");
+    assert!(output.contains("[ Cancel ]"), "{output}");
+    let (_, state) = render_with_state(&app, 100, 30);
+    for field in [
+        lazydb::model::catalog_editor::CatalogFormFocus::Name,
+        lazydb::model::catalog_editor::CatalogFormFocus::Schema,
+        lazydb::model::catalog_editor::CatalogFormFocus::Owner,
+        lazydb::model::catalog_editor::CatalogFormFocus::Comment,
+        lazydb::model::catalog_editor::CatalogFormFocus::Tablespace,
+    ] {
+        assert!(
+            state
+                .hit_regions
+                .iter()
+                .any(|region| { region.target == HitTarget::CatalogEditorFormField(field) }),
+            "missing target for {field:?}"
+        );
+    }
+    if let Some(lazydb::model::catalog_editor::CatalogDraft::MaterializedView(draft)) = app
+        .catalog_editor
+        .as_mut()
+        .and_then(|editor| editor.draft.as_mut())
+    {
+        draft.focus = lazydb::model::catalog_editor::CatalogFormFocus::Query;
+    }
+    let compact = render(&app, 56, 16);
+    assert!(compact.contains("Query"), "{compact}");
+    assert!(compact.contains("[ SQL ]"), "{compact}");
+    assert!(compact.contains("[ Cancel ]"), "{compact}");
+}
+
+#[test]
+fn sequence_editor_renders_sections_bounds_and_all_fields() {
+    let mut app = App::new(Vec::new());
+    app.catalog_editor = Some(lazydb::model::catalog_editor::CatalogEditorState {
+        mode: CatalogMutationMode::Create,
+        anchor: CatalogMutationAnchor::Profile {
+            profile_id: uuid::Uuid::nil(),
+        },
+        object_type: Some(CatalogObjectType::Catalog(CatalogKind::Sequence)),
+        page: CatalogEditorPage::Form,
+        operation: None,
+        catalog_epoch: 0,
+        options: vec![],
+        selected_option: 0,
+        baseline: None,
+        plan: None,
+        error: None,
+        owner_picker: Default::default(),
+        draft: Some(lazydb::model::catalog_editor::CatalogDraft::Sequence(
+            lazydb::model::catalog_editor::SequenceDraft {
+                name: "orders".into(),
+                schema: "public".into(),
+                owner: "postgres".into(),
+                comment: "ids".into(),
+                data_type: "bigint".into(),
+                increment: "1".into(),
+                min_value: lazydb::model::catalog_editor::SequenceBoundDraft {
+                    kind: lazydb::model::catalog_editor::SequenceBoundKind::Custom,
+                    value: "10".into(),
+                },
+                max_value: lazydb::model::catalog_editor::SequenceBoundDraft {
+                    kind: lazydb::model::catalog_editor::SequenceBoundKind::Default,
+                    value: "".into(),
+                },
+                start_value: "10".into(),
+                restart_value: "".into(),
+                cache: "1".into(),
+                cycle: true,
+                owned_by: "public.orders.id".into(),
+                focus: lazydb::model::catalog_editor::CatalogFormFocus::MinValue,
+            },
+        )),
+    });
+    app.overlay = Some(Overlay::CatalogEditor);
+    let (output, state) = render_with_state(&app, 100, 30);
+    for label in [
+        "GENERAL",
+        "VALUES",
+        "OWNERSHIP",
+        "Name",
+        "Schema",
+        "Owner",
+        "Comment",
+        "Data type",
+        "Increment",
+        "Minimum",
+        "Maximum",
+        "Start",
+        "Restart",
+        "Cache",
+        "Cycle",
+        "Owned by",
+        "Default",
+        "Custom",
+        "10",
+    ] {
+        assert!(output.contains(label), "missing {label}: {output}");
+    }
+    assert!(output.contains("[x] On"), "{output}");
+    if let Some(lazydb::model::catalog_editor::CatalogDraft::Sequence(draft)) = app
+        .catalog_editor
+        .as_mut()
+        .and_then(|editor| editor.draft.as_mut())
+    {
+        draft.min_value.kind = lazydb::model::catalog_editor::SequenceBoundKind::NoLimit;
+        draft.max_value.kind = lazydb::model::catalog_editor::SequenceBoundKind::NoLimit;
+    }
+    let bounds = render(&app, 100, 30);
+    assert!(bounds.contains("No min value"), "{bounds}");
+    assert!(bounds.contains("No max value"), "{bounds}");
+    for field in [
+        lazydb::model::catalog_editor::CatalogFormFocus::Name,
+        lazydb::model::catalog_editor::CatalogFormFocus::Schema,
+        lazydb::model::catalog_editor::CatalogFormFocus::Owner,
+        lazydb::model::catalog_editor::CatalogFormFocus::Comment,
+        lazydb::model::catalog_editor::CatalogFormFocus::DataType,
+        lazydb::model::catalog_editor::CatalogFormFocus::Increment,
+        lazydb::model::catalog_editor::CatalogFormFocus::MinValue,
+        lazydb::model::catalog_editor::CatalogFormFocus::MaxValue,
+        lazydb::model::catalog_editor::CatalogFormFocus::StartValue,
+        lazydb::model::catalog_editor::CatalogFormFocus::RestartValue,
+        lazydb::model::catalog_editor::CatalogFormFocus::Cache,
+        lazydb::model::catalog_editor::CatalogFormFocus::Cycle,
+        lazydb::model::catalog_editor::CatalogFormFocus::OwnedBy,
+    ] {
+        assert!(
+            state
+                .hit_regions
+                .iter()
+                .any(|region| { region.target == HitTarget::CatalogEditorFormField(field) }),
+            "missing target for {field:?}"
+        );
+    }
+    let compact = render(&app, 56, 16);
+    assert!(compact.contains("Minimum"), "{compact}");
+    assert!(compact.contains("[ SQL ]"), "{compact}");
+    assert!(compact.contains("[ Cancel ]"), "{compact}");
 }
 
 #[test]
