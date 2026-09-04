@@ -4053,14 +4053,35 @@ impl App {
                 }
                 Vec::new()
             }
-            Action::CatalogEditorToggleMaterializedViewData => {
-                if let Some(editor) = self.catalog_editor.as_mut()
-                    && editor.mode == crate::db::catalog_mutation::CatalogMutationMode::Create
-                    && let Some(crate::model::catalog_editor::CatalogDraft::MaterializedView(draft)) =
-                        editor.draft.as_mut()
-                    && draft.focus == crate::model::catalog_editor::CatalogFormFocus::WithData
-                {
-                    draft.with_data = !draft.with_data;
+            Action::CatalogEditorCycleChoice(delta) => {
+                if let Some(draft) = self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut()) {
+                    match draft {
+                        crate::model::catalog_editor::CatalogDraft::View(draft) => {
+                            draft.cycle_focused_choice(delta);
+                        }
+                        crate::model::catalog_editor::CatalogDraft::Sequence(draft) => {
+                            draft.cycle_focused_choice(delta);
+                        }
+                        _ => {}
+                    }
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorToggleFocused => {
+                if let Some(editor) = self.catalog_editor.as_mut() {
+                    let create_mode =
+                        editor.mode == crate::db::catalog_mutation::CatalogMutationMode::Create;
+                    if let Some(draft) = editor.draft.as_mut() {
+                        match draft {
+                            crate::model::catalog_editor::CatalogDraft::MaterializedView(draft) => {
+                                draft.toggle_focused(create_mode);
+                            }
+                            crate::model::catalog_editor::CatalogDraft::Sequence(draft) => {
+                                draft.toggle_focused();
+                            }
+                            _ => {}
+                        }
+                    }
                 }
                 Vec::new()
             }

@@ -172,7 +172,7 @@ fn materialized_view_storage_controls_update_independently() {
         })
         .unwrap()
         .focus = CatalogFormFocus::WithData;
-    app.update(Action::CatalogEditorToggleMaterializedViewData);
+    app.update(Action::CatalogEditorToggleFocused);
 
     assert_eq!(materialized_view_draft(&app).tablespace.value(), "fast ");
     assert!(!materialized_view_draft(&app).with_data);
@@ -209,7 +209,7 @@ fn materialized_view_edit_skips_and_does_not_edit_query() {
         })
         .unwrap()
         .focus = CatalogFormFocus::WithData;
-    app.update(Action::CatalogEditorToggleMaterializedViewData);
+    app.update(Action::CatalogEditorToggleFocused);
     assert!(materialized_view_draft(&app).with_data);
 }
 
@@ -259,8 +259,8 @@ fn catalog_editor_paste_supports_view_materialized_view_and_sequence_text_fields
             comment: "".into(),
             data_type: "bigint".into(),
             increment: "1".into(),
-            min_value: SequenceBound::Unset,
-            max_value: SequenceBound::Unset,
+            min_value: SequenceBound::Unset.into(),
+            max_value: SequenceBound::Unset.into(),
             start_value: "1".into(),
             restart_value: "".into(),
             cache: "1".into(),
@@ -348,8 +348,8 @@ fn catalog_editor_paste_is_noop_for_read_only_choice_toggle_and_action_focus() {
                 comment: "".into(),
                 data_type: "bigint".into(),
                 increment: "1".into(),
-                min_value: SequenceBound::Unset,
-                max_value: SequenceBound::Unset,
+                min_value: SequenceBound::Unset.into(),
+                max_value: SequenceBound::Unset.into(),
                 start_value: "1".into(),
                 restart_value: "".into(),
                 cache: "1".into(),
@@ -366,10 +366,129 @@ fn catalog_editor_paste_is_noop_for_read_only_choice_toggle_and_action_focus() {
         else {
             panic!("sequence draft expected");
         };
-        assert_eq!(draft.min_value, SequenceBound::Unset);
+        assert_eq!(draft.min_value.to_bound(), SequenceBound::Unset);
         assert!(!draft.cycle);
         assert_eq!(draft.owned_by.value(), "NONE");
     }
+}
+
+#[test]
+fn view_option_actions_cycle_only_the_focused_available_choice() {
+    let mut app = simple_catalog_editor(
+        CatalogMutationMode::Create,
+        CatalogDraft::View(ViewDraft {
+            name: "v".into(),
+            schema: "public".into(),
+            owner: "postgres".into(),
+            comment: "".into(),
+            query: "SELECT 1".into(),
+            output_columns: "".into(),
+            security_barrier: ViewOption::available(None),
+            security_invoker: ViewOption::unavailable("unsupported"),
+            check_option: ViewOption::available(None),
+            focus: CatalogFormFocus::SecurityBarrier,
+        }),
+    );
+
+    app.update(Action::CatalogEditorCycleChoice(1));
+    let Some(CatalogDraft::View(draft)) =
+        app.catalog_editor.as_ref().and_then(|e| e.draft.as_ref())
+    else {
+        panic!("view draft expected");
+    };
+    assert_eq!(draft.security_barrier.value, Some(true));
+    assert_eq!(draft.check_option.value, None);
+
+    app.catalog_editor
+        .as_mut()
+        .unwrap()
+        .draft
+        .as_mut()
+        .and_then(|draft| match draft {
+            CatalogDraft::View(draft) => Some(draft),
+            _ => None,
+        })
+        .unwrap()
+        .focus = CatalogFormFocus::SecurityInvoker;
+    app.update(Action::CatalogEditorCycleChoice(1));
+    let Some(CatalogDraft::View(draft)) =
+        app.catalog_editor.as_ref().and_then(|e| e.draft.as_ref())
+    else {
+        panic!("view draft expected");
+    };
+    assert_eq!(
+        draft.security_invoker,
+        ViewOption::unavailable("unsupported")
+    );
+}
+
+#[test]
+fn sequence_control_actions_edit_custom_bound_and_toggle_independently() {
+    let mut app = simple_catalog_editor(
+        CatalogMutationMode::Create,
+        CatalogDraft::Sequence(SequenceDraft {
+            name: "seq".into(),
+            schema: "public".into(),
+            owner: "postgres".into(),
+            comment: "".into(),
+            data_type: "bigint".into(),
+            increment: "1".into(),
+            min_value: SequenceBound::Unset.into(),
+            max_value: SequenceBound::Unset.into(),
+            start_value: "1".into(),
+            restart_value: "".into(),
+            cache: "1".into(),
+            cycle: false,
+            owned_by: "NONE".into(),
+            focus: CatalogFormFocus::MinValue,
+        }),
+    );
+
+    app.update(Action::CatalogEditorCycleChoice(1));
+    app.update(Action::CatalogEditorCycleChoice(1));
+    app.update(Action::CatalogEditorInsert('-'));
+    app.update(Action::CatalogEditorPaste("100".into()));
+    let draft = match app
+        .catalog_editor
+        .as_ref()
+        .and_then(|e| e.draft.as_ref())
+        .unwrap()
+    {
+        CatalogDraft::Sequence(draft) => draft,
+        _ => panic!("sequence draft expected"),
+    };
+    assert_eq!(
+        draft.min_value.to_bound(),
+        SequenceBound::Value("-100".into())
+    );
+    assert_eq!(draft.max_value.to_bound(), SequenceBound::Unset);
+
+    app.catalog_editor
+        .as_mut()
+        .unwrap()
+        .draft
+        .as_mut()
+        .and_then(|draft| match draft {
+            CatalogDraft::Sequence(draft) => Some(draft),
+            _ => None,
+        })
+        .unwrap()
+        .focus = CatalogFormFocus::Cycle;
+    app.update(Action::CatalogEditorToggleFocused);
+    let draft = match app
+        .catalog_editor
+        .as_ref()
+        .and_then(|e| e.draft.as_ref())
+        .unwrap()
+    {
+        CatalogDraft::Sequence(draft) => draft,
+        _ => panic!("sequence draft expected"),
+    };
+    assert!(draft.cycle);
+    assert_eq!(
+        draft.min_value.to_bound(),
+        SequenceBound::Value("-100".into())
+    );
 }
 
 #[test]

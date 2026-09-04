@@ -508,6 +508,66 @@ pub struct MaterializedViewDraft {
     pub query_editable: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SequenceBoundKind {
+    Default,
+    NoLimit,
+    Custom,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SequenceBoundDraft {
+    pub kind: SequenceBoundKind,
+    pub value: TextInput,
+}
+
+impl SequenceBoundDraft {
+    pub fn to_bound(&self) -> crate::db::catalog_mutation::SequenceBound {
+        match self.kind {
+            SequenceBoundKind::Default => crate::db::catalog_mutation::SequenceBound::Unset,
+            SequenceBoundKind::NoLimit => crate::db::catalog_mutation::SequenceBound::NoLimit,
+            SequenceBoundKind::Custom => {
+                crate::db::catalog_mutation::SequenceBound::Value(self.value.value().to_owned())
+            }
+        }
+    }
+
+    fn cycle(&mut self, delta: isize) {
+        let choices = [
+            SequenceBoundKind::Default,
+            SequenceBoundKind::NoLimit,
+            SequenceBoundKind::Custom,
+        ];
+        let current = choices
+            .iter()
+            .position(|kind| *kind == self.kind)
+            .unwrap_or(0);
+        self.kind = choices[(current as isize + delta).rem_euclid(choices.len() as isize) as usize];
+        if self.kind == SequenceBoundKind::Custom {
+            self.value.set("");
+        }
+    }
+}
+
+impl From<crate::db::catalog_mutation::SequenceBound> for SequenceBoundDraft {
+    fn from(bound: crate::db::catalog_mutation::SequenceBound) -> Self {
+        match bound {
+            crate::db::catalog_mutation::SequenceBound::Unset => Self {
+                kind: SequenceBoundKind::Default,
+                value: TextInput::default(),
+            },
+            crate::db::catalog_mutation::SequenceBound::NoLimit => Self {
+                kind: SequenceBoundKind::NoLimit,
+                value: TextInput::default(),
+            },
+            crate::db::catalog_mutation::SequenceBound::Value(value) => Self {
+                kind: SequenceBoundKind::Custom,
+                value: value.into(),
+            },
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SequenceDraft {
     pub name: TextInput,
@@ -516,8 +576,8 @@ pub struct SequenceDraft {
     pub comment: TextInput,
     pub data_type: TextInput,
     pub increment: TextInput,
-    pub min_value: crate::db::catalog_mutation::SequenceBound,
-    pub max_value: crate::db::catalog_mutation::SequenceBound,
+    pub min_value: SequenceBoundDraft,
+    pub max_value: SequenceBoundDraft,
     pub start_value: TextInput,
     pub restart_value: TextInput,
     pub cache: TextInput,
@@ -535,8 +595,8 @@ impl SequenceDraft {
             comment: optional_text(&definition.comment),
             data_type: definition.data_type.clone().into(),
             increment: definition.increment.clone().into(),
-            min_value: definition.min_value.clone(),
-            max_value: definition.max_value.clone(),
+            min_value: definition.min_value.clone().into(),
+            max_value: definition.max_value.clone().into(),
             start_value: definition.start_value.clone().into(),
             restart_value: TextInput::default(),
             cache: definition.cache.clone().into(),
@@ -568,8 +628,8 @@ impl SequenceDraft {
             }
         }
         for (label, bound) in [("minimum", &self.min_value), ("maximum", &self.max_value)] {
-            if let crate::db::catalog_mutation::SequenceBound::Value(value) = bound
-                && value.trim().parse::<i128>().is_err()
+            if bound.kind == SequenceBoundKind::Custom
+                && bound.value.value().trim().parse::<i128>().is_err()
             {
                 return Err(invalid(&format!("sequence {label} must be numeric")));
             }
@@ -609,6 +669,12 @@ impl SequenceDraft {
             CatalogFormFocus::Comment => Some(&mut self.comment),
             CatalogFormFocus::DataType => Some(&mut self.data_type),
             CatalogFormFocus::Increment => Some(&mut self.increment),
+            CatalogFormFocus::MinValue if self.min_value.kind == SequenceBoundKind::Custom => {
+                Some(&mut self.min_value.value)
+            }
+            CatalogFormFocus::MaxValue if self.max_value.kind == SequenceBoundKind::Custom => {
+                Some(&mut self.max_value.value)
+            }
             CatalogFormFocus::StartValue => Some(&mut self.start_value),
             CatalogFormFocus::RestartValue => Some(&mut self.restart_value),
             CatalogFormFocus::Cache => Some(&mut self.cache),
@@ -665,6 +731,24 @@ impl SequenceDraft {
         if let Some(input) = self.selected_input_mut() {
             input.move_end()
         }
+    }
+
+    pub fn cycle_focused_choice(&mut self, delta: isize) -> bool {
+        let bound = match self.focus {
+            CatalogFormFocus::MinValue => &mut self.min_value,
+            CatalogFormFocus::MaxValue => &mut self.max_value,
+            _ => return false,
+        };
+        bound.cycle(delta);
+        true
+    }
+
+    pub fn toggle_focused(&mut self) -> bool {
+        if self.focus != CatalogFormFocus::Cycle {
+            return false;
+        }
+        self.cycle = !self.cycle;
+        true
     }
 }
 
@@ -787,6 +871,14 @@ impl MaterializedViewDraft {
             input.move_end();
         }
     }
+
+    pub fn toggle_focused(&mut self, create_mode: bool) -> bool {
+        if !create_mode || self.focus != CatalogFormFocus::WithData {
+            return false;
+        }
+        self.with_data = !self.with_data;
+        true
+    }
 }
 
 impl ViewDraft {
@@ -907,6 +999,48 @@ impl ViewDraft {
         if let Some(input) = self.selected_input_mut() {
             input.move_end();
         }
+    }
+
+    pub fn cycle_focused_choice(&mut self, delta: isize) -> bool {
+        fn cycle<T: Clone + PartialEq>(value: &mut Option<T>, choices: &[Option<T>], delta: isize) {
+            let current = choices
+                .iter()
+                .position(|choice| choice == value)
+                .unwrap_or(0);
+            *value = choices
+                [(current as isize + delta).rem_euclid(choices.len() as isize) as usize]
+                .clone();
+        }
+
+        match self.focus {
+            CatalogFormFocus::SecurityBarrier
+                if self.security_barrier.availability.is_available() =>
+            {
+                cycle(
+                    &mut self.security_barrier.value,
+                    &[None, Some(true), Some(false)],
+                    delta,
+                );
+            }
+            CatalogFormFocus::SecurityInvoker
+                if self.security_invoker.availability.is_available() =>
+            {
+                cycle(
+                    &mut self.security_invoker.value,
+                    &[None, Some(true), Some(false)],
+                    delta,
+                );
+            }
+            CatalogFormFocus::CheckOption if self.check_option.availability.is_available() => {
+                cycle(
+                    &mut self.check_option.value,
+                    &[None, Some("LOCAL".into()), Some("CASCADED".into())],
+                    delta,
+                );
+            }
+            _ => return false,
+        }
+        true
     }
 }
 
@@ -1808,6 +1942,86 @@ pub enum CatalogDraft {
 }
 
 impl CatalogDraft {
+    pub fn focus_accepts_text(&self) -> bool {
+        match self {
+            Self::View(draft) => matches!(
+                draft.focus,
+                CatalogFormFocus::Name
+                    | CatalogFormFocus::Schema
+                    | CatalogFormFocus::Owner
+                    | CatalogFormFocus::Comment
+                    | CatalogFormFocus::OutputColumns
+                    | CatalogFormFocus::Query
+            ),
+            Self::MaterializedView(draft) => {
+                matches!(
+                    draft.focus,
+                    CatalogFormFocus::Name
+                        | CatalogFormFocus::Schema
+                        | CatalogFormFocus::Owner
+                        | CatalogFormFocus::Comment
+                        | CatalogFormFocus::Tablespace
+                ) || draft.focus == CatalogFormFocus::Query && draft.query_editable
+            }
+            Self::Sequence(draft) => {
+                matches!(
+                    draft.focus,
+                    CatalogFormFocus::Name
+                        | CatalogFormFocus::Schema
+                        | CatalogFormFocus::Owner
+                        | CatalogFormFocus::Comment
+                        | CatalogFormFocus::DataType
+                        | CatalogFormFocus::Increment
+                        | CatalogFormFocus::StartValue
+                        | CatalogFormFocus::RestartValue
+                        | CatalogFormFocus::Cache
+                        | CatalogFormFocus::OwnedBy
+                ) || draft.focus == CatalogFormFocus::MinValue
+                    && draft.min_value.kind == SequenceBoundKind::Custom
+                    || draft.focus == CatalogFormFocus::MaxValue
+                        && draft.max_value.kind == SequenceBoundKind::Custom
+            }
+            _ => true,
+        }
+    }
+
+    pub fn focus_is_choice(&self) -> bool {
+        match self {
+            Self::View(draft) => match draft.focus {
+                CatalogFormFocus::SecurityBarrier => {
+                    draft.security_barrier.availability.is_available()
+                }
+                CatalogFormFocus::SecurityInvoker => {
+                    draft.security_invoker.availability.is_available()
+                }
+                CatalogFormFocus::CheckOption => draft.check_option.availability.is_available(),
+                _ => false,
+            },
+            Self::Sequence(draft) => {
+                matches!(
+                    draft.focus,
+                    CatalogFormFocus::MinValue | CatalogFormFocus::MaxValue
+                )
+            }
+            _ => false,
+        }
+    }
+
+    pub fn focus_is_toggle(&self, create_mode: bool) -> bool {
+        matches!(self, Self::Sequence(draft) if draft.focus == CatalogFormFocus::Cycle)
+            || matches!(self, Self::MaterializedView(draft) if create_mode && draft.focus == CatalogFormFocus::WithData)
+    }
+
+    pub fn focused_action(&self) -> Option<CatalogFormFocus> {
+        let focus = match self {
+            Self::View(draft) => draft.focus,
+            Self::MaterializedView(draft) => draft.focus,
+            Self::Sequence(draft) => draft.focus,
+            _ => return Some(CatalogFormFocus::Review),
+        };
+        matches!(focus, CatalogFormFocus::Review | CatalogFormFocus::Cancel).then_some(focus)
+    }
+
     pub fn move_field(&mut self, delta: isize, allow_with_data: bool) {
         match self {
             Self::Table(d) => d.move_field(delta),
@@ -2168,8 +2382,8 @@ impl CatalogEditorState {
                     comment: TextInput::default(),
                     data_type: "bigint".into(),
                     increment: "1".into(),
-                    min_value: crate::db::catalog_mutation::SequenceBound::Unset,
-                    max_value: crate::db::catalog_mutation::SequenceBound::Unset,
+                    min_value: crate::db::catalog_mutation::SequenceBound::Unset.into(),
+                    max_value: crate::db::catalog_mutation::SequenceBound::Unset.into(),
                     start_value: "1".into(),
                     restart_value: TextInput::default(),
                     cache: "1".into(),
@@ -2466,8 +2680,8 @@ mod tests {
             comment: TextInput::default(),
             data_type: TextInput::default(),
             increment: TextInput::default(),
-            min_value: SequenceBound::Unset,
-            max_value: SequenceBound::Unset,
+            min_value: SequenceBound::Unset.into(),
+            max_value: SequenceBound::Unset.into(),
             start_value: TextInput::default(),
             restart_value: TextInput::default(),
             cache: TextInput::default(),
@@ -2570,5 +2784,93 @@ mod tests {
         sequence.focus = CatalogFormFocus::Owner;
         editor.draft = Some(CatalogDraft::Sequence(sequence));
         assert!(editor.owner_field_focused());
+    }
+
+    #[test]
+    fn view_option_cycles_cover_every_value_and_reject_unavailable_options() {
+        let mut draft = view_draft();
+
+        draft.focus = CatalogFormFocus::SecurityBarrier;
+        for expected in [Some(true), Some(false), None] {
+            assert!(draft.cycle_focused_choice(1));
+            assert_eq!(draft.security_barrier.value, expected);
+        }
+
+        draft.security_invoker = ViewOption::available(None);
+        draft.focus = CatalogFormFocus::SecurityInvoker;
+        assert!(draft.cycle_focused_choice(-1));
+        assert_eq!(draft.security_invoker.value, Some(false));
+
+        draft.focus = CatalogFormFocus::CheckOption;
+        for expected in [Some("LOCAL"), Some("CASCADED"), None] {
+            assert!(draft.cycle_focused_choice(1));
+            assert_eq!(draft.check_option.value.as_deref(), expected);
+        }
+
+        draft.security_invoker = ViewOption::unavailable("not supported");
+        draft.focus = CatalogFormFocus::SecurityInvoker;
+        assert!(!draft.cycle_focused_choice(1));
+        assert_eq!(
+            draft.security_invoker,
+            ViewOption::unavailable("not supported")
+        );
+    }
+
+    #[test]
+    fn sequence_control_cycles_bounds_and_toggles_cycle() {
+        let mut draft = sequence_draft();
+        draft.focus = CatalogFormFocus::MinValue;
+        for expected in [
+            SequenceBound::NoLimit,
+            SequenceBound::Value(String::new()),
+            SequenceBound::Unset,
+        ] {
+            assert!(draft.cycle_focused_choice(1));
+            assert_eq!(draft.min_value.to_bound(), expected);
+        }
+
+        draft.focus = CatalogFormFocus::MaxValue;
+        assert!(draft.cycle_focused_choice(-1));
+        assert_eq!(
+            draft.max_value.to_bound(),
+            SequenceBound::Value(String::new())
+        );
+
+        draft.focus = CatalogFormFocus::Cycle;
+        assert!(draft.toggle_focused());
+        assert!(draft.cycle);
+        assert!(!draft.cycle_focused_choice(1));
+    }
+
+    #[test]
+    fn sequence_control_custom_bound_uses_unicode_safe_text_editing() {
+        let mut draft = sequence_draft();
+        draft.focus = CatalogFormFocus::MinValue;
+        draft.min_value = SequenceBound::Value("界-100".into()).into();
+
+        draft.move_home();
+        draft.move_right();
+        draft.delete();
+        draft.insert('9');
+        draft.move_end();
+        draft.backspace();
+
+        assert_eq!(
+            draft.min_value.to_bound(),
+            SequenceBound::Value("界910".into())
+        );
+        assert_eq!(draft.max_value.to_bound(), SequenceBound::Unset);
+
+        for focus in [
+            CatalogFormFocus::MaxValue,
+            CatalogFormFocus::Cycle,
+            CatalogFormFocus::Review,
+            CatalogFormFocus::Cancel,
+        ] {
+            draft.focus = focus;
+            draft.insert('7');
+            draft.backspace();
+        }
+        assert_eq!(draft.max_value.to_bound(), SequenceBound::Unset);
     }
 }

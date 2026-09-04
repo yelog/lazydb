@@ -1475,8 +1475,8 @@ LIMIT 2001
             draft.start_value.value().trim(),
             draft.cache.value().trim()
         );
-        clauses.push_str(&bound(&draft.min_value, "MINVALUE"));
-        clauses.push_str(&bound(&draft.max_value, "MAXVALUE"));
+        clauses.push_str(&bound(&draft.min_value.to_bound(), "MINVALUE"));
+        clauses.push_str(&bound(&draft.max_value.to_bound(), "MAXVALUE"));
         if draft.cycle {
             clauses.push_str(" CYCLE");
         }

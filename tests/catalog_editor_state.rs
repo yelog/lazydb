@@ -1286,8 +1286,8 @@ fn sequence_draft_cycles_all_fields_and_preserves_no_limit_state() {
         comment: "".into(),
         data_type: "bigint".into(),
         increment: "1".into(),
-        min_value: lazydb::db::catalog_mutation::SequenceBound::NoLimit,
-        max_value: lazydb::db::catalog_mutation::SequenceBound::Unset,
+        min_value: lazydb::db::catalog_mutation::SequenceBound::NoLimit.into(),
+        max_value: lazydb::db::catalog_mutation::SequenceBound::Unset.into(),
         start_value: "1".into(),
         restart_value: "".into(),
         cache: "1".into(),
@@ -1298,7 +1298,7 @@ fn sequence_draft_cycles_all_fields_and_preserves_no_limit_state() {
     draft.insert('x');
     assert_eq!(draft.owned_by.value(), "NONEx");
     assert!(matches!(
-        draft.min_value,
+        draft.min_value.to_bound(),
         lazydb::db::catalog_mutation::SequenceBound::NoLimit
     ));
 }
