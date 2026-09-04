@@ -190,6 +190,7 @@ pub enum Action {
     CatalogEditorFieldNext,
     CatalogEditorFieldPrevious,
     CatalogEditorFocusField(usize),
+    CatalogEditorFocusFormField(crate::model::catalog_editor::CatalogFormFocus),
     CatalogOwnerPickerOpen,
     CatalogOwnerPickerClose,
     CatalogOwnerPickerMove(isize),

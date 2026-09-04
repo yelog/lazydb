@@ -310,6 +310,67 @@ fn table_editor_keymap_dispatches_by_focus_region() {
 }
 
 #[test]
+fn catalog_form_keymap_keeps_review_and_cancel_semantics() {
+    let mut app = materialized_view_keymap_app();
+    let mut keymap = Keymap::default();
+    for (focus, expected) in [
+        (
+            lazydb::model::catalog_editor::CatalogFormFocus::Review,
+            Action::CatalogEditorPreview,
+        ),
+        (
+            lazydb::model::catalog_editor::CatalogFormFocus::Cancel,
+            Action::CatalogEditorCancel,
+        ),
+    ] {
+        match app.catalog_editor.as_mut().unwrap().draft.as_mut().unwrap() {
+            lazydb::model::catalog_editor::CatalogDraft::MaterializedView(draft) => {
+                draft.focus = focus
+            }
+            _ => panic!("materialized view draft expected"),
+        }
+        assert_eq!(keymap.map(key(KeyCode::Enter), &app), Some(expected));
+    }
+}
+
+fn materialized_view_keymap_app() -> App {
+    let mut app = App::new(Vec::new());
+    app.catalog_editor = Some(lazydb::model::catalog_editor::CatalogEditorState {
+        mode: lazydb::db::catalog_mutation::CatalogMutationMode::Create,
+        anchor: lazydb::db::catalog_mutation::CatalogMutationAnchor::Profile {
+            profile_id: Uuid::nil(),
+        },
+        object_type: None,
+        page: lazydb::model::catalog_editor::CatalogEditorPage::Form,
+        operation: None,
+        catalog_epoch: 0,
+        options: Vec::new(),
+        selected_option: 0,
+        draft: Some(
+            lazydb::model::catalog_editor::CatalogDraft::MaterializedView(
+                lazydb::model::catalog_editor::MaterializedViewDraft {
+                    name: "mv".into(),
+                    schema: "public".into(),
+                    owner: "postgres".into(),
+                    comment: "".into(),
+                    query: "SELECT 1".into(),
+                    tablespace: "".into(),
+                    with_data: true,
+                    focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
+                    query_editable: true,
+                },
+            ),
+        ),
+        baseline: None,
+        plan: None,
+        error: None,
+        owner_picker: Default::default(),
+    });
+    app.overlay = Some(Overlay::CatalogEditor);
+    app
+}
+
+#[test]
 fn catalog_table_form_accepts_paste_as_one_text_edit() {
     let app = table_editor_app();
     assert_eq!(

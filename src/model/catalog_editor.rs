@@ -1942,6 +1942,26 @@ pub enum CatalogDraft {
 }
 
 impl CatalogDraft {
+    pub fn owner(&self) -> Option<&TextInput> {
+        match self {
+            Self::Schema(draft) => Some(&draft.owner),
+            Self::View(draft) => Some(&draft.owner),
+            Self::MaterializedView(draft) => Some(&draft.owner),
+            Self::Sequence(draft) => Some(&draft.owner),
+            _ => None,
+        }
+    }
+
+    pub fn owner_mut(&mut self) -> Option<&mut TextInput> {
+        match self {
+            Self::Schema(draft) => Some(&mut draft.owner),
+            Self::View(draft) => Some(&mut draft.owner),
+            Self::MaterializedView(draft) => Some(&mut draft.owner),
+            Self::Sequence(draft) => Some(&mut draft.owner),
+            _ => None,
+        }
+    }
+
     pub fn focus_accepts_text(&self) -> bool {
         match self {
             Self::View(draft) => matches!(

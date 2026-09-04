@@ -70,6 +70,7 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                             | HitTarget::ProfileGroupCancel
                             | HitTarget::ExplorerAddOption(_)
                             | HitTarget::CatalogEditorField(_)
+                            | HitTarget::CatalogEditorFormField(_)
                             | HitTarget::CatalogEditorTableField(_)
                             | HitTarget::CatalogEditorTableColumn(_)
                             | HitTarget::CatalogEditorAddTableColumn
@@ -173,8 +174,9 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                 HitTarget::CatalogEditorField(index) => {
                     Some(Action::CatalogEditorFocusField(index))
                 }
-                // View form targets are registered for the future catalog form reducer.
-                HitTarget::CatalogEditorFormField(_) => None,
+                HitTarget::CatalogEditorFormField(field) => {
+                    Some(Action::CatalogEditorFocusFormField(field))
+                }
                 HitTarget::CatalogEditorTableField(field) => {
                     Some(Action::CatalogEditorFocusTableField(field))
                 }

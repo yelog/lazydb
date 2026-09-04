@@ -255,7 +255,15 @@ fn form(
     } else if let Some(CatalogDraft::Constraint(draft)) = editor.draft.as_ref() {
         render_constraint(frame, chunks[1], draft, theme);
     } else if let Some(CatalogDraft::View(draft)) = editor.draft.as_ref() {
-        render_view(frame, chunks[1], draft, ui, theme);
+        render_view(
+            frame,
+            chunks[1],
+            draft,
+            ui,
+            theme,
+            app.catalog_owner_choices(),
+            &editor.owner_picker,
+        );
     } else if let Some(CatalogDraft::MaterializedView(draft)) = editor.draft.as_ref() {
         render_materialized_view(
             frame,
@@ -264,9 +272,19 @@ fn form(
             editor.mode == crate::db::catalog_mutation::CatalogMutationMode::Create,
             ui,
             theme,
+            app.catalog_owner_choices(),
+            &editor.owner_picker,
         );
     } else if let Some(CatalogDraft::Sequence(draft)) = editor.draft.as_ref() {
-        render_sequence(frame, chunks[1], draft, ui, theme);
+        render_sequence(
+            frame,
+            chunks[1],
+            draft,
+            ui,
+            theme,
+            app.catalog_owner_choices(),
+            &editor.owner_picker,
+        );
     } else {
         frame.render_widget(
             Paragraph::new("Definition form is ready for the selected object type."),
@@ -385,87 +403,9 @@ fn render_schema(
             );
         }
     }
-    if draft.selected_field == crate::model::catalog_editor::SCHEMA_OWNER_FIELD && picker.open {
-        let Some(choices) = owner_choices else {
-            return;
-        };
-        let picker_y = area.y.saturating_add(4);
-        let filter = picker.filter.value();
-        let visible = choices
-            .iter()
-            .filter(|choice| choice.name.to_lowercase().contains(&filter.to_lowercase()))
-            .take(usize::from(area.height.saturating_sub(5)));
-        let mut header = vec![Span::styled(
-            "OWNER ROLE",
-            Style::new()
-                .fg(theme.muted)
-                .bg(theme.surface)
-                .add_modifier(Modifier::BOLD),
-        )];
-        if !filter.is_empty() {
-            header.push(Span::styled(
-                format!("  /{}", sanitize_terminal_text(filter)),
-                Style::new().fg(theme.action).bg(theme.surface),
-            ));
-        }
-        if let Some(message) = picker.message.as_deref() {
-            header.push(Span::styled(
-                format!("  {}", sanitize_terminal_text(message)),
-                Style::new().fg(theme.warning).bg(theme.surface),
-            ));
-        }
-        frame.render_widget(
-            Paragraph::new(Line::from(header)).style(Style::new().bg(theme.surface)),
-            Rect::new(area.x, picker_y, area.width, 1),
-        );
-        for (offset, choice) in visible.enumerate() {
-            let row = Rect::new(
-                area.x,
-                picker_y.saturating_add(1 + offset as u16),
-                area.width,
-                1,
-            );
-            ui.hit_regions.push(HitRegion {
-                area: row,
-                target: HitTarget::CatalogOwnerChoice(choice.name.clone()),
-            });
-            let selected = Some(choice.name.as_str()) == picker.selected_name.as_deref();
-            let status = if choice.is_current {
-                "CURRENT"
-            } else if choice.can_login {
-                "LOGIN"
-            } else {
-                "ROLE"
-            };
-            let suffix = if choice.selectable {
-                status.to_owned()
-            } else {
-                format!("{status} - cannot SET ROLE")
-            };
-            frame.render_widget(
-                Paragraph::new(format!(
-                    "{}{}  {}",
-                    if selected { "› " } else { "  " },
-                    choice.name,
-                    suffix
-                ))
-                .style(
-                    Style::new()
-                        .fg(if choice.selectable {
-                            theme.text
-                        } else {
-                            theme.muted
-                        })
-                        .bg(if selected {
-                            theme.selection
-                        } else {
-                            theme.surface
-                        }),
-                ),
-                row,
-            );
-        }
-    } else if draft.selected_field == crate::model::catalog_editor::SCHEMA_OWNER_FIELD
+    render_owner_picker(frame, area, owner_choices, picker, ui, theme);
+    if draft.selected_field == crate::model::catalog_editor::SCHEMA_OWNER_FIELD
+        && !picker.open
         && let crate::model::workspace::CatalogOwnerContextState::Failed { message, .. } =
             owner_context
     {
@@ -476,6 +416,82 @@ fn render_schema(
             ))
             .style(Style::new().fg(theme.warning).bg(theme.surface)),
             Rect::new(area.x, area.y.saturating_add(4), area.width, 1),
+        );
+    }
+}
+
+fn render_owner_picker(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    owner_choices: Option<&[crate::db::catalog_mutation::CatalogOwnerChoice]>,
+    picker: &crate::model::catalog_editor::OwnerPickerState,
+    ui: &mut UiState,
+    theme: Theme,
+) {
+    let Some(choices) = owner_choices else {
+        return;
+    };
+    if !picker.open {
+        return;
+    }
+    let picker_y = area.y.saturating_add(4);
+    let visible = picker.visible(choices);
+    let content_bottom = area.bottom().saturating_sub(2);
+    let max_rows = usize::from(content_bottom.saturating_sub(picker_y + 1));
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "OWNER ROLE",
+                Style::new()
+                    .fg(theme.muted)
+                    .bg(theme.surface)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  /{}", sanitize_terminal_text(picker.filter.value())),
+                Style::new().fg(theme.action).bg(theme.surface),
+            ),
+        ]))
+        .style(Style::new().bg(theme.surface)),
+        Rect::new(area.x, picker_y, area.width, 1),
+    );
+    for (offset, choice) in visible.into_iter().take(max_rows).enumerate() {
+        let row = Rect::new(
+            area.x,
+            picker_y.saturating_add(1 + offset as u16),
+            area.width,
+            1,
+        );
+        ui.hit_regions.push(HitRegion {
+            area: row,
+            target: HitTarget::CatalogOwnerChoice(choice.name.clone()),
+        });
+        let selected = Some(choice.name.as_str()) == picker.selected_name.as_deref();
+        frame.render_widget(
+            Paragraph::new(format!(
+                "{}{}  {}",
+                if selected { "› " } else { "  " },
+                choice.name,
+                if choice.selectable {
+                    "SELECTABLE"
+                } else {
+                    "DISABLED"
+                }
+            ))
+            .style(
+                Style::new()
+                    .fg(if choice.selectable {
+                        theme.text
+                    } else {
+                        theme.muted
+                    })
+                    .bg(if selected {
+                        theme.selection
+                    } else {
+                        theme.surface
+                    }),
+            ),
+            row,
         );
     }
 }
@@ -561,6 +577,8 @@ fn render_sequence(
     draft: &SequenceDraft,
     ui: &mut UiState,
     theme: Theme,
+    owner_choices: Option<&[crate::db::catalog_mutation::CatalogOwnerChoice]>,
+    picker: &crate::model::catalog_editor::OwnerPickerState,
 ) {
     let bottom = area.bottom().saturating_sub(2);
     let compact = area.height < 18;
@@ -728,6 +746,7 @@ fn render_sequence(
         }
     }
     render_catalog_actions(frame, area, draft.focus, ui, theme);
+    render_owner_picker(frame, area, owner_choices, picker, ui, theme);
 }
 
 fn render_materialized_view(
@@ -737,6 +756,8 @@ fn render_materialized_view(
     query_editable: bool,
     ui: &mut UiState,
     theme: Theme,
+    owner_choices: Option<&[crate::db::catalog_mutation::CatalogOwnerChoice]>,
+    picker: &crate::model::catalog_editor::OwnerPickerState,
 ) {
     let bottom = area.bottom().saturating_sub(2);
     let compact = area.height < 16;
@@ -855,6 +876,7 @@ fn render_materialized_view(
         }
     }
     render_catalog_actions(frame, area, draft.focus, ui, theme);
+    render_owner_picker(frame, area, owner_choices, picker, ui, theme);
 }
 
 fn render_sequence_fields(
@@ -984,6 +1006,8 @@ fn render_view(
     draft: &ViewDraft,
     ui: &mut UiState,
     theme: Theme,
+    owner_choices: Option<&[crate::db::catalog_mutation::CatalogOwnerChoice]>,
+    picker: &crate::model::catalog_editor::OwnerPickerState,
 ) {
     let content_bottom = area.bottom().saturating_sub(2);
     let compact = area.height < 16;
@@ -1212,6 +1236,7 @@ fn render_view(
             x = x.saturating_add(width + 3);
         }
     }
+    render_owner_picker(frame, area, owner_choices, picker, ui, theme);
 }
 
 fn render_constraint(frame: &mut Frame<'_>, area: Rect, draft: &ConstraintDraft, theme: Theme) {

@@ -1848,6 +1848,7 @@ impl App {
                         | Action::CatalogDropClear
                         | Action::CatalogDropConfirm
                         | Action::CatalogDropCancel
+                        | Action::CatalogEditorFocusFormField(_)
                         | Action::OpenDashboard
                         | Action::DashboardSetPage(_)
                         | Action::DashboardRefresh
@@ -3198,10 +3199,12 @@ impl App {
                 };
                 if let Some(editor) = self.catalog_editor.as_mut() {
                     if !editor.owner_picker.open
-                        && let Some(crate::model::catalog_editor::CatalogDraft::Schema(draft)) =
-                            editor.draft.as_ref()
+                        && let Some(draft) = editor.draft.as_ref()
+                        && catalog_owner_field_focused(draft)
                     {
-                        editor.owner_picker.open(draft.owner.value(), &choices);
+                        editor
+                            .owner_picker
+                            .open(draft.owner().map_or("", |owner| owner.value()), &choices);
                     }
                     editor.owner_picker.insert_filter(character, &choices);
                 }
@@ -3238,12 +3241,13 @@ impl App {
                     && let Some(choice) = editor.owner_picker.selected(&choices)
                 {
                     if choice.selectable {
-                        if let Some(crate::model::catalog_editor::CatalogDraft::Schema(draft)) =
-                            editor.draft.as_mut()
+                        if let Some(draft) = editor.draft.as_mut()
+                            && catalog_owner_field_focused(draft)
+                            && let Some(owner) = draft.owner_mut()
                         {
-                            draft.owner.set(choice.name.clone());
+                            owner.set(choice.name.clone());
+                            editor.owner_picker.close();
                         }
-                        editor.owner_picker.close();
                     } else {
                         editor.owner_picker.message =
                             Some(format!("Cannot SET ROLE to {}", choice.name));
@@ -3511,6 +3515,40 @@ impl App {
                 }
                 if let Some(editor) = self.catalog_editor.as_mut() {
                     editor.owner_picker.close();
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorFocusFormField(focus) => {
+                let allow_with_data = self.catalog_editor.as_ref().is_some_and(|editor| {
+                    editor.mode == crate::db::catalog_mutation::CatalogMutationMode::Create
+                });
+                let accepted = if let Some(draft) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    match draft {
+                        crate::model::catalog_editor::CatalogDraft::View(draft) => {
+                            draft.focus(focus)
+                        }
+                        crate::model::catalog_editor::CatalogDraft::MaterializedView(draft) => {
+                            draft.focus(focus, allow_with_data)
+                        }
+                        crate::model::catalog_editor::CatalogDraft::Sequence(draft) => {
+                            draft.focus(focus)
+                        }
+                        _ => false,
+                    }
+                } else {
+                    false
+                };
+                if accepted && focus == crate::model::catalog_editor::CatalogFormFocus::Owner {
+                    return self.open_catalog_owner_picker();
+                }
+                if !accepted || focus != crate::model::catalog_editor::CatalogFormFocus::Owner {
+                    if let Some(editor) = self.catalog_editor.as_mut() {
+                        editor.owner_picker.close();
+                    }
                 }
                 Vec::new()
             }
@@ -8483,10 +8521,12 @@ impl App {
             return Vec::new();
         };
         if let Some(editor) = self.catalog_editor.as_mut()
-            && let Some(crate::model::catalog_editor::CatalogDraft::Schema(draft)) =
-                editor.draft.as_ref()
+            && let Some(draft) = editor.draft.as_ref()
+            && catalog_owner_field_focused(draft)
         {
-            editor.owner_picker.open(draft.owner.value(), &choices);
+            editor
+                .owner_picker
+                .open(draft.owner().map_or("", |owner| owner.value()), &choices);
         }
         Vec::new()
     }

@@ -51,6 +51,30 @@ fn maps_catalog_editor_field_clicks() {
 }
 
 #[test]
+fn maps_catalog_editor_form_field_clicks_to_typed_focus_actions() {
+    let mut app = App::new(Vec::new());
+    app.overlay = Some(Overlay::CatalogEditor);
+    let mut ui = UiState::new();
+    ui.hit_regions.push(HitRegion {
+        area: Rect::new(10, 5, 20, 1),
+        target: HitTarget::CatalogEditorFormField(
+            lazydb::model::catalog_editor::CatalogFormFocus::Query,
+        ),
+    });
+
+    assert_eq!(
+        map_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 12, 5),
+            &ui,
+            &app,
+        ),
+        Some(Action::CatalogEditorFocusFormField(
+            lazydb::model::catalog_editor::CatalogFormFocus::Query,
+        ))
+    );
+}
+
+#[test]
 fn rendered_catalog_editor_table_regions_map_to_column_actions() {
     let profile = import_connection_url(":memory:", Some("test"))
         .unwrap()

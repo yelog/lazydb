@@ -214,6 +214,131 @@ fn materialized_view_edit_skips_and_does_not_edit_query() {
 }
 
 #[test]
+fn typed_form_focus_delegates_to_view_materialized_view_and_sequence_drafts() {
+    let mut view = simple_catalog_editor(
+        CatalogMutationMode::Create,
+        CatalogDraft::View(ViewDraft {
+            name: "v".into(),
+            schema: "public".into(),
+            owner: "postgres".into(),
+            comment: "".into(),
+            query: "SELECT 1".into(),
+            output_columns: "".into(),
+            security_barrier: ViewOption::available(None),
+            security_invoker: ViewOption::available(None),
+            check_option: ViewOption::available(None),
+            focus: CatalogFormFocus::Name,
+        }),
+    );
+    view.update(Action::CatalogEditorFocusFormField(CatalogFormFocus::Query));
+    assert_eq!(
+        view.catalog_editor
+            .as_ref()
+            .unwrap()
+            .draft
+            .as_ref()
+            .unwrap()
+            .focused_action(),
+        None
+    );
+    assert_eq!(
+        match view
+            .catalog_editor
+            .as_ref()
+            .unwrap()
+            .draft
+            .as_ref()
+            .unwrap()
+        {
+            CatalogDraft::View(draft) => draft.focus,
+            _ => panic!("view draft expected"),
+        },
+        CatalogFormFocus::Query
+    );
+
+    let mut sequence = simple_catalog_editor(
+        CatalogMutationMode::Create,
+        CatalogDraft::Sequence(SequenceDraft {
+            name: "seq".into(),
+            schema: "public".into(),
+            owner: "postgres".into(),
+            comment: "".into(),
+            data_type: "bigint".into(),
+            increment: "1".into(),
+            min_value: SequenceBound::Unset.into(),
+            max_value: SequenceBound::Unset.into(),
+            start_value: "1".into(),
+            restart_value: "".into(),
+            cache: "1".into(),
+            cycle: false,
+            owned_by: "NONE".into(),
+            focus: CatalogFormFocus::Name,
+        }),
+    );
+    sequence.update(Action::CatalogEditorFocusFormField(
+        CatalogFormFocus::MinValue,
+    ));
+    assert_eq!(
+        match sequence
+            .catalog_editor
+            .as_ref()
+            .unwrap()
+            .draft
+            .as_ref()
+            .unwrap()
+        {
+            CatalogDraft::Sequence(draft) => draft.focus,
+            _ => panic!("sequence draft expected"),
+        },
+        CatalogFormFocus::MinValue
+    );
+}
+
+#[test]
+fn typed_form_focus_rejects_disabled_and_read_only_fields() {
+    let mut view = simple_catalog_editor(
+        CatalogMutationMode::Create,
+        CatalogDraft::View(ViewDraft {
+            name: "v".into(),
+            schema: "public".into(),
+            owner: "postgres".into(),
+            comment: "".into(),
+            query: "SELECT 1".into(),
+            output_columns: "".into(),
+            security_barrier: ViewOption::unavailable("unsupported"),
+            security_invoker: ViewOption::available(None),
+            check_option: ViewOption::available(None),
+            focus: CatalogFormFocus::Name,
+        }),
+    );
+    view.update(Action::CatalogEditorFocusFormField(
+        CatalogFormFocus::SecurityBarrier,
+    ));
+    assert_eq!(
+        match view
+            .catalog_editor
+            .as_ref()
+            .unwrap()
+            .draft
+            .as_ref()
+            .unwrap()
+        {
+            CatalogDraft::View(draft) => draft.focus,
+            _ => panic!("view draft expected"),
+        },
+        CatalogFormFocus::Name
+    );
+
+    let mut materialized =
+        materialized_view_editor(CatalogMutationMode::Edit, CatalogFormFocus::Name);
+    materialized.update(Action::CatalogEditorFocusFormField(CatalogFormFocus::Query));
+    assert_eq!(
+        materialized_view_draft(&materialized).focus,
+        CatalogFormFocus::Name
+    );
+}
+
+#[test]
 fn catalog_editor_paste_supports_view_materialized_view_and_sequence_text_fields() {
     let mut view = simple_catalog_editor(
         CatalogMutationMode::Create,
