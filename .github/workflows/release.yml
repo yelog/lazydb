@@ -139,7 +139,9 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with: { pattern: release-*-unknown-linux-gnu, path: dist, merge-multiple: true }
       - name: Install nFPM
-        run: curl -fsSL https://raw.githubusercontent.com/goreleaser/nfpm/v2.42.0/scripts/install.sh | sh -s -- -b "$HOME/.local/bin"
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/goreleaser/nfpm/v2.42.0/scripts/install.sh | sh -s -- -b "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Build packages
         run: |
           set -eu
