@@ -535,12 +535,10 @@ impl EditorWorkspace {
         }
         if !matches!(mode_after, EditorMode::Insert | EditorMode::Replace)
             && matches!(mode_before, EditorMode::Insert | EditorMode::Replace)
+            && let Some(start) = session.history.transaction_start.take()
+            && start.text != after.text
         {
-            if let Some(start) = session.history.transaction_start.take()
-                && start.text != after.text
-            {
-                session.history.push_undo(start);
-            }
+            session.history.push_undo(start);
         }
         Ok(())
     }

@@ -771,6 +771,7 @@ fn render_sequence(
     render_owner_picker(frame, area, owner_choices, picker, ui, theme);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_materialized_view(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -901,6 +902,7 @@ fn render_materialized_view(
     render_owner_picker(frame, area, owner_choices, picker, ui, theme);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_sequence_fields(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -933,6 +935,7 @@ fn render_sequence_fields(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_sequence_bound(
     frame: &mut Frame<'_>,
     area: Rect,

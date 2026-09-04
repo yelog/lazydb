@@ -2900,14 +2900,15 @@ mod tests {
 
     #[test]
     fn catalog_form_focus_owner_detection_covers_all_owner_forms() {
-        let mut editor = CatalogEditorState::default();
-
-        editor.draft = Some(CatalogDraft::Schema(SchemaDraft {
-            name: TextInput::default(),
-            owner: TextInput::default(),
-            comment: TextInput::default(),
-            selected_field: SCHEMA_OWNER_FIELD,
-        }));
+        let mut editor = CatalogEditorState {
+            draft: Some(CatalogDraft::Schema(SchemaDraft {
+                name: TextInput::default(),
+                owner: TextInput::default(),
+                comment: TextInput::default(),
+                selected_field: SCHEMA_OWNER_FIELD,
+            })),
+            ..CatalogEditorState::default()
+        };
         assert!(editor.owner_field_focused());
 
         let mut view = view_draft();
