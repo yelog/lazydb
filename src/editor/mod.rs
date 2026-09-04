@@ -1901,6 +1901,10 @@ fn map_highlight(kind: sql::HighlightKind) -> EditorHighlightKind {
     match kind {
         sql::HighlightKind::Keyword => EditorHighlightKind::Keyword,
         sql::HighlightKind::Identifier => EditorHighlightKind::Identifier,
+        sql::HighlightKind::Relation => EditorHighlightKind::Relation,
+        sql::HighlightKind::RelationAlias => EditorHighlightKind::RelationAlias,
+        sql::HighlightKind::Column => EditorHighlightKind::Column,
+        sql::HighlightKind::Function => EditorHighlightKind::Function,
         sql::HighlightKind::String => EditorHighlightKind::String,
         sql::HighlightKind::Number => EditorHighlightKind::Number,
         sql::HighlightKind::Comment => EditorHighlightKind::Comment,

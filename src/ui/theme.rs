@@ -4,6 +4,10 @@ use ratatui::style::{Color, Modifier, Style};
 pub(crate) enum SyntaxColor {
     Keyword,
     Identifier,
+    Relation,
+    RelationAlias,
+    Column,
+    Function,
     String,
     Number,
     Comment,
@@ -26,6 +30,10 @@ pub struct Theme {
     pub muted: Color,
     pub accent: Color,
     pub action: Color,
+    pub syntax_relation: Color,
+    pub syntax_relation_alias: Color,
+    pub syntax_column: Color,
+    pub syntax_function: Color,
     pub success: Color,
     pub warning: Color,
     pub error: Color,
@@ -63,6 +71,10 @@ impl Theme {
             muted: Color::Reset,
             accent: Color::Reset,
             action: Color::Reset,
+            syntax_relation: Color::Reset,
+            syntax_relation_alias: Color::Reset,
+            syntax_column: Color::Reset,
+            syntax_function: Color::Reset,
             success: Color::Reset,
             warning: Color::Reset,
             error: Color::Reset,
@@ -87,6 +99,10 @@ impl Theme {
             muted: Color::Rgb(105, 126, 146),
             accent: Color::Rgb(99, 230, 216),
             action: Color::Rgb(101, 167, 255),
+            syntax_relation: Color::Rgb(92, 200, 150),
+            syntax_relation_alias: Color::Rgb(199, 146, 234),
+            syntax_column: Color::Rgb(101, 167, 255),
+            syntax_function: Color::Rgb(130, 170, 255),
             success: Color::Rgb(92, 200, 150),
             warning: Color::Rgb(244, 184, 96),
             error: Color::Rgb(255, 107, 122),
@@ -113,6 +129,10 @@ impl Theme {
         match kind {
             SyntaxColor::Keyword => self.accent,
             SyntaxColor::Identifier | SyntaxColor::Number | SyntaxColor::Parameter => self.action,
+            SyntaxColor::Relation => self.syntax_relation,
+            SyntaxColor::RelationAlias => self.syntax_relation_alias,
+            SyntaxColor::Column => self.syntax_column,
+            SyntaxColor::Function => self.syntax_function,
             SyntaxColor::String => self.warning,
             SyntaxColor::Comment => self.muted,
             SyntaxColor::Operator | SyntaxColor::Punctuation | SyntaxColor::Plain => self.text,
@@ -122,6 +142,8 @@ impl Theme {
 
 #[cfg(test)]
 mod tests {
+    use ratatui::style::Color;
+
     use super::{SyntaxColor, Theme};
 
     #[test]
@@ -133,5 +155,34 @@ mod tests {
         assert_eq!(theme.syntax_color(SyntaxColor::String), theme.warning);
         assert_eq!(theme.syntax_color(SyntaxColor::Comment), theme.muted);
         assert_eq!(theme.syntax_color(SyntaxColor::Plain), theme.text);
+        assert_eq!(
+            theme.syntax_color(SyntaxColor::Relation),
+            theme.syntax_relation
+        );
+        assert_eq!(
+            theme.syntax_color(SyntaxColor::RelationAlias),
+            theme.syntax_relation_alias
+        );
+        assert_eq!(theme.syntax_color(SyntaxColor::Column), theme.syntax_column);
+        assert_eq!(
+            theme.syntax_color(SyntaxColor::Function),
+            theme.syntax_function
+        );
+        assert_ne!(theme.syntax_relation, theme.syntax_relation_alias);
+        assert_ne!(theme.syntax_relation, theme.syntax_column);
+        assert_ne!(theme.syntax_relation_alias, theme.syntax_column);
+    }
+
+    #[test]
+    fn plain_theme_resets_semantic_syntax_colors() {
+        let theme = Theme::for_color_mode(crate::cli::ColorMode::Never);
+        for kind in [
+            SyntaxColor::Relation,
+            SyntaxColor::RelationAlias,
+            SyntaxColor::Column,
+            SyntaxColor::Function,
+        ] {
+            assert_eq!(theme.syntax_color(kind), Color::Reset);
+        }
     }
 }

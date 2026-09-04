@@ -491,6 +491,38 @@ fn read_only_text_replacement_invalidates_cached_sql_highlights() {
 }
 
 #[test]
+fn render_snapshot_preserves_semantic_sql_highlight_kinds() {
+    let (workspace, id) = fixture("SELECT u.id FROM users u");
+    let snapshot = workspace
+        .render_snapshot_with_dialect(
+            id,
+            EditorViewport {
+                width: 120,
+                height: 20,
+            },
+            crate::sql::SqlDialect::Postgres,
+        )
+        .unwrap();
+    let spans = &snapshot.lines[0].spans;
+
+    assert!(
+        spans
+            .iter()
+            .any(|span| { span.text == "users" && span.kind == EditorHighlightKind::Relation })
+    );
+    assert!(
+        spans
+            .iter()
+            .any(|span| { span.text == "u" && span.kind == EditorHighlightKind::RelationAlias })
+    );
+    assert!(
+        spans
+            .iter()
+            .any(|span| { span.text == "id" && span.kind == EditorHighlightKind::Column })
+    );
+}
+
+#[test]
 fn vim_motions_are_table_driven_and_unicode_safe() {
     let cases = [
         ("3w", "one two three four", 0, 14),
