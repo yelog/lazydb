@@ -375,6 +375,8 @@ impl EditorWorkspace {
             EditorKey::Redo
         } else if crate::input::is_text_undo(event) {
             EditorKey::Undo
+        } else if event.modifiers.contains(KeyModifiers::SUPER) {
+            return Ok(());
         } else if event.modifiers.contains(KeyModifiers::CONTROL) {
             match event.code {
                 KeyCode::Char(c) => EditorKey::Control(c),
