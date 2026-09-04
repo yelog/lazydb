@@ -62,6 +62,8 @@ struct SemanticHighlight {
     kind: HighlightKind,
 }
 
+const MAX_SEMANTIC_RECOVERY_ATTEMPTS: usize = 16;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BindingKind {
     Relation,
@@ -407,37 +409,73 @@ impl Visitor for SemanticCollector<'_> {
     }
 }
 
+fn semantic_highlights_for(source: &str, dialect: SqlDialect) -> Option<Vec<SemanticHighlight>> {
+    let statements = Parser::parse_sql(dialect_ref(dialect), source).ok()?;
+    let index = LineIndex::new(source);
+    let mut collector = SemanticCollector {
+        text: source,
+        index: &index,
+        spans: Vec::new(),
+        scopes: Vec::new(),
+        statement_scopes: Vec::new(),
+        query_select_scopes: Vec::new(),
+    };
+    let _ = statements.visit(&mut collector);
+    Some(collector.spans)
+}
+
+fn semantic_recovery_prefixes(source: &str, dialect: SqlDialect) -> Vec<usize> {
+    let index = LineIndex::new(source);
+    let mut tokenizer = Tokenizer::new(dialect_ref(dialect), source);
+    let mut tokens = Vec::new();
+    let _ = tokenizer.tokenize_with_location_into_buf(&mut tokens);
+
+    let mut ends = tokens
+        .into_iter()
+        .filter_map(|token| {
+            let start = index.range(source, token.span.start, token.span.end).start;
+            (start > 0 && start <= source.len() && source.is_char_boundary(start)).then_some(start)
+        })
+        .collect::<Vec<_>>();
+    ends.sort_unstable();
+    ends.dedup();
+    ends.into_iter()
+        .rev()
+        .take(MAX_SEMANTIC_RECOVERY_ATTEMPTS)
+        .collect()
+}
+
+fn recover_semantic_highlights(
+    source: &str,
+    dialect: SqlDialect,
+) -> Option<Vec<SemanticHighlight>> {
+    if let Some(highlights) = semantic_highlights_for(source, dialect) {
+        return Some(highlights);
+    }
+
+    semantic_recovery_prefixes(source, dialect)
+        .into_iter()
+        .filter_map(|end| source.get(..end).map(str::trim_end))
+        .filter(|prefix| !prefix.is_empty())
+        .find_map(|prefix| semantic_highlights_for(prefix, dialect))
+}
+
 fn apply_semantic_highlights(text: &str, dialect: SqlDialect, spans: &mut [HighlightSpan]) {
     let mut semantic = Vec::new();
     for statement in super::scan_statements(text, dialect) {
         let Some(source) = statement.get(text) else {
             continue;
         };
-        let Ok(statements) = Parser::parse_sql(dialect_ref(dialect), source) else {
+        let Some(highlights) = recover_semantic_highlights(source, dialect) else {
             continue;
         };
-        let index = LineIndex::new(source);
-        let mut collector = SemanticCollector {
-            text: source,
-            index: &index,
-            spans: Vec::new(),
-            scopes: Vec::new(),
-            statement_scopes: Vec::new(),
-            query_select_scopes: Vec::new(),
-        };
-        let _ = statements.visit(&mut collector);
-        semantic.extend(
-            collector
-                .spans
-                .into_iter()
-                .map(|highlight| SemanticHighlight {
-                    range: TextRange::new(
-                        statement.start + highlight.range.start,
-                        statement.start + highlight.range.end,
-                    ),
-                    kind: highlight.kind,
-                }),
-        );
+        semantic.extend(highlights.into_iter().map(|highlight| SemanticHighlight {
+            range: TextRange::new(
+                statement.start + highlight.range.start,
+                statement.start + highlight.range.end,
+            ),
+            kind: highlight.kind,
+        }));
     }
 
     apply_semantic_spans(spans, &semantic);
