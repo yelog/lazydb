@@ -30,7 +30,6 @@ fn table_navigation_reaches_and_leaves_every_action() {
     );
     assert!(editor.select_object_type(CatalogObjectType::Catalog(CatalogKind::Table)));
     app.catalog_editor = Some(editor);
-    app.catalog_editor_compact.set(true);
 
     app.update(Action::CatalogEditorFieldNext);
     assert!(matches!(
@@ -98,6 +97,81 @@ fn table_editor_for_paste() -> App {
 }
 
 #[test]
+fn table_column_details_actions_open_confirm_and_cancel_atomically() {
+    let mut app = table_editor_for_paste();
+    draft_mut(&mut app).columns[0].name = "id".into();
+    draft_mut(&mut app).focus = lazydb::model::catalog_editor::TableEditorFocus::Columns;
+
+    app.update(Action::CatalogEditorOpenTableColumnDetails);
+    app.update(Action::CatalogEditorInsert('2'));
+    assert_eq!(draft(&app).columns[0].name.value(), "id");
+
+    app.update(Action::CatalogEditorCancelTableColumnDetails);
+    assert_eq!(draft(&app).columns[0].name.value(), "id");
+
+    app.update(Action::CatalogEditorOpenTableColumnDetails);
+    app.update(Action::CatalogEditorInsert('2'));
+    app.update(Action::CatalogEditorConfirmTableColumnDetails);
+    assert_eq!(draft(&app).columns[0].name.value(), "id2");
+}
+
+#[test]
+fn table_new_column_is_committed_only_after_details_confirmation() {
+    let mut app = table_editor_for_paste();
+    draft_mut(&mut app).columns[0].name = "id".into();
+    draft_mut(&mut app).focus = lazydb::model::catalog_editor::TableEditorFocus::Columns;
+
+    app.update(Action::CatalogEditorAddTableColumn);
+    assert_eq!(draft(&app).columns.len(), 1);
+    app.update(Action::CatalogEditorInsert('n'));
+    app.update(Action::CatalogEditorCancelTableColumnDetails);
+    assert_eq!(draft(&app).columns.len(), 1);
+
+    app.update(Action::CatalogEditorAddTableColumn);
+    app.update(Action::CatalogEditorInsert('n'));
+    app.update(Action::CatalogEditorConfirmTableColumnDetails);
+    assert_eq!(draft(&app).columns.len(), 2);
+    assert_eq!(draft(&app).columns[1].name.value(), "n");
+}
+
+#[test]
+fn table_preview_opens_column_details_for_the_first_invalid_column_field() {
+    let mut app = table_editor_for_paste();
+    draft_mut(&mut app).name = "events".into();
+    draft_mut(&mut app).focus = lazydb::model::catalog_editor::TableEditorFocus::Columns;
+
+    app.update(Action::CatalogEditorPreview);
+
+    let draft = draft(&app);
+    assert_eq!(draft.selected_column, 0);
+    assert_eq!(
+        draft.focus,
+        lazydb::model::catalog_editor::TableEditorFocus::ColumnDetails(
+            lazydb::model::catalog_editor::TableColumnField::Name
+        )
+    );
+    assert!(draft.column_editor.is_some());
+    assert!(
+        app.catalog_editor
+            .as_ref()
+            .and_then(|editor| editor.error.as_deref())
+            .is_some_and(|error| error.contains("column 1 name is required"))
+    );
+}
+
+fn draft(app: &App) -> &lazydb::model::catalog_editor::TableDraft {
+    match app
+        .catalog_editor
+        .as_ref()
+        .and_then(|editor| editor.draft.as_ref())
+        .expect("catalog draft")
+    {
+        lazydb::model::catalog_editor::CatalogDraft::Table(draft) => draft,
+        _ => panic!("table draft expected"),
+    }
+}
+
+#[test]
 fn catalog_editor_paste_writes_multicharacter_table_name_at_general_name_focus() {
     let mut app = table_editor_for_paste();
 
@@ -116,9 +190,7 @@ fn catalog_editor_paste_writes_multicharacter_table_name_at_general_name_focus()
 #[test]
 fn catalog_editor_paste_writes_multicharacter_column_name_at_column_name_focus() {
     let mut app = table_editor_for_paste();
-    draft_mut(&mut app).focus = lazydb::model::catalog_editor::TableEditorFocus::ColumnDetails(
-        lazydb::model::catalog_editor::TableColumnField::Name,
-    );
+    draft_mut(&mut app).begin_edit_selected_column();
 
     app.update(Action::CatalogEditorPaste("user\n名前🙂".into()));
 
@@ -129,7 +201,11 @@ fn catalog_editor_paste_writes_multicharacter_column_name_at_column_name_focus()
     else {
         panic!("table draft expected");
     };
-    assert_eq!(draft.columns[0].name.value(), "user\n名前🙂");
+    assert_eq!(draft.columns[0].name.value(), "");
+    assert_eq!(
+        draft.column_editor.as_ref().unwrap().draft.name.value(),
+        "user\n名前🙂"
+    );
 }
 
 fn profile() -> ConnectionProfile {
@@ -435,7 +511,7 @@ fn opening_create_on_schema_uses_capability_ordered_options() {
         editor.draft,
         Some(lazydb::model::catalog_editor::CatalogDraft::Table(_))
     ));
-    app.update(Action::CatalogEditorEditTableColumn);
+    app.update(Action::CatalogEditorOpenTableColumnDetails);
     let Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)) = app
         .catalog_editor
         .as_ref()
@@ -449,7 +525,7 @@ fn opening_create_on_schema_uses_capability_ordered_options() {
             lazydb::model::catalog_editor::TableColumnField::Name,
         )
     );
-    app.update(Action::CatalogEditorLeaveTableColumnDetails);
+    app.update(Action::CatalogEditorCancelTableColumnDetails);
     let Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)) = app
         .catalog_editor
         .as_ref()
@@ -670,30 +746,35 @@ fn table_column_selection_and_add_actions_sync_focus_and_details() {
     app.catalog_editor = Some(editor);
 
     app.update(Action::CatalogEditorSelectTableColumn(0));
-    let draft = app.catalog_editor.as_ref().unwrap().draft.as_ref().unwrap();
-    let lazydb::model::catalog_editor::CatalogDraft::Table(draft) = draft else {
+    let table = app.catalog_editor.as_ref().unwrap().draft.as_ref().unwrap();
+    let lazydb::model::catalog_editor::CatalogDraft::Table(table_draft) = table else {
         panic!("table draft expected");
     };
-    assert_eq!(draft.selected_column, 0);
+    assert_eq!(table_draft.selected_column, 0);
     assert_eq!(
-        draft.focus,
+        table_draft.focus,
         lazydb::model::catalog_editor::TableEditorFocus::Columns
     );
 
     draft_mut(&mut app).columns[0].name = "id".into();
     app.update(Action::CatalogEditorAddTableColumn);
-    let draft = app.catalog_editor.as_ref().unwrap().draft.as_ref().unwrap();
-    let lazydb::model::catalog_editor::CatalogDraft::Table(draft) = draft else {
+    let table = app.catalog_editor.as_ref().unwrap().draft.as_ref().unwrap();
+    let lazydb::model::catalog_editor::CatalogDraft::Table(table_draft) = table else {
         panic!("table draft expected");
     };
-    assert_eq!(draft.columns[0].name.value(), "id");
-    assert_eq!(draft.selected_column, 1);
+    assert_eq!(table_draft.columns[0].name.value(), "id");
+    assert_eq!(table_draft.selected_column, 0);
+    assert_eq!(table_draft.columns.len(), 1);
     assert_eq!(
-        draft.focus,
+        table_draft.focus,
         lazydb::model::catalog_editor::TableEditorFocus::ColumnDetails(
             lazydb::model::catalog_editor::TableColumnField::Name
         )
     );
+    app.update(Action::CatalogEditorConfirmTableColumnDetails);
+    let final_draft = draft(&app);
+    assert_eq!(final_draft.selected_column, 1);
+    assert_eq!(final_draft.columns.len(), 2);
 }
 
 #[test]

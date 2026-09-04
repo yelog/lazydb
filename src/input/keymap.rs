@@ -1518,12 +1518,7 @@ fn map_catalog_editor(event: KeyEvent, app: &App) -> Option<Action> {
                     _ => {}
                 }
             }
-            map_catalog_editor_form(
-                event,
-                editor,
-                app.catalog_editor_details_visible.get(),
-                app.catalog_editor_compact.get(),
-            )
+            map_catalog_editor_form(event, editor)
         }
         crate::model::catalog_editor::CatalogEditorPage::SqlPreview => match event.code {
             KeyCode::Enter => Some(Action::CatalogEditorApply),
@@ -1539,14 +1534,12 @@ fn map_catalog_editor(event: KeyEvent, app: &App) -> Option<Action> {
 fn map_catalog_editor_form(
     event: KeyEvent,
     editor: &crate::model::catalog_editor::CatalogEditorState,
-    details_visible: bool,
-    compact: bool,
 ) -> Option<Action> {
     if matches!(
         editor.draft.as_ref(),
         Some(crate::model::catalog_editor::CatalogDraft::Table(_))
     ) {
-        return map_table_editor(event, editor, details_visible, compact);
+        return map_table_editor(event, editor);
     }
     match event.code {
         KeyCode::Esc => Some(Action::CatalogEditorCancel),
@@ -1589,72 +1582,16 @@ fn map_catalog_editor_form(
 fn map_table_editor(
     event: KeyEvent,
     editor: &crate::model::catalog_editor::CatalogEditorState,
-    details_visible: bool,
-    compact: bool,
 ) -> Option<Action> {
-    use crate::model::catalog_editor::{
-        TableActionField, TableColumnField, TableEditorFocus, TableGeneralField,
-    };
+    use crate::model::catalog_editor::{TableActionField, TableEditorFocus};
     let field = match editor.draft.as_ref() {
         Some(crate::model::catalog_editor::CatalogDraft::Table(draft)) => draft.focus,
         _ => return None,
     };
-    if matches!(field, TableEditorFocus::ColumnDetails(_))
-        && ((!details_visible && !compact)
-            || compact
-                && !matches!(
-                    field,
-                    TableEditorFocus::ColumnDetails(
-                        TableColumnField::Name | TableColumnField::Type
-                    )
-                ))
-    {
-        return match event.code {
-            KeyCode::Esc | KeyCode::Tab | KeyCode::BackTab | KeyCode::Up | KeyCode::Down => {
-                Some(Action::CatalogEditorLeaveTableColumnDetails)
-            }
-            _ => None,
-        };
+    if editor_table_details_open(editor) {
+        return map_table_column_details(event, field);
     }
-    if compact {
-        match (field, event.code) {
-            (TableEditorFocus::General(TableGeneralField::Name), KeyCode::Tab | KeyCode::Down)
-                if event.modifiers.is_empty() =>
-            {
-                return Some(Action::CatalogEditorFocusTableField(
-                    TableEditorFocus::Columns,
-                ));
-            }
-            (TableEditorFocus::Columns, KeyCode::BackTab | KeyCode::Up)
-                if event.modifiers.is_empty()
-                    && editor_table_selected_column_index(editor) == Some(0) =>
-            {
-                return Some(Action::CatalogEditorFocusTableField(
-                    TableEditorFocus::General(TableGeneralField::Name),
-                ));
-            }
-            _ => {}
-        }
-        match (field, event.code) {
-            (
-                TableEditorFocus::ColumnDetails(TableColumnField::Name),
-                KeyCode::BackTab | KeyCode::Up,
-            )
-            | (
-                TableEditorFocus::ColumnDetails(TableColumnField::Type),
-                KeyCode::Tab | KeyCode::Down,
-            ) => return Some(Action::CatalogEditorLeaveTableColumnDetails),
-            _ => {}
-        }
-    }
-    let text_focus = matches!(
-        field,
-        TableEditorFocus::General(_)
-            | TableEditorFocus::ColumnDetails(TableColumnField::Name)
-            | TableEditorFocus::ColumnDetails(TableColumnField::Type)
-            | TableEditorFocus::ColumnDetails(TableColumnField::Default)
-            | TableEditorFocus::ColumnDetails(TableColumnField::Comment)
-    );
+    let text_focus = matches!(field, TableEditorFocus::General(_));
     if text_focus && event.modifiers == KeyModifiers::CONTROL {
         return match event.code {
             KeyCode::Char('w') => Some(Action::CatalogEditorDeletePreviousWord),
@@ -1670,9 +1607,6 @@ fn map_table_editor(
         return None;
     }
     match (field, event.code) {
-        (TableEditorFocus::ColumnDetails(_), KeyCode::Esc) => {
-            return Some(Action::CatalogEditorLeaveTableColumnDetails);
-        }
         (TableEditorFocus::General(_), KeyCode::Esc)
         | (TableEditorFocus::Columns, KeyCode::Esc)
         | (TableEditorFocus::Action(TableActionField::AddColumn), KeyCode::Esc)
@@ -1703,38 +1637,11 @@ fn map_table_editor(
             _ => None,
         };
     }
-    if let TableEditorFocus::ColumnDetails(column_field) = field {
-        return match event.code {
-            KeyCode::Tab if event.modifiers.contains(KeyModifiers::SHIFT) => {
-                Some(Action::CatalogEditorFieldPrevious)
-            }
-            KeyCode::Tab => Some(Action::CatalogEditorFieldNext),
-            KeyCode::BackTab => Some(Action::CatalogEditorFieldPrevious),
-            KeyCode::Up => Some(Action::CatalogEditorFieldPrevious),
-            KeyCode::Down => Some(Action::CatalogEditorFieldNext),
-            KeyCode::Enter | KeyCode::Char(' ') if column_field == TableColumnField::Nullable => {
-                Some(Action::CatalogEditorToggleTableColumnNullable)
-            }
-            KeyCode::Enter | KeyCode::Char(' ') if column_field == TableColumnField::Identity => {
-                Some(Action::CatalogEditorToggleTableColumnIdentity)
-            }
-            KeyCode::Char(c) => Some(Action::CatalogEditorInsert(c)),
-            KeyCode::Backspace => Some(Action::CatalogEditorBackspace),
-            KeyCode::Delete => Some(Action::CatalogEditorDelete),
-            KeyCode::Left => Some(Action::CatalogEditorMoveLeft),
-            KeyCode::Right => Some(Action::CatalogEditorMoveRight),
-            KeyCode::Home => Some(Action::CatalogEditorMoveHome),
-            KeyCode::End => Some(Action::CatalogEditorMoveEnd),
-            _ => None,
-        };
-    }
     if field == TableEditorFocus::Columns {
         return match event.code {
             KeyCode::Char('a') => Some(Action::CatalogEditorAddTableColumn),
-            KeyCode::Char('e') | KeyCode::Enter
-                if details_visible || compact && editor_table_has_selected_column(editor) =>
-            {
-                Some(Action::CatalogEditorEditTableColumn)
+            KeyCode::Char('e') if editor_table_has_selected_column(editor) => {
+                Some(Action::CatalogEditorOpenTableColumnDetails)
             }
             KeyCode::Tab if event.modifiers.contains(KeyModifiers::SHIFT) => {
                 Some(Action::CatalogEditorFieldPrevious)
@@ -1774,6 +1681,69 @@ fn map_table_editor(
     }
 }
 
+fn editor_table_details_open(editor: &crate::model::catalog_editor::CatalogEditorState) -> bool {
+    matches!(
+        editor.draft.as_ref(),
+        Some(crate::model::catalog_editor::CatalogDraft::Table(draft))
+            if draft.column_editor.is_some()
+    )
+}
+
+fn map_table_column_details(
+    event: KeyEvent,
+    field: crate::model::catalog_editor::TableEditorFocus,
+) -> Option<Action> {
+    use crate::model::catalog_editor::{TableColumnField, TableEditorFocus};
+    if event.modifiers == KeyModifiers::CONTROL {
+        return match event.code {
+            KeyCode::Char('w') => Some(Action::CatalogEditorDeletePreviousWord),
+            KeyCode::Char('u') => Some(Action::CatalogEditorDeleteToStart),
+            KeyCode::Char('a') => Some(Action::CatalogEditorMoveHome),
+            KeyCode::Char('e') => Some(Action::CatalogEditorMoveEnd),
+            _ => None,
+        };
+    }
+    if event.modifiers != KeyModifiers::NONE
+        && !matches!(event.code, KeyCode::Tab | KeyCode::BackTab)
+    {
+        return None;
+    }
+    match event.code {
+        KeyCode::Esc => Some(Action::CatalogEditorCancelTableColumnDetails),
+        KeyCode::Enter => Some(Action::CatalogEditorConfirmTableColumnDetails),
+        KeyCode::Tab if event.modifiers.contains(KeyModifiers::SHIFT) => {
+            Some(Action::CatalogEditorFieldPrevious)
+        }
+        KeyCode::Tab => Some(Action::CatalogEditorFieldNext),
+        KeyCode::BackTab | KeyCode::Up => Some(Action::CatalogEditorFieldPrevious),
+        KeyCode::Down => Some(Action::CatalogEditorFieldNext),
+        KeyCode::Char(' ')
+            if matches!(
+                field,
+                TableEditorFocus::ColumnDetails(
+                    TableColumnField::Nullable | TableColumnField::Identity
+                )
+            ) =>
+        {
+            Some(
+                if field == TableEditorFocus::ColumnDetails(TableColumnField::Nullable) {
+                    Action::CatalogEditorToggleTableColumnNullable
+                } else {
+                    Action::CatalogEditorToggleTableColumnIdentity
+                },
+            )
+        }
+        KeyCode::Char(character) => Some(Action::CatalogEditorInsert(character)),
+        KeyCode::Backspace => Some(Action::CatalogEditorBackspace),
+        KeyCode::Delete => Some(Action::CatalogEditorDelete),
+        KeyCode::Left => Some(Action::CatalogEditorMoveLeft),
+        KeyCode::Right => Some(Action::CatalogEditorMoveRight),
+        KeyCode::Home => Some(Action::CatalogEditorMoveHome),
+        KeyCode::End => Some(Action::CatalogEditorMoveEnd),
+        _ => None,
+    }
+}
+
 fn editor_table_has_selected_column(
     editor: &crate::model::catalog_editor::CatalogEditorState,
 ) -> bool {
@@ -1782,17 +1752,6 @@ fn editor_table_has_selected_column(
         Some(crate::model::catalog_editor::CatalogDraft::Table(draft))
             if draft.selected_column().is_some()
     )
-}
-
-fn editor_table_selected_column_index(
-    editor: &crate::model::catalog_editor::CatalogEditorState,
-) -> Option<usize> {
-    match editor.draft.as_ref() {
-        Some(crate::model::catalog_editor::CatalogDraft::Table(draft)) => {
-            Some(draft.selected_column)
-        }
-        _ => None,
-    }
 }
 
 fn pending_is_valid(

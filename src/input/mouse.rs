@@ -76,8 +76,32 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                             | HitTarget::CatalogEditorRemoveTableColumn
                             | HitTarget::CatalogEditorReview
                             | HitTarget::CatalogEditorCancel
+                            | HitTarget::CatalogEditorColumnDetailsConfirm
+                            | HitTarget::CatalogEditorColumnDetailsCancel
                             | HitTarget::CatalogOwnerChoice(_)
                     ))
+            {
+                return None;
+            }
+            let details_open = app
+                .catalog_editor
+                .as_ref()
+                .and_then(|editor| editor.draft.as_ref())
+                .is_some_and(|draft| {
+                    matches!(
+                        draft,
+                        crate::model::catalog_editor::CatalogDraft::Table(table)
+                            if table.column_editor.is_some()
+                    )
+                });
+            if details_open
+                && !matches!(
+                    target,
+                    HitTarget::CatalogEditorTableField(
+                        crate::model::catalog_editor::TableEditorFocus::ColumnDetails(_)
+                    ) | HitTarget::CatalogEditorColumnDetailsConfirm
+                        | HitTarget::CatalogEditorColumnDetailsCancel
+                )
             {
                 return None;
             }
@@ -161,6 +185,12 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                 }
                 HitTarget::CatalogEditorReview => Some(Action::CatalogEditorPreview),
                 HitTarget::CatalogEditorCancel => Some(Action::CatalogEditorCancel),
+                HitTarget::CatalogEditorColumnDetailsConfirm => {
+                    Some(Action::CatalogEditorConfirmTableColumnDetails)
+                }
+                HitTarget::CatalogEditorColumnDetailsCancel => {
+                    Some(Action::CatalogEditorCancelTableColumnDetails)
+                }
                 HitTarget::CatalogOwnerChoice(name) => Some(Action::CatalogOwnerPickerChoose(name)),
                 HitTarget::RelationFirstPage => Some(Action::RelationFirstPage),
                 HitTarget::RelationPreviousPage => Some(Action::RelationPreviousPage),
@@ -313,6 +343,8 @@ fn focus_at(ui: &UiState, column: u16, row: u16) -> Option<Focus> {
         | HitTarget::CatalogEditorRemoveTableColumn
         | HitTarget::CatalogEditorReview
         | HitTarget::CatalogEditorCancel
+        | HitTarget::CatalogEditorColumnDetailsConfirm
+        | HitTarget::CatalogEditorColumnDetailsCancel
         | HitTarget::CatalogOwnerChoice(_) => None,
         HitTarget::RelationFirstPage
         | HitTarget::RelationPreviousPage

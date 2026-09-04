@@ -32,6 +32,51 @@ fn state() -> CatalogEditorState {
 }
 
 #[test]
+fn table_column_edit_session_is_atomic_across_confirm_and_cancel() {
+    let mut draft = TableDraft::new("public");
+    draft.columns[0].name = "id".into();
+
+    assert!(draft.begin_edit_selected_column());
+    draft.insert('2');
+    assert_eq!(draft.columns[0].name.value(), "id");
+    assert_eq!(
+        draft.column_editor.as_ref().unwrap().draft.name.value(),
+        "id2"
+    );
+
+    draft.cancel_column_details();
+    assert_eq!(draft.columns[0].name.value(), "id");
+    assert!(draft.column_editor.is_none());
+    assert_eq!(draft.focus, TableEditorFocus::Columns);
+
+    assert!(draft.begin_edit_selected_column());
+    draft.insert('2');
+    assert!(draft.confirm_column_details());
+    assert_eq!(draft.columns[0].name.value(), "id2");
+    assert!(draft.column_editor.is_none());
+    assert_eq!(draft.focus, TableEditorFocus::Columns);
+}
+
+#[test]
+fn table_new_column_is_inserted_only_when_details_are_confirmed() {
+    let mut draft = TableDraft::new("public");
+    draft.columns[0].name = "id".into();
+
+    draft.begin_add_column_below();
+    assert_eq!(draft.columns.len(), 1);
+    draft.insert('n');
+    draft.cancel_column_details();
+    assert_eq!(draft.columns.len(), 1);
+
+    draft.begin_add_column_below();
+    draft.insert('n');
+    assert!(draft.confirm_column_details());
+    assert_eq!(draft.columns.len(), 2);
+    assert_eq!(draft.columns[1].name.value(), "n");
+    assert_eq!(draft.selected_column, 1);
+}
+
+#[test]
 fn database_draft_keeps_creation_options_display_only_after_loading() {
     let definition = lazydb::db::catalog_mutation::DatabaseDefinition {
         name: "app".into(),
@@ -176,7 +221,8 @@ fn table_full_general_navigation_is_reversible() {
 #[test]
 fn table_column_navigation_crosses_region_boundaries() {
     let mut draft = TableDraft::new("public");
-    draft.add_column_below();
+    draft.begin_add_column_below();
+    assert!(draft.confirm_column_details());
     draft.focus = TableEditorFocus::Columns;
     draft.selected_column = 0;
     draft.focus_next();
@@ -195,7 +241,8 @@ fn table_column_navigation_crosses_region_boundaries() {
 #[test]
 fn table_columns_move_between_existing_columns_before_general_or_add() {
     let mut draft = TableDraft::new("public");
-    draft.add_column_below();
+    draft.begin_add_column_below();
+    assert!(draft.confirm_column_details());
     draft.focus = TableEditorFocus::Columns;
 
     draft.focus_previous();
@@ -273,16 +320,21 @@ fn table_action_navigation_moves_both_directions_and_form_clamps_at_ends() {
 }
 
 #[test]
-fn table_column_details_navigation_is_clamped_and_preserves_column_on_leave() {
+fn table_column_details_navigation_wraps_and_cancel_returns_to_columns() {
     let mut draft = TableDraft::new("public");
-    draft.enter_column_details();
+    assert!(draft.begin_edit_selected_column());
     assert_eq!(
         draft.focus,
         TableEditorFocus::ColumnDetails(TableColumnField::Name)
     );
     draft.focus_previous();
+    assert_eq!(
+        draft.focus,
+        TableEditorFocus::ColumnDetails(TableColumnField::Identity)
+    );
+    draft.cancel_column_details();
     assert_eq!(draft.focus, TableEditorFocus::Columns);
-    draft.enter_column_details();
+    assert!(draft.begin_edit_selected_column());
     for _ in 0..5 {
         draft.focus_next();
     }
@@ -290,7 +342,7 @@ fn table_column_details_navigation_is_clamped_and_preserves_column_on_leave() {
         draft.focus,
         TableEditorFocus::ColumnDetails(TableColumnField::Identity)
     );
-    draft.leave_column_details();
+    draft.cancel_column_details();
     assert_eq!(draft.focus, TableEditorFocus::Columns);
     assert_eq!(draft.selected_column, 0);
 }
@@ -298,16 +350,23 @@ fn table_column_details_navigation_is_clamped_and_preserves_column_on_leave() {
 #[test]
 fn table_column_details_navigation_is_continuous_at_both_boundaries() {
     let mut draft = TableDraft::new("public");
-    draft.enter_column_details();
+    assert!(draft.begin_edit_selected_column());
 
     draft.focus_previous();
-    assert_eq!(draft.focus, TableEditorFocus::Columns);
-    draft.enter_column_details();
-    for _ in 0..5 {
+    assert_eq!(
+        draft.focus,
+        TableEditorFocus::ColumnDetails(TableColumnField::Identity)
+    );
+    draft.cancel_column_details();
+    assert!(draft.begin_edit_selected_column());
+    for _ in 0..6 {
         draft.focus_next();
     }
     draft.focus_next();
-    assert_eq!(draft.focus, TableEditorFocus::Columns);
+    assert_eq!(
+        draft.focus,
+        TableEditorFocus::ColumnDetails(TableColumnField::Type)
+    );
 }
 
 #[test]
@@ -345,7 +404,7 @@ fn table_navigation_uses_one_complete_state_machine_for_compact_action_chain() {
 #[test]
 fn table_column_details_full_navigation_remains_available_to_full_mode() {
     let mut draft = TableDraft::new("public");
-    draft.enter_column_details();
+    assert!(draft.begin_edit_selected_column());
     for _ in 0..5 {
         draft.focus_next();
     }
@@ -354,7 +413,10 @@ fn table_column_details_full_navigation_remains_available_to_full_mode() {
         TableEditorFocus::ColumnDetails(TableColumnField::Identity)
     );
     draft.focus_next();
-    assert_eq!(draft.focus, TableEditorFocus::Columns);
+    assert_eq!(
+        draft.focus,
+        TableEditorFocus::ColumnDetails(TableColumnField::Name)
+    );
 }
 
 #[test]
@@ -363,7 +425,7 @@ fn table_enter_column_details_requires_a_valid_selected_column() {
     draft.focus = TableEditorFocus::General(TableGeneralField::Owner);
     draft.selected_column = 1;
 
-    draft.enter_column_details();
+    assert!(!draft.begin_edit_selected_column());
 
     assert_eq!(
         draft.focus,
@@ -379,6 +441,7 @@ fn table_draft_delegates_text_edits_to_general_and_column_inputs() {
     let CatalogDraft::Table(table) = &mut draft else {
         unreachable!();
     };
+    assert!(table.begin_edit_selected_column());
     table.focus = TableEditorFocus::ColumnDetails(TableColumnField::Name);
     draft.insert('i');
     draft.insert('d');
@@ -390,7 +453,11 @@ fn table_draft_delegates_text_edits_to_general_and_column_inputs() {
         unreachable!();
     };
     assert_eq!(draft.name.value(), "ev");
-    assert_eq!(draft.columns[0].name.value(), "i");
+    assert_eq!(draft.columns[0].name.value(), "");
+    assert_eq!(
+        draft.column_editor.as_ref().unwrap().draft.name.value(),
+        "i"
+    );
 }
 
 #[test]
@@ -402,18 +469,24 @@ fn table_draft_pastes_multicharacter_unicode_and_newline_values_into_focused_nam
     };
     assert_eq!(table.name.value(), "events\n数据🙂");
 
+    assert!(table.begin_edit_selected_column());
     table.focus = TableEditorFocus::ColumnDetails(TableColumnField::Name);
     draft.paste("user\n名前🙂");
 
     let CatalogDraft::Table(table) = draft else {
         unreachable!();
     };
-    assert_eq!(table.columns[0].name.value(), "user\n名前🙂");
+    assert_eq!(table.columns[0].name.value(), "");
+    assert_eq!(
+        table.column_editor.as_ref().unwrap().draft.name.value(),
+        "user\n名前🙂"
+    );
 }
 
 #[test]
 fn table_draft_routes_text_input_to_all_general_and_column_detail_fields() {
     let mut draft = TableDraft::new("");
+    assert!(draft.begin_edit_selected_column());
 
     draft.focus = TableEditorFocus::General(TableGeneralField::Schema);
     draft.insert('s');
@@ -431,9 +504,10 @@ fn table_draft_routes_text_input_to_all_general_and_column_detail_fields() {
     assert_eq!(draft.schema.value(), "s");
     assert_eq!(draft.owner.value(), "o");
     assert_eq!(draft.comment.value(), "g");
-    assert_eq!(draft.columns[0].native_type.value(), "texty");
-    assert_eq!(draft.columns[0].default_expression.value(), "d");
-    assert_eq!(draft.columns[0].comment.value(), "c");
+    let column = &draft.column_editor.as_ref().unwrap().draft;
+    assert_eq!(column.native_type.value(), "texty");
+    assert_eq!(column.default_expression.value(), "d");
+    assert_eq!(column.comment.value(), "c");
 }
 
 #[test]
@@ -457,14 +531,28 @@ fn table_draft_supports_shared_deletion_commands() {
 fn table_draft_adds_selects_and_toggles_columns() {
     let mut draft = TableDraft::new("public");
     draft.columns[0].name = "id".into();
-    draft.add_column_below();
-    assert_eq!(draft.selected_column, 1);
+    draft.begin_add_column_below();
+    assert_eq!(draft.selected_column, 0);
     assert_eq!(
         draft.focus,
         TableEditorFocus::ColumnDetails(TableColumnField::Name)
     );
     draft.toggle_selected_column_nullable();
     draft.toggle_selected_column_identity();
+    assert!(!draft.column_editor.as_ref().unwrap().draft.nullable);
+    assert!(draft.column_editor.as_ref().unwrap().draft.identity);
+    assert_eq!(
+        draft
+            .column_editor
+            .as_ref()
+            .unwrap()
+            .draft
+            .default_expression
+            .value(),
+        ""
+    );
+    assert!(draft.confirm_column_details());
+    assert_eq!(draft.selected_column, 1);
     assert!(!draft.columns[1].nullable);
     assert!(draft.columns[1].identity);
     assert_eq!(draft.columns[1].default_expression.value(), "");
@@ -474,26 +562,31 @@ fn table_draft_adds_selects_and_toggles_columns() {
 fn table_draft_adds_column_below_current_column_and_enters_its_details() {
     let mut draft = TableDraft::new("public");
     draft.columns[0].name = "id".into();
-    draft.add_column_below();
+    draft.begin_add_column_below();
 
-    assert_eq!(draft.columns.len(), 2);
+    assert_eq!(draft.columns.len(), 1);
     assert_eq!(draft.columns[0].name.value(), "id");
-    assert_eq!(draft.selected_column, 1);
+    assert_eq!(draft.selected_column, 0);
     assert_eq!(
         draft.focus,
         TableEditorFocus::ColumnDetails(TableColumnField::Name)
     );
+    assert!(draft.confirm_column_details());
+    assert_eq!(draft.columns.len(), 2);
+    assert_eq!(draft.selected_column, 1);
 }
 
 #[test]
 fn table_draft_inserts_below_middle_column_and_preserves_order() {
     let mut draft = TableDraft::new("public");
     draft.columns[0].name = "id".into();
-    draft.add_column_below();
+    draft.begin_add_column_below();
+    assert!(draft.confirm_column_details());
     draft.columns[1].name = "name".into();
     draft.selected_column = 0;
 
-    draft.add_column_below();
+    draft.begin_add_column_below();
+    assert!(draft.confirm_column_details());
 
     assert_eq!(
         draft
@@ -549,7 +642,8 @@ fn table_draft_insertion_preserves_existing_column_identity_and_state() {
     let existing = draft.columns[1].clone();
     draft.selected_column = 0;
 
-    draft.add_column_below();
+    draft.begin_add_column_below();
+    assert!(draft.confirm_column_details());
 
     assert_eq!(draft.columns[0].existing_name.as_deref(), Some("id"));
     assert!(matches!(
@@ -600,7 +694,8 @@ fn table_draft_inserts_new_column_after_max_ordinal_without_reordering_existing_
     let mut draft = TableDraft::from_definition(&definition);
     draft.selected_column = 0;
 
-    draft.add_column_below();
+    draft.begin_add_column_below();
+    assert!(draft.confirm_column_details());
 
     assert_eq!(draft.columns[0].ordinal_position, 1);
     assert_eq!(draft.columns[1].ordinal_position, 4);
@@ -610,12 +705,12 @@ fn table_draft_inserts_new_column_after_max_ordinal_without_reordering_existing_
 #[test]
 fn table_column_edit_and_leave_actions_are_explicit() {
     assert!(matches!(
-        Action::CatalogEditorEditTableColumn,
-        Action::CatalogEditorEditTableColumn
+        Action::CatalogEditorOpenTableColumnDetails,
+        Action::CatalogEditorOpenTableColumnDetails
     ));
     assert!(matches!(
-        Action::CatalogEditorLeaveTableColumnDetails,
-        Action::CatalogEditorLeaveTableColumnDetails
+        Action::CatalogEditorCancelTableColumnDetails,
+        Action::CatalogEditorCancelTableColumnDetails
     ));
 }
 
