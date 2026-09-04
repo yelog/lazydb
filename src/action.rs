@@ -98,6 +98,31 @@ pub enum Action {
     ResetPaneSizes,
     PaneLayoutChanged(PaneLayoutMetrics),
     ShowHelp,
+    OpenUpdateCenter,
+    StartUpdateCheck {
+        automatic: bool,
+    },
+    UpdateCheckCompleted {
+        request_id: u64,
+        inspection: crate::update::UpdateInspection,
+    },
+    UpdateCheckFailed {
+        request_id: u64,
+        automatic: bool,
+        message: String,
+    },
+    UpdateOverlayToggleFocus,
+    UpdateOverlayConfirm,
+    InstallUpdate,
+    UpdateInstalled {
+        request_id: u64,
+        inspection: crate::update::UpdateInspection,
+    },
+    UpdateInstallFailed {
+        request_id: u64,
+        message: String,
+    },
+    RestartForUpdate,
     DismissOverlay,
     DismissNotification(u64),
     OpenNotificationHistory,
@@ -1034,6 +1059,17 @@ pub enum Command {
     WriteClipboard(ClipboardPayload),
     CheckSecretStoreAvailability,
     ScheduleCompletion(crate::sql::CompletionScheduleKey),
+    CheckForUpdate {
+        request_id: u64,
+        automatic: bool,
+    },
+    InstallUpdate {
+        request_id: u64,
+        channel: crate::update::UpdateChannel,
+    },
+    ScheduleUpdateCheck {
+        delay_ms: u64,
+    },
     Quit,
 }
 

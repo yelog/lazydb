@@ -23,6 +23,10 @@ default_access = "global"
 [dashboard]
 refresh_interval_seconds = 5
 
+[updates]
+check_on_startup = true
+check_interval_hours = 24
+
 [keybindings]
 # The preset covers the complete Vim editing contract documented in
 # docs/keybindings.md. The grouped tables below follow the panel where each
@@ -38,6 +42,8 @@ help = ["F1", "?"]
 quit = ["Ctrl-c"]
 # F8 opens notification history.
 notification-history = ["F8"]
+# F9 opens the update center.
+update = ["F9"]
 # Tab focuses the next pane.
 # Shift-Tab focuses the previous pane.
 focus-next-pane = ["Tab"]

@@ -17,4 +17,5 @@ pub mod sql_editor_list;
 pub mod tab;
 pub mod text_input;
 pub mod transaction;
+pub mod update;
 pub mod workspace;

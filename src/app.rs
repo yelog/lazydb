@@ -221,6 +221,10 @@ pub struct App {
     pub catalog_editor: Option<CatalogEditorState>,
     pub system_credential_availability: crate::persistence::secrets::SecretStoreAvailability,
     pub should_quit: bool,
+    pub restart_path: Option<std::path::PathBuf>,
+    pub update_state: crate::model::update::UpdateState,
+    update_request_generation: u64,
+    last_update_notification: Option<String>,
     connection_request_generation: u64,
     connection_terminal_generation: u64,
     next_search_session: u64,
@@ -579,6 +583,10 @@ impl App {
             system_credential_availability:
                 crate::persistence::secrets::SecretStoreAvailability::Unavailable,
             should_quit: false,
+            restart_path: None,
+            update_state: Default::default(),
+            update_request_generation: 0,
+            last_update_notification: None,
             connection_request_generation: 0,
             connection_terminal_generation: 0,
             next_search_session: 0,
@@ -603,6 +611,23 @@ impl App {
 
     pub(crate) fn set_key_bindings(&mut self, bindings: crate::config::KeyBindings) {
         self.key_bindings = bindings;
+    }
+
+    pub fn update_inspection(&self) -> Option<&crate::update::UpdateInspection> {
+        use crate::model::update::UpdateState;
+        match &self.update_state {
+            UpdateState::UpToDate(inspection)
+            | UpdateState::Available(inspection)
+            | UpdateState::ReadyToRestart(inspection)
+            | UpdateState::ManagerActionRequired(inspection)
+            | UpdateState::Installing { inspection, .. } => Some(inspection),
+            _ => None,
+        }
+    }
+
+    fn next_update_request_id(&mut self) -> u64 {
+        self.update_request_generation = self.update_request_generation.saturating_add(1);
+        self.update_request_generation
     }
 
     pub fn set_dashboard_refresh_interval_millis(&mut self, interval_millis: u64) {
@@ -1467,6 +1492,7 @@ impl App {
             Id::OpenSqlEditors => vec![Action::OpenSqlEditorList],
             Id::OpenNotificationHistory => vec![Action::OpenNotificationHistory],
             Id::OpenNotificationHistoryLeader => vec![Action::OpenNotificationHistory],
+            Id::OpenUpdateCenter => vec![Action::OpenUpdateCenter],
             Id::ExplorerMoveDown => vec![Action::ExplorerMove(1)],
             Id::ExplorerMoveUp => vec![Action::ExplorerMove(-1)],
             Id::ExplorerFirst => vec![Action::ExplorerSelectTarget(
@@ -2679,6 +2705,237 @@ impl App {
             }
             Action::PaneLayoutChanged(metrics) => {
                 self.pane_layout = metrics;
+                Vec::new()
+            }
+            Action::OpenUpdateCenter => {
+                if !matches!(self.overlay, Some(Overlay::Update(_))) {
+                    self.overlay =
+                        Some(Overlay::Update(crate::model::update::UpdateOverlayState {
+                            focus: crate::model::update::UpdateOverlayFocus::Later,
+                        }));
+                }
+                if matches!(
+                    self.update_state,
+                    crate::model::update::UpdateState::Idle
+                        | crate::model::update::UpdateState::Failed { .. }
+                ) {
+                    let request_id = self.next_update_request_id();
+                    self.update_state = crate::model::update::UpdateState::Checking {
+                        request_id,
+                        automatic: false,
+                    };
+                    return vec![Command::CheckForUpdate {
+                        request_id,
+                        automatic: false,
+                    }];
+                }
+                Vec::new()
+            }
+            Action::StartUpdateCheck { automatic } => {
+                if matches!(
+                    self.update_state,
+                    crate::model::update::UpdateState::Checking { .. }
+                        | crate::model::update::UpdateState::Installing { .. }
+                ) {
+                    return Vec::new();
+                }
+                let request_id = self.next_update_request_id();
+                self.update_state = crate::model::update::UpdateState::Checking {
+                    request_id,
+                    automatic,
+                };
+                vec![Command::CheckForUpdate {
+                    request_id,
+                    automatic,
+                }]
+            }
+            Action::UpdateCheckCompleted {
+                request_id,
+                inspection,
+            } => {
+                if !matches!(
+                    self.update_state,
+                    crate::model::update::UpdateState::Checking { request_id: current, .. }
+                        if current == request_id
+                ) {
+                    return Vec::new();
+                }
+                let is_available = inspection.status == crate::update::UpdateStatus::Available;
+                let target_version = inspection.target_version.clone();
+                let automatic = matches!(
+                    self.update_state,
+                    crate::model::update::UpdateState::Checking {
+                        automatic: true,
+                        ..
+                    }
+                );
+                self.update_state = crate::model::update::UpdateState::from_inspection(inspection);
+                if is_available
+                    && let Some(target_version) = target_version
+                    && self.last_update_notification.as_deref() != Some(target_version.as_str())
+                {
+                    self.last_update_notification = Some(target_version.clone());
+                    if automatic || self.overlay.is_some() {
+                        self.notify_info(
+                            "Update available",
+                            format!("LazyDB {target_version} is ready to install"),
+                        );
+                    }
+                }
+                Vec::new()
+            }
+            Action::UpdateCheckFailed {
+                request_id,
+                automatic,
+                message,
+            } => {
+                if !matches!(
+                    self.update_state,
+                    crate::model::update::UpdateState::Checking { request_id: current, .. }
+                        if current == request_id
+                ) {
+                    return Vec::new();
+                }
+                if automatic {
+                    self.update_state = crate::model::update::UpdateState::Idle;
+                } else {
+                    self.update_state = crate::model::update::UpdateState::Failed {
+                        operation: crate::model::update::UpdateOperation::Check,
+                        message,
+                    };
+                }
+                Vec::new()
+            }
+            Action::UpdateOverlayToggleFocus => {
+                if let Some(Overlay::Update(update)) = self.overlay.as_mut() {
+                    update.focus = match update.focus {
+                        crate::model::update::UpdateOverlayFocus::Later => {
+                            crate::model::update::UpdateOverlayFocus::Primary
+                        }
+                        crate::model::update::UpdateOverlayFocus::Primary => {
+                            crate::model::update::UpdateOverlayFocus::Later
+                        }
+                    };
+                }
+                Vec::new()
+            }
+            Action::UpdateOverlayConfirm => {
+                let focus = match self.overlay.as_ref() {
+                    Some(Overlay::Update(update)) => update.focus,
+                    _ => return Vec::new(),
+                };
+                match (focus, self.update_state.clone()) {
+                    (
+                        crate::model::update::UpdateOverlayFocus::Primary,
+                        crate::model::update::UpdateState::Available(inspection),
+                    ) if inspection.manager == crate::update::InstallationManager::Native => {
+                        let request_id = self.next_update_request_id();
+                        let channel = inspection.channel;
+                        self.update_state = crate::model::update::UpdateState::Installing {
+                            request_id,
+                            inspection,
+                        };
+                        vec![Command::InstallUpdate {
+                            request_id,
+                            channel,
+                        }]
+                    }
+                    (
+                        crate::model::update::UpdateOverlayFocus::Primary,
+                        crate::model::update::UpdateState::ReadyToRestart(inspection),
+                    ) => {
+                        let _ = inspection;
+                        vec![Action::RestartForUpdate]
+                            .into_iter()
+                            .flat_map(|action| self.update(action))
+                            .collect()
+                    }
+                    (
+                        crate::model::update::UpdateOverlayFocus::Primary,
+                        crate::model::update::UpdateState::Failed { .. },
+                    ) => self.update(Action::StartUpdateCheck { automatic: false }),
+                    (
+                        crate::model::update::UpdateOverlayFocus::Primary,
+                        crate::model::update::UpdateState::UpToDate(_),
+                    ) => self.update(Action::StartUpdateCheck { automatic: false }),
+                    (
+                        crate::model::update::UpdateOverlayFocus::Primary,
+                        crate::model::update::UpdateState::ManagerActionRequired(_),
+                    )
+                    | (
+                        crate::model::update::UpdateOverlayFocus::Primary,
+                        crate::model::update::UpdateState::Checking { .. },
+                    )
+                    | (
+                        crate::model::update::UpdateOverlayFocus::Primary,
+                        crate::model::update::UpdateState::Installing { .. },
+                    ) => Vec::new(),
+                    (_, _) => {
+                        self.overlay = None;
+                        Vec::new()
+                    }
+                }
+            }
+            Action::InstallUpdate => self.update(Action::UpdateOverlayConfirm),
+            Action::UpdateInstalled {
+                request_id,
+                inspection,
+            } => {
+                if matches!(self.update_state, crate::model::update::UpdateState::Installing { request_id: current, .. } if current == request_id)
+                {
+                    if inspection.status == crate::update::UpdateStatus::ReadyToRestart
+                        && inspection.installed_version != Some(inspection.running_version.clone())
+                    {
+                        self.update_state =
+                            crate::model::update::UpdateState::ReadyToRestart(inspection);
+                    } else {
+                        self.update_state = crate::model::update::UpdateState::Failed {
+                            operation: crate::model::update::UpdateOperation::Install,
+                            message: "update installed but could not be verified".to_owned(),
+                        };
+                    }
+                }
+                Vec::new()
+            }
+            Action::UpdateInstallFailed {
+                request_id,
+                message,
+            } => {
+                if matches!(self.update_state, crate::model::update::UpdateState::Installing { request_id: current, .. } if current == request_id)
+                {
+                    self.update_state = crate::model::update::UpdateState::Failed {
+                        operation: crate::model::update::UpdateOperation::Install,
+                        message,
+                    };
+                }
+                Vec::new()
+            }
+            Action::RestartForUpdate => {
+                let Some(inspection) = self.update_inspection().cloned() else {
+                    return Vec::new();
+                };
+                let Some(path) = inspection.launcher_path else {
+                    self.notify_error("Update", "The updated launcher path is unavailable");
+                    return Vec::new();
+                };
+                match self.workspace_exit_check() {
+                    WorkspaceExitCheck::Ready => {
+                        self.overlay = None;
+                        self.restart_path = Some(path);
+                        self.should_quit = true;
+                    }
+                    WorkspaceExitCheck::Running => self.notify_warning(
+                        "Update",
+                        "Wait for running SQL or relation loads to finish before restarting",
+                    ),
+                    WorkspaceExitCheck::RelationTransaction => self.notify_warning(
+                        "Update",
+                        "Commit or roll back relation edits before restarting",
+                    ),
+                    WorkspaceExitCheck::ConsoleTransactions(ids) => {
+                        return self.defer_intent(DeferredIntent::Restart, ids);
+                    }
+                }
                 Vec::new()
             }
             Action::ShowHelp => {
@@ -7583,6 +7840,19 @@ impl App {
             }],
             DeferredIntent::Disconnect { connection } => vec![Command::Disconnect { connection }],
             DeferredIntent::Quit => {
+                self.should_quit = true;
+                vec![Command::Quit]
+            }
+            DeferredIntent::Restart => {
+                let Some(inspection) = self.update_inspection().cloned() else {
+                    self.notify_error("Update", "The updated launcher path is unavailable");
+                    return Vec::new();
+                };
+                let Some(path) = inspection.launcher_path else {
+                    self.notify_error("Update", "The updated launcher path is unavailable");
+                    return Vec::new();
+                };
+                self.restart_path = Some(path);
                 self.should_quit = true;
                 vec![Command::Quit]
             }

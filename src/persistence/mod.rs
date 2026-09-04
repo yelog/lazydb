@@ -4,4 +4,5 @@ pub mod paths;
 pub mod profiles;
 pub mod secrets;
 pub mod settings;
+pub mod update_check;
 pub mod workspace;

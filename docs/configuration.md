@@ -459,3 +459,21 @@ Codex, OpenCode, and Claude Code configuration. The MCP server defaults to
 and cannot relax LazyDB profile or database permissions. For writable
 development or staging sessions, use `--write-policy non-production` and retain
 per-call client approval. Restart the MCP client after changing the command.
+
+## Update Checks
+
+LazyDB checks for releases asynchronously after the first frame when startup
+checking is enabled. Successful checks are cached for 24 hours by default; failed
+checks are not cached.
+
+```toml
+[updates]
+check_on_startup = true
+check_interval_hours = 24
+```
+
+Press `F9` or click the version/update badge in the header to open the Update Center.
+Only confirmed native installations can be updated directly. Package-manager and
+source installations are never overwritten and instead show their upgrade guidance.
+After a native update is installed, the current process continues running normally;
+the UI distinguishes `Running` from `Installed` until the user chooses `Restart now`.

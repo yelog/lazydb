@@ -62,6 +62,7 @@ pub enum DeferredIntent {
     DeleteProfile { profile_id: Uuid, request_id: u64 },
     Disconnect { connection: ConnectionIdentity },
     Quit,
+    Restart,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

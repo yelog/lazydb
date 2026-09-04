@@ -96,6 +96,10 @@ pub enum HitTarget {
         column: usize,
     },
     Help,
+    UpdateCenter,
+    UpdateButton {
+        primary: bool,
+    },
     ToggleResultView,
     ResultView(ResultView),
     RelationView(crate::model::relation::RelationView),
@@ -741,6 +745,7 @@ fn render_key_sequence_popup(
 fn overlay_key(overlay: &Overlay) -> u8 {
     match overlay {
         Overlay::Help(_) => 1,
+        Overlay::Update(_) => 21,
         Overlay::NotificationHistory(_) => 17,
         Overlay::RecordView(_) => 2,
         Overlay::ProfileManager => 3,
@@ -1279,13 +1284,31 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, sta
         ConnectionStatus::Failed => Some(("FAILED", theme.error)),
         ConnectionStatus::Disconnected | ConnectionStatus::Connected => None,
     };
+    let update_badge = app
+        .update_inspection()
+        .and_then(|inspection| match inspection.status {
+            crate::update::UpdateStatus::Available => inspection
+                .target_version
+                .as_ref()
+                .map(|version| format!(" UPDATE {version} ")),
+            crate::update::UpdateStatus::ReadyToRestart => inspection
+                .installed_version
+                .as_ref()
+                .map(|version| format!(" RESTART {version} ")),
+            _ => None,
+        });
+    let update_width = update_badge
+        .as_deref()
+        .map_or(0, |value| value.cell_width());
     let status_width = status.map_or(0, |(status, _)| status.cell_width().saturating_add(2));
+    let right_width = update_width.saturating_add(status_width);
     let main_area = Rect::new(
         area.x,
         area.y,
-        area.width.saturating_sub(status_width),
+        area.width.saturating_sub(right_width),
         area.height,
     );
+    let running_version = format!(" v{} ", env!("CARGO_PKG_VERSION"));
     let spans = vec![
         Span::styled(
             " LAZYDB ",
@@ -1293,6 +1316,10 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, sta
                 .fg(theme.background)
                 .bg(theme.accent)
                 .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            running_version.clone(),
+            Style::new().fg(theme.action).bg(theme.surface),
         ),
         Span::styled("  ", Style::new().bg(theme.surface)),
         Span::styled(
@@ -1310,6 +1337,19 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, sta
         Paragraph::new(line).style(Style::new().bg(theme.surface)),
         main_area,
     );
+    let version_x = area.x.saturating_add(8);
+    let version_width = running_version.cell_width() as u16;
+    if version_width > 0 && version_x < main_area.right() {
+        state.hit_regions.push(HitRegion {
+            area: Rect::new(
+                version_x,
+                area.y,
+                version_width.min(main_area.right().saturating_sub(version_x)),
+                1,
+            ),
+            target: HitTarget::UpdateCenter,
+        });
+    }
     if let Some((status, color)) = status {
         frame.render_widget(
             Paragraph::new(format!(" {status} "))
@@ -1320,10 +1360,40 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, sta
                         .add_modifier(Modifier::BOLD),
                 )
                 .alignment(Alignment::Right),
-            Rect::new(main_area.right(), area.y, status_width, area.height),
+            Rect::new(
+                area.right().saturating_sub(status_width),
+                area.y,
+                status_width,
+                area.height,
+            ),
         );
     }
-    let profile_x = area.x.saturating_add(10);
+    if let Some(update_badge) = update_badge {
+        let update_area = Rect::new(
+            area.right().saturating_sub(right_width),
+            area.y,
+            update_width,
+            area.height,
+        );
+        frame.render_widget(
+            Paragraph::new(update_badge)
+                .style(
+                    Style::new()
+                        .fg(theme.warning)
+                        .bg(theme.surface)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .alignment(Alignment::Right),
+            update_area,
+        );
+        state.hit_regions.push(HitRegion {
+            area: update_area,
+            target: HitTarget::UpdateCenter,
+        });
+    }
+    let profile_x = area
+        .x
+        .saturating_add(10 + running_version.cell_width() as u16 + 2);
     let profile_width = profile_width.min(main_area.right().saturating_sub(profile_x));
     if profile_width > 0 {
         state.hit_regions.push(HitRegion {
@@ -2906,6 +2976,7 @@ fn render_overlay(
 ) {
     match overlay {
         Overlay::Help(help) => render_help(frame, area, help, state, theme),
+        Overlay::Update(_) => render_update_overlay(frame, area, app, state, theme),
         Overlay::NotificationHistory(history) => {
             notifications::render_history(frame, area, app, history, theme, state)
         }
@@ -4254,6 +4325,148 @@ fn render_message(frame: &mut Frame<'_>, area: Rect, title: &str, body: &str, th
             .wrap(Wrap { trim: true }),
         popup,
     );
+}
+
+fn render_update_overlay(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    state: &mut UiState,
+    theme: Theme,
+) {
+    use crate::model::update::{UpdateOverlayFocus, UpdateState};
+
+    let popup = centered(area, 76, 16);
+    frame.render_widget(Clear, popup);
+    let block = panel_block(" UPDATE CENTER ", true, theme);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    let mut lines = vec![Line::from(Span::styled(
+        " LAZYDB UPDATE",
+        theme.title(true),
+    ))];
+    let (primary, primary_enabled, status_line) = match &app.update_state {
+        UpdateState::Idle => ("Check now", true, "No update check has run".to_owned()),
+        UpdateState::Checking { .. } => {
+            ("Checking...", false, "Checking for updates...".to_owned())
+        }
+        UpdateState::UpToDate(inspection) => (
+            "Check again",
+            true,
+            format!(
+                "Running {} · Latest {}",
+                inspection.running_version,
+                inspection.target_version.as_deref().unwrap_or("unknown")
+            ),
+        ),
+        UpdateState::Available(inspection) => (
+            "Update now",
+            inspection.manager == crate::update::InstallationManager::Native,
+            format!(
+                "Running {} · Latest {} · {:?}",
+                inspection.running_version,
+                inspection.target_version.as_deref().unwrap_or("unknown"),
+                inspection.channel
+            ),
+        ),
+        UpdateState::Installing { inspection, .. } => (
+            "Installing...",
+            false,
+            format!(
+                "Installing {}. You can continue using LazyDB.",
+                inspection.target_version.as_deref().unwrap_or("the update")
+            ),
+        ),
+        UpdateState::ReadyToRestart(inspection) => (
+            "Restart now",
+            true,
+            format!(
+                "Running {} · Installed {}",
+                inspection.running_version,
+                inspection.installed_version.as_deref().unwrap_or("unknown")
+            ),
+        ),
+        UpdateState::ManagerActionRequired(inspection) => (
+            "Copy command",
+            false,
+            format!(
+                "Latest {} · {:?}: {}",
+                inspection.target_version.as_deref().unwrap_or("unknown"),
+                inspection.manager,
+                inspection
+                    .action
+                    .as_deref()
+                    .unwrap_or("use the installation manager to update")
+            ),
+        ),
+        UpdateState::Failed { message, .. } => (
+            "Retry",
+            true,
+            format!("Update failed: {}", sanitize_terminal_text(message)),
+        ),
+    };
+    lines.push(Line::raw(status_line));
+    lines.push(Line::raw(""));
+    if let UpdateState::Available(inspection) = &app.update_state {
+        lines.push(Line::raw(format!("Installation: {:?}", inspection.manager)));
+    }
+    lines.push(Line::raw(""));
+    let later_selected = matches!(
+        app.overlay,
+        Some(Overlay::Update(ref overlay)) if overlay.focus == UpdateOverlayFocus::Later
+    );
+    let primary_selected = !later_selected;
+    let primary_label = if primary_enabled && primary_selected {
+        format!("[ {primary} ]")
+    } else {
+        format!("  {primary}  ")
+    };
+    let later_label = if later_selected {
+        "[ Later ]"
+    } else {
+        "  Later  "
+    };
+    lines.push(Line::from(vec![
+        Span::styled(
+            primary_label,
+            Style::new()
+                .fg(if primary_enabled {
+                    theme.action
+                } else {
+                    theme.muted
+                })
+                .bg(theme.surface),
+        ),
+        Span::raw("   "),
+        Span::styled(later_label, Style::new().fg(theme.text).bg(theme.surface)),
+    ]));
+    lines.push(Line::from(Span::styled(
+        "Tab/Left/Right select   Enter confirm   Esc/q close",
+        Style::new().fg(theme.muted),
+    )));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::new().fg(theme.text).bg(theme.surface))
+            .wrap(Wrap { trim: true }),
+        inner,
+    );
+    let action_y = inner.bottom().saturating_sub(2);
+    let button_width = (inner.width / 2).max(1);
+    if primary_enabled {
+        state.hit_regions.push(HitRegion {
+            area: Rect::new(inner.x, action_y, button_width, 1),
+            target: HitTarget::UpdateButton { primary: true },
+        });
+    }
+    state.hit_regions.push(HitRegion {
+        area: Rect::new(
+            inner.x.saturating_add(button_width),
+            action_y,
+            inner.width.saturating_sub(button_width),
+            1,
+        ),
+        target: HitTarget::UpdateButton { primary: false },
+    });
 }
 
 fn render_profile_access(

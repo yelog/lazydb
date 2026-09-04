@@ -13,10 +13,12 @@ pub const CONFIG_VERSION: u16 = 1;
 pub const DEFAULT_CONFIG_TOML: &str = include_str!("../config/default.toml");
 const MIN_DASHBOARD_REFRESH_INTERVAL_SECONDS: u64 = 1;
 const MIN_KEY_SEQUENCE_TIMEOUT_MS: u64 = 1;
+const MIN_UPDATE_CHECK_INTERVAL_HOURS: u64 = 1;
 const SUPPORTED_COMMANDS: &[&str] = &[
     "help",
     "quit",
     "notification-history",
+    "update",
     "focus-next-pane",
     "focus-previous-pane",
     "run-statement",
@@ -78,6 +80,8 @@ pub enum ConfigError {
     InvalidDashboardRefreshInterval,
     #[error("keybindings.sequence_timeout_ms must be at least {MIN_KEY_SEQUENCE_TIMEOUT_MS}")]
     InvalidKeySequenceTimeout,
+    #[error("updates.check_interval_hours must be at least 1")]
+    InvalidUpdateCheckInterval,
     #[error("invalid keybinding for `{command}`: `{key}`")]
     InvalidKeybinding { command: String, key: String },
     #[error("keybinding `{key}` is assigned to both `{first}` and `{second}`")]
@@ -98,6 +102,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub connections: ConnectionsConfig,
     pub dashboard: DashboardConfig,
+    #[serde(default)]
+    pub updates: UpdateConfig,
     pub keybindings: KeybindingConfig,
 }
 
@@ -108,7 +114,7 @@ pub struct TerminalConfig {
     pub color: ColorMode,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct UiConfig {
     pub icons: IconMode,
@@ -139,6 +145,22 @@ pub enum ConnectionAccessDefault {
 #[serde(deny_unknown_fields)]
 pub struct DashboardConfig {
     pub refresh_interval_seconds: u64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateConfig {
+    pub check_on_startup: bool,
+    pub check_interval_hours: u64,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self {
+            check_on_startup: true,
+            check_interval_hours: 24,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -376,6 +398,10 @@ impl AppConfig {
             .saturating_mul(1_000)
     }
 
+    pub const fn update_check_interval_hours(&self) -> u64 {
+        self.updates.check_interval_hours
+    }
+
     pub fn keybindings_for(&self, command: &str) -> &[String] {
         let (group, name) = if let Some(name) = command.strip_prefix("explorer-") {
             (&self.keybindings.explorer, name)
@@ -409,6 +435,9 @@ impl AppConfig {
         }
         if self.keybindings.sequence_timeout_ms < MIN_KEY_SEQUENCE_TIMEOUT_MS {
             return Err(ConfigError::InvalidKeySequenceTimeout);
+        }
+        if self.updates.check_interval_hours < MIN_UPDATE_CHECK_INTERVAL_HOURS {
+            return Err(ConfigError::InvalidUpdateCheckInterval);
         }
         self.keybindings.key_bindings()?;
         Ok(())

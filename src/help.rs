@@ -199,6 +199,7 @@ fn shortcut_context_with_overlay(app: &App, include_help: bool) -> ShortcutConte
                     ShortcutContext::CatalogEditorPreview
                 }
                 Overlay::NotificationHistory(_) => ShortcutContext::NotificationHistory,
+                Overlay::Update(_) => ShortcutContext::Message,
             };
         }
     }
@@ -290,6 +291,7 @@ pub enum HelpShortcutId {
     OpenSqlEditors,
     OpenNotificationHistory,
     OpenNotificationHistoryLeader,
+    OpenUpdateCenter,
     ExplorerMoveDown,
     ExplorerMoveUp,
     ExplorerFirst,
@@ -1034,6 +1036,25 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
         "open notification history",
         Leader,
         "m"
+    ),
+    row!(
+        OpenUpdateCenter,
+        [
+            Explorer,
+            EditorNormal,
+            EditorInsert,
+            EditorVisual,
+            SqlResultsData,
+            SqlOutput,
+            RelationDataBrowse,
+            RelationDataEdit,
+            RelationDataVisual,
+            RelationDataBusy,
+            RelationDdl,
+            Dashboard
+        ],
+        "F9",
+        "open update center"
     ),
     row!(ExplorerMoveDown, [Explorer], "j", "move selection down"),
     row!(ExplorerMoveUp, [Explorer], "k", "move selection up"),
@@ -2667,6 +2688,7 @@ pub(crate) fn configured_sequence(
         HelpShortcutId::ExplorerNewProfile => Some("explorer-new-profile"),
         HelpShortcutId::ExplorerRefresh => Some("explorer-refresh"),
         HelpShortcutId::ExplorerToggle => Some("explorer-toggle"),
+        HelpShortcutId::OpenUpdateCenter => Some("update"),
         _ => None,
     };
     command

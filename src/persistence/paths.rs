@@ -61,6 +61,10 @@ impl AppPaths {
         self.config_dir.join("settings.toml")
     }
 
+    pub fn update_check_file(&self) -> PathBuf {
+        self.state_dir.join("update-check.json")
+    }
+
     pub fn credential_key_file(&self) -> PathBuf {
         self.config_dir.join("credential.key")
     }

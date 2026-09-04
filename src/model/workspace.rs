@@ -105,6 +105,7 @@ pub fn pane_resize(focus: Focus, operator: char, count: u32) -> Option<PaneResiz
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Overlay {
+    Update(crate::model::update::UpdateOverlayState),
     Help(HelpState),
     NotificationHistory(crate::model::notification::NotificationHistoryState),
     RecordView(crate::model::record_view::RecordViewState),

@@ -5,7 +5,7 @@ use std::fs;
 use std::io::{Cursor, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use clap::ValueEnum;
@@ -45,6 +45,27 @@ pub struct UpdateReport {
     pub target_version: Option<String>,
     pub status: String,
     pub action: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UpdateStatus {
+    UpToDate,
+    Available,
+    ReadyToRestart,
+    ManagerActionRequired,
+    Error,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpdateInspection {
+    pub manager: InstallationManager,
+    pub channel: UpdateChannel,
+    pub running_version: String,
+    pub installed_version: Option<String>,
+    pub target_version: Option<String>,
+    pub status: UpdateStatus,
+    pub action: Option<String>,
+    pub launcher_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -186,6 +207,8 @@ impl Default for SystemUpdateHttpClient {
                         attempt.error("HTTP redirect left the approved host or scheme")
                     }
                 }))
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(60))
                 .build()
                 .expect("valid HTTP client configuration"),
         }
@@ -331,105 +354,219 @@ where
     S: InstallationStateSource,
     H: UpdateHttpClient,
 {
+    let inspection = inspect_installation(
+        requested_channel,
+        allow_downgrade,
+        source,
+        probe,
+        &std::env::current_exe().unwrap_or_else(|_| PathBuf::from("lazydb")),
+        http,
+    )
+    .await;
+    report_from_inspection(&inspection)
+}
+
+pub async fn inspect_current_installation(
+    requested_channel: Option<UpdateChannel>,
+    allow_downgrade: bool,
+) -> anyhow::Result<UpdateInspection> {
+    let paths = crate::persistence::paths::AppPaths::discover().ok();
+    let source = InstallationStateFileSource {
+        path: paths
+            .as_ref()
+            .map(|paths| paths.data_dir.join("install.json"))
+            .unwrap_or_else(|| PathBuf::from("install.json")),
+        file_system: SystemUpdateFileSystem,
+    };
+    Ok(inspect_installation(
+        requested_channel,
+        allow_downgrade,
+        &source,
+        &SystemInstallationProbe,
+        &std::env::current_exe().unwrap_or_else(|_| PathBuf::from("lazydb")),
+        &SystemUpdateHttpClient::default(),
+    )
+    .await)
+}
+
+pub async fn install_current_native(
+    requested_channel: Option<UpdateChannel>,
+    allow_downgrade: bool,
+) -> anyhow::Result<UpdateInspection> {
+    let paths = crate::persistence::paths::AppPaths::discover().ok();
+    let source = InstallationStateFileSource {
+        path: paths
+            .as_ref()
+            .map(|paths| paths.data_dir.join("install.json"))
+            .unwrap_or_else(|| PathBuf::from("install.json")),
+        file_system: SystemUpdateFileSystem,
+    };
     let executable = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("lazydb"));
+    let initial_state = source
+        .state()
+        .ok_or_else(|| anyhow::anyhow!("native installation state is unavailable"))?;
+    if detect_installation_manager(&executable, Some(&initial_state), &SystemInstallationProbe)
+        != InstallationManager::Native
+    {
+        anyhow::bail!("the current installation is not managed by LazyDB")
+    }
+    let lock = UpdateLock::acquire(&native_data_dir(&initial_state)?)?;
+    let current_state = source
+        .state()
+        .ok_or_else(|| anyhow::anyhow!("native installation state is unavailable"))?;
+    if detect_installation_manager(&executable, Some(&current_state), &SystemInstallationProbe)
+        != InstallationManager::Native
+    {
+        anyhow::bail!("the current installation changed during update preparation")
+    }
+    let channel = resolve_channel(requested_channel, Some(current_state.channel.as_str()));
+    let manifest = fetch_manifest(channel, &SystemUpdateHttpClient::default())
+        .await
+        .map_err(anyhow::Error::msg)?;
+    let target = current_target(Some(&current_state))
+        .ok_or_else(|| anyhow::anyhow!("current target is unsupported"))?;
+    let current_version = Version::parse(&current_state.version)
+        .map_err(|_| anyhow::anyhow!("native installation version is invalid"))?;
+    let target_version = Version::parse(&manifest.version)
+        .map_err(|_| anyhow::anyhow!("channel manifest version is invalid"))?;
+    if target_version <= current_version && !allow_downgrade {
+        return Ok(inspection_after_native_install(
+            &current_state,
+            manifest.version.clone(),
+            if target_version == current_version {
+                UpdateStatus::UpToDate
+            } else {
+                UpdateStatus::Error
+            },
+        ));
+    }
+    apply_native_update(
+        &current_state,
+        &target,
+        &manifest,
+        &SystemUpdateHttpClient::default(),
+    )
+    .await?;
+    let installed = source
+        .state()
+        .ok_or_else(|| anyhow::anyhow!("updated installation state is unavailable"))?;
+    if installed.version != manifest.version {
+        anyhow::bail!("updated installation state does not match the downloaded release")
+    }
+    drop(lock);
+    Ok(inspection_after_native_install(
+        &installed,
+        manifest.version,
+        UpdateStatus::ReadyToRestart,
+    ))
+}
+
+async fn inspect_installation<P, S, H>(
+    requested_channel: Option<UpdateChannel>,
+    allow_downgrade: bool,
+    source: &S,
+    probe: &P,
+    executable: &Path,
+    http: &H,
+) -> UpdateInspection
+where
+    P: InstallationProbe,
+    S: InstallationStateSource,
+    H: UpdateHttpClient,
+{
     let state = source.state();
-    let manager = detect_installation_manager(&executable, state.as_ref(), probe);
+    let manager = detect_installation_manager(executable, state.as_ref(), probe);
     let channel = resolve_channel(
         requested_channel,
         state.as_ref().map(|state| state.channel.as_str()),
     );
-    if manager != InstallationManager::Native {
-        return UpdateReport {
-            schema: 1,
-            manager,
-            channel,
-            current_version: None,
-            target_version: None,
-            status: if manager == InstallationManager::Unknown {
-                "error".to_owned()
-            } else {
-                "manager_action_required".to_owned()
-            },
-            action: match manager {
-                InstallationManager::Homebrew | InstallationManager::Npm => {
-                    manager_action(manager, channel)
-                }
-                InstallationManager::Deb => {
-                    Some("use your Debian package manager to upgrade lazydb".to_owned())
-                }
-                InstallationManager::Rpm => {
-                    Some("use your RPM package manager to upgrade lazydb".to_owned())
-                }
-                InstallationManager::Arch => {
-                    Some("use your Arch package manager to upgrade lazydb".to_owned())
-                }
-                InstallationManager::Cargo => Some("cargo install lazydb".to_owned()),
-                InstallationManager::Unknown => {
-                    Some("installation manager could not be determined".to_owned())
-                }
-                InstallationManager::Native => None,
-            },
-        };
-    }
-    let current_version = state.as_ref().map(|state| state.version.clone());
-    let target = current_target(state.as_ref());
+    let running_version = env!("CARGO_PKG_VERSION").to_owned();
+    let native_state = (manager == InstallationManager::Native)
+        .then_some(state.as_ref())
+        .flatten();
+    let installed_version = native_state
+        .map(|state| state.version.clone())
+        .or_else(|| Some(running_version.clone()));
+    let launcher_path = native_state.map(|state| state.path.clone());
     let manifest = fetch_manifest(channel, http).await;
-    let (target_version, status, action) = match (manifest, target) {
-        (Ok(manifest), Some(target)) if manifest.assets.contains_key(&target) => {
-            let target_version = manifest.version.clone();
-            let status =
-                version_status(current_version.as_deref(), &target_version, allow_downgrade);
-            let action = match manager {
-                InstallationManager::Native if status == "update_available" => {
-                    Some(format!("native target {target}; update will be applied"))
+    let target_version = manifest
+        .as_ref()
+        .ok()
+        .map(|manifest| manifest.version.clone());
+    let status = match manifest {
+        Ok(_) => match manager {
+            InstallationManager::Native => {
+                let status = version_status_kind(
+                    installed_version.as_deref(),
+                    target_version.as_deref().unwrap_or_default(),
+                    allow_downgrade,
+                );
+                if status == UpdateStatus::UpToDate
+                    && installed_version.as_deref() != Some(running_version.as_str())
+                {
+                    UpdateStatus::ReadyToRestart
+                } else {
+                    status
                 }
-                InstallationManager::Native => None,
-                _ => manager_action(manager, channel),
-            };
-            (Some(target_version), status.to_owned(), action)
+            }
+            InstallationManager::Unknown => UpdateStatus::Error,
+            _ => UpdateStatus::ManagerActionRequired,
+        },
+        Err(_) => UpdateStatus::Error,
+    };
+    let action = match status {
+        UpdateStatus::Available if manager == InstallationManager::Native => {
+            Some("native target update will be applied".to_owned())
         }
-        (Err(error), _) => (None, "error".to_owned(), Some(error)),
-        (Ok(_), Some(_)) | (_, None) => (
-            None,
-            "error".to_owned(),
-            Some("current target is unsupported".to_owned()),
-        ),
+        UpdateStatus::ManagerActionRequired => manager_action(manager, channel),
+        UpdateStatus::Error => Some("unable to determine the latest LazyDB release".to_owned()),
+        _ => None,
     };
-    let (status, action) = match manager {
-        InstallationManager::Native => (status, action),
-        manager @ (InstallationManager::Homebrew | InstallationManager::Npm) => (
-            "manager_action_required".to_owned(),
-            manager_action(manager, channel),
-        ),
-        InstallationManager::Deb => (
-            "manager_action_required".to_owned(),
-            Some("use your Debian package manager to upgrade lazydb".to_owned()),
-        ),
-        InstallationManager::Rpm => (
-            "manager_action_required".to_owned(),
-            Some("use your RPM package manager to upgrade lazydb".to_owned()),
-        ),
-        InstallationManager::Arch => (
-            "manager_action_required".to_owned(),
-            Some("use your Arch package manager to upgrade lazydb".to_owned()),
-        ),
-        InstallationManager::Cargo => (
-            "manager_action_required".to_owned(),
-            Some("cargo install lazydb".to_owned()),
-        ),
-        InstallationManager::Unknown => (
-            "error".to_owned(),
-            Some("installation manager could not be determined".to_owned()),
-        ),
-    };
-    UpdateReport {
-        schema: 1,
+    UpdateInspection {
         manager,
         channel,
-        current_version,
+        running_version,
+        installed_version,
         target_version,
         status,
         action,
+        launcher_path,
+    }
+}
+
+fn report_from_inspection(inspection: &UpdateInspection) -> UpdateReport {
+    let status = match inspection.status {
+        UpdateStatus::UpToDate => "up_to_date",
+        UpdateStatus::Available => "update_available",
+        UpdateStatus::ReadyToRestart => "updated",
+        UpdateStatus::ManagerActionRequired => "manager_action_required",
+        UpdateStatus::Error => "error",
+    };
+    UpdateReport {
+        schema: 1,
+        manager: inspection.manager,
+        channel: inspection.channel,
+        current_version: inspection.installed_version.clone(),
+        target_version: inspection.target_version.clone(),
+        status: status.to_owned(),
+        action: inspection.action.clone(),
+    }
+}
+
+fn inspection_after_native_install(
+    state: &InstallationState,
+    target_version: String,
+    status: UpdateStatus,
+) -> UpdateInspection {
+    UpdateInspection {
+        manager: InstallationManager::Native,
+        channel: resolve_channel(None, Some(state.channel.as_str())),
+        running_version: env!("CARGO_PKG_VERSION").to_owned(),
+        installed_version: Some(state.version.clone()),
+        target_version: Some(target_version),
+        status,
+        action: None,
+        launcher_path: Some(state.path.clone()),
     }
 }
 
@@ -453,6 +590,14 @@ fn current_target(state: Option<&InstallationState>) -> Option<String> {
                 .contains(&target.as_str())
                 .then_some(target)
         })
+}
+
+fn version_status_kind(current: Option<&str>, target: &str, allow_downgrade: bool) -> UpdateStatus {
+    match version_status(current, target, allow_downgrade) {
+        "update_available" => UpdateStatus::Available,
+        "up_to_date" => UpdateStatus::UpToDate,
+        _ => UpdateStatus::Error,
+    }
 }
 
 fn version_status(current: Option<&str>, target: &str, allow_downgrade: bool) -> &'static str {
@@ -530,7 +675,23 @@ fn manager_action(manager: InstallationManager, _channel: UpdateChannel) -> Opti
             "official npm distribution is unavailable; use the Pages installer or Homebrew"
                 .to_owned(),
         ),
-        _ => None,
+        InstallationManager::Deb => Some(
+            "use your Debian package manager to upgrade lazydb; LazyDB will not invoke sudo"
+                .to_owned(),
+        ),
+        InstallationManager::Rpm => Some(
+            "use your RPM package manager to upgrade lazydb; LazyDB will not invoke sudo"
+                .to_owned(),
+        ),
+        InstallationManager::Arch => Some(
+            "use your Arch package manager to upgrade lazydb; LazyDB will not invoke sudo"
+                .to_owned(),
+        ),
+        InstallationManager::Cargo => Some("cargo install lazydb".to_owned()),
+        InstallationManager::Unknown => {
+            Some("installation manager could not be determined".to_owned())
+        }
+        InstallationManager::Native => None,
     }
 }
 
@@ -552,7 +713,10 @@ impl UpdateLock {
         fs::create_dir_all(data_dir)?;
         match fs::create_dir(&path) {
             Ok(()) => {
-                fs::write(path.join("pid"), std::process::id().to_string())?;
+                if let Err(error) = fs::write(path.join("pid"), std::process::id().to_string()) {
+                    let _ = fs::remove_dir_all(&path);
+                    return Err(error.into());
+                }
                 Ok(Self { path })
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -637,7 +801,17 @@ async fn apply_native_update<H: UpdateHttpClient>(
     let destination = releases.join(&manifest.version);
     let destination_created = !destination.exists();
     if !destination_created {
-        fs::remove_dir_all(&staging)?;
+        let existing_binary = destination.join("lazydb");
+        let existing_is_valid = existing_binary.is_file()
+            && run_staged_version(&existing_binary)
+                .is_ok_and(|version| version == manifest.version);
+        if existing_is_valid {
+            fs::remove_dir_all(&staging)?;
+        } else {
+            fs::remove_dir_all(&destination)?;
+            fs::rename(&release, &destination)?;
+            fs::remove_dir_all(&staging)?;
+        }
     } else {
         if let Err(error) = fs::rename(&release, &destination) {
             let _ = fs::remove_dir_all(&staging);
