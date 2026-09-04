@@ -281,7 +281,7 @@ fn postgres_materialized_view_create_plan_refreshes_materialized_view_group_and_
         query: "SELECT 1".into(),
         tablespace: "fast".into(),
         with_data: false,
-        selected_field: 0,
+        focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
         query_editable: true,
     };
     let plan = lazydb::db::postgres::PostgresAdapter::plan_catalog_mutation(
@@ -1149,7 +1149,7 @@ fn postgres_view_draft_rejects_trailing_statements_and_plans_safe_replace() {
         security_barrier: lazydb::db::catalog_mutation::ViewOption::unavailable("not tested"),
         security_invoker: lazydb::db::catalog_mutation::ViewOption::unavailable("not tested"),
         check_option: lazydb::db::catalog_mutation::ViewOption::unavailable("not tested"),
-        selected_field: 0,
+        focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
     };
     assert!(draft.validate().is_err());
     draft.query = "SELECT 1".into();
@@ -1185,7 +1185,7 @@ fn postgres_view_options_are_version_gated_and_render_exact_syntax() {
         security_barrier: lazydb::db::catalog_mutation::ViewOption::available(Some(true)),
         security_invoker: lazydb::db::catalog_mutation::ViewOption::unavailable("not supported"),
         check_option: lazydb::db::catalog_mutation::ViewOption::available(Some("LOCAL".into())),
-        selected_field: 0,
+        focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
     };
     let profile = Uuid::new_v4();
     let request = CatalogMutationRequest::new(
@@ -1320,7 +1320,7 @@ fn sequence_bounds_keep_unset_distinct_from_no_limit_and_validate_numbers() {
         cache: "1".into(),
         cycle: false,
         owned_by: "NONE".into(),
-        selected_field: 0,
+        focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
     };
     assert!(draft.validate().is_ok());
     assert!(matches!(draft.min_value, SequenceBound::Unset));
@@ -1360,7 +1360,7 @@ fn sequence_create_plan_quotes_owned_by_and_has_no_child_options() {
         cache: "10".into(),
         cycle: true,
         owned_by: "public.events.id".into(),
-        selected_field: 0,
+        focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
     });
     let plan =
         lazydb::db::postgres::PostgresAdapter::plan_catalog_mutation(request, draft, None).unwrap();

@@ -1552,7 +1552,8 @@ fn map_catalog_editor_form(
                 && matches!(
                     editor.draft.as_ref(),
                     Some(crate::model::catalog_editor::CatalogDraft::MaterializedView(draft))
-                        if draft.selected_field == 5
+                        if draft.focus
+                            == crate::model::catalog_editor::CatalogFormFocus::WithData
                 );
             Some(if toggle_data {
                 Action::CatalogEditorToggleMaterializedViewData

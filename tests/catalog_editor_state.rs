@@ -913,9 +913,9 @@ fn schema_draft_edits_name_owner_and_comment() {
     let mut draft = CatalogDraft::Schema(SchemaDraft::new());
 
     draft.insert('a');
-    draft.move_field(1);
+    draft.move_field(1, true);
     draft.insert('o');
-    draft.move_field(1);
+    draft.move_field(1, true);
     draft.insert('c');
 
     let CatalogDraft::Schema(draft) = draft else {
@@ -959,10 +959,10 @@ fn materialized_view_edit_draft_keeps_query_display_only() {
         baseline_fingerprint: "sha256:mv".into(),
     };
     let mut draft = MaterializedViewDraft::from_definition(&definition);
-    draft.selected_field = 4;
+    draft.focus = lazydb::model::catalog_editor::CatalogFormFocus::Query;
     draft.insert('x');
     assert_eq!(draft.query.value(), "SELECT 1");
-    draft.selected_field = 5;
+    draft.focus = lazydb::model::catalog_editor::CatalogFormFocus::Tablespace;
     draft.insert('x');
     assert_eq!(draft.tablespace.value(), "fastx");
 }
@@ -1246,13 +1246,15 @@ fn view_draft_preserves_query_and_cycles_editable_fields() {
         security_barrier: lazydb::db::catalog_mutation::ViewOption::available(Some(false)),
         security_invoker: lazydb::db::catalog_mutation::ViewOption::unavailable("not tested"),
         check_option: lazydb::db::catalog_mutation::ViewOption::unavailable("not tested"),
-        selected_field: 0,
+        focus: lazydb::model::catalog_editor::CatalogFormFocus::Query,
     };
-    draft.move_field(4);
     draft.insert(' ');
     assert_eq!(draft.query.value(), "SELECT 1 ");
     draft.move_field(1);
-    assert_eq!(draft.selected_field, 5);
+    assert_eq!(
+        draft.focus,
+        lazydb::model::catalog_editor::CatalogFormFocus::SecurityBarrier
+    );
 }
 
 #[test]
@@ -1268,7 +1270,7 @@ fn view_query_validation_ignores_semicolons_in_literals_and_comments() {
         security_barrier: lazydb::db::catalog_mutation::ViewOption::unavailable("not tested"),
         security_invoker: lazydb::db::catalog_mutation::ViewOption::unavailable("not tested"),
         check_option: lazydb::db::catalog_mutation::ViewOption::unavailable("not tested"),
-        selected_field: 0,
+        focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
     };
     assert!(draft.validate().is_ok());
     draft.query = "SELECT 1; SELECT 2".into();
@@ -1291,9 +1293,8 @@ fn sequence_draft_cycles_all_fields_and_preserves_no_limit_state() {
         cache: "1".into(),
         cycle: false,
         owned_by: "NONE".into(),
-        selected_field: 0,
+        focus: lazydb::model::catalog_editor::CatalogFormFocus::OwnedBy,
     };
-    draft.move_field(-1);
     draft.insert('x');
     assert_eq!(draft.owned_by.value(), "NONEx");
     assert!(matches!(

@@ -154,7 +154,7 @@ fn materialized_view_mutation_create_and_native_safe_edit_never_replaces_definit
         query: "SELECT 1".into(),
         tablespace: "fast".into(),
         with_data: false,
-        selected_field: 0,
+        focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
         query_editable: true,
     };
     let request = CatalogMutationRequest::new(
@@ -1153,7 +1153,7 @@ async fn apply_view(
         security_barrier: lazydb::db::catalog_mutation::ViewOption::available(None),
         security_invoker: lazydb::db::catalog_mutation::ViewOption::available(None),
         check_option: lazydb::db::catalog_mutation::ViewOption::available(None),
-        selected_field: 0,
+        focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
     };
     apply_plan(
         database,
@@ -1194,7 +1194,7 @@ async fn apply_materialized(
         .into(),
         tablespace: "".into(),
         with_data: true,
-        selected_field: 0,
+        focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
         query_editable: true,
     };
     apply_plan(
@@ -1244,7 +1244,7 @@ async fn apply_sequence(
         cache: "1".into(),
         cycle: false,
         owned_by: "NONE".into(),
-        selected_field: 0,
+        focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
     };
     apply_plan(
         database,

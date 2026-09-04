@@ -987,7 +987,7 @@ fn view_editor_renders_query_and_output_columns() {
                     "not tested",
                 ),
                 check_option: lazydb::db::catalog_mutation::ViewOption::unavailable("not tested"),
-                selected_field: 0,
+                focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
             },
         )),
     });
@@ -1072,7 +1072,7 @@ fn materialized_view_editor_renders_data_state_and_read_only_query() {
                     query: "SELECT id FROM items".into(),
                     tablespace: "fast".into(),
                     with_data: false,
-                    selected_field: 0,
+                    focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
                     query_editable: false,
                 },
             ),
