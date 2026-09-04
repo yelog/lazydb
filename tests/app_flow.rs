@@ -66,6 +66,13 @@ fn editor_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
     app.update(Action::EditorKey(KeyEvent::new(code, modifiers)));
 }
 
+fn mapped_editor_key(app: &mut App, keymap: &mut lazydb::input::keymap::Keymap, code: KeyCode) {
+    let action = keymap
+        .map(KeyEvent::new(code, KeyModifiers::NONE), app)
+        .expect("editor key should be routed through the keymap");
+    app.update(action);
+}
+
 #[test]
 fn normal_mode_motions_do_not_insert_literal_keys_through_app() {
     let mut app = App::new(Vec::new());
@@ -90,6 +97,39 @@ fn normal_mode_motions_do_not_insert_literal_keys_through_app() {
     assert_eq!(
         app.active_editor_mode(),
         lazydb::model::editor::EditorMode::Normal
+    );
+}
+
+#[test]
+fn normal_mode_gg_moves_cursor_to_first_line_through_keymap() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::ReplaceEditor("one\ntwo\nthree".into()));
+    let mut keymap = lazydb::input::keymap::Keymap::default();
+
+    mapped_editor_key(&mut app, &mut keymap, KeyCode::Char('G'));
+    assert_eq!(
+        app.active_editor_render_snapshot(lazydb::model::editor::EditorViewport {
+            width: 80,
+            height: 10,
+        })
+        .unwrap()
+        .cursor
+        .line,
+        2
+    );
+
+    mapped_editor_key(&mut app, &mut keymap, KeyCode::Char('g'));
+    mapped_editor_key(&mut app, &mut keymap, KeyCode::Char('g'));
+
+    assert_eq!(
+        app.active_editor_render_snapshot(lazydb::model::editor::EditorViewport {
+            width: 80,
+            height: 10,
+        })
+        .unwrap()
+        .cursor
+        .line,
+        0
     );
 }
 

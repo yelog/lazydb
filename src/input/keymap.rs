@@ -596,10 +596,6 @@ impl Keymap {
                 _ if self.bindings.matches("focus-previous-pane", event) => {
                     return Some(Action::FocusPrevious);
                 }
-                KeyCode::Char('g') => {
-                    self.set_pending(Pending::Goto, app);
-                    return None;
-                }
                 _ => {}
             }
         }

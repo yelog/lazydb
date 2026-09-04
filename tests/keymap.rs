@@ -1878,11 +1878,14 @@ fn maps_tab_sequences_from_editor_normal_mode() {
         Some(Action::NextTab)
     );
 
-    assert_eq!(keymap.map(key(KeyCode::Char('g')), &app), None);
-    assert_eq!(
+    assert!(matches!(
+        keymap.map(key(KeyCode::Char('g')), &app),
+        Some(Action::EditorKey(_))
+    ));
+    assert!(matches!(
         keymap.map(key(KeyCode::Char('T')), &app),
-        Some(Action::PreviousTab)
-    );
+        Some(Action::EditorKey(_))
+    ));
     assert_eq!(
         keymap.map(
             KeyEvent::new(KeyCode::PageDown, KeyModifiers::CONTROL),

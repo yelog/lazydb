@@ -1146,6 +1146,27 @@ impl EditorWorkspace {
                 }
             }
         }
+        if mode == EditorMode::Normal
+            && let EditorKey::Character(character) = key
+            && self
+                .sessions
+                .get(&id)
+                .is_some_and(|session| session.pending_binding == Some(PendingBinding::Goto))
+        {
+            self.sessions
+                .get_mut(&id)
+                .ok_or(EditorError::MissingSession(id))?
+                .pending_binding = None;
+            match character {
+                't' => self.effects.push(EditorEffect::NextTab),
+                'T' => self.effects.push(EditorEffect::PreviousTab),
+                _ => {
+                    self.input_vim_key(id, EditorKey::Character('g'))?;
+                    self.input_vim_key(id, key)?;
+                }
+            }
+            return Ok(());
+        }
         match (mode, key) {
             (EditorMode::Normal, EditorKey::Character('Q')) => {
                 self.effects.push(EditorEffect::Quit);
@@ -1471,9 +1492,6 @@ impl EditorWorkspace {
                     self.effects.push(EditorEffect::TogglePaneMaximized)
                 }
                 (PendingBinding::Window(_), 'k' | 'l') => {}
-                (PendingBinding::Goto, 'g') => self.input_vim_key(id, EditorKey::Character('g'))?,
-                (PendingBinding::Goto, 't') => self.effects.push(EditorEffect::NextTab),
-                (PendingBinding::Goto, 'T') => self.effects.push(EditorEffect::PreviousTab),
                 (_, _) => {}
             }
             if self
