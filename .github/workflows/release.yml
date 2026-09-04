@@ -140,7 +140,8 @@ jobs:
         with: { pattern: release-*-unknown-linux-gnu, path: dist, merge-multiple: true }
       - name: Install nFPM
         run: |
-          curl -fsSL https://raw.githubusercontent.com/goreleaser/nfpm/v2.42.0/scripts/install.sh | sh -s -- -b "$HOME/.local/bin"
+          GOBIN="$HOME/.local/bin" go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.42.0
+          "$HOME/.local/bin/nfpm" --version
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Build packages
         run: |
