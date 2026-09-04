@@ -103,6 +103,7 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
           VERSION: ${{ needs.plan.outputs.version }}
+        shell: bash
         run: |
           set -eu
           mkdir -p dist/package
@@ -121,7 +122,9 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4.4.3
         with:
           name: release-${{ matrix.target }}
-          path: dist/*.tar.xz
+          path: |
+            dist/*.tar.xz
+            dist/*.zip
           if-no-files-found: error
 
   package:

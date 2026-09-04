@@ -30,12 +30,26 @@ async fn main() -> Result<()> {
     match lazydb::runtime::run_tui(cli).await? {
         lazydb::runtime::RunOutcome::Exit => Ok(()),
         lazydb::runtime::RunOutcome::Restart { executable } => {
-            use std::os::unix::process::CommandExt;
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
 
-            let error = std::process::Command::new(executable)
-                .args(std::env::args_os().skip(1))
-                .exec();
-            Err(error.into())
+                let error = std::process::Command::new(executable)
+                    .args(std::env::args_os().skip(1))
+                    .exec();
+                Err(error.into())
+            }
+            #[cfg(not(unix))]
+            {
+                let status = std::process::Command::new(executable)
+                    .args(std::env::args_os().skip(1))
+                    .status()?;
+                if status.success() {
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!("restart process exited with {status}"))
+                }
+            }
         }
     }
 }
