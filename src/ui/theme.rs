@@ -99,9 +99,9 @@ impl Theme {
             muted: Color::Rgb(105, 126, 146),
             accent: Color::Rgb(99, 230, 216),
             action: Color::Rgb(101, 167, 255),
-            syntax_relation: Color::Rgb(92, 200, 150),
-            syntax_relation_alias: Color::Rgb(199, 146, 234),
-            syntax_column: Color::Rgb(101, 167, 255),
+            syntax_relation: Color::Rgb(101, 167, 255),
+            syntax_relation_alias: Color::Rgb(215, 226, 237),
+            syntax_column: Color::Rgb(199, 146, 234),
             syntax_function: Color::Rgb(130, 170, 255),
             success: Color::Rgb(92, 200, 150),
             warning: Color::Rgb(244, 184, 96),
@@ -133,7 +133,7 @@ impl Theme {
             SyntaxColor::RelationAlias => self.syntax_relation_alias,
             SyntaxColor::Column => self.syntax_column,
             SyntaxColor::Function => self.syntax_function,
-            SyntaxColor::String => self.warning,
+            SyntaxColor::String => self.success,
             SyntaxColor::Comment => self.muted,
             SyntaxColor::Operator | SyntaxColor::Punctuation | SyntaxColor::Plain => self.text,
         }
@@ -152,7 +152,7 @@ mod tests {
 
         assert_eq!(theme.syntax_color(SyntaxColor::Keyword), theme.accent);
         assert_eq!(theme.syntax_color(SyntaxColor::Identifier), theme.action);
-        assert_eq!(theme.syntax_color(SyntaxColor::String), theme.warning);
+        assert_eq!(theme.syntax_color(SyntaxColor::String), theme.success);
         assert_eq!(theme.syntax_color(SyntaxColor::Comment), theme.muted);
         assert_eq!(theme.syntax_color(SyntaxColor::Plain), theme.text);
         assert_eq!(
@@ -168,9 +168,18 @@ mod tests {
             theme.syntax_color(SyntaxColor::Function),
             theme.syntax_function
         );
-        assert_ne!(theme.syntax_relation, theme.syntax_relation_alias);
-        assert_ne!(theme.syntax_relation, theme.syntax_column);
-        assert_ne!(theme.syntax_relation_alias, theme.syntax_column);
+        assert_ne!(
+            theme.syntax_color(SyntaxColor::Relation),
+            theme.syntax_color(SyntaxColor::RelationAlias)
+        );
+        assert_ne!(
+            theme.syntax_color(SyntaxColor::Relation),
+            theme.syntax_color(SyntaxColor::Column)
+        );
+        assert_ne!(
+            theme.syntax_color(SyntaxColor::RelationAlias),
+            theme.syntax_color(SyntaxColor::Column)
+        );
     }
 
     #[test]
