@@ -44,12 +44,14 @@ async fn sql_server_transactions_cover_isolation_commit_rollback_ddl_disconnect_
         .execute(&format!("CREATE TABLE {table} ([id] int NOT NULL)"))
         .await
         .unwrap();
+    eprintln!("sqlserver transaction fixture: table created");
 
     let mut transaction = match &database {
         DatabaseConnection::SqlServer(adapter) => adapter.transaction_backend().await.unwrap(),
         _ => unreachable!("SQL Server URL produced a non-SQL Server connection"),
     };
     transaction.begin().await.unwrap();
+    eprintln!("sqlserver transaction fixture: first transaction begun");
     transaction
         .execute(&format!("INSERT INTO {table} ([id]) VALUES (1)"))
         .await
@@ -60,6 +62,7 @@ async fn sql_server_transactions_cover_isolation_commit_rollback_ddl_disconnect_
         .unwrap();
     assert_eq!(count(&outside), 0);
     transaction.commit().await.unwrap();
+    eprintln!("sqlserver transaction fixture: first transaction committed");
     assert_eq!(transaction.depth(), 0);
 
     let committed = database
@@ -74,6 +77,7 @@ async fn sql_server_transactions_cover_isolation_commit_rollback_ddl_disconnect_
         .await
         .unwrap();
     transaction.rollback().await.unwrap();
+    eprintln!("sqlserver transaction fixture: second transaction rolled back");
     let rolled_back = database
         .execute(&format!("SELECT COUNT(*) FROM {table}"))
         .await
@@ -88,9 +92,12 @@ async fn sql_server_transactions_cover_isolation_commit_rollback_ddl_disconnect_
         ))
         .await
         .unwrap();
+    eprintln!("sqlserver transaction fixture: ddl transaction begun and executed");
     transaction.rollback().await.unwrap();
+    eprintln!("sqlserver transaction fixture: ddl transaction rolled back");
 
     database.execute("SELECT 1").await.unwrap();
+    eprintln!("sqlserver transaction fixture: pool reuse verified");
     database
         .execute(&format!("DROP TABLE {table}"))
         .await
