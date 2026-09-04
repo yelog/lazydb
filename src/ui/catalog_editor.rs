@@ -677,7 +677,7 @@ fn render_view(
                 CatalogFormFocus::OutputColumns | CatalogFormFocus::Query
             ),
         );
-        if !compact {
+        if !compact || draft.focus == CatalogFormFocus::OutputColumns {
             render_catalog_text_field(
                 frame,
                 Rect::new(area.x, definition_y + 1, area.width, 1),
@@ -690,7 +690,13 @@ fn render_view(
                 theme,
             );
         }
-        let query_y = definition_y.saturating_add(if compact { 1 } else { 2 });
+        let query_y = definition_y.saturating_add(
+            if compact && draft.focus != CatalogFormFocus::OutputColumns {
+                1
+            } else {
+                2
+            },
+        );
         if query_y < content_bottom {
             render_catalog_text_field(
                 frame,
@@ -705,7 +711,17 @@ fn render_view(
             );
         }
     }
-    let options_y = area.y.saturating_add(if compact { 5 } else { 9 });
+    let options_y = if compact
+        && matches!(
+            draft.focus,
+            CatalogFormFocus::SecurityBarrier
+                | CatalogFormFocus::SecurityInvoker
+                | CatalogFormFocus::CheckOption
+        ) {
+        content_bottom.saturating_sub(2)
+    } else {
+        area.y.saturating_add(if compact { 5 } else { 9 })
+    };
     if options_y < content_bottom {
         heading(
             frame,
@@ -737,10 +753,10 @@ fn render_view(
             ),
         ];
         for (offset, (field, label, option, default, on, off)) in rows.into_iter().enumerate() {
-            if compact && offset > 0 {
+            if compact && draft.focus != field {
                 continue;
             }
-            let y = options_y.saturating_add(1 + offset as u16);
+            let y = options_y.saturating_add(if compact { 1 } else { 1 + offset as u16 });
             if y < content_bottom {
                 let available = option.availability.is_available();
                 let value = option
@@ -759,8 +775,8 @@ fn render_view(
                 );
             }
         }
-        let y = options_y.saturating_add(if compact { 2 } else { 3 });
-        if y < content_bottom {
+        let y = options_y.saturating_add(if compact { 1 } else { 3 });
+        if (!compact || draft.focus == CatalogFormFocus::CheckOption) && y < content_bottom {
             let available = draft.check_option.availability.is_available();
             let value = draft
                 .check_option

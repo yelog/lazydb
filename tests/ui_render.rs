@@ -970,41 +970,7 @@ fn constraint_editor_renders_typed_fields() {
 
 #[test]
 fn view_editor_renders_query_and_output_columns() {
-    let mut app = App::new(Vec::new());
-    app.catalog_editor = Some(lazydb::model::catalog_editor::CatalogEditorState {
-        mode: lazydb::db::catalog_mutation::CatalogMutationMode::Create,
-        anchor: lazydb::db::catalog_mutation::CatalogMutationAnchor::Profile {
-            profile_id: uuid::Uuid::nil(),
-        },
-        object_type: Some(lazydb::db::catalog_mutation::CatalogObjectType::Catalog(
-            CatalogKind::View,
-        )),
-        page: lazydb::model::catalog_editor::CatalogEditorPage::Form,
-        operation: None,
-        catalog_epoch: 0,
-        options: vec![],
-        selected_option: 0,
-        baseline: None,
-        plan: None,
-        error: None,
-        owner_picker: Default::default(),
-        draft: Some(lazydb::model::catalog_editor::CatalogDraft::View(
-            lazydb::model::catalog_editor::ViewDraft {
-                name: "v".into(),
-                schema: "public".into(),
-                owner: "postgres".into(),
-                comment: "note".into(),
-                query: "SELECT id FROM items".into(),
-                output_columns: "id".into(),
-                security_barrier: lazydb::db::catalog_mutation::ViewOption::available(Some(false)),
-                security_invoker: lazydb::db::catalog_mutation::ViewOption::available(Some(true)),
-                check_option: lazydb::db::catalog_mutation::ViewOption::available(Some(
-                    "CASCADED".into(),
-                )),
-                focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
-            },
-        )),
-    });
+    let mut app = view_editor_fixture();
     app.overlay = Some(Overlay::CatalogEditor);
     let (output, state) = render_with_state(&app, 100, 30);
     for label in [
@@ -1074,6 +1040,82 @@ fn view_editor_renders_query_and_output_columns() {
     assert!(states.contains("Default"), "{states}");
     assert!(states.contains("Local"), "{states}");
     assert!(states.contains("DISABLED"), "{states}");
+}
+
+#[test]
+fn compact_view_editor_keeps_focused_output_columns_visible() {
+    let mut app = view_editor_fixture();
+    if let Some(lazydb::model::catalog_editor::CatalogDraft::View(draft)) = app
+        .catalog_editor
+        .as_mut()
+        .and_then(|editor| editor.draft.as_mut())
+    {
+        draft.focus = lazydb::model::catalog_editor::CatalogFormFocus::OutputColumns;
+    }
+
+    let output = render(&app, 56, 16);
+    assert!(output.contains("Output columns"), "{output}");
+    assert!(output.contains("id"), "{output}");
+    assert!(output.contains("[ SQL ]"), "{output}");
+    assert!(output.contains("[ Cancel ]"), "{output}");
+}
+
+#[test]
+fn compact_view_editor_keeps_focused_security_invoker_visible() {
+    let mut app = view_editor_fixture();
+    if let Some(lazydb::model::catalog_editor::CatalogDraft::View(draft)) = app
+        .catalog_editor
+        .as_mut()
+        .and_then(|editor| editor.draft.as_mut())
+    {
+        draft.focus = lazydb::model::catalog_editor::CatalogFormFocus::SecurityInvoker;
+    }
+
+    let output = render(&app, 56, 16);
+    assert!(output.contains("Security invoker"), "{output}");
+    assert!(output.contains("On"), "{output}");
+    assert!(output.contains("[ SQL ]"), "{output}");
+    assert!(output.contains("[ Cancel ]"), "{output}");
+}
+
+fn view_editor_fixture() -> App {
+    let mut app = App::new(Vec::new());
+    app.catalog_editor = Some(lazydb::model::catalog_editor::CatalogEditorState {
+        mode: lazydb::db::catalog_mutation::CatalogMutationMode::Create,
+        anchor: lazydb::db::catalog_mutation::CatalogMutationAnchor::Profile {
+            profile_id: uuid::Uuid::nil(),
+        },
+        object_type: Some(lazydb::db::catalog_mutation::CatalogObjectType::Catalog(
+            CatalogKind::View,
+        )),
+        page: lazydb::model::catalog_editor::CatalogEditorPage::Form,
+        operation: None,
+        catalog_epoch: 0,
+        options: vec![],
+        selected_option: 0,
+        baseline: None,
+        plan: None,
+        error: None,
+        owner_picker: Default::default(),
+        draft: Some(lazydb::model::catalog_editor::CatalogDraft::View(
+            lazydb::model::catalog_editor::ViewDraft {
+                name: "v".into(),
+                schema: "public".into(),
+                owner: "postgres".into(),
+                comment: "note".into(),
+                query: "SELECT id FROM items".into(),
+                output_columns: "id".into(),
+                security_barrier: lazydb::db::catalog_mutation::ViewOption::available(Some(false)),
+                security_invoker: lazydb::db::catalog_mutation::ViewOption::available(Some(true)),
+                check_option: lazydb::db::catalog_mutation::ViewOption::available(Some(
+                    "CASCADED".into(),
+                )),
+                focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
+            },
+        )),
+    });
+    app.overlay = Some(Overlay::CatalogEditor);
+    app
 }
 
 #[test]
