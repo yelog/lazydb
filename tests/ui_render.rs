@@ -521,6 +521,7 @@ fn table_editor_renders_general_and_columns_sections() {
                 columns: vec![lazydb::model::catalog_editor::ColumnDraft::new_added()],
                 selected_column: 0,
                 focus: lazydb::model::catalog_editor::TableEditorFocus::Columns,
+                column_editor: None,
                 indexes: vec![],
                 constraints: vec![],
             },
@@ -530,19 +531,16 @@ fn table_editor_renders_general_and_columns_sections() {
     let output = render(&app, 100, 30);
     assert!(output.contains("GENERAL"), "{output}");
     assert!(output.contains("COLUMNS"), "{output}");
-    assert!(output.contains("COLUMN DETAILS"), "{output}");
+    assert!(!output.contains("COLUMN DETAILS"), "{output}");
     assert!(output.contains("Review SQL"), "{output}");
     assert!(!output.contains("Indexes"), "{output}");
     assert!(!output.contains("Constraints"), "{output}");
 
     let compact_output = render(&app, 56, 16);
     assert!(
-        compact_output.contains("COLUMN DETAILS"),
+        !compact_output.contains("COLUMN DETAILS"),
         "{compact_output}"
     );
-    assert!(compact_output.contains("Name:"), "{compact_output}");
-    assert!(compact_output.contains("Type:"), "{compact_output}");
-    assert!(app.catalog_editor_details_visible.get());
 }
 
 #[test]
@@ -576,6 +574,7 @@ fn table_editor_focus_drives_sections_details_actions_and_context_hints() {
                 focus: lazydb::model::catalog_editor::TableEditorFocus::General(
                     lazydb::model::catalog_editor::TableGeneralField::Name,
                 ),
+                column_editor: None,
                 indexes: vec![],
                 constraints: vec![],
             },
@@ -615,14 +614,15 @@ fn table_editor_focus_drives_sections_details_actions_and_context_hints() {
         .as_mut()
         .and_then(|editor| editor.draft.as_mut())
     {
+        draft.begin_edit_selected_column();
         draft.focus = lazydb::model::catalog_editor::TableEditorFocus::ColumnDetails(
             lazydb::model::catalog_editor::TableColumnField::Nullable,
         );
     }
     let (details, _) = render_with_state(&app, 100, 30);
-    assert!(details.contains("Esc return to columns"), "{details}");
+    assert!(details.contains("COLUMN DETAILS"), "{details}");
     assert!(details.contains("Nullable"), "{details}");
-    assert!(details.contains("Enter/Space toggle"), "{details}");
+    assert!(details.contains("Enter confirm"), "{details}");
 
     if let Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)) = app
         .catalog_editor
@@ -634,19 +634,12 @@ fn table_editor_focus_drives_sections_details_actions_and_context_hints() {
         );
     }
     let text_details = render(&app, 100, 30);
+    assert!(text_details.contains("COLUMN DETAILS"), "{text_details}");
     assert!(
-        text_details.contains("Tab/Shift-Tab/Up/Down move focus"),
+        text_details.contains("Tab/Shift-Tab/Up/Down move field"),
         "{text_details}"
     );
-    assert!(
-        !text_details.contains("Enter/Space toggle"),
-        "{text_details}"
-    );
-    assert!(
-        text_details.contains("type / Backspace edit text field"),
-        "{text_details}"
-    );
-    assert!(!text_details.contains("edit Name/Type"), "{text_details}");
+    assert!(text_details.contains("Enter confirm"), "{text_details}");
 
     for field in [
         lazydb::model::catalog_editor::TableColumnField::Default,
@@ -660,11 +653,8 @@ fn table_editor_focus_drives_sections_details_actions_and_context_hints() {
             draft.focus = lazydb::model::catalog_editor::TableEditorFocus::ColumnDetails(field);
         }
         let output = render(&app, 100, 30);
-        assert!(
-            output.contains("type / Backspace edit text field"),
-            "{output}"
-        );
-        assert!(!output.contains("edit Name/Type"), "{output}");
+        assert!(output.contains("COLUMN DETAILS"), "{output}");
+        assert!(output.contains("Enter confirm"), "{output}");
     }
 
     if let Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)) = app
@@ -672,6 +662,7 @@ fn table_editor_focus_drives_sections_details_actions_and_context_hints() {
         .as_mut()
         .and_then(|editor| editor.draft.as_mut())
     {
+        draft.cancel_column_details();
         draft.focus = lazydb::model::catalog_editor::TableEditorFocus::Action(
             lazydb::model::catalog_editor::TableActionField::Review,
         );
@@ -682,7 +673,7 @@ fn table_editor_focus_drives_sections_details_actions_and_context_hints() {
 }
 
 #[test]
-fn compact_table_editor_keeps_details_actions_and_footer_on_distinct_rows() {
+fn compact_table_editor_hides_inline_details_and_keeps_actions_reachable() {
     let mut app = App::new(Vec::new());
     app.catalog_editor = Some(lazydb::model::catalog_editor::CatalogEditorState {
         mode: lazydb::db::catalog_mutation::CatalogMutationMode::Create,
@@ -728,42 +719,12 @@ fn compact_table_editor_keeps_details_actions_and_footer_on_distinct_rows() {
         .collect();
     assert!(!action_rows.is_empty());
     assert!(action_rows.iter().all(|row| *row < 16));
-    assert!(!state.hit_regions.iter().any(|region| {
-        matches!(
-            region.target,
-            HitTarget::CatalogEditorTableField(
-                lazydb::model::catalog_editor::TableEditorFocus::ColumnDetails(_)
-            )
-        ) && action_rows.contains(&region.area.y)
-    }));
-
-    let type_region = state
-        .hit_regions
-        .iter()
-        .find(|region| {
-            region.target
-                == HitTarget::CatalogEditorTableField(
-                    lazydb::model::catalog_editor::TableEditorFocus::ColumnDetails(
-                        lazydb::model::catalog_editor::TableColumnField::Type,
-                    ),
-                )
-        })
-        .unwrap();
-    let name_region = state
-        .hit_regions
-        .iter()
-        .find(|region| {
-            region.target
-                == HitTarget::CatalogEditorTableField(
-                    lazydb::model::catalog_editor::TableEditorFocus::ColumnDetails(
-                        lazydb::model::catalog_editor::TableColumnField::Name,
-                    ),
-                )
-                && region.area.y == type_region.area.y
-        })
-        .unwrap();
-    assert_eq!(name_region.area.y, type_region.area.y);
-    assert!(!name_region.area.intersects(type_region.area));
+    assert!(!state.hit_regions.iter().any(|region| matches!(
+        region.target,
+        HitTarget::CatalogEditorTableField(
+            lazydb::model::catalog_editor::TableEditorFocus::ColumnDetails(_)
+        )
+    )));
 }
 
 #[test]
@@ -802,23 +763,13 @@ fn very_small_table_editor_keeps_selected_column_reachable() {
             .iter()
             .any(|region| { region.target == HitTarget::CatalogEditorTableColumn(0) })
     );
-    assert!(state.hit_regions.iter().any(|region| {
-        region.target
-            == HitTarget::CatalogEditorTableField(
-                lazydb::model::catalog_editor::TableEditorFocus::ColumnDetails(
-                    lazydb::model::catalog_editor::TableColumnField::Name,
-                ),
-            )
-    }));
 }
 
 #[test]
-fn compact_table_editor_shows_name_and_type_after_add_focus() {
+fn table_column_details_modal_renders_all_fields_and_controls_at_compact_size() {
     let mut app = App::new(Vec::new());
     let mut draft = lazydb::model::catalog_editor::TableDraft::new("public");
-    draft.focus = lazydb::model::catalog_editor::TableEditorFocus::ColumnDetails(
-        lazydb::model::catalog_editor::TableColumnField::Name,
-    );
+    draft.begin_edit_selected_column();
     app.catalog_editor = Some(lazydb::model::catalog_editor::CatalogEditorState {
         mode: lazydb::db::catalog_mutation::CatalogMutationMode::Create,
         anchor: lazydb::db::catalog_mutation::CatalogMutationAnchor::Profile {
@@ -842,15 +793,38 @@ fn compact_table_editor_shows_name_and_type_after_add_focus() {
 
     let (output, state) = render_with_state(&app, 56, 16);
     assert!(output.contains("COLUMN DETAILS"), "{output}");
-    assert!(output.contains("Type"), "{output}");
-    assert!(state.hit_regions.iter().any(|region| {
-        region.target
-            == HitTarget::CatalogEditorTableField(
-                lazydb::model::catalog_editor::TableEditorFocus::ColumnDetails(
-                    lazydb::model::catalog_editor::TableColumnField::Name,
-                ),
-            )
-    }));
+    for label in ["Name", "Type", "Default", "Comment", "Nullable", "Identity"] {
+        assert!(output.contains(label), "missing {label}: {output}");
+    }
+    assert!(output.contains("[ Confirm ]"), "{output}");
+    assert!(output.contains("[ Cancel ]"), "{output}");
+    for field in [
+        lazydb::model::catalog_editor::TableColumnField::Name,
+        lazydb::model::catalog_editor::TableColumnField::Type,
+        lazydb::model::catalog_editor::TableColumnField::Default,
+        lazydb::model::catalog_editor::TableColumnField::Comment,
+        lazydb::model::catalog_editor::TableColumnField::Nullable,
+        lazydb::model::catalog_editor::TableColumnField::Identity,
+    ] {
+        assert!(state.hit_regions.iter().any(|region| {
+            region.target
+                == HitTarget::CatalogEditorTableField(
+                    lazydb::model::catalog_editor::TableEditorFocus::ColumnDetails(field),
+                )
+        }));
+    }
+    assert!(
+        state
+            .hit_regions
+            .iter()
+            .any(|region| region.target == HitTarget::CatalogEditorColumnDetailsConfirm)
+    );
+    assert!(
+        state
+            .hit_regions
+            .iter()
+            .any(|region| region.target == HitTarget::CatalogEditorColumnDetailsCancel)
+    );
 }
 
 #[test]
@@ -890,15 +864,15 @@ fn table_editor_scrolls_selected_column_into_the_rendered_window() {
     let (output, state) = render_with_state(&app, 100, 30);
     assert!(output.contains("column_7"), "{output}");
     assert!(
-        !state
+        state
             .hit_regions
             .iter()
-            .any(|region| { region.target == HitTarget::CatalogEditorTableColumn(0) })
+            .any(|region| region.target == HitTarget::CatalogEditorTableColumn(0))
     );
 }
 
 #[test]
-fn table_editor_keeps_details_visible_for_last_column_at_list_capacity() {
+fn table_editor_hides_details_for_last_column_at_list_capacity() {
     let mut app = App::new(Vec::new());
     let mut draft = lazydb::model::catalog_editor::TableDraft::new("public");
     draft.columns = (0..18)
@@ -932,17 +906,13 @@ fn table_editor_keeps_details_visible_for_last_column_at_list_capacity() {
     let (output, state) = render_with_state(&app, 100, 36);
 
     assert!(output.contains("column_17"), "{output}");
-    assert!(output.contains("COLUMN DETAILS"), "{output}");
-    assert!(output.contains("Name"), "{output}");
-    assert!(app.catalog_editor_details_visible.get());
-    assert!(state.hit_regions.iter().any(|region| {
-        region.target
-            == HitTarget::CatalogEditorTableField(
-                lazydb::model::catalog_editor::TableEditorFocus::ColumnDetails(
-                    lazydb::model::catalog_editor::TableColumnField::Type,
-                ),
-            )
-    }));
+    assert!(!output.contains("COLUMN DETAILS"), "{output}");
+    assert!(!state.hit_regions.iter().any(|region| matches!(
+        region.target,
+        HitTarget::CatalogEditorTableField(
+            lazydb::model::catalog_editor::TableEditorFocus::ColumnDetails(_)
+        )
+    )));
 }
 
 #[test]

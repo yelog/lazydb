@@ -143,26 +143,26 @@ fn shortcut_context_with_overlay(app: &App, include_help: bool) -> ShortcutConte
                         crate::model::catalog_editor::CatalogEditorPage::SqlPreview => {
                             ShortcutContext::CatalogEditorPreview
                         }
-                        crate::model::catalog_editor::CatalogEditorPage::Form => match editor
-                            .draft
-                            .as_ref()
-                        {
-                            Some(crate::model::catalog_editor::CatalogDraft::Table(draft)) => {
-                                match draft.focus {
-                                    crate::model::catalog_editor::TableEditorFocus::Columns => {
-                                        ShortcutContext::CatalogEditorTableColumns
-                                    }
-                                    crate::model::catalog_editor::TableEditorFocus::ColumnDetails(_) => {
+                        crate::model::catalog_editor::CatalogEditorPage::Form => {
+                            match editor.draft.as_ref() {
+                                Some(crate::model::catalog_editor::CatalogDraft::Table(draft)) => {
+                                    if draft.column_editor.is_some() {
                                         ShortcutContext::CatalogEditorColumnDetails
+                                    } else {
+                                        match draft.focus {
+                                        crate::model::catalog_editor::TableEditorFocus::Columns => {
+                                            ShortcutContext::CatalogEditorTableColumns
+                                        }
+                                        crate::model::catalog_editor::TableEditorFocus::Action(_) => {
+                                            ShortcutContext::CatalogEditorTableActions
+                                        }
+                                        _ => ShortcutContext::CatalogEditorForm,
                                     }
-                                     crate::model::catalog_editor::TableEditorFocus::Action(_) => {
-                                         ShortcutContext::CatalogEditorTableActions
-                                     }
-                                     _ => ShortcutContext::CatalogEditorForm,
+                                    }
                                 }
+                                _ => ShortcutContext::CatalogEditorForm,
                             }
-                            _ => ShortcutContext::CatalogEditorForm,
-                        },
+                        }
                         _ => ShortcutContext::CatalogEditorForm,
                     },
                     None => ShortcutContext::CatalogEditorBusy,
@@ -468,8 +468,9 @@ pub enum HelpShortcutId {
     CatalogEditorTableColumnEdit,
     CatalogEditorColumnDetailsMove,
     CatalogEditorColumnDetailsEdit,
-    CatalogEditorColumnDetailsBack,
     CatalogEditorColumnDetailsToggle,
+    CatalogEditorColumnDetailsConfirm,
+    CatalogEditorColumnDetailsCancel,
     CatalogEditorTableActionActivate,
     CatalogEditorBusyCancel,
     EditorComplete,
@@ -574,6 +575,8 @@ const fn footer_priority(id: HelpShortcutId) -> Option<u8> {
         | CatalogEditorApply
         | CatalogEditorBack
         | CatalogEditorColumnDetailsToggle
+        | CatalogEditorColumnDetailsConfirm
+        | CatalogEditorColumnDetailsCancel
         | CatalogEditorTableActionActivate
         | CatalogEditorBusyCancel
         | CatalogEditorCancel
@@ -2377,21 +2380,28 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
         CatalogEditorColumnDetailsEdit,
         [CatalogEditorColumnDetails],
         "type / Backspace",
-        "edit Name/Type",
-        display
-    ),
-    row!(
-        CatalogEditorColumnDetailsBack,
-        [CatalogEditorColumnDetails],
-        "Esc",
-        "return to columns",
+        "edit text field",
         display
     ),
     row!(
         CatalogEditorColumnDetailsToggle,
         [CatalogEditorColumnDetails],
-        "Enter/Space",
-        "toggle only Nullable/Identity",
+        "Space",
+        "toggle Nullable/Identity",
+        display
+    ),
+    row!(
+        CatalogEditorColumnDetailsConfirm,
+        [CatalogEditorColumnDetails],
+        "Enter",
+        "confirm changes",
+        display
+    ),
+    row!(
+        CatalogEditorColumnDetailsCancel,
+        [CatalogEditorColumnDetails],
+        "Esc",
+        "cancel changes",
         display
     ),
     row!(
@@ -2942,7 +2952,8 @@ fn footer_rank(
             Id::CatalogEditorColumnDetailsMove => Some(1),
             Id::CatalogEditorColumnDetailsEdit => Some(2),
             Id::CatalogEditorColumnDetailsToggle => Some(3),
-            Id::CatalogEditorColumnDetailsBack => Some(4),
+            Id::CatalogEditorColumnDetailsConfirm => Some(4),
+            Id::CatalogEditorColumnDetailsCancel => Some(5),
             _ => None,
         },
         _ => footer_priority(id),
@@ -3987,7 +3998,8 @@ mod tests {
             vec![
                 "Tab/Shift-Tab/Up/Down",
                 "type / Backspace",
-                "Enter/Space",
+                "Space",
+                "Enter",
                 "Esc"
             ]
         );
@@ -4155,7 +4167,8 @@ mod tests {
             vec![
                 "Tab/Shift-Tab/Up/Down",
                 "type / Backspace",
-                "Enter/Space",
+                "Space",
+                "Enter",
                 "Esc"
             ]
         );
@@ -4163,7 +4176,7 @@ mod tests {
             .into_iter()
             .find(|shortcut| shortcut.id == HelpShortcutId::CatalogEditorColumnDetailsToggle)
             .expect("column details toggle help row");
-        assert_eq!(toggle.description, "toggle only Nullable/Identity");
+        assert_eq!(toggle.description, "toggle Nullable/Identity");
     }
 
     #[test]

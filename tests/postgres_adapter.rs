@@ -734,6 +734,7 @@ async fn serialized_postgres_catalog_mutations_round_trip_catalog_definitions() 
                     ],
                     selected_column: 0,
                     focus: lazydb::model::catalog_editor::TableEditorFocus::Columns,
+                    column_editor: None,
                     indexes: vec![],
                     constraints: vec![],
                 }),

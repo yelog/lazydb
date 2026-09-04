@@ -1,7 +1,6 @@
 #![allow(clippy::collapsible_if)]
 
 use std::{
-    cell::Cell,
     collections::{BTreeSet, HashMap, HashSet},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
@@ -220,8 +219,6 @@ pub struct App {
     pub overlay: Option<Overlay>,
     pub profile_manager: Option<ProfileManagerState>,
     pub catalog_editor: Option<CatalogEditorState>,
-    pub catalog_editor_details_visible: Cell<bool>,
-    pub catalog_editor_compact: Cell<bool>,
     pub system_credential_availability: crate::persistence::secrets::SecretStoreAvailability,
     pub should_quit: bool,
     connection_request_generation: u64,
@@ -579,8 +576,6 @@ impl App {
             overlay: None,
             profile_manager: None,
             catalog_editor: None,
-            catalog_editor_details_visible: Cell::new(true),
-            catalog_editor_compact: Cell::new(false),
             system_credential_availability:
                 crate::persistence::secrets::SecretStoreAvailability::Unavailable,
             should_quit: false,
@@ -3495,7 +3490,13 @@ impl App {
                     .as_mut()
                     .and_then(|editor| editor.draft.as_mut())
                 {
-                    draft.focus = field;
+                    let details_field = matches!(
+                        field,
+                        crate::model::catalog_editor::TableEditorFocus::ColumnDetails(_)
+                    );
+                    if draft.column_editor.is_some() == details_field {
+                        draft.focus = field;
+                    }
                 }
                 Vec::new()
             }
@@ -3510,23 +3511,33 @@ impl App {
                 }
                 Vec::new()
             }
-            Action::CatalogEditorEditTableColumn => {
+            Action::CatalogEditorOpenTableColumnDetails => {
                 if let Some(crate::model::catalog_editor::CatalogDraft::Table(draft)) = self
                     .catalog_editor
                     .as_mut()
                     .and_then(|editor| editor.draft.as_mut())
                 {
-                    draft.enter_column_details();
+                    draft.begin_edit_selected_column();
                 }
                 Vec::new()
             }
-            Action::CatalogEditorLeaveTableColumnDetails => {
+            Action::CatalogEditorConfirmTableColumnDetails => {
                 if let Some(crate::model::catalog_editor::CatalogDraft::Table(draft)) = self
                     .catalog_editor
                     .as_mut()
                     .and_then(|editor| editor.draft.as_mut())
                 {
-                    draft.leave_column_details();
+                    draft.confirm_column_details();
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorCancelTableColumnDetails => {
+                if let Some(crate::model::catalog_editor::CatalogDraft::Table(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.cancel_column_details();
                 }
                 Vec::new()
             }
@@ -3546,7 +3557,7 @@ impl App {
                     .as_mut()
                     .and_then(|editor| editor.draft.as_mut())
                 {
-                    draft.add_column_below();
+                    draft.begin_add_column_below();
                 }
                 Vec::new()
             }
@@ -4060,6 +4071,7 @@ impl App {
                         {
                             if let Some(column) = column {
                                 table.selected_column = column;
+                                table.begin_edit_selected_column();
                             }
                             table.focus = field;
                             editor.set_validation_error(message);

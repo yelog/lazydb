@@ -85,20 +85,6 @@ fn rendered_catalog_editor_table_regions_map_to_column_actions() {
     assert_click_maps(
         &ui_state,
         &app,
-        &HitTarget::CatalogEditorTableField(
-            lazydb::model::catalog_editor::TableEditorFocus::ColumnDetails(
-                lazydb::model::catalog_editor::TableColumnField::Name,
-            ),
-        ),
-        Action::CatalogEditorFocusTableField(
-            lazydb::model::catalog_editor::TableEditorFocus::ColumnDetails(
-                lazydb::model::catalog_editor::TableColumnField::Name,
-            ),
-        ),
-    );
-    assert_click_maps(
-        &ui_state,
-        &app,
         &HitTarget::CatalogEditorAddTableColumn,
         Action::CatalogEditorAddTableColumn,
     );
@@ -134,7 +120,7 @@ fn compact_catalog_editor_registers_cancel_action_region() {
 }
 
 #[test]
-fn compact_table_details_name_and_type_clicks_focus_their_own_fields() {
+fn table_details_name_and_type_clicks_focus_their_own_fields() {
     let mut editor = lazydb::model::catalog_editor::CatalogEditorState::new(
         CatalogMutationMode::Create,
         CatalogMutationAnchor::Group {
@@ -145,6 +131,9 @@ fn compact_table_details_name_and_type_clicks_focus_their_own_fields() {
         Vec::new(),
     );
     assert!(editor.select_object_type(CatalogObjectType::Catalog(CatalogKind::Table)));
+    if let Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)) = editor.draft.as_mut() {
+        draft.begin_edit_selected_column();
+    }
     let mut app = App::new(Vec::new());
     app.overlay = Some(Overlay::CatalogEditor);
     app.catalog_editor = Some(editor);
@@ -172,10 +161,9 @@ fn compact_table_details_name_and_type_clicks_focus_their_own_fields() {
     let name_region = state
         .hit_regions
         .iter()
-        .find(|region| region.target == name && region.area.y == type_region.area.y)
+        .find(|region| region.target == name)
         .unwrap();
-    assert_eq!(name_region.area.y, type_region.area.y);
-    assert_eq!(name_region.area.right(), type_region.area.x);
+    assert_ne!(name_region.area.y, type_region.area.y);
     assert_eq!(
         map_mouse(
             mouse(
@@ -211,6 +199,52 @@ fn compact_table_details_name_and_type_clicks_focus_their_own_fields() {
 }
 
 #[test]
+fn column_details_modal_controls_map_to_confirm_and_cancel() {
+    let mut editor = lazydb::model::catalog_editor::CatalogEditorState::new(
+        CatalogMutationMode::Create,
+        CatalogMutationAnchor::Group {
+            schema: CatalogId::new(Uuid::nil(), CatalogKind::Schema, ["app", "public"]),
+            group: ObjectGroup::Tables,
+        },
+        0,
+        Vec::new(),
+    );
+    assert!(editor.select_object_type(CatalogObjectType::Catalog(CatalogKind::Table)));
+    if let Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)) = editor.draft.as_mut() {
+        draft.begin_edit_selected_column();
+    }
+    let mut app = App::new(Vec::new());
+    app.overlay = Some(Overlay::CatalogEditor);
+    app.catalog_editor = Some(editor);
+    let mut state = UiState::new();
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal
+        .draw(|frame| ui::render_with_state(frame, &app, &mut state))
+        .unwrap();
+
+    assert_click_maps(
+        &state,
+        &app,
+        &HitTarget::CatalogEditorColumnDetailsConfirm,
+        Action::CatalogEditorConfirmTableColumnDetails,
+    );
+    assert_click_maps(
+        &state,
+        &app,
+        &HitTarget::CatalogEditorColumnDetailsCancel,
+        Action::CatalogEditorCancelTableColumnDetails,
+    );
+    assert_eq!(
+        map_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 10, 10),
+            &state,
+            &app,
+        ),
+        None
+    );
+}
+
+#[test]
 fn rendered_table_sections_and_controls_map_to_layered_focus_actions() {
     let profile = import_connection_url(":memory:", Some("test"))
         .unwrap()
@@ -226,6 +260,9 @@ fn rendered_table_sections_and_controls_map_to_layered_focus_actions() {
         Vec::new(),
     );
     assert!(editor.select_object_type(CatalogObjectType::Catalog(CatalogKind::Table)));
+    if let Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)) = editor.draft.as_mut() {
+        draft.begin_edit_selected_column();
+    }
     let mut app = App::new(vec![profile]);
     app.overlay = Some(Overlay::CatalogEditor);
     app.catalog_editor = Some(editor);
@@ -236,22 +273,6 @@ fn rendered_table_sections_and_controls_map_to_layered_focus_actions() {
         .unwrap();
 
     for (focus, action) in [
-        (
-            lazydb::model::catalog_editor::TableEditorFocus::General(
-                lazydb::model::catalog_editor::TableGeneralField::Name,
-            ),
-            Action::CatalogEditorFocusTableField(
-                lazydb::model::catalog_editor::TableEditorFocus::General(
-                    lazydb::model::catalog_editor::TableGeneralField::Name,
-                ),
-            ),
-        ),
-        (
-            lazydb::model::catalog_editor::TableEditorFocus::Columns,
-            Action::CatalogEditorFocusTableField(
-                lazydb::model::catalog_editor::TableEditorFocus::Columns,
-            ),
-        ),
         (
             lazydb::model::catalog_editor::TableEditorFocus::ColumnDetails(
                 lazydb::model::catalog_editor::TableColumnField::Nullable,
@@ -280,11 +301,13 @@ fn rendered_table_sections_and_controls_map_to_layered_focus_actions() {
             action,
         );
     }
-    assert_click_maps(
-        &state,
-        &app,
-        &HitTarget::CatalogEditorReview,
-        Action::CatalogEditorPreview,
+    assert_eq!(
+        map_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 10, 10),
+            &state,
+            &app,
+        ),
+        None
     );
 }
 

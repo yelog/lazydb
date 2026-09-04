@@ -200,7 +200,6 @@ fn table_editor_app() -> App {
     );
     app.catalog_editor = Some(editor);
     app.overlay = Some(Overlay::CatalogEditor);
-    app.catalog_editor_details_visible.set(true);
     app
 }
 
@@ -230,7 +229,7 @@ fn table_editor_keymap_dispatches_by_focus_region() {
     );
     assert_eq!(
         keymap.map(key(KeyCode::Char('e')), &app),
-        Some(Action::CatalogEditorEditTableColumn)
+        Some(Action::CatalogEditorOpenTableColumnDetails)
     );
     assert_eq!(
         keymap.map(key(KeyCode::Tab), &app),
@@ -257,6 +256,7 @@ fn table_editor_keymap_dispatches_by_focus_region() {
         Some(Action::CatalogEditorCancel)
     );
 
+    app.update(Action::CatalogEditorOpenTableColumnDetails);
     set_focus(
         &mut app,
         lazydb::model::catalog_editor::TableEditorFocus::ColumnDetails(
@@ -265,7 +265,7 @@ fn table_editor_keymap_dispatches_by_focus_region() {
     );
     assert_eq!(
         keymap.map(key(KeyCode::Esc), &app),
-        Some(Action::CatalogEditorLeaveTableColumnDetails)
+        Some(Action::CatalogEditorCancelTableColumnDetails)
     );
     assert_eq!(
         keymap.map(key(KeyCode::Tab), &app),
@@ -288,6 +288,7 @@ fn table_editor_keymap_dispatches_by_focus_region() {
         Some(Action::CatalogEditorInsert('a'))
     );
 
+    app.update(Action::CatalogEditorCancelTableColumnDetails);
     set_focus(
         &mut app,
         lazydb::model::catalog_editor::TableEditorFocus::General(
@@ -364,9 +365,8 @@ fn table_editor_action_buttons_keep_enter_and_space_semantics() {
 }
 
 #[test]
-fn table_editor_does_not_enter_hidden_column_details() {
+fn table_editor_opens_column_details_with_e_but_not_enter() {
     let mut app = table_editor_app();
-    app.catalog_editor_details_visible.set(false);
     let mut keymap = Keymap::default();
     let Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)) = app
         .catalog_editor
@@ -378,15 +378,16 @@ fn table_editor_does_not_enter_hidden_column_details() {
     draft.focus = lazydb::model::catalog_editor::TableEditorFocus::Columns;
 
     assert_eq!(keymap.map(key(KeyCode::Enter), &app), None);
-    assert_eq!(keymap.map(key(KeyCode::Char('e')), &app), None);
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('e')), &app),
+        Some(Action::CatalogEditorOpenTableColumnDetails)
+    );
 }
 
 #[test]
-fn compact_table_editor_keeps_added_column_name_and_type_editable() {
+fn table_editor_column_details_uses_enter_to_confirm_and_esc_to_cancel() {
     let mut app = table_editor_app();
     let mut keymap = Keymap::default();
-    app.catalog_editor_compact.set(true);
-    app.catalog_editor_details_visible.set(false);
     let Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)) = app
         .catalog_editor
         .as_mut()
@@ -395,19 +396,7 @@ fn compact_table_editor_keeps_added_column_name_and_type_editable() {
         panic!("table draft expected");
     };
     draft.focus = lazydb::model::catalog_editor::TableEditorFocus::Columns;
-    assert_eq!(
-        keymap.map(key(KeyCode::Enter), &app),
-        Some(Action::CatalogEditorEditTableColumn)
-    );
-    assert_eq!(
-        keymap.map(key(KeyCode::Char('e')), &app),
-        Some(Action::CatalogEditorEditTableColumn)
-    );
-    assert_eq!(
-        keymap.map(key(KeyCode::Char('a')), &app),
-        Some(Action::CatalogEditorAddTableColumn)
-    );
-    app.update(Action::CatalogEditorAddTableColumn);
+    app.update(Action::CatalogEditorOpenTableColumnDetails);
     let Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)) = app
         .catalog_editor
         .as_mut()
@@ -415,7 +404,6 @@ fn compact_table_editor_keeps_added_column_name_and_type_editable() {
     else {
         panic!("table draft expected");
     };
-    assert_eq!(draft.columns.len(), 2);
     assert_eq!(
         draft.focus,
         lazydb::model::catalog_editor::TableEditorFocus::ColumnDetails(
@@ -434,47 +422,34 @@ fn compact_table_editor_keeps_added_column_name_and_type_editable() {
         keymap.map(key(KeyCode::Backspace), &app),
         Some(Action::CatalogEditorBackspace)
     );
+    assert_eq!(
+        keymap.map(key(KeyCode::Enter), &app),
+        Some(Action::CatalogEditorConfirmTableColumnDetails)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Esc), &app),
+        Some(Action::CatalogEditorCancelTableColumnDetails)
+    );
 }
 
 #[test]
-fn compact_table_editor_maps_visible_detail_boundaries_to_shared_navigation() {
+fn table_editor_column_details_keeps_navigation_inside_modal() {
     let mut app = table_editor_app();
-    app.catalog_editor_compact.set(true);
     let mut keymap = Keymap::default();
-    if let Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)) = app
-        .catalog_editor
-        .as_mut()
-        .and_then(|editor| editor.draft.as_mut())
-    {
-        draft.focus = lazydb::model::catalog_editor::TableEditorFocus::ColumnDetails(
-            lazydb::model::catalog_editor::TableColumnField::Name,
-        );
-    } else {
-        panic!("table draft expected");
-    }
+    app.update(Action::CatalogEditorOpenTableColumnDetails);
     assert_eq!(
         keymap.map(key(KeyCode::Tab), &app),
         Some(Action::CatalogEditorFieldNext)
     );
     assert_eq!(
         keymap.map(key(KeyCode::Up), &app),
-        Some(Action::CatalogEditorLeaveTableColumnDetails)
+        Some(Action::CatalogEditorFieldPrevious)
     );
 
-    if let Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)) = app
-        .catalog_editor
-        .as_mut()
-        .and_then(|editor| editor.draft.as_mut())
-    {
-        draft.focus = lazydb::model::catalog_editor::TableEditorFocus::ColumnDetails(
-            lazydb::model::catalog_editor::TableColumnField::Type,
-        );
-    } else {
-        panic!("table draft expected");
-    }
+    app.update(Action::CatalogEditorFieldNext);
     assert_eq!(
         keymap.map(key(KeyCode::Down), &app),
-        Some(Action::CatalogEditorLeaveTableColumnDetails)
+        Some(Action::CatalogEditorFieldNext)
     );
     assert_eq!(
         keymap.map(key(KeyCode::BackTab), &app),
@@ -483,9 +458,8 @@ fn compact_table_editor_maps_visible_detail_boundaries_to_shared_navigation() {
 }
 
 #[test]
-fn compact_table_editor_columns_keymap_matches_column_state_navigation() {
+fn table_editor_columns_keymap_keeps_parent_navigation() {
     let mut app = table_editor_app();
-    app.catalog_editor_compact.set(true);
     let mut keymap = Keymap::default();
     let Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)) = app
         .catalog_editor
@@ -494,9 +468,7 @@ fn compact_table_editor_columns_keymap_matches_column_state_navigation() {
     else {
         panic!("table draft expected");
     };
-    draft.add_column_below();
     draft.focus = lazydb::model::catalog_editor::TableEditorFocus::Columns;
-    draft.selected_column = 1;
 
     assert_eq!(
         keymap.map(key(KeyCode::Up), &app),
@@ -512,42 +484,6 @@ fn compact_table_editor_columns_keymap_matches_column_state_navigation() {
     };
     assert_eq!(draft.selected_column, 0);
 
-    assert_eq!(
-        keymap.map(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT), &app),
-        Some(Action::CatalogEditorFocusTableField(
-            lazydb::model::catalog_editor::TableEditorFocus::General(
-                lazydb::model::catalog_editor::TableGeneralField::Name,
-            ),
-        ))
-    );
-    app.update(Action::CatalogEditorFocusTableField(
-        lazydb::model::catalog_editor::TableEditorFocus::General(
-            lazydb::model::catalog_editor::TableGeneralField::Name,
-        ),
-    ));
-    let Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)) = app
-        .catalog_editor
-        .as_ref()
-        .and_then(|editor| editor.draft.as_ref())
-    else {
-        panic!("table draft expected");
-    };
-    assert_eq!(
-        draft.focus,
-        lazydb::model::catalog_editor::TableEditorFocus::General(
-            lazydb::model::catalog_editor::TableGeneralField::Name
-        )
-    );
-
-    let Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)) = app
-        .catalog_editor
-        .as_mut()
-        .and_then(|editor| editor.draft.as_mut())
-    else {
-        panic!("table draft expected");
-    };
-    draft.focus = lazydb::model::catalog_editor::TableEditorFocus::Columns;
-    draft.selected_column = 0;
     assert_eq!(
         keymap.map(key(KeyCode::Down), &app),
         Some(Action::CatalogEditorFieldNext)
@@ -588,6 +524,7 @@ fn table_editor_nullable_and_identity_keep_enter_and_space_toggle_semantics() {
         else {
             panic!("table draft expected");
         };
+        draft.begin_edit_selected_column();
         draft.focus = lazydb::model::catalog_editor::TableEditorFocus::ColumnDetails(field);
 
         let expected = match field {
@@ -601,9 +538,10 @@ fn table_editor_nullable_and_identity_keep_enter_and_space_toggle_semantics() {
         };
         assert_eq!(
             keymap.map(key(KeyCode::Enter), &app),
-            Some(expected.clone())
+            Some(Action::CatalogEditorConfirmTableColumnDetails)
         );
         assert_eq!(keymap.map(key(KeyCode::Char(' ')), &app), Some(expected));
+        app.update(Action::CatalogEditorCancelTableColumnDetails);
     }
 }
 
@@ -1005,6 +943,13 @@ fn table_column_details_escape_leaves_every_field_without_text_capture() {
     );
     app.catalog_editor = Some(editor);
     app.overlay = Some(Overlay::CatalogEditor);
+    if let Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)) = app
+        .catalog_editor
+        .as_mut()
+        .and_then(|editor| editor.draft.as_mut())
+    {
+        draft.begin_edit_selected_column();
+    }
     let mut keymap = Keymap::default();
 
     for field in [
@@ -1022,7 +967,7 @@ fn table_column_details_escape_leaves_every_field_without_text_capture() {
         draft.focus = lazydb::model::catalog_editor::TableEditorFocus::ColumnDetails(field);
         assert_eq!(
             keymap.map(key(KeyCode::Esc), &app),
-            Some(Action::CatalogEditorLeaveTableColumnDetails)
+            Some(Action::CatalogEditorCancelTableColumnDetails)
         );
     }
 
@@ -1031,6 +976,7 @@ fn table_column_details_escape_leaves_every_field_without_text_capture() {
         .as_mut()
         .and_then(|editor| editor.draft.as_mut())
     {
+        draft.cancel_column_details();
         draft.focus = lazydb::model::catalog_editor::TableEditorFocus::General(
             lazydb::model::catalog_editor::TableGeneralField::Name,
         );
@@ -1921,13 +1867,12 @@ fn maps_column_details_navigation_and_toggle_keys() {
         )),
     });
     app.overlay = Some(Overlay::CatalogEditor);
-    app.catalog_editor_details_visible.set(true);
     if let Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)) = app
         .catalog_editor
         .as_mut()
         .and_then(|editor| editor.draft.as_mut())
     {
-        draft.enter_column_details();
+        draft.begin_edit_selected_column();
         draft.focus = lazydb::model::catalog_editor::TableEditorFocus::ColumnDetails(
             lazydb::model::catalog_editor::TableColumnField::Nullable,
         );
@@ -1951,11 +1896,11 @@ fn maps_column_details_navigation_and_toggle_keys() {
     );
     assert_eq!(
         keymap.map(key(KeyCode::Enter), &app),
-        Some(Action::CatalogEditorToggleTableColumnNullable)
+        Some(Action::CatalogEditorConfirmTableColumnDetails)
     );
     assert_eq!(
         keymap.map(key(KeyCode::Esc), &app),
-        Some(Action::CatalogEditorLeaveTableColumnDetails)
+        Some(Action::CatalogEditorCancelTableColumnDetails)
     );
 }
 

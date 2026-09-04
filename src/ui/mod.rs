@@ -135,6 +135,8 @@ pub enum HitTarget {
     CatalogEditorRemoveTableColumn,
     CatalogEditorReview,
     CatalogEditorCancel,
+    CatalogEditorColumnDetailsConfirm,
+    CatalogEditorColumnDetailsCancel,
     CatalogOwnerChoice(String),
     DismissNotification(u64),
     RelationFirstPage,

@@ -48,6 +48,12 @@ pub fn render(
         CatalogEditorPage::Form => form(frame, inner, app, editor, ui, theme),
         CatalogEditorPage::SqlPreview => preview(frame, inner, editor, theme),
     }
+    if editor.page == CatalogEditorPage::Form
+        && let Some(CatalogDraft::Table(draft)) = editor.draft.as_ref()
+        && let Some(session) = draft.column_editor.as_ref()
+    {
+        render_table_column_details_modal(frame, inner, draft.focus, session, ui, theme);
+    }
 }
 
 fn panel_title(editor: &CatalogEditorState) -> String {
@@ -242,7 +248,7 @@ fn form(
             &editor.owner_picker,
         );
     } else if let Some(CatalogDraft::Table(draft)) = editor.draft.as_ref() {
-        render_table(frame, chunks[1], app, draft, ui, theme);
+        render_table(frame, chunks[1], draft, ui, theme);
     } else if let Some(CatalogDraft::Index(draft)) = editor.draft.as_ref() {
         render_index(frame, chunks[1], draft, theme);
     } else if let Some(CatalogDraft::Constraint(draft)) = editor.draft.as_ref() {
@@ -263,6 +269,14 @@ fn form(
         frame.render_widget(
             Paragraph::new(format!("× {}", sanitize_terminal_text(error)))
                 .style(Style::new().fg(theme.error).bg(theme.surface)),
+            chunks[2],
+        );
+    } else if matches!(
+        editor.draft.as_ref(),
+        Some(CatalogDraft::Table(draft)) if draft.column_editor.is_some()
+    ) {
+        frame.render_widget(
+            Paragraph::new("").style(Style::new().bg(theme.surface)),
             chunks[2],
         );
     } else {
@@ -713,7 +727,6 @@ fn render_index(frame: &mut Frame<'_>, area: Rect, draft: &IndexDraft, theme: Th
 fn render_table(
     frame: &mut Frame<'_>,
     area: Rect,
-    app: &App,
     draft: &TableDraft,
     ui: &mut UiState,
     theme: Theme,
@@ -723,7 +736,6 @@ fn render_table(
         draft.focus,
         TableEditorFocus::Columns | TableEditorFocus::ColumnDetails(_)
     );
-    let details_focus = matches!(draft.focus, TableEditorFocus::ColumnDetails(_));
     // Fall back to the compact layout before the full layout can starve the
     // column list of its selected row.
     let full_list_capacity = area.height.saturating_sub(16);
@@ -818,16 +830,8 @@ fn render_table(
             Rect::new(area.x, columns_y, area.width, 1),
         );
     }
-    // Details use one heading plus five field rows in the full layout.
-    let detail_height = if compact { 2 } else { 6_u16 };
     let list_start = columns_y.saturating_add(1);
-    let list_capacity = if compact && !draft.columns.is_empty() {
-        1
-    } else {
-        content_bottom
-            .saturating_sub(detail_height)
-            .saturating_sub(list_start)
-    };
+    let list_capacity = content_bottom.saturating_sub(list_start);
     let visible_start = if list_capacity == 0 {
         0
     } else {
@@ -869,154 +873,6 @@ fn render_table(
             area: Rect::new(area.x, y, area.width, 1),
             target: HitTarget::CatalogEditorTableColumn(index),
         });
-    }
-    let visible_columns = draft
-        .columns
-        .len()
-        .saturating_sub(visible_start)
-        .min(usize::from(list_capacity)) as u16;
-    // The details header follows the last rendered column directly. Keeping
-    // this in sync with detail_height lets the list use the final available row.
-    let detail_y = list_start.saturating_add(visible_columns);
-    let details_visible = draft.selected_column().is_some()
-        && detail_y.saturating_add(detail_height) <= content_bottom;
-    app.catalog_editor_details_visible.set(details_visible);
-    app.catalog_editor_compact.set(compact);
-    if let Some(column) = draft.selected_column()
-        && details_visible
-    {
-        frame.render_widget(
-            Paragraph::new("COLUMN DETAILS").style(section_style(details_focus, theme)),
-            Rect::new(area.x, detail_y, area.width, 1),
-        );
-        ui.hit_regions.push(HitRegion {
-            area: Rect::new(area.x, detail_y, area.width, 1),
-            target: HitTarget::CatalogEditorTableField(TableEditorFocus::ColumnDetails(
-                TableColumnField::Name,
-            )),
-        });
-        if compact {
-            let name_area = Rect::new(area.x, detail_y + 1, area.width / 2, 1);
-            let type_area = Rect::new(
-                area.x + area.width / 2,
-                detail_y + 1,
-                area.width.saturating_sub(area.width / 2),
-                1,
-            );
-            frame.render_widget(
-                Paragraph::new(format!(
-                    "  Name: {}    Type: {}",
-                    sanitize_terminal_text(column.name.value()).if_empty("<unnamed>"),
-                    sanitize_terminal_text(column.native_type.value()),
-                ))
-                .style(Style::new().fg(theme.text).bg(theme.surface)),
-                Rect::new(area.x, detail_y + 1, area.width, 1),
-            );
-            ui.hit_regions.push(HitRegion {
-                area: name_area,
-                target: HitTarget::CatalogEditorTableField(TableEditorFocus::ColumnDetails(
-                    TableColumnField::Name,
-                )),
-            });
-            ui.hit_regions.push(HitRegion {
-                area: type_area,
-                target: HitTarget::CatalogEditorTableField(TableEditorFocus::ColumnDetails(
-                    TableColumnField::Type,
-                )),
-            });
-        } else {
-            render_table_text_field(
-                frame,
-                Rect::new(area.x, detail_y + 1, area.width, 1),
-                TableEditorFocus::ColumnDetails(TableColumnField::Name),
-                "Name",
-                &column.name,
-                draft.focus,
-                ui,
-                theme,
-            );
-            render_table_text_field(
-                frame,
-                Rect::new(area.x, detail_y + 2, area.width, 1),
-                TableEditorFocus::ColumnDetails(TableColumnField::Type),
-                "Type",
-                &column.native_type,
-                draft.focus,
-                ui,
-                theme,
-            );
-        }
-        if !compact {
-            render_table_text_field(
-                frame,
-                Rect::new(area.x, detail_y + 3, area.width, 1),
-                TableEditorFocus::ColumnDetails(TableColumnField::Default),
-                "Default",
-                &column.default_expression,
-                draft.focus,
-                ui,
-                theme,
-            );
-            render_table_text_field(
-                frame,
-                Rect::new(area.x, detail_y + 4, area.width, 1),
-                TableEditorFocus::ColumnDetails(TableColumnField::Comment),
-                "Comment",
-                &column.comment,
-                draft.focus,
-                ui,
-                theme,
-            );
-        }
-        let nullable_area = Rect::new(area.x, detail_y + 5, area.width / 2, 1);
-        let identity_area = Rect::new(
-            area.x + area.width / 2,
-            detail_y + 5,
-            area.width.saturating_sub(area.width / 2),
-            1,
-        );
-        if !compact {
-            frame.render_widget(
-                Paragraph::new(format!(
-                    "  Nullable       {}",
-                    if column.nullable { "[x] On" } else { "[ ] Off" }
-                ))
-                .style(Style::new().fg(theme.text).bg(
-                    if draft.focus == TableEditorFocus::ColumnDetails(TableColumnField::Nullable) {
-                        theme.selection
-                    } else {
-                        theme.surface
-                    },
-                )),
-                nullable_area,
-            );
-            frame.render_widget(
-                Paragraph::new(format!(
-                    "  Identity       {}",
-                    if column.identity { "[x] On" } else { "[ ] Off" }
-                ))
-                .style(Style::new().fg(theme.text).bg(
-                    if draft.focus == TableEditorFocus::ColumnDetails(TableColumnField::Identity) {
-                        theme.selection
-                    } else {
-                        theme.surface
-                    },
-                )),
-                identity_area,
-            );
-            ui.hit_regions.push(HitRegion {
-                area: nullable_area,
-                target: HitTarget::CatalogEditorTableField(TableEditorFocus::ColumnDetails(
-                    TableColumnField::Nullable,
-                )),
-            });
-            ui.hit_regions.push(HitRegion {
-                area: identity_area,
-                target: HitTarget::CatalogEditorTableField(TableEditorFocus::ColumnDetails(
-                    TableColumnField::Identity,
-                )),
-            });
-        }
     }
     let actions = if compact {
         [
@@ -1099,34 +955,28 @@ fn render_table(
         });
         x = x.saturating_add(width + 3);
     }
-    let hints = match draft.focus {
-        TableEditorFocus::Columns => vec![
-            ShortcutHint::new("Tab/Shift-Tab/Up/Down", "move focus"),
-            ShortcutHint::new("a", "add column below"),
-            ShortcutHint::new("e", "edit selected column"),
-            ShortcutHint::new("Esc", "close/cancel editor"),
-        ],
-        TableEditorFocus::ColumnDetails(TableColumnField::Nullable)
-        | TableEditorFocus::ColumnDetails(TableColumnField::Identity) => vec![
-            ShortcutHint::new("Enter/Space", "toggle"),
-            ShortcutHint::new("Tab/Shift-Tab/Up/Down", "move focus"),
-            ShortcutHint::new("Esc", "return to columns"),
-        ],
-        TableEditorFocus::ColumnDetails(_) => vec![
-            ShortcutHint::new("type / Backspace", "edit text field"),
-            ShortcutHint::new("Tab/Shift-Tab/Up/Down", "move focus"),
-            ShortcutHint::new("Esc", "return to columns"),
-        ],
-        TableEditorFocus::Action(_) => vec![
-            ShortcutHint::new("Enter/Space", "activate"),
-            ShortcutHint::new("↑/↓", "move"),
-            ShortcutHint::new("Esc", "close/cancel editor"),
-        ],
-        TableEditorFocus::General(_) => vec![
-            ShortcutHint::new("Tab/Shift-Tab/Up/Down", "move focus"),
-            ShortcutHint::new("Enter", "preview"),
-            ShortcutHint::new("Esc", "cancel"),
-        ],
+    let hints = if draft.column_editor.is_some() {
+        Vec::new()
+    } else {
+        match draft.focus {
+            TableEditorFocus::Columns => vec![
+                ShortcutHint::new("Tab/Shift-Tab/Up/Down", "move focus"),
+                ShortcutHint::new("a", "add column below"),
+                ShortcutHint::new("e", "edit selected column"),
+                ShortcutHint::new("Esc", "close/cancel editor"),
+            ],
+            TableEditorFocus::ColumnDetails(_) => Vec::new(),
+            TableEditorFocus::Action(_) => vec![
+                ShortcutHint::new("Enter/Space", "activate"),
+                ShortcutHint::new("↑/↓", "move"),
+                ShortcutHint::new("Esc", "close/cancel editor"),
+            ],
+            TableEditorFocus::General(_) => vec![
+                ShortcutHint::new("Tab/Shift-Tab/Up/Down", "move focus"),
+                ShortcutHint::new("Enter", "preview"),
+                ShortcutHint::new("Esc", "cancel"),
+            ],
+        }
     };
     frame.render_widget(
         Paragraph::new(shortcut_hints::line(
@@ -1139,6 +989,136 @@ fn render_table(
         .alignment(ratatui::layout::Alignment::Center),
         Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
     );
+}
+
+fn render_table_column_details_modal(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    focus: TableEditorFocus,
+    session: &crate::model::catalog_editor::TableColumnEditSession,
+    ui: &mut UiState,
+    theme: Theme,
+) {
+    let popup = super::centered(
+        area,
+        72.min(area.width.saturating_sub(4)),
+        14.min(area.height),
+    );
+    frame.render_widget(Clear, popup);
+    let block = super::panel_block(" COLUMN DETAILS ", true, theme);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    if inner.height < 8 || inner.width < 20 {
+        return;
+    }
+    let column = &session.draft;
+    let fields = [
+        (TableColumnField::Name, "Name", &column.name),
+        (TableColumnField::Type, "Type", &column.native_type),
+        (
+            TableColumnField::Default,
+            "Default",
+            &column.default_expression,
+        ),
+        (TableColumnField::Comment, "Comment", &column.comment),
+    ];
+    for (offset, (field, label, input)) in fields.into_iter().enumerate() {
+        render_table_text_field(
+            frame,
+            Rect::new(
+                inner.x,
+                inner.y.saturating_add(offset as u16),
+                inner.width,
+                1,
+            ),
+            TableEditorFocus::ColumnDetails(field),
+            label,
+            input,
+            focus,
+            ui,
+            theme,
+        );
+    }
+    let nullable = Rect::new(inner.x, inner.y.saturating_add(4), inner.width, 1);
+    let identity = Rect::new(inner.x, inner.y.saturating_add(5), inner.width, 1);
+    for (row, field, label, value) in [
+        (
+            nullable,
+            TableColumnField::Nullable,
+            "Nullable",
+            column.nullable,
+        ),
+        (
+            identity,
+            TableColumnField::Identity,
+            "Identity",
+            column.identity,
+        ),
+    ] {
+        frame.render_widget(
+            Paragraph::new(format!(
+                "  {label:<12} {}",
+                if value { "[x] On" } else { "[ ] Off" }
+            ))
+            .style(Style::new().fg(theme.text).bg(
+                if focus == TableEditorFocus::ColumnDetails(field) {
+                    theme.selection
+                } else {
+                    theme.surface
+                },
+            )),
+            row,
+        );
+        ui.hit_regions.push(HitRegion {
+            area: row,
+            target: HitTarget::CatalogEditorTableField(TableEditorFocus::ColumnDetails(field)),
+        });
+    }
+    let footer = Rect::new(inner.x, inner.y.saturating_add(7), inner.width, 1);
+    frame.render_widget(
+        Paragraph::new(shortcut_hints::line(
+            &[
+                ShortcutHint::new("Tab/Shift-Tab/Up/Down", "move field"),
+                ShortcutHint::new("Enter", "confirm"),
+                ShortcutHint::new("Esc", "cancel"),
+                ShortcutHint::new("Space", "toggle"),
+            ],
+            footer.width,
+            theme,
+            theme.surface,
+        ))
+        .style(Style::new().bg(theme.surface))
+        .alignment(ratatui::layout::Alignment::Center),
+        footer,
+    );
+    let controls = Rect::new(inner.x, inner.y.saturating_add(6), inner.width, 1);
+    let confirm_width = 13.min(controls.width);
+    let cancel_x = controls.x.saturating_add(confirm_width.saturating_add(3));
+    let cancel_width = 12.min(controls.right().saturating_sub(cancel_x));
+    for (x, width, label, target) in [
+        (
+            controls.x,
+            confirm_width,
+            "[ Confirm ]",
+            HitTarget::CatalogEditorColumnDetailsConfirm,
+        ),
+        (
+            cancel_x,
+            cancel_width,
+            "[ Cancel ]",
+            HitTarget::CatalogEditorColumnDetailsCancel,
+        ),
+    ] {
+        if width == 0 {
+            continue;
+        }
+        let row = Rect::new(x, controls.y, width, 1);
+        frame.render_widget(
+            Paragraph::new(label).style(Style::new().fg(theme.action).bg(theme.surface)),
+            row,
+        );
+        ui.hit_regions.push(HitRegion { area: row, target });
+    }
 }
 
 trait EmptyText {

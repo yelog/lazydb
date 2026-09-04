@@ -156,6 +156,18 @@ pub enum TableEditorFocus {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TableColumnEditTarget {
+    Existing { index: usize },
+    New { insert_at: usize },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TableColumnEditSession {
+    pub target: TableColumnEditTarget,
+    pub draft: ColumnDraft,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CatalogMutationOption {
     pub object_type: CatalogObjectType,
     pub label: String,
@@ -376,6 +388,7 @@ pub struct TableDraft {
     pub columns: Vec<ColumnDraft>,
     pub selected_column: usize,
     pub focus: TableEditorFocus,
+    pub column_editor: Option<TableColumnEditSession>,
     pub indexes: Vec<String>,
     pub constraints: Vec<String>,
 }
@@ -1054,6 +1067,7 @@ impl TableDraft {
             columns: vec![ColumnDraft::new_added()],
             selected_column: 0,
             focus: TableEditorFocus::General(TableGeneralField::Name),
+            column_editor: None,
             indexes: Vec::new(),
             constraints: Vec::new(),
         }
@@ -1072,6 +1086,7 @@ impl TableDraft {
                 .collect(),
             selected_column: 0,
             focus: TableEditorFocus::General(TableGeneralField::Name),
+            column_editor: None,
             indexes: definition.indexes.clone(),
             constraints: definition.constraints.clone(),
         }
@@ -1215,7 +1230,11 @@ impl TableDraft {
                 TableEditorFocus::ColumnDetails(TableColumnField::Identity)
             }
             TableEditorFocus::ColumnDetails(TableColumnField::Identity) => {
-                TableEditorFocus::Columns
+                if self.column_editor.is_some() {
+                    TableEditorFocus::ColumnDetails(TableColumnField::Name)
+                } else {
+                    TableEditorFocus::Columns
+                }
             }
             TableEditorFocus::Action(TableActionField::AddColumn) => {
                 TableEditorFocus::Action(TableActionField::RemoveColumn)
@@ -1250,7 +1269,13 @@ impl TableDraft {
                     TableEditorFocus::General(TableGeneralField::Comment)
                 }
             }
-            TableEditorFocus::ColumnDetails(TableColumnField::Name) => TableEditorFocus::Columns,
+            TableEditorFocus::ColumnDetails(TableColumnField::Name) => {
+                if self.column_editor.is_some() {
+                    TableEditorFocus::ColumnDetails(TableColumnField::Identity)
+                } else {
+                    TableEditorFocus::Columns
+                }
+            }
             TableEditorFocus::ColumnDetails(TableColumnField::Type) => {
                 TableEditorFocus::ColumnDetails(TableColumnField::Name)
             }
@@ -1279,20 +1304,74 @@ impl TableDraft {
         };
     }
 
-    pub fn enter_column_details(&mut self) {
-        if self.selected_column().is_some() {
-            self.focus = TableEditorFocus::ColumnDetails(TableColumnField::Name);
+    pub fn begin_edit_selected_column(&mut self) -> bool {
+        if self.column_editor.is_some() {
+            return false;
         }
+        let Some(column) = self.selected_column().cloned() else {
+            return false;
+        };
+        self.column_editor = Some(TableColumnEditSession {
+            target: TableColumnEditTarget::Existing {
+                index: self.selected_column,
+            },
+            draft: column,
+        });
+        self.focus = TableEditorFocus::ColumnDetails(TableColumnField::Name);
+        true
     }
 
-    pub fn leave_column_details(&mut self) {
-        if self.is_editing_column_details() {
+    pub fn begin_add_column_below(&mut self) {
+        if self.column_editor.is_some() {
+            return;
+        }
+        let insert_at = self
+            .selected_column
+            .min(self.columns.len().saturating_sub(1))
+            .saturating_add(1);
+        let mut column = ColumnDraft::new_added();
+        column.ordinal_position = self
+            .columns
+            .iter()
+            .map(|column| column.ordinal_position)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        self.column_editor = Some(TableColumnEditSession {
+            target: TableColumnEditTarget::New { insert_at },
+            draft: column,
+        });
+        self.focus = TableEditorFocus::ColumnDetails(TableColumnField::Name);
+    }
+
+    pub fn confirm_column_details(&mut self) -> bool {
+        let Some(session) = self.column_editor.take() else {
+            return false;
+        };
+        match session.target {
+            TableColumnEditTarget::Existing { index } => {
+                let Some(column) = self.columns.get_mut(index) else {
+                    self.focus = TableEditorFocus::Columns;
+                    return false;
+                };
+                *column = session.draft;
+                self.selected_column = index;
+            }
+            TableColumnEditTarget::New { insert_at } => {
+                let index = insert_at.min(self.columns.len());
+                self.columns.insert(index, session.draft);
+                self.selected_column = index;
+            }
+        }
+        self.focus = TableEditorFocus::Columns;
+        true
+    }
+
+    pub fn cancel_column_details(&mut self) {
+        self.column_editor = None;
+        if matches!(self.focus, TableEditorFocus::ColumnDetails(_)) {
             self.focus = TableEditorFocus::Columns;
         }
-    }
-
-    pub fn is_editing_column_details(&self) -> bool {
-        matches!(self.focus, TableEditorFocus::ColumnDetails(_))
     }
 
     pub fn move_field(&mut self, delta: isize) {
@@ -1313,30 +1392,11 @@ impl TableDraft {
         self.columns.get_mut(self.selected_column)
     }
 
-    pub fn add_column_below(&mut self) {
-        let column = ColumnDraft::new_added();
-        let insert_at = self
-            .selected_column
-            .min(self.columns.len().saturating_sub(1));
-        let ordinal_position = self
-            .columns
-            .iter()
-            .map(|column| column.ordinal_position)
-            .max()
-            .unwrap_or(0)
-            .saturating_add(1);
-        let mut column = column;
-        column.ordinal_position = ordinal_position;
-        self.columns.insert(insert_at + 1, column);
-        self.selected_column = insert_at + 1;
-        self.focus = TableEditorFocus::ColumnDetails(TableColumnField::Name);
-    }
-
     pub fn remove_selected_column(&mut self) {
         if self.columns.len() == 1 {
             self.columns[0] = ColumnDraft::new_added();
             self.selected_column = 0;
-            self.focus = TableEditorFocus::ColumnDetails(TableColumnField::Name);
+            self.focus = TableEditorFocus::Columns;
             return;
         }
         if matches!(
@@ -1356,13 +1416,21 @@ impl TableDraft {
     }
 
     pub fn toggle_selected_column_nullable(&mut self) {
-        if let Some(column) = self.selected_column_mut() {
+        if let Some(column) = self
+            .column_editor
+            .as_mut()
+            .map(|session| &mut session.draft)
+        {
             column.nullable = !column.nullable;
         }
     }
 
     pub fn toggle_selected_column_identity(&mut self) {
-        if let Some(column) = self.selected_column_mut() {
+        if let Some(column) = self
+            .column_editor
+            .as_mut()
+            .map(|session| &mut session.draft)
+        {
             column.identity = !column.identity;
             if column.identity {
                 column.default_expression.set("");
@@ -1377,21 +1445,21 @@ impl TableDraft {
             TableEditorFocus::General(TableGeneralField::Owner) => Some(&mut self.owner),
             TableEditorFocus::General(TableGeneralField::Comment) => Some(&mut self.comment),
             TableEditorFocus::ColumnDetails(TableColumnField::Name) => self
-                .columns
-                .get_mut(self.selected_column)
-                .map(|column| &mut column.name),
+                .column_editor
+                .as_mut()
+                .map(|session| &mut session.draft.name),
             TableEditorFocus::ColumnDetails(TableColumnField::Type) => self
-                .columns
-                .get_mut(self.selected_column)
-                .map(|column| &mut column.native_type),
+                .column_editor
+                .as_mut()
+                .map(|session| &mut session.draft.native_type),
             TableEditorFocus::ColumnDetails(TableColumnField::Default) => self
-                .columns
-                .get_mut(self.selected_column)
-                .map(|column| &mut column.default_expression),
+                .column_editor
+                .as_mut()
+                .map(|session| &mut session.draft.default_expression),
             TableEditorFocus::ColumnDetails(TableColumnField::Comment) => self
-                .columns
-                .get_mut(self.selected_column)
-                .map(|column| &mut column.comment),
+                .column_editor
+                .as_mut()
+                .map(|session| &mut session.draft.comment),
             _ => None,
         }
     }
