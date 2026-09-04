@@ -996,21 +996,84 @@ fn view_editor_renders_query_and_output_columns() {
                 comment: "note".into(),
                 query: "SELECT id FROM items".into(),
                 output_columns: "id".into(),
-                security_barrier: lazydb::db::catalog_mutation::ViewOption::unavailable(
-                    "not tested",
-                ),
-                security_invoker: lazydb::db::catalog_mutation::ViewOption::unavailable(
-                    "not tested",
-                ),
-                check_option: lazydb::db::catalog_mutation::ViewOption::unavailable("not tested"),
+                security_barrier: lazydb::db::catalog_mutation::ViewOption::available(Some(false)),
+                security_invoker: lazydb::db::catalog_mutation::ViewOption::available(Some(true)),
+                check_option: lazydb::db::catalog_mutation::ViewOption::available(Some(
+                    "CASCADED".into(),
+                )),
                 focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
             },
         )),
     });
     app.overlay = Some(Overlay::CatalogEditor);
-    let output = render(&app, 100, 30);
-    assert!(output.contains("Query: SELECT id FROM items"), "{output}");
-    assert!(output.contains("Output columns: id"), "{output}");
+    let (output, state) = render_with_state(&app, 100, 30);
+    for label in [
+        "GENERAL",
+        "DEFINITION",
+        "OPTIONS",
+        "Name",
+        "Schema",
+        "Owner",
+        "Comment",
+        "Output columns",
+        "Query",
+        "Security barrier",
+        "Security invoker",
+        "Check option",
+    ] {
+        assert!(output.contains(label), "missing {label}: {output}");
+    }
+    assert!(output.contains("Query"), "{output}");
+    assert!(output.contains("SELECT id FROM items"), "{output}");
+    assert!(output.contains("Output columns"), "{output}");
+    assert!(output.contains("On"), "{output}");
+    assert!(output.contains("Off"), "{output}");
+    assert!(output.contains("Cascaded"), "{output}");
+    assert!(output.contains("[ Review SQL ]"), "{output}");
+    assert!(output.contains("[ Cancel ]"), "{output}");
+    for field in [
+        lazydb::model::catalog_editor::CatalogFormFocus::Name,
+        lazydb::model::catalog_editor::CatalogFormFocus::Schema,
+        lazydb::model::catalog_editor::CatalogFormFocus::Owner,
+        lazydb::model::catalog_editor::CatalogFormFocus::Comment,
+        lazydb::model::catalog_editor::CatalogFormFocus::OutputColumns,
+        lazydb::model::catalog_editor::CatalogFormFocus::Query,
+        lazydb::model::catalog_editor::CatalogFormFocus::SecurityBarrier,
+        lazydb::model::catalog_editor::CatalogFormFocus::SecurityInvoker,
+        lazydb::model::catalog_editor::CatalogFormFocus::CheckOption,
+    ] {
+        assert!(
+            state
+                .hit_regions
+                .iter()
+                .any(|region| { region.target == HitTarget::CatalogEditorFormField(field) }),
+            "missing target for {field:?}"
+        );
+    }
+
+    let compact = render(&app, 56, 16);
+    assert!(compact.contains("GENERAL"), "{compact}");
+    assert!(compact.contains("DEFINITION"), "{compact}");
+    assert!(compact.contains("Query"), "{compact}");
+    assert!(compact.contains("OPTIONS"), "{compact}");
+    assert!(compact.contains("[ SQL ]"), "{compact}");
+    assert!(compact.contains("[ Cancel ]"), "{compact}");
+
+    if let Some(lazydb::model::catalog_editor::CatalogDraft::View(draft)) = app
+        .catalog_editor
+        .as_mut()
+        .and_then(|editor| editor.draft.as_mut())
+    {
+        draft.security_barrier = lazydb::db::catalog_mutation::ViewOption::available(None);
+        draft.security_invoker =
+            lazydb::db::catalog_mutation::ViewOption::unavailable("not tested");
+        draft.check_option =
+            lazydb::db::catalog_mutation::ViewOption::available(Some("LOCAL".into()));
+    }
+    let states = render(&app, 100, 30);
+    assert!(states.contains("Default"), "{states}");
+    assert!(states.contains("Local"), "{states}");
+    assert!(states.contains("DISABLED"), "{states}");
 }
 
 #[test]
