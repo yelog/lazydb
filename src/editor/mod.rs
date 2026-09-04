@@ -176,10 +176,52 @@ struct EditorSession {
     mode: EditorMode,
     position: EditorPosition,
     revision: u64,
-    previous_text: Option<String>,
-    redo_text: Option<String>,
+    history: EditorHistory,
     capability: EditorSessionCapability,
     interacted: bool,
+}
+
+const EDITOR_HISTORY_LIMIT: usize = 100;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct EditorSnapshot {
+    text: String,
+    position: EditorPosition,
+}
+
+// LazyDB owns history because programmatic edits reset modalkit's buffer history.
+#[derive(Default)]
+struct EditorHistory {
+    undo: Vec<EditorSnapshot>,
+    redo: Vec<EditorSnapshot>,
+    transaction_start: Option<EditorSnapshot>,
+}
+
+impl EditorHistory {
+    fn push_undo(&mut self, snapshot: EditorSnapshot) {
+        if self.undo.last() == Some(&snapshot) {
+            return;
+        }
+        if self.undo.len() == EDITOR_HISTORY_LIMIT {
+            self.undo.remove(0);
+        }
+        self.undo.push(snapshot);
+        self.redo.clear();
+    }
+
+    fn push_redo(&mut self, snapshot: EditorSnapshot) {
+        if self.redo.len() == EDITOR_HISTORY_LIMIT {
+            self.redo.remove(0);
+        }
+        self.redo.push(snapshot);
+    }
+
+    fn push_undo_without_clearing_redo(&mut self, snapshot: EditorSnapshot) {
+        if self.undo.len() == EDITOR_HISTORY_LIMIT {
+            self.undo.remove(0);
+        }
+        self.undo.push(snapshot);
+    }
 }
 
 type VimKeyManager = modalkit::editing::key::KeyManager<
@@ -301,12 +343,21 @@ impl EditorWorkspace {
                 mode,
                 position: EditorPosition { line: 0, column: 0 },
                 revision: 0,
-                previous_text: None,
-                redo_text: None,
+                history: EditorHistory::default(),
                 capability,
                 interacted: false,
             },
         );
+        if capability == EditorSessionCapability::Editable {
+            let session = self
+                .sessions
+                .get_mut(&id)
+                .expect("session was inserted above");
+            session.history.transaction_start = Some(EditorSnapshot {
+                text: text.to_owned(),
+                position: EditorPosition { line: 0, column: 0 },
+            });
+        }
     }
 
     pub(crate) fn close_console(&mut self, id: Uuid) {
@@ -408,6 +459,117 @@ impl EditorWorkspace {
             .get(&id)
             .map(|session| session.revision)
             .ok_or(EditorError::MissingSession(id))
+    }
+
+    fn snapshot(&self, id: Uuid) -> Result<EditorSnapshot, EditorError> {
+        Ok(EditorSnapshot {
+            text: self.text(id)?,
+            position: self.position(id)?,
+        })
+    }
+
+    fn write_text(
+        &mut self,
+        id: Uuid,
+        text: &str,
+        position: EditorPosition,
+    ) -> Result<(), EditorError> {
+        let session = self
+            .sessions
+            .get_mut(&id)
+            .ok_or(EditorError::MissingSession(id))?;
+        let mut buffer = session
+            .buffer
+            .write()
+            .map_err(|_| EditorError::Operation("buffer lock poisoned".into()))?;
+        buffer.set_text(encode_editor_text(text));
+        let line_count = text.matches('\n').count();
+        let line = text.rsplit('\n').next().unwrap_or_default();
+        session.position = EditorPosition {
+            line: position.line.min(line_count),
+            column: position.column.min(line.chars().count()),
+        };
+        buffer.set_leader(
+            session.group_id,
+            modalkit::editing::cursor::Cursor::new(session.position.line, session.position.column),
+        );
+        Ok(())
+    }
+
+    fn restore_snapshot(&mut self, id: Uuid, snapshot: EditorSnapshot) -> Result<(), EditorError> {
+        self.write_text(id, &snapshot.text, snapshot.position)?;
+        let session = self
+            .sessions
+            .get_mut(&id)
+            .ok_or(EditorError::MissingSession(id))?;
+        session.keys.reset_mode();
+        session.mode = EditorMode::Normal;
+        session.pending_binding = None;
+        session.pending_count = None;
+        session.current_sequence.clear();
+        session.last_sequence = None;
+        Ok(())
+    }
+
+    fn record_edit_history(
+        &mut self,
+        id: Uuid,
+        before: EditorSnapshot,
+        after: &EditorSnapshot,
+        mode_before: EditorMode,
+        mode_after: EditorMode,
+    ) -> Result<(), EditorError> {
+        let in_insert = matches!(mode_before, EditorMode::Insert | EditorMode::Replace)
+            || matches!(mode_after, EditorMode::Insert | EditorMode::Replace);
+        let session = self
+            .sessions
+            .get_mut(&id)
+            .ok_or(EditorError::MissingSession(id))?;
+        if in_insert {
+            if session.history.transaction_start.is_none() {
+                session.history.transaction_start = Some(before);
+            }
+            session.history.redo.clear();
+        } else {
+            session.history.push_undo(before);
+        }
+        if !matches!(mode_after, EditorMode::Insert | EditorMode::Replace)
+            && matches!(mode_before, EditorMode::Insert | EditorMode::Replace)
+        {
+            if let Some(start) = session.history.transaction_start.take()
+                && start.text != after.text
+            {
+                session.history.push_undo(start);
+            }
+        }
+        Ok(())
+    }
+
+    fn commit_transaction(&mut self, id: Uuid) -> Result<(), EditorError> {
+        let current = self.snapshot(id)?;
+        let session = self
+            .sessions
+            .get_mut(&id)
+            .ok_or(EditorError::MissingSession(id))?;
+        if let Some(start) = session.history.transaction_start.take()
+            && start.text != current.text
+        {
+            session.history.push_undo(start);
+        }
+        Ok(())
+    }
+
+    fn record_changed(&mut self, id: Uuid) -> Result<(), EditorError> {
+        let session = self
+            .sessions
+            .get_mut(&id)
+            .ok_or(EditorError::MissingSession(id))?;
+        session.revision = session.revision.saturating_add(1);
+        self.effects.push(EditorEffect::Changed {
+            console_id: id,
+            revision: session.revision,
+        });
+        Ok(())
     }
 
     pub(crate) fn viewport(&self, id: Uuid) -> Result<EditorViewport, EditorError> {
@@ -770,7 +932,9 @@ impl EditorWorkspace {
         replacement: &str,
         cursor: ReplacementCursor,
     ) -> Result<(), EditorError> {
-        let old = self.text(id)?;
+        let mode_before = self.mode(id)?;
+        let before = self.snapshot(id)?;
+        let old = before.text.clone();
         if range.get(&old).is_none() {
             return Err(EditorError::Operation(
                 "format range is not on a UTF-8 boundary".into(),
@@ -778,32 +942,19 @@ impl EditorWorkspace {
         }
         let mut next = old.clone();
         next.replace_range(range.start..range.end, replacement);
-        let session = self
-            .sessions
-            .get_mut(&id)
-            .ok_or(EditorError::MissingSession(id))?;
-        session.previous_text = Some(old);
-        session.redo_text = None;
+        if next == old {
+            return Ok(());
+        }
         let cursor_offset = match cursor {
             ReplacementCursor::Start => range.start,
             ReplacementCursor::EndOfInsertion => range.start + replacement.len(),
             ReplacementCursor::PreserveRelative => range.start + replacement.len(),
         };
-        session.position = byte_to_char_position(&next, cursor_offset);
-        let mut buffer = session
-            .buffer
-            .write()
-            .map_err(|_| EditorError::Operation("buffer lock poisoned".into()))?;
-        buffer.set_text(encode_editor_text(&next));
-        buffer.set_leader(
-            session.group_id,
-            modalkit::editing::cursor::Cursor::new(session.position.line, session.position.column),
-        );
-        session.revision = session.revision.saturating_add(1);
-        self.effects.push(EditorEffect::Changed {
-            console_id: id,
-            revision: session.revision,
-        });
+        let position = byte_to_char_position(&next, cursor_offset);
+        self.write_text(id, &next, position)?;
+        let after = self.snapshot(id)?;
+        self.record_edit_history(id, before, &after, mode_before, mode_before)?;
+        self.record_changed(id)?;
         Ok(())
     }
 
@@ -835,8 +986,7 @@ impl EditorWorkspace {
         session.viewport = Default::default();
         session.mode = EditorMode::Normal;
         session.revision = session.revision.saturating_add(1);
-        session.previous_text = None;
-        session.redo_text = None;
+        session.history = EditorHistory::default();
         Ok(())
     }
 
@@ -1076,32 +1226,25 @@ impl EditorWorkspace {
     }
 
     pub(crate) fn undo(&mut self, id: Uuid) -> Result<(), EditorError> {
-        let current = self.text(id)?;
-        if let Some(previous) = self
+        self.commit_transaction(id)?;
+        let current = self.snapshot(id)?;
+        let previous = self
             .sessions
             .get_mut(&id)
             .ok_or(EditorError::MissingSession(id))?
-            .previous_text
-            .take()
-        {
-            let session = self
-                .sessions
-                .get_mut(&id)
-                .ok_or(EditorError::MissingSession(id))?;
-            session.redo_text = Some(current);
-            session
-                .buffer
-                .write()
-                .map_err(|_| EditorError::Operation("buffer lock poisoned".into()))?
-                .set_text(encode_editor_text(&previous));
-            session.position = EditorPosition { line: 0, column: 0 };
-            session.revision = session.revision.saturating_add(1);
+            .history
+            .undo
+            .pop();
+        let Some(previous) = previous else {
             return Ok(());
-        }
-        if self.mode(id)? == EditorMode::Insert {
-            self.press(id, EditorKey::Escape)?;
-        }
-        self.input_vim_key(id, EditorKey::Character('u'))
+        };
+        self.sessions
+            .get_mut(&id)
+            .ok_or(EditorError::MissingSession(id))?
+            .history
+            .push_redo(current);
+        self.restore_snapshot(id, previous)?;
+        self.record_changed(id)
     }
 
     pub(crate) fn substitute_confirm(
@@ -1141,50 +1284,58 @@ impl EditorWorkspace {
     }
 
     pub(crate) fn redo(&mut self, id: Uuid) -> Result<(), EditorError> {
-        let current = self.text(id)?;
-        if let Some(next) = self
+        self.commit_transaction(id)?;
+        let current = self.snapshot(id)?;
+        let next = self
             .sessions
             .get_mut(&id)
             .ok_or(EditorError::MissingSession(id))?
-            .redo_text
-            .take()
+            .history
+            .redo
+            .pop();
+        let Some(next) = next else { return Ok(()) };
+        self.sessions
+            .get_mut(&id)
+            .ok_or(EditorError::MissingSession(id))?
+            .history
+            .push_undo_without_clearing_redo(current);
+        self.restore_snapshot(id, next)?;
+        self.record_changed(id)
+    }
+
+    pub(crate) fn set_mode(&mut self, id: Uuid, mode: EditorMode) -> Result<(), EditorError> {
+        let old_mode = self.mode(id)?;
+        let before = self.snapshot(id)?;
         {
             let session = self
                 .sessions
                 .get_mut(&id)
                 .ok_or(EditorError::MissingSession(id))?;
-            session.previous_text = Some(current);
-            session
-                .buffer
-                .write()
-                .map_err(|_| EditorError::Operation("buffer lock poisoned".into()))?
-                .set_text(encode_editor_text(&next));
-            session.position = byte_to_char_position(&next, next.len());
-            session.revision = session.revision.saturating_add(1);
-            return Ok(());
+            session.keys.reset_mode();
+            if mode == EditorMode::Insert {
+                session
+                    .keys
+                    .input_key(modalkit::key::TerminalKey::from(KeyEvent::new(
+                        KeyCode::Char('i'),
+                        KeyModifiers::NONE,
+                    )));
+                while session.keys.pop().is_some() {}
+            }
+            session.mode = mode;
         }
-        self.input_vim_key(id, EditorKey::Control('r'))
-    }
-
-    pub(crate) fn set_mode(&mut self, id: Uuid, mode: EditorMode) -> Result<(), EditorError> {
-        let session = self
-            .sessions
-            .get_mut(&id)
-            .ok_or(EditorError::MissingSession(id))?;
-        session.keys.reset_mode();
-        if mode == EditorMode::Insert {
-            session
-                .keys
-                .input_key(modalkit::key::TerminalKey::from(KeyEvent::new(
-                    KeyCode::Char('i'),
-                    KeyModifiers::NONE,
-                )));
-            while session.keys.pop().is_some() {}
+        if matches!(mode, EditorMode::Insert | EditorMode::Replace)
+            && !matches!(old_mode, EditorMode::Insert | EditorMode::Replace)
+        {
+            self.sessions
+                .get_mut(&id)
+                .ok_or(EditorError::MissingSession(id))?
+                .history
+                .transaction_start = Some(before);
+        } else if !matches!(mode, EditorMode::Insert | EditorMode::Replace)
+            && matches!(old_mode, EditorMode::Insert | EditorMode::Replace)
+        {
+            self.commit_transaction(id)?;
         }
-        if mode == EditorMode::Insert && session.mode != EditorMode::Insert {
-            session.previous_text = None;
-        }
-        session.mode = mode;
         Ok(())
     }
 
@@ -1249,52 +1400,24 @@ impl EditorWorkspace {
     where
         F: FnOnce(&mut String, usize) -> usize,
     {
-        let old = self.text(id)?;
-        let session = self
-            .sessions
-            .get_mut(&id)
-            .ok_or(EditorError::MissingSession(id))?;
-        let position = {
-            let mut buffer = session
-                .buffer
-                .write()
-                .map_err(|_| EditorError::Operation("buffer lock poisoned".into()))?;
-            let cursor = buffer.get_leader(session.group_id);
-            EditorPosition {
-                line: cursor.get_y(),
-                column: cursor.get_x(),
-            }
-        };
-        let offset = char_position_to_byte(&old, position);
-        let mut next = old.clone();
+        let mode_before = self.mode(id)?;
+        let before = self.snapshot(id)?;
+        let offset = char_position_to_byte(&before.text, before.position);
+        let mut next = before.text.clone();
         let new_offset = edit(&mut next, offset);
-        if next == old {
+        if next == before.text {
             return Ok(());
         }
-        if session.previous_text.is_none() {
-            session.previous_text = Some(old);
-        }
-        session.position = byte_to_char_position(&next, new_offset);
-        let mut buffer = session
-            .buffer
-            .write()
-            .map_err(|_| EditorError::Operation("buffer lock poisoned".into()))?;
-        buffer.set_text(encode_editor_text(&next));
-        buffer.set_leader(
-            session.group_id,
-            modalkit::editing::cursor::Cursor::new(session.position.line, session.position.column),
-        );
-        session.revision = session.revision.saturating_add(1);
-        session.redo_text = None;
-        self.effects.push(EditorEffect::Changed {
-            console_id: id,
-            revision: session.revision,
-        });
-        Ok(())
+        let position = byte_to_char_position(&next, new_offset);
+        self.write_text(id, &next, position)?;
+        let after = self.snapshot(id)?;
+        self.record_edit_history(id, before, &after, mode_before, mode_before)?;
+        self.record_changed(id)
     }
 
     fn input_vim_key(&mut self, id: Uuid, key: EditorKey) -> Result<(), EditorError> {
-        let before = self.text(id)?;
+        let mode_before = self.mode(id)?;
+        let before = self.snapshot(id)?;
         let unnamed_before = self.register('"').map(str::to_owned);
         let session = self
             .sessions
@@ -1379,17 +1502,35 @@ impl EditorWorkspace {
                 self.effects.push(EditorEffect::Yanked(copied));
             }
         }
-        if before != self.text(id)? {
-            let session = self
-                .sessions
-                .get_mut(&id)
-                .ok_or(EditorError::MissingSession(id))?;
-            session.revision = session.revision.saturating_add(1);
-            session.last_sequence = Some(std::mem::take(&mut session.current_sequence));
-            self.effects.push(EditorEffect::Changed {
-                console_id: id,
-                revision: session.revision,
-            });
+        let after = self.snapshot(id)?;
+        if before.text != after.text {
+            {
+                let session = self
+                    .sessions
+                    .get_mut(&id)
+                    .ok_or(EditorError::MissingSession(id))?;
+                session.last_sequence = Some(std::mem::take(&mut session.current_sequence));
+            }
+            let mode_after = self.mode(id)?;
+            self.record_edit_history(id, before, &after, mode_before, mode_after)?;
+            self.record_changed(id)?;
+        } else {
+            let mode_after = self.mode(id)?;
+            if !matches!(mode_before, EditorMode::Insert | EditorMode::Replace)
+                && matches!(mode_after, EditorMode::Insert | EditorMode::Replace)
+            {
+                let session = self
+                    .sessions
+                    .get_mut(&id)
+                    .ok_or(EditorError::MissingSession(id))?;
+                if session.history.transaction_start.is_none() {
+                    session.history.transaction_start = Some(before);
+                }
+            } else if matches!(mode_before, EditorMode::Insert | EditorMode::Replace)
+                && !matches!(mode_after, EditorMode::Insert | EditorMode::Replace)
+            {
+                self.commit_transaction(id)?;
+            }
         }
         Ok(())
     }
@@ -1723,32 +1864,11 @@ impl EditorWorkspace {
         accepted: &[usize],
     ) -> Result<(), EditorError> {
         let next = substitute::apply(plan, accepted);
-        let session = self
-            .sessions
-            .get_mut(&id)
-            .ok_or(EditorError::MissingSession(id))?;
-        session.previous_text = Some(plan.source.clone());
-        session.redo_text = None;
-        session
-            .buffer
-            .write()
-            .map_err(|_| EditorError::Operation("buffer lock poisoned".into()))?
-            .set_text(encode_editor_text(&next));
-        session.position = byte_to_char_position(&next, 0);
-        session
-            .buffer
-            .write()
-            .map_err(|_| EditorError::Operation("buffer lock poisoned".into()))?
-            .set_leader(
-                session.group_id,
-                modalkit::editing::cursor::Cursor::new(0, 0),
-            );
-        session.revision = session.revision.saturating_add(1);
-        self.effects.push(EditorEffect::Changed {
-            console_id: id,
-            revision: session.revision,
-        });
-        Ok(())
+        let before = self.snapshot(id)?;
+        self.write_text(id, &next, EditorPosition { line: 0, column: 0 })?;
+        let after = self.snapshot(id)?;
+        self.record_edit_history(id, before, &after, EditorMode::Normal, EditorMode::Normal)?;
+        self.record_changed(id)
     }
 }
 

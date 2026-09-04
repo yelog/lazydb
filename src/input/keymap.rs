@@ -1091,6 +1091,12 @@ impl Keymap {
                 {
                     Some(Action::EditorKey(event))
                 }
+                KeyCode::Char('r')
+                    if app.focus == Focus::Editor
+                        && app.active_editor_mode() == EditorMode::Normal =>
+                {
+                    Some(Action::EditorKey(event))
+                }
                 KeyCode::Char('w') if app.focus == Focus::Editor => Some(Action::EditorKey(event)),
                 KeyCode::Char('w') => {
                     self.set_pending(Pending::Window { count: 1 }, app);
