@@ -357,17 +357,126 @@ fn semantic_highlighting_is_isolated_per_statement() {
 }
 
 #[test]
-fn incomplete_sql_falls_back_to_lexical_highlighting() {
+fn incomplete_where_preserves_completed_semantic_highlights() {
+    let text = r#"SELECT A.USERNAME, A."name", A.CREATE_TIME, A.EMAIL, A.USER_TYPE, A.PHONE
+FROM SYS_USER A
+LEFT JOIN sys_user_role B ON A.id = B.USER_ID
+LEFT JOIN sys_role C ON B.ROLE_ID = C.id
+WHERE"#;
+    let spans = highlight_sql(text, SqlDialect::Postgres);
+
+    assert_eq!(
+        kinds_for(text, &spans, "SYS_USER"),
+        vec![HighlightKind::Relation]
+    );
+    assert_eq!(
+        kinds_for(text, &spans, "sys_user_role"),
+        vec![HighlightKind::Relation]
+    );
+    assert_eq!(
+        kinds_for(text, &spans, "sys_role"),
+        vec![HighlightKind::Relation]
+    );
+    assert!(
+        kinds_for(text, &spans, "A")
+            .iter()
+            .all(|kind| *kind == HighlightKind::RelationAlias)
+    );
+    assert!(
+        kinds_for(text, &spans, "B")
+            .iter()
+            .all(|kind| *kind == HighlightKind::RelationAlias)
+    );
+    assert!(
+        kinds_for(text, &spans, "C")
+            .iter()
+            .all(|kind| *kind == HighlightKind::RelationAlias)
+    );
+    assert_eq!(
+        kinds_for(text, &spans, "USERNAME"),
+        vec![HighlightKind::Column]
+    );
+    assert_eq!(
+        kinds_for(text, &spans, "WHERE"),
+        vec![HighlightKind::Keyword]
+    );
+    assert!(spans.iter().all(|span| span.range.end <= text.len()));
+}
+
+#[test]
+fn incomplete_expression_keeps_the_longest_semantic_prefix() {
+    let text = "SELECT u.id FROM users u WHERE u.id =";
+    let spans = highlight_sql(text, SqlDialect::Postgres);
+
+    assert_eq!(
+        kinds_for(text, &spans, "users"),
+        vec![HighlightKind::Relation]
+    );
+    assert!(
+        kinds_for(text, &spans, "u")
+            .iter()
+            .all(|kind| *kind == HighlightKind::RelationAlias)
+    );
+    assert!(
+        kinds_for(text, &spans, "id")
+            .iter()
+            .all(|kind| *kind == HighlightKind::Column)
+    );
+    assert!(spans.iter().all(|span| span.range.end <= text.len()));
+}
+
+#[test]
+fn unmatched_trailing_parenthesis_preserves_earlier_semantics() {
     let text = "SELECT u.id FROM users u WHERE (";
     let spans = highlight_sql(text, SqlDialect::Postgres);
 
-    assert!(spans.iter().any(|span| span.kind == HighlightKind::Keyword));
-    assert!(spans.iter().any(|span| {
-        &text[span.range.start..span.range.end] == "users"
-            && matches!(
-                span.kind,
-                HighlightKind::Identifier | HighlightKind::Relation
-            )
-    }));
+    assert_eq!(
+        kinds_for(text, &spans, "users"),
+        vec![HighlightKind::Relation]
+    );
+    assert!(
+        kinds_for(text, &spans, "u")
+            .iter()
+            .all(|kind| *kind == HighlightKind::RelationAlias)
+    );
+    assert_eq!(kinds_for(text, &spans, "id"), vec![HighlightKind::Column]);
+    assert!(spans.iter().all(|span| span.range.end <= text.len()));
+}
+
+#[test]
+fn incomplete_statement_recovery_is_isolated_per_statement() {
+    let text = "SELECT a.id FROM alpha a; SELECT b.id FROM beta b WHERE";
+    let spans = highlight_sql(text, SqlDialect::Postgres);
+
+    assert_eq!(
+        kinds_for(text, &spans, "alpha"),
+        vec![HighlightKind::Relation]
+    );
+    assert_eq!(
+        kinds_for(text, &spans, "beta"),
+        vec![HighlightKind::Relation]
+    );
+    assert!(
+        kinds_for(text, &spans, "a")
+            .iter()
+            .all(|kind| *kind == HighlightKind::RelationAlias)
+    );
+    assert!(
+        kinds_for(text, &spans, "b")
+            .iter()
+            .all(|kind| *kind == HighlightKind::RelationAlias)
+    );
+    assert!(spans.iter().all(|span| span.range.end <= text.len()));
+}
+
+#[test]
+fn unrecoverable_sql_still_returns_safe_lexical_highlighting() {
+    let text = "WHERE (";
+    let spans = highlight_sql(text, SqlDialect::Postgres);
+
+    assert_eq!(
+        kinds_for(text, &spans, "WHERE"),
+        vec![HighlightKind::Keyword]
+    );
     assert!(spans.iter().all(|span| span.range.end <= text.len()));
 }
