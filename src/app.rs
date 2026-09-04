@@ -3626,6 +3626,16 @@ impl App {
                 }
                 Vec::new()
             }
+            Action::CatalogEditorPaste(text) => {
+                if let Some(draft) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.paste(&text);
+                }
+                Vec::new()
+            }
             Action::CatalogEditorBackspace => {
                 if let Some(draft) = self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut())
                     && matches!(draft, crate::model::catalog_editor::CatalogDraft::Table(_))

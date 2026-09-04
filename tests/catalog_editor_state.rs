@@ -394,6 +394,24 @@ fn table_draft_delegates_text_edits_to_general_and_column_inputs() {
 }
 
 #[test]
+fn table_draft_pastes_multicharacter_unicode_and_newline_values_into_focused_names() {
+    let mut draft = CatalogDraft::Table(TableDraft::new("public"));
+    draft.paste("events\n数据🙂");
+    let CatalogDraft::Table(table) = &mut draft else {
+        unreachable!();
+    };
+    assert_eq!(table.name.value(), "events\n数据🙂");
+
+    table.focus = TableEditorFocus::ColumnDetails(TableColumnField::Name);
+    draft.paste("user\n名前🙂");
+
+    let CatalogDraft::Table(table) = draft else {
+        unreachable!();
+    };
+    assert_eq!(table.columns[0].name.value(), "user\n名前🙂");
+}
+
+#[test]
 fn table_draft_routes_text_input_to_all_general_and_column_detail_fields() {
     let mut draft = TableDraft::new("");
 

@@ -1983,7 +1983,18 @@ pub fn map_paste(value: String, app: &App) -> Vec<Action> {
             .collect();
     }
     if app.overlay == Some(Overlay::CatalogEditor) {
-        let editable = app.catalog_editor.as_ref().is_some_and(|editor| {
+        let editor = app.catalog_editor.as_ref();
+        let editable_table = editor.is_some_and(|editor| {
+            editor.page == crate::model::catalog_editor::CatalogEditorPage::Form
+                && !editor.is_busy()
+                && matches!(
+                    editor.draft,
+                    Some(crate::model::catalog_editor::CatalogDraft::Table(_))
+                )
+        });
+        if editable_table {
+            return vec![Action::CatalogEditorPaste(value)];
+        } else if editor.is_some_and(|editor| {
             editor.page == crate::model::catalog_editor::CatalogEditorPage::Form
                 && !editor.is_busy()
                 && matches!(
@@ -1993,12 +2004,11 @@ pub fn map_paste(value: String, app: &App) -> Vec<Action> {
                             | crate::model::catalog_editor::CatalogDraft::Sequence(_)
                     )
                 )
-        });
-        return if editable {
-            value.chars().map(Action::CatalogEditorInsert).collect()
+        }) {
+            return value.chars().map(Action::CatalogEditorInsert).collect();
         } else {
-            Vec::new()
-        };
+            return Vec::new();
+        }
     }
     if app.overlay.is_some() {
         return Vec::new();

@@ -200,6 +200,7 @@ pub enum Action {
     CatalogOwnerPickerAccept,
     CatalogOwnerPickerChoose(String),
     CatalogEditorInsert(char),
+    CatalogEditorPaste(String),
     CatalogEditorBackspace,
     CatalogEditorDeletePreviousWord,
     CatalogEditorDeleteToStart,

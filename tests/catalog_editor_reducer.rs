@@ -78,6 +78,60 @@ fn table_navigation_reaches_and_leaves_every_action() {
     }
 }
 
+fn table_editor_for_paste() -> App {
+    let mut app = App::new(Vec::new());
+    let mut editor = lazydb::model::catalog_editor::CatalogEditorState::new(
+        lazydb::db::catalog_mutation::CatalogMutationMode::Create,
+        CatalogMutationAnchor::Group {
+            schema: CatalogId::new(Uuid::nil(), CatalogKind::Schema, ["app", "public"]),
+            group: lazydb::db::catalog::ObjectGroup::Tables,
+        },
+        0,
+        vec![lazydb::model::catalog_editor::CatalogMutationOption {
+            object_type: CatalogObjectType::Catalog(CatalogKind::Table),
+            label: "Table".into(),
+        }],
+    );
+    assert!(editor.select_object_type(CatalogObjectType::Catalog(CatalogKind::Table)));
+    app.catalog_editor = Some(editor);
+    app
+}
+
+#[test]
+fn catalog_editor_paste_writes_multicharacter_table_name_at_general_name_focus() {
+    let mut app = table_editor_for_paste();
+
+    app.update(Action::CatalogEditorPaste("events\n数据🙂".into()));
+
+    let Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)) = app
+        .catalog_editor
+        .as_ref()
+        .and_then(|editor| editor.draft.as_ref())
+    else {
+        panic!("table draft expected");
+    };
+    assert_eq!(draft.name.value(), "events\n数据🙂");
+}
+
+#[test]
+fn catalog_editor_paste_writes_multicharacter_column_name_at_column_name_focus() {
+    let mut app = table_editor_for_paste();
+    draft_mut(&mut app).focus = lazydb::model::catalog_editor::TableEditorFocus::ColumnDetails(
+        lazydb::model::catalog_editor::TableColumnField::Name,
+    );
+
+    app.update(Action::CatalogEditorPaste("user\n名前🙂".into()));
+
+    let Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)) = app
+        .catalog_editor
+        .as_ref()
+        .and_then(|editor| editor.draft.as_ref())
+    else {
+        panic!("table draft expected");
+    };
+    assert_eq!(draft.columns[0].name.value(), "user\n名前🙂");
+}
+
 fn profile() -> ConnectionProfile {
     import_connection_url(":memory:", Some("test"))
         .unwrap()

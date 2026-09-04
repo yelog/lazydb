@@ -297,6 +297,15 @@ fn table_editor_keymap_dispatches_by_focus_region() {
 }
 
 #[test]
+fn catalog_table_form_accepts_paste_as_one_text_edit() {
+    let app = table_editor_app();
+    assert_eq!(
+        map_paste("orders".into(), &app),
+        vec![Action::CatalogEditorPaste("orders".into())]
+    );
+}
+
+#[test]
 fn table_editor_action_buttons_keep_enter_and_space_semantics() {
     let mut app = table_editor_app();
     let mut keymap = Keymap::default();

@@ -1402,6 +1402,12 @@ impl TableDraft {
         }
     }
 
+    pub fn paste(&mut self, text: &str) {
+        if let Some(input) = self.selected_text_input_mut() {
+            input.paste(text);
+        }
+    }
+
     pub fn backspace(&mut self) {
         if let Some(input) = self.selected_text_input_mut() {
             input.backspace();
@@ -1559,6 +1565,11 @@ impl CatalogDraft {
             Self::Database(d) => d.insert(c),
             Self::Role(d) => d.insert(c),
             _ => {}
+        }
+    }
+    pub fn paste(&mut self, text: &str) {
+        if let Self::Table(draft) = self {
+            draft.paste(text);
         }
     }
     pub fn backspace(&mut self) {
