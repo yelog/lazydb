@@ -1,6 +1,6 @@
 [package]
 name = "lazydb"
-version = "0.1.0-beta.2"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.94"
 description = "A keyboard-first terminal database IDE"
