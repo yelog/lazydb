@@ -3,9 +3,16 @@ use lazydb::{
     app::App,
     db::{
         catalog::{CatalogEntry, CatalogId, CatalogKind, OptionalMetadata, QualifiedName},
-        catalog_mutation::{CatalogMutationAnchor, CatalogObjectType},
+        catalog_mutation::{
+            CatalogMutationAnchor, CatalogMutationMode, CatalogObjectType, SequenceBound,
+            ViewOption,
+        },
     },
     model::{
+        catalog_editor::{
+            CatalogDraft, CatalogEditorPage, CatalogEditorState, CatalogFormFocus,
+            MaterializedViewDraft, SequenceDraft, ViewDraft,
+        },
         explorer::{ExplorerMutationIntent, ExplorerNodeId, StatusRowKind},
         workspace::Overlay,
     },
@@ -94,6 +101,275 @@ fn table_editor_for_paste() -> App {
     assert!(editor.select_object_type(CatalogObjectType::Catalog(CatalogKind::Table)));
     app.catalog_editor = Some(editor);
     app
+}
+
+fn simple_catalog_editor(mode: CatalogMutationMode, draft: CatalogDraft) -> App {
+    let mut app = App::new(Vec::new());
+    app.catalog_editor = Some(CatalogEditorState {
+        mode,
+        anchor: CatalogMutationAnchor::Profile {
+            profile_id: Uuid::nil(),
+        },
+        object_type: None,
+        page: CatalogEditorPage::Form,
+        operation: None,
+        catalog_epoch: 0,
+        options: Vec::new(),
+        selected_option: 0,
+        draft: Some(draft),
+        baseline: None,
+        plan: None,
+        error: None,
+        owner_picker: Default::default(),
+    });
+    app
+}
+
+fn materialized_view_editor(mode: CatalogMutationMode, focus: CatalogFormFocus) -> App {
+    simple_catalog_editor(
+        mode,
+        CatalogDraft::MaterializedView(MaterializedViewDraft {
+            name: "mv".into(),
+            schema: "public".into(),
+            owner: "postgres".into(),
+            comment: "comment".into(),
+            query: "SELECT 1".into(),
+            tablespace: "fast".into(),
+            with_data: true,
+            focus,
+            query_editable: mode == CatalogMutationMode::Create,
+        }),
+    )
+}
+
+fn materialized_view_draft(app: &App) -> &MaterializedViewDraft {
+    match app
+        .catalog_editor
+        .as_ref()
+        .and_then(|editor| editor.draft.as_ref())
+        .expect("catalog draft")
+    {
+        CatalogDraft::MaterializedView(draft) => draft,
+        _ => panic!("materialized view draft expected"),
+    }
+}
+
+#[test]
+fn materialized_view_storage_controls_update_independently() {
+    let mut app =
+        materialized_view_editor(CatalogMutationMode::Create, CatalogFormFocus::Tablespace);
+
+    app.update(Action::CatalogEditorInsert(' '));
+    assert_eq!(materialized_view_draft(&app).tablespace.value(), "fast ");
+    assert!(materialized_view_draft(&app).with_data);
+
+    app.catalog_editor
+        .as_mut()
+        .and_then(|editor| editor.draft.as_mut())
+        .and_then(|draft| match draft {
+            CatalogDraft::MaterializedView(draft) => Some(draft),
+            _ => None,
+        })
+        .unwrap()
+        .focus = CatalogFormFocus::WithData;
+    app.update(Action::CatalogEditorToggleMaterializedViewData);
+
+    assert_eq!(materialized_view_draft(&app).tablespace.value(), "fast ");
+    assert!(!materialized_view_draft(&app).with_data);
+}
+
+#[test]
+fn materialized_view_edit_skips_and_does_not_edit_query() {
+    let mut app = materialized_view_editor(CatalogMutationMode::Edit, CatalogFormFocus::Comment);
+
+    app.update(Action::CatalogEditorFieldNext);
+    assert_eq!(
+        materialized_view_draft(&app).focus,
+        CatalogFormFocus::Tablespace
+    );
+
+    app.catalog_editor
+        .as_mut()
+        .and_then(|editor| editor.draft.as_mut())
+        .and_then(|draft| match draft {
+            CatalogDraft::MaterializedView(draft) => Some(draft),
+            _ => None,
+        })
+        .unwrap()
+        .focus = CatalogFormFocus::Query;
+    app.update(Action::CatalogEditorInsert('x'));
+    assert_eq!(materialized_view_draft(&app).query.value(), "SELECT 1");
+
+    app.catalog_editor
+        .as_mut()
+        .and_then(|editor| editor.draft.as_mut())
+        .and_then(|draft| match draft {
+            CatalogDraft::MaterializedView(draft) => Some(draft),
+            _ => None,
+        })
+        .unwrap()
+        .focus = CatalogFormFocus::WithData;
+    app.update(Action::CatalogEditorToggleMaterializedViewData);
+    assert!(materialized_view_draft(&app).with_data);
+}
+
+#[test]
+fn catalog_editor_paste_supports_view_materialized_view_and_sequence_text_fields() {
+    let mut view = simple_catalog_editor(
+        CatalogMutationMode::Create,
+        CatalogDraft::View(ViewDraft {
+            name: "v".into(),
+            schema: "public".into(),
+            owner: "postgres".into(),
+            comment: "".into(),
+            query: "SELECT ".into(),
+            output_columns: "".into(),
+            security_barrier: ViewOption::available(None),
+            security_invoker: ViewOption::available(None),
+            check_option: ViewOption::available(None),
+            focus: CatalogFormFocus::Query,
+        }),
+    );
+    view.update(Action::CatalogEditorPaste("名 前".into()));
+    let Some(CatalogDraft::View(draft)) = view
+        .catalog_editor
+        .as_ref()
+        .and_then(|editor| editor.draft.as_ref())
+    else {
+        panic!("view draft expected");
+    };
+    assert_eq!(draft.query.value(), "SELECT 名 前");
+
+    let mut materialized_view =
+        materialized_view_editor(CatalogMutationMode::Create, CatalogFormFocus::Tablespace);
+    materialized_view.update(Action::CatalogEditorPaste(" 表 空间".into()));
+    assert_eq!(
+        materialized_view_draft(&materialized_view)
+            .tablespace
+            .value(),
+        "fast 表 空间"
+    );
+
+    let mut sequence = simple_catalog_editor(
+        CatalogMutationMode::Create,
+        CatalogDraft::Sequence(SequenceDraft {
+            name: "seq".into(),
+            schema: "public".into(),
+            owner: "postgres".into(),
+            comment: "".into(),
+            data_type: "bigint".into(),
+            increment: "1".into(),
+            min_value: SequenceBound::Unset,
+            max_value: SequenceBound::Unset,
+            start_value: "1".into(),
+            restart_value: "".into(),
+            cache: "1".into(),
+            cycle: false,
+            owned_by: "public.table.".into(),
+            focus: CatalogFormFocus::OwnedBy,
+        }),
+    );
+    sequence.update(Action::CatalogEditorPaste("列 名".into()));
+    let Some(CatalogDraft::Sequence(draft)) = sequence
+        .catalog_editor
+        .as_ref()
+        .and_then(|editor| editor.draft.as_ref())
+    else {
+        panic!("sequence draft expected");
+    };
+    assert_eq!(draft.owned_by.value(), "public.table.列 名");
+}
+
+#[test]
+fn catalog_editor_paste_is_noop_for_read_only_choice_toggle_and_action_focus() {
+    let mut materialized_view =
+        materialized_view_editor(CatalogMutationMode::Edit, CatalogFormFocus::Query);
+    materialized_view.update(Action::CatalogEditorPaste(" ignored".into()));
+    assert_eq!(
+        materialized_view_draft(&materialized_view).query.value(),
+        "SELECT 1"
+    );
+
+    for focus in [CatalogFormFocus::WithData, CatalogFormFocus::Review] {
+        let mut app = materialized_view_editor(CatalogMutationMode::Create, focus);
+        app.update(Action::CatalogEditorPaste(" ignored".into()));
+        let draft = materialized_view_draft(&app);
+        assert_eq!(draft.tablespace.value(), "fast");
+        assert!(draft.with_data);
+    }
+
+    for focus in [
+        CatalogFormFocus::SecurityBarrier,
+        CatalogFormFocus::SecurityInvoker,
+        CatalogFormFocus::Cancel,
+    ] {
+        let mut view = simple_catalog_editor(
+            CatalogMutationMode::Create,
+            CatalogDraft::View(ViewDraft {
+                name: "v".into(),
+                schema: "public".into(),
+                owner: "postgres".into(),
+                comment: "".into(),
+                query: "SELECT 1".into(),
+                output_columns: "".into(),
+                security_barrier: ViewOption::unavailable("unsupported"),
+                security_invoker: ViewOption::available(None),
+                check_option: ViewOption::available(None),
+                focus,
+            }),
+        );
+        view.update(Action::CatalogEditorPaste(" ignored".into()));
+        let Some(CatalogDraft::View(draft)) = view
+            .catalog_editor
+            .as_ref()
+            .and_then(|editor| editor.draft.as_ref())
+        else {
+            panic!("view draft expected");
+        };
+        assert_eq!(draft.query.value(), "SELECT 1");
+        assert_eq!(
+            draft.security_barrier,
+            ViewOption::unavailable("unsupported")
+        );
+        assert_eq!(draft.security_invoker, ViewOption::available(None));
+    }
+
+    for focus in [
+        CatalogFormFocus::MinValue,
+        CatalogFormFocus::Cycle,
+        CatalogFormFocus::Cancel,
+    ] {
+        let mut sequence = simple_catalog_editor(
+            CatalogMutationMode::Create,
+            CatalogDraft::Sequence(SequenceDraft {
+                name: "seq".into(),
+                schema: "public".into(),
+                owner: "postgres".into(),
+                comment: "".into(),
+                data_type: "bigint".into(),
+                increment: "1".into(),
+                min_value: SequenceBound::Unset,
+                max_value: SequenceBound::Unset,
+                start_value: "1".into(),
+                restart_value: "".into(),
+                cache: "1".into(),
+                cycle: false,
+                owned_by: "NONE".into(),
+                focus,
+            }),
+        );
+        sequence.update(Action::CatalogEditorPaste(" ignored".into()));
+        let Some(CatalogDraft::Sequence(draft)) = sequence
+            .catalog_editor
+            .as_ref()
+            .and_then(|editor| editor.draft.as_ref())
+        else {
+            panic!("sequence draft expected");
+        };
+        assert_eq!(draft.min_value, SequenceBound::Unset);
+        assert!(!draft.cycle);
+        assert_eq!(draft.owned_by.value(), "NONE");
+    }
 }
 
 #[test]

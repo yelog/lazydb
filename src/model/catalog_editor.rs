@@ -621,6 +621,11 @@ impl SequenceDraft {
             input.insert(c)
         }
     }
+    pub fn paste(&mut self, text: &str) {
+        if let Some(input) = self.selected_input_mut() {
+            input.paste(text);
+        }
+    }
     pub fn backspace(&mut self) {
         if let Some(input) = self.selected_input_mut() {
             input.backspace()
@@ -737,6 +742,11 @@ impl MaterializedViewDraft {
             input.insert(c);
         }
     }
+    pub fn paste(&mut self, text: &str) {
+        if let Some(input) = self.selected_input_mut() {
+            input.paste(text);
+        }
+    }
     pub fn backspace(&mut self) {
         if let Some(input) = self.selected_input_mut() {
             input.backspace();
@@ -851,6 +861,11 @@ impl ViewDraft {
     pub fn insert(&mut self, c: char) {
         if let Some(input) = self.selected_input_mut() {
             input.insert(c);
+        }
+    }
+    pub fn paste(&mut self, text: &str) {
+        if let Some(input) = self.selected_input_mut() {
+            input.paste(text);
         }
     }
     pub fn backspace(&mut self) {
@@ -1818,8 +1833,12 @@ impl CatalogDraft {
         }
     }
     pub fn paste(&mut self, text: &str) {
-        if let Self::Table(draft) = self {
-            draft.paste(text);
+        match self {
+            Self::Table(draft) => draft.paste(text),
+            Self::View(draft) => draft.paste(text),
+            Self::MaterializedView(draft) => draft.paste(text),
+            Self::Sequence(draft) => draft.paste(text),
+            _ => {}
         }
     }
     pub fn backspace(&mut self) {
