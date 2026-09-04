@@ -35,6 +35,14 @@ fn fixture(text: &str) -> (EditorWorkspace, Uuid) {
     (workspace, id)
 }
 
+fn insert_text(workspace: &mut EditorWorkspace, id: Uuid, text: &str) {
+    for character in text.chars() {
+        workspace
+            .press(id, EditorKey::Character(character))
+            .unwrap();
+    }
+}
+
 #[test]
 fn session_starts_insert_and_transitions_with_escape_and_i() {
     let (mut workspace, id) = fixture("");
@@ -97,6 +105,122 @@ fn consecutive_insert_keys_undo_as_one_insert_session() {
     workspace.press(id, EditorKey::Character('c')).unwrap();
     workspace.undo(id).unwrap();
     assert_eq!(workspace.text(id).unwrap(), "");
+}
+
+#[test]
+fn insert_session_undo_and_redo_restore_complete_text() {
+    let (mut workspace, id) = fixture("");
+    insert_text(&mut workspace, id, "select * from");
+    workspace.press(id, EditorKey::Escape).unwrap();
+
+    workspace.press(id, EditorKey::Character('u')).unwrap();
+    assert_eq!(workspace.text(id).unwrap(), "");
+
+    workspace.press(id, EditorKey::Control('r')).unwrap();
+    assert_eq!(workspace.text(id).unwrap(), "select * from");
+}
+
+#[test]
+fn undo_and_redo_restore_cursor_and_emit_one_change() {
+    let (mut workspace, id) = fixture("");
+    insert_text(&mut workspace, id, "数据🙂");
+    workspace.move_cursor_to_end(id).unwrap();
+    workspace.press(id, EditorKey::Escape).unwrap();
+    let final_position = workspace.position(id).unwrap();
+    workspace.drain_effects();
+
+    let revision = workspace.revision(id).unwrap();
+    workspace.press(id, EditorKey::Character('u')).unwrap();
+    assert_eq!(workspace.text(id).unwrap(), "");
+    assert_eq!(
+        workspace.position(id).unwrap(),
+        EditorPosition { line: 0, column: 0 }
+    );
+    assert_eq!(workspace.mode(id).unwrap(), EditorMode::Normal);
+    assert_eq!(workspace.revision(id).unwrap(), revision + 1);
+    assert!(matches!(
+        workspace.drain_effects().as_slice(),
+        [EditorEffect::Changed { .. }]
+    ));
+
+    workspace.press(id, EditorKey::Control('r')).unwrap();
+    assert_eq!(workspace.text(id).unwrap(), "数据🙂");
+    assert_eq!(workspace.position(id).unwrap(), final_position);
+    assert_eq!(workspace.mode(id).unwrap(), EditorMode::Normal);
+    assert_eq!(workspace.revision(id).unwrap(), revision + 2);
+    assert!(matches!(
+        workspace.drain_effects().as_slice(),
+        [EditorEffect::Changed { .. }]
+    ));
+}
+
+#[test]
+fn undo_and_redo_without_history_are_noops() {
+    let (mut workspace, id) = normal_fixture("");
+    let revision = workspace.revision(id).unwrap();
+
+    workspace.press(id, EditorKey::Character('u')).unwrap();
+    workspace.press(id, EditorKey::Control('r')).unwrap();
+
+    assert_eq!(workspace.text(id).unwrap(), "");
+    assert_eq!(workspace.revision(id).unwrap(), revision);
+    assert!(workspace.drain_effects().is_empty());
+}
+
+#[test]
+fn accepted_completion_stays_in_the_current_insert_transaction() {
+    let (mut workspace, id) = fixture("");
+    insert_text(&mut workspace, id, "select * from sysuser");
+    workspace
+        .replace_range(
+            id,
+            crate::sql::TextRange::new(14, 21),
+            "sys_user",
+            super::ReplacementCursor::EndOfInsertion,
+        )
+        .unwrap();
+    workspace.press(id, EditorKey::Escape).unwrap();
+
+    workspace.press(id, EditorKey::Character('u')).unwrap();
+    assert_eq!(workspace.text(id).unwrap(), "");
+
+    workspace.press(id, EditorKey::Control('r')).unwrap();
+    assert_eq!(workspace.text(id).unwrap(), "select * from sys_user");
+}
+
+#[test]
+fn new_insert_after_undo_clears_redo() {
+    let (mut workspace, id) = fixture("");
+    insert_text(&mut workspace, id, "first");
+    workspace.press(id, EditorKey::Escape).unwrap();
+    workspace.press(id, EditorKey::Character('u')).unwrap();
+
+    workspace.press(id, EditorKey::Character('i')).unwrap();
+    insert_text(&mut workspace, id, "second");
+    workspace.press(id, EditorKey::Escape).unwrap();
+    workspace.press(id, EditorKey::Control('r')).unwrap();
+
+    assert_eq!(workspace.text(id).unwrap(), "second");
+}
+
+#[test]
+fn consecutive_insert_sessions_undo_and_redo_independently() {
+    let (mut workspace, id) = fixture("");
+    insert_text(&mut workspace, id, "one");
+    workspace.press(id, EditorKey::Escape).unwrap();
+    workspace.move_cursor_to_end(id).unwrap();
+    workspace.press(id, EditorKey::Character('i')).unwrap();
+    insert_text(&mut workspace, id, " two");
+    workspace.press(id, EditorKey::Escape).unwrap();
+
+    workspace.press(id, EditorKey::Character('u')).unwrap();
+    assert_eq!(workspace.text(id).unwrap(), "one");
+    workspace.press(id, EditorKey::Character('u')).unwrap();
+    assert_eq!(workspace.text(id).unwrap(), "");
+    workspace.press(id, EditorKey::Control('r')).unwrap();
+    assert_eq!(workspace.text(id).unwrap(), "one");
+    workspace.press(id, EditorKey::Control('r')).unwrap();
+    assert_eq!(workspace.text(id).unwrap(), "one two");
 }
 
 #[test]

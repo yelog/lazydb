@@ -23,6 +23,18 @@ fn key(code: KeyCode) -> KeyEvent {
 }
 
 #[test]
+fn normal_mode_ctrl_r_routes_to_editor_redo() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::EditorKey(key(KeyCode::Esc)));
+    assert_eq!(app.active_editor_mode(), EditorMode::Normal);
+
+    let mut keymap = Keymap::default();
+    let redo = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
+
+    assert_eq!(keymap.map(redo, &app), Some(Action::EditorKey(redo)));
+}
+
+#[test]
 fn console_manager_browse_and_search_keys_are_mode_aware() {
     let mut app = App::new(Vec::new());
     app.update(Action::OpenSqlEditorList);

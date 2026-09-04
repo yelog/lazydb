@@ -269,7 +269,9 @@ fn accepting_completion_places_cursor_after_inserted_text() {
 
     editor_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
     editor_key(&mut app, KeyCode::Char('u'), KeyModifiers::NONE);
-    assert_eq!(app.active_editor_text().unwrap(), "sel");
+    assert_eq!(app.active_editor_text().unwrap(), "");
+    editor_key(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
+    assert_eq!(app.active_editor_text().unwrap(), "SELECT ");
 }
 
 #[test]
