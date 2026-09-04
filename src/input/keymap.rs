@@ -6,6 +6,7 @@ use uuid::Uuid;
 use crate::{
     action::Action,
     app::App,
+    input::{is_text_redo, is_text_undo},
     model::{
         editor::EditorMode,
         explorer::ExplorerNodeId,
@@ -2291,16 +2292,6 @@ fn map_text_input_edit(event: KeyEvent) -> Option<TextInputEdit> {
     }
 }
 
-fn is_text_undo(event: KeyEvent) -> bool {
-    event.modifiers == KeyModifiers::CONTROL && event.code == KeyCode::Char('z')
-}
-
-fn is_text_redo(event: KeyEvent) -> bool {
-    (event.modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT)
-        && matches!(event.code, KeyCode::Char('z' | 'Z')))
-        || (event.modifiers == KeyModifiers::CONTROL && event.code == KeyCode::Char('Z'))
-}
-
 fn normalize_shift_tab(mut event: KeyEvent) -> KeyEvent {
     if matches!(event.code, KeyCode::Tab | KeyCode::BackTab)
         && event.modifiers.contains(KeyModifiers::SHIFT)
@@ -2324,8 +2315,12 @@ fn map_profile_manager(event: KeyEvent, app: &App) -> Option<Action> {
         return None;
     }
     if manager.page == ProfileManagerPage::Form
-        && event.modifiers.contains(KeyModifiers::CONTROL)
-        && (event.modifiers & !(KeyModifiers::CONTROL | KeyModifiers::SHIFT)).is_empty()
+        && (event.modifiers.contains(KeyModifiers::CONTROL)
+            || is_text_undo(event)
+            || is_text_redo(event))
+        && ((event.modifiers & !(KeyModifiers::CONTROL | KeyModifiers::SHIFT)).is_empty()
+            || is_text_undo(event)
+            || is_text_redo(event))
     {
         if is_profile_history_field(manager.selected_field) {
             if is_text_redo(event) {
@@ -2864,16 +2859,25 @@ mod tests {
 
     #[test]
     fn text_history_keys_are_normalized_across_terminal_encodings() {
+        let modifier = if cfg!(target_os = "macos") {
+            KeyModifiers::SUPER
+        } else {
+            KeyModifiers::CONTROL
+        };
+        let other_modifier = if cfg!(target_os = "macos") {
+            KeyModifiers::CONTROL
+        } else {
+            KeyModifiers::SUPER
+        };
+
         assert_eq!(
-            map_text_input_edit(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL,)),
+            map_text_input_edit(KeyEvent::new(KeyCode::Char('z'), modifier)),
             Some(crate::model::text_input::TextInputEdit::Undo),
         );
         for event in [
-            KeyEvent::new(
-                KeyCode::Char('z'),
-                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-            ),
-            KeyEvent::new(KeyCode::Char('Z'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('z'), modifier | KeyModifiers::SHIFT),
+            KeyEvent::new(KeyCode::Char('Z'), modifier),
+            KeyEvent::new(KeyCode::Char('Z'), modifier | KeyModifiers::SHIFT),
         ] {
             assert_eq!(
                 map_text_input_edit(event),
@@ -2881,13 +2885,12 @@ mod tests {
             );
         }
         for event in [
-            KeyEvent::new(
-                KeyCode::Char('z'),
-                KeyModifiers::CONTROL | KeyModifiers::ALT,
-            ),
+            KeyEvent::new(KeyCode::Char('z'), other_modifier),
+            KeyEvent::new(KeyCode::Char('z'), other_modifier | KeyModifiers::SHIFT),
+            KeyEvent::new(KeyCode::Char('z'), modifier | KeyModifiers::ALT),
             KeyEvent::new(
                 KeyCode::Char('Z'),
-                KeyModifiers::CONTROL | KeyModifiers::SHIFT | KeyModifiers::ALT,
+                modifier | KeyModifiers::SHIFT | KeyModifiers::ALT,
             ),
             KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE),
             KeyEvent::new(KeyCode::Char('Z'), KeyModifiers::SHIFT),
@@ -2913,14 +2916,28 @@ mod tests {
         ));
         let mut keymap = Keymap::default();
         assert_eq!(
-            keymap.map(control_key('z'), &app),
+            keymap.map(
+                KeyEvent::new(
+                    KeyCode::Char('z'),
+                    if cfg!(target_os = "macos") {
+                        KeyModifiers::SUPER
+                    } else {
+                        KeyModifiers::CONTROL
+                    },
+                ),
+                &app,
+            ),
             Some(Action::RelationEditUndo)
         );
         assert_eq!(
             keymap.map(
                 KeyEvent::new(
                     KeyCode::Char('z'),
-                    KeyModifiers::CONTROL | KeyModifiers::SHIFT
+                    (if cfg!(target_os = "macos") {
+                        KeyModifiers::SUPER
+                    } else {
+                        KeyModifiers::CONTROL
+                    }) | KeyModifiers::SHIFT,
                 ),
                 &app,
             ),

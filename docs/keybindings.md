@@ -211,8 +211,8 @@ or form, returns from preview, or cancels a busy editor.
 | arrows, Home, End | Move cursor |
 | Backspace, Delete | Delete text |
 | `Ctrl-w/U/H` | Delete previous word, to line start, or backspace |
-| `Ctrl-Z` | Undo the focused editor text edit |
-| `Ctrl-Shift-Z` | Redo the focused editor text edit |
+| `Cmd-Z` (macOS), `Ctrl-Z` (Linux/Windows) | Undo the focused editor text edit |
+| `Cmd-Shift-Z` (macOS), `Ctrl-Shift-Z` (Linux/Windows) | Redo the focused editor text edit |
 | `Ctrl-Space` | Trigger completion |
 | `Esc` | Return to Normal |
 | `F5` | Run SQL |
@@ -229,15 +229,21 @@ search, and confirmation inputs.
 
 | Keys | Behavior |
 | --- | --- |
-| `Ctrl-Z` | Undo the focused input's latest edit group |
-| `Ctrl-Shift-Z` | Redo the focused input's latest undone edit group |
-| `Ctrl-Shift-Z` or `Ctrl-Z` with shifted `Z` | Alternate terminal encoding of redo |
+| `Cmd-Z` (macOS), `Ctrl-Z` (Linux/Windows) | Undo the focused input's latest edit group |
+| `Cmd-Shift-Z` (macOS), `Ctrl-Shift-Z` (Linux/Windows) | Redo the focused input's latest undone edit group |
+
+Terminals may report redo either as lowercase `z` with Shift or as uppercase `Z`;
+both encodings are accepted with the platform modifier.
 
 Consecutive typed characters and consecutive deletions are grouped into one
 edit. Paste, completion replacement, word deletion, line deletion, and clear
 are atomic edits. Moving to another field closes the current edit group. A new
 edit after undo discards the redo branch. History is local to the focused field
 and is not persisted.
+
+On macOS, Command shortcuts require a terminal that forwards the Command modifier
+as a Super key event. If the terminal reserves `Cmd-Z` or does not support enhanced
+keyboard reporting, configure the terminal to forward that key combination.
 
 ### Visual
 

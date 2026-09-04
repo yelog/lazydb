@@ -140,16 +140,6 @@ fn decode_editor_text(text: &str) -> Result<String, EditorError> {
         .ok_or(EditorError::MissingSentinel)
 }
 
-fn is_editor_undo(event: KeyEvent) -> bool {
-    event.modifiers == KeyModifiers::CONTROL && event.code == KeyCode::Char('z')
-}
-
-fn is_editor_redo(event: KeyEvent) -> bool {
-    (event.modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT)
-        && matches!(event.code, KeyCode::Char('z' | 'Z')))
-        || (event.modifiers == KeyModifiers::CONTROL && event.code == KeyCode::Char('Z'))
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum EditorKey {
     Character(char),
@@ -381,9 +371,9 @@ impl EditorWorkspace {
     }
 
     pub(crate) fn key(&mut self, id: Uuid, event: KeyEvent) -> Result<(), EditorError> {
-        let key = if is_editor_redo(event) {
+        let key = if crate::input::is_text_redo(event) {
             EditorKey::Redo
-        } else if is_editor_undo(event) {
+        } else if crate::input::is_text_undo(event) {
             EditorKey::Undo
         } else if event.modifiers.contains(KeyModifiers::CONTROL) {
             match event.code {

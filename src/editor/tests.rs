@@ -121,22 +121,45 @@ fn insert_session_undo_and_redo_restore_complete_text() {
 }
 
 #[test]
-fn ctrl_history_in_insert_mode_preserves_insert_mode() {
+fn platform_history_keys_in_insert_mode_preserve_insert_mode() {
     let (mut workspace, id) = fixture("");
     insert_text(&mut workspace, id, "hello");
-    let undo = crossterm::event::KeyEvent::new(
-        crossterm::event::KeyCode::Char('z'),
-        crossterm::event::KeyModifiers::CONTROL,
-    );
+    let modifier = if cfg!(target_os = "macos") {
+        crossterm::event::KeyModifiers::SUPER
+    } else {
+        crossterm::event::KeyModifiers::CONTROL
+    };
+    let undo = crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Char('z'), modifier);
     let redo = crossterm::event::KeyEvent::new(
         crossterm::event::KeyCode::Char('z'),
-        crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::SHIFT,
+        modifier | crossterm::event::KeyModifiers::SHIFT,
     );
 
     workspace.key(id, undo).unwrap();
     assert_eq!(workspace.text(id).unwrap(), "");
     assert_eq!(workspace.mode(id).unwrap(), EditorMode::Insert);
     workspace.key(id, redo).unwrap();
+    assert_eq!(workspace.text(id).unwrap(), "hello");
+    assert_eq!(workspace.mode(id).unwrap(), EditorMode::Insert);
+}
+
+#[test]
+fn non_platform_history_modifier_does_not_edit_sql_buffer() {
+    let (mut workspace, id) = fixture("");
+    insert_text(&mut workspace, id, "hello");
+    let modifier = if cfg!(target_os = "macos") {
+        crossterm::event::KeyModifiers::CONTROL
+    } else {
+        crossterm::event::KeyModifiers::SUPER
+    };
+
+    workspace
+        .key(
+            id,
+            crossterm::event::KeyEvent::new(crossterm::event::KeyCode::Char('z'), modifier),
+        )
+        .unwrap();
+
     assert_eq!(workspace.text(id).unwrap(), "hello");
     assert_eq!(workspace.mode(id).unwrap(), EditorMode::Insert);
 }

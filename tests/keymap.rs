@@ -56,11 +56,11 @@ fn console_manager_browse_and_search_keys_are_mode_aware() {
     app.update(Action::SqlEditorListSearchStart);
 
     assert_eq!(
-        keymap.map(ctrl('z'), &app),
+        keymap.map(text_undo(), &app),
         Some(Action::SqlEditorListInputUndo)
     );
     assert_eq!(
-        keymap.map(ctrl_shift('z'), &app),
+        keymap.map(text_redo(), &app),
         Some(Action::SqlEditorListInputRedo)
     );
 
@@ -182,10 +182,22 @@ fn ctrl(character: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL)
 }
 
-fn ctrl_shift(character: char) -> KeyEvent {
+fn text_history_modifier() -> KeyModifiers {
+    if cfg!(target_os = "macos") {
+        KeyModifiers::SUPER
+    } else {
+        KeyModifiers::CONTROL
+    }
+}
+
+fn text_undo() -> KeyEvent {
+    KeyEvent::new(KeyCode::Char('z'), text_history_modifier())
+}
+
+fn text_redo() -> KeyEvent {
     KeyEvent::new(
-        KeyCode::Char(character),
-        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        KeyCode::Char('z'),
+        text_history_modifier() | KeyModifiers::SHIFT,
     )
 }
 
@@ -791,11 +803,8 @@ fn focused_data_query_accepts_text_history_keys() {
     app.active_tab = 1;
     let mut keymap = Keymap::default();
 
-    assert_eq!(keymap.map(ctrl('z'), &app), Some(Action::DataQueryUndo));
-    assert_eq!(
-        keymap.map(ctrl_shift('z'), &app),
-        Some(Action::DataQueryRedo)
-    );
+    assert_eq!(keymap.map(text_undo(), &app), Some(Action::DataQueryUndo));
+    assert_eq!(keymap.map(text_redo(), &app), Some(Action::DataQueryRedo));
 }
 
 #[test]
@@ -803,9 +812,12 @@ fn focused_catalog_table_field_accepts_text_history_keys() {
     let app = table_editor_app();
     let mut keymap = Keymap::default();
 
-    assert_eq!(keymap.map(ctrl('z'), &app), Some(Action::CatalogEditorUndo));
     assert_eq!(
-        keymap.map(ctrl_shift('z'), &app),
+        keymap.map(text_undo(), &app),
+        Some(Action::CatalogEditorUndo)
+    );
+    assert_eq!(
+        keymap.map(text_redo(), &app),
         Some(Action::CatalogEditorRedo)
     );
 }
@@ -3233,12 +3245,12 @@ fn profile_form_maps_navigation_editing_and_commands() {
     ] {
         assert_eq!(keymap.map(event, &app), Some(expected));
     }
-    assert_eq!(keymap.map(ctrl('z'), &app), Some(Action::ProfileUndo));
-    assert_eq!(keymap.map(ctrl_shift('z'), &app), Some(Action::ProfileRedo));
+    assert_eq!(keymap.map(text_undo(), &app), Some(Action::ProfileUndo));
+    assert_eq!(keymap.map(text_redo(), &app), Some(Action::ProfileRedo));
     app.profile_manager.as_mut().unwrap().selected_field = ProfileField::Url;
-    assert_eq!(keymap.map(ctrl('z'), &app), Some(Action::ProfileUndo));
+    assert_eq!(keymap.map(text_undo(), &app), Some(Action::ProfileUndo));
     app.profile_manager.as_mut().unwrap().selected_field = ProfileField::Password;
-    assert_eq!(keymap.map(ctrl_shift('z'), &app), Some(Action::ProfileRedo));
+    assert_eq!(keymap.map(text_redo(), &app), Some(Action::ProfileRedo));
     for character in ['h', 'j', 'k', 'l'] {
         assert_eq!(
             keymap.map(key(KeyCode::Char(character)), &app),
