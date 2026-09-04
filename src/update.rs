@@ -21,11 +21,12 @@ const CHANNEL_MANIFEST_SCHEMA: u32 = 1;
 const DEFAULT_CHANNEL_BASE_URL: &str = "https://lazydb.yelog.org/channels";
 const GITHUB_HOST: &str = "github.com";
 const PAGES_HOST: &str = "lazydb.yelog.org";
-const SUPPORTED_TARGETS: [&str; 4] = [
+const SUPPORTED_TARGETS: [&str; 5] = [
     "x86_64-apple-darwin",
     "aarch64-apple-darwin",
     "x86_64-unknown-linux-gnu",
     "aarch64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
 ];
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
@@ -154,7 +155,12 @@ fn validate_channel_manifest(manifest: ChannelManifest) -> Result<ChannelManifes
     }
     for target in SUPPORTED_TARGETS {
         let asset = &manifest.assets[target];
-        let expected = format!("lazydb_{}_{}.tar.xz", manifest.version, target);
+        let extension = if target == "x86_64-pc-windows-msvc" {
+            "zip"
+        } else {
+            "tar.xz"
+        };
+        let expected = format!("lazydb_{}_{}.{}", manifest.version, target, extension);
         if asset.url
             != format!(
                 "https://github.com/yelog/lazydb/releases/download/{}/{}",
@@ -580,6 +586,7 @@ fn current_target(state: Option<&InstallationState>) -> Option<String> {
                     ("aarch64", "macos") => "aarch64-apple-darwin",
                     ("x86_64", "linux") => "x86_64-unknown-linux-gnu",
                     ("aarch64", "linux") => "aarch64-unknown-linux-gnu",
+                    ("x86_64", "windows") => "x86_64-pc-windows-msvc",
                     _ => "unsupported",
                 }
                 .to_owned(),
@@ -780,7 +787,12 @@ async fn apply_native_update<H: UpdateHttpClient>(
         let _ = fs::remove_dir_all(&staging);
         return Err(error);
     }
-    let binary = release.join("lazydb");
+    let binary_name = if target == "x86_64-pc-windows-msvc" {
+        "lazydb.exe"
+    } else {
+        "lazydb"
+    };
+    let binary = release.join(binary_name);
     let reported = match run_staged_version(&binary) {
         Ok(version) => version,
         Err(error) => {
@@ -801,7 +813,7 @@ async fn apply_native_update<H: UpdateHttpClient>(
     let destination = releases.join(&manifest.version);
     let destination_created = !destination.exists();
     if !destination_created {
-        let existing_binary = destination.join("lazydb");
+        let existing_binary = destination.join(binary_name);
         let existing_is_valid = existing_binary.is_file()
             && run_staged_version(&existing_binary)
                 .is_ok_and(|version| version == manifest.version);
@@ -838,10 +850,15 @@ fn extract_archive(
     let mut decoder = XzDecoder::new(Cursor::new(archive));
     let mut tar_bytes = Vec::new();
     decoder.read_to_end(&mut tar_bytes)?;
-    let mut archive = tar::Archive::new(Cursor::new(&tar_bytes));
-    let entries = archive.entries()?.collect::<Result<Vec<_>, _>>()?;
+    let mut tar_archive = tar::Archive::new(Cursor::new(&tar_bytes));
+    let entries = tar_archive.entries()?.collect::<Result<Vec<_>, _>>()?;
     let mut names = std::collections::BTreeSet::new();
-    let binary_name = format!("{expected_root}/lazydb");
+    let binary_file = if target == "x86_64-pc-windows-msvc" {
+        "lazydb.exe"
+    } else {
+        "lazydb"
+    };
+    let binary_name = format!("{expected_root}/{binary_file}");
     let mut root_seen = false;
     let mut binary_seen = false;
     for entry in &entries {
@@ -866,8 +883,38 @@ fn extract_archive(
     if !root_seen || !binary_seen {
         anyhow::bail!("archive does not contain the expected executable")
     }
-    let mut archive = tar::Archive::new(Cursor::new(&tar_bytes));
-    archive.unpack(destination)?;
+    if target == "x86_64-pc-windows-msvc" {
+        let mut zip = zip::ZipArchive::new(Cursor::new(archive))?;
+        for index in 0..zip.len() {
+            let entry = zip.by_index(index)?;
+            let name = entry.name().trim_end_matches('/');
+            if !archive_entry_path_is_normal(name)
+                || !name.starts_with(&format!("{expected_root}/"))
+                || entry.is_symlink()
+            {
+                anyhow::bail!("unsafe archive entry: {name}")
+            }
+        }
+        let mut zip = zip::ZipArchive::new(Cursor::new(archive))?;
+        for index in 0..zip.len() {
+            let mut entry = zip.by_index(index)?;
+            let name = entry.name().trim_end_matches('/');
+            let relative = name.strip_prefix(&format!("{expected_root}/")).unwrap();
+            let output = destination.join(relative);
+            if entry.is_dir() {
+                fs::create_dir_all(output)?;
+            } else {
+                if let Some(parent) = output.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                let mut file = fs::File::create(output)?;
+                std::io::copy(&mut entry, &mut file)?;
+            }
+        }
+    } else {
+        let mut tar_archive = tar::Archive::new(Cursor::new(&tar_bytes));
+        tar_archive.unpack(destination)?;
+    }
     fs::rename(
         destination.join(&expected_root),
         destination.join("lazydb-root"),
@@ -883,9 +930,9 @@ fn extract_archive(
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut permissions = fs::metadata(destination.join("lazydb"))?.permissions();
+        let mut permissions = fs::metadata(destination.join(binary_file))?.permissions();
         permissions.set_mode(0o755);
-        fs::set_permissions(destination.join("lazydb"), permissions)?;
+        fs::set_permissions(destination.join(binary_file), permissions)?;
     }
     Ok(())
 }
@@ -1417,7 +1464,8 @@ mod tests {
                     (*target).to_owned(),
                     ManifestAsset {
                         url: format!(
-                            "https://github.com/yelog/lazydb/releases/download/v1.3.0/lazydb_1.3.0_{target}.tar.xz"
+                            "https://github.com/yelog/lazydb/releases/download/v1.3.0/lazydb_1.3.0_{target}.{}",
+                            if *target == "x86_64-pc-windows-msvc" { "zip" } else { "tar.xz" }
                         ),
                         sha256: "a".repeat(64),
                     },

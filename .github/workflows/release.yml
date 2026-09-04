@@ -79,6 +79,8 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -89,10 +91,13 @@ jobs:
       - run: rustup toolchain install 1.94.0 --target "${{ matrix.target }}" --profile minimal --no-self-update
       - run: rustup default 1.94.0
       - name: Build
+        shell: bash
         run: cargo build --release --locked --target "${{ matrix.target }}"
       - name: Smoke test
+        if: matrix.os != 'windows-2025'
         run: scripts/release/smoke-artifact.sh "target/${{ matrix.target }}/release/lazydb" "${{ needs.plan.outputs.version }}"
       - name: Report binary size and dynamic dependencies
+        if: matrix.os != 'windows-2025'
         run: scripts/release/check-binary-size.sh "target/${{ matrix.target }}/release/lazydb"
       - name: Assemble archive
         env:
@@ -103,9 +108,16 @@ jobs:
           mkdir -p dist/package
           staging="dist/package/lazydb_${VERSION}_${TARGET}"
           mkdir "$staging"
-          cp "target/$TARGET/release/lazydb" "$staging/lazydb"
+          executable="target/$TARGET/release/lazydb"
+          output_name=lazydb
+          if [ "$TARGET" = x86_64-pc-windows-msvc ]; then executable="${executable}.exe"; output_name=lazydb.exe; fi
+          cp "$executable" "$staging/$output_name"
           cp README.md LICENSE-MIT LICENSE-APACHE "$staging/"
-          tar -cJf "dist/lazydb_${VERSION}_${TARGET}.tar.xz" -C dist/package "lazydb_${VERSION}_${TARGET}"
+          if [ "$TARGET" = x86_64-pc-windows-msvc ]; then
+             (cd dist/package && 7z a -tzip "../lazydb_${VERSION}_${TARGET}.zip" "lazydb_${VERSION}_${TARGET}")
+          else
+            tar -cJf "dist/lazydb_${VERSION}_${TARGET}.tar.xz" -C dist/package "lazydb_${VERSION}_${TARGET}"
+          fi
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4.4.3
         with:
           name: release-${{ matrix.target }}
@@ -161,9 +173,10 @@ jobs:
         run: |
           set -eu
           cp "$GITHUB_WORKSPACE/install.sh" dist/lazydb-installer.sh
+          cp "$GITHUB_WORKSPACE/pages/install.ps1" dist/lazydb-installer.ps1
           chmod 0755 dist/lazydb-installer.sh
           find dist -mindepth 2 -type f \( -name '*.deb' -o -name '*.rpm' -o -name '*.pkg.tar.zst' \) -exec cp {} dist/ \; 2>/dev/null || true
-          if [ "$CHANNEL" = beta ]; then rm -f dist/lazydb-installer.sh; fi
+          if [ "$CHANNEL" = beta ]; then rm -f dist/lazydb-installer.sh dist/lazydb-installer.ps1; fi
           scripts/release/generate-sbom.sh "$VERSION" "dist/lazydb-${VERSION}-sbom.spdx.json"
           (cd dist && find . -maxdepth 1 -type f ! -name SHA256SUMS -exec basename {} \; | sort | xargs sha256sum > SHA256SUMS)
           body=$(scripts/release/changelog-section.sh "$VERSION")

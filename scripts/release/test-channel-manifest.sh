@@ -12,7 +12,8 @@ make_fixture() {
     for target in x86_64-apple-darwin aarch64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
         printf '%s\n' "$target" > "$dir/lazydb_${version}_${target}.tar.xz"
     done
-    (cd "$dir" && sha256sum lazydb_*.tar.xz > SHA256SUMS)
+    printf '%s\n' windows > "$dir/lazydb_${version}_x86_64-pc-windows-msvc.zip"
+    (cd "$dir" && sha256sum lazydb_*.tar.xz lazydb_*.zip > SHA256SUMS)
 }
 
 assert_rejects() {
@@ -39,7 +40,7 @@ for path, channel, version in ((sys.argv[1], "stable", "1.2.3"), (sys.argv[2], "
     assert data["channel"] == channel and data["version"] == version
     assert data["tag"] == "v" + version and data["prerelease"] == (channel == "beta")
     assert data["release_url"].startswith("https://github.com/yelog/lazydb/")
-    assert set(data["assets"]) == {"x86_64-apple-darwin", "aarch64-apple-darwin", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"}
+    assert set(data["assets"]) == {"x86_64-apple-darwin", "aarch64-apple-darwin", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "x86_64-pc-windows-msvc"}
     for asset in data["assets"].values():
         assert asset["url"].startswith("https://github.com/yelog/lazydb/releases/download/")
         assert "evil.example" not in asset["url"]

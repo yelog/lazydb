@@ -11,18 +11,20 @@ make_assets() {
     for target in x86_64-apple-darwin aarch64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
         printf '%s\n' "$target" > "$dir/lazydb_${version}_${target}.tar.xz"
     done
-    (cd "$dir" && sha256sum lazydb_*.tar.xz > SHA256SUMS)
+    printf '%s\n' windows > "$dir/lazydb_${version}_x86_64-pc-windows-msvc.zip"
+    (cd "$dir" && sha256sum lazydb_*.tar.xz lazydb_*.zip > SHA256SUMS)
     if [ "$version" = 1.2.3 ]; then
         for name in lazydb_1.2.3_amd64.deb lazydb_1.2.3_arm64.deb lazydb-1.2.3-amd64.rpm lazydb-1.2.3-arm64.rpm lazydb-1.2.3-x86_64.pkg.tar.zst lazydb-1.2.3-aarch64.pkg.tar.zst; do
             printf '%s\n' package > "$dir/$name"
         done
         printf '%s\n' installer > "$dir/lazydb-installer.sh"
+        printf '%s\n' installer > "$dir/lazydb-installer.ps1"
     fi
     printf '%s\n' '{}' > "$dir/lazydb-${version}-sbom.spdx.json"
 }
 
 mkdir -p "$TMP/existing" "$TMP/source" "$TMP/stable-assets" "$TMP/beta-assets"
-cp "$ROOT/pages/install.sh" "$ROOT/pages/install-beta.sh" "$ROOT/pages/install-core.sh" "$ROOT/pages/CNAME" "$TMP/source/"
+cp "$ROOT/pages/install.sh" "$ROOT/pages/install-beta.sh" "$ROOT/pages/install-core.sh" "$ROOT/pages/install.ps1" "$ROOT/pages/CNAME" "$TMP/source/"
 printf '%s\n' preserved > "$TMP/existing/beta.json"
 make_assets "$TMP/stable-assets" 1.2.3
 sh "$ROOT/scripts/release/assemble-pages.sh" stable 1.2.3 2026-08-31T12:00:00Z "$TMP/stable-assets" "$TMP/source" "$TMP/existing" "$TMP/output"
@@ -31,7 +33,7 @@ cmp "$TMP/output/channels/stable.json" "$TMP/output-again/channels/stable.json"
 [ -f "$TMP/output/channels/stable.json" ]
 [ "$(cat "$TMP/output/channels/beta.json")" = preserved ]
 [ "$(cat "$TMP/output/CNAME")" = lazydb.yelog.org ]
-[ -x "$TMP/output/install.sh" ] && [ -x "$TMP/output/install-beta.sh" ] && [ -x "$TMP/output/install-core.sh" ]
+[ -x "$TMP/output/install.sh" ] && [ -x "$TMP/output/install-beta.sh" ] && [ -x "$TMP/output/install-core.sh" ] && [ -f "$TMP/output/install.ps1" ]
 [ "$(grep -c 'set -eu' "$TMP/output/install.sh")" -eq 1 ]
 [ "$(grep -c 'LAZYDB_CHANNEL_LOCKED=stable' "$TMP/output/install.sh")" -eq 1 ]
 [ "$(grep -c 'LAZYDB_CHANNEL_LOCKED=beta' "$TMP/output/install-beta.sh")" -eq 1 ]
@@ -40,6 +42,7 @@ channels/stable.json
 CNAME
 install-beta.sh
 install-core.sh
+install.ps1
 install.sh" ]
 if find "$TMP/output" -type f -name '*.tar.xz' | grep . >/dev/null 2>&1; then exit 1; fi
 

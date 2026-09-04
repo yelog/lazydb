@@ -1,7 +1,6 @@
-# LazyDB
-
-**A keyboard-first database workspace for the terminal.**
-
+<p align="center"><strong>LazyDB</strong> is a keyboard-first database workspace for the terminal.
+<p align="center"> </p>
+</br>
 LazyDB lets you browse schemas, write and run SQL, inspect relations, manage
 connection profiles, and expose project-scoped database access to coding agents
 without leaving your terminal. It is written in Rust and supports PostgreSQL,
@@ -10,6 +9,65 @@ Oracle MySQL, SQL Server, and SQLite.
 > **Project status:** LazyDB is currently in beta. The core database workspace,
 > connection management, SQL execution, and coding-agent interfaces are usable,
 > but LazyDB is not yet a production-ready replacement for DataGrip.
+
+---
+
+## Quickstart
+
+### Installing and running LazyDB
+
+Run the following on Mac or Linux to install LazyDB
+
+```bash
+curl -fsSL https://lazydb.yelog.org/install.sh | sh
+```
+
+Run the following on Windows to install LazyDB:
+
+```powershell
+powershell -ExecutionPolicy Bypass -Command "irm https://lazydb.yelog.org/install.ps1 | iex"
+```
+
+The Windows installer supports 64-bit Windows (MSVC), downloads the release
+release metadata and ZIP archive over HTTPS, verifies the SHA-256 checksum, and
+adds `%LOCALAPPDATA%\LazyDB\bin` to the user `PATH`. Open a new terminal after
+installation. To install the beta channel, set `$env:LAZYDB_CHANNEL = "beta"`
+before running the command. You can also download the Windows ZIP from the
+[latest GitHub Release](https://github.com/yelog/lazydb/releases/latest).
+
+LazyDB can also be installed via Homebrew, Cargo, or by building from source. See
+
+```bash
+# install using Homebrew
+brew install yelog/tap/lazydb
+
+```
+
+<details>
+<summary>You can also go to the <a href="https://github.com/yelog/lazydb/releases/latest">latest GitHub Release</a> and download the appropriate binary for your platform.</summary>
+
+Each GitHub Release contains many executables, but in practice, you likely want one of these:
+
+- macOS
+  - Apple Silicon/arm64: `lazydb_xxx_aarch64-apple-darwin.tar.xz`
+  - x86_64 (older Mac hardware): `lazydb_xxx_x86_64-apple-darwin.tar.xz`
+- Linux
+  - x86_64: `lazydb_xxx_x86_64-unknown-linux-gnu.tar.xz`
+  - arm64: `lazydb_xxx_aarch64-unknown-linux-gnu.tar.xz`
+
+For example, on Apple silicon macOS with `v0.1.0-beta.2`:
+
+```bash
+tar -xJf lazydb_0.1.0-beta.2_aarch64-apple-darwin.tar.xz
+mkdir -p "$HOME/.local/bin"
+cp lazydb_0.1.0-beta.2_aarch64-apple-darwin/lazydb "$HOME/.local/bin/lazydb"
+chmod +x "$HOME/.local/bin/lazydb"
+lazydb version
+```
+
+Ensure `$HOME/.local/bin` is in `PATH`. To upgrade an offline installation,
+
+</details>
 
 ## Features
 
@@ -54,190 +112,6 @@ Oracle MySQL, SQL Server, and SQLite.
 MariaDB is not part of the current MySQL catalog contract. See the complete
 [database capability matrix](docs/database-capabilities.md) for metadata,
 paging, relation DDL, and version details.
-
-## Installation
-
-### Homebrew
-
-On supported macOS systems, install the latest stable release from the external
-tap:
-
-```bash
-brew install yelog/tap/lazydb
-```
-
-Homebrew owns this installation. Upgrade it with `brew update` followed by
-`brew upgrade yelog/tap/lazydb`, not with `lazydb update`.
-
-### Pages installer
-
-The stable Pages installer is the canonical macOS and Linux installation path.
-It verifies a channel manifest and the matching archive SHA-256 digest, then
-installs to `~/.local/bin` by default. It never uses `sudo`:
-
-```bash
-curl -fsSL https://lazydb.yelog.org/install.sh | sh
-```
-
-The beta installer is clearly separate and never changes the stable channel:
-
-```bash
-curl -fsSL https://lazydb.yelog.org/install-beta.sh | sh
-```
-
-Beta is for testing prereleases. It does not update Homebrew, the stable
-installer, or the `latest` release path. To inspect either installer before
-running it, download it first:
-
-```bash
-curl -fsSL \
-  https://lazydb.yelog.org/install.sh \
-  -o lazydb-installer.sh
-less lazydb-installer.sh
-sh lazydb-installer.sh --install-dir "$HOME/.local/bin"
-```
-
-The installer supports `--channel stable|beta`, `--version VERSION`, and
-`--install-dir PATH`. The stable and beta Pages entrypoints lock their own
-channel, so use the matching entrypoint when selecting a channel explicitly.
-
-### Offline installation from GitHub Releases
-
-For a machine without internet access, download the matching archive from
-[GitHub Releases](https://github.com/yelog/lazydb/releases) on a connected
-machine, then transfer it to the offline machine. Each archive contains a
-standalone `lazydb` executable; it is not an `apt`, DNF, or Pacman package.
-
-Choose the archive that matches the offline machine:
-
-| Platform | Release target |
-| --- | --- |
-| macOS on Apple silicon | `aarch64-apple-darwin` |
-| macOS on Intel | `x86_64-apple-darwin` |
-| Linux on ARM64 | `aarch64-unknown-linux-gnu` |
-| Linux on x86-64 | `x86_64-unknown-linux-gnu` |
-
-After transferring the archive to the offline machine, extract it, create a
-user-local binary directory, copy the executable, and verify the installation.
-For example, on Apple silicon macOS with `v0.1.0-beta.2`:
-
-```bash
-tar -xJf lazydb_0.1.0-beta.2_aarch64-apple-darwin.tar.xz
-mkdir -p "$HOME/.local/bin"
-cp lazydb_0.1.0-beta.2_aarch64-apple-darwin/lazydb "$HOME/.local/bin/lazydb"
-chmod +x "$HOME/.local/bin/lazydb"
-lazydb version
-```
-
-Ensure `$HOME/.local/bin` is in `PATH`. To upgrade an offline installation,
-repeat the download, transfer, extraction, and replacement steps with the newer
-release. Use the [Pages installer](#pages-installer) instead when the target
-machine has internet access and should receive automatic channel updates.
-
-### Cargo package
-
-For a source-based Cargo installation:
-
-```bash
-cargo install lazydb
-```
-
-Cargo owns this installation. Upgrade it with `cargo install lazydb`; the
-application reports that manager action rather than replacing the Cargo binary.
-
-### Build from source
-
-Requirements:
-
-- Rust 1.94 or newer
-- macOS or Linux
-- A UTF-8 terminal; truecolor is recommended
-- Nerd Fonts 3.x are recommended for branded database icons
-
-```bash
-cargo build --release
-```
-
-Unicode and ASCII icon fallbacks are available when Nerd Font glyphs are not
-installed.
-
-## Quick Start
-
-Verify a binary installation:
-
-```bash
-lazydb version
-lazydb doctor
-```
-
-Check for an available update without changing files:
-
-```bash
-lazydb update --check
-```
-
-Apply an update for a native Pages installation:
-
-```bash
-lazydb update
-```
-
-`lazydb update` checks the installed manager and selected channel. Native Pages
-installations download and verify the channel manifest and apply a newer
-release atomically. `lazydb update --check` performs the same check but never
-applies it. Use `--channel beta` or `--channel stable` to select a channel for
-the operation; a successful native update records that channel. Homebrew,
-Debian, RPM, Arch, and Cargo installations remain owned by their managers and
-receive an explicit manager command instead. npm-managed installations are
-detected and protected, but official npm distribution is currently unavailable;
-use the Pages installer or Homebrew instead.
-
-Inside the TUI, the header shows the running version. Press `F9` or click the
-version/update badge to open the Update Center. Startup checks run asynchronously
-after the first frame and are cached for 24 hours by default. A native update can
-be installed without interrupting the current session; the current process keeps
-running until `Restart now` is selected. `Later` leaves the session untouched.
-Package-manager and source installations are never overwritten and instead show
-the appropriate upgrade guidance.
-
-Start LazyDB:
-
-```bash
-lazydb
-```
-
-On first launch, the Profile Manager opens automatically. Select PostgreSQL,
-MySQL, SQL Server, or SQLite; enter the connection details; test the connection;
-then save and connect. Saved profiles remain available the next time LazyDB
-starts, and passwords can use local encrypted storage or the native
-operating-system secret store when available.
-
-### Explorer Connection Groups
-
-Saved connections can belong to at most one custom group. In Explorer, a group
-is projected independently in the primary and `others` regions when it has
-members in both; empty groups remain available in the group picker but are not
-shown as tree rows. Use `a` to create a group, `e` to rename a selected group,
-`d` to delete it, and `g` on a saved profile to change its membership. Deleting
-a group ungroups its connections without deleting them. `J` and `K` reorder a
-connection only among visible siblings in the same region and group.
-
-The V6 `connections.toml` format stores group metadata and profile order. It
-does not store plaintext credentials:
-
-```toml
-version = 6
-
-[[groups]]
-id = "11111111-1111-1111-1111-111111111111"
-name = "Production"
-
-[[profiles]]
-id = "22222222-2222-2222-2222-222222222222"
-name = "Billing"
-group_id = "11111111-1111-1111-1111-111111111111"
-# existing connection fields follow
-```
 
 ## Coding-Agent Access
 

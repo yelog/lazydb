@@ -16,6 +16,7 @@ TARGETS = (
     "aarch64-apple-darwin",
     "x86_64-unknown-linux-gnu",
     "aarch64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
 )
 REPOSITORY = "yelog/lazydb"
 TAG_RE = re.compile(r"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-beta\.[1-9][0-9]*)?$")
@@ -59,7 +60,8 @@ def main() -> None:
     checksums = parse_checksums(asset_dir_path / "SHA256SUMS")
     assets = {}
     for target in TARGETS:
-        name = f"lazydb_{version}_{target}.tar.xz"
+        suffix = "zip" if target == "x86_64-pc-windows-msvc" else "tar.xz"
+        name = f"lazydb_{version}_{target}.{suffix}"
         asset = asset_dir_path / name
         if not asset.is_file():
             fail(f"missing target archive: {name}")

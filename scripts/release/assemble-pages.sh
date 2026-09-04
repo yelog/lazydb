@@ -23,7 +23,7 @@ case "$channel" in stable|beta) ;; *) printf 'pages: invalid channel: %s\n' "$ch
 
 "$SCRIPT_DIR/check-assets.sh" "$channel" "$version" "$assets"
 
-for name in install-core.sh CNAME; do
+for name in install-core.sh install.ps1 CNAME; do
     [ -f "$source_pages/$name" ] || { printf 'pages: missing source file: %s\n' "$name" >&2; exit 1; }
 done
 [ "$(cat "$source_pages/CNAME")" = 'lazydb.yelog.org' ] || {
@@ -47,6 +47,7 @@ mkdir -p "$output/channels"
     tail -n +2 "$source_pages/install-core.sh"
 } > "$output/install-beta.sh"
 cp "$source_pages/install-core.sh" "$output/"
+cp "$source_pages/install.ps1" "$output/install.ps1"
 cp "$source_pages/CNAME" "$output/CNAME"
 chmod 0755 "$output/install.sh" "$output/install-beta.sh" "$output/install-core.sh"
 
@@ -58,5 +59,5 @@ fi
 
 # The allow-list above is deliberate: release archives never become Pages files.
 unexpected=$(find "$output" -type f ! -name 'install.sh' ! -name 'install-beta.sh' \
-    ! -name 'install-core.sh' ! -name 'CNAME' ! -name 'stable.json' ! -name 'beta.json' -print)
+    ! -name 'install-core.sh' ! -name 'install.ps1' ! -name 'CNAME' ! -name 'stable.json' ! -name 'beta.json' -print)
 [ -z "$unexpected" ] || { printf 'pages: unexpected output file: %s\n' "$unexpected" >&2; exit 1; }
