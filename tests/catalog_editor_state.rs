@@ -461,6 +461,17 @@ fn table_draft_delegates_text_edits_to_general_and_column_inputs() {
 }
 
 #[test]
+fn table_draft_undo_and_redo_restore_the_focused_text_field() {
+    let mut draft = TableDraft::new("public");
+    draft.insert('a');
+    draft.insert('b');
+    draft.undo();
+    assert_eq!(draft.name.value(), "");
+    draft.redo();
+    assert_eq!(draft.name.value(), "ab");
+}
+
+#[test]
 fn table_draft_pastes_multicharacter_unicode_and_newline_values_into_focused_names() {
     let mut draft = CatalogDraft::Table(TableDraft::new("public"));
     draft.paste("events\n数据🙂");

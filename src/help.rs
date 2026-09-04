@@ -3082,6 +3082,7 @@ impl HelpState {
         self.selected = 0;
     }
     pub(crate) fn move_selection(&mut self, delta: isize, count: usize) {
+        self.query.finish_edit_group();
         if count == 0 {
             self.selected = 0;
             return;

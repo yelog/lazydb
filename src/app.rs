@@ -1739,6 +1739,8 @@ impl App {
                         | Action::DataQueryMoveHome
                         | Action::DataQueryMoveEnd
                         | Action::DataQueryClear
+                        | Action::DataQueryUndo
+                        | Action::DataQueryRedo
                         | Action::DataQueryCompletionNext
                         | Action::DataQueryCompletionPrevious
                         | Action::DataQueryCompletionAccept
@@ -1766,6 +1768,8 @@ impl App {
                         | Action::RelationEditMoveRight
                         | Action::RelationEditMoveHome
                         | Action::RelationEditMoveEnd
+                        | Action::RelationEditUndo
+                        | Action::RelationEditRedo
                         | Action::RelationEditConfirm
                         | Action::RelationEditCancel
                         | Action::RelationVisualLine
@@ -1792,6 +1796,8 @@ impl App {
                         | Action::ExplorerFindInsert(_)
                         | Action::ExplorerFindBackspace
                         | Action::ExplorerFindClear
+                        | Action::ExplorerFindUndo
+                        | Action::ExplorerFindRedo
                         | Action::ExplorerFindConfirm
                         | Action::ExplorerFindNext
                         | Action::ExplorerFindPrevious
@@ -1800,6 +1806,8 @@ impl App {
                         | Action::ExplorerSearchInsert(_)
                         | Action::ExplorerSearchBackspace
                         | Action::ExplorerSearchClear
+                        | Action::ExplorerSearchUndo
+                        | Action::ExplorerSearchRedo
                         | Action::ExplorerSearchMove(_)
                         | Action::ExplorerSearchNext
                         | Action::ExplorerSearchPrevious
@@ -1813,6 +1821,11 @@ impl App {
                         | Action::ConfirmDeleteConsole
                         | Action::CancelDeleteConsole
                         | Action::OpenNotificationHistory
+                        | Action::NotificationHistorySearchInsert(_)
+                        | Action::NotificationHistorySearchBackspace
+                        | Action::NotificationHistorySearchClear
+                        | Action::NotificationHistorySearchUndo
+                        | Action::NotificationHistorySearchRedo
                         | Action::OpenSqlEditorList
                         | Action::SqlEditorListActivate
                         | Action::SqlEditorListCreate
@@ -1828,12 +1841,16 @@ impl App {
                         | Action::SqlEditorListInputMoveRight
                         | Action::SqlEditorListInputMoveHome
                         | Action::SqlEditorListInputMoveEnd
+                        | Action::SqlEditorListInputUndo
+                        | Action::SqlEditorListInputRedo
                         | Action::SqlEditorListCancel
                         | Action::SqlEditorListMove(_)
                         | Action::ActivateSqlEditor(_)
                         | Action::CatalogDropInsert(_)
                         | Action::CatalogDropBackspace
                         | Action::CatalogDropClear
+                        | Action::CatalogDropUndo
+                        | Action::CatalogDropRedo
                         | Action::CatalogDropConfirm
                         | Action::CatalogDropCancel
                         | Action::OpenDashboard
@@ -1846,6 +1863,8 @@ impl App {
                         | Action::DashboardProcessFilterStart
                         | Action::DashboardProcessFilterCommit
                         | Action::DashboardProcessFilterCancel
+                        | Action::DashboardProcessFilterUndo
+                        | Action::DashboardProcessFilterRedo
                         | Action::DashboardMetricsDue
                         | Action::DashboardProcessesDue
                         | Action::DashboardMetricsLoaded { .. }
@@ -1920,6 +1939,8 @@ impl App {
                     | Action::SqlEditorListInputMoveRight
                     | Action::SqlEditorListInputMoveHome
                     | Action::SqlEditorListInputMoveEnd
+                    | Action::SqlEditorListInputUndo
+                    | Action::SqlEditorListInputRedo
                     | Action::SqlEditorListCancel
                     | Action::SqlEditorListMove(_)
                     | Action::ActivateSqlEditor(_)
@@ -2112,7 +2133,9 @@ impl App {
             Action::DashboardProcessFilterMoveLeft
             | Action::DashboardProcessFilterMoveRight
             | Action::DashboardProcessFilterMoveHome
-            | Action::DashboardProcessFilterMoveEnd => {
+            | Action::DashboardProcessFilterMoveEnd
+            | Action::DashboardProcessFilterUndo
+            | Action::DashboardProcessFilterRedo => {
                 if let Some(WorkspaceTab::Dashboard(tab)) = self.tabs.get_mut(self.active_tab)
                     && let Some(draft) = tab.process_filter_draft.as_mut()
                 {
@@ -2121,8 +2144,15 @@ impl App {
                         Action::DashboardProcessFilterMoveRight => draft.move_right(),
                         Action::DashboardProcessFilterMoveHome => draft.move_home(),
                         Action::DashboardProcessFilterMoveEnd => draft.move_end(),
+                        Action::DashboardProcessFilterUndo => {
+                            draft.undo();
+                        }
+                        Action::DashboardProcessFilterRedo => {
+                            draft.redo();
+                        }
                         _ => unreachable!(),
                     }
+                    tab.reconcile_process_grid();
                 }
                 Vec::new()
             }
@@ -2555,6 +2585,8 @@ impl App {
             Action::SqlEditorListInputMoveEnd => {
                 self.update_sql_editor_list_input(|list| list.move_end())
             }
+            Action::SqlEditorListInputUndo => self.update_sql_editor_list_input(|list| list.undo()),
+            Action::SqlEditorListInputRedo => self.update_sql_editor_list_input(|list| list.redo()),
             Action::SqlEditorListCancel => {
                 if let Some(Overlay::SqlEditorList(list)) = self.overlay.as_mut()
                     && list.cancel_mode()
@@ -2794,6 +2826,18 @@ impl App {
             Action::NotificationHistorySearchClear => {
                 if let Some(Overlay::NotificationHistory(state)) = self.overlay.as_mut() {
                     state.clear_search();
+                }
+                Vec::new()
+            }
+            Action::NotificationHistorySearchUndo => {
+                if let Some(Overlay::NotificationHistory(state)) = self.overlay.as_mut() {
+                    state.undo_search();
+                }
+                Vec::new()
+            }
+            Action::NotificationHistorySearchRedo => {
+                if let Some(Overlay::NotificationHistory(state)) = self.overlay.as_mut() {
+                    state.redo_search();
                 }
                 Vec::new()
             }
@@ -3218,6 +3262,19 @@ impl App {
                 }
                 Vec::new()
             }
+            Action::CatalogOwnerPickerUndo | Action::CatalogOwnerPickerRedo => {
+                let Some(choices) = self.catalog_owner_choices().map(<[_]>::to_vec) else {
+                    return Vec::new();
+                };
+                if let Some(editor) = self.catalog_editor.as_mut() {
+                    if matches!(action, Action::CatalogOwnerPickerUndo) {
+                        editor.owner_picker.undo(&choices);
+                    } else {
+                        editor.owner_picker.redo(&choices);
+                    }
+                }
+                Vec::new()
+            }
             Action::CatalogOwnerPickerAccept => {
                 let Some(choices) = self.catalog_owner_choices().map(<[_]>::to_vec) else {
                     return Vec::new();
@@ -3495,6 +3552,9 @@ impl App {
                         crate::model::catalog_editor::TableEditorFocus::ColumnDetails(_)
                     );
                     if draft.column_editor.is_some() == details_field {
+                        if draft.focus != field {
+                            draft.finish_edit_group();
+                        }
                         draft.focus = field;
                     }
                 }
@@ -3506,6 +3566,7 @@ impl App {
                     .as_mut()
                     .and_then(|editor| editor.draft.as_mut())
                 {
+                    draft.finish_edit_group();
                     draft.selected_column = index.min(draft.columns.len().saturating_sub(1));
                     draft.focus = crate::model::catalog_editor::TableEditorFocus::Columns;
                 }
@@ -3537,6 +3598,7 @@ impl App {
                     .as_mut()
                     .and_then(|editor| editor.draft.as_mut())
                 {
+                    draft.finish_edit_group();
                     draft.cancel_column_details();
                 }
                 Vec::new()
@@ -3558,6 +3620,7 @@ impl App {
                     .and_then(|editor| editor.draft.as_mut())
                 {
                     draft.begin_add_column_below();
+                    draft.finish_edit_group();
                 }
                 Vec::new()
             }
@@ -3567,6 +3630,7 @@ impl App {
                     .as_mut()
                     .and_then(|editor| editor.draft.as_mut())
                 {
+                    draft.finish_edit_group();
                     draft.remove_selected_column();
                 }
                 Vec::new()
@@ -3644,6 +3708,20 @@ impl App {
                     .and_then(|editor| editor.draft.as_mut())
                 {
                     draft.paste(&text);
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorUndo | Action::CatalogEditorRedo => {
+                if let Some(draft) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    if matches!(action, Action::CatalogEditorUndo) {
+                        draft.undo();
+                    } else {
+                        draft.redo();
+                    }
                 }
                 Vec::new()
             }
@@ -4035,6 +4113,13 @@ impl App {
                 Vec::new()
             }
             Action::CatalogEditorPreview => {
+                if let Some(draft) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.finish_edit_group();
+                }
                 let Some((draft, catalog_epoch, mode, anchor, object_type, baseline)) =
                     self.catalog_editor.as_ref().and_then(|editor| {
                         Some((
@@ -4163,6 +4248,26 @@ impl App {
                     self.overlay.as_mut()
                 {
                     input.insert(character);
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorConfirmBackspace => {
+                if let Some(Overlay::CatalogEditorDestructiveConfirm { input, .. }) =
+                    self.overlay.as_mut()
+                {
+                    input.backspace();
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorConfirmUndo | Action::CatalogEditorConfirmRedo => {
+                if let Some(Overlay::CatalogEditorDestructiveConfirm { input, .. }) =
+                    self.overlay.as_mut()
+                {
+                    if matches!(action, Action::CatalogEditorConfirmUndo) {
+                        input.undo();
+                    } else {
+                        input.redo();
+                    }
                 }
                 Vec::new()
             }
@@ -4361,7 +4466,19 @@ impl App {
                 if let Some(Overlay::CatalogDropConfirm { input, busy, .. }) = self.overlay.as_mut()
                     && !*busy
                 {
-                    input.set("");
+                    input.clear();
+                }
+                Vec::new()
+            }
+            Action::CatalogDropUndo | Action::CatalogDropRedo => {
+                if let Some(Overlay::CatalogDropConfirm { input, busy, .. }) = self.overlay.as_mut()
+                    && !*busy
+                {
+                    if matches!(action, Action::CatalogDropUndo) {
+                        input.undo();
+                    } else {
+                        input.redo();
+                    }
                 }
                 Vec::new()
             }
@@ -4487,7 +4604,9 @@ impl App {
             }
             Action::ProfileInsert(input) => {
                 if let Some(manager) = self.editable_profile_manager_mut() {
-                    manager.paste(input.value());
+                    if let Some(character) = input.character() {
+                        manager.insert(character);
+                    }
                 }
                 Vec::new()
             }
@@ -4542,6 +4661,18 @@ impl App {
             Action::ProfileMoveEnd => {
                 if let Some(manager) = self.editable_profile_manager_mut() {
                     manager.move_cursor_end();
+                }
+                Vec::new()
+            }
+            Action::ProfileUndo => {
+                if let Some(manager) = self.editable_profile_manager_mut() {
+                    manager.undo();
+                }
+                Vec::new()
+            }
+            Action::ProfileRedo => {
+                if let Some(manager) = self.editable_profile_manager_mut() {
+                    manager.redo();
                 }
                 Vec::new()
             }
@@ -5517,6 +5648,15 @@ impl App {
                         DataQueryCapability::Relation | DataQueryCapability::Sql
                     )
                 {
+                    if query.focus != Some(input) {
+                        match query.focus {
+                            Some(DataQueryInput::Where) => query.where_input.finish_edit_group(),
+                            Some(DataQueryInput::OrderBy) => {
+                                query.order_by_input.finish_edit_group()
+                            }
+                            None => {}
+                        }
+                    }
                     query.focus = Some(input);
                     query.error = None;
                 }
@@ -5569,7 +5709,21 @@ impl App {
                 Vec::new()
             }
             Action::DataQueryClear => {
-                self.with_active_data_query(|input| input.set(""));
+                self.with_active_data_query(|input| input.clear());
+                self.refresh_active_data_query_completion();
+                Vec::new()
+            }
+            Action::DataQueryUndo => {
+                self.with_active_data_query(|input| {
+                    input.undo();
+                });
+                self.refresh_active_data_query_completion();
+                Vec::new()
+            }
+            Action::DataQueryRedo => {
+                self.with_active_data_query(|input| {
+                    input.redo();
+                });
                 self.refresh_active_data_query_completion();
                 Vec::new()
             }
@@ -5595,7 +5749,10 @@ impl App {
                 self.cancel_active_data_query();
                 Vec::new()
             }
-            Action::SubmitDataQuery => self.submit_data_query(),
+            Action::SubmitDataQuery => {
+                self.finish_active_data_query_edit_group();
+                self.submit_data_query()
+            }
             Action::FocusRelationQueryInput(input) => {
                 self.update(Action::FocusDataQueryInput(input))
             }
@@ -6652,17 +6809,30 @@ impl App {
                 Vec::new()
             }
             Action::ExplorerFindInsert(character) => {
-                self.explorer.edit_find(|query| query.push(character));
+                self.explorer
+                    .edit_find_input(|query| query.insert(character));
                 Vec::new()
             }
             Action::ExplorerFindBackspace => {
-                self.explorer.edit_find(|query| {
-                    query.pop();
+                self.explorer.edit_find_input(|query| {
+                    query.backspace();
                 });
                 Vec::new()
             }
             Action::ExplorerFindClear => {
-                self.explorer.edit_find(String::clear);
+                self.explorer.edit_find_input(|query| query.clear());
+                Vec::new()
+            }
+            Action::ExplorerFindUndo => {
+                self.explorer.edit_find_input(|query| {
+                    query.undo();
+                });
+                Vec::new()
+            }
+            Action::ExplorerFindRedo => {
+                self.explorer.edit_find_input(|query| {
+                    query.redo();
+                });
                 Vec::new()
             }
             Action::ExplorerFindConfirm => {
@@ -6694,12 +6864,18 @@ impl App {
                 Vec::new()
             }
             Action::ExplorerSearchInsert(character) => {
-                self.edit_explorer_search(|query| query.push(character))
+                self.edit_explorer_search(|query| query.insert(character))
             }
             Action::ExplorerSearchBackspace => self.edit_explorer_search(|query| {
-                query.pop();
+                query.backspace();
             }),
-            Action::ExplorerSearchClear => self.edit_explorer_search(String::clear),
+            Action::ExplorerSearchClear => self.edit_explorer_search(|query| query.clear()),
+            Action::ExplorerSearchUndo => self.edit_explorer_search(|query| {
+                query.undo();
+            }),
+            Action::ExplorerSearchRedo => self.edit_explorer_search(|query| {
+                query.redo();
+            }),
             Action::ExplorerSearchMove(delta) => {
                 self.explorer.move_search(delta);
                 Vec::new()
@@ -6829,6 +7005,18 @@ impl App {
             }
             Action::RelationEditMoveEnd => {
                 self.relation_edit_input(|input| input.move_end());
+                Vec::new()
+            }
+            Action::RelationEditUndo => {
+                self.relation_edit_input(|input| {
+                    input.undo();
+                });
+                Vec::new()
+            }
+            Action::RelationEditRedo => {
+                self.relation_edit_input(|input| {
+                    input.redo();
+                });
                 Vec::new()
             }
             Action::RelationEditConfirm => self.relation_edit_confirm(),
@@ -7545,6 +7733,18 @@ impl App {
     ) -> Vec<Command> {
         if let Some(Overlay::SqlEditorList(list)) = self.overlay.as_mut() {
             update(list);
+        }
+        let query = self
+            .overlay
+            .as_ref()
+            .and_then(|overlay| match overlay {
+                Overlay::SqlEditorList(list) => Some(list.visible_query().to_owned()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let visible_ids = self.visible_console_ids(&query);
+        if let Some(Overlay::SqlEditorList(list)) = self.overlay.as_mut() {
+            list.reconcile_selection(&visible_ids);
         }
         Vec::new()
     }
@@ -9427,11 +9627,14 @@ impl App {
         vec![Command::LoadCatalogPage(request)]
     }
 
-    fn edit_explorer_search(&mut self, edit: impl FnOnce(&mut String)) -> Vec<Command> {
+    fn edit_explorer_search(
+        &mut self,
+        edit: impl FnOnce(&mut crate::model::text_input::TextInput),
+    ) -> Vec<Command> {
         if self.explorer.search.is_none() {
             return Vec::new();
         }
-        self.explorer.edit_search(edit);
+        self.explorer.edit_search_input(edit);
         self.explorer.refresh_frontend_search();
         Vec::new()
     }
@@ -10838,6 +11041,16 @@ impl App {
         }
         if clear_derived {
             self.active_console_mut().derived = None;
+        }
+    }
+
+    fn finish_active_data_query_edit_group(&mut self) {
+        if let Some(query) = self.active_data_query_mut() {
+            match query.focus {
+                Some(DataQueryInput::Where) => query.where_input.finish_edit_group(),
+                Some(DataQueryInput::OrderBy) => query.order_by_input.finish_edit_group(),
+                None => {}
+            }
         }
     }
 

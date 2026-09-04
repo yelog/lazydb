@@ -121,6 +121,53 @@ fn insert_session_undo_and_redo_restore_complete_text() {
 }
 
 #[test]
+fn ctrl_history_in_insert_mode_preserves_insert_mode() {
+    let (mut workspace, id) = fixture("");
+    insert_text(&mut workspace, id, "hello");
+    let undo = crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('z'),
+        crossterm::event::KeyModifiers::CONTROL,
+    );
+    let redo = crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('z'),
+        crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::SHIFT,
+    );
+
+    workspace.key(id, undo).unwrap();
+    assert_eq!(workspace.text(id).unwrap(), "");
+    assert_eq!(workspace.mode(id).unwrap(), EditorMode::Insert);
+    workspace.key(id, redo).unwrap();
+    assert_eq!(workspace.text(id).unwrap(), "hello");
+    assert_eq!(workspace.mode(id).unwrap(), EditorMode::Insert);
+}
+
+#[test]
+fn ctrl_history_in_prompt_does_not_edit_the_sql_buffer() {
+    let (mut workspace, id) = normal_fixture("select 1");
+    workspace.press(id, EditorKey::Character(':')).unwrap();
+    press_keys(&mut workspace, id, "run");
+    workspace
+        .key(
+            id,
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('z'),
+                crossterm::event::KeyModifiers::CONTROL,
+            ),
+        )
+        .unwrap();
+    workspace
+        .key(
+            id,
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('z'),
+                crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::SHIFT,
+            ),
+        )
+        .unwrap();
+    assert_eq!(workspace.text(id).unwrap(), "select 1");
+}
+
+#[test]
 fn undo_and_redo_restore_cursor_and_emit_one_change() {
     let (mut workspace, id) = fixture("");
     insert_text(&mut workspace, id, "数据🙂");

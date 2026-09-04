@@ -723,6 +723,36 @@ fn text_actions_edit_only_the_focused_text_or_password_field() {
 }
 
 #[test]
+fn profile_typed_characters_share_one_undo_group() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::OpenProfileManager);
+    app.update(Action::ProfileFocusField(ProfileField::Name));
+
+    app.update(Action::ProfileInsert('a'.into()));
+    app.update(Action::ProfileInsert('b'.into()));
+    app.update(Action::ProfileUndo);
+
+    let draft = app
+        .profile_manager
+        .as_ref()
+        .unwrap()
+        .draft
+        .as_ref()
+        .unwrap();
+    assert_eq!(draft.name.value(), "");
+
+    app.update(Action::ProfileRedo);
+    let draft = app
+        .profile_manager
+        .as_ref()
+        .unwrap()
+        .draft
+        .as_ref()
+        .unwrap();
+    assert_eq!(draft.name.value(), "ab");
+}
+
+#[test]
 fn cycle_and_toggle_actions_only_change_supported_fields() {
     let mut app = App::new(Vec::new());
     app.update(Action::OpenProfileManager);

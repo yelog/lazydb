@@ -140,9 +140,21 @@ fn decode_editor_text(text: &str) -> Result<String, EditorError> {
         .ok_or(EditorError::MissingSentinel)
 }
 
+fn is_editor_undo(event: KeyEvent) -> bool {
+    event.modifiers == KeyModifiers::CONTROL && event.code == KeyCode::Char('z')
+}
+
+fn is_editor_redo(event: KeyEvent) -> bool {
+    (event.modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+        && matches!(event.code, KeyCode::Char('z' | 'Z')))
+        || (event.modifiers == KeyModifiers::CONTROL && event.code == KeyCode::Char('Z'))
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum EditorKey {
     Character(char),
+    Undo,
+    Redo,
     Escape,
     Enter,
     Backspace,
@@ -369,7 +381,11 @@ impl EditorWorkspace {
     }
 
     pub(crate) fn key(&mut self, id: Uuid, event: KeyEvent) -> Result<(), EditorError> {
-        let key = if event.modifiers.contains(KeyModifiers::CONTROL) {
+        let key = if is_editor_redo(event) {
+            EditorKey::Redo
+        } else if is_editor_undo(event) {
+            EditorKey::Undo
+        } else if event.modifiers.contains(KeyModifiers::CONTROL) {
             match event.code {
                 KeyCode::Char(c) => EditorKey::Control(c),
                 _ => return Ok(()),
@@ -497,13 +513,39 @@ impl EditorWorkspace {
     }
 
     fn restore_snapshot(&mut self, id: Uuid, snapshot: EditorSnapshot) -> Result<(), EditorError> {
+        self.restore_snapshot_with_mode(id, snapshot, EditorMode::Normal)
+    }
+
+    fn restore_snapshot_with_mode(
+        &mut self,
+        id: Uuid,
+        snapshot: EditorSnapshot,
+        mode: EditorMode,
+    ) -> Result<(), EditorError> {
         self.write_text(id, &snapshot.text, snapshot.position)?;
         let session = self
             .sessions
             .get_mut(&id)
             .ok_or(EditorError::MissingSession(id))?;
         session.keys.reset_mode();
-        session.mode = EditorMode::Normal;
+        if mode == EditorMode::Insert {
+            session
+                .keys
+                .input_key(modalkit::key::TerminalKey::from(KeyEvent::new(
+                    KeyCode::Char('i'),
+                    KeyModifiers::NONE,
+                )));
+            while session.keys.pop().is_some() {}
+        } else if mode == EditorMode::Replace {
+            session
+                .keys
+                .input_key(modalkit::key::TerminalKey::from(KeyEvent::new(
+                    KeyCode::Char('R'),
+                    KeyModifiers::NONE,
+                )));
+            while session.keys.pop().is_some() {}
+        }
+        session.mode = mode;
         session.pending_binding = None;
         session.pending_count = None;
         session.current_sequence.clear();
@@ -535,12 +577,10 @@ impl EditorWorkspace {
         }
         if !matches!(mode_after, EditorMode::Insert | EditorMode::Replace)
             && matches!(mode_before, EditorMode::Insert | EditorMode::Replace)
+            && let Some(start) = session.history.transaction_start.take()
+            && start.text != after.text
         {
-            if let Some(start) = session.history.transaction_start.take()
-                && start.text != after.text
-            {
-                session.history.push_undo(start);
-            }
+            session.history.push_undo(start);
         }
         Ok(())
     }
@@ -848,10 +888,10 @@ impl EditorWorkspace {
                     EditorPromptKind::SearchBackward => "?".to_owned(),
                     EditorPromptKind::Command => ":".to_owned(),
                 },
-                text: project_editor_line(&prompt.text).text,
-                cursor: project_editor_line(&prompt.text)
+                text: project_editor_line(prompt.input.value()).text,
+                cursor: project_editor_line(prompt.input.value())
                     .source_to_display_cells
-                    .get(prompt.cursor)
+                    .get(prompt.input.cursor())
                     .copied()
                     .unwrap_or_default(),
                 error: prompt
@@ -1074,6 +1114,8 @@ impl EditorWorkspace {
             if matches!(
                 key,
                 EditorKey::Character('i' | 'a' | 'o' | 'O' | 'R' | 'Q' | ':')
+                    | EditorKey::Undo
+                    | EditorKey::Redo
                     | EditorKey::Control('r')
             ) {
                 return Ok(());
@@ -1168,6 +1210,12 @@ impl EditorWorkspace {
             return Ok(());
         }
         match (mode, key) {
+            (EditorMode::Insert | EditorMode::Replace, EditorKey::Undo) => {
+                self.undo_preserving_mode(id, mode)
+            }
+            (EditorMode::Insert | EditorMode::Replace, EditorKey::Redo) => {
+                self.redo_preserving_mode(id, mode)
+            }
             (EditorMode::Normal, EditorKey::Character('Q')) => {
                 self.effects.push(EditorEffect::Quit);
                 Ok(())
@@ -1321,6 +1369,50 @@ impl EditorWorkspace {
             .history
             .push_undo_without_clearing_redo(current);
         self.restore_snapshot(id, next)?;
+        self.record_changed(id)
+    }
+
+    fn undo_preserving_mode(&mut self, id: Uuid, mode: EditorMode) -> Result<(), EditorError> {
+        self.commit_transaction(id)?;
+        let current = self.snapshot(id)?;
+        let previous = self
+            .sessions
+            .get_mut(&id)
+            .ok_or(EditorError::MissingSession(id))?
+            .history
+            .undo
+            .pop();
+        let Some(previous) = previous else {
+            return Ok(());
+        };
+        self.sessions
+            .get_mut(&id)
+            .ok_or(EditorError::MissingSession(id))?
+            .history
+            .push_redo(current);
+        self.restore_snapshot_with_mode(id, previous, mode)?;
+        self.record_changed(id)
+    }
+
+    fn redo_preserving_mode(&mut self, id: Uuid, mode: EditorMode) -> Result<(), EditorError> {
+        self.commit_transaction(id)?;
+        let current = self.snapshot(id)?;
+        let next = self
+            .sessions
+            .get_mut(&id)
+            .ok_or(EditorError::MissingSession(id))?
+            .history
+            .redo
+            .pop();
+        let Some(next) = next else {
+            return Ok(());
+        };
+        self.sessions
+            .get_mut(&id)
+            .ok_or(EditorError::MissingSession(id))?
+            .history
+            .push_undo_without_clearing_redo(current);
+        self.restore_snapshot_with_mode(id, next, mode)?;
         self.record_changed(id)
     }
 
@@ -1639,6 +1731,18 @@ impl EditorWorkspace {
                 self.prompt = None;
             }
             EditorKey::Enter => self.submit_prompt(id)?,
+            EditorKey::Undo => {
+                if let Some(prompt) = self.prompt.as_mut() {
+                    prompt.input.undo();
+                    prompt.error = None;
+                }
+            }
+            EditorKey::Redo => {
+                if let Some(prompt) = self.prompt.as_mut() {
+                    prompt.input.redo();
+                    prompt.error = None;
+                }
+            }
             EditorKey::Backspace | EditorKey::Control('h') => {
                 if let Some(prompt) = self.prompt.as_mut() {
                     prompt.backspace();
@@ -1651,29 +1755,28 @@ impl EditorWorkspace {
             }
             EditorKey::Control('u') => {
                 if let Some(prompt) = self.prompt.as_mut() {
-                    prompt.text.clear();
-                    prompt.cursor = 0;
+                    prompt.input.clear();
                     prompt.error = None;
                 }
             }
             EditorKey::Left => {
                 if let Some(prompt) = self.prompt.as_mut() {
-                    prompt.cursor = prompt.cursor.saturating_sub(1);
+                    prompt.input.move_left();
                 }
             }
             EditorKey::Right => {
                 if let Some(prompt) = self.prompt.as_mut() {
-                    prompt.cursor = (prompt.cursor + 1).min(prompt.text.chars().count());
+                    prompt.input.move_right();
                 }
             }
             EditorKey::Home => {
                 if let Some(prompt) = self.prompt.as_mut() {
-                    prompt.cursor = 0;
+                    prompt.input.move_home();
                 }
             }
             EditorKey::End => {
                 if let Some(prompt) = self.prompt.as_mut() {
-                    prompt.cursor = prompt.text.chars().count();
+                    prompt.input.move_end();
                 }
             }
             EditorKey::Up | EditorKey::Down => self.history_move(matches!(key, EditorKey::Down)),
@@ -1706,15 +1809,14 @@ impl EditorWorkspace {
             (_, true) => return,
         };
         prompt.history_index = Some(next);
-        prompt.text = self.command_history[next].clone();
-        prompt.cursor = prompt.text.chars().count();
+        prompt.input.set(self.command_history[next].clone());
     }
 
     fn submit_prompt(&mut self, id: Uuid) -> Result<(), EditorError> {
         let Some(prompt) = self.prompt.take() else {
             return Ok(());
         };
-        let raw = prompt.text;
+        let raw = prompt.input.value().to_owned();
         match prompt.kind {
             EditorPromptKind::Command => {
                 self.command_history.push(raw.clone());
@@ -1726,8 +1828,7 @@ impl EditorWorkspace {
                         Err(error) => {
                             self.prompt = Some(PromptSession {
                                 kind: EditorPromptKind::Command,
-                                text: raw,
-                                cursor: 0,
+                                input: raw.as_str().into(),
                                 error: Some(error.to_string()),
                                 history_index: None,
                             })
@@ -1738,8 +1839,7 @@ impl EditorWorkspace {
                 } else {
                     self.prompt = Some(PromptSession {
                         kind: EditorPromptKind::Command,
-                        text: raw,
-                        cursor: 0,
+                        input: raw.as_str().into(),
                         error: Some("unknown or invalid Ex command".to_owned()),
                         history_index: None,
                     });
@@ -1754,8 +1854,7 @@ impl EditorWorkspace {
                 if !self.search(id, &raw, self.last_search_backward)? {
                     self.prompt = Some(PromptSession {
                         kind,
-                        text: raw.clone(),
-                        cursor: raw.chars().count(),
+                        input: raw.as_str().into(),
                         error: Some("pattern not found".to_owned()),
                         history_index: None,
                     });
@@ -1981,6 +2080,11 @@ impl EditorKey {
     fn to_terminal_key(self) -> Result<modalkit::key::TerminalKey, EditorError> {
         let text = match self {
             Self::Character(c) => c.to_string(),
+            Self::Undo | Self::Redo => {
+                return Err(EditorError::Operation(
+                    "history keys are handled before Vim key conversion".into(),
+                ));
+            }
             Self::Escape => "<Esc>".into(),
             Self::Enter => "<Enter>".into(),
             Self::Backspace => "<BS>".into(),

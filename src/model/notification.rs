@@ -3,6 +3,8 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local};
 
+use crate::model::text_input::TextInput;
+
 const HISTORY_CAPACITY: usize = 500;
 const LIVE_CAPACITY: usize = 4;
 
@@ -204,7 +206,7 @@ pub enum HistorySearchPhase {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct NotificationHistoryState {
-    pub query: String,
+    pub query: TextInput,
     pub phase: HistorySearchPhase,
     pub selected: usize,
     pub active_match: usize,
@@ -218,7 +220,7 @@ impl NotificationHistoryState {
     }
 
     pub fn begin_search(&mut self) {
-        self.previous_query.clone_from(&self.query);
+        self.previous_query = self.query.value().to_owned();
         self.phase = HistorySearchPhase::Editing;
     }
 
@@ -232,19 +234,31 @@ impl NotificationHistoryState {
 
     pub fn push_search_char(&mut self, character: char) {
         if self.phase == HistorySearchPhase::Editing {
-            self.query.push(character);
+            self.query.insert(character);
         }
     }
 
     pub fn backspace_search(&mut self) {
         if self.phase == HistorySearchPhase::Editing {
-            self.query.pop();
+            self.query.backspace();
         }
     }
 
     pub fn clear_search(&mut self) {
         if self.phase == HistorySearchPhase::Editing {
             self.query.clear();
+        }
+    }
+
+    pub fn undo_search(&mut self) {
+        if self.phase == HistorySearchPhase::Editing {
+            self.query.undo();
+        }
+    }
+
+    pub fn redo_search(&mut self) {
+        if self.phase == HistorySearchPhase::Editing {
+            self.query.redo();
         }
     }
 
@@ -257,8 +271,8 @@ impl NotificationHistoryState {
 
     pub fn cancel_search(&mut self) {
         if self.phase == HistorySearchPhase::Editing {
-            self.query.clone_from(&self.previous_query);
-            self.phase = if self.query.is_empty() {
+            self.query.set(&self.previous_query);
+            self.phase = if self.query.value().is_empty() {
                 HistorySearchPhase::Inactive
             } else {
                 HistorySearchPhase::Confirmed
@@ -282,7 +296,7 @@ impl NotificationHistoryState {
         &'a self,
         history: &'a [Notification],
     ) -> impl Iterator<Item = usize> + 'a {
-        let query = self.query.to_lowercase();
+        let query = self.query.value().to_lowercase();
         history
             .iter()
             .enumerate()
@@ -405,6 +419,18 @@ mod tests {
         assert_eq!(state.selected, 2);
         state.move_selection(-10, history.len());
         assert_eq!(state.selected, 0);
+    }
+
+    #[test]
+    fn search_editing_supports_local_undo_and_redo() {
+        let mut state = NotificationHistoryState::new();
+        state.begin_search();
+        state.push_search_char('a');
+        state.push_search_char('b');
+        state.undo_search();
+        assert_eq!(state.query.value(), "");
+        state.redo_search();
+        assert_eq!(state.query.value(), "ab");
     }
 
     #[test]
