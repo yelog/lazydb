@@ -31,6 +31,12 @@ impl ProfileInput {
     pub(crate) fn value(&self) -> &str {
         self.0.expose_secret()
     }
+
+    pub(crate) fn character(&self) -> Option<char> {
+        let mut characters = self.value().chars();
+        let character = characters.next()?;
+        characters.next().is_none().then_some(character)
+    }
 }
 
 impl fmt::Debug for ProfileInput {
@@ -62,6 +68,246 @@ impl From<String> for ProfileInput {
 impl From<&str> for ProfileInput {
     fn from(value: &str) -> Self {
         Self(SecretString::from(value.to_owned()))
+    }
+}
+
+const SECRET_TEXT_HISTORY_LIMIT: usize = 20;
+
+#[derive(Clone)]
+struct SecretTextSnapshot {
+    value: SecretString,
+    cursor: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SecretEditGroup {
+    Insert,
+    Backspace,
+    Delete,
+}
+
+#[derive(Clone, Default)]
+struct SecretTextHistory {
+    undo: Vec<SecretTextSnapshot>,
+    redo: Vec<SecretTextSnapshot>,
+    group: Option<(SecretEditGroup, SecretTextSnapshot)>,
+}
+
+#[derive(Clone)]
+struct SecretTextInput {
+    value: SecretString,
+    cursor: usize,
+    history: SecretTextHistory,
+}
+
+impl Default for SecretTextInput {
+    fn default() -> Self {
+        Self {
+            value: SecretString::from(String::new()),
+            cursor: 0,
+            history: SecretTextHistory::default(),
+        }
+    }
+}
+
+impl SecretTextInput {
+    fn value(&self) -> &str {
+        self.value.expose_secret()
+    }
+
+    fn secret(&self) -> &SecretString {
+        &self.value
+    }
+
+    fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    fn set(&mut self, value: impl Into<String>) {
+        self.value = SecretString::from(value.into());
+        self.cursor = self.value().chars().count();
+        self.history = SecretTextHistory::default();
+    }
+
+    fn insert(&mut self, character: char) -> bool {
+        let before = self.snapshot();
+        let mut value = Zeroizing::new(self.value().to_owned());
+        let offset = character_byte_index(&value, self.cursor);
+        value.insert(offset, character);
+        self.value = SecretString::from(std::mem::take(&mut *value));
+        self.cursor += 1;
+        self.record_grouped(SecretEditGroup::Insert, before);
+        true
+    }
+
+    fn paste(&mut self, text: &str) -> bool {
+        if text.is_empty() {
+            return false;
+        }
+        let before = self.snapshot();
+        let mut value = Zeroizing::new(self.value().to_owned());
+        let offset = character_byte_index(&value, self.cursor);
+        value.insert_str(offset, text);
+        self.value = SecretString::from(std::mem::take(&mut *value));
+        self.cursor += text.chars().count();
+        self.record_atomic(before);
+        true
+    }
+
+    fn backspace(&mut self) -> bool {
+        if self.cursor == 0 {
+            return false;
+        }
+        let before = self.snapshot();
+        let mut value = Zeroizing::new(self.value().to_owned());
+        let start = character_byte_index(&value, self.cursor - 1);
+        let end = character_byte_index(&value, self.cursor);
+        value.replace_range(start..end, "");
+        self.value = SecretString::from(std::mem::take(&mut *value));
+        self.cursor -= 1;
+        self.record_grouped(SecretEditGroup::Backspace, before);
+        true
+    }
+
+    fn delete_previous_word(&mut self) -> bool {
+        let before = self.snapshot();
+        let mut value = Zeroizing::new(self.value().to_owned());
+        let mut cursor = self.cursor;
+        delete_previous_word(&mut value, &mut cursor);
+        if cursor == self.cursor {
+            return false;
+        }
+        self.value = SecretString::from(std::mem::take(&mut *value));
+        self.cursor = cursor;
+        self.record_atomic(before);
+        true
+    }
+
+    fn delete_to_start(&mut self) -> bool {
+        if self.cursor == 0 {
+            return false;
+        }
+        let before = self.snapshot();
+        let mut value = Zeroizing::new(self.value().to_owned());
+        let end = character_byte_index(&value, self.cursor);
+        value.replace_range(..end, "");
+        self.value = SecretString::from(std::mem::take(&mut *value));
+        self.cursor = 0;
+        self.record_atomic(before);
+        true
+    }
+
+    fn delete(&mut self) -> bool {
+        let start = character_byte_index(self.value(), self.cursor);
+        if start == self.value().len() {
+            return false;
+        }
+        let before = self.snapshot();
+        let mut value = Zeroizing::new(self.value().to_owned());
+        let end = character_byte_index(&value, self.cursor + 1);
+        value.replace_range(start..end, "");
+        self.value = SecretString::from(std::mem::take(&mut *value));
+        self.record_grouped(SecretEditGroup::Delete, before);
+        true
+    }
+
+    fn move_left(&mut self) {
+        self.finish_edit_group();
+        self.cursor = self.cursor.saturating_sub(1);
+    }
+
+    fn move_right(&mut self) {
+        self.finish_edit_group();
+        self.cursor = (self.cursor + 1).min(self.value().chars().count());
+    }
+
+    fn move_home(&mut self) {
+        self.finish_edit_group();
+        self.cursor = 0;
+    }
+
+    fn move_end(&mut self) {
+        self.finish_edit_group();
+        self.cursor = self.value().chars().count();
+    }
+
+    fn undo(&mut self) -> bool {
+        self.finish_edit_group();
+        let Some(previous) = self.history.undo.pop() else {
+            return false;
+        };
+        let current = self.snapshot();
+        self.push_redo(current);
+        self.restore(previous);
+        true
+    }
+
+    fn redo(&mut self) -> bool {
+        self.finish_edit_group();
+        let Some(next) = self.history.redo.pop() else {
+            return false;
+        };
+        let current = self.snapshot();
+        self.push_undo(current);
+        self.restore(next);
+        true
+    }
+
+    fn finish_edit_group(&mut self) {
+        if let Some((_, start)) = self.history.group.take() {
+            self.push_undo(start);
+        }
+    }
+
+    fn snapshot(&self) -> SecretTextSnapshot {
+        SecretTextSnapshot {
+            value: self.value.clone(),
+            cursor: self.cursor,
+        }
+    }
+
+    fn restore(&mut self, snapshot: SecretTextSnapshot) {
+        self.value = snapshot.value;
+        self.cursor = snapshot.cursor.min(self.value().chars().count());
+    }
+
+    fn record_grouped(&mut self, group: SecretEditGroup, before: SecretTextSnapshot) {
+        if !self
+            .history
+            .group
+            .as_ref()
+            .is_some_and(|(current, _)| *current == group)
+        {
+            self.finish_edit_group();
+            self.history.group = Some((group, before));
+        }
+        self.history.redo.clear();
+    }
+
+    fn record_atomic(&mut self, before: SecretTextSnapshot) {
+        self.finish_edit_group();
+        self.push_undo(before);
+        self.history.redo.clear();
+    }
+
+    fn push_undo(&mut self, snapshot: SecretTextSnapshot) {
+        if self.history.undo.last().is_some_and(|last| {
+            last.cursor == snapshot.cursor
+                && last.value.expose_secret() == snapshot.value.expose_secret()
+        }) {
+            return;
+        }
+        if self.history.undo.len() == SECRET_TEXT_HISTORY_LIMIT {
+            self.history.undo.remove(0);
+        }
+        self.history.undo.push(snapshot);
+    }
+
+    fn push_redo(&mut self, snapshot: SecretTextSnapshot) {
+        if self.history.redo.len() == SECRET_TEXT_HISTORY_LIMIT {
+            self.history.redo.remove(0);
+        }
+        self.history.redo.push(snapshot);
     }
 }
 
@@ -295,16 +541,14 @@ pub struct ProfileDraft {
     pub access: ProfileAccess,
     pub kind: DatabaseKind,
     pub url_format: ConnectionUrlFormat,
-    url: SecretString,
-    url_cursor: usize,
+    url: SecretTextInput,
     url_pending: bool,
     url_error: Option<String>,
     pub name: TextInput,
     pub host: TextInput,
     pub port: TextInput,
     pub user: TextInput,
-    password: SecretString,
-    password_cursor: usize,
+    password: SecretTextInput,
     pub database: TextInput,
     pub schema: TextInput,
     pub ssl_mode: SslMode,
@@ -354,16 +598,14 @@ impl ProfileDraft {
             access: ProfileAccess::Global,
             kind,
             url_format: ConnectionUrlFormat::default_for(kind),
-            url: SecretString::from(String::new()),
-            url_cursor: 0,
+            url: SecretTextInput::default(),
             url_pending: false,
             url_error: None,
             name: TextInput::default(),
             host: TextInput::from(host),
             port: TextInput::from(port),
             user: TextInput::default(),
-            password: SecretString::from(String::new()),
-            password_cursor: 0,
+            password: SecretTextInput::default(),
             database: TextInput::default(),
             schema: TextInput::from(schema),
             ssl_mode,
@@ -414,8 +656,7 @@ impl ProfileDraft {
             } else {
                 ConnectionUrlFormat::default_for(profile.kind)
             },
-            url: SecretString::from(String::new()),
-            url_cursor: 0,
+            url: SecretTextInput::default(),
             url_pending: false,
             url_error: None,
             name: TextInput::from(profile.name.clone()),
@@ -427,8 +668,7 @@ impl ProfileDraft {
                     .unwrap_or_default(),
             ),
             user: TextInput::from(profile.user.clone().unwrap_or_default()),
-            password: SecretString::from(String::new()),
-            password_cursor: 0,
+            password: SecretTextInput::default(),
             database: TextInput::from(profile.database.clone().unwrap_or_default()),
             schema: TextInput::from(profile.default_schema.clone().unwrap_or_default()),
             ssl_mode: profile.ssl_mode,
@@ -464,20 +704,20 @@ impl ProfileDraft {
     }
 
     pub fn password(&self) -> &SecretString {
-        &self.password
+        self.password.secret()
     }
 
     pub fn url_display(&self) -> String {
-        redact_url_password(self.url.expose_secret()).0
+        redact_url_password(self.url.value()).0
     }
 
     pub fn url_cursor(&self) -> usize {
-        let raw = self.url.expose_secret();
+        let raw = self.url.value();
         let (display, password_ranges) = redact_url_password(raw);
         if password_ranges.is_empty() {
-            return self.url_cursor.min(display.chars().count());
+            return self.url.cursor().min(display.chars().count());
         }
-        let raw_cursor = self.url_cursor.min(raw.chars().count());
+        let raw_cursor = self.url.cursor().min(raw.chars().count());
         let redacted_len = "[REDACTED]".chars().count();
         let mut adjustment = 0_isize;
         for (start, end) in password_ranges {
@@ -506,7 +746,7 @@ impl ProfileDraft {
                 Err(ProfileValidationError::new(ProfileField::Url, error))
             });
         }
-        let parsed = parse_connection_url(self.url.expose_secret()).map_err(|error| {
+        let parsed = parse_connection_url(self.url.value()).map_err(|error| {
             let message = error.to_string();
             self.url_error = Some(message.clone());
             ProfileValidationError::new(ProfileField::Url, message)
@@ -542,29 +782,23 @@ impl ProfileDraft {
 
     pub fn set_password(&mut self, password: impl Into<String>) {
         let password = password.into();
-        self.password_cursor = password.chars().count();
-        self.password = SecretString::from(password);
+        self.password.set(password);
         self.credential_changed();
     }
 
     pub fn password_len(&self) -> usize {
-        self.password.expose_secret().chars().count()
+        self.password.value().chars().count()
     }
 
     pub fn insert(&mut self, field: ProfileField, character: char) {
         if field == ProfileField::Url {
-            let cursor = self.url_cursor;
-            self.edit_url(|url| {
-                let byte_index = character_byte_index(url, cursor);
-                url.insert(byte_index, character);
-            });
-            self.url_cursor += 1;
+            if self.url.insert(character) {
+                self.mark_url_edited();
+            }
         } else if field == ProfileField::Password {
-            let mut password = Zeroizing::new(self.password.expose_secret().to_owned());
-            let byte_index = character_byte_index(&password, self.password_cursor);
-            password.insert(byte_index, character);
-            self.password_cursor += 1;
-            self.password = SecretString::from(std::mem::take(&mut *password));
+            if !self.password.insert(character) {
+                return;
+            }
         } else if let Some(input) = self.text_input_mut(field) {
             input.insert(character);
         }
@@ -573,18 +807,13 @@ impl ProfileDraft {
 
     pub fn paste(&mut self, field: ProfileField, text: &str) {
         if field == ProfileField::Url {
-            let cursor = self.url_cursor;
-            self.edit_url(|url| {
-                let byte_index = character_byte_index(url, cursor);
-                url.insert_str(byte_index, text);
-            });
-            self.url_cursor += text.chars().count();
+            if self.url.paste(text) {
+                self.mark_url_edited();
+            }
         } else if field == ProfileField::Password {
-            let mut password = Zeroizing::new(self.password.expose_secret().to_owned());
-            let byte_index = character_byte_index(&password, self.password_cursor);
-            password.insert_str(byte_index, text);
-            self.password_cursor += text.chars().count();
-            self.password = SecretString::from(std::mem::take(&mut *password));
+            if !self.password.paste(text) {
+                return;
+            }
         } else if let Some(input) = self.text_input_mut(field) {
             input.paste(text);
         }
@@ -593,26 +822,13 @@ impl ProfileDraft {
 
     pub fn backspace(&mut self, field: ProfileField) {
         if field == ProfileField::Url {
-            if self.url_cursor == 0 {
-                return;
+            if self.url.backspace() {
+                self.mark_url_edited();
             }
-            let cursor = self.url_cursor;
-            self.edit_url(|url| {
-                let start = character_byte_index(url, cursor - 1);
-                let end = character_byte_index(url, cursor);
-                url.replace_range(start..end, "");
-            });
-            self.url_cursor -= 1;
         } else if field == ProfileField::Password {
-            if self.password_cursor == 0 {
+            if !self.password.backspace() {
                 return;
             }
-            let mut password = Zeroizing::new(self.password.expose_secret().to_owned());
-            let start = character_byte_index(&password, self.password_cursor - 1);
-            let end = character_byte_index(&password, self.password_cursor);
-            password.replace_range(start..end, "");
-            self.password_cursor -= 1;
-            self.password = SecretString::from(std::mem::take(&mut *password));
         } else if let Some(input) = self.text_input_mut(field) {
             input.backspace();
         }
@@ -621,13 +837,13 @@ impl ProfileDraft {
 
     pub fn delete_previous_word(&mut self, field: ProfileField) {
         if field == ProfileField::Url {
-            let mut cursor = self.url_cursor;
-            self.edit_url(|url| delete_previous_word(url, &mut cursor));
-            self.url_cursor = cursor;
+            if self.url.delete_previous_word() {
+                self.mark_url_edited();
+            }
         } else if field == ProfileField::Password {
-            let mut password = Zeroizing::new(self.password.expose_secret().to_owned());
-            delete_previous_word(&mut password, &mut self.password_cursor);
-            self.password = SecretString::from(std::mem::take(&mut *password));
+            if !self.password.delete_previous_word() {
+                return;
+            }
         } else if let Some(input) = self.text_input_mut(field) {
             input.delete_previous_word();
         }
@@ -636,18 +852,13 @@ impl ProfileDraft {
 
     pub fn delete_to_start(&mut self, field: ProfileField) {
         if field == ProfileField::Url {
-            let cursor = self.url_cursor;
-            self.edit_url(|url| {
-                let end = character_byte_index(url, cursor);
-                url.replace_range(..end, "");
-            });
-            self.url_cursor = 0;
+            if self.url.delete_to_start() {
+                self.mark_url_edited();
+            }
         } else if field == ProfileField::Password {
-            let mut password = Zeroizing::new(self.password.expose_secret().to_owned());
-            let end = character_byte_index(&password, self.password_cursor);
-            password.replace_range(..end, "");
-            self.password_cursor = 0;
-            self.password = SecretString::from(std::mem::take(&mut *password));
+            if !self.password.delete_to_start() {
+                return;
+            }
         } else if let Some(input) = self.text_input_mut(field) {
             input.delete_to_start();
         }
@@ -656,23 +867,13 @@ impl ProfileDraft {
 
     pub fn delete(&mut self, field: ProfileField) {
         if field == ProfileField::Url {
-            let cursor = self.url_cursor;
-            self.edit_url(|url| {
-                let start = character_byte_index(url, cursor);
-                if start < url.len() {
-                    let end = character_byte_index(url, cursor + 1);
-                    url.replace_range(start..end, "");
-                }
-            });
+            if self.url.delete() {
+                self.mark_url_edited();
+            }
         } else if field == ProfileField::Password {
-            let mut password = Zeroizing::new(self.password.expose_secret().to_owned());
-            let start = character_byte_index(&password, self.password_cursor);
-            if start == password.len() {
+            if !self.password.delete() {
                 return;
             }
-            let end = character_byte_index(&password, self.password_cursor + 1);
-            password.replace_range(start..end, "");
-            self.password = SecretString::from(std::mem::take(&mut *password));
         } else if let Some(input) = self.text_input_mut(field) {
             input.delete();
         }
@@ -747,9 +948,9 @@ impl ProfileDraft {
 
     pub fn move_left(&mut self, field: ProfileField) {
         if field == ProfileField::Url {
-            self.url_cursor = self.url_cursor.saturating_sub(1);
+            self.url.move_left();
         } else if field == ProfileField::Password {
-            self.password_cursor = self.password_cursor.saturating_sub(1);
+            self.password.move_left();
         } else if let Some(input) = self.text_input_mut(field) {
             input.move_left();
         }
@@ -757,9 +958,9 @@ impl ProfileDraft {
 
     pub fn move_right(&mut self, field: ProfileField) {
         if field == ProfileField::Url {
-            self.url_cursor = (self.url_cursor + 1).min(self.url.expose_secret().chars().count());
+            self.url.move_right();
         } else if field == ProfileField::Password {
-            self.password_cursor = (self.password_cursor + 1).min(self.password_len());
+            self.password.move_right();
         } else if let Some(input) = self.text_input_mut(field) {
             input.move_right();
         }
@@ -767,9 +968,9 @@ impl ProfileDraft {
 
     pub fn move_home(&mut self, field: ProfileField) {
         if field == ProfileField::Url {
-            self.url_cursor = 0;
+            self.url.move_home();
         } else if field == ProfileField::Password {
-            self.password_cursor = 0;
+            self.password.move_home();
         } else if let Some(input) = self.text_input_mut(field) {
             input.move_home();
         }
@@ -777,9 +978,9 @@ impl ProfileDraft {
 
     pub fn move_end(&mut self, field: ProfileField) {
         if field == ProfileField::Url {
-            self.url_cursor = self.url.expose_secret().chars().count();
+            self.url.move_end();
         } else if field == ProfileField::Password {
-            self.password_cursor = self.password_len();
+            self.password.move_end();
         } else if let Some(input) = self.text_input_mut(field) {
             input.move_end();
         }
@@ -956,12 +1157,14 @@ impl ProfileDraft {
             };
         }
 
-        if !self.password.expose_secret().is_empty() {
+        if !self.password.value().is_empty() {
             return match self.password_storage {
                 PasswordStorageChoice::LocalEncrypted => {
-                    CredentialUpdate::LocalEncrypted(self.password.clone())
+                    CredentialUpdate::LocalEncrypted(self.password.secret().clone())
                 }
-                PasswordStorageChoice::System => CredentialUpdate::System(self.password.clone()),
+                PasswordStorageChoice::System => {
+                    CredentialUpdate::System(self.password.secret().clone())
+                }
             };
         }
 
@@ -1000,6 +1203,46 @@ impl ProfileDraft {
             ProfileField::Schema => Some(&mut self.schema),
             ProfileField::SqlitePath => Some(&mut self.sqlite_path),
             _ => None,
+        }
+    }
+
+    pub fn undo(&mut self, field: ProfileField) {
+        let changed = match field {
+            ProfileField::Url => self.url.undo(),
+            ProfileField::Password => self.password.undo(),
+            _ => self.text_input_mut(field).is_some_and(|input| input.undo()),
+        };
+        if changed {
+            if field == ProfileField::Url {
+                self.mark_url_edited();
+            }
+            self.connection_field_changed(field);
+        }
+    }
+
+    pub fn redo(&mut self, field: ProfileField) {
+        let changed = match field {
+            ProfileField::Url => self.url.redo(),
+            ProfileField::Password => self.password.redo(),
+            _ => self.text_input_mut(field).is_some_and(|input| input.redo()),
+        };
+        if changed {
+            if field == ProfileField::Url {
+                self.mark_url_edited();
+            }
+            self.connection_field_changed(field);
+        }
+    }
+
+    pub fn finish_edit_group(&mut self, field: ProfileField) {
+        match field {
+            ProfileField::Url => self.url.finish_edit_group(),
+            ProfileField::Password => self.password.finish_edit_group(),
+            _ => {
+                if let Some(input) = self.text_input_mut(field) {
+                    input.finish_edit_group();
+                }
+            }
         }
     }
 
@@ -1073,10 +1316,7 @@ impl ProfileDraft {
         self.refresh_url();
     }
 
-    fn edit_url(&mut self, edit: impl FnOnce(&mut String)) {
-        let mut url = Zeroizing::new(self.url.expose_secret().to_owned());
-        edit(&mut url);
-        self.url = SecretString::from(std::mem::take(&mut *url));
+    fn mark_url_edited(&mut self) {
         self.url_pending = true;
         self.url_error = None;
     }
@@ -1088,8 +1328,7 @@ impl ProfileDraft {
         let Ok(url) = format_connection_url(&profile, self.url_format) else {
             return;
         };
-        self.url_cursor = url.chars().count();
-        self.url = SecretString::from(url);
+        self.url.set(url);
         self.url_pending = false;
         self.url_error = None;
     }
@@ -1564,6 +1803,9 @@ impl ProfileManagerState {
             self.message = Some(error.message);
             return;
         }
+        if let Some(draft) = self.draft.as_mut() {
+            draft.finish_edit_group(self.selected_field);
+        }
         let fields = self.visible_fields();
         if fields.is_empty() {
             return;
@@ -1583,6 +1825,11 @@ impl ProfileManagerState {
         {
             self.message = Some(error.message);
             return;
+        }
+        if field != self.selected_field
+            && let Some(draft) = self.draft.as_mut()
+        {
+            draft.finish_edit_group(self.selected_field);
         }
         if self.visible_fields().contains(&field) {
             self.selected_field = field;
@@ -1662,6 +1909,22 @@ impl ProfileManagerState {
         let field = self.selected_field;
         if let Some(draft) = self.draft.as_mut() {
             draft.move_end(field);
+        }
+    }
+
+    pub fn undo(&mut self) {
+        let field = self.selected_field;
+        if let Some(draft) = self.draft.as_mut() {
+            draft.undo(field);
+            self.message = None;
+        }
+    }
+
+    pub fn redo(&mut self) {
+        let field = self.selected_field;
+        if let Some(draft) = self.draft.as_mut() {
+            draft.redo(field);
+            self.message = None;
         }
     }
 

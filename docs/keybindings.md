@@ -211,12 +211,33 @@ or form, returns from preview, or cancels a busy editor.
 | arrows, Home, End | Move cursor |
 | Backspace, Delete | Delete text |
 | `Ctrl-w/U/H` | Delete previous word, to line start, or backspace |
+| `Ctrl-Z` | Undo the focused editor text edit |
+| `Ctrl-Shift-Z` | Redo the focused editor text edit |
 | `Ctrl-Space` | Trigger completion |
 | `Esc` | Return to Normal |
 | `F5` | Run SQL |
 
 `Ctrl-w` in Insert/Replace is an editor text command, never the pane prefix.
 `Space` remains text input in Insert/Replace; it does not start either Leader.
+
+### Non-Vim Text Inputs
+
+All focused non-Vim text inputs use the same editing contract, including profile
+fields, catalog forms, WHERE/ORDER BY filters, cell editing, console search and
+rename, Help search, Explorer search, Dashboard process filtering, notification
+search, and confirmation inputs.
+
+| Keys | Behavior |
+| --- | --- |
+| `Ctrl-Z` | Undo the focused input's latest edit group |
+| `Ctrl-Shift-Z` | Redo the focused input's latest undone edit group |
+| `Ctrl-Shift-Z` or `Ctrl-Z` with shifted `Z` | Alternate terminal encoding of redo |
+
+Consecutive typed characters and consecutive deletions are grouped into one
+edit. Paste, completion replacement, word deletion, line deletion, and clear
+are atomic edits. Moving to another field closes the current edit group. A new
+edit after undo discards the redo branch. History is local to the focused field
+and is not persisted.
 
 ### Visual
 

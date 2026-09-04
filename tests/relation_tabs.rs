@@ -293,7 +293,7 @@ fn ddl_viewport_actions_only_affect_the_active_relation_ddl_view() {
     assert_eq!(ddl_offsets(&app), (0, 0));
     assert_eq!(relation_tab(&app).ddl_viewport.total_rows, 0);
 
-    app.active_tab = 0;
+    app.active_tab = 1;
     app.update(Action::SetDdlViewportMetrics {
         visible_rows: 1,
         visible_columns: 1,
@@ -460,6 +460,32 @@ fn shared_query_actions_preserve_relation_editing_and_submission() {
         relation_query(&app).submitted.where_clause.as_deref(),
         Some("i")
     );
+}
+
+#[test]
+fn data_query_undo_and_redo_are_scoped_to_the_focused_input() {
+    let mut app = lazydb::app::App::new(Vec::new());
+    app.tabs
+        .push(WorkspaceTab::Relation(RelationTab::new("users")));
+    app.active_tab = 1;
+
+    app.update(Action::FocusDataQueryInput(
+        lazydb::model::data_query::DataQueryInput::Where,
+    ));
+    app.update(Action::DataQueryInsert('a'));
+    app.update(Action::DataQueryInsert('b'));
+    app.update(Action::DataQueryUndo);
+    assert_eq!(relation_query(&app).where_input.value(), "");
+    app.update(Action::DataQueryRedo);
+    assert_eq!(relation_query(&app).where_input.value(), "ab");
+
+    app.update(Action::FocusDataQueryInput(
+        lazydb::model::data_query::DataQueryInput::OrderBy,
+    ));
+    app.update(Action::DataQueryInsert('c'));
+    app.update(Action::DataQueryUndo);
+    assert_eq!(relation_query(&app).where_input.value(), "ab");
+    assert_eq!(relation_query(&app).order_by_input.value(), "");
 }
 
 #[test]

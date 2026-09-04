@@ -56,6 +56,15 @@ fn console_manager_browse_and_search_keys_are_mode_aware() {
     app.update(Action::SqlEditorListSearchStart);
 
     assert_eq!(
+        keymap.map(ctrl('z'), &app),
+        Some(Action::SqlEditorListInputUndo)
+    );
+    assert_eq!(
+        keymap.map(ctrl_shift('z'), &app),
+        Some(Action::SqlEditorListInputRedo)
+    );
+
+    assert_eq!(
         keymap.map(key(KeyCode::Char('j')), &app),
         Some(Action::SqlEditorListInputInsert('j'))
     );
@@ -171,6 +180,13 @@ fn profile_access_menu_navigates_and_cancels() {
 
 fn ctrl(character: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL)
+}
+
+fn ctrl_shift(character: char) -> KeyEvent {
+    KeyEvent::new(
+        KeyCode::Char(character),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    )
 }
 
 fn table_editor_app() -> App {
@@ -713,6 +729,7 @@ fn role_editor_uses_catalog_editor_field_keymap() {
 fn data_query_completion_keys_preempt_query_input_navigation() {
     let mut app = App::new(Vec::new());
     let mut tab = RelationTab::new("users");
+    tab.query.capability = lazydb::model::data_query::DataQueryCapability::Relation;
     tab.query.focus = Some(DataQueryInput::Where);
     tab.query.completion = Some(DataQueryCompletion {
         candidates: vec![DataQueryCandidate {
@@ -762,6 +779,35 @@ fn data_query_completion_keys_preempt_query_input_navigation() {
     assert_eq!(
         keymap.map(key(KeyCode::Enter), &app),
         Some(Action::SubmitDataQuery)
+    );
+}
+
+#[test]
+fn focused_data_query_accepts_text_history_keys() {
+    let mut app = App::new(Vec::new());
+    let mut tab = RelationTab::new("users");
+    tab.query.capability = lazydb::model::data_query::DataQueryCapability::Relation;
+    tab.query.focus = Some(DataQueryInput::Where);
+    app.tabs.push(WorkspaceTab::Relation(tab));
+    app.active_tab = 1;
+    let mut keymap = Keymap::default();
+
+    assert_eq!(keymap.map(ctrl('z'), &app), Some(Action::DataQueryUndo));
+    assert_eq!(
+        keymap.map(ctrl_shift('z'), &app),
+        Some(Action::DataQueryRedo)
+    );
+}
+
+#[test]
+fn focused_catalog_table_field_accepts_text_history_keys() {
+    let app = table_editor_app();
+    let mut keymap = Keymap::default();
+
+    assert_eq!(keymap.map(ctrl('z'), &app), Some(Action::CatalogEditorUndo));
+    assert_eq!(
+        keymap.map(ctrl_shift('z'), &app),
+        Some(Action::CatalogEditorRedo)
     );
 }
 
@@ -3098,6 +3144,12 @@ fn profile_form_maps_navigation_editing_and_commands() {
     ] {
         assert_eq!(keymap.map(event, &app), Some(expected));
     }
+    assert_eq!(keymap.map(ctrl('z'), &app), Some(Action::ProfileUndo));
+    assert_eq!(keymap.map(ctrl_shift('z'), &app), Some(Action::ProfileRedo));
+    app.profile_manager.as_mut().unwrap().selected_field = ProfileField::Url;
+    assert_eq!(keymap.map(ctrl('z'), &app), Some(Action::ProfileUndo));
+    app.profile_manager.as_mut().unwrap().selected_field = ProfileField::Password;
+    assert_eq!(keymap.map(ctrl_shift('z'), &app), Some(Action::ProfileRedo));
     for character in ['h', 'j', 'k', 'l'] {
         assert_eq!(
             keymap.map(key(KeyCode::Char(character)), &app),

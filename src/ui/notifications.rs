@@ -118,7 +118,8 @@ pub(crate) fn render_history(
         ""
     };
     frame.render_widget(
-        Paragraph::new(format!("{search}{}", history.query)).style(Style::new().fg(theme.action)),
+        Paragraph::new(format!("{search}{}", history.query.value()))
+            .style(Style::new().fg(theme.action)),
         chunks[0],
     );
     let selected = history.selected.min(entries.len().saturating_sub(1));
@@ -187,7 +188,7 @@ pub(crate) fn render_history(
         state.cursor_style = Some(crate::ui::CursorStyle::Bar);
         let x = chunks[0]
             .x
-            .saturating_add(history.query.width() as u16)
+            .saturating_add(history.query.value().width() as u16)
             .min(chunks[0].right().saturating_sub(1));
         frame.set_cursor_position(Position::new(x, chunks[0].y));
     }

@@ -60,6 +60,27 @@ fn profile_secret_fields_support_shell_style_deletion() {
 }
 
 #[test]
+fn profile_url_and_password_support_secure_undo_and_redo() {
+    let mut draft = ProfileDraft::new(DatabaseKind::Postgres);
+    let original_url = draft.url_display();
+
+    draft.insert(ProfileField::Url, 'x');
+    assert_ne!(draft.url_display(), original_url);
+    draft.undo(ProfileField::Url);
+    assert_eq!(draft.url_display(), original_url);
+    draft.redo(ProfileField::Url);
+    assert_ne!(draft.url_display(), original_url);
+
+    draft.set_password("secret");
+    draft.insert(ProfileField::Password, '!');
+    draft.undo(ProfileField::Password);
+    assert_eq!(draft.password().expose_secret(), "secret");
+    draft.redo(ProfileField::Password);
+    assert_eq!(draft.password().expose_secret(), "secret!");
+    assert!(!format!("{draft:?}").contains("secret"));
+}
+
+#[test]
 fn editing_a_profile_preserves_project_access() {
     let mut profile = saved_postgres_profile();
     profile.access = ProfileAccess::Projects {

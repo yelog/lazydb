@@ -1807,7 +1807,7 @@ fn render_explorer_find(
         return;
     }
     let (current, total) = app.explorer.find_match_position();
-    let query = format!("/ {}", sanitize_terminal_text(&find.query));
+    let query = format!("/ {}", sanitize_terminal_text(find.query.value()));
     let input = format!("{query} ({current}/{total})");
     frame.render_widget(
         Paragraph::new(input.clone()).style(Style::new().fg(theme.action).bg(theme.surface)),
@@ -1906,7 +1906,7 @@ fn explorer_find_list_item(
     )];
     spans.extend(match_spans(
         sanitize_terminal_text(label),
-        &find.query,
+        find.query.value(),
         base_style,
         Style::new()
             .fg(theme.action)
@@ -1966,7 +1966,7 @@ fn render_explorer_search(
     if area.is_empty() {
         return;
     }
-    let input = format!("/ {}", sanitize_terminal_text(&search.query));
+    let input = format!("/ {}", sanitize_terminal_text(search.query.value()));
     frame.render_widget(
         Paragraph::new(input.clone()).style(
             Style::new()
@@ -2049,7 +2049,7 @@ fn render_explorer_search(
             }
             spans.extend(match_spans(
                 sanitize_terminal_text(&row.label),
-                &search.query,
+                search.query.value(),
                 label_style,
                 Style::new()
                     .fg(theme.action)
@@ -2095,7 +2095,7 @@ fn render_explorer_search(
             crate::model::workspace::ExplorerSearchLifecycle::Ready => {
                 format!(
                     "No objects match \"{}\"",
-                    sanitize_terminal_text(&search.query)
+                    sanitize_terminal_text(search.query.value())
                 )
             }
             crate::model::workspace::ExplorerSearchLifecycle::Failed(message) => {

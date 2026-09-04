@@ -327,6 +327,12 @@ impl Keymap {
         }
         if matches!(app.overlay, Some(Overlay::CatalogDropConfirm { .. })) {
             self.pending = None;
+            if is_text_redo(event) {
+                return Some(Action::CatalogDropRedo);
+            }
+            if is_text_undo(event) {
+                return Some(Action::CatalogDropUndo);
+            }
             return match event.code {
                 KeyCode::Enter => Some(Action::CatalogDropConfirm),
                 KeyCode::Esc => Some(Action::CatalogDropCancel),
@@ -344,13 +350,19 @@ impl Keymap {
             app.overlay,
             Some(Overlay::CatalogEditorDestructiveConfirm { .. })
         ) {
+            if is_text_redo(event) {
+                return Some(Action::CatalogEditorConfirmRedo);
+            }
+            if is_text_undo(event) {
+                return Some(Action::CatalogEditorConfirmUndo);
+            }
             return match event.code {
                 KeyCode::Enter => Some(Action::CatalogEditorApply),
                 KeyCode::Esc => Some(Action::CatalogEditorCancel),
                 KeyCode::Char(character) if event.modifiers.is_empty() => {
                     Some(Action::CatalogEditorConfirmInsert(character))
                 }
-                KeyCode::Backspace => Some(Action::CatalogEditorBackspace),
+                KeyCode::Backspace => Some(Action::CatalogEditorConfirmBackspace),
                 _ => None,
             };
         }
@@ -366,6 +378,12 @@ impl Keymap {
                 };
             }
             if history.phase == crate::model::notification::HistorySearchPhase::Editing {
+                if is_text_redo(event) {
+                    return Some(Action::NotificationHistorySearchRedo);
+                }
+                if is_text_undo(event) {
+                    return Some(Action::NotificationHistorySearchUndo);
+                }
                 return match event.code {
                     KeyCode::Esc | KeyCode::Char('q') => Some(Action::DismissOverlay),
                     KeyCode::Enter => Some(Action::NotificationHistorySearchConfirm),
@@ -416,6 +434,12 @@ impl Keymap {
             });
             if !confirmed {
                 self.pending = None;
+                if is_text_redo(event) {
+                    return Some(Action::ExplorerFindRedo);
+                }
+                if is_text_undo(event) {
+                    return Some(Action::ExplorerFindUndo);
+                }
                 return match event.code {
                     KeyCode::Esc => Some(Action::ExplorerFindClose),
                     KeyCode::Enter => Some(Action::ExplorerFindConfirm),
@@ -465,6 +489,12 @@ impl Keymap {
                 }
             } else {
                 self.pending = None;
+                if is_text_redo(event) {
+                    return Some(Action::ExplorerSearchRedo);
+                }
+                if is_text_undo(event) {
+                    return Some(Action::ExplorerSearchUndo);
+                }
                 if event.modifiers == KeyModifiers::CONTROL && event.code == KeyCode::Char('u') {
                     return Some(Action::ExplorerSearchClear);
                 }
@@ -500,6 +530,12 @@ impl Keymap {
                     _ => None,
                 },
                 SqlEditorListMode::Search => {
+                    if is_text_redo(event) {
+                        return Some(Action::SqlEditorListInputRedo);
+                    }
+                    if is_text_undo(event) {
+                        return Some(Action::SqlEditorListInputUndo);
+                    }
                     if event.modifiers == KeyModifiers::CONTROL {
                         return match event.code {
                             KeyCode::Char('w') => {
@@ -527,6 +563,12 @@ impl Keymap {
                     }
                 }
                 SqlEditorListMode::Rename { .. } => {
+                    if is_text_redo(event) {
+                        return Some(Action::SqlEditorListInputRedo);
+                    }
+                    if is_text_undo(event) {
+                        return Some(Action::SqlEditorListInputUndo);
+                    }
                     if event.modifiers == KeyModifiers::CONTROL {
                         return match event.code {
                             KeyCode::Char('w') => {
@@ -607,6 +649,18 @@ impl Keymap {
             && app.active_editor_mode() == EditorMode::Insert
             && event.code == KeyCode::Esc
         {
+            return Some(Action::EditorKey(event));
+        }
+        if app.focus == Focus::Editor
+            && matches!(
+                app.active_editor_mode(),
+                EditorMode::Insert | EditorMode::Replace
+            )
+            && (is_text_undo(event) || is_text_redo(event))
+        {
+            return Some(Action::EditorKey(event));
+        }
+        if app.focus == Focus::Editor && (is_text_undo(event) || is_text_redo(event)) {
             return Some(Action::EditorKey(event));
         }
         if app.active_console_opt().is_some_and(|tab| {
@@ -1224,6 +1278,8 @@ impl Keymap {
                         TextInputEdit::MoveRight => Action::DashboardProcessFilterMoveRight,
                         TextInputEdit::MoveHome => Action::DashboardProcessFilterMoveHome,
                         TextInputEdit::MoveEnd => Action::DashboardProcessFilterMoveEnd,
+                        TextInputEdit::Undo => Action::DashboardProcessFilterUndo,
+                        TextInputEdit::Redo => Action::DashboardProcessFilterRedo,
                     });
                 }
                 return match event.code {
@@ -1490,6 +1546,12 @@ fn map_catalog_editor(event: KeyEvent, app: &App) -> Option<Action> {
             _ => None,
         },
         crate::model::catalog_editor::CatalogEditorPage::Form if editor.owner_picker_active() => {
+            if is_text_redo(event) {
+                return Some(Action::CatalogOwnerPickerRedo);
+            }
+            if is_text_undo(event) {
+                return Some(Action::CatalogOwnerPickerUndo);
+            }
             match event.code {
                 KeyCode::Esc => Some(Action::CatalogOwnerPickerClose),
                 KeyCode::Tab => Some(Action::CatalogEditorFieldNext),
@@ -1551,6 +1613,12 @@ fn map_catalog_editor_form(
         Some(crate::model::catalog_editor::CatalogDraft::Table(_))
     ) {
         return map_table_editor(event, editor, details_visible, compact);
+    }
+    if is_text_redo(event) {
+        return Some(Action::CatalogEditorRedo);
+    }
+    if is_text_undo(event) {
+        return Some(Action::CatalogEditorUndo);
     }
     match event.code {
         KeyCode::Esc => Some(Action::CatalogEditorCancel),
@@ -1659,6 +1727,12 @@ fn map_table_editor(
             | TableEditorFocus::ColumnDetails(TableColumnField::Default)
             | TableEditorFocus::ColumnDetails(TableColumnField::Comment)
     );
+    if text_focus && is_text_redo(event) {
+        return Some(Action::CatalogEditorRedo);
+    }
+    if text_focus && is_text_undo(event) {
+        return Some(Action::CatalogEditorUndo);
+    }
     if text_focus && event.modifiers == KeyModifiers::CONTROL {
         return match event.code {
             KeyCode::Char('w') => Some(Action::CatalogEditorDeletePreviousWord),
@@ -2146,6 +2220,8 @@ fn map_relation_data(event: KeyEvent, app: &App) -> Option<Action> {
                 TextInputEdit::MoveRight => Action::RelationEditMoveRight,
                 TextInputEdit::MoveHome => Action::RelationEditMoveHome,
                 TextInputEdit::MoveEnd => Action::RelationEditMoveEnd,
+                TextInputEdit::Undo => Action::RelationEditUndo,
+                TextInputEdit::Redo => Action::RelationEditRedo,
             }),
         };
     }
@@ -2192,6 +2268,12 @@ fn map_relation_data(event: KeyEvent, app: &App) -> Option<Action> {
 }
 
 fn map_text_input_edit(event: KeyEvent) -> Option<TextInputEdit> {
+    if is_text_redo(event) {
+        return Some(TextInputEdit::Redo);
+    }
+    if is_text_undo(event) {
+        return Some(TextInputEdit::Undo);
+    }
     if event.modifiers == KeyModifiers::CONTROL {
         return match event.code {
             KeyCode::Char('w') => Some(TextInputEdit::DeletePreviousWord),
@@ -2215,6 +2297,16 @@ fn map_text_input_edit(event: KeyEvent) -> Option<TextInputEdit> {
         KeyCode::Char(character) => Some(TextInputEdit::Insert(character)),
         _ => None,
     }
+}
+
+fn is_text_undo(event: KeyEvent) -> bool {
+    event.modifiers == KeyModifiers::CONTROL && event.code == KeyCode::Char('z')
+}
+
+fn is_text_redo(event: KeyEvent) -> bool {
+    (event.modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+        && matches!(event.code, KeyCode::Char('z' | 'Z')))
+        || (event.modifiers == KeyModifiers::CONTROL && event.code == KeyCode::Char('Z'))
 }
 
 fn normalize_shift_tab(mut event: KeyEvent) -> KeyEvent {
@@ -2243,6 +2335,14 @@ fn map_profile_manager(event: KeyEvent, app: &App) -> Option<Action> {
         && event.modifiers.contains(KeyModifiers::CONTROL)
         && (event.modifiers & !(KeyModifiers::CONTROL | KeyModifiers::SHIFT)).is_empty()
     {
+        if is_profile_history_field(manager.selected_field) {
+            if is_text_redo(event) {
+                return Some(Action::ProfileRedo);
+            }
+            if is_text_undo(event) {
+                return Some(Action::ProfileUndo);
+            }
+        }
         return match event.code {
             KeyCode::Char('s') => Some(Action::ProfileSave { connect: false }),
             KeyCode::Char('t') => Some(Action::ProfileTest),
@@ -2395,6 +2495,10 @@ fn is_text_field(field: ProfileField) -> bool {
             | ProfileField::Schema
             | ProfileField::SqlitePath
     )
+}
+
+fn is_profile_history_field(field: ProfileField) -> bool {
+    is_text_field(field)
 }
 
 fn is_cycle_field(field: ProfileField) -> bool {
@@ -2706,6 +2810,8 @@ fn map_data_query(event: KeyEvent, app: &App) -> Option<Action> {
                 TextInputEdit::MoveRight => Action::DataQueryMoveRight,
                 TextInputEdit::MoveHome => Action::DataQueryMoveHome,
                 TextInputEdit::MoveEnd => Action::DataQueryMoveEnd,
+                TextInputEdit::Undo => Action::DataQueryUndo,
+                TextInputEdit::Redo => Action::DataQueryRedo,
             }),
         };
     }
@@ -2736,7 +2842,7 @@ fn active_data_query_has_focus(app: &App) -> bool {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use super::{Keymap, Pending, PendingState};
+    use super::{Keymap, Pending, PendingState, map_text_input_edit};
     use crate::{
         action::Action,
         app::App,
@@ -2762,6 +2868,72 @@ mod tests {
         app.active_tab = 1;
         app.focus = Focus::Results;
         app
+    }
+
+    #[test]
+    fn text_history_keys_are_normalized_across_terminal_encodings() {
+        assert_eq!(
+            map_text_input_edit(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL,)),
+            Some(crate::model::text_input::TextInputEdit::Undo),
+        );
+        for event in [
+            KeyEvent::new(
+                KeyCode::Char('z'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+            KeyEvent::new(KeyCode::Char('Z'), KeyModifiers::CONTROL),
+        ] {
+            assert_eq!(
+                map_text_input_edit(event),
+                Some(crate::model::text_input::TextInputEdit::Redo),
+            );
+        }
+        for event in [
+            KeyEvent::new(
+                KeyCode::Char('z'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            ),
+            KeyEvent::new(
+                KeyCode::Char('Z'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT | KeyModifiers::ALT,
+            ),
+            KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('Z'), KeyModifiers::SHIFT),
+        ] {
+            assert!(!matches!(
+                map_text_input_edit(event),
+                Some(
+                    crate::model::text_input::TextInputEdit::Undo
+                        | crate::model::text_input::TextInputEdit::Redo
+                )
+            ));
+        }
+    }
+
+    #[test]
+    fn cell_editor_history_keys_are_owned_by_cell_input() {
+        let app = relation_app(RelationGridMode::EditCell(
+            crate::model::relation_edit::CellEditorState {
+                row: 0,
+                column: 0,
+                input: Default::default(),
+            },
+        ));
+        let mut keymap = Keymap::default();
+        assert_eq!(
+            keymap.map(control_key('z'), &app),
+            Some(Action::RelationEditUndo)
+        );
+        assert_eq!(
+            keymap.map(
+                KeyEvent::new(
+                    KeyCode::Char('z'),
+                    KeyModifiers::CONTROL | KeyModifiers::SHIFT
+                ),
+                &app,
+            ),
+            Some(Action::RelationEditRedo)
+        );
     }
 
     fn key(code: KeyCode) -> KeyEvent {

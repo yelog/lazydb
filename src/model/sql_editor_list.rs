@@ -72,6 +72,14 @@ impl SqlEditorListState {
         self.input_mut().move_end();
     }
 
+    pub fn undo(&mut self) {
+        self.input_mut().undo();
+    }
+
+    pub fn redo(&mut self) {
+        self.input_mut().redo();
+    }
+
     fn input_mut(&mut self) -> &mut TextInput {
         match &mut self.mode {
             SqlEditorListMode::Rename { input, .. } => input,
@@ -82,6 +90,7 @@ impl SqlEditorListState {
     }
 
     pub fn move_selection(&mut self, delta: isize, visible_ids: &[Uuid]) {
+        self.input_mut().finish_edit_group();
         if visible_ids.is_empty() {
             self.reconcile_selection(visible_ids);
             return;
@@ -229,5 +238,17 @@ mod tests {
         assert_eq!(state.selected_id, Some(second));
         state.move_selection(1, &[first, second]);
         assert_eq!(state.selected_id, Some(first));
+    }
+
+    #[test]
+    fn input_undo_and_redo_restore_the_active_search_text() {
+        let mut state = SqlEditorListState::new(None);
+        state.start_search();
+        state.insert('a');
+        state.insert('b');
+        state.undo();
+        assert_eq!(state.visible_query(), "");
+        state.redo();
+        assert_eq!(state.visible_query(), "ab");
     }
 }

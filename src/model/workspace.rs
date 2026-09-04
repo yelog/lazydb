@@ -19,6 +19,7 @@ use crate::model::explorer::{
     ExplorerScrollAmount, ExplorerTreeState, ProfilePlacement, ProfileProvenance, StatusRowKind,
 };
 use crate::model::tab::{ConsoleRecord, WorkspaceTab};
+use crate::model::text_input::TextInput;
 use crate::model::transaction::{
     CancellationIntent, DeferredTransactionPrompt, TransactionExitChoice,
 };
@@ -365,7 +366,7 @@ pub struct ExplorerFindRow {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExplorerFindState {
     pub phase: ExplorerSearchPhase,
-    pub query: String,
+    pub query: TextInput,
     pub rows: Vec<ExplorerFindRow>,
     pub matches: Vec<ExplorerNodeId>,
     pub current: usize,
@@ -385,7 +386,7 @@ pub struct ExplorerSearchState {
     pub phase: ExplorerSearchPhase,
     pub connection: Option<ConnectionIdentity>,
     pub session_id: u64,
-    pub query: String,
+    pub query: TextInput,
     pub generation: u64,
     pub lifecycle: ExplorerSearchLifecycle,
     pub hits: Vec<CatalogSearchHit>,
@@ -418,7 +419,7 @@ impl ExplorerSearchState {
             phase: ExplorerSearchPhase::Editing,
             connection,
             session_id,
-            query: String::new(),
+            query: TextInput::default(),
             generation: 0,
             lifecycle: ExplorerSearchLifecycle::Idle,
             hits: Vec::new(),
@@ -465,7 +466,7 @@ impl ExplorerState {
     pub fn open_find(&mut self) {
         self.find = Some(ExplorerFindState {
             phase: ExplorerSearchPhase::Editing,
-            query: String::new(),
+            query: TextInput::default(),
             rows: self
                 .visible()
                 .into_iter()
@@ -481,16 +482,27 @@ impl ExplorerState {
     }
 
     pub fn edit_find(&mut self, edit: impl FnOnce(&mut String)) -> bool {
+        self.edit_find_input(|query| {
+            query.edit_string(edit);
+        })
+    }
+
+    pub fn edit_find_input(&mut self, edit: impl FnOnce(&mut TextInput)) -> bool {
         let Some(find) = self.find.as_mut() else {
             return false;
         };
+        let before_value = find.query.value().to_owned();
+        let before_cursor = find.query.cursor();
         edit(&mut find.query);
-        find.matches = if find.query.trim().is_empty() {
+        if before_value == find.query.value() && before_cursor == find.query.cursor() {
+            return false;
+        }
+        find.matches = if find.query.value().trim().is_empty() {
             Vec::new()
         } else {
             find.rows
                 .iter()
-                .filter(|row| search_text_matches(&row.label, &find.query))
+                .filter(|row| search_text_matches(&row.label, find.query.value()))
                 .map(|row| row.id.clone())
                 .collect()
         };
@@ -585,8 +597,19 @@ impl ExplorerState {
     }
 
     pub fn edit_search(&mut self, edit: impl FnOnce(&mut String)) -> Option<u64> {
+        self.edit_search_input(|query| {
+            query.edit_string(edit);
+        })
+    }
+
+    pub fn edit_search_input(&mut self, edit: impl FnOnce(&mut TextInput)) -> Option<u64> {
         let search = self.search.as_mut()?;
+        let before_value = search.query.value().to_owned();
+        let before_cursor = search.query.cursor();
         edit(&mut search.query);
+        if before_value == search.query.value() && before_cursor == search.query.cursor() {
+            return None;
+        }
         search.generation = search.generation.saturating_add(1);
         search.selected = 0;
         search.scroll = 0;
@@ -596,7 +619,7 @@ impl ExplorerState {
         search.frontend_rows.clear();
         search.frontend_match_rows.clear();
         search.phase = ExplorerSearchPhase::Editing;
-        search.lifecycle = if search.query.trim().is_empty() {
+        search.lifecycle = if search.query.value().trim().is_empty() {
             search.hits.clear();
             ExplorerSearchLifecycle::Idle
         } else {
@@ -609,7 +632,7 @@ impl ExplorerState {
         let Some(search) = self.search.as_ref() else {
             return;
         };
-        if search.query.trim().is_empty() {
+        if search.query.value().trim().is_empty() {
             let Some(search) = self.search.as_mut() else {
                 return;
             };
@@ -619,7 +642,7 @@ impl ExplorerState {
             return;
         }
         let profile_id = search.connection.map(|connection| connection.profile_id);
-        let query = search.query.clone();
+        let query = search.query.value().to_owned();
         let (rows, matches) = self.normalized.filtered_search_rows(profile_id, &query);
         let selected_id = search
             .frontend_rows

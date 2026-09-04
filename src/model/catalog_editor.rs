@@ -1370,7 +1370,7 @@ impl TableDraft {
         }
     }
 
-    fn selected_text_input_mut(&mut self) -> Option<&mut TextInput> {
+    pub(crate) fn selected_text_input_mut(&mut self) -> Option<&mut TextInput> {
         match self.focus {
             TableEditorFocus::General(TableGeneralField::Name) => Some(&mut self.name),
             TableEditorFocus::General(TableGeneralField::Schema) => Some(&mut self.schema),
@@ -1455,6 +1455,24 @@ impl TableDraft {
             input.move_end();
         }
     }
+
+    pub fn undo(&mut self) {
+        if let Some(input) = self.selected_text_input_mut() {
+            input.undo();
+        }
+    }
+
+    pub fn redo(&mut self) {
+        if let Some(input) = self.selected_text_input_mut() {
+            input.redo();
+        }
+    }
+
+    pub(crate) fn finish_edit_group(&mut self) {
+        if let Some(input) = self.selected_text_input_mut() {
+            input.finish_edit_group();
+        }
+    }
 }
 
 impl ColumnDraft {
@@ -1529,6 +1547,7 @@ impl SchemaDraft {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CatalogDraft {
     Database(DatabaseDraft),
@@ -1544,6 +1563,7 @@ pub enum CatalogDraft {
 
 impl CatalogDraft {
     pub fn move_field(&mut self, delta: isize) {
+        self.finish_edit_group();
         match self {
             Self::Table(d) => d.move_field(delta),
             Self::Schema(d) => d.move_field(delta),
@@ -1656,6 +1676,41 @@ impl CatalogDraft {
             _ => {}
         }
     }
+
+    pub fn undo(&mut self) {
+        if let Some(input) = self.selected_input_mut() {
+            input.undo();
+        }
+    }
+
+    pub fn redo(&mut self) {
+        if let Some(input) = self.selected_input_mut() {
+            input.redo();
+        }
+    }
+
+    pub fn finish_edit_group(&mut self) {
+        if let Some(input) = self.selected_input_mut() {
+            input.finish_edit_group();
+        }
+    }
+
+    fn selected_input_mut(&mut self) -> Option<&mut TextInput> {
+        match self {
+            Self::Table(draft) => draft.selected_text_input_mut(),
+            Self::Schema(draft) => Some(draft.selected_input_mut()),
+            Self::View(draft) => Some(draft.selected_input_mut()),
+            Self::MaterializedView(draft) => (draft.query_editable || draft.selected_field != 4)
+                .then(|| draft.selected_input_mut()),
+            Self::Sequence(draft) => Some(draft.selected_input_mut()),
+            Self::Database(draft) => (draft.editable_creation_options
+                || !matches!(draft.selected_field, 2..=8))
+            .then(|| draft.selected_input_mut()),
+            Self::Role(draft) => draft.input(),
+            Self::Constraint(draft) => draft.selected_input_mut(),
+            Self::Index(_) => None,
+        }
+    }
 }
 
 pub use crate::db::catalog_mutation::{
@@ -1732,6 +1787,7 @@ impl OwnerPickerState {
     }
 
     pub fn move_selection(&mut self, delta: isize, choices: &[CatalogOwnerChoice]) {
+        self.filter.finish_edit_group();
         let visible = self.visible(choices);
         if visible.is_empty() {
             self.selected_name = None;
@@ -1743,6 +1799,16 @@ impl OwnerPickerState {
             .unwrap_or(0);
         let next = (current as isize + delta).rem_euclid(visible.len() as isize) as usize;
         self.selected_name = Some(visible[next].name.clone());
+    }
+
+    pub fn undo(&mut self, choices: &[CatalogOwnerChoice]) {
+        self.filter.undo();
+        self.reconcile(choices);
+    }
+
+    pub fn redo(&mut self, choices: &[CatalogOwnerChoice]) {
+        self.filter.redo();
+        self.reconcile(choices);
     }
 
     pub fn selected<'a>(
