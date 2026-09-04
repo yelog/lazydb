@@ -2646,6 +2646,12 @@ LIMIT 2001
                 schema: Some(schema.to_owned()),
             })?,
             vec![
+                CatalogTarget::Groups {
+                    schema: old_schema_id.clone(),
+                },
+                CatalogTarget::Groups {
+                    schema: new_schema_id.clone(),
+                },
                 CatalogTarget::Objects {
                     schema: old_schema_id.clone(),
                     group: ObjectGroup::Tables,

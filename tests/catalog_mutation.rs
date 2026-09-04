@@ -1296,6 +1296,9 @@ fn postgres_table_create_and_edit_plan_is_quoted_ordered_and_destructive_when_ne
         None,
     )
     .unwrap();
+    assert!(plan.refresh.contains(&CatalogTarget::Groups {
+        schema: id(profile, CatalogKind::Schema, &["app", "public"]),
+    }));
     assert_eq!(
         plan.statements()[0],
         "CREATE TABLE \"public\".\"odd\"\"table\" (\"id\" integer DEFAULT nextval('seq') NOT NULL, \"name\" integer DEFAULT nextval('seq') NOT NULL)"
