@@ -133,6 +133,7 @@ pub enum HitTarget {
     ProfileGroupCancel,
     ExplorerAddOption(usize),
     CatalogEditorField(usize),
+    CatalogEditorFormField(crate::model::catalog_editor::CatalogFormFocus),
     CatalogEditorTableField(crate::model::catalog_editor::TableEditorFocus),
     CatalogEditorTableColumn(usize),
     CatalogEditorAddTableColumn,

@@ -11,10 +11,11 @@ use crate::{
     db::{catalog::CatalogKind, catalog_mutation::CatalogObjectType},
     model::catalog_editor::{
         CatalogDraft, CatalogEditorOperation, CatalogEditorPage, CatalogEditorState,
-        ConstraintDraft, DatabaseDraft, IndexDraft, MaterializedViewDraft, RoleDraft, SchemaDraft,
-        SequenceDraft, TableActionField, TableColumnField, TableDraft, TableEditorFocus,
-        TableGeneralField, ViewDraft,
+        CatalogFormFocus, ConstraintDraft, DatabaseDraft, IndexDraft, MaterializedViewDraft,
+        RoleDraft, SchemaDraft, SequenceDraft, TableActionField, TableColumnField, TableDraft,
+        TableEditorFocus, TableGeneralField, ViewDraft,
     },
+    model::text_input::TextInput,
     security::sanitize_terminal_text,
 };
 
@@ -254,11 +255,36 @@ fn form(
     } else if let Some(CatalogDraft::Constraint(draft)) = editor.draft.as_ref() {
         render_constraint(frame, chunks[1], draft, theme);
     } else if let Some(CatalogDraft::View(draft)) = editor.draft.as_ref() {
-        render_view(frame, chunks[1], draft, theme);
+        render_view(
+            frame,
+            chunks[1],
+            draft,
+            ui,
+            theme,
+            app.catalog_owner_choices(),
+            &editor.owner_picker,
+        );
     } else if let Some(CatalogDraft::MaterializedView(draft)) = editor.draft.as_ref() {
-        render_materialized_view(frame, chunks[1], draft, theme);
+        render_materialized_view(
+            frame,
+            chunks[1],
+            draft,
+            editor.mode == crate::db::catalog_mutation::CatalogMutationMode::Create,
+            ui,
+            theme,
+            app.catalog_owner_choices(),
+            &editor.owner_picker,
+        );
     } else if let Some(CatalogDraft::Sequence(draft)) = editor.draft.as_ref() {
-        render_sequence(frame, chunks[1], draft, theme);
+        render_sequence(
+            frame,
+            chunks[1],
+            draft,
+            ui,
+            theme,
+            app.catalog_owner_choices(),
+            &editor.owner_picker,
+        );
     } else {
         frame.render_widget(
             Paragraph::new("Definition form is ready for the selected object type."),
@@ -281,12 +307,34 @@ fn form(
         );
     } else {
         let mut hints = vec![ShortcutHint::new("Tab/Shift-Tab", "fields")];
-        if matches!(
-            editor.draft.as_ref(),
-            Some(CatalogDraft::MaterializedView(_))
-        ) && editor.mode == crate::db::catalog_mutation::CatalogMutationMode::Create
+        if let Some(
+            draft @ (CatalogDraft::View(_)
+            | CatalogDraft::MaterializedView(_)
+            | CatalogDraft::Sequence(_)),
+        ) = editor.draft.as_ref()
         {
-            hints.push(ShortcutHint::new("Space", "toggle data"));
+            match draft
+                .focus_kind(editor.mode == crate::db::catalog_mutation::CatalogMutationMode::Create)
+            {
+                crate::model::catalog_editor::CatalogFormFocusKind::Text => {
+                    hints.push(ShortcutHint::new("Type", "edit"));
+                }
+                crate::model::catalog_editor::CatalogFormFocusKind::Choice => {
+                    hints.push(ShortcutHint::new("Space", "cycle"));
+                }
+                crate::model::catalog_editor::CatalogFormFocusKind::Toggle => {
+                    hints.push(ShortcutHint::new("Space", "toggle"));
+                }
+                crate::model::catalog_editor::CatalogFormFocusKind::Action => {
+                    hints.push(ShortcutHint::new("Enter/Space", "activate"));
+                }
+                crate::model::catalog_editor::CatalogFormFocusKind::Disabled => {
+                    hints.push(ShortcutHint::new("Unavailable", "field"));
+                }
+                crate::model::catalog_editor::CatalogFormFocusKind::ReadOnly => {
+                    hints.push(ShortcutHint::new("Read only", "field"));
+                }
+            }
         }
         if editor.owner_picker_active() {
             hints.extend([
@@ -377,87 +425,9 @@ fn render_schema(
             );
         }
     }
-    if draft.selected_field == crate::model::catalog_editor::SCHEMA_OWNER_FIELD && picker.open {
-        let Some(choices) = owner_choices else {
-            return;
-        };
-        let picker_y = area.y.saturating_add(4);
-        let filter = picker.filter.value();
-        let visible = choices
-            .iter()
-            .filter(|choice| choice.name.to_lowercase().contains(&filter.to_lowercase()))
-            .take(usize::from(area.height.saturating_sub(5)));
-        let mut header = vec![Span::styled(
-            "OWNER ROLE",
-            Style::new()
-                .fg(theme.muted)
-                .bg(theme.surface)
-                .add_modifier(Modifier::BOLD),
-        )];
-        if !filter.is_empty() {
-            header.push(Span::styled(
-                format!("  /{}", sanitize_terminal_text(filter)),
-                Style::new().fg(theme.action).bg(theme.surface),
-            ));
-        }
-        if let Some(message) = picker.message.as_deref() {
-            header.push(Span::styled(
-                format!("  {}", sanitize_terminal_text(message)),
-                Style::new().fg(theme.warning).bg(theme.surface),
-            ));
-        }
-        frame.render_widget(
-            Paragraph::new(Line::from(header)).style(Style::new().bg(theme.surface)),
-            Rect::new(area.x, picker_y, area.width, 1),
-        );
-        for (offset, choice) in visible.enumerate() {
-            let row = Rect::new(
-                area.x,
-                picker_y.saturating_add(1 + offset as u16),
-                area.width,
-                1,
-            );
-            ui.hit_regions.push(HitRegion {
-                area: row,
-                target: HitTarget::CatalogOwnerChoice(choice.name.clone()),
-            });
-            let selected = Some(choice.name.as_str()) == picker.selected_name.as_deref();
-            let status = if choice.is_current {
-                "CURRENT"
-            } else if choice.can_login {
-                "LOGIN"
-            } else {
-                "ROLE"
-            };
-            let suffix = if choice.selectable {
-                status.to_owned()
-            } else {
-                format!("{status} - cannot SET ROLE")
-            };
-            frame.render_widget(
-                Paragraph::new(format!(
-                    "{}{}  {}",
-                    if selected { "› " } else { "  " },
-                    choice.name,
-                    suffix
-                ))
-                .style(
-                    Style::new()
-                        .fg(if choice.selectable {
-                            theme.text
-                        } else {
-                            theme.muted
-                        })
-                        .bg(if selected {
-                            theme.selection
-                        } else {
-                            theme.surface
-                        }),
-                ),
-                row,
-            );
-        }
-    } else if draft.selected_field == crate::model::catalog_editor::SCHEMA_OWNER_FIELD
+    render_owner_picker(frame, area, owner_choices, picker, ui, theme);
+    if draft.selected_field == crate::model::catalog_editor::SCHEMA_OWNER_FIELD
+        && !picker.open
         && let crate::model::workspace::CatalogOwnerContextState::Failed { message, .. } =
             owner_context
     {
@@ -468,6 +438,82 @@ fn render_schema(
             ))
             .style(Style::new().fg(theme.warning).bg(theme.surface)),
             Rect::new(area.x, area.y.saturating_add(4), area.width, 1),
+        );
+    }
+}
+
+fn render_owner_picker(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    owner_choices: Option<&[crate::db::catalog_mutation::CatalogOwnerChoice]>,
+    picker: &crate::model::catalog_editor::OwnerPickerState,
+    ui: &mut UiState,
+    theme: Theme,
+) {
+    let Some(choices) = owner_choices else {
+        return;
+    };
+    if !picker.open {
+        return;
+    }
+    let picker_y = area.y.saturating_add(4);
+    let visible = picker.visible(choices);
+    let content_bottom = area.bottom().saturating_sub(2);
+    let max_rows = usize::from(content_bottom.saturating_sub(picker_y + 1));
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "OWNER ROLE",
+                Style::new()
+                    .fg(theme.muted)
+                    .bg(theme.surface)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  /{}", sanitize_terminal_text(picker.filter.value())),
+                Style::new().fg(theme.action).bg(theme.surface),
+            ),
+        ]))
+        .style(Style::new().bg(theme.surface)),
+        Rect::new(area.x, picker_y, area.width, 1),
+    );
+    for (offset, choice) in visible.into_iter().take(max_rows).enumerate() {
+        let row = Rect::new(
+            area.x,
+            picker_y.saturating_add(1 + offset as u16),
+            area.width,
+            1,
+        );
+        ui.hit_regions.push(HitRegion {
+            area: row,
+            target: HitTarget::CatalogOwnerChoice(choice.name.clone()),
+        });
+        let selected = Some(choice.name.as_str()) == picker.selected_name.as_deref();
+        frame.render_widget(
+            Paragraph::new(format!(
+                "{}{}  {}",
+                if selected { "› " } else { "  " },
+                choice.name,
+                if choice.selectable {
+                    "SELECTABLE"
+                } else {
+                    "DISABLED"
+                }
+            ))
+            .style(
+                Style::new()
+                    .fg(if choice.selectable {
+                        theme.text
+                    } else {
+                        theme.muted
+                    })
+                    .bg(if selected {
+                        theme.selection
+                    } else {
+                        theme.surface
+                    }),
+            ),
+            row,
         );
     }
 }
@@ -547,109 +593,675 @@ fn render_database(frame: &mut Frame<'_>, area: Rect, draft: &DatabaseDraft, the
     );
 }
 
-fn render_sequence(frame: &mut Frame<'_>, area: Rect, draft: &SequenceDraft, theme: Theme) {
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::raw(format!(
-                "Name: {}  Schema: {}  Owner: {}",
-                draft.name.value(),
-                draft.schema.value(),
-                draft.owner.value()
-            )),
-            Line::raw(format!("Comment: {}", draft.comment.value())),
-            Line::raw(format!(
-                "Type: {}  Increment: {}  Start: {}  Restart: {}",
-                draft.data_type.value(),
-                draft.increment.value(),
-                draft.start_value.value(),
-                draft.restart_value.value()
-            )),
-            Line::raw(format!(
-                "Min: {:?}  Max: {:?}  Cache: {}  Cycle: {}",
-                draft.min_value,
-                draft.max_value,
-                draft.cache.value(),
-                draft.cycle
-            )),
-            Line::raw(format!("Owned by: {}", draft.owned_by.value())),
-        ])
-        .style(Style::new().fg(theme.text))
-        .wrap(Wrap { trim: true }),
-        area,
+fn render_sequence(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    draft: &SequenceDraft,
+    ui: &mut UiState,
+    theme: Theme,
+    owner_choices: Option<&[crate::db::catalog_mutation::CatalogOwnerChoice]>,
+    picker: &crate::model::catalog_editor::OwnerPickerState,
+) {
+    let bottom = area.bottom().saturating_sub(2);
+    let compact = area.height < 18;
+    render_catalog_section_heading(
+        frame,
+        Rect::new(area.x, area.y, area.width, 1),
+        "GENERAL",
+        matches!(
+            draft.focus,
+            CatalogFormFocus::Name
+                | CatalogFormFocus::Schema
+                | CatalogFormFocus::Owner
+                | CatalogFormFocus::Comment
+        ),
+        theme,
     );
+    let general = [
+        (CatalogFormFocus::Name, "Name", &draft.name),
+        (CatalogFormFocus::Schema, "Schema", &draft.schema),
+        (CatalogFormFocus::Owner, "Owner", &draft.owner),
+        (CatalogFormFocus::Comment, "Comment", &draft.comment),
+    ];
+    render_sequence_fields(
+        frame,
+        area,
+        bottom,
+        1,
+        &general,
+        draft.focus,
+        compact,
+        ui,
+        theme,
+    );
+    let values_y = area.y + if compact { 3 } else { 5 };
+    if values_y < bottom {
+        render_catalog_section_heading(
+            frame,
+            Rect::new(area.x, values_y, area.width, 1),
+            "VALUES",
+            !matches!(
+                draft.focus,
+                CatalogFormFocus::Name
+                    | CatalogFormFocus::Schema
+                    | CatalogFormFocus::Owner
+                    | CatalogFormFocus::Comment
+                    | CatalogFormFocus::OwnedBy
+            ),
+            theme,
+        );
+        let values = [
+            (CatalogFormFocus::DataType, "Data type", &draft.data_type),
+            (CatalogFormFocus::Increment, "Increment", &draft.increment),
+            (CatalogFormFocus::StartValue, "Start", &draft.start_value),
+            (
+                CatalogFormFocus::RestartValue,
+                "Restart",
+                &draft.restart_value,
+            ),
+            (CatalogFormFocus::Cache, "Cache", &draft.cache),
+        ];
+        render_sequence_fields(
+            frame,
+            area,
+            bottom,
+            values_y + 1 - area.y,
+            &values,
+            draft.focus,
+            compact,
+            ui,
+            theme,
+        );
+        let min_y = if compact
+            && matches!(
+                draft.focus,
+                CatalogFormFocus::MinValue | CatalogFormFocus::MaxValue
+            ) {
+            bottom.saturating_sub(3)
+        } else {
+            values_y + if compact { 1 } else { 6 }
+        };
+        if min_y < bottom {
+            render_sequence_bound(
+                frame,
+                Rect::new(area.x, min_y, area.width, 1),
+                "Minimum",
+                &draft.min_value,
+                CatalogFormFocus::MinValue,
+                draft.focus,
+                ui,
+                theme,
+                "No min value",
+            );
+            let max_y = min_y
+                + if draft.min_value.kind == crate::model::catalog_editor::SequenceBoundKind::Custom
+                {
+                    2
+                } else {
+                    1
+                };
+            if max_y < bottom {
+                render_sequence_bound(
+                    frame,
+                    Rect::new(area.x, max_y, area.width, 1),
+                    "Maximum",
+                    &draft.max_value,
+                    CatalogFormFocus::MaxValue,
+                    draft.focus,
+                    ui,
+                    theme,
+                    "No max value",
+                );
+            }
+        }
+    }
+    let ownership_y = if compact {
+        if matches!(
+            draft.focus,
+            CatalogFormFocus::Cycle | CatalogFormFocus::OwnedBy
+        ) {
+            bottom.saturating_sub(4)
+        } else {
+            bottom
+        }
+    } else {
+        area.y + 16
+    };
+    if ownership_y < bottom {
+        render_catalog_section_heading(
+            frame,
+            Rect::new(area.x, ownership_y, area.width, 1),
+            "OWNERSHIP",
+            matches!(
+                draft.focus,
+                CatalogFormFocus::Cycle | CatalogFormFocus::OwnedBy
+            ),
+            theme,
+        );
+        if ownership_y + 1 < bottom {
+            render_catalog_toggle_field(
+                frame,
+                Rect::new(area.x, ownership_y + 1, area.width, 1),
+                "Cycle",
+                draft.cycle,
+                "On",
+                "Off",
+                draft.focus == CatalogFormFocus::Cycle,
+                true,
+                HitTarget::CatalogEditorFormField(CatalogFormFocus::Cycle),
+                ui,
+                theme,
+            );
+        }
+        if ownership_y + 2 < bottom {
+            render_catalog_text_field(
+                frame,
+                Rect::new(area.x, ownership_y + 2, area.width, 1),
+                "Owned by",
+                &draft.owned_by,
+                draft.focus == CatalogFormFocus::OwnedBy,
+                true,
+                HitTarget::CatalogEditorFormField(CatalogFormFocus::OwnedBy),
+                ui,
+                theme,
+            );
+        }
+    }
+    render_catalog_actions(frame, area, draft.focus, ui, theme);
+    render_owner_picker(frame, area, owner_choices, picker, ui, theme);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_materialized_view(
     frame: &mut Frame<'_>,
     area: Rect,
     draft: &MaterializedViewDraft,
+    query_editable: bool,
+    ui: &mut UiState,
     theme: Theme,
+    owner_choices: Option<&[crate::db::catalog_mutation::CatalogOwnerChoice]>,
+    picker: &crate::model::catalog_editor::OwnerPickerState,
 ) {
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::raw(format!("Name: {}", draft.name.value())),
-            Line::raw(format!(
-                "Schema: {}   Owner: {}",
-                draft.schema.value(),
-                draft.owner.value()
-            )),
-            Line::raw(format!("Comment: {}", draft.comment.value())),
-            Line::raw(format!("Tablespace: {}", draft.tablespace.value())),
-            Line::raw(format!(
-                "Query (read-only on edit): {}",
-                draft.query.value()
-            )),
-            Line::raw(format!(
-                "WITH {}DATA",
-                if draft.with_data { "" } else { "NO " }
-            )),
-        ])
-        .style(Style::new().fg(theme.text))
-        .wrap(Wrap { trim: true }),
-        area,
+    let bottom = area.bottom().saturating_sub(2);
+    let compact = area.height < 16;
+    render_catalog_section_heading(
+        frame,
+        Rect::new(area.x, area.y, area.width, 1),
+        "GENERAL",
+        matches!(
+            draft.focus,
+            CatalogFormFocus::Name
+                | CatalogFormFocus::Schema
+                | CatalogFormFocus::Owner
+                | CatalogFormFocus::Comment
+        ),
+        theme,
     );
-}
-
-fn render_view(frame: &mut Frame<'_>, area: Rect, draft: &ViewDraft, theme: Theme) {
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::raw(format!("Name: {}", draft.name.value())),
-            Line::raw(format!(
-                "Schema: {}   Owner: {}",
-                draft.schema.value(),
-                draft.owner.value()
-            )),
-            Line::raw(format!("Comment: {}", draft.comment.value())),
-            Line::raw(format!("Output columns: {}", draft.output_columns.value())),
-            Line::raw(format!("Query: {}", draft.query.value())),
-            Line::raw(format!(
-                "Security barrier: {:?}  invoker: {:?}  check: {:?}",
-                draft.security_barrier, draft.security_invoker, draft.check_option
-            )),
-            Line::raw(format!(
-                "Availability: barrier={}  invoker={}  check={}",
-                view_option_status(&draft.security_barrier.availability),
-                view_option_status(&draft.security_invoker.availability),
-                view_option_status(&draft.check_option.availability),
-            )),
-        ])
-        .style(Style::new().fg(theme.text))
-        .wrap(Wrap { trim: true }),
+    let general = [
+        (CatalogFormFocus::Name, "Name", &draft.name),
+        (CatalogFormFocus::Schema, "Schema", &draft.schema),
+        (CatalogFormFocus::Owner, "Owner", &draft.owner),
+        (CatalogFormFocus::Comment, "Comment", &draft.comment),
+    ];
+    render_sequence_fields(
+        frame,
         area,
+        bottom,
+        1,
+        &general,
+        draft.focus,
+        compact,
+        ui,
+        theme,
     );
-}
-
-fn view_option_status(
-    availability: &crate::db::catalog_mutation::ViewMutationOptionAvailability,
-) -> String {
-    match availability {
-        crate::db::catalog_mutation::ViewMutationOptionAvailability::Available => {
-            "available".into()
-        }
-        crate::db::catalog_mutation::ViewMutationOptionAvailability::Unavailable { reason } => {
-            format!("disabled ({reason})")
+    let definition_y = if compact && draft.focus == CatalogFormFocus::Query {
+        bottom.saturating_sub(2)
+    } else {
+        area.y + if compact { 3 } else { 5 }
+    };
+    if definition_y < bottom {
+        render_catalog_section_heading(
+            frame,
+            Rect::new(area.x, definition_y, area.width, 1),
+            "DEFINITION",
+            matches!(draft.focus, CatalogFormFocus::Query),
+            theme,
+        );
+        let query_y = if compact && draft.focus == CatalogFormFocus::Query {
+            bottom.saturating_sub(1)
+        } else {
+            definition_y + 1
+        };
+        if query_y < bottom {
+            render_catalog_text_field(
+                frame,
+                Rect::new(area.x, query_y, area.width, 1),
+                "Query",
+                &draft.query,
+                draft.focus == CatalogFormFocus::Query,
+                query_editable,
+                HitTarget::CatalogEditorFormField(CatalogFormFocus::Query),
+                ui,
+                theme,
+            );
         }
     }
+    let storage_y = if compact && draft.focus == CatalogFormFocus::Query {
+        bottom
+    } else if compact {
+        bottom.saturating_sub(2)
+    } else {
+        area.y + 8
+    };
+    if storage_y < bottom {
+        render_catalog_section_heading(
+            frame,
+            Rect::new(area.x, storage_y, area.width, 1),
+            "STORAGE",
+            matches!(
+                draft.focus,
+                CatalogFormFocus::Tablespace | CatalogFormFocus::WithData
+            ),
+            theme,
+        );
+        if storage_y + 1 < bottom {
+            render_catalog_text_field(
+                frame,
+                Rect::new(area.x, storage_y + 1, area.width, 1),
+                "Tablespace",
+                &draft.tablespace,
+                draft.focus == CatalogFormFocus::Tablespace,
+                true,
+                HitTarget::CatalogEditorFormField(CatalogFormFocus::Tablespace),
+                ui,
+                theme,
+            );
+        }
+        if storage_y + 2 < bottom || (compact && draft.focus == CatalogFormFocus::WithData) {
+            let toggle_y = if compact && draft.focus == CatalogFormFocus::WithData {
+                bottom.saturating_sub(1)
+            } else {
+                storage_y + 2
+            };
+            render_catalog_toggle_field(
+                frame,
+                Rect::new(area.x, toggle_y, area.width, 1),
+                "With data",
+                draft.with_data,
+                "WITH DATA",
+                "WITH NO DATA",
+                draft.focus == CatalogFormFocus::WithData,
+                query_editable,
+                HitTarget::CatalogEditorFormField(CatalogFormFocus::WithData),
+                ui,
+                theme,
+            );
+        }
+    }
+    render_catalog_actions(frame, area, draft.focus, ui, theme);
+    render_owner_picker(frame, area, owner_choices, picker, ui, theme);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_sequence_fields(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    bottom: u16,
+    start: u16,
+    fields: &[(CatalogFormFocus, &str, &TextInput)],
+    focus: CatalogFormFocus,
+    compact: bool,
+    ui: &mut UiState,
+    theme: Theme,
+) {
+    for (offset, (field, label, input)) in fields.iter().enumerate() {
+        if compact && focus != *field {
+            continue;
+        }
+        let y = area.y + start + offset as u16;
+        if y < bottom {
+            render_catalog_text_field(
+                frame,
+                Rect::new(area.x, y, area.width, 1),
+                label,
+                input,
+                focus == *field,
+                true,
+                HitTarget::CatalogEditorFormField(*field),
+                ui,
+                theme,
+            );
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_sequence_bound(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    label: &str,
+    bound: &crate::model::catalog_editor::SequenceBoundDraft,
+    field: CatalogFormFocus,
+    focus: CatalogFormFocus,
+    ui: &mut UiState,
+    theme: Theme,
+    no_limit: &str,
+) {
+    use crate::model::catalog_editor::SequenceBoundKind;
+    let value = match bound.kind {
+        SequenceBoundKind::Default => "Default",
+        SequenceBoundKind::NoLimit => no_limit,
+        SequenceBoundKind::Custom => "Custom",
+    };
+    render_catalog_choice_field(
+        frame,
+        area,
+        label,
+        value,
+        focus == field,
+        true,
+        HitTarget::CatalogEditorFormField(field),
+        ui,
+        theme,
+    );
+    if bound.kind == SequenceBoundKind::Custom && area.y + 1 < frame.area().bottom() {
+        let input_area = Rect::new(area.x, area.y + 1, area.width, 1);
+        render_text_input(
+            frame,
+            catalog_field_areas(input_area).1,
+            "",
+            &bound.value,
+            Style::new().fg(theme.text).bg(if focus == field {
+                theme.selection
+            } else {
+                theme.surface
+            }),
+            ui,
+        );
+    }
+}
+
+fn render_catalog_actions(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    focus: CatalogFormFocus,
+    ui: &mut UiState,
+    theme: Theme,
+) {
+    let y = area.bottom().saturating_sub(2);
+    let review = if area.width < 70 {
+        "[ SQL ]"
+    } else {
+        "[ Review SQL ]"
+    };
+    let actions = [
+        (
+            review,
+            CatalogFormFocus::Review,
+            HitTarget::CatalogEditorReview,
+        ),
+        (
+            "[ Cancel ]",
+            CatalogFormFocus::Cancel,
+            HitTarget::CatalogEditorCancel,
+        ),
+    ];
+    let mut x = area.x;
+    for (label, field, target) in actions {
+        let width = (label.len() as u16).min(area.right().saturating_sub(x));
+        if width > 0 {
+            render_catalog_action(
+                frame,
+                Rect::new(x, y, width, 1),
+                label,
+                focus == field,
+                true,
+                target,
+                ui,
+                theme,
+            );
+            x = x.saturating_add(width + 3);
+        }
+    }
+}
+
+fn render_view(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    draft: &ViewDraft,
+    ui: &mut UiState,
+    theme: Theme,
+    owner_choices: Option<&[crate::db::catalog_mutation::CatalogOwnerChoice]>,
+    picker: &crate::model::catalog_editor::OwnerPickerState,
+) {
+    let content_bottom = area.bottom().saturating_sub(2);
+    let compact = area.height < 16;
+    let heading = |frame: &mut Frame<'_>, y: u16, label: &str, selected: bool| {
+        render_catalog_section_heading(
+            frame,
+            Rect::new(area.x, y, area.width, 1),
+            label,
+            selected,
+            theme,
+        );
+    };
+    heading(
+        frame,
+        area.y,
+        "GENERAL",
+        matches!(
+            draft.focus,
+            crate::model::catalog_editor::CatalogFormFocus::Name
+                | crate::model::catalog_editor::CatalogFormFocus::Schema
+                | crate::model::catalog_editor::CatalogFormFocus::Owner
+                | crate::model::catalog_editor::CatalogFormFocus::Comment
+        ),
+    );
+    let general = [
+        (CatalogFormFocus::Name, "Name", &draft.name, true),
+        (CatalogFormFocus::Schema, "Schema", &draft.schema, true),
+        (CatalogFormFocus::Owner, "Owner", &draft.owner, true),
+        (CatalogFormFocus::Comment, "Comment", &draft.comment, true),
+    ];
+    for (offset, (field, label, input, enabled)) in general.into_iter().enumerate() {
+        if compact && draft.focus != field {
+            continue;
+        }
+        let y = area.y.saturating_add(1 + offset as u16);
+        if y < content_bottom {
+            render_catalog_text_field(
+                frame,
+                Rect::new(area.x, y, area.width, 1),
+                label,
+                input,
+                draft.focus == field,
+                enabled,
+                HitTarget::CatalogEditorFormField(field),
+                ui,
+                theme,
+            );
+        }
+    }
+    let definition_y = area.y.saturating_add(if compact { 3 } else { 6 });
+    if definition_y < content_bottom {
+        heading(
+            frame,
+            definition_y,
+            "DEFINITION",
+            matches!(
+                draft.focus,
+                CatalogFormFocus::OutputColumns | CatalogFormFocus::Query
+            ),
+        );
+        if !compact || draft.focus == CatalogFormFocus::OutputColumns {
+            render_catalog_text_field(
+                frame,
+                Rect::new(area.x, definition_y + 1, area.width, 1),
+                "Output columns",
+                &draft.output_columns,
+                draft.focus == CatalogFormFocus::OutputColumns,
+                true,
+                HitTarget::CatalogEditorFormField(CatalogFormFocus::OutputColumns),
+                ui,
+                theme,
+            );
+        }
+        let query_y = definition_y.saturating_add(
+            if compact && draft.focus != CatalogFormFocus::OutputColumns {
+                1
+            } else {
+                2
+            },
+        );
+        if query_y < content_bottom {
+            render_catalog_text_field(
+                frame,
+                Rect::new(area.x, query_y, area.width, 1),
+                "Query",
+                &draft.query,
+                draft.focus == CatalogFormFocus::Query,
+                true,
+                HitTarget::CatalogEditorFormField(CatalogFormFocus::Query),
+                ui,
+                theme,
+            );
+        }
+    }
+    let options_y = if compact
+        && matches!(
+            draft.focus,
+            CatalogFormFocus::SecurityBarrier
+                | CatalogFormFocus::SecurityInvoker
+                | CatalogFormFocus::CheckOption
+        ) {
+        content_bottom.saturating_sub(2)
+    } else {
+        area.y.saturating_add(if compact { 5 } else { 9 })
+    };
+    if options_y < content_bottom {
+        heading(
+            frame,
+            options_y,
+            "OPTIONS",
+            matches!(
+                draft.focus,
+                CatalogFormFocus::SecurityBarrier
+                    | CatalogFormFocus::SecurityInvoker
+                    | CatalogFormFocus::CheckOption
+            ),
+        );
+        let rows = [
+            (
+                CatalogFormFocus::SecurityBarrier,
+                "Security barrier",
+                &draft.security_barrier,
+                "Default",
+                "On",
+                "Off",
+            ),
+            (
+                CatalogFormFocus::SecurityInvoker,
+                "Security invoker",
+                &draft.security_invoker,
+                "Default",
+                "On",
+                "Off",
+            ),
+        ];
+        for (offset, (field, label, option, default, on, off)) in rows.into_iter().enumerate() {
+            if compact && draft.focus != field {
+                continue;
+            }
+            let y = options_y.saturating_add(if compact { 1 } else { 1 + offset as u16 });
+            if y < content_bottom {
+                let available = option.availability.is_available();
+                let value = option
+                    .value
+                    .map_or(default, |value| if value { on } else { off });
+                render_catalog_choice_field(
+                    frame,
+                    Rect::new(area.x, y, area.width, 1),
+                    label,
+                    value,
+                    draft.focus == field,
+                    available,
+                    HitTarget::CatalogEditorFormField(field),
+                    ui,
+                    theme,
+                );
+            }
+        }
+        let y = options_y.saturating_add(if compact { 1 } else { 3 });
+        if (!compact || draft.focus == CatalogFormFocus::CheckOption) && y < content_bottom {
+            let available = draft.check_option.availability.is_available();
+            let value = draft
+                .check_option
+                .value
+                .as_deref()
+                .map_or("None", |value| match value {
+                    "LOCAL" => "Local",
+                    "CASCADED" => "Cascaded",
+                    _ => value,
+                });
+            render_catalog_choice_field(
+                frame,
+                Rect::new(area.x, y, area.width, 1),
+                "Check option",
+                value,
+                draft.focus == CatalogFormFocus::CheckOption,
+                available,
+                HitTarget::CatalogEditorFormField(CatalogFormFocus::CheckOption),
+                ui,
+                theme,
+            );
+        }
+    }
+    let actions_y = area.bottom().saturating_sub(2);
+    let actions = if compact {
+        [
+            (
+                "[ SQL ]",
+                CatalogFormFocus::Review,
+                HitTarget::CatalogEditorReview,
+            ),
+            (
+                "[ Cancel ]",
+                CatalogFormFocus::Cancel,
+                HitTarget::CatalogEditorCancel,
+            ),
+        ]
+    } else {
+        [
+            (
+                "[ Review SQL ]",
+                CatalogFormFocus::Review,
+                HitTarget::CatalogEditorReview,
+            ),
+            (
+                "[ Cancel ]",
+                CatalogFormFocus::Cancel,
+                HitTarget::CatalogEditorCancel,
+            ),
+        ]
+    };
+    let mut x = area.x;
+    for (label, field, target) in actions {
+        let width = (label.len() as u16).min(area.right().saturating_sub(x));
+        if width > 0 {
+            render_catalog_action(
+                frame,
+                Rect::new(x, actions_y, width, 1),
+                label,
+                draft.focus == field,
+                true,
+                target,
+                ui,
+                theme,
+            );
+            x = x.saturating_add(width + 3);
+        }
+    }
+    render_owner_picker(frame, area, owner_choices, picker, ui, theme);
 }
 
 fn render_constraint(frame: &mut Frame<'_>, area: Rect, draft: &ConstraintDraft, theme: Theme) {
@@ -740,15 +1352,15 @@ fn render_table(
     // column list of its selected row.
     let full_list_capacity = area.height.saturating_sub(16);
     let compact = area.height <= 10 || full_list_capacity == 0;
-    let heading = Line::from(vec![
-        Span::styled("GENERAL", section_style(general_focus, theme)),
-        Span::raw("    "),
-        Span::styled("COLUMNS", section_style(columns_focus, theme)),
-    ]);
-    frame.render_widget(
-        Paragraph::new(heading),
-        Rect::new(area.x, area.y, area.width, 1),
+    let general_heading = Rect::new(area.x, area.y, area.width / 2, 1);
+    let columns_heading = Rect::new(
+        general_heading.right(),
+        area.y,
+        area.width.saturating_sub(general_heading.width),
+        1,
     );
+    render_catalog_section_heading(frame, general_heading, "GENERAL", general_focus, theme);
+    render_catalog_section_heading(frame, columns_heading, "COLUMNS", columns_focus, theme);
     ui.hit_regions.push(HitRegion {
         area: Rect::new(area.x, area.y, area.width / 2, 1),
         target: HitTarget::CatalogEditorTableField(TableEditorFocus::General(
@@ -825,9 +1437,12 @@ fn render_table(
         area.y.saturating_add(7)
     };
     if columns_y < content_bottom {
-        frame.render_widget(
-            Paragraph::new(Span::styled("COLUMNS", section_style(columns_focus, theme))),
+        render_catalog_section_heading(
+            frame,
             Rect::new(area.x, columns_y, area.width, 1),
+            "COLUMNS",
+            columns_focus,
+            theme,
         );
     }
     let list_start = columns_y.saturating_add(1);
@@ -933,26 +1548,16 @@ fn render_table(
         if action_area.width == 0 {
             continue;
         }
-        frame.render_widget(
-            Paragraph::new(label).style(
-                Style::new()
-                    .fg(if draft.focus == field {
-                        theme.background
-                    } else {
-                        theme.action
-                    })
-                    .bg(if draft.focus == field {
-                        theme.accent
-                    } else {
-                        theme.surface
-                    }),
-            ),
+        render_catalog_action(
+            frame,
             action_area,
-        );
-        ui.hit_regions.push(HitRegion {
-            area: action_area,
+            label,
+            draft.focus == field,
+            true,
             target,
-        });
+            ui,
+            theme,
+        );
         x = x.saturating_add(width + 3);
     }
     let hints = if draft.column_editor.is_some() {
@@ -1135,6 +1740,216 @@ impl EmptyText for String {
     }
 }
 
+const CATALOG_FIELD_LABEL_WIDTH: u16 = 18;
+
+fn catalog_field_areas(area: Rect) -> (Rect, Rect) {
+    let label_width = area.width.min(CATALOG_FIELD_LABEL_WIDTH);
+    (
+        Rect::new(area.x, area.y, label_width, area.height),
+        Rect::new(
+            area.x.saturating_add(label_width),
+            area.y,
+            area.width.saturating_sub(label_width),
+            area.height,
+        ),
+    )
+}
+
+fn render_catalog_field_label(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    label: &str,
+    active: bool,
+    enabled: bool,
+    theme: Theme,
+) {
+    let active = active && enabled;
+    frame.render_widget(
+        Paragraph::new(format!(
+            "{} {:<15}",
+            if active { "›" } else { " " },
+            sanitize_terminal_text(label)
+        ))
+        .style(
+            Style::new()
+                .fg(if active { theme.action } else { theme.muted })
+                .add_modifier(Modifier::BOLD),
+        ),
+        area,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_catalog_text_field(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    label: &str,
+    input: &TextInput,
+    active: bool,
+    enabled: bool,
+    target: HitTarget,
+    ui: &mut UiState,
+    theme: Theme,
+) {
+    let (label_area, value_area) = catalog_field_areas(area);
+    render_catalog_field_label(frame, label_area, label, active, enabled, theme);
+    if enabled {
+        ui.hit_regions.push(HitRegion { area, target });
+    }
+    if active && enabled {
+        render_text_input(
+            frame,
+            value_area,
+            "",
+            input,
+            Style::new().fg(theme.text).bg(theme.selection),
+            ui,
+        );
+    } else {
+        let value = sanitize_terminal_text(input.value());
+        let value = if enabled {
+            value
+        } else {
+            format!("{value}  READ ONLY")
+        };
+        frame.render_widget(
+            Paragraph::new(value).style(
+                Style::new()
+                    .fg(if enabled { theme.text } else { theme.muted })
+                    .bg(theme.surface),
+            ),
+            value_area,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments, dead_code)]
+fn render_catalog_choice_field(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    label: &str,
+    value: &str,
+    active: bool,
+    enabled: bool,
+    target: HitTarget,
+    ui: &mut UiState,
+    theme: Theme,
+) {
+    let (label_area, value_area) = catalog_field_areas(area);
+    render_catalog_field_label(frame, label_area, label, active, enabled, theme);
+    let value = sanitize_terminal_text(value);
+    let value = if enabled {
+        format!("‹ {value} ›")
+    } else {
+        format!("{value}  DISABLED")
+    };
+    frame.render_widget(
+        Paragraph::new(value).style(
+            Style::new()
+                .fg(if enabled { theme.text } else { theme.muted })
+                .bg(if active && enabled {
+                    theme.selection
+                } else {
+                    theme.surface
+                }),
+        ),
+        value_area,
+    );
+    if enabled {
+        ui.hit_regions.push(HitRegion { area, target });
+    }
+}
+
+#[allow(clippy::too_many_arguments, dead_code)]
+fn render_catalog_toggle_field(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    label: &str,
+    value: bool,
+    enabled_label: &str,
+    disabled_label: &str,
+    active: bool,
+    enabled: bool,
+    target: HitTarget,
+    ui: &mut UiState,
+    theme: Theme,
+) {
+    let (label_area, value_area) = catalog_field_areas(area);
+    render_catalog_field_label(frame, label_area, label, active, enabled, theme);
+    let state_label = sanitize_terminal_text(if value { enabled_label } else { disabled_label });
+    let value = format!("[{}] {state_label}", if value { "x" } else { " " });
+    let value = if enabled {
+        value
+    } else {
+        format!("{value}  DISABLED")
+    };
+    frame.render_widget(
+        Paragraph::new(value).style(
+            Style::new()
+                .fg(if enabled { theme.text } else { theme.muted })
+                .bg(if active && enabled {
+                    theme.selection
+                } else {
+                    theme.surface
+                }),
+        ),
+        value_area,
+    );
+    if enabled {
+        ui.hit_regions.push(HitRegion { area, target });
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_catalog_action(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    label: &str,
+    active: bool,
+    enabled: bool,
+    target: HitTarget,
+    ui: &mut UiState,
+    theme: Theme,
+) {
+    frame.render_widget(
+        Paragraph::new(sanitize_terminal_text(label)).style(
+            Style::new()
+                .fg(if !enabled {
+                    theme.muted
+                } else if active {
+                    theme.background
+                } else {
+                    theme.action
+                })
+                .bg(if active && enabled {
+                    theme.accent
+                } else {
+                    theme.surface
+                }),
+        ),
+        area,
+    );
+    if enabled {
+        ui.hit_regions.push(HitRegion { area, target });
+    }
+}
+
+fn render_catalog_section_heading(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    label: &str,
+    active: bool,
+    theme: Theme,
+) {
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            sanitize_terminal_text(label),
+            section_style(active, theme),
+        )),
+        area,
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_table_text_field(
     frame: &mut Frame<'_>,
@@ -1146,42 +1961,17 @@ fn render_table_text_field(
     ui: &mut UiState,
     theme: Theme,
 ) {
-    let active = field == selected;
-    let label_width = area.width.min(18);
-    let value_area = Rect::new(
-        area.x + label_width,
-        area.y,
-        area.width.saturating_sub(label_width),
-        1,
-    );
-    frame.render_widget(
-        Paragraph::new(format!("{} {:<15}", if active { "›" } else { " " }, label)).style(
-            Style::new()
-                .fg(if active { theme.action } else { theme.muted })
-                .add_modifier(Modifier::BOLD),
-        ),
-        Rect::new(area.x, area.y, label_width, 1),
-    );
-    ui.hit_regions.push(HitRegion {
+    render_catalog_text_field(
+        frame,
         area,
-        target: HitTarget::CatalogEditorTableField(field),
-    });
-    if active {
-        render_text_input(
-            frame,
-            value_area,
-            "",
-            input,
-            Style::new().fg(theme.text).bg(theme.selection),
-            ui,
-        );
-    } else {
-        frame.render_widget(
-            Paragraph::new(sanitize_terminal_text(input.value()))
-                .style(Style::new().fg(theme.text).bg(theme.surface)),
-            value_area,
-        );
-    }
+        label,
+        input,
+        field == selected,
+        true,
+        HitTarget::CatalogEditorTableField(field),
+        ui,
+        theme,
+    );
 }
 
 fn section_style(selected: bool, theme: Theme) -> Style {

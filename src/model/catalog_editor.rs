@@ -155,6 +155,104 @@ pub enum TableEditorFocus {
     Action(TableActionField),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CatalogFormFocus {
+    Name,
+    Schema,
+    Owner,
+    Comment,
+    OutputColumns,
+    Query,
+    Tablespace,
+    WithData,
+    DataType,
+    Increment,
+    MinValue,
+    MaxValue,
+    StartValue,
+    RestartValue,
+    Cache,
+    Cycle,
+    OwnedBy,
+    SecurityBarrier,
+    SecurityInvoker,
+    CheckOption,
+    Review,
+    Cancel,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CatalogFormFocusKind {
+    Text,
+    Choice,
+    Toggle,
+    Action,
+    Disabled,
+    ReadOnly,
+}
+
+const VIEW_FOCUS_ORDER: &[CatalogFormFocus] = &[
+    CatalogFormFocus::Name,
+    CatalogFormFocus::Schema,
+    CatalogFormFocus::Owner,
+    CatalogFormFocus::Comment,
+    CatalogFormFocus::OutputColumns,
+    CatalogFormFocus::Query,
+    CatalogFormFocus::SecurityBarrier,
+    CatalogFormFocus::SecurityInvoker,
+    CatalogFormFocus::CheckOption,
+    CatalogFormFocus::Review,
+    CatalogFormFocus::Cancel,
+];
+
+const MATERIALIZED_VIEW_FOCUS_ORDER: &[CatalogFormFocus] = &[
+    CatalogFormFocus::Name,
+    CatalogFormFocus::Schema,
+    CatalogFormFocus::Owner,
+    CatalogFormFocus::Comment,
+    CatalogFormFocus::Query,
+    CatalogFormFocus::Tablespace,
+    CatalogFormFocus::WithData,
+    CatalogFormFocus::Review,
+    CatalogFormFocus::Cancel,
+];
+
+const SEQUENCE_FOCUS_ORDER: &[CatalogFormFocus] = &[
+    CatalogFormFocus::Name,
+    CatalogFormFocus::Schema,
+    CatalogFormFocus::Owner,
+    CatalogFormFocus::Comment,
+    CatalogFormFocus::DataType,
+    CatalogFormFocus::Increment,
+    CatalogFormFocus::MinValue,
+    CatalogFormFocus::MaxValue,
+    CatalogFormFocus::StartValue,
+    CatalogFormFocus::RestartValue,
+    CatalogFormFocus::Cache,
+    CatalogFormFocus::Cycle,
+    CatalogFormFocus::OwnedBy,
+    CatalogFormFocus::Review,
+    CatalogFormFocus::Cancel,
+];
+
+fn move_catalog_form_focus(
+    current: CatalogFormFocus,
+    delta: isize,
+    order: &[CatalogFormFocus],
+    enabled: impl Fn(CatalogFormFocus) -> bool,
+) -> CatalogFormFocus {
+    let visible = order
+        .iter()
+        .copied()
+        .filter(|focus| enabled(*focus))
+        .collect::<Vec<_>>();
+    let current = visible
+        .iter()
+        .position(|focus| *focus == current)
+        .unwrap_or(0);
+    visible[(current as isize + delta).rem_euclid(visible.len() as isize) as usize]
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TableColumnEditTarget {
     Existing { index: usize },
@@ -404,7 +502,7 @@ pub struct ViewDraft {
     pub security_barrier: crate::db::catalog_mutation::ViewOption<bool>,
     pub security_invoker: crate::db::catalog_mutation::ViewOption<bool>,
     pub check_option: crate::db::catalog_mutation::ViewOption<String>,
-    pub selected_field: usize,
+    pub focus: CatalogFormFocus,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -416,8 +514,68 @@ pub struct MaterializedViewDraft {
     pub query: TextInput,
     pub tablespace: TextInput,
     pub with_data: bool,
-    pub selected_field: usize,
+    pub focus: CatalogFormFocus,
     pub query_editable: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SequenceBoundKind {
+    Default,
+    NoLimit,
+    Custom,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SequenceBoundDraft {
+    pub kind: SequenceBoundKind,
+    pub value: TextInput,
+}
+
+impl SequenceBoundDraft {
+    pub fn to_bound(&self) -> crate::db::catalog_mutation::SequenceBound {
+        match self.kind {
+            SequenceBoundKind::Default => crate::db::catalog_mutation::SequenceBound::Unset,
+            SequenceBoundKind::NoLimit => crate::db::catalog_mutation::SequenceBound::NoLimit,
+            SequenceBoundKind::Custom => {
+                crate::db::catalog_mutation::SequenceBound::Value(self.value.value().to_owned())
+            }
+        }
+    }
+
+    fn cycle(&mut self, delta: isize) {
+        let choices = [
+            SequenceBoundKind::Default,
+            SequenceBoundKind::NoLimit,
+            SequenceBoundKind::Custom,
+        ];
+        let current = choices
+            .iter()
+            .position(|kind| *kind == self.kind)
+            .unwrap_or(0);
+        self.kind = choices[(current as isize + delta).rem_euclid(choices.len() as isize) as usize];
+        if self.kind == SequenceBoundKind::Custom {
+            self.value.set("");
+        }
+    }
+}
+
+impl From<crate::db::catalog_mutation::SequenceBound> for SequenceBoundDraft {
+    fn from(bound: crate::db::catalog_mutation::SequenceBound) -> Self {
+        match bound {
+            crate::db::catalog_mutation::SequenceBound::Unset => Self {
+                kind: SequenceBoundKind::Default,
+                value: TextInput::default(),
+            },
+            crate::db::catalog_mutation::SequenceBound::NoLimit => Self {
+                kind: SequenceBoundKind::NoLimit,
+                value: TextInput::default(),
+            },
+            crate::db::catalog_mutation::SequenceBound::Value(value) => Self {
+                kind: SequenceBoundKind::Custom,
+                value: value.into(),
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -428,14 +586,14 @@ pub struct SequenceDraft {
     pub comment: TextInput,
     pub data_type: TextInput,
     pub increment: TextInput,
-    pub min_value: crate::db::catalog_mutation::SequenceBound,
-    pub max_value: crate::db::catalog_mutation::SequenceBound,
+    pub min_value: SequenceBoundDraft,
+    pub max_value: SequenceBoundDraft,
     pub start_value: TextInput,
     pub restart_value: TextInput,
     pub cache: TextInput,
     pub cycle: bool,
     pub owned_by: TextInput,
-    pub selected_field: usize,
+    pub focus: CatalogFormFocus,
 }
 
 impl SequenceDraft {
@@ -447,8 +605,8 @@ impl SequenceDraft {
             comment: optional_text(&definition.comment),
             data_type: definition.data_type.clone().into(),
             increment: definition.increment.clone().into(),
-            min_value: definition.min_value.clone(),
-            max_value: definition.max_value.clone(),
+            min_value: definition.min_value.clone().into(),
+            max_value: definition.max_value.clone().into(),
             start_value: definition.start_value.clone().into(),
             restart_value: TextInput::default(),
             cache: definition.cache.clone().into(),
@@ -459,7 +617,7 @@ impl SequenceDraft {
                 .map_or_else(TextInput::default, |(s, t, c)| {
                     format!("{s}.{t}.{c}").into()
                 }),
-            selected_field: 0,
+            focus: CatalogFormFocus::Name,
         }
     }
     pub fn validate(&self) -> Result<(), crate::db::catalog_mutation::CatalogMutationError> {
@@ -480,8 +638,8 @@ impl SequenceDraft {
             }
         }
         for (label, bound) in [("minimum", &self.min_value), ("maximum", &self.max_value)] {
-            if let crate::db::catalog_mutation::SequenceBound::Value(value) = bound
-                && value.trim().parse::<i128>().is_err()
+            if bound.kind == SequenceBoundKind::Custom
+                && bound.value.value().trim().parse::<i128>().is_err()
             {
                 return Err(invalid(&format!("sequence {label} must be numeric")));
             }
@@ -496,49 +654,150 @@ impl SequenceDraft {
         }
         Ok(())
     }
-    pub fn move_field(&mut self, delta: isize) {
-        self.selected_field = (self.selected_field as isize + delta).rem_euclid(10) as usize;
+
+    pub fn validation_focus(&self) -> Option<CatalogFormFocus> {
+        if self.name.value().trim().is_empty() {
+            return Some(CatalogFormFocus::Name);
+        }
+        if self.schema.value().trim().is_empty() {
+            return Some(CatalogFormFocus::Schema);
+        }
+        if self.data_type.value().trim().is_empty() {
+            return Some(CatalogFormFocus::DataType);
+        }
+        for (focus, value) in [
+            (CatalogFormFocus::Increment, &self.increment),
+            (CatalogFormFocus::StartValue, &self.start_value),
+            (CatalogFormFocus::RestartValue, &self.restart_value),
+            (CatalogFormFocus::Cache, &self.cache),
+        ] {
+            if !value.value().trim().is_empty() && value.value().trim().parse::<i128>().is_err() {
+                return Some(focus);
+            }
+        }
+        for (focus, bound) in [
+            (CatalogFormFocus::MinValue, &self.min_value),
+            (CatalogFormFocus::MaxValue, &self.max_value),
+        ] {
+            if bound.kind == SequenceBoundKind::Custom
+                && bound.value.value().trim().parse::<i128>().is_err()
+            {
+                return Some(focus);
+            }
+        }
+        if !self.owned_by.value().trim().is_empty()
+            && self.owned_by.value().trim() != "NONE"
+            && self.owned_by.value().split('.').count() != 3
+        {
+            return Some(CatalogFormFocus::OwnedBy);
+        }
+        None
     }
-    fn selected_input_mut(&mut self) -> &mut TextInput {
-        match self.selected_field {
-            0 => &mut self.name,
-            1 => &mut self.schema,
-            2 => &mut self.owner,
-            3 => &mut self.comment,
-            4 => &mut self.data_type,
-            5 => &mut self.increment,
-            6 => &mut self.start_value,
-            7 => &mut self.restart_value,
-            8 => &mut self.cache,
-            _ => &mut self.owned_by,
+    pub fn focus_enabled(&self, focus: CatalogFormFocus) -> bool {
+        SEQUENCE_FOCUS_ORDER.contains(&focus)
+    }
+
+    pub fn focus(&mut self, focus: CatalogFormFocus) -> bool {
+        if !self.focus_enabled(focus) {
+            return false;
+        }
+        self.focus = focus;
+        true
+    }
+
+    pub fn move_field(&mut self, delta: isize) {
+        self.focus = move_catalog_form_focus(self.focus, delta, SEQUENCE_FOCUS_ORDER, |focus| {
+            self.focus_enabled(focus)
+        });
+    }
+    fn selected_input_mut(&mut self) -> Option<&mut TextInput> {
+        match self.focus {
+            CatalogFormFocus::Name => Some(&mut self.name),
+            CatalogFormFocus::Schema => Some(&mut self.schema),
+            CatalogFormFocus::Owner => Some(&mut self.owner),
+            CatalogFormFocus::Comment => Some(&mut self.comment),
+            CatalogFormFocus::DataType => Some(&mut self.data_type),
+            CatalogFormFocus::Increment => Some(&mut self.increment),
+            CatalogFormFocus::MinValue if self.min_value.kind == SequenceBoundKind::Custom => {
+                Some(&mut self.min_value.value)
+            }
+            CatalogFormFocus::MaxValue if self.max_value.kind == SequenceBoundKind::Custom => {
+                Some(&mut self.max_value.value)
+            }
+            CatalogFormFocus::StartValue => Some(&mut self.start_value),
+            CatalogFormFocus::RestartValue => Some(&mut self.restart_value),
+            CatalogFormFocus::Cache => Some(&mut self.cache),
+            CatalogFormFocus::OwnedBy => Some(&mut self.owned_by),
+            _ => None,
         }
     }
     pub fn insert(&mut self, c: char) {
-        self.selected_input_mut().insert(c)
+        if let Some(input) = self.selected_input_mut() {
+            input.insert(c)
+        }
+    }
+    pub fn paste(&mut self, text: &str) {
+        if let Some(input) = self.selected_input_mut() {
+            input.paste(text);
+        }
     }
     pub fn backspace(&mut self) {
-        self.selected_input_mut().backspace()
+        if let Some(input) = self.selected_input_mut() {
+            input.backspace()
+        }
     }
     pub fn delete(&mut self) {
-        self.selected_input_mut().delete()
+        if let Some(input) = self.selected_input_mut() {
+            input.delete()
+        }
     }
     pub fn delete_previous_word(&mut self) {
-        self.selected_input_mut().delete_previous_word()
+        if let Some(input) = self.selected_input_mut() {
+            input.delete_previous_word()
+        }
     }
     pub fn delete_to_start(&mut self) {
-        self.selected_input_mut().delete_to_start()
+        if let Some(input) = self.selected_input_mut() {
+            input.delete_to_start()
+        }
     }
     pub fn move_left(&mut self) {
-        self.selected_input_mut().move_left()
+        if let Some(input) = self.selected_input_mut() {
+            input.move_left()
+        }
     }
     pub fn move_right(&mut self) {
-        self.selected_input_mut().move_right()
+        if let Some(input) = self.selected_input_mut() {
+            input.move_right()
+        }
     }
     pub fn move_home(&mut self) {
-        self.selected_input_mut().move_home()
+        if let Some(input) = self.selected_input_mut() {
+            input.move_home()
+        }
     }
     pub fn move_end(&mut self) {
-        self.selected_input_mut().move_end()
+        if let Some(input) = self.selected_input_mut() {
+            input.move_end()
+        }
+    }
+
+    pub fn cycle_focused_choice(&mut self, delta: isize) -> bool {
+        let bound = match self.focus {
+            CatalogFormFocus::MinValue => &mut self.min_value,
+            CatalogFormFocus::MaxValue => &mut self.max_value,
+            _ => return false,
+        };
+        bound.cycle(delta);
+        true
+    }
+
+    pub fn toggle_focused(&mut self) -> bool {
+        if self.focus != CatalogFormFocus::Cycle {
+            return false;
+        }
+        self.cycle = !self.cycle;
+        true
     }
 }
 
@@ -554,7 +813,7 @@ impl MaterializedViewDraft {
             query: definition.query.clone().into(),
             tablespace: optional_text(&definition.tablespace),
             with_data: definition.populated,
-            selected_field: 0,
+            focus: CatalogFormFocus::Name,
             query_editable: false,
         }
     }
@@ -578,65 +837,110 @@ impl MaterializedViewDraft {
         Ok(())
     }
 
-    pub fn move_field(&mut self, delta: isize) {
-        self.selected_field = (self.selected_field as isize + delta).rem_euclid(6) as usize;
+    pub fn validation_focus(&self) -> Option<CatalogFormFocus> {
+        if self.name.value().trim().is_empty() || self.schema.value().trim().is_empty() {
+            Some(if self.name.value().trim().is_empty() {
+                CatalogFormFocus::Name
+            } else {
+                CatalogFormFocus::Schema
+            })
+        } else if self.query_editable && self.query.value().trim().is_empty() {
+            Some(CatalogFormFocus::Query)
+        } else {
+            None
+        }
     }
 
-    fn selected_input_mut(&mut self) -> &mut TextInput {
-        match self.selected_field {
-            0 => &mut self.name,
-            1 => &mut self.schema,
-            2 => &mut self.owner,
-            3 => &mut self.comment,
-            4 => &mut self.query,
-            _ => &mut self.tablespace,
+    pub fn focus_enabled(&self, focus: CatalogFormFocus, allow_with_data: bool) -> bool {
+        MATERIALIZED_VIEW_FOCUS_ORDER.contains(&focus)
+            && (focus != CatalogFormFocus::Query || self.query_editable)
+            && (focus != CatalogFormFocus::WithData || allow_with_data)
+    }
+
+    pub fn focus(&mut self, focus: CatalogFormFocus, allow_with_data: bool) -> bool {
+        if !self.focus_enabled(focus, allow_with_data) {
+            return false;
+        }
+        self.focus = focus;
+        true
+    }
+
+    pub fn move_field(&mut self, delta: isize, allow_with_data: bool) {
+        self.focus =
+            move_catalog_form_focus(self.focus, delta, MATERIALIZED_VIEW_FOCUS_ORDER, |focus| {
+                self.focus_enabled(focus, allow_with_data)
+            });
+    }
+
+    fn selected_input_mut(&mut self) -> Option<&mut TextInput> {
+        match self.focus {
+            CatalogFormFocus::Name => Some(&mut self.name),
+            CatalogFormFocus::Schema => Some(&mut self.schema),
+            CatalogFormFocus::Owner => Some(&mut self.owner),
+            CatalogFormFocus::Comment => Some(&mut self.comment),
+            CatalogFormFocus::Query if self.query_editable => Some(&mut self.query),
+            CatalogFormFocus::Tablespace => Some(&mut self.tablespace),
+            _ => None,
         }
     }
 
     pub fn insert(&mut self, c: char) {
-        if self.query_editable || self.selected_field != 4 {
-            self.selected_input_mut().insert(c);
+        if let Some(input) = self.selected_input_mut() {
+            input.insert(c);
+        }
+    }
+    pub fn paste(&mut self, text: &str) {
+        if let Some(input) = self.selected_input_mut() {
+            input.paste(text);
         }
     }
     pub fn backspace(&mut self) {
-        if self.query_editable || self.selected_field != 4 {
-            self.selected_input_mut().backspace();
+        if let Some(input) = self.selected_input_mut() {
+            input.backspace();
         }
     }
     pub fn delete(&mut self) {
-        if self.query_editable || self.selected_field != 4 {
-            self.selected_input_mut().delete();
+        if let Some(input) = self.selected_input_mut() {
+            input.delete();
         }
     }
     pub fn delete_previous_word(&mut self) {
-        if self.query_editable || self.selected_field != 4 {
-            self.selected_input_mut().delete_previous_word();
+        if let Some(input) = self.selected_input_mut() {
+            input.delete_previous_word();
         }
     }
     pub fn delete_to_start(&mut self) {
-        if self.query_editable || self.selected_field != 4 {
-            self.selected_input_mut().delete_to_start();
+        if let Some(input) = self.selected_input_mut() {
+            input.delete_to_start();
         }
     }
     pub fn move_left(&mut self) {
-        if self.query_editable || self.selected_field != 4 {
-            self.selected_input_mut().move_left();
+        if let Some(input) = self.selected_input_mut() {
+            input.move_left();
         }
     }
     pub fn move_right(&mut self) {
-        if self.query_editable || self.selected_field != 4 {
-            self.selected_input_mut().move_right();
+        if let Some(input) = self.selected_input_mut() {
+            input.move_right();
         }
     }
     pub fn move_home(&mut self) {
-        if self.query_editable || self.selected_field != 4 {
-            self.selected_input_mut().move_home();
+        if let Some(input) = self.selected_input_mut() {
+            input.move_home();
         }
     }
     pub fn move_end(&mut self) {
-        if self.query_editable || self.selected_field != 4 {
-            self.selected_input_mut().move_end();
+        if let Some(input) = self.selected_input_mut() {
+            input.move_end();
         }
+    }
+
+    pub fn toggle_focused(&mut self, create_mode: bool) -> bool {
+        if !create_mode || self.focus != CatalogFormFocus::WithData {
+            return false;
+        }
+        self.with_data = !self.with_data;
+        true
     }
 }
 
@@ -652,7 +956,7 @@ impl ViewDraft {
             security_barrier: definition.security_barrier.clone(),
             security_invoker: definition.security_invoker.clone(),
             check_option: definition.check_option.clone(),
-            selected_field: 0,
+            focus: CatalogFormFocus::Name,
         }
     }
 
@@ -671,45 +975,153 @@ impl ViewDraft {
         Ok(())
     }
 
-    pub fn move_field(&mut self, delta: isize) {
-        self.selected_field = (self.selected_field as isize + delta).rem_euclid(6) as usize;
+    pub fn validation_focus(&self) -> Option<CatalogFormFocus> {
+        if self.name.value().trim().is_empty() || self.schema.value().trim().is_empty() {
+            Some(if self.name.value().trim().is_empty() {
+                CatalogFormFocus::Name
+            } else {
+                CatalogFormFocus::Schema
+            })
+        } else if self.query.value().trim().is_empty()
+            || crate::sql::scan_statements(self.query.value(), crate::sql::SqlDialect::Postgres)
+                .len()
+                != 1
+        {
+            Some(CatalogFormFocus::Query)
+        } else {
+            None
+        }
     }
-    fn selected_input_mut(&mut self) -> &mut TextInput {
-        match self.selected_field {
-            0 => &mut self.name,
-            1 => &mut self.schema,
-            2 => &mut self.owner,
-            3 => &mut self.comment,
-            4 => &mut self.query,
-            _ => &mut self.output_columns,
+
+    pub fn focus_enabled(&self, focus: CatalogFormFocus) -> bool {
+        VIEW_FOCUS_ORDER.contains(&focus)
+            && match focus {
+                CatalogFormFocus::SecurityBarrier => {
+                    self.security_barrier.availability.is_available()
+                }
+                CatalogFormFocus::SecurityInvoker => {
+                    self.security_invoker.availability.is_available()
+                }
+                CatalogFormFocus::CheckOption => self.check_option.availability.is_available(),
+                _ => true,
+            }
+    }
+
+    pub fn focus(&mut self, focus: CatalogFormFocus) -> bool {
+        if !self.focus_enabled(focus) {
+            return false;
+        }
+        self.focus = focus;
+        true
+    }
+
+    pub fn move_field(&mut self, delta: isize) {
+        self.focus = move_catalog_form_focus(self.focus, delta, VIEW_FOCUS_ORDER, |focus| {
+            self.focus_enabled(focus)
+        });
+    }
+    fn selected_input_mut(&mut self) -> Option<&mut TextInput> {
+        match self.focus {
+            CatalogFormFocus::Name => Some(&mut self.name),
+            CatalogFormFocus::Schema => Some(&mut self.schema),
+            CatalogFormFocus::Owner => Some(&mut self.owner),
+            CatalogFormFocus::Comment => Some(&mut self.comment),
+            CatalogFormFocus::Query => Some(&mut self.query),
+            CatalogFormFocus::OutputColumns => Some(&mut self.output_columns),
+            _ => None,
         }
     }
     pub fn insert(&mut self, c: char) {
-        self.selected_input_mut().insert(c);
+        if let Some(input) = self.selected_input_mut() {
+            input.insert(c);
+        }
+    }
+    pub fn paste(&mut self, text: &str) {
+        if let Some(input) = self.selected_input_mut() {
+            input.paste(text);
+        }
     }
     pub fn backspace(&mut self) {
-        self.selected_input_mut().backspace();
+        if let Some(input) = self.selected_input_mut() {
+            input.backspace();
+        }
     }
     pub fn delete(&mut self) {
-        self.selected_input_mut().delete();
+        if let Some(input) = self.selected_input_mut() {
+            input.delete();
+        }
     }
     pub fn delete_previous_word(&mut self) {
-        self.selected_input_mut().delete_previous_word();
+        if let Some(input) = self.selected_input_mut() {
+            input.delete_previous_word();
+        }
     }
     pub fn delete_to_start(&mut self) {
-        self.selected_input_mut().delete_to_start();
+        if let Some(input) = self.selected_input_mut() {
+            input.delete_to_start();
+        }
     }
     pub fn move_left(&mut self) {
-        self.selected_input_mut().move_left();
+        if let Some(input) = self.selected_input_mut() {
+            input.move_left();
+        }
     }
     pub fn move_right(&mut self) {
-        self.selected_input_mut().move_right();
+        if let Some(input) = self.selected_input_mut() {
+            input.move_right();
+        }
     }
     pub fn move_home(&mut self) {
-        self.selected_input_mut().move_home();
+        if let Some(input) = self.selected_input_mut() {
+            input.move_home();
+        }
     }
     pub fn move_end(&mut self) {
-        self.selected_input_mut().move_end();
+        if let Some(input) = self.selected_input_mut() {
+            input.move_end();
+        }
+    }
+
+    pub fn cycle_focused_choice(&mut self, delta: isize) -> bool {
+        fn cycle<T: Clone + PartialEq>(value: &mut Option<T>, choices: &[Option<T>], delta: isize) {
+            let current = choices
+                .iter()
+                .position(|choice| choice == value)
+                .unwrap_or(0);
+            *value = choices
+                [(current as isize + delta).rem_euclid(choices.len() as isize) as usize]
+                .clone();
+        }
+
+        match self.focus {
+            CatalogFormFocus::SecurityBarrier
+                if self.security_barrier.availability.is_available() =>
+            {
+                cycle(
+                    &mut self.security_barrier.value,
+                    &[None, Some(true), Some(false)],
+                    delta,
+                );
+            }
+            CatalogFormFocus::SecurityInvoker
+                if self.security_invoker.availability.is_available() =>
+            {
+                cycle(
+                    &mut self.security_invoker.value,
+                    &[None, Some(true), Some(false)],
+                    delta,
+                );
+            }
+            CatalogFormFocus::CheckOption if self.check_option.availability.is_available() => {
+                cycle(
+                    &mut self.check_option.value,
+                    &[None, Some("LOCAL".into()), Some("CASCADED".into())],
+                    delta,
+                );
+            }
+            _ => return false,
+        }
+        true
     }
 }
 
@@ -1630,13 +2042,152 @@ pub enum CatalogDraft {
 }
 
 impl CatalogDraft {
-    pub fn move_field(&mut self, delta: isize) {
+    pub fn validation_focus(&self) -> Option<CatalogFormFocus> {
+        match self {
+            Self::View(draft) => draft.validation_focus(),
+            Self::MaterializedView(draft) => draft.validation_focus(),
+            Self::Sequence(draft) => draft.validation_focus(),
+            _ => None,
+        }
+    }
+
+    pub fn focus_kind(&self, create_mode: bool) -> CatalogFormFocusKind {
+        if self.focused_action().is_some() {
+            return CatalogFormFocusKind::Action;
+        }
+        if self.focus_is_toggle(create_mode) {
+            return CatalogFormFocusKind::Toggle;
+        }
+        if self.focus_is_choice() {
+            return CatalogFormFocusKind::Choice;
+        }
+        if !self.focus_accepts_text() {
+            return match self {
+                Self::MaterializedView(draft) if draft.focus == CatalogFormFocus::Query => {
+                    CatalogFormFocusKind::ReadOnly
+                }
+                Self::View(draft)
+                    if matches!(
+                        draft.focus,
+                        CatalogFormFocus::SecurityBarrier
+                            | CatalogFormFocus::SecurityInvoker
+                            | CatalogFormFocus::CheckOption
+                    ) =>
+                {
+                    CatalogFormFocusKind::Disabled
+                }
+                _ => CatalogFormFocusKind::ReadOnly,
+            };
+        }
+        CatalogFormFocusKind::Text
+    }
+    pub fn owner(&self) -> Option<&TextInput> {
+        match self {
+            Self::Schema(draft) => Some(&draft.owner),
+            Self::View(draft) => Some(&draft.owner),
+            Self::MaterializedView(draft) => Some(&draft.owner),
+            Self::Sequence(draft) => Some(&draft.owner),
+            _ => None,
+        }
+    }
+
+    pub fn owner_mut(&mut self) -> Option<&mut TextInput> {
+        match self {
+            Self::Schema(draft) => Some(&mut draft.owner),
+            Self::View(draft) => Some(&mut draft.owner),
+            Self::MaterializedView(draft) => Some(&mut draft.owner),
+            Self::Sequence(draft) => Some(&mut draft.owner),
+            _ => None,
+        }
+    }
+
+    pub fn focus_accepts_text(&self) -> bool {
+        match self {
+            Self::View(draft) => matches!(
+                draft.focus,
+                CatalogFormFocus::Name
+                    | CatalogFormFocus::Schema
+                    | CatalogFormFocus::Owner
+                    | CatalogFormFocus::Comment
+                    | CatalogFormFocus::OutputColumns
+                    | CatalogFormFocus::Query
+            ),
+            Self::MaterializedView(draft) => {
+                matches!(
+                    draft.focus,
+                    CatalogFormFocus::Name
+                        | CatalogFormFocus::Schema
+                        | CatalogFormFocus::Owner
+                        | CatalogFormFocus::Comment
+                        | CatalogFormFocus::Tablespace
+                ) || draft.focus == CatalogFormFocus::Query && draft.query_editable
+            }
+            Self::Sequence(draft) => {
+                matches!(
+                    draft.focus,
+                    CatalogFormFocus::Name
+                        | CatalogFormFocus::Schema
+                        | CatalogFormFocus::Owner
+                        | CatalogFormFocus::Comment
+                        | CatalogFormFocus::DataType
+                        | CatalogFormFocus::Increment
+                        | CatalogFormFocus::StartValue
+                        | CatalogFormFocus::RestartValue
+                        | CatalogFormFocus::Cache
+                        | CatalogFormFocus::OwnedBy
+                ) || draft.focus == CatalogFormFocus::MinValue
+                    && draft.min_value.kind == SequenceBoundKind::Custom
+                    || draft.focus == CatalogFormFocus::MaxValue
+                        && draft.max_value.kind == SequenceBoundKind::Custom
+            }
+            _ => true,
+        }
+    }
+
+    pub fn focus_is_choice(&self) -> bool {
+        match self {
+            Self::View(draft) => match draft.focus {
+                CatalogFormFocus::SecurityBarrier => {
+                    draft.security_barrier.availability.is_available()
+                }
+                CatalogFormFocus::SecurityInvoker => {
+                    draft.security_invoker.availability.is_available()
+                }
+                CatalogFormFocus::CheckOption => draft.check_option.availability.is_available(),
+                _ => false,
+            },
+            Self::Sequence(draft) => {
+                matches!(
+                    draft.focus,
+                    CatalogFormFocus::MinValue | CatalogFormFocus::MaxValue
+                )
+            }
+            _ => false,
+        }
+    }
+
+    pub fn focus_is_toggle(&self, create_mode: bool) -> bool {
+        matches!(self, Self::Sequence(draft) if draft.focus == CatalogFormFocus::Cycle)
+            || matches!(self, Self::MaterializedView(draft) if create_mode && draft.focus == CatalogFormFocus::WithData)
+    }
+
+    pub fn focused_action(&self) -> Option<CatalogFormFocus> {
+        let focus = match self {
+            Self::View(draft) => draft.focus,
+            Self::MaterializedView(draft) => draft.focus,
+            Self::Sequence(draft) => draft.focus,
+            _ => return Some(CatalogFormFocus::Review),
+        };
+        matches!(focus, CatalogFormFocus::Review | CatalogFormFocus::Cancel).then_some(focus)
+    }
+
+    pub fn move_field(&mut self, delta: isize, allow_with_data: bool) {
         self.finish_edit_group();
         match self {
             Self::Table(d) => d.move_field(delta),
             Self::Schema(d) => d.move_field(delta),
             Self::View(d) => d.move_field(delta),
-            Self::MaterializedView(d) => d.move_field(delta),
+            Self::MaterializedView(d) => d.move_field(delta, allow_with_data),
             Self::Sequence(d) => d.move_field(delta),
             Self::Database(d) => d.move_field(delta),
             Self::Role(d) => d.move_field(delta),
@@ -1656,8 +2207,12 @@ impl CatalogDraft {
         }
     }
     pub fn paste(&mut self, text: &str) {
-        if let Self::Table(draft) = self {
-            draft.paste(text);
+        match self {
+            Self::Table(draft) => draft.paste(text),
+            Self::View(draft) => draft.paste(text),
+            Self::MaterializedView(draft) => draft.paste(text),
+            Self::Sequence(draft) => draft.paste(text),
+            _ => {}
         }
     }
     pub fn backspace(&mut self) {
@@ -1767,10 +2322,9 @@ impl CatalogDraft {
         match self {
             Self::Table(draft) => draft.selected_text_input_mut(),
             Self::Schema(draft) => Some(draft.selected_input_mut()),
-            Self::View(draft) => Some(draft.selected_input_mut()),
-            Self::MaterializedView(draft) => (draft.query_editable || draft.selected_field != 4)
-                .then(|| draft.selected_input_mut()),
-            Self::Sequence(draft) => Some(draft.selected_input_mut()),
+            Self::View(draft) => draft.selected_input_mut(),
+            Self::MaterializedView(draft) => draft.selected_input_mut(),
+            Self::Sequence(draft) => draft.selected_input_mut(),
             Self::Database(draft) => (draft.editable_creation_options
                 || !matches!(draft.selected_field, 2..=8))
             .then(|| draft.selected_input_mut()),
@@ -1944,11 +2498,20 @@ impl CatalogEditorState {
         self.operation.is_some()
     }
 
-    /// True when the schema form focuses the owner field, which the owner picker owns.
+    /// True when a catalog form focuses the owner field, which the owner picker owns.
     pub fn owner_field_focused(&self) -> bool {
         matches!(
             self.draft.as_ref(),
             Some(CatalogDraft::Schema(draft)) if draft.selected_field == SCHEMA_OWNER_FIELD
+        ) || matches!(
+            self.draft.as_ref(),
+            Some(CatalogDraft::View(draft)) if draft.focus == CatalogFormFocus::Owner
+        ) || matches!(
+            self.draft.as_ref(),
+            Some(CatalogDraft::MaterializedView(draft)) if draft.focus == CatalogFormFocus::Owner
+        ) || matches!(
+            self.draft.as_ref(),
+            Some(CatalogDraft::Sequence(draft)) if draft.focus == CatalogFormFocus::Owner
         )
     }
 
@@ -2024,14 +2587,14 @@ impl CatalogEditorState {
                     comment: TextInput::default(),
                     data_type: "bigint".into(),
                     increment: "1".into(),
-                    min_value: crate::db::catalog_mutation::SequenceBound::Unset,
-                    max_value: crate::db::catalog_mutation::SequenceBound::Unset,
+                    min_value: crate::db::catalog_mutation::SequenceBound::Unset.into(),
+                    max_value: crate::db::catalog_mutation::SequenceBound::Unset.into(),
                     start_value: "1".into(),
                     restart_value: TextInput::default(),
                     cache: "1".into(),
                     cycle: false,
                     owned_by: "NONE".into(),
-                    selected_field: 0,
+                    focus: CatalogFormFocus::Name,
                 }));
             }
             if id.kind == crate::db::catalog::CatalogKind::Database
@@ -2115,7 +2678,7 @@ impl CatalogEditorState {
                     check_option: crate::db::catalog_mutation::ViewOption::unavailable(
                         "check option capability is not loaded",
                     ),
-                    selected_field: 0,
+                    focus: CatalogFormFocus::Name,
                 }));
             }
             if id.kind == crate::db::catalog::CatalogKind::Schema
@@ -2130,7 +2693,7 @@ impl CatalogEditorState {
                     query: TextInput::default(),
                     tablespace: TextInput::default(),
                     with_data: true,
-                    selected_field: 0,
+                    focus: CatalogFormFocus::Name,
                     query_editable: true,
                 }));
             }
@@ -2277,5 +2840,243 @@ impl Default for CatalogEditorState {
             0,
             Vec::new(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::catalog_mutation::{SequenceBound, ViewOption};
+
+    fn view_draft() -> ViewDraft {
+        ViewDraft {
+            name: TextInput::default(),
+            schema: TextInput::default(),
+            owner: TextInput::default(),
+            comment: TextInput::default(),
+            query: TextInput::default(),
+            output_columns: TextInput::default(),
+            security_barrier: ViewOption::available(None),
+            security_invoker: ViewOption::unavailable("not supported"),
+            check_option: ViewOption::available(None),
+            focus: CatalogFormFocus::Name,
+        }
+    }
+
+    fn materialized_view_draft(query_editable: bool) -> MaterializedViewDraft {
+        MaterializedViewDraft {
+            name: TextInput::default(),
+            schema: TextInput::default(),
+            owner: TextInput::default(),
+            comment: TextInput::default(),
+            query: TextInput::default(),
+            tablespace: TextInput::default(),
+            with_data: true,
+            focus: CatalogFormFocus::Name,
+            query_editable,
+        }
+    }
+
+    fn sequence_draft() -> SequenceDraft {
+        SequenceDraft {
+            name: TextInput::default(),
+            schema: TextInput::default(),
+            owner: TextInput::default(),
+            comment: TextInput::default(),
+            data_type: TextInput::default(),
+            increment: TextInput::default(),
+            min_value: SequenceBound::Unset.into(),
+            max_value: SequenceBound::Unset.into(),
+            start_value: TextInput::default(),
+            restart_value: TextInput::default(),
+            cache: TextInput::default(),
+            cycle: false,
+            owned_by: TextInput::default(),
+            focus: CatalogFormFocus::Name,
+        }
+    }
+
+    #[test]
+    fn catalog_form_focus_view_order_skips_unavailable_options_and_wraps() {
+        let mut draft = view_draft();
+        let expected = [
+            CatalogFormFocus::Schema,
+            CatalogFormFocus::Owner,
+            CatalogFormFocus::Comment,
+            CatalogFormFocus::OutputColumns,
+            CatalogFormFocus::Query,
+            CatalogFormFocus::SecurityBarrier,
+            CatalogFormFocus::CheckOption,
+            CatalogFormFocus::Review,
+            CatalogFormFocus::Cancel,
+            CatalogFormFocus::Name,
+        ];
+        for focus in expected {
+            draft.move_field(1);
+            assert_eq!(draft.focus, focus);
+        }
+        for focus in expected.into_iter().rev().skip(1) {
+            draft.move_field(-1);
+            assert_eq!(draft.focus, focus);
+        }
+        draft.move_field(-1);
+        assert_eq!(draft.focus, CatalogFormFocus::Name);
+        assert!(!draft.focus(CatalogFormFocus::SecurityInvoker));
+        assert_eq!(draft.focus, CatalogFormFocus::Name);
+    }
+
+    #[test]
+    fn catalog_form_focus_materialized_view_order_is_mode_aware_and_wraps() {
+        let mut create = materialized_view_draft(true);
+        for focus in MATERIALIZED_VIEW_FOCUS_ORDER.iter().copied().skip(1) {
+            create.move_field(1, true);
+            assert_eq!(create.focus, focus);
+        }
+        create.move_field(1, true);
+        assert_eq!(create.focus, CatalogFormFocus::Name);
+        for focus in MATERIALIZED_VIEW_FOCUS_ORDER.iter().copied().rev() {
+            create.move_field(-1, true);
+            assert_eq!(create.focus, focus);
+        }
+
+        let mut edit = materialized_view_draft(false);
+        edit.focus = CatalogFormFocus::Comment;
+        edit.move_field(1, false);
+        assert_eq!(edit.focus, CatalogFormFocus::Tablespace);
+        assert!(!edit.focus(CatalogFormFocus::Query, false));
+        assert!(!edit.focus(CatalogFormFocus::WithData, false));
+        assert_eq!(edit.focus, CatalogFormFocus::Tablespace);
+    }
+
+    #[test]
+    fn catalog_form_focus_sequence_order_and_wraps() {
+        let mut draft = sequence_draft();
+        for focus in SEQUENCE_FOCUS_ORDER.iter().copied().skip(1) {
+            draft.move_field(1);
+            assert_eq!(draft.focus, focus);
+        }
+        draft.move_field(1);
+        assert_eq!(draft.focus, CatalogFormFocus::Name);
+        for focus in SEQUENCE_FOCUS_ORDER.iter().copied().rev() {
+            draft.move_field(-1);
+            assert_eq!(draft.focus, focus);
+        }
+    }
+
+    #[test]
+    fn catalog_form_focus_owner_detection_covers_all_owner_forms() {
+        let mut editor = CatalogEditorState {
+            draft: Some(CatalogDraft::Schema(SchemaDraft {
+                name: TextInput::default(),
+                owner: TextInput::default(),
+                comment: TextInput::default(),
+                selected_field: SCHEMA_OWNER_FIELD,
+            })),
+            ..CatalogEditorState::default()
+        };
+        assert!(editor.owner_field_focused());
+
+        let mut view = view_draft();
+        view.focus = CatalogFormFocus::Owner;
+        editor.draft = Some(CatalogDraft::View(view));
+        assert!(editor.owner_field_focused());
+
+        let mut materialized_view = materialized_view_draft(true);
+        materialized_view.focus = CatalogFormFocus::Owner;
+        editor.draft = Some(CatalogDraft::MaterializedView(materialized_view));
+        assert!(editor.owner_field_focused());
+
+        let mut sequence = sequence_draft();
+        sequence.focus = CatalogFormFocus::Owner;
+        editor.draft = Some(CatalogDraft::Sequence(sequence));
+        assert!(editor.owner_field_focused());
+    }
+
+    #[test]
+    fn view_option_cycles_cover_every_value_and_reject_unavailable_options() {
+        let mut draft = view_draft();
+
+        draft.focus = CatalogFormFocus::SecurityBarrier;
+        for expected in [Some(true), Some(false), None] {
+            assert!(draft.cycle_focused_choice(1));
+            assert_eq!(draft.security_barrier.value, expected);
+        }
+
+        draft.security_invoker = ViewOption::available(None);
+        draft.focus = CatalogFormFocus::SecurityInvoker;
+        assert!(draft.cycle_focused_choice(-1));
+        assert_eq!(draft.security_invoker.value, Some(false));
+
+        draft.focus = CatalogFormFocus::CheckOption;
+        for expected in [Some("LOCAL"), Some("CASCADED"), None] {
+            assert!(draft.cycle_focused_choice(1));
+            assert_eq!(draft.check_option.value.as_deref(), expected);
+        }
+
+        draft.security_invoker = ViewOption::unavailable("not supported");
+        draft.focus = CatalogFormFocus::SecurityInvoker;
+        assert!(!draft.cycle_focused_choice(1));
+        assert_eq!(
+            draft.security_invoker,
+            ViewOption::unavailable("not supported")
+        );
+    }
+
+    #[test]
+    fn sequence_control_cycles_bounds_and_toggles_cycle() {
+        let mut draft = sequence_draft();
+        draft.focus = CatalogFormFocus::MinValue;
+        for expected in [
+            SequenceBound::NoLimit,
+            SequenceBound::Value(String::new()),
+            SequenceBound::Unset,
+        ] {
+            assert!(draft.cycle_focused_choice(1));
+            assert_eq!(draft.min_value.to_bound(), expected);
+        }
+
+        draft.focus = CatalogFormFocus::MaxValue;
+        assert!(draft.cycle_focused_choice(-1));
+        assert_eq!(
+            draft.max_value.to_bound(),
+            SequenceBound::Value(String::new())
+        );
+
+        draft.focus = CatalogFormFocus::Cycle;
+        assert!(draft.toggle_focused());
+        assert!(draft.cycle);
+        assert!(!draft.cycle_focused_choice(1));
+    }
+
+    #[test]
+    fn sequence_control_custom_bound_uses_unicode_safe_text_editing() {
+        let mut draft = sequence_draft();
+        draft.focus = CatalogFormFocus::MinValue;
+        draft.min_value = SequenceBound::Value("界-100".into()).into();
+
+        draft.move_home();
+        draft.move_right();
+        draft.delete();
+        draft.insert('9');
+        draft.move_end();
+        draft.backspace();
+
+        assert_eq!(
+            draft.min_value.to_bound(),
+            SequenceBound::Value("界910".into())
+        );
+        assert_eq!(draft.max_value.to_bound(), SequenceBound::Unset);
+
+        for focus in [
+            CatalogFormFocus::MaxValue,
+            CatalogFormFocus::Cycle,
+            CatalogFormFocus::Review,
+            CatalogFormFocus::Cancel,
+        ] {
+            draft.focus = focus;
+            draft.insert('7');
+            draft.backspace();
+        }
+        assert_eq!(draft.max_value.to_bound(), SequenceBound::Unset);
     }
 }

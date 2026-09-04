@@ -72,6 +72,7 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                             | HitTarget::ProfileGroupCancel
                             | HitTarget::ExplorerAddOption(_)
                             | HitTarget::CatalogEditorField(_)
+                            | HitTarget::CatalogEditorFormField(_)
                             | HitTarget::CatalogEditorTableField(_)
                             | HitTarget::CatalogEditorTableColumn(_)
                             | HitTarget::CatalogEditorAddTableColumn
@@ -183,6 +184,9 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                 HitTarget::ExplorerAddOption(index) => Some(Action::ExplorerAddSelect(index)),
                 HitTarget::CatalogEditorField(index) => {
                     Some(Action::CatalogEditorFocusField(index))
+                }
+                HitTarget::CatalogEditorFormField(field) => {
+                    Some(Action::CatalogEditorFocusFormField(field))
                 }
                 HitTarget::CatalogEditorTableField(field) => {
                     Some(Action::CatalogEditorFocusTableField(field))
@@ -350,6 +354,7 @@ fn focus_at(ui: &UiState, column: u16, row: u16) -> Option<Focus> {
         | HitTarget::ProfileGroupCancel
         | HitTarget::ExplorerAddOption(_)
         | HitTarget::CatalogEditorField(_)
+        | HitTarget::CatalogEditorFormField(_)
         | HitTarget::CatalogEditorTableField(_)
         | HitTarget::CatalogEditorTableColumn(_)
         | HitTarget::CatalogEditorAddTableColumn

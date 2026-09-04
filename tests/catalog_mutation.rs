@@ -281,7 +281,7 @@ fn postgres_materialized_view_create_plan_refreshes_materialized_view_group_and_
         query: "SELECT 1".into(),
         tablespace: "fast".into(),
         with_data: false,
-        selected_field: 0,
+        focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
         query_editable: true,
     };
     let plan = lazydb::db::postgres::PostgresAdapter::plan_catalog_mutation(
@@ -1149,7 +1149,7 @@ fn postgres_view_draft_rejects_trailing_statements_and_plans_safe_replace() {
         security_barrier: lazydb::db::catalog_mutation::ViewOption::unavailable("not tested"),
         security_invoker: lazydb::db::catalog_mutation::ViewOption::unavailable("not tested"),
         check_option: lazydb::db::catalog_mutation::ViewOption::unavailable("not tested"),
-        selected_field: 0,
+        focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
     };
     assert!(draft.validate().is_err());
     draft.query = "SELECT 1".into();
@@ -1185,7 +1185,7 @@ fn postgres_view_options_are_version_gated_and_render_exact_syntax() {
         security_barrier: lazydb::db::catalog_mutation::ViewOption::available(Some(true)),
         security_invoker: lazydb::db::catalog_mutation::ViewOption::unavailable("not supported"),
         check_option: lazydb::db::catalog_mutation::ViewOption::available(Some("LOCAL".into())),
-        selected_field: 0,
+        focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
     };
     let profile = Uuid::new_v4();
     let request = CatalogMutationRequest::new(
@@ -1211,6 +1211,56 @@ fn postgres_view_options_are_version_gated_and_render_exact_syntax() {
         plan.sql()
             .contains("WITH (security_barrier=true) AS SELECT 1 LOCAL CHECK OPTION")
     );
+    draft.security_barrier = lazydb::db::catalog_mutation::ViewOption::available(Some(false));
+    draft.security_invoker = lazydb::db::catalog_mutation::ViewOption::available(Some(false));
+    draft.check_option =
+        lazydb::db::catalog_mutation::ViewOption::available(Some("CASCADED".into()));
+    let explicit_plan = lazydb::db::postgres::PostgresAdapter::plan_catalog_mutation_for_version(
+        CatalogMutationRequest::new(
+            ConnectionIdentity {
+                profile_id: profile,
+                generation: 1,
+            },
+            2,
+            1,
+            CatalogMutationMode::Create,
+            CatalogMutationAnchor::Catalog(id(profile, CatalogKind::Schema, &["app", "public"])),
+            CatalogObjectType::Catalog(CatalogKind::View),
+        )
+        .unwrap(),
+        CatalogDraft::View(draft.clone()),
+        None,
+        150_000,
+    )
+    .unwrap();
+    assert!(explicit_plan.sql().contains(
+        "WITH (security_barrier=false, security_invoker=false) AS SELECT 1 CASCADED CHECK OPTION"
+    ));
+
+    draft.security_barrier.value = None;
+    draft.security_invoker.value = None;
+    draft.check_option.value = None;
+    let default_plan = lazydb::db::postgres::PostgresAdapter::plan_catalog_mutation_for_version(
+        CatalogMutationRequest::new(
+            ConnectionIdentity {
+                profile_id: profile,
+                generation: 1,
+            },
+            3,
+            1,
+            CatalogMutationMode::Create,
+            CatalogMutationAnchor::Catalog(id(profile, CatalogKind::Schema, &["app", "public"])),
+            CatalogObjectType::Catalog(CatalogKind::View),
+        )
+        .unwrap(),
+        CatalogDraft::View(draft.clone()),
+        None,
+        150_000,
+    )
+    .unwrap();
+    assert!(!default_plan.sql().contains(" WITH ("));
+    assert!(!default_plan.sql().contains(" CHECK OPTION"));
+
     draft.security_invoker = lazydb::db::catalog_mutation::ViewOption::available(Some(true));
     assert!(
         lazydb::db::postgres::PostgresAdapter::plan_catalog_mutation_for_version(
@@ -1316,20 +1366,46 @@ fn sequence_bounds_keep_unset_distinct_from_no_limit_and_validate_numbers() {
         comment: "".into(),
         data_type: "bigint".into(),
         increment: "1".into(),
-        min_value: SequenceBound::Unset,
-        max_value: SequenceBound::NoLimit,
+        min_value: SequenceBound::Unset.into(),
+        max_value: SequenceBound::NoLimit.into(),
         start_value: "1".into(),
         restart_value: "".into(),
         cache: "1".into(),
         cycle: false,
         owned_by: "NONE".into(),
-        selected_field: 0,
+        focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
     };
     assert!(draft.validate().is_ok());
-    assert!(matches!(draft.min_value, SequenceBound::Unset));
+    assert_eq!(draft.min_value.to_bound(), SequenceBound::Unset);
     let mut invalid = draft;
     invalid.cache = "not-a-number".into();
     assert!(invalid.validate().is_err());
+}
+
+#[test]
+fn sequence_custom_bounds_validate_empty_non_numeric_and_signed_values() {
+    use lazydb::{db::catalog_mutation::SequenceBound, model::catalog_editor::SequenceDraft};
+    let mut draft = SequenceDraft {
+        name: "seq".into(),
+        schema: "public".into(),
+        owner: "postgres".into(),
+        comment: "".into(),
+        data_type: "bigint".into(),
+        increment: "1".into(),
+        min_value: SequenceBound::Value(String::new()).into(),
+        max_value: SequenceBound::Unset.into(),
+        start_value: "1".into(),
+        restart_value: "".into(),
+        cache: "1".into(),
+        cycle: false,
+        owned_by: "NONE".into(),
+        focus: lazydb::model::catalog_editor::CatalogFormFocus::MinValue,
+    };
+    assert!(draft.validate().is_err());
+    draft.min_value = SequenceBound::Value("nope".into()).into();
+    assert!(draft.validate().is_err());
+    draft.min_value = SequenceBound::Value("-100".into()).into();
+    assert!(draft.validate().is_ok());
 }
 
 #[test]
@@ -1356,17 +1432,18 @@ fn sequence_create_plan_quotes_owned_by_and_has_no_child_options() {
         comment: "note".into(),
         data_type: "bigint".into(),
         increment: "2".into(),
-        min_value: SequenceBound::NoLimit,
-        max_value: SequenceBound::Unset,
+        min_value: SequenceBound::NoLimit.into(),
+        max_value: SequenceBound::Value("99".into()).into(),
         start_value: "5".into(),
         restart_value: "".into(),
         cache: "10".into(),
         cycle: true,
         owned_by: "public.events.id".into(),
-        selected_field: 0,
+        focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
     });
     let plan =
         lazydb::db::postgres::PostgresAdapter::plan_catalog_mutation(request, draft, None).unwrap();
+    assert!(plan.sql().contains(" NO MINVALUE MAXVALUE 99 CYCLE"));
     assert!(plan.sql().contains("OWNED BY \"public\".\"events\".\"id\""));
     assert!(
         lazydb::db::postgres::PostgresAdapter::catalog_mutation_capabilities()

@@ -326,6 +326,67 @@ fn table_editor_keymap_dispatches_by_focus_region() {
 }
 
 #[test]
+fn catalog_form_keymap_keeps_review_and_cancel_semantics() {
+    let mut app = materialized_view_keymap_app();
+    let mut keymap = Keymap::default();
+    for (focus, expected) in [
+        (
+            lazydb::model::catalog_editor::CatalogFormFocus::Review,
+            Action::CatalogEditorPreview,
+        ),
+        (
+            lazydb::model::catalog_editor::CatalogFormFocus::Cancel,
+            Action::CatalogEditorCancel,
+        ),
+    ] {
+        match app.catalog_editor.as_mut().unwrap().draft.as_mut().unwrap() {
+            lazydb::model::catalog_editor::CatalogDraft::MaterializedView(draft) => {
+                draft.focus = focus
+            }
+            _ => panic!("materialized view draft expected"),
+        }
+        assert_eq!(keymap.map(key(KeyCode::Enter), &app), Some(expected));
+    }
+}
+
+fn materialized_view_keymap_app() -> App {
+    let mut app = App::new(Vec::new());
+    app.catalog_editor = Some(lazydb::model::catalog_editor::CatalogEditorState {
+        mode: lazydb::db::catalog_mutation::CatalogMutationMode::Create,
+        anchor: lazydb::db::catalog_mutation::CatalogMutationAnchor::Profile {
+            profile_id: Uuid::nil(),
+        },
+        object_type: None,
+        page: lazydb::model::catalog_editor::CatalogEditorPage::Form,
+        operation: None,
+        catalog_epoch: 0,
+        options: Vec::new(),
+        selected_option: 0,
+        draft: Some(
+            lazydb::model::catalog_editor::CatalogDraft::MaterializedView(
+                lazydb::model::catalog_editor::MaterializedViewDraft {
+                    name: "mv".into(),
+                    schema: "public".into(),
+                    owner: "postgres".into(),
+                    comment: "".into(),
+                    query: "SELECT 1".into(),
+                    tablespace: "".into(),
+                    with_data: true,
+                    focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
+                    query_editable: true,
+                },
+            ),
+        ),
+        baseline: None,
+        plan: None,
+        error: None,
+        owner_picker: Default::default(),
+    });
+    app.overlay = Some(Overlay::CatalogEditor);
+    app
+}
+
+#[test]
 fn catalog_table_form_accepts_paste_as_one_text_edit() {
     let app = table_editor_app();
     assert_eq!(
@@ -1258,7 +1319,7 @@ fn view_editor_form_owns_navigation_and_preview_keys() {
                 security_barrier: lazydb::db::catalog_mutation::ViewOption::unavailable("test"),
                 security_invoker: lazydb::db::catalog_mutation::ViewOption::unavailable("test"),
                 check_option: lazydb::db::catalog_mutation::ViewOption::unavailable("test"),
-                selected_field: 0,
+                focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
             },
         )),
     });
@@ -1272,10 +1333,7 @@ fn view_editor_form_owns_navigation_and_preview_keys() {
         keymap.map(key(KeyCode::Char('x')), &app),
         Some(Action::CatalogEditorInsert('x'))
     );
-    assert_eq!(
-        keymap.map(key(KeyCode::Enter), &app),
-        Some(Action::CatalogEditorPreview)
-    );
+    assert_eq!(keymap.map(key(KeyCode::Enter), &app), None);
 }
 
 #[test]
@@ -1294,14 +1352,14 @@ fn sequence_editor_form_owns_text_input_keys() {
                 comment: "".into(),
                 data_type: "bigint".into(),
                 increment: "1".into(),
-                min_value: lazydb::db::catalog_mutation::SequenceBound::Unset,
-                max_value: lazydb::db::catalog_mutation::SequenceBound::Unset,
+                min_value: lazydb::db::catalog_mutation::SequenceBound::Unset.into(),
+                max_value: lazydb::db::catalog_mutation::SequenceBound::Unset.into(),
                 start_value: "1".into(),
                 restart_value: "".into(),
                 cache: "1".into(),
                 cycle: false,
                 owned_by: "NONE".into(),
-                selected_field: 0,
+                focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
             },
         )),
         page: lazydb::model::catalog_editor::CatalogEditorPage::Form,
@@ -1313,6 +1371,35 @@ fn sequence_editor_form_owns_text_input_keys() {
         keymap.map(key(KeyCode::Char('x')), &app),
         Some(Action::CatalogEditorInsert('x'))
     ));
+
+    let draft = match app.catalog_editor.as_mut().unwrap().draft.as_mut().unwrap() {
+        lazydb::model::catalog_editor::CatalogDraft::Sequence(draft) => draft,
+        _ => unreachable!(),
+    };
+    draft.focus = lazydb::model::catalog_editor::CatalogFormFocus::MinValue;
+    assert_eq!(
+        keymap.map(key(KeyCode::Left), &app),
+        Some(Action::CatalogEditorCycleChoice(-1))
+    );
+    assert_eq!(keymap.map(key(KeyCode::Char('x')), &app), None);
+
+    let draft = match app.catalog_editor.as_mut().unwrap().draft.as_mut().unwrap() {
+        lazydb::model::catalog_editor::CatalogDraft::Sequence(draft) => draft,
+        _ => unreachable!(),
+    };
+    draft.min_value = lazydb::db::catalog_mutation::SequenceBound::Value(String::new()).into();
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('-')), &app),
+        Some(Action::CatalogEditorInsert('-'))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Left), &app),
+        Some(Action::CatalogEditorMoveLeft)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char(' ')), &app),
+        Some(Action::CatalogEditorCycleChoice(1))
+    );
 }
 
 #[test]
@@ -2206,11 +2293,13 @@ fn explorer_catalog_mutation_synthetic_nodes_are_noops() {
     }
 }
 
-#[test]
-fn materialized_view_create_form_maps_space_to_data_state_toggle() {
+fn materialized_view_editor(
+    mode: lazydb::db::catalog_mutation::CatalogMutationMode,
+    focus: lazydb::model::catalog_editor::CatalogFormFocus,
+) -> App {
     let mut app = App::new(Vec::new());
     app.catalog_editor = Some(lazydb::model::catalog_editor::CatalogEditorState {
-        mode: lazydb::db::catalog_mutation::CatalogMutationMode::Create,
+        mode,
         anchor: lazydb::db::catalog_mutation::CatalogMutationAnchor::Profile {
             profile_id: uuid::Uuid::nil(),
         },
@@ -2232,8 +2321,9 @@ fn materialized_view_create_form_maps_space_to_data_state_toggle() {
                     query: "SELECT 1".into(),
                     tablespace: "".into(),
                     with_data: true,
-                    selected_field: 5,
-                    query_editable: true,
+                    focus,
+                    query_editable: mode
+                        == lazydb::db::catalog_mutation::CatalogMutationMode::Create,
                 },
             ),
         ),
@@ -2244,20 +2334,71 @@ fn materialized_view_create_form_maps_space_to_data_state_toggle() {
     });
     app.focus = lazydb::model::workspace::Focus::Explorer;
     app.overlay = Some(Overlay::CatalogEditor);
+    app
+}
+
+#[test]
+fn materialized_view_tablespace_maps_space_to_text_input() {
+    let app = materialized_view_editor(
+        lazydb::db::catalog_mutation::CatalogMutationMode::Create,
+        lazydb::model::catalog_editor::CatalogFormFocus::Tablespace,
+    );
     let mut keymap = Keymap::default();
+
     assert_eq!(
         keymap.map(key(KeyCode::Char(' ')), &app),
-        Some(Action::CatalogEditorToggleMaterializedViewData)
+        Some(Action::CatalogEditorInsert(' '))
     );
-    app.update(Action::CatalogEditorToggleMaterializedViewData);
-    let Some(lazydb::model::catalog_editor::CatalogDraft::MaterializedView(draft)) = app
-        .catalog_editor
-        .as_ref()
-        .and_then(|editor| editor.draft.as_ref())
-    else {
-        panic!("materialized view draft expected");
-    };
-    assert!(!draft.with_data);
+}
+
+#[test]
+fn materialized_view_data_focus_maps_space_to_toggle() {
+    let app = materialized_view_editor(
+        lazydb::db::catalog_mutation::CatalogMutationMode::Create,
+        lazydb::model::catalog_editor::CatalogFormFocus::WithData,
+    );
+    let mut keymap = Keymap::default();
+
+    assert_eq!(
+        keymap.map(key(KeyCode::Char(' ')), &app),
+        Some(Action::CatalogEditorToggleFocused)
+    );
+}
+
+#[test]
+fn catalog_editor_maps_only_focused_control_and_text_keys() {
+    let mut app = materialized_view_editor(
+        lazydb::db::catalog_mutation::CatalogMutationMode::Create,
+        lazydb::model::catalog_editor::CatalogFormFocus::WithData,
+    );
+    let mut keymap = Keymap::default();
+    assert_eq!(
+        keymap.map(key(KeyCode::Enter), &app),
+        Some(Action::CatalogEditorToggleFocused)
+    );
+    assert_eq!(keymap.map(key(KeyCode::Char('x')), &app), None);
+
+    match app.catalog_editor.as_mut().unwrap().draft.as_mut().unwrap() {
+        lazydb::model::catalog_editor::CatalogDraft::MaterializedView(draft) => {
+            draft.focus = lazydb::model::catalog_editor::CatalogFormFocus::Review;
+        }
+        _ => unreachable!(),
+    }
+    assert_eq!(
+        keymap.map(key(KeyCode::Enter), &app),
+        Some(Action::CatalogEditorPreview)
+    );
+    assert_eq!(keymap.map(key(KeyCode::Char('x')), &app), None);
+    match app.catalog_editor.as_mut().unwrap().draft.as_mut().unwrap() {
+        lazydb::model::catalog_editor::CatalogDraft::MaterializedView(draft) => {
+            draft.focus = lazydb::model::catalog_editor::CatalogFormFocus::Cancel;
+        }
+        _ => unreachable!(),
+    }
+    assert_eq!(
+        keymap.map(key(KeyCode::Enter), &app),
+        Some(Action::CatalogEditorCancel)
+    );
 }
 
 #[test]

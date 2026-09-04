@@ -1625,38 +1625,46 @@ fn map_catalog_editor_form(
     if is_text_undo(event) {
         return Some(Action::CatalogEditorUndo);
     }
+    let draft = editor.draft.as_ref()?;
+    let create_mode = editor.mode == crate::db::catalog_mutation::CatalogMutationMode::Create;
+    let text_focus = draft.focus_accepts_text();
+    let choice_focus = draft.focus_is_choice();
+    let toggle_focus = draft.focus_is_toggle(create_mode);
     match event.code {
         KeyCode::Esc => Some(Action::CatalogEditorCancel),
         KeyCode::Tab | KeyCode::Down => Some(Action::CatalogEditorFieldNext),
         KeyCode::BackTab | KeyCode::Up => Some(Action::CatalogEditorFieldPrevious),
-        KeyCode::Enter => Some(Action::CatalogEditorPreview),
-        KeyCode::Char(' ') if event.modifiers.is_empty() => {
-            let toggle_data = editor.mode
-                == crate::db::catalog_mutation::CatalogMutationMode::Create
-                && matches!(
-                    editor.draft.as_ref(),
-                    Some(crate::model::catalog_editor::CatalogDraft::MaterializedView(draft))
-                        if draft.selected_field == 5
-                );
-            Some(if toggle_data {
-                Action::CatalogEditorToggleMaterializedViewData
-            } else {
-                Action::CatalogEditorInsert(' ')
-            })
+        KeyCode::Enter if toggle_focus => Some(Action::CatalogEditorToggleFocused),
+        KeyCode::Enter => match draft.focused_action() {
+            Some(crate::model::catalog_editor::CatalogFormFocus::Review) => {
+                Some(Action::CatalogEditorPreview)
+            }
+            Some(crate::model::catalog_editor::CatalogFormFocus::Cancel) => {
+                Some(Action::CatalogEditorCancel)
+            }
+            _ => None,
+        },
+        KeyCode::Char(' ') if event.modifiers.is_empty() && toggle_focus => {
+            Some(Action::CatalogEditorToggleFocused)
         }
-        KeyCode::Char(character) if event.modifiers.is_empty() => {
+        KeyCode::Char(' ') if event.modifiers.is_empty() && choice_focus => {
+            Some(Action::CatalogEditorCycleChoice(1))
+        }
+        KeyCode::Left if choice_focus && !text_focus => Some(Action::CatalogEditorCycleChoice(-1)),
+        KeyCode::Right if choice_focus && !text_focus => Some(Action::CatalogEditorCycleChoice(1)),
+        KeyCode::Char(character) if event.modifiers.is_empty() && text_focus => {
             Some(Action::CatalogEditorInsert(character))
         }
-        KeyCode::Backspace => Some(Action::CatalogEditorBackspace),
-        KeyCode::Delete => Some(Action::CatalogEditorDelete),
-        KeyCode::Left => Some(Action::CatalogEditorMoveLeft),
-        KeyCode::Right => Some(Action::CatalogEditorMoveRight),
-        KeyCode::Home => Some(Action::CatalogEditorMoveHome),
-        KeyCode::End => Some(Action::CatalogEditorMoveEnd),
-        KeyCode::Char('w') if event.modifiers == KeyModifiers::CONTROL => {
+        KeyCode::Backspace if text_focus => Some(Action::CatalogEditorBackspace),
+        KeyCode::Delete if text_focus => Some(Action::CatalogEditorDelete),
+        KeyCode::Left if text_focus => Some(Action::CatalogEditorMoveLeft),
+        KeyCode::Right if text_focus => Some(Action::CatalogEditorMoveRight),
+        KeyCode::Home if text_focus => Some(Action::CatalogEditorMoveHome),
+        KeyCode::End if text_focus => Some(Action::CatalogEditorMoveEnd),
+        KeyCode::Char('w') if event.modifiers == KeyModifiers::CONTROL && text_focus => {
             Some(Action::CatalogEditorDeletePreviousWord)
         }
-        KeyCode::Char('u') if event.modifiers == KeyModifiers::CONTROL => {
+        KeyCode::Char('u') if event.modifiers == KeyModifiers::CONTROL && text_focus => {
             Some(Action::CatalogEditorDeleteToStart)
         }
         _ => None,

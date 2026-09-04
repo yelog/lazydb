@@ -585,11 +585,27 @@ fn table_editor_focus_drives_sections_details_actions_and_context_hints() {
     let (general, general_state) = render_with_state(&app, 100, 30);
     assert!(general.contains("GENERAL"), "{general}");
     assert!(general.contains("COLUMNS"), "{general}");
+    assert!(general.contains("events"), "{general}");
+    assert!(general.contains("[ Review SQL ]"), "{general}");
+    assert!(general.contains("[ Cancel ]"), "{general}");
     assert!(
         general.contains("Tab/Shift-Tab/Up/Down move focus"),
         "{general}"
     );
     assert!(general_state.hit_regions.iter().any(|region| {
+        region.target
+            == HitTarget::CatalogEditorTableField(
+                lazydb::model::catalog_editor::TableEditorFocus::General(
+                    lazydb::model::catalog_editor::TableGeneralField::Name,
+                ),
+            )
+    }));
+
+    let (compact, compact_state) = render_with_state(&app, 56, 16);
+    assert!(compact.contains("events"), "{compact}");
+    assert!(compact.contains("[ SQL ]"), "{compact}");
+    assert!(compact.contains("[ Cancel ]"), "{compact}");
+    assert!(compact_state.hit_regions.iter().any(|region| {
         region.target
             == HitTarget::CatalogEditorTableField(
                 lazydb::model::catalog_editor::TableEditorFocus::General(
@@ -954,6 +970,331 @@ fn constraint_editor_renders_typed_fields() {
 
 #[test]
 fn view_editor_renders_query_and_output_columns() {
+    let mut app = view_editor_fixture();
+    app.overlay = Some(Overlay::CatalogEditor);
+    let (output, state) = render_with_state(&app, 100, 30);
+    for label in [
+        "GENERAL",
+        "DEFINITION",
+        "OPTIONS",
+        "Name",
+        "Schema",
+        "Owner",
+        "Comment",
+        "Output columns",
+        "Query",
+        "Security barrier",
+        "Security invoker",
+        "Check option",
+    ] {
+        assert!(output.contains(label), "missing {label}: {output}");
+    }
+    assert!(output.contains("Query"), "{output}");
+    assert!(output.contains("SELECT id FROM items"), "{output}");
+    assert!(output.contains("Output columns"), "{output}");
+    assert!(output.contains("On"), "{output}");
+    assert!(output.contains("Off"), "{output}");
+    assert!(output.contains("Cascaded"), "{output}");
+    assert!(output.contains("[ Review SQL ]"), "{output}");
+    assert!(output.contains("[ Cancel ]"), "{output}");
+    for field in [
+        lazydb::model::catalog_editor::CatalogFormFocus::Name,
+        lazydb::model::catalog_editor::CatalogFormFocus::Schema,
+        lazydb::model::catalog_editor::CatalogFormFocus::Owner,
+        lazydb::model::catalog_editor::CatalogFormFocus::Comment,
+        lazydb::model::catalog_editor::CatalogFormFocus::OutputColumns,
+        lazydb::model::catalog_editor::CatalogFormFocus::Query,
+        lazydb::model::catalog_editor::CatalogFormFocus::SecurityBarrier,
+        lazydb::model::catalog_editor::CatalogFormFocus::SecurityInvoker,
+        lazydb::model::catalog_editor::CatalogFormFocus::CheckOption,
+    ] {
+        assert!(
+            state
+                .hit_regions
+                .iter()
+                .any(|region| { region.target == HitTarget::CatalogEditorFormField(field) }),
+            "missing target for {field:?}"
+        );
+    }
+
+    let compact = render(&app, 56, 16);
+    assert!(compact.contains("GENERAL"), "{compact}");
+    assert!(compact.contains("DEFINITION"), "{compact}");
+    assert!(compact.contains("Query"), "{compact}");
+    assert!(compact.contains("OPTIONS"), "{compact}");
+    assert!(compact.contains("[ SQL ]"), "{compact}");
+    assert!(compact.contains("[ Cancel ]"), "{compact}");
+
+    if let Some(lazydb::model::catalog_editor::CatalogDraft::View(draft)) = app
+        .catalog_editor
+        .as_mut()
+        .and_then(|editor| editor.draft.as_mut())
+    {
+        draft.security_barrier = lazydb::db::catalog_mutation::ViewOption::available(None);
+        draft.security_invoker =
+            lazydb::db::catalog_mutation::ViewOption::unavailable("not tested");
+        draft.check_option =
+            lazydb::db::catalog_mutation::ViewOption::available(Some("LOCAL".into()));
+    }
+    let states = render(&app, 100, 30);
+    assert!(states.contains("Default"), "{states}");
+    assert!(states.contains("Local"), "{states}");
+    assert!(states.contains("DISABLED"), "{states}");
+}
+
+#[test]
+fn compact_view_editor_keeps_focused_output_columns_visible() {
+    let mut app = view_editor_fixture();
+    if let Some(lazydb::model::catalog_editor::CatalogDraft::View(draft)) = app
+        .catalog_editor
+        .as_mut()
+        .and_then(|editor| editor.draft.as_mut())
+    {
+        draft.focus = lazydb::model::catalog_editor::CatalogFormFocus::OutputColumns;
+    }
+
+    let output = render(&app, 56, 16);
+    assert!(output.contains("Output columns"), "{output}");
+    assert!(output.contains("id"), "{output}");
+    assert!(output.contains("[ SQL ]"), "{output}");
+    assert!(output.contains("[ Cancel ]"), "{output}");
+}
+
+#[test]
+fn compact_view_editor_keeps_focused_security_invoker_visible() {
+    let mut app = view_editor_fixture();
+    if let Some(lazydb::model::catalog_editor::CatalogDraft::View(draft)) = app
+        .catalog_editor
+        .as_mut()
+        .and_then(|editor| editor.draft.as_mut())
+    {
+        draft.focus = lazydb::model::catalog_editor::CatalogFormFocus::SecurityInvoker;
+    }
+
+    let output = render(&app, 56, 16);
+    assert!(output.contains("Security invoker"), "{output}");
+    assert!(output.contains("On"), "{output}");
+    assert!(output.contains("[ SQL ]"), "{output}");
+    assert!(output.contains("[ Cancel ]"), "{output}");
+}
+
+#[test]
+fn catalog_form_footer_hints_follow_focus_kind_without_moving_actions() {
+    let mut app = view_editor_fixture();
+    for (focus, hint) in [
+        (
+            lazydb::model::catalog_editor::CatalogFormFocus::Name,
+            "Type edit",
+        ),
+        (
+            lazydb::model::catalog_editor::CatalogFormFocus::SecurityBarrier,
+            "Space cycle",
+        ),
+        (
+            lazydb::model::catalog_editor::CatalogFormFocus::Review,
+            "Enter/Space activate",
+        ),
+    ] {
+        if let Some(lazydb::model::catalog_editor::CatalogDraft::View(draft)) = app
+            .catalog_editor
+            .as_mut()
+            .and_then(|editor| editor.draft.as_mut())
+        {
+            draft.focus = focus;
+        }
+        let (output, state) = render_with_state(&app, 100, 30);
+        assert!(output.contains(hint), "{output}");
+        let action_rows: Vec<_> = state
+            .hit_regions
+            .iter()
+            .filter(|region| {
+                matches!(
+                    region.target,
+                    HitTarget::CatalogEditorReview | HitTarget::CatalogEditorCancel
+                )
+            })
+            .map(|region| region.area.y)
+            .collect();
+        assert_eq!(action_rows.len(), 2, "{output}");
+        assert!(
+            action_rows.windows(2).all(|rows| rows[0] == rows[1]),
+            "{output}"
+        );
+    }
+}
+
+#[test]
+fn materialized_view_footer_does_not_advertise_space_globally() {
+    let mut app = view_editor_fixture();
+    app.catalog_editor.as_mut().unwrap().object_type =
+        Some(CatalogObjectType::Catalog(CatalogKind::MaterializedView));
+    app.catalog_editor.as_mut().unwrap().draft = Some(
+        lazydb::model::catalog_editor::CatalogDraft::MaterializedView(
+            lazydb::model::catalog_editor::MaterializedViewDraft {
+                name: "mv".into(),
+                schema: "public".into(),
+                owner: "postgres".into(),
+                comment: "".into(),
+                query: "SELECT 1".into(),
+                tablespace: "fast".into(),
+                with_data: true,
+                focus: lazydb::model::catalog_editor::CatalogFormFocus::Tablespace,
+                query_editable: true,
+            },
+        ),
+    );
+    let output = render(&app, 100, 30);
+    assert!(!output.contains("Space toggle data"), "{output}");
+    assert!(output.contains("Type edit"), "{output}");
+}
+
+#[test]
+fn redesigned_object_forms_have_no_debug_output_at_any_supported_size() {
+    for (name, app) in [
+        ("view", view_editor_fixture()),
+        ("materialized view", materialized_view_fixture()),
+        ("sequence", sequence_editor_fixture()),
+    ] {
+        for (width, height) in [(120, 36), (100, 30), (80, 24), (56, 16)] {
+            let output = render(&app, width, height);
+            for forbidden in [
+                "ViewOption {",
+                "availability:",
+                "value:",
+                "Unset",
+                "NoLimit",
+                "Value(\"",
+            ] {
+                assert!(
+                    !output.contains(forbidden),
+                    "{name} at {width}x{height} leaked {forbidden}: {output}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn redesigned_object_forms_keep_active_field_actions_and_footer_in_render_matrix() {
+    let cases = [
+        (
+            "view",
+            view_editor_fixture(),
+            [
+                lazydb::model::catalog_editor::CatalogFormFocus::Name,
+                lazydb::model::catalog_editor::CatalogFormFocus::Query,
+                lazydb::model::catalog_editor::CatalogFormFocus::CheckOption,
+            ],
+        ),
+        (
+            "materialized view",
+            materialized_view_fixture(),
+            [
+                lazydb::model::catalog_editor::CatalogFormFocus::Name,
+                lazydb::model::catalog_editor::CatalogFormFocus::Query,
+                lazydb::model::catalog_editor::CatalogFormFocus::WithData,
+            ],
+        ),
+        (
+            "sequence",
+            sequence_editor_fixture(),
+            [
+                lazydb::model::catalog_editor::CatalogFormFocus::Name,
+                lazydb::model::catalog_editor::CatalogFormFocus::MinValue,
+                lazydb::model::catalog_editor::CatalogFormFocus::OwnedBy,
+            ],
+        ),
+    ];
+
+    for (name, mut app, focuses) in cases {
+        for (width, height) in [(120, 36), (100, 30), (80, 24), (56, 16)] {
+            for focus in focuses {
+                set_catalog_form_focus(&mut app, focus);
+                let (output, state) = render_with_state(&app, width, height);
+                assert!(
+                    state.hit_regions.iter().any(|region| {
+                        region.target == HitTarget::CatalogEditorFormField(focus)
+                    }),
+                    "{name} at {width}x{height} lost active field {focus:?}: {output}"
+                );
+                assert!(
+                    state
+                        .hit_regions
+                        .iter()
+                        .any(|region| region.target == HitTarget::CatalogEditorReview),
+                    "{name} at {width}x{height} lost Review: {output}"
+                );
+                assert!(
+                    state
+                        .hit_regions
+                        .iter()
+                        .any(|region| region.target == HitTarget::CatalogEditorCancel),
+                    "{name} at {width}x{height} lost Cancel: {output}"
+                );
+                assert!(output.contains("Tab/Shift-Tab"), "{name}: {output}");
+            }
+        }
+    }
+}
+
+fn materialized_view_fixture() -> App {
+    let mut app = view_editor_fixture();
+    app.catalog_editor.as_mut().unwrap().object_type =
+        Some(CatalogObjectType::Catalog(CatalogKind::MaterializedView));
+    app.catalog_editor.as_mut().unwrap().draft = Some(
+        lazydb::model::catalog_editor::CatalogDraft::MaterializedView(
+            lazydb::model::catalog_editor::MaterializedViewDraft {
+                name: "mv".into(),
+                schema: "public".into(),
+                owner: "postgres".into(),
+                comment: "note".into(),
+                query: "SELECT id FROM items".into(),
+                tablespace: "fast".into(),
+                with_data: true,
+                focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
+                query_editable: true,
+            },
+        ),
+    );
+    app
+}
+
+fn sequence_editor_fixture() -> App {
+    let mut app = view_editor_fixture();
+    app.catalog_editor.as_mut().unwrap().object_type =
+        Some(CatalogObjectType::Catalog(CatalogKind::Sequence));
+    app.catalog_editor.as_mut().unwrap().draft =
+        Some(lazydb::model::catalog_editor::CatalogDraft::Sequence(
+            lazydb::model::catalog_editor::SequenceDraft {
+                name: "orders".into(),
+                schema: "public".into(),
+                owner: "postgres".into(),
+                comment: "ids".into(),
+                data_type: "bigint".into(),
+                increment: "1".into(),
+                min_value: lazydb::model::catalog_editor::SequenceBound::Unset.into(),
+                max_value: lazydb::model::catalog_editor::SequenceBound::Unset.into(),
+                start_value: "1".into(),
+                restart_value: "".into(),
+                cache: "1".into(),
+                cycle: false,
+                owned_by: "NONE".into(),
+                focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
+            },
+        ));
+    app
+}
+
+fn set_catalog_form_focus(app: &mut App, focus: lazydb::model::catalog_editor::CatalogFormFocus) {
+    match app.catalog_editor.as_mut().unwrap().draft.as_mut().unwrap() {
+        lazydb::model::catalog_editor::CatalogDraft::View(draft) => draft.focus = focus,
+        lazydb::model::catalog_editor::CatalogDraft::MaterializedView(draft) => draft.focus = focus,
+        lazydb::model::catalog_editor::CatalogDraft::Sequence(draft) => draft.focus = focus,
+        _ => panic!("unexpected catalog form fixture"),
+    }
+}
+
+fn view_editor_fixture() -> App {
     let mut app = App::new(Vec::new());
     app.catalog_editor = Some(lazydb::model::catalog_editor::CatalogEditorState {
         mode: lazydb::db::catalog_mutation::CatalogMutationMode::Create,
@@ -980,21 +1321,17 @@ fn view_editor_renders_query_and_output_columns() {
                 comment: "note".into(),
                 query: "SELECT id FROM items".into(),
                 output_columns: "id".into(),
-                security_barrier: lazydb::db::catalog_mutation::ViewOption::unavailable(
-                    "not tested",
-                ),
-                security_invoker: lazydb::db::catalog_mutation::ViewOption::unavailable(
-                    "not tested",
-                ),
-                check_option: lazydb::db::catalog_mutation::ViewOption::unavailable("not tested"),
-                selected_field: 0,
+                security_barrier: lazydb::db::catalog_mutation::ViewOption::available(Some(false)),
+                security_invoker: lazydb::db::catalog_mutation::ViewOption::available(Some(true)),
+                check_option: lazydb::db::catalog_mutation::ViewOption::available(Some(
+                    "CASCADED".into(),
+                )),
+                focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
             },
         )),
     });
     app.overlay = Some(Overlay::CatalogEditor);
-    let output = render(&app, 100, 30);
-    assert!(output.contains("Query: SELECT id FROM items"), "{output}");
-    assert!(output.contains("Output columns: id"), "{output}");
+    app
 }
 
 #[test]
@@ -1072,7 +1409,7 @@ fn materialized_view_editor_renders_data_state_and_read_only_query() {
                     query: "SELECT id FROM items".into(),
                     tablespace: "fast".into(),
                     with_data: false,
-                    selected_field: 0,
+                    focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
                     query_editable: false,
                 },
             ),
@@ -1080,11 +1417,160 @@ fn materialized_view_editor_renders_data_state_and_read_only_query() {
     });
     app.overlay = Some(Overlay::CatalogEditor);
     let output = render(&app, 100, 30);
+    for label in [
+        "GENERAL",
+        "DEFINITION",
+        "STORAGE",
+        "Name",
+        "Schema",
+        "Owner",
+        "Comment",
+        "Query",
+        "Tablespace",
+        "With data",
+    ] {
+        assert!(output.contains(label), "missing {label}: {output}");
+    }
     assert!(output.contains("WITH NO DATA"), "{output}");
-    assert!(
-        output.contains("Query (read-only on edit): SELECT id FROM items"),
-        "{output}"
-    );
+    assert!(output.contains("READ ONLY"), "{output}");
+    assert!(output.contains("[ Review SQL ]"), "{output}");
+    assert!(output.contains("[ Cancel ]"), "{output}");
+    let (_, state) = render_with_state(&app, 100, 30);
+    for field in [
+        lazydb::model::catalog_editor::CatalogFormFocus::Name,
+        lazydb::model::catalog_editor::CatalogFormFocus::Schema,
+        lazydb::model::catalog_editor::CatalogFormFocus::Owner,
+        lazydb::model::catalog_editor::CatalogFormFocus::Comment,
+        lazydb::model::catalog_editor::CatalogFormFocus::Tablespace,
+    ] {
+        assert!(
+            state
+                .hit_regions
+                .iter()
+                .any(|region| { region.target == HitTarget::CatalogEditorFormField(field) }),
+            "missing target for {field:?}"
+        );
+    }
+    if let Some(lazydb::model::catalog_editor::CatalogDraft::MaterializedView(draft)) = app
+        .catalog_editor
+        .as_mut()
+        .and_then(|editor| editor.draft.as_mut())
+    {
+        draft.focus = lazydb::model::catalog_editor::CatalogFormFocus::Query;
+    }
+    let compact = render(&app, 56, 16);
+    assert!(compact.contains("Query"), "{compact}");
+    assert!(compact.contains("[ SQL ]"), "{compact}");
+    assert!(compact.contains("[ Cancel ]"), "{compact}");
+}
+
+#[test]
+fn sequence_editor_renders_sections_bounds_and_all_fields() {
+    let mut app = App::new(Vec::new());
+    app.catalog_editor = Some(lazydb::model::catalog_editor::CatalogEditorState {
+        mode: CatalogMutationMode::Create,
+        anchor: CatalogMutationAnchor::Profile {
+            profile_id: uuid::Uuid::nil(),
+        },
+        object_type: Some(CatalogObjectType::Catalog(CatalogKind::Sequence)),
+        page: CatalogEditorPage::Form,
+        operation: None,
+        catalog_epoch: 0,
+        options: vec![],
+        selected_option: 0,
+        baseline: None,
+        plan: None,
+        error: None,
+        owner_picker: Default::default(),
+        draft: Some(lazydb::model::catalog_editor::CatalogDraft::Sequence(
+            lazydb::model::catalog_editor::SequenceDraft {
+                name: "orders".into(),
+                schema: "public".into(),
+                owner: "postgres".into(),
+                comment: "ids".into(),
+                data_type: "bigint".into(),
+                increment: "1".into(),
+                min_value: lazydb::model::catalog_editor::SequenceBoundDraft {
+                    kind: lazydb::model::catalog_editor::SequenceBoundKind::Custom,
+                    value: "10".into(),
+                },
+                max_value: lazydb::model::catalog_editor::SequenceBoundDraft {
+                    kind: lazydb::model::catalog_editor::SequenceBoundKind::Default,
+                    value: "".into(),
+                },
+                start_value: "10".into(),
+                restart_value: "".into(),
+                cache: "1".into(),
+                cycle: true,
+                owned_by: "public.orders.id".into(),
+                focus: lazydb::model::catalog_editor::CatalogFormFocus::MinValue,
+            },
+        )),
+    });
+    app.overlay = Some(Overlay::CatalogEditor);
+    let (output, state) = render_with_state(&app, 100, 30);
+    for label in [
+        "GENERAL",
+        "VALUES",
+        "OWNERSHIP",
+        "Name",
+        "Schema",
+        "Owner",
+        "Comment",
+        "Data type",
+        "Increment",
+        "Minimum",
+        "Maximum",
+        "Start",
+        "Restart",
+        "Cache",
+        "Cycle",
+        "Owned by",
+        "Default",
+        "Custom",
+        "10",
+    ] {
+        assert!(output.contains(label), "missing {label}: {output}");
+    }
+    assert!(output.contains("[x] On"), "{output}");
+    if let Some(lazydb::model::catalog_editor::CatalogDraft::Sequence(draft)) = app
+        .catalog_editor
+        .as_mut()
+        .and_then(|editor| editor.draft.as_mut())
+    {
+        draft.min_value.kind = lazydb::model::catalog_editor::SequenceBoundKind::NoLimit;
+        draft.max_value.kind = lazydb::model::catalog_editor::SequenceBoundKind::NoLimit;
+    }
+    let bounds = render(&app, 100, 30);
+    assert!(bounds.contains("No min value"), "{bounds}");
+    assert!(bounds.contains("No max value"), "{bounds}");
+    for field in [
+        lazydb::model::catalog_editor::CatalogFormFocus::Name,
+        lazydb::model::catalog_editor::CatalogFormFocus::Schema,
+        lazydb::model::catalog_editor::CatalogFormFocus::Owner,
+        lazydb::model::catalog_editor::CatalogFormFocus::Comment,
+        lazydb::model::catalog_editor::CatalogFormFocus::DataType,
+        lazydb::model::catalog_editor::CatalogFormFocus::Increment,
+        lazydb::model::catalog_editor::CatalogFormFocus::MinValue,
+        lazydb::model::catalog_editor::CatalogFormFocus::MaxValue,
+        lazydb::model::catalog_editor::CatalogFormFocus::StartValue,
+        lazydb::model::catalog_editor::CatalogFormFocus::RestartValue,
+        lazydb::model::catalog_editor::CatalogFormFocus::Cache,
+        lazydb::model::catalog_editor::CatalogFormFocus::Cycle,
+        lazydb::model::catalog_editor::CatalogFormFocus::OwnedBy,
+    ] {
+        assert!(
+            state
+                .hit_regions
+                .iter()
+                .any(|region| { region.target == HitTarget::CatalogEditorFormField(field) }),
+            "missing target for {field:?}"
+        );
+    }
+    let compact = render(&app, 56, 16);
+    assert!(compact.contains("Minimum"), "{compact}");
+    assert!(compact.contains("[ SQL ]"), "{compact}");
+    assert!(compact.contains("[ Cancel ]"), "{compact}");
 }
 
 #[test]

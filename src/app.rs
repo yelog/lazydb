@@ -283,12 +283,24 @@ fn selection_target_contains(target: &CatalogTarget, selection: &CatalogSelectio
     }
 }
 
-/// True when the draft is a schema form sitting on the owner row, which the picker owns.
-fn schema_owner_field_focused(draft: &crate::model::catalog_editor::CatalogDraft) -> bool {
+/// True when the draft is sitting on an owner row, which the picker owns.
+fn catalog_owner_field_focused(draft: &crate::model::catalog_editor::CatalogDraft) -> bool {
     matches!(
         draft,
         crate::model::catalog_editor::CatalogDraft::Schema(schema)
             if schema.selected_field == crate::model::catalog_editor::SCHEMA_OWNER_FIELD
+    ) || matches!(
+        draft,
+        crate::model::catalog_editor::CatalogDraft::View(view)
+            if view.focus == crate::model::catalog_editor::CatalogFormFocus::Owner
+    ) || matches!(
+        draft,
+        crate::model::catalog_editor::CatalogDraft::MaterializedView(view)
+            if view.focus == crate::model::catalog_editor::CatalogFormFocus::Owner
+    ) || matches!(
+        draft,
+        crate::model::catalog_editor::CatalogDraft::Sequence(sequence)
+            if sequence.focus == crate::model::catalog_editor::CatalogFormFocus::Owner
     )
 }
 
@@ -1879,6 +1891,7 @@ impl App {
                         | Action::CatalogDropRedo
                         | Action::CatalogDropConfirm
                         | Action::CatalogDropCancel
+                        | Action::CatalogEditorFocusFormField(_)
                         | Action::OpenDashboard
                         | Action::DashboardSetPage(_)
                         | Action::DashboardRefresh
@@ -3487,10 +3500,12 @@ impl App {
                 };
                 if let Some(editor) = self.catalog_editor.as_mut() {
                     if !editor.owner_picker.open
-                        && let Some(crate::model::catalog_editor::CatalogDraft::Schema(draft)) =
-                            editor.draft.as_ref()
+                        && let Some(draft) = editor.draft.as_ref()
+                        && catalog_owner_field_focused(draft)
                     {
-                        editor.owner_picker.open(draft.owner.value(), &choices);
+                        editor
+                            .owner_picker
+                            .open(draft.owner().map_or("", |owner| owner.value()), &choices);
                     }
                     editor.owner_picker.insert_filter(character, &choices);
                 }
@@ -3540,12 +3555,13 @@ impl App {
                     && let Some(choice) = editor.owner_picker.selected(&choices)
                 {
                     if choice.selectable {
-                        if let Some(crate::model::catalog_editor::CatalogDraft::Schema(draft)) =
-                            editor.draft.as_mut()
+                        if let Some(draft) = editor.draft.as_mut()
+                            && catalog_owner_field_focused(draft)
+                            && let Some(owner) = draft.owner_mut()
                         {
-                            draft.owner.set(choice.name.clone());
+                            owner.set(choice.name.clone());
+                            editor.owner_picker.close();
                         }
-                        editor.owner_picker.close();
                     } else {
                         editor.owner_picker.message =
                             Some(format!("Cannot SET ROLE to {}", choice.name));
@@ -3686,6 +3702,9 @@ impl App {
                 Vec::new()
             }
             Action::CatalogEditorFieldNext => {
+                let allow_with_data = self.catalog_editor.as_ref().is_some_and(|editor| {
+                    editor.mode == crate::db::catalog_mutation::CatalogMutationMode::Create
+                });
                 if let Some(editor) = self.catalog_editor.as_mut()
                     && editor.owner_picker.open
                 {
@@ -3693,7 +3712,7 @@ impl App {
                 }
                 if let Some(draft) = self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut()) {
                     if matches!(draft, crate::model::catalog_editor::CatalogDraft::Table(_)) {
-                        draft.move_field(1);
+                        draft.move_field(1, allow_with_data);
                         return Vec::new();
                     }
                     if matches!(
@@ -3701,8 +3720,8 @@ impl App {
                         crate::model::catalog_editor::CatalogDraft::Sequence(_)
                             | crate::model::catalog_editor::CatalogDraft::Schema(_)
                     ) {
-                        draft.move_field(1);
-                        if schema_owner_field_focused(draft) {
+                        draft.move_field(1, allow_with_data);
+                        if catalog_owner_field_focused(draft) {
                             return self.open_catalog_owner_picker();
                         }
                         return Vec::new();
@@ -3711,7 +3730,10 @@ impl App {
                         draft,
                         crate::model::catalog_editor::CatalogDraft::MaterializedView(_)
                     ) {
-                        draft.move_field(1);
+                        draft.move_field(1, allow_with_data);
+                        if catalog_owner_field_focused(draft) {
+                            return self.open_catalog_owner_picker();
+                        }
                         return Vec::new();
                     }
                 }
@@ -3721,6 +3743,9 @@ impl App {
                     .and_then(|editor| editor.draft.as_mut())
                 {
                     draft.move_field(1);
+                    if draft.focus == crate::model::catalog_editor::CatalogFormFocus::Owner {
+                        return self.open_catalog_owner_picker();
+                    }
                     return Vec::new();
                 }
                 if let Some(crate::model::catalog_editor::CatalogDraft::Constraint(draft)) = self
@@ -3734,6 +3759,9 @@ impl App {
                 Vec::new()
             }
             Action::CatalogEditorFieldPrevious => {
+                let allow_with_data = self.catalog_editor.as_ref().is_some_and(|editor| {
+                    editor.mode == crate::db::catalog_mutation::CatalogMutationMode::Create
+                });
                 if let Some(editor) = self.catalog_editor.as_mut()
                     && editor.owner_picker.open
                 {
@@ -3741,7 +3769,7 @@ impl App {
                 }
                 if let Some(draft) = self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut()) {
                     if matches!(draft, crate::model::catalog_editor::CatalogDraft::Table(_)) {
-                        draft.move_field(-1);
+                        draft.move_field(-1, allow_with_data);
                         return Vec::new();
                     }
                     if matches!(
@@ -3749,8 +3777,8 @@ impl App {
                         crate::model::catalog_editor::CatalogDraft::Sequence(_)
                             | crate::model::catalog_editor::CatalogDraft::Schema(_)
                     ) {
-                        draft.move_field(-1);
-                        if schema_owner_field_focused(draft) {
+                        draft.move_field(-1, allow_with_data);
+                        if catalog_owner_field_focused(draft) {
                             return self.open_catalog_owner_picker();
                         }
                         return Vec::new();
@@ -3759,7 +3787,10 @@ impl App {
                         draft,
                         crate::model::catalog_editor::CatalogDraft::MaterializedView(_)
                     ) {
-                        draft.move_field(-1);
+                        draft.move_field(-1, allow_with_data);
+                        if catalog_owner_field_focused(draft) {
+                            return self.open_catalog_owner_picker();
+                        }
                         return Vec::new();
                     }
                 }
@@ -3769,6 +3800,9 @@ impl App {
                     .and_then(|editor| editor.draft.as_mut())
                 {
                     draft.move_field(-1);
+                    if draft.focus == crate::model::catalog_editor::CatalogFormFocus::Owner {
+                        return self.open_catalog_owner_picker();
+                    }
                     return Vec::new();
                 }
                 if let Some(crate::model::catalog_editor::CatalogDraft::Constraint(draft)) = self
@@ -3795,6 +3829,40 @@ impl App {
                 }
                 if let Some(editor) = self.catalog_editor.as_mut() {
                     editor.owner_picker.close();
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorFocusFormField(focus) => {
+                let allow_with_data = self.catalog_editor.as_ref().is_some_and(|editor| {
+                    editor.mode == crate::db::catalog_mutation::CatalogMutationMode::Create
+                });
+                let accepted = if let Some(draft) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    match draft {
+                        crate::model::catalog_editor::CatalogDraft::View(draft) => {
+                            draft.focus(focus)
+                        }
+                        crate::model::catalog_editor::CatalogDraft::MaterializedView(draft) => {
+                            draft.focus(focus, allow_with_data)
+                        }
+                        crate::model::catalog_editor::CatalogDraft::Sequence(draft) => {
+                            draft.focus(focus)
+                        }
+                        _ => false,
+                    }
+                } else {
+                    false
+                };
+                if accepted && focus == crate::model::catalog_editor::CatalogFormFocus::Owner {
+                    return self.open_catalog_owner_picker();
+                }
+                if !accepted || focus != crate::model::catalog_editor::CatalogFormFocus::Owner {
+                    if let Some(editor) = self.catalog_editor.as_mut() {
+                        editor.owner_picker.close();
+                    }
                 }
                 Vec::new()
             }
@@ -4358,14 +4426,35 @@ impl App {
                 }
                 Vec::new()
             }
-            Action::CatalogEditorToggleMaterializedViewData => {
-                if let Some(editor) = self.catalog_editor.as_mut()
-                    && editor.mode == crate::db::catalog_mutation::CatalogMutationMode::Create
-                    && let Some(crate::model::catalog_editor::CatalogDraft::MaterializedView(draft)) =
-                        editor.draft.as_mut()
-                    && draft.selected_field == 5
-                {
-                    draft.with_data = !draft.with_data;
+            Action::CatalogEditorCycleChoice(delta) => {
+                if let Some(draft) = self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut()) {
+                    match draft {
+                        crate::model::catalog_editor::CatalogDraft::View(draft) => {
+                            draft.cycle_focused_choice(delta);
+                        }
+                        crate::model::catalog_editor::CatalogDraft::Sequence(draft) => {
+                            draft.cycle_focused_choice(delta);
+                        }
+                        _ => {}
+                    }
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorToggleFocused => {
+                if let Some(editor) = self.catalog_editor.as_mut() {
+                    let create_mode =
+                        editor.mode == crate::db::catalog_mutation::CatalogMutationMode::Create;
+                    if let Some(draft) = editor.draft.as_mut() {
+                        match draft {
+                            crate::model::catalog_editor::CatalogDraft::MaterializedView(draft) => {
+                                draft.toggle_focused(create_mode);
+                            }
+                            crate::model::catalog_editor::CatalogDraft::Sequence(draft) => {
+                                draft.toggle_focused();
+                            }
+                            _ => {}
+                        }
+                    }
                 }
                 Vec::new()
             }
@@ -4418,6 +4507,24 @@ impl App {
                             table.focus = field;
                             editor.set_validation_error(message);
                         } else {
+                            if let Some(focus) = draft.validation_focus()
+                                && let Some(current) = editor.draft.as_mut()
+                            {
+                                match current {
+                                    crate::model::catalog_editor::CatalogDraft::View(draft) => {
+                                        draft.focus(focus);
+                                    }
+                                    crate::model::catalog_editor::CatalogDraft::MaterializedView(
+                                        draft,
+                                    ) => {
+                                        draft.focus(focus, mode == crate::db::catalog_mutation::CatalogMutationMode::Create);
+                                    }
+                                    crate::model::catalog_editor::CatalogDraft::Sequence(draft) => {
+                                        draft.focus(focus);
+                                    }
+                                    _ => {}
+                                }
+                            }
                             editor.set_validation_error(error.to_string());
                         }
                     }
@@ -8902,10 +9009,12 @@ impl App {
             return Vec::new();
         };
         if let Some(editor) = self.catalog_editor.as_mut()
-            && let Some(crate::model::catalog_editor::CatalogDraft::Schema(draft)) =
-                editor.draft.as_ref()
+            && let Some(draft) = editor.draft.as_ref()
+            && catalog_owner_field_focused(draft)
         {
-            editor.owner_picker.open(draft.owner.value(), &choices);
+            editor
+                .owner_picker
+                .open(draft.owner().map_or("", |owner| owner.value()), &choices);
         }
         Vec::new()
     }
