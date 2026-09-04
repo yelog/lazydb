@@ -1148,6 +1148,152 @@ fn materialized_view_footer_does_not_advertise_space_globally() {
     assert!(output.contains("Type edit"), "{output}");
 }
 
+#[test]
+fn redesigned_object_forms_have_no_debug_output_at_any_supported_size() {
+    for (name, app) in [
+        ("view", view_editor_fixture()),
+        ("materialized view", materialized_view_fixture()),
+        ("sequence", sequence_editor_fixture()),
+    ] {
+        for (width, height) in [(120, 36), (100, 30), (80, 24), (56, 16)] {
+            let output = render(&app, width, height);
+            for forbidden in [
+                "ViewOption {",
+                "availability:",
+                "value:",
+                "Unset",
+                "NoLimit",
+                "Value(\"",
+            ] {
+                assert!(
+                    !output.contains(forbidden),
+                    "{name} at {width}x{height} leaked {forbidden}: {output}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn redesigned_object_forms_keep_active_field_actions_and_footer_in_render_matrix() {
+    let cases = [
+        (
+            "view",
+            view_editor_fixture(),
+            [
+                lazydb::model::catalog_editor::CatalogFormFocus::Name,
+                lazydb::model::catalog_editor::CatalogFormFocus::Query,
+                lazydb::model::catalog_editor::CatalogFormFocus::CheckOption,
+            ],
+        ),
+        (
+            "materialized view",
+            materialized_view_fixture(),
+            [
+                lazydb::model::catalog_editor::CatalogFormFocus::Name,
+                lazydb::model::catalog_editor::CatalogFormFocus::Query,
+                lazydb::model::catalog_editor::CatalogFormFocus::WithData,
+            ],
+        ),
+        (
+            "sequence",
+            sequence_editor_fixture(),
+            [
+                lazydb::model::catalog_editor::CatalogFormFocus::Name,
+                lazydb::model::catalog_editor::CatalogFormFocus::MinValue,
+                lazydb::model::catalog_editor::CatalogFormFocus::OwnedBy,
+            ],
+        ),
+    ];
+
+    for (name, mut app, focuses) in cases {
+        for (width, height) in [(120, 36), (100, 30), (80, 24), (56, 16)] {
+            for focus in focuses {
+                set_catalog_form_focus(&mut app, focus);
+                let (output, state) = render_with_state(&app, width, height);
+                assert!(
+                    state.hit_regions.iter().any(|region| {
+                        region.target == HitTarget::CatalogEditorFormField(focus)
+                    }),
+                    "{name} at {width}x{height} lost active field {focus:?}: {output}"
+                );
+                assert!(
+                    state
+                        .hit_regions
+                        .iter()
+                        .any(|region| region.target == HitTarget::CatalogEditorReview),
+                    "{name} at {width}x{height} lost Review: {output}"
+                );
+                assert!(
+                    state
+                        .hit_regions
+                        .iter()
+                        .any(|region| region.target == HitTarget::CatalogEditorCancel),
+                    "{name} at {width}x{height} lost Cancel: {output}"
+                );
+                assert!(output.contains("Tab/Shift-Tab"), "{name}: {output}");
+            }
+        }
+    }
+}
+
+fn materialized_view_fixture() -> App {
+    let mut app = view_editor_fixture();
+    app.catalog_editor.as_mut().unwrap().object_type =
+        Some(CatalogObjectType::Catalog(CatalogKind::MaterializedView));
+    app.catalog_editor.as_mut().unwrap().draft = Some(
+        lazydb::model::catalog_editor::CatalogDraft::MaterializedView(
+            lazydb::model::catalog_editor::MaterializedViewDraft {
+                name: "mv".into(),
+                schema: "public".into(),
+                owner: "postgres".into(),
+                comment: "note".into(),
+                query: "SELECT id FROM items".into(),
+                tablespace: "fast".into(),
+                with_data: true,
+                focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
+                query_editable: true,
+            },
+        ),
+    );
+    app
+}
+
+fn sequence_editor_fixture() -> App {
+    let mut app = view_editor_fixture();
+    app.catalog_editor.as_mut().unwrap().object_type =
+        Some(CatalogObjectType::Catalog(CatalogKind::Sequence));
+    app.catalog_editor.as_mut().unwrap().draft =
+        Some(lazydb::model::catalog_editor::CatalogDraft::Sequence(
+            lazydb::model::catalog_editor::SequenceDraft {
+                name: "orders".into(),
+                schema: "public".into(),
+                owner: "postgres".into(),
+                comment: "ids".into(),
+                data_type: "bigint".into(),
+                increment: "1".into(),
+                min_value: lazydb::model::catalog_editor::SequenceBound::Unset.into(),
+                max_value: lazydb::model::catalog_editor::SequenceBound::Unset.into(),
+                start_value: "1".into(),
+                restart_value: "".into(),
+                cache: "1".into(),
+                cycle: false,
+                owned_by: "NONE".into(),
+                focus: lazydb::model::catalog_editor::CatalogFormFocus::Name,
+            },
+        ));
+    app
+}
+
+fn set_catalog_form_focus(app: &mut App, focus: lazydb::model::catalog_editor::CatalogFormFocus) {
+    match app.catalog_editor.as_mut().unwrap().draft.as_mut().unwrap() {
+        lazydb::model::catalog_editor::CatalogDraft::View(draft) => draft.focus = focus,
+        lazydb::model::catalog_editor::CatalogDraft::MaterializedView(draft) => draft.focus = focus,
+        lazydb::model::catalog_editor::CatalogDraft::Sequence(draft) => draft.focus = focus,
+        _ => panic!("unexpected catalog form fixture"),
+    }
+}
+
 fn view_editor_fixture() -> App {
     let mut app = App::new(Vec::new());
     app.catalog_editor = Some(lazydb::model::catalog_editor::CatalogEditorState {
