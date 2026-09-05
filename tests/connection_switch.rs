@@ -387,7 +387,7 @@ fn successful_switch_caches_and_restores_profile_workspace_once() {
     assert!(
         commands
             .iter()
-            .any(|command| matches!(command, Command::PersistWorkspace(_)))
+            .any(|command| matches!(command, Command::PersistWorkspace { .. }))
     );
 
     let first_generation = match app.update(Action::RequestConnect(first_id)).as_slice() {
@@ -510,7 +510,7 @@ fn target_selector_switches_only_after_matching_connection_success() {
     assert!(
         commands
             .iter()
-            .any(|command| matches!(command, Command::PersistWorkspace(_)))
+            .any(|command| matches!(command, Command::PersistWorkspace { .. }))
     );
 }
 
@@ -933,7 +933,7 @@ fn active_disconnect_caches_and_hides_workspace_until_reconnect() {
     assert_eq!(app.active_editor_text().unwrap(), "");
     assert!(commands.iter().any(|command| matches!(
         command,
-        Command::PersistWorkspace(snapshot)
+        Command::PersistWorkspace { snapshot, .. }
             if snapshot.profiles.iter().any(|workspace| {
                 workspace.profile_id == profile_id
                     && workspace.consoles.iter().any(|console| console.id == console_id)

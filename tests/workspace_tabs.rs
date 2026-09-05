@@ -204,9 +204,9 @@ fn closing_relation_tab_bypasses_transaction_exit() {
 
     assert!(
         commands.is_empty()
-            || commands
-                .iter()
-                .any(|command| { matches!(command, lazydb::action::Command::PersistWorkspace(_)) })
+            || commands.iter().any(|command| {
+                matches!(command, lazydb::action::Command::PersistWorkspace { .. })
+            })
     );
     assert_eq!(app.tabs.len(), 1);
 }
@@ -236,7 +236,7 @@ fn closing_final_sql_console_creates_a_replacement_editor() {
     assert!(
         commands
             .iter()
-            .any(|command| matches!(command, Command::PersistWorkspace(_)))
+            .any(|command| matches!(command, Command::PersistWorkspace { .. }))
     );
 }
 

@@ -1,6 +1,8 @@
 # Workspace Save Queue and Failure Feedback Design
 
-Status: proposed design, not implemented. This document supersedes the queue
+Status: partially implemented. The current worktree implements the bounded save
+slot, revision-aware completion, retry retention, and flush-before-quit core.
+Delete ordering, debounce, and full UI retry controls remain follow-ups. This document supersedes the queue
 portion of T05 in the architecture optimization plan. No disk-format migration
 or new dependency is required for the first implementation.
 

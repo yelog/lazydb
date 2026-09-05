@@ -47,8 +47,10 @@ Revision-based grid caching and full editor analysis indexing remain pending.
 Result budgets count retained cell JSON sizes, not the complete response or RSS.
 Column metadata/result-set count limits, skipping decode after budget exhaustion,
 manual transaction/page byte budgets and complete truncation UI coverage remain
-follow-ups. The save coordinator and failure feedback are designed separately in
-`plans/2026-09-05-workspace-save-state-machine.md`, not implemented.
+follow-ups. The save coordinator, revision-aware completion, retry retention, and
+flush-before-quit path are implemented. The separate DeleteSqlFile path is not
+yet folded into the coordinator, so save/delete ordering and cleanup failure
+feedback remain pending.
 
 The earlier release sample was 86.566583ms for 20 full renders, before pre-commit
 corrections. There is no measured pre-change baseline, so this is not a speedup

@@ -236,6 +236,8 @@ pub struct App {
     pending_target_console: Option<Uuid>,
     pub sql_editor_list: crate::model::sql_editor_list::SqlEditorListState,
     workspaces: HashMap<Uuid, ConnectionWorkspace>,
+    workspace_save: crate::model::workspace_save::SaveState,
+    workspace_save_closing: bool,
     pub notifications: NotificationCenter,
     dashboard_refresh_interval_millis: u64,
     default_connection_access: crate::config::ConnectionAccessDefault,
@@ -610,6 +612,8 @@ impl App {
             pending_target_console: None,
             sql_editor_list: Default::default(),
             workspaces: HashMap::new(),
+            workspace_save: Default::default(),
+            workspace_save_closing: false,
             notifications: NotificationCenter::default(),
             dashboard_refresh_interval_millis: crate::persistence::settings::AppSettings::default()
                 .dashboard_refresh_interval_millis(),
@@ -1461,8 +1465,15 @@ impl App {
         }
     }
 
-    fn persist_workspace_command(&self) -> Command {
-        Command::PersistWorkspace(self.workspace_snapshot())
+    fn persist_workspace_command(&mut self) -> Command {
+        let revision = self.workspace_save.offered().unwrap_or_else(|| {
+            self.notify_error("Workspace", "Workspace save revision exhausted");
+            self.workspace_save.current_revision
+        });
+        Command::PersistWorkspace {
+            revision,
+            snapshot: self.workspace_snapshot(),
+        }
     }
 
     fn execute_help_shortcut(&mut self, id: crate::help::HelpShortcutId) -> Vec<Command> {
@@ -1999,11 +2010,46 @@ impl App {
                     | Action::ConfirmDeleteConsole
                     | Action::CancelDeleteConsole
                     | Action::OpenNotificationHistory
+                    | Action::WorkspaceSaveSucceeded { .. }
+                    | Action::WorkspaceSaveFailed { .. }
+                    | Action::WorkspaceSaveRetry
+                    | Action::WorkspaceSaveFlushed { .. }
             )
         {
             return Vec::new();
         }
         match action {
+            Action::WorkspaceSaveSucceeded { revision } => {
+                self.notify_info("Workspace", format!("Saved workspace revision {revision}"));
+                self.workspace_save.succeeded(revision);
+                vec![Command::CompleteWorkspaceSave {
+                    revision,
+                    succeeded: true,
+                }]
+            }
+            Action::WorkspaceSaveFailed { revision, message } => {
+                self.workspace_save.failed(revision);
+                self.notify_error(
+                    "Workspace",
+                    format!("Workspace save {revision} failed: {message}"),
+                );
+                vec![Command::CompleteWorkspaceSave {
+                    revision,
+                    succeeded: false,
+                }]
+            }
+            Action::WorkspaceSaveRetry => {
+                self.workspace_save.status = crate::model::workspace_save::SaveStatus::Saving;
+                vec![Command::RetryWorkspaceSave]
+            }
+            Action::WorkspaceSaveFlushed { revision } => {
+                if !self.workspace_save.is_acknowledged(revision) {
+                    return Vec::new();
+                }
+                self.workspace_save_closing = false;
+                self.should_quit = true;
+                vec![Command::Quit]
+            }
             Action::OpenDashboard => {
                 if !self.has_active_workspace() {
                     return Vec::new();
@@ -7495,8 +7541,11 @@ impl App {
             }
             Action::Quit => match self.workspace_exit_check() {
                 WorkspaceExitCheck::Ready => {
-                    self.should_quit = true;
-                    vec![Command::Quit]
+                    let command = self.persist_workspace_command();
+                    let revision = self.workspace_save.current_revision;
+                    self.workspace_save_closing = true;
+                    self.workspace_save.begin_closing();
+                    vec![command, Command::FlushWorkspace { revision }]
                 }
                 WorkspaceExitCheck::Running => {
                     self.notify_warning(
@@ -14684,7 +14733,7 @@ mod tests {
         assert!(
             commands
                 .iter()
-                .any(|command| matches!(command, Command::PersistWorkspace(_)))
+                .any(|command| matches!(command, Command::PersistWorkspace { .. }))
         );
     }
 
@@ -14832,7 +14881,7 @@ mod tests {
         assert!(
             commands
                 .iter()
-                .any(|command| matches!(command, Command::PersistWorkspace(_)))
+                .any(|command| matches!(command, Command::PersistWorkspace { .. }))
         );
     }
 
@@ -14887,7 +14936,7 @@ mod tests {
         assert!(
             commands
                 .iter()
-                .any(|command| matches!(command, Command::PersistWorkspace(_)))
+                .any(|command| matches!(command, Command::PersistWorkspace { .. }))
         );
     }
 
@@ -14923,7 +14972,7 @@ mod tests {
                 .unwrap()
                 .open
         );
-        let Command::PersistWorkspace(snapshot) = &commands[0] else {
+        let Command::PersistWorkspace { snapshot, .. } = &commands[0] else {
             panic!("expected workspace persistence")
         };
         assert_eq!(
@@ -15508,11 +15557,15 @@ mod tests {
             })
         }));
 
+        let commands = app.update(Action::Quit);
         assert!(matches!(
-            app.update(Action::Quit).as_slice(),
-            [Command::Quit]
+            commands.as_slice(),
+            [
+                Command::PersistWorkspace { .. },
+                Command::FlushWorkspace { .. }
+            ]
         ));
-        assert!(app.should_quit);
+        assert!(!app.should_quit);
     }
 
     #[test]

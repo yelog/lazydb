@@ -617,10 +617,10 @@ fn ex_quit_is_reduced_by_app_not_called_directly() {
         KeyCode::Enter,
         KeyModifiers::NONE,
     )));
-    assert!(app.should_quit);
+    assert!(!app.should_quit);
     assert!(
         commands
             .iter()
-            .any(|command| matches!(command, lazydb::action::Command::Quit))
+            .any(|command| matches!(command, lazydb::action::Command::FlushWorkspace { .. }))
     );
 }
