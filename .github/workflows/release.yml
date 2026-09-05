@@ -61,6 +61,8 @@ jobs:
           ref: ${{ needs.plan.outputs.tag }}
       - run: rustup toolchain install 1.94.0 --profile minimal --no-self-update
       - run: rustup default 1.94.0
+      - name: Distribution contracts
+        run: sh scripts/release/test-distribution.sh
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --all-targets --all-features

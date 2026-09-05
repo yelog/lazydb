@@ -77,7 +77,10 @@ approval, and remote push approval; tests and inspections should be automatic.
    `scripts/release/validate-version.sh --pre-tag vVERSION`.
 8. Run `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features
    -- -D warnings`, `cargo test --all-targets --all-features`, and a release
-   binary `version --json` smoke test. Report each command's actual result;
+   binary `version --json` smoke test. Also run
+   `sh scripts/release/test-distribution.sh`; this is the shared CI/Release
+   gate for installer, manifest, Pages, metadata, and online smoke-test contracts.
+   All checks must pass before commit/tag approval. Report each command's actual result;
    never infer success from a partial or concurrent command.
 9. Show the complete release diff, the files changed, the baseline and commit
    count, and the exact proposed commands. Wait for `confirm commit` before
@@ -86,9 +89,21 @@ approval, and remote push approval; tests and inspections should be automatic.
 10. Verify the commit, tag target, clean worktree, and tag uniqueness. Then
     wait for `confirm push` before running `git push origin main` followed by
     `git push origin vVERSION`. Pushing the tag starts GitHub publication.
-11. After pushing, verify local/remote refs and report the URLs of the
-    triggered CI and Release workflows when `gh` is available. Do not wait
-    for workflow completion unless explicitly requested.
+11. After pushing, verify local/remote refs and use `gh` to identify and wait
+    for the CI and Release runs for the exact pushed commit/tag. Then identify
+    the Pages run triggered by that Release run and wait for its completion,
+    including the Linux and macOS online installation verification jobs.
+    Do not accept an older successful run as evidence. Poll for the downstream
+    run with a bounded timeout; if it never appears, report the blocker.
+12. Report "release complete" only when CI, Release, and Pages (including
+    online installation of the exact version) succeed. Include all run URLs.
+    If `gh` is unavailable, a run fails, or monitoring times out, report
+    "pushed; release verification incomplete" with the outstanding checks.
+    If the user explicitly asks not to wait, use that same incomplete status.
+    For an explicitly requested manual verification, run
+    `sh scripts/release/smoke-online-install.sh CHANNEL VERSION`; it uses
+    isolated temporary directories and never replaces the maintainer's install.
+    Never rewrite tags or republish assets automatically to recover a failure.
 
 ## Changelog baselines
 
