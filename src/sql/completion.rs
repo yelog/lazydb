@@ -14,6 +14,7 @@ use super::{SqlDialect, TextRange};
 pub struct CompletionScheduleKey {
     pub console_id: Uuid,
     pub document_revision: u64,
+    pub cursor: usize,
     pub connection: crate::model::workspace::ConnectionIdentity,
     pub catalog_generation: u64,
 }
@@ -611,56 +612,91 @@ fn quote_relation_component(value: &str, dialect: SqlDialect) -> String {
 }
 
 pub fn should_offer_completion(text: &str, cursor: usize) -> bool {
+    should_offer_completion_for_dialect(text, cursor, SqlDialect::Generic)
+}
+
+pub fn should_offer_completion_for_dialect(text: &str, cursor: usize, dialect: SqlDialect) -> bool {
     let cursor = cursor.min(text.len());
-    let Some(previous) = cursor
-        .checked_sub(1)
-        .and_then(|index| text.as_bytes().get(index))
-    else {
+    if cursor == 0 || cursor_is_in_comment_or_literal(&text[..cursor], dialect) {
+        return false;
+    }
+    let bytes = text.as_bytes();
+    let Some(previous) = cursor.checked_sub(1).and_then(|index| bytes.get(index)) else {
         return false;
     };
-    if *previous == b'.'
-        || previous.is_ascii_alphanumeric()
-        || *previous == b'_'
-        || *previous >= 0x80
-    {
+    if previous.is_ascii_alphanumeric() || *previous == b'_' || *previous >= 0x80 {
         return true;
     }
-    if previous.is_ascii_whitespace() {
-        let tokens = completion_tokens(&text[..cursor], SqlDialect::Generic);
-        let Some(last_word) = tokens
-            .iter()
-            .rev()
-            .find_map(|token| token_word(Some(token)))
-        else {
-            return false;
+    if *previous != b'.' || cursor < 2 {
+        return false;
+    }
+    let mut qualifier_start = cursor - 2;
+    while qualifier_start > 0 && is_identifier_byte(bytes[qualifier_start - 1], dialect) {
+        qualifier_start -= 1;
+    }
+    !bytes[qualifier_start].is_ascii_digit()
+}
+
+fn cursor_is_in_comment_or_literal(text: &str, dialect: SqlDialect) -> bool {
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'-' && bytes.get(index + 1) == Some(&b'-') {
+            index += 2;
+            while index < bytes.len() && bytes[index] != b'\n' {
+                index += 1;
+            }
+            if index == bytes.len() {
+                return true;
+            }
+            continue;
+        }
+        if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'*') {
+            index += 2;
+            while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/') {
+                index += 1;
+            }
+            if index + 1 == bytes.len() {
+                return true;
+            }
+            index += 2;
+            continue;
+        }
+        if bytes[index] == b'\'' {
+            index += 1;
+            while index < bytes.len() {
+                if bytes[index] == b'\'' {
+                    if bytes.get(index + 1) == Some(&b'\'') {
+                        index += 2;
+                    } else {
+                        index += 1;
+                        break;
+                    }
+                } else {
+                    index += 1;
+                }
+            }
+            if index == bytes.len() && bytes.last() != Some(&b'\'') {
+                return true;
+            }
+            continue;
+        }
+        let quote = match bytes[index] {
+            b'"' if dialect != SqlDialect::MySql => Some(b'"'),
+            b'[' if dialect == SqlDialect::SqlServer => Some(b']'),
+            b'`' if dialect == SqlDialect::MySql => Some(b'`'),
+            _ => None,
         };
-        return matches!(
-            last_word.to_ascii_lowercase().as_str(),
-            "from"
-                | "join"
-                | "update"
-                | "insert"
-                | "into"
-                | "select"
-                | "where"
-                | "create"
-                | "alter"
-                | "drop"
-                | "truncate"
-                | "table"
-                | "view"
-                | "index"
-                | "schema"
-                | "database"
-                | "sequence"
-                | "type"
-                | "function"
-                | "procedure"
-                | "trigger"
-                | "on"
-                | "column"
-                | "constraint"
-        );
+        if let Some(quote) = quote {
+            index += 1;
+            while index < bytes.len() && bytes[index] != quote {
+                index += 1;
+            }
+            if index == bytes.len() {
+                return true;
+            }
+        }
+        index += 1;
     }
     false
 }
