@@ -3833,6 +3833,41 @@ mod tests {
     }
 
     #[test]
+    fn empty_workspace_navigation_keeps_explorer_focus() {
+        let profile = crate::profile::import_connection_url(":memory:", Some("saved"))
+            .unwrap()
+            .profile;
+        let mut app = App::new(vec![profile]);
+        app.focus = Focus::Explorer;
+        let mut keymap = Keymap::default();
+
+        for event in [key(KeyCode::Tab), key(KeyCode::BackTab)] {
+            let action = keymap.map(event, &app).expect("focus action");
+            app.update(action);
+            assert_eq!(app.focus, Focus::Explorer);
+        }
+
+        for direction in ['h', 'j', 'k', 'l', 'w'] {
+            let mut keymap = Keymap::default();
+            assert_eq!(
+                keymap.map(
+                    KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+                    &app,
+                ),
+                None
+            );
+            let action = keymap.map(key(KeyCode::Char(direction)), &app);
+            if direction == 'l' {
+                assert!(action.is_some());
+            }
+            if let Some(action) = action {
+                app.update(action);
+            }
+            assert_eq!(app.focus, Focus::Explorer);
+        }
+    }
+
+    #[test]
     fn dashboard_window_right_focuses_results_instead_of_missing_editor() {
         let mut app = App::new(Vec::new());
         app.tabs.clear();

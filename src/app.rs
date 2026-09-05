@@ -905,7 +905,9 @@ impl App {
     }
 
     fn normalize_focus(&mut self) {
-        if self.active_console_opt().is_none() && self.focus == Focus::Editor {
+        if self.tabs.is_empty() {
+            self.focus = Focus::Explorer;
+        } else if self.active_console_opt().is_none() && self.focus == Focus::Editor {
             self.focus = Focus::Results;
         }
     }
@@ -2671,6 +2673,7 @@ impl App {
                 } else {
                     self.focus.next()
                 };
+                self.normalize_focus();
                 Vec::new()
             }
             Action::FocusPrevious => {
@@ -2682,6 +2685,7 @@ impl App {
                 } else {
                     self.focus.previous()
                 };
+                self.normalize_focus();
                 Vec::new()
             }
             Action::Focus(focus) => {

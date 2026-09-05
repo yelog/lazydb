@@ -72,6 +72,27 @@ fn dashboard_cycles_focus_only_between_explorer_and_results() {
 }
 
 #[test]
+fn empty_workspace_keeps_focus_in_explorer() {
+    let profile = import_connection_url(":memory:", Some("saved"))
+        .unwrap()
+        .profile;
+    let mut app = App::new(vec![profile]);
+    assert!(app.tabs.is_empty());
+
+    for action in [
+        Action::FocusNext,
+        Action::FocusPrevious,
+        Action::Focus(Focus::Editor),
+        Action::Focus(Focus::Results),
+        Action::Focus(Focus::Explorer),
+    ] {
+        app.focus = Focus::Explorer;
+        assert!(app.update(action).is_empty());
+        assert_eq!(app.focus, Focus::Explorer);
+    }
+}
+
+#[test]
 fn new_app_with_profiles_has_no_active_workspace_until_connected() {
     let profile = import_connection_url(":memory:", Some("saved"))
         .unwrap()
