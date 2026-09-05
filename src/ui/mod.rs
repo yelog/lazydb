@@ -2415,7 +2415,7 @@ fn render_editor(
                 .iter()
                 .find(|profile| profile.id == target.profile_id)
                 .map(|profile| {
-                    let target = format!(
+                    let target_label = format!(
                         "[{}] {}{}",
                         profile.name,
                         target.database,
@@ -2425,10 +2425,14 @@ fn render_editor(
                             .map(|schema| format!(".{schema}"))
                             .unwrap_or_default()
                     );
-                    if app.connection.active_identity().is_some() {
-                        target
+                    if app.connection.active_identity().is_some()
+                        && app.connection.target.as_ref() == Some(target)
+                    {
+                        target_label
+                    } else if app.connection.active_identity().is_some() {
+                        format!("{target_label} NOT CONNECTED")
                     } else {
-                        format!("{target} OFFLINE")
+                        format!("{target_label} OFFLINE")
                     }
                 })
         })

@@ -1275,7 +1275,7 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
         OpenTargetSelector,
         [EditorNormal],
         "Space d",
-        "choose editor connection target",
+        "choose and reconnect editor target",
         EditorLeader,
         "d"
     ),

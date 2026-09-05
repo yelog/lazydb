@@ -259,6 +259,37 @@ fn execution_fails_closed_when_console_target_is_missing_or_stale() {
 }
 
 #[test]
+fn target_mismatch_is_reported_before_query_or_transaction_dispatch() {
+    let mut app = connected_app(ConfirmationPolicy::RiskyOnly);
+    let profile_id = app.connection.profile_id.unwrap();
+    app.active_console_mut().execution_target =
+        Some(lazydb::model::execution_target::ExecutionTarget {
+            profile_id,
+            database: ":memory:".into(),
+            schema: Some("other".into()),
+        });
+    app.update(Action::ReplaceEditor("SELECT 1".into()));
+
+    let commands = app.update(Action::RunActiveSql);
+
+    assert!(commands.is_empty());
+    assert!(app.overlay.is_none());
+    assert!(app.notifications.history().any(|notification| {
+        notification.level == lazydb::model::notification::NotificationLevel::Warning
+            && notification.body.contains("SQL was not executed")
+            && notification.body.contains("Space d")
+    }));
+
+    app.update(Action::ReplaceEditor("BEGIN;".into()));
+    let commands = app.update(Action::RunActiveSql);
+    assert!(commands.is_empty());
+    assert_eq!(
+        app.active_console().transaction_state,
+        lazydb::model::transaction::TransactionState::Idle
+    );
+}
+
+#[test]
 fn base_execution_resets_page_and_invalidates_total() {
     let mut app = connected_app(ConfirmationPolicy::RiskyOnly);
     app.update(Action::ReplaceEditor("SELECT 1".into()));

@@ -554,6 +554,77 @@ fn target_selector_switches_only_after_matching_connection_success() {
 }
 
 #[test]
+fn target_selector_reconnects_when_console_target_matches_selection_but_connection_does_not() {
+    let mut profile = memory_profile("target-reconnect");
+    profile.catalog_scope.databases = CatalogSelection::All;
+    let profile_id = profile.id;
+    let default = ExecutionTarget::from_profile(&profile);
+    let alias = ExecutionTarget {
+        profile_id,
+        database: ":memory:".into(),
+        schema: Some("attached".into()),
+    };
+    let mut app = App::new(vec![profile]);
+    app.update(Action::ConnectionSucceeded {
+        profile_id,
+        generation: 1,
+        server: server(":memory:"),
+        mutation_capabilities: Default::default(),
+    });
+    app.connection.target = Some(default);
+    app.active_console_mut().execution_target = Some(alias.clone());
+
+    let database = CatalogEntry::database(
+        CatalogId::new(profile_id, CatalogKind::Database, [":memory:"]),
+        QualifiedName {
+            database: Some(":memory:".into()),
+            schema: None,
+            object: ":memory:".into(),
+        },
+        "database",
+        OptionalMetadata::Supported(None),
+        true,
+    )
+    .unwrap();
+    let schema = CatalogEntry::schema(
+        CatalogId::new(profile_id, CatalogKind::Schema, [":memory:", "attached"]),
+        database.id.clone(),
+        QualifiedName {
+            database: Some(":memory:".into()),
+            schema: Some("attached".into()),
+            object: "attached".into(),
+        },
+        "schema",
+        OptionalMetadata::Supported(None),
+        true,
+    )
+    .unwrap();
+    app.explorer
+        .normalized
+        .profiles
+        .get_mut(&profile_id)
+        .unwrap()
+        .catalog
+        .insert_subtree(vec![database, schema])
+        .unwrap();
+
+    app.update(Action::OpenTargetSelector);
+    let selected = match app.overlay.as_ref().unwrap() {
+        lazydb::model::workspace::Overlay::TargetSelector { candidates, .. } => candidates
+            .iter()
+            .position(|candidate| candidate == &alias)
+            .unwrap(),
+        other => panic!("unexpected overlay: {other:?}"),
+    };
+    let commands = app.update(Action::SelectTargetSelector(selected));
+
+    assert!(matches!(
+        commands.as_slice(),
+        [Command::Connect { target, .. }] if target == &alias
+    ));
+}
+
+#[test]
 fn target_selector_requires_an_active_connection_and_blocks_manual_transactions() {
     let profile = memory_profile("target");
     let profile_id = profile.id;

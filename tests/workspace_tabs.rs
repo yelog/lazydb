@@ -472,6 +472,29 @@ fn initial_and_new_consoles_use_the_active_profile_target() {
 }
 
 #[test]
+fn new_console_inherits_the_connected_target_instead_of_profile_default() {
+    let mut profile = import_connection_url(":memory:", Some("active"))
+        .unwrap()
+        .profile;
+    profile.catalog_scope.databases = lazydb::profile::CatalogSelection::All;
+    let mut app = App::new(vec![profile.clone()]);
+    let connected_target = lazydb::model::execution_target::ExecutionTarget {
+        profile_id: profile.id,
+        database: ":memory:".into(),
+        schema: Some("attached".into()),
+    };
+    app.connection.profile_id = Some(profile.id);
+    app.connection.target = Some(connected_target.clone());
+    app.connection.status = lazydb::model::workspace::ConnectionStatus::Connected;
+    app.update(Action::NewConsole);
+
+    assert_eq!(
+        app.active_console().execution_target.as_ref(),
+        Some(&connected_target)
+    );
+}
+
+#[test]
 fn workspace_restore_preserves_valid_targets_and_defaults_missing_targets() {
     let profile = import_connection_url(":memory:", Some("active"))
         .unwrap()

@@ -6023,7 +6023,11 @@ impl App {
                 let Some(tab) = self.active_console_opt() else {
                     return Vec::new();
                 };
-                if tab.execution_target.as_ref() == Some(&target) {
+                if tab.execution_target.as_ref() == Some(&target)
+                    && self.connection.status == ConnectionStatus::Connected
+                    && self.connection.pending_generation.is_none()
+                    && self.connection.target.as_ref() == Some(&target)
+                {
                     return Vec::new();
                 }
                 if self.connection.pending_generation.is_some() {
@@ -8602,7 +8606,13 @@ impl App {
 
     fn create_sql_editor_named(&mut self, name: String) {
         let mut tab = ConsoleTab::new(name);
-        tab.execution_target = self.active_profile().map(ExecutionTarget::from_profile);
+        tab.execution_target = self.active_profile().and_then(|profile| {
+            self.connection
+                .target
+                .clone()
+                .filter(|target| target.profile_id == profile.id && target.is_valid(profile))
+                .or_else(|| Some(ExecutionTarget::from_profile(profile)))
+        });
         let id = tab.id;
         self.editor.open_console(id, "");
         self.editor.open_read_only(tab.output_editor_id, "");
@@ -9171,6 +9181,18 @@ impl App {
             .active_console_opt()
             .and_then(|tab| tab.execution_target.clone())
             .filter(|target| target.profile_id == profile_id && target.is_valid(profile))
+            .or_else(|| {
+                self.workspaces
+                    .get(&profile_id)
+                    .and_then(|workspace| {
+                        workspace
+                            .active_tab_id
+                            .and_then(|id| workspace.tabs.iter().find(|tab| tab.id() == id))
+                    })
+                    .and_then(WorkspaceTab::as_console)
+                    .and_then(|tab| tab.execution_target.clone())
+                    .filter(|target| target.profile_id == profile_id && target.is_valid(profile))
+            })
             .unwrap_or_else(|| ExecutionTarget::from_profile(profile));
         if self.active_console_opt().is_some_and(|tab| {
             tab.execution_target.as_ref().is_none_or(|current| {
@@ -9973,6 +9995,15 @@ impl App {
             self.notify_warning("Query", "No SQL scope at cursor");
             return Vec::new();
         };
+        let tab = self.active_console();
+        let Some(target) = tab.execution_target.clone() else {
+            self.notify_warning("Query", "Select an execution target before running SQL");
+            return Vec::new();
+        };
+        if self.connection.target.as_ref() != Some(&target) {
+            self.notify_target_mismatch(&target);
+            return Vec::new();
+        }
         match sql::classify_transaction_sql(&scope.sql, dialect) {
             sql::TransactionSqlClassification::Control(control) => {
                 return self.dispatch_transaction_sql(tab_id, connection, control, scope.sql);
@@ -9984,10 +10015,6 @@ impl App {
         if tab.query_status == QueryStatus::Running {
             return Vec::new();
         }
-        let Some(target) = tab.execution_target.clone() else {
-            self.notify_warning("Query", "Select an execution target before running SQL");
-            return Vec::new();
-        };
         let draft = sql::ExecutionDraft::new(
             tab_id,
             tab.generation,
@@ -10179,6 +10206,23 @@ impl App {
             return Err("A query is already running in this console".to_owned());
         }
         Ok(())
+    }
+
+    fn notify_target_mismatch(&mut self, target: &ExecutionTarget) {
+        let active = self
+            .connection
+            .target
+            .as_ref()
+            .map(format_execution_target)
+            .unwrap_or_else(|| "none".to_owned());
+        self.notify_warning(
+            "Query",
+            format!(
+                "SQL was not executed: console target {} does not match active connection {}. Use Space d to reconnect the console target, then run SQL again.",
+                format_execution_target(target),
+                active
+            ),
+        );
     }
 
     fn dispatch_draft(&mut self, draft: sql::ExecutionDraft) -> Vec<Command> {
@@ -13913,6 +13957,13 @@ fn format_execution_log(
         )
     };
     Some((context, OutputEntry::plain(OutputKind::Success, summary)))
+}
+
+fn format_execution_target(target: &ExecutionTarget) -> String {
+    match &target.schema {
+        Some(schema) => format!("{}/{}", target.database, schema),
+        None => target.database.clone(),
+    }
 }
 
 fn format_timestamp(seconds: u64, millis: u32) -> String {
