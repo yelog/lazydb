@@ -5,6 +5,7 @@ use lazydb::{
     action::{Action, Command},
     app::App,
     db::{
+        ServerInfo,
         catalog::{
             CatalogEntry, CatalogId, CatalogKind, ObjectGroup, OptionalMetadata, QualifiedName,
         },
@@ -48,6 +49,170 @@ fn maps_catalog_editor_field_clicks() {
         ),
         Some(Action::CatalogEditorFocusField(1))
     );
+}
+
+#[test]
+fn target_selector_rows_and_cancel_map_to_selection_actions() {
+    let mut app = App::new(Vec::new());
+    app.overlay = Some(Overlay::TargetSelector {
+        candidates: Vec::new(),
+        selected: 0,
+    });
+    let mut ui = UiState::new();
+    ui.hit_regions.extend([
+        HitRegion {
+            area: Rect::new(10, 5, 20, 1),
+            target: HitTarget::TargetSelectorRow(2),
+        },
+        HitRegion {
+            area: Rect::new(10, 7, 20, 1),
+            target: HitTarget::TargetSelectorCancel,
+        },
+    ]);
+
+    assert_eq!(
+        map_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 12, 5),
+            &ui,
+            &app
+        ),
+        Some(Action::SelectTargetSelector(2))
+    );
+    assert_eq!(
+        map_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 12, 7),
+            &ui,
+            &app
+        ),
+        Some(Action::CancelTargetSelector)
+    );
+}
+
+#[test]
+fn rendered_editor_header_maps_target_and_transaction_clicks() {
+    let profile = import_connection_url("sqlite::memory:", Some("header-clicks"))
+        .unwrap()
+        .profile;
+    let mut app = App::new(vec![profile.clone()]);
+    app.update(Action::ConnectionSucceeded {
+        profile_id: profile.id,
+        generation: 1,
+        server: ServerInfo {
+            kind: DatabaseKind::Sqlite,
+            version: "3.50.0".into(),
+            database: ":memory:".into(),
+            current_user: None,
+        },
+        mutation_capabilities: Default::default(),
+    });
+    let backend = TestBackend::new(120, 36);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut ui_state = UiState::new();
+    terminal
+        .draw(|frame| ui::render_with_state(frame, &app, &mut ui_state))
+        .unwrap();
+
+    assert_click_maps(
+        &ui_state,
+        &app,
+        &HitTarget::EditorTransactionMenu,
+        Action::OpenTransactionMenu,
+    );
+    assert_click_maps(
+        &ui_state,
+        &app,
+        &HitTarget::EditorExecutionTarget,
+        Action::OpenTargetSelector,
+    );
+}
+
+#[test]
+fn rendered_transaction_menu_rows_map_to_actions() {
+    let mut app = App::new(Vec::new());
+    app.overlay = Some(Overlay::TransactionMenu { selected: 0 });
+    let backend = TestBackend::new(100, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut ui_state = UiState::new();
+    terminal
+        .draw(|frame| ui::render_with_state(frame, &app, &mut ui_state))
+        .unwrap();
+
+    assert_click_maps(
+        &ui_state,
+        &app,
+        &HitTarget::TransactionMenuItem(0),
+        Action::SelectTransactionMenu(0),
+    );
+    assert_click_maps(
+        &ui_state,
+        &app,
+        &HitTarget::TransactionMenuCancel,
+        Action::CancelTransactionMenu,
+    );
+}
+
+#[test]
+fn rendered_transaction_confirmation_buttons_map_to_safe_actions() {
+    let mut app = App::new(Vec::new());
+    app.active_console_mut().transaction_mode = lazydb::model::transaction::TransactionMode::Manual;
+    app.active_console_mut().transaction_state =
+        lazydb::model::transaction::TransactionState::Active;
+    let (console_id, transaction_generation) = {
+        let console = app.active_console();
+        (console.id, console.transaction_generation)
+    };
+    app.overlay = Some(Overlay::TransactionExitConfirm {
+        prompt: lazydb::model::transaction::DeferredTransactionPrompt {
+            console_id,
+            transaction_generation,
+            intent: lazydb::model::transaction::DeferredIntent::Quit,
+        },
+        choice: lazydb::model::transaction::TransactionExitChoice::Rollback,
+    });
+    let backend = TestBackend::new(100, 30);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut ui_state = UiState::new();
+    terminal
+        .draw(|frame| ui::render_with_state(frame, &app, &mut ui_state))
+        .unwrap();
+
+    assert_click_maps(
+        &ui_state,
+        &app,
+        &HitTarget::TransactionExitChoice(
+            lazydb::model::transaction::TransactionExitChoice::Rollback,
+        ),
+        Action::ConfirmTransactionExitChoice(
+            lazydb::model::transaction::TransactionExitChoice::Rollback,
+        ),
+    );
+    assert_click_maps(
+        &ui_state,
+        &app,
+        &HitTarget::TransactionExitCancel,
+        Action::CancelTransactionExit,
+    );
+}
+
+#[test]
+fn selecting_target_selector_row_preserves_overlay_until_confirmation() {
+    let target = lazydb::model::execution_target::ExecutionTarget {
+        profile_id: Uuid::nil(),
+        database: "db".into(),
+        schema: Some("public".into()),
+    };
+    let mut app = App::new(Vec::new());
+    app.overlay = Some(Overlay::TargetSelector {
+        candidates: vec![target],
+        selected: 0,
+    });
+
+    app.update(Action::SelectTargetSelector(0));
+
+    assert!(matches!(
+        app.overlay,
+        Some(Overlay::TargetSelector { selected: 0, .. })
+    ));
 }
 
 #[test]

@@ -106,6 +106,21 @@ fn fixture() -> App {
 }
 
 #[test]
+fn transaction_menu_renders_state_aware_disabled_reasons() {
+    let mut app = fixture();
+    app.update(Action::OpenTransactionMenu);
+    let output = render(&app, 100, 30);
+    assert!(output.contains("TRANSACTION MODE"));
+    assert!(output.contains("no active transaction"));
+
+    app.update(Action::CancelTransactionMenu);
+    app.active_console_mut().query_status = QueryStatus::Running;
+    app.update(Action::OpenTransactionMenu);
+    let output = render(&app, 100, 30);
+    assert!(output.contains("query running"));
+}
+
+#[test]
 fn record_view_renders_the_selected_row_as_ordered_fields() {
     let mut app = fixture();
     app.focus = Focus::Results;
@@ -4644,6 +4659,46 @@ fn target_selector_renders_real_target_and_navigation_hint() {
     assert!(output.contains("current"));
     assert!(output.contains("Enter confirm"));
     assert!(!output.contains("Target selector is available"));
+}
+
+#[test]
+fn target_selector_renders_visible_rows_and_mouse_regions() {
+    let mut app = fixture();
+    let profile_id = app.active_profile().unwrap().id;
+    let candidates = (0..24)
+        .map(|index| lazydb::model::execution_target::ExecutionTarget {
+            profile_id,
+            database: format!("db-{index}\nunsafe"),
+            schema: Some(format!("schema-{index}")),
+        })
+        .collect();
+    app.overlay = Some(Overlay::TargetSelector {
+        candidates,
+        selected: 23,
+    });
+
+    let (output, state) = render_with_state(&app, 80, 24);
+
+    assert!(output.contains("db-23unsafe.schema-23"), "{output}");
+    assert!(!output.contains("db-0unsafe.schema-0"), "{output}");
+    assert!(
+        state
+            .hit_regions
+            .iter()
+            .any(|region| region.target == HitTarget::TargetSelectorRow(23))
+    );
+    assert!(
+        state
+            .hit_regions
+            .iter()
+            .any(|region| region.target == HitTarget::TargetSelectorCancel)
+    );
+    assert!(
+        state
+            .hit_regions
+            .iter()
+            .all(|region| region.area.bottom() <= 24)
+    );
 }
 
 #[test]

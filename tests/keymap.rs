@@ -83,6 +83,34 @@ fn console_manager_browse_and_search_keys_are_mode_aware() {
 }
 
 #[test]
+fn transaction_menu_owns_navigation_and_cancel_keys() {
+    let mut app = App::new(vec![profile("transaction-menu")]);
+    app.overlay = Some(Overlay::TransactionMenu { selected: 0 });
+    let mut keymap = Keymap::default();
+
+    assert_eq!(
+        keymap.map(key(KeyCode::Down), &app),
+        Some(Action::MoveTransactionMenu(1))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Enter), &app),
+        Some(Action::ConfirmTransactionMenu)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Esc), &app),
+        Some(Action::CancelTransactionMenu)
+    );
+}
+
+#[test]
+fn transaction_menu_does_not_open_without_a_sql_console() {
+    let mut app = App::new(Vec::new());
+    app.tabs.clear();
+    app.update(Action::OpenTransactionMenu);
+    assert_eq!(app.overlay, None);
+}
+
+#[test]
 fn console_manager_delete_keys_are_confirmation_aware() {
     let mut app = App::new(Vec::new());
     app.update(Action::OpenSqlEditorList);

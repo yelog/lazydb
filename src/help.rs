@@ -191,6 +191,7 @@ fn shortcut_context_with_overlay(app: &App, include_help: bool) -> ShortcutConte
                 Overlay::ClearTransactionOutcome { .. } => {
                     ShortcutContext::ClearTransactionOutcomeConfirmation
                 }
+                Overlay::TransactionMenu { .. } => ShortcutContext::Message,
                 Overlay::TargetSelector { .. } => ShortcutContext::TargetSelector,
                 Overlay::DeleteConsole { .. } => ShortcutContext::DeleteConsoleConfirmation,
                 Overlay::PageSizeSelector { .. } => ShortcutContext::PageSizeSelector,

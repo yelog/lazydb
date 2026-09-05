@@ -1822,6 +1822,10 @@ impl App {
                         | Action::RelationUndo
                         | Action::RelationRedo
                         | Action::OpenTransactionControl
+                        | Action::OpenTransactionMenu
+                        | Action::MoveTransactionMenu(_)
+                        | Action::ConfirmTransactionMenu
+                        | Action::CancelTransactionMenu
                         | Action::RelationCommit
                         | Action::RelationRollback
                         | Action::RelationTransactionStarted { .. }
@@ -5788,6 +5792,17 @@ impl App {
                 }
                 Vec::new()
             }
+            Action::SelectTargetSelector(index) => {
+                if let Some(Overlay::TargetSelector {
+                    candidates,
+                    selected,
+                }) = self.overlay.as_mut()
+                    && index < candidates.len()
+                {
+                    *selected = index;
+                }
+                Vec::new()
+            }
             Action::ConfirmTargetSelector => {
                 let Some(Overlay::TargetSelector {
                     candidates,
@@ -5902,6 +5917,50 @@ impl App {
                 self.set_transaction_mode(mode)
             }
             Action::OpenTransactionControl => self.open_transaction_control(),
+            Action::OpenTransactionMenu => {
+                if self.active_console_opt().is_some() {
+                    self.overlay = Some(Overlay::TransactionMenu { selected: 0 });
+                }
+                Vec::new()
+            }
+            Action::SelectTransactionMenu(index) => {
+                if let Some(Overlay::TransactionMenu { selected }) = self.overlay.as_mut() {
+                    if index >= 4 {
+                        return Vec::new();
+                    }
+                    *selected = index;
+                    return self.update(Action::ConfirmTransactionMenu);
+                }
+                Vec::new()
+            }
+            Action::MoveTransactionMenu(delta) => {
+                if let Some(Overlay::TransactionMenu { selected }) = self.overlay.as_mut() {
+                    *selected = (*selected as isize + delta).rem_euclid(4) as usize;
+                }
+                Vec::new()
+            }
+            Action::ConfirmTransactionMenu => {
+                let Some(Overlay::TransactionMenu { selected }) = self.overlay else {
+                    return Vec::new();
+                };
+                let availability = self.transaction_menu_availability();
+                if !availability[selected].0 {
+                    return Vec::new();
+                }
+                self.overlay = None;
+                match selected {
+                    0 => self.update(Action::SetTransactionMode(TransactionMode::Auto)),
+                    1 => self.update(Action::SetTransactionMode(TransactionMode::Manual)),
+                    2 => self.update(Action::OpenTransactionControl),
+                    _ => Vec::new(),
+                }
+            }
+            Action::CancelTransactionMenu => {
+                if matches!(self.overlay, Some(Overlay::TransactionMenu { .. })) {
+                    self.overlay = None;
+                }
+                Vec::new()
+            }
             Action::CommitTransaction => self.transaction_control(true),
             Action::RollbackTransaction => self.transaction_control(false),
             Action::RefreshCatalog => {
@@ -7634,6 +7693,58 @@ impl App {
             .find(|tab| tab.id() == console_id)
             .and_then(WorkspaceTab::as_console)
             .is_some_and(|tab| tab.transaction_state != TransactionState::Idle)
+    }
+
+    pub fn transaction_menu_availability(&self) -> [(bool, &'static str); 4] {
+        let Some(tab) = self.active_console_opt() else {
+            return [
+                (false, " (no SQL console)"),
+                (false, " (no SQL console)"),
+                (false, " (no SQL console)"),
+                (true, ""),
+            ];
+        };
+        if tab.query_status == QueryStatus::Running {
+            return [
+                (false, " (query running)"),
+                (false, " (query running)"),
+                (false, " (query running)"),
+                (true, ""),
+            ];
+        }
+        match (tab.transaction_mode, tab.transaction_state) {
+            (TransactionMode::Auto, TransactionState::Idle) => [
+                (true, ""),
+                (true, ""),
+                (false, " (no active transaction)"),
+                (true, ""),
+            ],
+            (TransactionMode::Manual, TransactionState::Idle) => [
+                (true, ""),
+                (true, ""),
+                (false, " (no active transaction)"),
+                (true, ""),
+            ],
+            (_, TransactionState::OutcomeUnknown) => [
+                (false, " (outcome unknown)"),
+                (false, " (outcome unknown)"),
+                (true, ""),
+                (true, ""),
+            ],
+            (TransactionMode::Manual, TransactionState::Aborted) => [
+                (false, " (aborted transaction)"),
+                (true, ""),
+                (true, ""),
+                (true, ""),
+            ],
+            (TransactionMode::Manual, _) => [(true, ""), (true, ""), (true, ""), (true, "")],
+            (TransactionMode::Auto, _) => [
+                (false, " (transaction active)"),
+                (false, " (transaction active)"),
+                (true, ""),
+                (true, ""),
+            ],
+        }
     }
 
     fn workspace_exit_check(&self) -> WorkspaceExitCheck {

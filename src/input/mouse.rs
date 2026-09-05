@@ -59,6 +59,9 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
             if let Some(overlay) = &app.overlay
                 && (overlay != &Overlay::ProfileManager
                     && overlay != &Overlay::CatalogEditor
+                    && !matches!(overlay, Overlay::TargetSelector { .. })
+                    && !matches!(overlay, Overlay::TransactionMenu { .. })
+                    && !matches!(overlay, Overlay::TransactionExitConfirm { .. })
                     && !matches!(overlay, Overlay::Update(_))
                     || !matches!(
                         target,
@@ -82,6 +85,14 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                             | HitTarget::CatalogEditorColumnDetailsConfirm
                             | HitTarget::CatalogEditorColumnDetailsCancel
                             | HitTarget::CatalogOwnerChoice(_)
+                            | HitTarget::TargetSelectorRow(_)
+                            | HitTarget::TargetSelectorCancel
+                            | HitTarget::EditorExecutionTarget
+                            | HitTarget::EditorTransactionMenu
+                            | HitTarget::TransactionMenuItem(_)
+                            | HitTarget::TransactionMenuCancel
+                            | HitTarget::TransactionExitChoice(_)
+                            | HitTarget::TransactionExitCancel
                             | HitTarget::UpdateButton { .. }
                     ))
             {
@@ -207,6 +218,16 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                     Some(Action::CatalogEditorCancelTableColumnDetails)
                 }
                 HitTarget::CatalogOwnerChoice(name) => Some(Action::CatalogOwnerPickerChoose(name)),
+                HitTarget::TargetSelectorRow(index) => Some(Action::SelectTargetSelector(index)),
+                HitTarget::TargetSelectorCancel => Some(Action::CancelTargetSelector),
+                HitTarget::EditorExecutionTarget => Some(Action::OpenTargetSelector),
+                HitTarget::EditorTransactionMenu => Some(Action::OpenTransactionMenu),
+                HitTarget::TransactionMenuItem(index) => Some(Action::SelectTransactionMenu(index)),
+                HitTarget::TransactionMenuCancel => Some(Action::CancelTransactionMenu),
+                HitTarget::TransactionExitChoice(choice) => {
+                    Some(Action::ConfirmTransactionExitChoice(choice))
+                }
+                HitTarget::TransactionExitCancel => Some(Action::CancelTransactionExit),
                 HitTarget::RelationFirstPage => Some(Action::RelationFirstPage),
                 HitTarget::RelationPreviousPage => Some(Action::RelationPreviousPage),
                 HitTarget::RelationPageSize => {
@@ -364,6 +385,13 @@ fn focus_at(ui: &UiState, column: u16, row: u16) -> Option<Focus> {
         | HitTarget::CatalogEditorColumnDetailsConfirm
         | HitTarget::CatalogEditorColumnDetailsCancel
         | HitTarget::CatalogOwnerChoice(_) => None,
+        HitTarget::TargetSelectorRow(_)
+        | HitTarget::TargetSelectorCancel
+        | HitTarget::EditorExecutionTarget
+        | HitTarget::EditorTransactionMenu
+        | HitTarget::TransactionMenuItem(_)
+        | HitTarget::TransactionMenuCancel => None,
+        HitTarget::TransactionExitChoice(_) | HitTarget::TransactionExitCancel => None,
         HitTarget::RelationFirstPage
         | HitTarget::RelationPreviousPage
         | HitTarget::RelationPageSize
