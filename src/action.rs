@@ -28,7 +28,7 @@ use crate::{
         profile_manager::{
             DiscoveryFingerprint, ProfileChange, ProfileField, ProfileInput, ProfileSubmission,
         },
-        workspace::{ConnectionIdentity, Focus, PaneLayoutMetrics, PaneResize},
+        workspace::{ConnectionIdentity, Focus, PaneLayoutMetrics, PaneResize, PaneSplit},
     },
     persistence::secrets::SecretStoreAvailability,
     profile::{ConnectionProfile, DatabaseKind},
@@ -95,6 +95,10 @@ pub enum Action {
     Focus(Focus),
     TogglePaneMaximized,
     ResizePane(PaneResize),
+    SetPaneSize {
+        split: PaneSplit,
+        size: u16,
+    },
     ResetPaneSizes,
     PaneLayoutChanged(PaneLayoutMetrics),
     ShowHelp,

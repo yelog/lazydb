@@ -42,7 +42,7 @@ use crate::{
     ui::{self, UiState},
 };
 use anyhow::{Context, Result};
-use crossterm::event::{Event, EventStream};
+use crossterm::event::{Event, EventStream, MouseEventKind};
 use futures_util::StreamExt;
 use secrecy::SecretString;
 use tokio::{
@@ -3942,21 +3942,29 @@ pub async fn run_tui(cli: Cli) -> Result<RunOutcome> {
                         Event::Key(key) => {
                             let now = std::time::Instant::now();
                             let before = keymap.sequence_state(&app, now);
+                            let cancelled_pane_drag = ui_state.pane_resize_drag.borrow_mut().take().is_some();
                             if let Some(action) = keymap.map(key, &app) {
                                 apply_action(&mut app, &mut runtime, action);
                                 redraw = true;
                             }
+                            redraw |= cancelled_pane_drag;
                             let after = keymap.sequence_state(&app, now);
                             redraw |= sequence_redraw_needed(&before, &after);
                         }
                         Event::Mouse(mouse) => {
                             let now = std::time::Instant::now();
                             let before = keymap.sequence_state(&app, now);
-                            keymap.clear_pending();
+                            let is_move = matches!(mouse.kind, MouseEventKind::Moved);
+                            if !is_move {
+                                keymap.clear_pending();
+                            }
+                            let was_pane_drag = ui_state.pane_resize_drag.borrow().is_some();
                             if let Some(action) = map_mouse(mouse, &ui_state, &app) {
                                 apply_action(&mut app, &mut runtime, action);
                                 redraw = true;
                             }
+                            redraw |= was_pane_drag
+                                != ui_state.pane_resize_drag.borrow().is_some();
                             let after = keymap.sequence_state(&app, now);
                             redraw |= sequence_redraw_needed(&before, &after);
                         }
@@ -3964,6 +3972,7 @@ pub async fn run_tui(cli: Cli) -> Result<RunOutcome> {
                             let now = std::time::Instant::now();
                             let before = keymap.sequence_state(&app, now);
                             keymap.clear_pending();
+                            let cancelled_pane_drag = ui_state.pane_resize_drag.borrow_mut().take().is_some();
                             let actions = map_paste(value, &app);
                             if !actions.is_empty() {
                                 for action in actions {
@@ -3971,6 +3980,7 @@ pub async fn run_tui(cli: Cli) -> Result<RunOutcome> {
                                 }
                                 redraw = true;
                             }
+                            redraw |= cancelled_pane_drag;
                             let after = keymap.sequence_state(&app, now);
                             redraw |= sequence_redraw_needed(&before, &after);
                         }

@@ -2716,6 +2716,21 @@ impl App {
                 }
                 Vec::new()
             }
+            Action::SetPaneSize { split, size } => {
+                match split {
+                    crate::model::workspace::PaneSplit::ExplorerWidth => {
+                        if self.pane_layout.explorer_width.is_some() {
+                            self.pane_sizes.explorer_width = Some(size);
+                        }
+                    }
+                    crate::model::workspace::PaneSplit::EditorHeight => {
+                        if self.pane_layout.editor_height.is_some() {
+                            self.pane_sizes.editor_height = Some(size);
+                        }
+                    }
+                }
+                Vec::new()
+            }
             Action::ResetPaneSizes => {
                 self.pane_sizes = PaneSizePreferences::default();
                 Vec::new()
@@ -15081,6 +15096,50 @@ mod tests {
         }));
         assert_eq!(app.pane_sizes.editor_height, Some(7));
 
+        app.update(Action::ResetPaneSizes);
+        assert_eq!(app.pane_sizes, PaneSizePreferences::default());
+    }
+
+    #[test]
+    fn set_pane_size_uses_effective_metrics_without_changing_focus() {
+        let mut app = App::new(Vec::new());
+        let focus = app.focus;
+        app.update(Action::PaneLayoutChanged(PaneLayoutMetrics {
+            explorer_width: Some(40),
+            editor_height: Some(10),
+        }));
+
+        app.update(Action::SetPaneSize {
+            split: PaneSplit::ExplorerWidth,
+            size: 52,
+        });
+        assert_eq!(app.pane_sizes.explorer_width, Some(52));
+        assert_eq!(app.focus, focus);
+
+        app.update(Action::SetPaneSize {
+            split: PaneSplit::EditorHeight,
+            size: 14,
+        });
+        assert_eq!(app.pane_sizes.editor_height, Some(14));
+    }
+
+    #[test]
+    fn set_pane_size_ignores_invisible_splits_and_reset_clears_it() {
+        let mut app = App::new(Vec::new());
+        app.update(Action::SetPaneSize {
+            split: PaneSplit::ExplorerWidth,
+            size: 52,
+        });
+        assert_eq!(app.pane_sizes, PaneSizePreferences::default());
+
+        app.update(Action::PaneLayoutChanged(PaneLayoutMetrics {
+            explorer_width: Some(40),
+            editor_height: None,
+        }));
+        app.update(Action::SetPaneSize {
+            split: PaneSplit::ExplorerWidth,
+            size: 52,
+        });
         app.update(Action::ResetPaneSizes);
         assert_eq!(app.pane_sizes, PaneSizePreferences::default());
     }

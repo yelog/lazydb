@@ -17,7 +17,7 @@ use lazydb::{
         explorer::{ExplorerNodeId, ExplorerScrollAmount},
         profile_manager::ProfileField,
         tab::GridScrollAmount,
-        workspace::{Focus, Overlay},
+        workspace::{Focus, Overlay, PaneLayoutMetrics, PaneSplit},
     },
     profile::{DatabaseKind, import_connection_url},
     ui::{self, HitRegion, HitTarget, ProfileButton, UiState},
@@ -1215,6 +1215,111 @@ fn horizontal_scrollbar_thumb_drag_maps_to_column_offsets() {
         Some(Action::GridEndColumnResize)
     );
     assert!(ui.grid_scrollbar_drag.borrow().is_none());
+}
+
+#[test]
+fn pane_border_drag_uses_original_pointer_and_size_as_anchor() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::PaneLayoutChanged(PaneLayoutMetrics {
+        explorer_width: Some(40),
+        editor_height: Some(10),
+    }));
+    let mut ui = UiState::new();
+    ui.pane_layout = PaneLayoutMetrics {
+        explorer_width: Some(40),
+        editor_height: Some(10),
+    };
+    ui.hit_regions.push(HitRegion {
+        area: Rect::new(39, 3, 1, 20),
+        target: HitTarget::PaneResize(PaneSplit::ExplorerWidth),
+    });
+
+    assert_eq!(
+        map_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 39, 10),
+            &ui,
+            &app,
+        ),
+        None
+    );
+    assert_eq!(
+        map_mouse(
+            mouse(MouseEventKind::Drag(MouseButton::Left), 49, 10),
+            &ui,
+            &app,
+        ),
+        Some(Action::SetPaneSize {
+            split: PaneSplit::ExplorerWidth,
+            size: 50,
+        })
+    );
+    assert_eq!(
+        map_mouse(
+            mouse(MouseEventKind::Drag(MouseButton::Left), 59, 10),
+            &ui,
+            &app,
+        ),
+        Some(Action::SetPaneSize {
+            split: PaneSplit::ExplorerWidth,
+            size: 60,
+        })
+    );
+    assert_eq!(
+        map_mouse(
+            mouse(MouseEventKind::Drag(MouseButton::Left), 44, 10),
+            &ui,
+            &app,
+        ),
+        Some(Action::SetPaneSize {
+            split: PaneSplit::ExplorerWidth,
+            size: 45,
+        })
+    );
+    assert!(ui.pane_resize_drag.borrow().is_some());
+    assert_eq!(
+        map_mouse(
+            mouse(MouseEventKind::Up(MouseButton::Left), 44, 10),
+            &ui,
+            &app,
+        ),
+        Some(Action::SetPaneSize {
+            split: PaneSplit::ExplorerWidth,
+            size: 45,
+        })
+    );
+    assert!(ui.pane_resize_drag.borrow().is_none());
+}
+
+#[test]
+fn pane_border_click_without_movement_preserves_automatic_size() {
+    let app = App::new(Vec::new());
+    let mut ui = UiState::new();
+    ui.pane_layout = PaneLayoutMetrics {
+        explorer_width: Some(40),
+        editor_height: None,
+    };
+    ui.hit_regions.push(HitRegion {
+        area: Rect::new(39, 3, 1, 20),
+        target: HitTarget::PaneResize(PaneSplit::ExplorerWidth),
+    });
+
+    assert_eq!(
+        map_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 39, 10),
+            &ui,
+            &app,
+        ),
+        None
+    );
+    assert_eq!(
+        map_mouse(
+            mouse(MouseEventKind::Up(MouseButton::Left), 39, 10),
+            &ui,
+            &app,
+        ),
+        None
+    );
+    assert!(ui.pane_resize_drag.borrow().is_none());
 }
 
 fn assert_click_maps(ui: &UiState, app: &App, target: &HitTarget, expected: Action) {

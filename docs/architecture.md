@@ -181,8 +181,11 @@ types become `Unsupported` values rather than failing the complete query.
 
 The UI is immediate-mode Ratatui. `AppLayout` selects too-small, focus, standard,
 or wide composition. `UiState` owns mouse hit regions and transient TachyonFX
-effects; effects never enter application state. Inactive effects cause no idle
-redraw.
+effects; effects never enter application state. Pane border dragging also keeps
+its pointer capture in `UiState`, computes an anchored absolute size, and emits
+`SetPaneSize`. The application reducer stores the preference, while
+`AppLayout` remains the single owner of minimum and maximum layout constraints.
+Inactive effects cause no idle redraw.
 
 Database text passes through terminal-control sanitization before it reaches
 diagnostic state or display-only editor/SQL-preview projections. Raw SQL remains

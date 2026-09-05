@@ -60,8 +60,8 @@ use crate::{
         relation::RelationLoad,
         tab::{DataGridViewport, ResultView, WorkspaceTab},
         workspace::{
-            ConnectionStatus, ExplorerSearchPhase, Focus, Overlay, PaneLayoutMetrics, QueryStatus,
-            VisibleCatalogNode,
+            ConnectionStatus, ExplorerSearchPhase, Focus, Overlay, PaneLayoutMetrics, PaneSplit,
+            QueryStatus, VisibleCatalogNode,
         },
     },
     security::sanitize_terminal_text,
@@ -107,6 +107,7 @@ pub enum HitTarget {
     RelationRetry,
     RelationCancel,
     DataQueryInput(crate::model::data_query::DataQueryInput),
+    PaneResize(PaneSplit),
     RelationColumnResize {
         column: usize,
         width: u16,
@@ -184,6 +185,7 @@ pub struct UiState {
     pub click_tracker: RefCell<Option<(crate::model::explorer::ExplorerNodeId, Instant)>>,
     pub relation_resize: RefCell<Option<(usize, u16, u16)>>,
     pub grid_scrollbar_drag: RefCell<Option<GridScrollbarDrag>>,
+    pub pane_resize_drag: RefCell<Option<PaneResizeDrag>>,
     pub(crate) animations: animation::AnimationState,
     pub(crate) result_area: Option<Rect>,
     pub(crate) activity_icons: icons::IconSet,
@@ -204,6 +206,13 @@ pub struct GridScrollbarDrag {
     pub thumb_width: u16,
     pub pointer_offset: u16,
     pub max_offset: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PaneResizeDrag {
+    pub split: PaneSplit,
+    pub start_pointer: u16,
+    pub start_size: u16,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -245,6 +254,7 @@ impl UiState {
             click_tracker: RefCell::new(None),
             relation_resize: RefCell::new(None),
             grid_scrollbar_drag: RefCell::new(None),
+            pane_resize_drag: RefCell::new(None),
             animations: animation::AnimationState::new(mode, Instant::now()),
             result_area: None,
             activity_icons: icons::IconSet::default(),
@@ -519,6 +529,13 @@ pub fn render_with_state_using_icons_sequence_and_theme(
         app.pane_sizes,
         app.pane_maximized,
     );
+    if app.overlay.is_some()
+        || layout
+            .pane_resize_region(PaneSplit::ExplorerWidth)
+            .is_none()
+    {
+        state.pane_resize_drag.borrow_mut().take();
+    }
     state.pane_layout = layout.pane_metrics;
     state.hit_regions.clear();
     state.editor_viewport = None;
@@ -615,6 +632,28 @@ pub fn render_with_state_using_icons_sequence_and_theme(
             area: layout.footer,
             target: HitTarget::Help,
         });
+    }
+
+    if app.overlay.is_none()
+        && let Some(area) = layout.pane_resize_region(PaneSplit::ExplorerWidth)
+    {
+        state.hit_regions.push(HitRegion {
+            area,
+            target: HitTarget::PaneResize(PaneSplit::ExplorerWidth),
+        });
+    }
+
+    if app.overlay.is_none()
+        && state.pane_resize_drag.borrow().is_some()
+        && let Some(area) = layout.pane_resize_region(PaneSplit::ExplorerWidth)
+    {
+        let buffer = frame.buffer_mut();
+        for y in area.y..area.bottom() {
+            let cell = &mut buffer[(area.x, y)];
+            cell.set_fg(theme.accent);
+            cell.set_bg(theme.surface_raised);
+            cell.set_style(Style::new().add_modifier(Modifier::BOLD));
+        }
     }
 
     if let Some(overlay) = &app.overlay {

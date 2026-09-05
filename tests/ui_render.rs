@@ -35,13 +35,13 @@ use lazydb::{
         tab::WorkspaceTab,
         tab::{CompletionPopup, ResultView},
         transaction::TransactionMode,
-        workspace::{ConnectionStatus, Focus, Overlay, QueryStatus},
+        workspace::{ConnectionStatus, Focus, Overlay, PaneSplit, QueryStatus},
     },
     persistence::secrets::keyring_ref,
     profile::{DatabaseKind, Environment, import_connection_url},
     sql::{CompletionCandidate, CompletionKind, CompletionScore, TextRange},
     ui::{
-        self, HitTarget, ProfileButton, UiState,
+        self, HitTarget, PaneResizeDrag, ProfileButton, UiState,
         icons::{IconMode, IconSet},
     },
 };
@@ -2377,6 +2377,20 @@ fn render_buffer_with_icons(
     (terminal.backend().buffer().clone(), state)
 }
 
+fn render_buffer_with_state(
+    app: &App,
+    width: u16,
+    height: u16,
+    mut state: UiState,
+) -> (ratatui::buffer::Buffer, UiState) {
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| ui::render_with_state_using_icons(frame, app, &mut state, IconSet::default()))
+        .unwrap();
+    (terminal.backend().buffer().clone(), state)
+}
+
 fn find_ascii_cells(buffer: &ratatui::buffer::Buffer, y: u16, text: &str) -> Option<u16> {
     let width = buffer.area.width;
     (0..width).find(|start| {
@@ -4128,6 +4142,37 @@ fn standard_layout_shows_stable_workspace_regions() {
     assert!(output.contains("Ada"));
     assert!(!output.contains("Ready"), "{output}");
     assert!(!output.contains("QUERY IDLE"), "{output}");
+}
+
+#[test]
+fn pane_resize_drag_highlights_the_rendered_explorer_border() {
+    let app = fixture();
+    let (before, state) = render_buffer_with_icons(&app, 120, 36, IconSet::default());
+    let border = state
+        .hit_regions
+        .iter()
+        .find(|region| region.target == HitTarget::PaneResize(PaneSplit::ExplorerWidth))
+        .unwrap()
+        .area;
+    assert_ne!(before[(border.x, border.y)].fg, Color::Rgb(101, 167, 255));
+
+    state.pane_resize_drag.replace(Some(PaneResizeDrag {
+        split: PaneSplit::ExplorerWidth,
+        start_pointer: border.x,
+        start_size: state.pane_layout.explorer_width.unwrap(),
+    }));
+    let (during, state) = render_buffer_with_state(&app, 120, 36, state);
+
+    assert_ne!(
+        during[(border.x, border.y)].fg,
+        before[(border.x, border.y)].fg
+    );
+    assert!(
+        during[(border.x, border.y)]
+            .modifier
+            .contains(Modifier::BOLD)
+    );
+    assert!(state.pane_resize_drag.borrow().is_some());
 }
 
 #[test]
