@@ -31,7 +31,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-          ref: ${{ github.event.inputs.tag || github.event.workflow_run.head_sha || github.sha }}
+          # Manual redeploys use the selected workflow ref's installer fixes,
+          # while the tag input selects only the existing release assets.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           persist-credentials: false
       - id: release
         env:

@@ -41,16 +41,12 @@ chmod 755 "$TMP/assets/lazydb"
 mkdir -p "$TMP/package/lazydb_1.2.3_x86_64-unknown-linux-gnu"
 cp "$TMP/assets/lazydb" "$TMP/package/lazydb_1.2.3_x86_64-unknown-linux-gnu/lazydb"
 (cd "$TMP/package" && COPYFILE_DISABLE=1 tar -cJf "$TMP/server/assets/lazydb_1.2.3_x86_64-unknown-linux-gnu.tar.xz" lazydb_1.2.3_x86_64-unknown-linux-gnu)
-digest=$(sha256sum "$TMP/server/assets/lazydb_1.2.3_x86_64-unknown-linux-gnu.tar.xz" | awk '{print $1}')
 for target in x86_64-apple-darwin aarch64-apple-darwin aarch64-unknown-linux-gnu; do
     cp "$TMP/server/assets/lazydb_1.2.3_x86_64-unknown-linux-gnu.tar.xz" "$TMP/server/assets/lazydb_1.2.3_$target.tar.xz"
 done
-python3 - "$TMP/server/channels/stable.json" "$digest" <<'PY'
-import json, sys
-targets = ('x86_64-apple-darwin', 'aarch64-apple-darwin', 'x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu')
-assets = {target: {'url': 'https://github.com/yelog/lazydb/releases/download/v1.2.3/lazydb_1.2.3_%s.tar.xz' % target, 'sha256': sys.argv[2]} for target in targets}
-json.dump({'schema': 1, 'product': 'lazydb', 'channel': 'stable', 'version': '1.2.3', 'tag': 'v1.2.3', 'prerelease': False, 'published_at': 'now', 'release_url': 'https://github.com/yelog/lazydb/releases/tag/v1.2.3', 'assets': assets}, open(sys.argv[1], 'w'))
-PY
+printf '%s\n' windows > "$TMP/server/assets/lazydb_1.2.3_x86_64-pc-windows-msvc.zip"
+(cd "$TMP/server/assets" && sha256sum lazydb_*.tar.xz lazydb_*.zip > SHA256SUMS)
+python3 "$ROOT/scripts/release/generate-channel-manifest.py" stable 1.2.3 2026-09-05T00:00:00Z "$TMP/server/assets" "$TMP/server/channels/stable.json"
 cat > "$TMP/assets/beta-lazydb" <<'SH'
 #!/bin/sh
 [ "${1:-}" = version ] && printf '%s\n' '{"version":"1.2.3-beta.1"}'
@@ -59,19 +55,15 @@ chmod 755 "$TMP/assets/beta-lazydb"
 mkdir -p "$TMP/package/lazydb_1.2.3-beta.1_x86_64-unknown-linux-gnu"
 cp "$TMP/assets/beta-lazydb" "$TMP/package/lazydb_1.2.3-beta.1_x86_64-unknown-linux-gnu/lazydb"
 (cd "$TMP/package" && COPYFILE_DISABLE=1 tar -cJf "$TMP/server/assets/lazydb_1.2.3-beta.1_x86_64-unknown-linux-gnu.tar.xz" lazydb_1.2.3-beta.1_x86_64-unknown-linux-gnu)
-beta_digest=$(sha256sum "$TMP/server/assets/lazydb_1.2.3-beta.1_x86_64-unknown-linux-gnu.tar.xz" | awk '{print $1}')
 for target in x86_64-apple-darwin aarch64-apple-darwin aarch64-unknown-linux-gnu; do
     cp "$TMP/server/assets/lazydb_1.2.3-beta.1_x86_64-unknown-linux-gnu.tar.xz" "$TMP/server/assets/lazydb_1.2.3-beta.1_$target.tar.xz"
 done
-python3 - "$TMP/server/channels/beta.json" "$beta_digest" <<'PY'
-import json, sys
-targets = ('x86_64-apple-darwin', 'aarch64-apple-darwin', 'x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu')
-assets = {target: {'url': 'https://github.com/yelog/lazydb/releases/download/v1.2.3-beta.1/lazydb_1.2.3-beta.1_%s.tar.xz' % target, 'sha256': sys.argv[2]} for target in targets}
-json.dump({'schema': 1, 'product': 'lazydb', 'channel': 'beta', 'version': '1.2.3-beta.1', 'tag': 'v1.2.3-beta.1', 'prerelease': True, 'published_at': 'now', 'release_url': 'https://github.com/yelog/lazydb/releases/tag/v1.2.3-beta.1', 'assets': assets}, open(sys.argv[1], 'w'))
-PY
+printf '%s\n' windows > "$TMP/server/assets/lazydb_1.2.3-beta.1_x86_64-pc-windows-msvc.zip"
+(cd "$TMP/server/assets" && sha256sum lazydb_*.tar.xz lazydb_*.zip > SHA256SUMS)
+python3 "$ROOT/scripts/release/generate-channel-manifest.py" beta 1.2.3-beta.1 2026-09-05T00:00:00Z "$TMP/server/assets" "$TMP/server/channels/beta.json"
 export TMPDIR_TEST="$TMP" PATH="$TMP/bin:$PATH" LAZYDB_CHANNEL_BASE_URL=https://fixture/channels
 export LAZYDB_CONFIG_HOME="$TMP/home/config"
-# The fixture contains the host target; production manifests contain all four.
+# Consume the same five-target manifests as production, including Windows.
 if ! HOME="$TMP/home" sh "$TMP/pages/install.sh" --install-dir "$TMP/install" >/dev/null; then
     printf '%s\n' 'installer fixture failed' >&2
     exit 1
@@ -97,4 +89,27 @@ case "$beta_output" in
     *) printf 'unexpected beta output: %s\n' "$beta_output" >&2; exit 1 ;;
 esac
 [ "$(python3 -c 'import json; print(json.load(open("'$TMP'/beta-home/config/install.json"))["channel"])')" = beta ]
+HOME="$TMP/home" XDG_DATA_HOME="$TMP/root-data" sh "$ROOT/install.sh" --install-dir "$TMP/root-install" >/dev/null
+for mutation in missing extra; do
+    python3 - "$TMP/server/channels/stable.json" "$mutation" <<'PY'
+import json, sys
+path, mutation = sys.argv[1:]
+with open(path) as stream:
+    data = json.load(stream)
+if mutation == 'missing':
+    del data['assets']['x86_64-unknown-linux-gnu']
+else:
+    data['assets']['unsupported-target'] = next(iter(data['assets'].values()))
+with open(path, 'w') as stream:
+    json.dump(data, stream)
+PY
+    for installer in "$TMP/pages/install.sh" "$ROOT/install.sh"; do
+        if HOME="$TMP/home" XDG_DATA_HOME="$TMP/root-data" sh "$installer" --install-dir "$TMP/install" >"$TMP/error" 2>&1; then
+            printf 'installer accepted %s target set\n' "$mutation" >&2
+            exit 1
+        fi
+        grep -q 'manifest target set mismatch' "$TMP/error"
+    done
+    python3 "$ROOT/scripts/release/generate-channel-manifest.py" stable 1.2.3 2026-09-05T00:00:00Z "$TMP/server/assets" "$TMP/server/channels/stable.json"
+done
 printf '%s\n' 'installer tests: ok'

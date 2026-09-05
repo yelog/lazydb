@@ -68,7 +68,7 @@ try:
     if not re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-beta\.[1-9][0-9]*)?", version): raise ValueError("invalid version")
     if (channel == "beta") != ("-beta." in version) or data.get("tag") != "v" + version or bool(data.get("prerelease")) != (channel == "beta"): raise ValueError("manifest version mismatch")
     if requested and requested != version: raise ValueError("requested version is not the channel version")
-    supported = {"x86_64-apple-darwin", "aarch64-apple-darwin", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"}
+    supported = {"x86_64-apple-darwin", "aarch64-apple-darwin", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "x86_64-pc-windows-msvc"}
     if set(data.get("assets", {})) != supported: raise ValueError("manifest target set mismatch")
     asset = data["assets"][target]
     url = asset["url"]; parsed = urlparse(url)
