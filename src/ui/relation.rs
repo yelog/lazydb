@@ -534,7 +534,7 @@ fn render_ddl_editor(
     frame.render_widget(block, area);
     for (row, line) in snapshot.lines.iter().take(viewport.height).enumerate() {
         let y = inner.y.saturating_add(row as u16);
-        let spans = super::editor_line_spans(line, &snapshot, theme, true);
+        let spans = super::editor_line_spans(line, &snapshot, theme, true, None);
         let selected = snapshot
             .selection_cells
             .iter()
