@@ -1328,10 +1328,14 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, sta
         |server| header_text(&server.database),
     );
     let profile_width = profile.as_str().cell_width();
-    let status = match app.connection.status {
-        ConnectionStatus::Connecting => Some(("LINKING", theme.warning)),
-        ConnectionStatus::Failed => Some(("FAILED", theme.error)),
-        ConnectionStatus::Disconnected | ConnectionStatus::Connected => None,
+    let status = if app.is_editor_target_switch_pending() {
+        Some(("TARGET", theme.warning))
+    } else {
+        match app.connection.status {
+            ConnectionStatus::Connecting => Some(("LINKING", theme.warning)),
+            ConnectionStatus::Failed => Some(("FAILED", theme.error)),
+            ConnectionStatus::Disconnected | ConnectionStatus::Connected => None,
+        }
     };
     let update_badge = app
         .update_inspection()

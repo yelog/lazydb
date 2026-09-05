@@ -850,6 +850,21 @@ impl ExplorerProfileState {
         self.load_states
             .insert(owner, ExplorerLoadState::Stale { next_cursor });
     }
+
+    pub fn recover_pending_requests(&mut self) -> Vec<CatalogTarget> {
+        let pending = std::mem::take(&mut self.pending_requests);
+        let mut targets = Vec::with_capacity(pending.len());
+        for (owner, request) in pending {
+            let previous = self
+                .previous_load_states
+                .remove(&owner)
+                .unwrap_or(ExplorerLoadState::NotLoaded);
+            self.load_states.insert(owner, previous);
+            targets.push(request.key.target);
+        }
+        self.previous_load_states.clear();
+        targets
+    }
 }
 
 pub fn owner_for_target(profile_id: Uuid, target: &CatalogTarget) -> ExplorerOwnerId {

@@ -456,6 +456,17 @@ fn target_selector_switches_only_after_matching_connection_success() {
         .catalog
         .insert_subtree(vec![database, schema])
         .unwrap();
+    let explorer_before = app.explorer.normalized.profiles[&profile_id]
+        .catalog
+        .entries()
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    let selected_before = app.explorer.normalized.selected.clone();
+    let expanded_before = app.explorer.normalized.expanded.clone();
+    app.explorer.selected = 7;
+    app.explorer.scroll = 3;
+    let catalog_epoch_before = app.explorer.normalized.profiles[&profile_id].catalog_epoch;
 
     app.update(Action::OpenTargetSelector);
     let lazydb::model::workspace::Overlay::TargetSelector {
@@ -492,6 +503,17 @@ fn target_selector_switches_only_after_matching_connection_success() {
         Some(&default)
     );
     assert_eq!(app.connection.target.as_ref(), Some(&default));
+    assert_eq!(
+        app.explorer.normalized.profiles[&profile_id].status,
+        ExplorerConnectionStatus::Online
+    );
+    assert_eq!(
+        app.explorer.normalized.profiles[&profile_id]
+            .catalog
+            .entries()
+            .len(),
+        explorer_before.len()
+    );
 
     app.update(Action::OpenTargetSelector);
     app.update(Action::MoveTargetSelector(1));
@@ -507,6 +529,23 @@ fn target_selector_switches_only_after_matching_connection_success() {
     });
     assert_eq!(app.active_console().execution_target.as_ref(), Some(&alias));
     assert_eq!(app.connection.target.as_ref(), Some(&alias));
+    assert_eq!(
+        app.explorer.normalized.profiles[&profile_id]
+            .catalog
+            .entries()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>(),
+        explorer_before
+    );
+    assert_eq!(app.explorer.normalized.selected, selected_before);
+    assert_eq!(app.explorer.normalized.expanded, expanded_before);
+    assert_eq!(app.explorer.selected, 7);
+    assert_eq!(app.explorer.scroll, 3);
+    assert_eq!(
+        app.explorer.normalized.profiles[&profile_id].catalog_epoch,
+        catalog_epoch_before
+    );
     assert!(
         commands
             .iter()

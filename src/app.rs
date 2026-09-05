@@ -235,6 +235,7 @@ pub struct App {
     deferred: DeferredIntentQueue,
     resolving_deferred: Option<DeferredTransactionPrompt>,
     pending_target_console: Option<Uuid>,
+    pending_editor_target_switch: Option<(Uuid, Uuid, u64)>,
     pub sql_editor_list: crate::model::sql_editor_list::SqlEditorListState,
     workspaces: HashMap<Uuid, ConnectionWorkspace>,
     pub notifications: NotificationCenter,
@@ -395,6 +396,10 @@ enum CompletionAfterEdit {
 }
 
 impl App {
+    pub fn is_editor_target_switch_pending(&self) -> bool {
+        self.pending_editor_target_switch.is_some()
+    }
+
     fn dashboard_metadata_commands(&self, connection: ConnectionIdentity) -> Vec<Command> {
         self.tabs
             .iter()
@@ -609,6 +614,7 @@ impl App {
             deferred: DeferredIntentQueue::default(),
             resolving_deferred: None,
             pending_target_console: None,
+            pending_editor_target_switch: None,
             sql_editor_list: Default::default(),
             workspaces: HashMap::new(),
             notifications: NotificationCenter::default(),
@@ -5341,6 +5347,11 @@ impl App {
                 if !self.pending_connection_matches(profile_id, generation) {
                     return Vec::new();
                 }
+                let is_editor_target_switch = self.pending_editor_target_switch.is_some_and(
+                    |(_, pending_profile_id, pending_generation)| {
+                        pending_profile_id == profile_id && pending_generation == generation
+                    },
+                );
                 let Some(profile) = self
                     .profiles
                     .iter()
@@ -5354,6 +5365,7 @@ impl App {
                 self.connection.pending_profile_id = None;
                 self.connection.pending_generation = None;
                 self.connection.pending_target = None;
+                self.pending_editor_target_switch = None;
                 self.pending_target_console = None;
                 self.connection.status = if self.connection.profile_id.is_some() {
                     ConnectionStatus::Connected
@@ -5363,9 +5375,13 @@ impl App {
                 self.connection.error = Some(message.clone());
                 self.notify_error("Connection", message.clone());
                 if let Some(state) = self.explorer.normalized.profiles.get_mut(&profile_id) {
-                    state.status = ExplorerConnectionStatus::Failed;
-                    state.last_error = Some(message.clone());
-                    state.expand_after_connect = false;
+                    if is_editor_target_switch && self.connection.profile_id == Some(profile_id) {
+                        state.status = ExplorerConnectionStatus::Online;
+                    } else {
+                        state.status = ExplorerConnectionStatus::Failed;
+                        state.last_error = Some(message.clone());
+                        state.expand_after_connect = false;
+                    }
                 }
                 if let Some(manager) = self.profile_manager.as_mut()
                     && manager
@@ -5398,6 +5414,7 @@ impl App {
                     self.connection.pending_profile_id = None;
                     self.connection.pending_generation = None;
                     self.connection.pending_target = None;
+                    self.pending_editor_target_switch = None;
                     self.pending_target_console = None;
                 }
                 if active_matches {
@@ -5846,6 +5863,13 @@ impl App {
                 if tab.execution_target.as_ref() == Some(&target) {
                     return Vec::new();
                 }
+                if self.connection.pending_generation.is_some() {
+                    self.notify_warning(
+                        "LazyDB",
+                        "Wait for the current connection change to finish before selecting another target",
+                    );
+                    return Vec::new();
+                }
                 if tab.query_status == QueryStatus::Running {
                     self.notify_warning("LazyDB", "Cannot change target while a query is running");
                     return Vec::new();
@@ -5866,6 +5890,23 @@ impl App {
                     );
                     return Vec::new();
                 }
+                if matches!(self.workspace_exit_check(), WorkspaceExitCheck::Running) {
+                    self.notify_warning(
+                        "LazyDB",
+                        "Wait for running relation loads to finish before changing target",
+                    );
+                    return Vec::new();
+                }
+                if matches!(
+                    self.workspace_exit_check(),
+                    WorkspaceExitCheck::RelationTransaction
+                ) {
+                    self.notify_warning(
+                        "LazyDB",
+                        "Commit or roll back relation edits before changing target",
+                    );
+                    return Vec::new();
+                }
                 if self.tabs.iter().any(|workspace_tab| {
                     workspace_tab.as_console().is_some_and(|console| {
                         console.transaction_mode == TransactionMode::Manual
@@ -5879,8 +5920,7 @@ impl App {
                     return Vec::new();
                 }
                 let console_id = tab.id;
-                self.pending_target_console = Some(console_id);
-                self.request_connection_target(target)
+                self.request_connection_target_for_editor_target(target, console_id)
             }
             Action::CancelTargetSelector => {
                 self.overlay = None;
@@ -6390,10 +6430,16 @@ impl App {
                 if !target.is_valid(profile) {
                     return Vec::new();
                 }
+                let editor_target_switch = self.pending_editor_target_switch.filter(
+                    |(_, pending_profile_id, pending_generation)| {
+                        *pending_profile_id == profile_id && *pending_generation == generation
+                    },
+                );
                 let old_profile_id = self.connection.profile_id;
-                let should_activate_workspace = pending_matches
-                    || self.connection.profile_id.is_none()
-                    || self.connection.profile_id == Some(profile_id);
+                let should_activate_workspace = editor_target_switch.is_none()
+                    && (pending_matches
+                        || self.connection.profile_id.is_none()
+                        || self.connection.profile_id == Some(profile_id));
                 let mut workspace_commands = if should_activate_workspace {
                     self.activate_profile_workspace(profile_id, target.clone())
                 } else {
@@ -6421,7 +6467,13 @@ impl App {
                 let mut persist_target = false;
                 if pending_matches
                     && self.connection.pending_target.as_ref() == Some(&target)
-                    && let Some(console_id) = self.pending_target_console.take()
+                    && let Some(console_id) = self
+                        .pending_editor_target_switch
+                        .filter(|(_, pending_profile_id, pending_generation)| {
+                            *pending_profile_id == profile_id && *pending_generation == generation
+                        })
+                        .map(|(console_id, _, _)| console_id)
+                        .or_else(|| self.pending_target_console.take())
                     && let Some(tab) = self
                         .tabs
                         .iter_mut()
@@ -6434,8 +6486,21 @@ impl App {
                 }
                 if pending_matches {
                     self.connection.pending_target = None;
+                    self.pending_editor_target_switch = None;
                 }
-                self.explorer.connection_changed();
+                if editor_target_switch.is_none() {
+                    self.explorer.connection_changed();
+                }
+                let interrupted_catalog_targets = if editor_target_switch.is_some() {
+                    self.explorer
+                        .normalized
+                        .profiles
+                        .get_mut(&profile_id)
+                        .map(|state| state.recover_pending_requests())
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
                 if let Some(old_profile_id) = old_profile_id.filter(|id| *id != profile_id) {
                     self.clear_profile_catalog(old_profile_id, ExplorerConnectionStatus::Offline);
                 }
@@ -6446,19 +6511,24 @@ impl App {
                 state.last_error = None;
                 let expand_after_connect = state.expand_after_connect;
                 state.expand_after_connect = false;
-                state.catalog = crate::model::explorer::CatalogTree::new(profile_id);
-                state.load_states.clear();
-                state.pending_requests.clear();
-                state.previous_load_states.clear();
-                state.load_errors.clear();
-                self.explorer.active_profile = Some(profile_id);
-                self.explorer.normalized.selected =
-                    Some(crate::model::explorer::ExplorerNodeId::Profile(profile_id));
-                if state.advance_catalog_epoch().is_none() {
-                    state.last_error = Some("catalog epoch exhausted".to_owned());
-                    return Vec::new();
+                if editor_target_switch.is_none() {
+                    state.catalog = crate::model::explorer::CatalogTree::new(profile_id);
+                    state.load_states.clear();
+                    state.pending_requests.clear();
+                    state.previous_load_states.clear();
+                    state.load_errors.clear();
+                    self.explorer.active_profile = Some(profile_id);
+                    self.explorer.normalized.selected =
+                        Some(crate::model::explorer::ExplorerNodeId::Profile(profile_id));
+                    if state.advance_catalog_epoch().is_none() {
+                        state.last_error = Some("catalog epoch exhausted".to_owned());
+                        return Vec::new();
+                    }
+                    state.status = ExplorerConnectionStatus::Syncing;
+                } else {
+                    state.status = ExplorerConnectionStatus::Online;
+                    self.explorer.active_profile = Some(profile_id);
                 }
-                state.status = ExplorerConnectionStatus::Syncing;
                 for tab in &mut self.tabs {
                     let Some(tab) = tab.as_console_mut() else {
                         continue;
@@ -6500,11 +6570,20 @@ impl App {
                     manager.operation = None;
                     manager.message = Some("Connected".to_owned());
                 }
-                let commands_for_catalog = self.start_catalog_request(
-                    CatalogTarget::Databases,
-                    None,
-                    CatalogRequestIntent::Automatic,
-                );
+                let commands_for_catalog = if editor_target_switch.is_none() {
+                    self.start_catalog_request(
+                        CatalogTarget::Databases,
+                        None,
+                        CatalogRequestIntent::Automatic,
+                    )
+                } else {
+                    interrupted_catalog_targets
+                        .into_iter()
+                        .flat_map(|target| {
+                            self.start_catalog_request(target, None, CatalogRequestIntent::Refresh)
+                        })
+                        .collect()
+                };
                 if expand_after_connect {
                     self.explorer
                         .normalized
@@ -6532,12 +6611,18 @@ impl App {
                 generation,
                 message,
             } => {
+                let is_editor_target_switch = self.pending_editor_target_switch.is_some_and(
+                    |(_, pending_profile_id, pending_generation)| {
+                        pending_profile_id == profile_id && pending_generation == generation
+                    },
+                );
                 if self.pending_connection_matches(profile_id, generation) {
                     self.connection_terminal_generation =
                         self.connection_terminal_generation.max(generation);
                     self.connection.pending_profile_id = None;
                     self.connection.pending_generation = None;
                     self.connection.pending_target = None;
+                    self.pending_editor_target_switch = None;
                     self.pending_target_console = None;
                     self.connection.status = if self.connection.profile_id.is_some() {
                         ConnectionStatus::Connected
@@ -6547,9 +6632,14 @@ impl App {
                     self.connection.error = Some(message.clone());
                     self.notify_error("Connection", message.clone());
                     if let Some(state) = self.explorer.normalized.profiles.get_mut(&profile_id) {
-                        state.status = ExplorerConnectionStatus::Failed;
-                        state.last_error = Some(message.clone());
-                        state.expand_after_connect = false;
+                        if is_editor_target_switch && self.connection.profile_id == Some(profile_id)
+                        {
+                            state.status = ExplorerConnectionStatus::Online;
+                        } else {
+                            state.status = ExplorerConnectionStatus::Failed;
+                            state.last_error = Some(message.clone());
+                            state.expand_after_connect = false;
+                        }
                     }
                     if let Some(manager) = self.profile_manager.as_mut()
                         && manager.operation == Some(ProfileOperation::Connecting)
@@ -8931,6 +9021,22 @@ impl App {
     }
 
     fn request_connection_target(&mut self, target: ExecutionTarget) -> Vec<Command> {
+        self.request_connection_target_inner(target, None)
+    }
+
+    fn request_connection_target_for_editor_target(
+        &mut self,
+        target: ExecutionTarget,
+        console_id: Uuid,
+    ) -> Vec<Command> {
+        self.request_connection_target_inner(target, Some(console_id))
+    }
+
+    fn request_connection_target_inner(
+        &mut self,
+        target: ExecutionTarget,
+        editor_target_console: Option<Uuid>,
+    ) -> Vec<Command> {
         let profile_id = target.profile_id;
         if !self
             .profiles
@@ -8955,6 +9061,8 @@ impl App {
         self.connection.pending_profile_id = Some(profile_id);
         self.connection.pending_generation = Some(generation);
         self.connection.pending_target = Some(target.clone());
+        self.pending_editor_target_switch =
+            editor_target_console.map(|console_id| (console_id, profile_id, generation));
         self.connection.status = ConnectionStatus::Connecting;
         self.connection.owner_context = Default::default();
         self.connection.error = None;
