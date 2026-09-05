@@ -208,7 +208,7 @@ or form, returns from preview, or cancels a busy editor.
 | `o` | Open line below |
 | `x`, Delete | Delete character |
 | `u` / `Ctrl-r` | Undo/redo |
-| `F5` | Run current statement |
+| `R` / `F5` | Run current statement |
 | `Shift-F5` | Run complete buffer |
 | `Space f` | Format current/selected SQL |
 | `Space y` | Copy current statement |
@@ -234,6 +234,12 @@ or form, returns from preview, or cancels a busy editor.
 | `Ctrl-Space` | Trigger completion |
 | `Esc` | Return to Normal |
 | `F5` | Run SQL |
+
+Bare `R` is text input in Insert and Replace mode. In Normal mode it runs the
+current statement; in Visual mode it runs the exact Char, Line, or Block
+selection. The native Normal/Visual Vim `R` Replace command is intentionally
+reassigned to SQL execution. Use `i`, `a`, `o`, or an existing change command
+to enter an editing mode.
 
 `Ctrl-w` in Insert/Replace is an editor text command, never the pane prefix.
 `Space` remains text input in Insert/Replace; it does not start either Leader.
@@ -269,9 +275,14 @@ keyboard reporting, configure the terminal to forward that key combination.
 | --- | --- |
 | `y` | Copy selection |
 | `Esc` | Return to Normal |
-| `F5` | Run selection |
+| `R` / `F5` | Run selection |
 | `Space f` | Format selection |
 | `Space y/Y` | Copy selection/buffer through EditorLeader |
+
+`Space r` and `Space R` remain available in Visual mode for current-selection
+and full-buffer execution respectively. A blank or comment-only selection does
+not fall back to the current statement or complete buffer. Visual Block runs
+the selected row slices in order, joined with newlines.
 
 Visual Char, Visual Line, and Visual Block are presented as the Editor Visual
 context. Empty selections do not fall back to the whole buffer. `Space ?` is

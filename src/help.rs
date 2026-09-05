@@ -332,6 +332,7 @@ pub enum HelpShortcutId {
     EditorUndo,
     EditorRedo,
     EditorRun,
+    EditorRunInsert,
     EditorFormat,
     EditorCopyStatement,
     EditorCopyBuffer,
@@ -1224,10 +1225,11 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
     row!(EditorRedo, [EditorNormal], "Ctrl-r", "redo"),
     row!(
         EditorRun,
-        [EditorNormal, EditorInsert, EditorVisual],
-        "F5",
-        "execute SQL"
+        [EditorNormal, EditorVisual],
+        "R / F5",
+        "execute current or selected SQL"
     ),
+    row!(EditorRunInsert, [EditorInsert], "F5", "execute SQL"),
     row!(
         EditorFormat,
         [EditorNormal, EditorVisual],
@@ -2848,7 +2850,7 @@ fn footer_rank(
             Id::EditorNormal => Some(1),
             Id::EditorComplete => Some(2),
             Id::EditorDeleteWord => Some(3),
-            Id::EditorRun => Some(4),
+            Id::EditorRunInsert => Some(4),
             Id::Help => Some(5),
             _ => None,
         },
@@ -3938,7 +3940,7 @@ mod tests {
             ),
             (
                 ShortcutContext::EditorNormal,
-                vec!["i", "F5", "Space f", "Space y", "? (also F1)"],
+                vec!["i", "R / F5", "Space f", "Space y", "? (also F1)"],
             ),
             (
                 ShortcutContext::EditorInsert,
@@ -3946,7 +3948,7 @@ mod tests {
             ),
             (
                 ShortcutContext::EditorVisual,
-                vec!["y", "Esc", "F5", "Space f", "? (also F1)"],
+                vec!["y", "Esc", "R / F5", "Space f", "? (also F1)"],
             ),
             (
                 ShortcutContext::SqlResultsData,

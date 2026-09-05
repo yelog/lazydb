@@ -33,6 +33,12 @@ fn connected_app(policy: ConfirmationPolicy) -> App {
     app
 }
 
+fn dispatch_editor_key(app: &mut App, keymap: &mut lazydb::input::keymap::Keymap, event: KeyEvent) {
+    if let Some(action) = keymap.map(event, app) {
+        app.update(action);
+    }
+}
+
 #[test]
 fn current_run_does_not_fall_back_to_the_whole_buffer() {
     let mut app = connected_app(ConfirmationPolicy::RiskyOnly);
@@ -58,6 +64,51 @@ fn current_run_executes_statement_when_cursor_is_on_internal_space() {
     let commands = app.update(Action::RunActiveSql);
     assert!(
         matches!(commands.as_slice(), [Command::RunQueryPage { source_sql, .. }] if source_sql == "SELECT 1;")
+    );
+}
+
+#[test]
+fn normal_r_runs_current_statement_through_keymap() {
+    let mut app = connected_app(ConfirmationPolicy::RiskyOnly);
+    app.update(Action::ReplaceEditor("SELECT 1; SELECT 2;".into()));
+    let mut keymap = lazydb::input::keymap::Keymap::default();
+
+    let commands = {
+        let event = KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE);
+        let action = keymap.map(event, &app).expect("R should route to editor");
+        app.update(action)
+    };
+    assert!(
+        matches!(commands.as_slice(), [Command::RunQueryPage { source_sql, .. }] if source_sql == "SELECT 1;")
+    );
+}
+
+#[test]
+fn visual_r_runs_exact_selection_through_keymap() {
+    let mut app = connected_app(ConfirmationPolicy::RiskyOnly);
+    app.update(Action::ReplaceEditor("SELECT 1; SELECT 2;".into()));
+    let mut keymap = lazydb::input::keymap::Keymap::default();
+
+    for event in [
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('7'), KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE),
+    ] {
+        dispatch_editor_key(&mut app, &mut keymap, event);
+    }
+
+    let commands = {
+        let event = KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE);
+        let action = keymap.map(event, &app).expect("R should route to editor");
+        app.update(action)
+    };
+    assert!(
+        matches!(
+            commands.as_slice(),
+        [Command::RunQueryPage { source_sql, .. }] if source_sql == "SELECT 1"
+        ),
+        "unexpected commands: {commands:?}"
     );
 }
 
@@ -112,6 +163,23 @@ fn bare_begin_enters_manual_without_pool_sql() {
         app.active_console().transaction_state,
         lazydb::model::transaction::TransactionState::Starting
     );
+}
+
+#[test]
+fn savepoint_execution_uses_current_scope_instead_of_full_buffer() {
+    let mut app = connected_app(ConfirmationPolicy::RiskyOnly);
+    app.update(Action::ReplaceEditor(
+        "SAVEPOINT checkpoint; SELECT 99;".into(),
+    ));
+    app.active_console_mut().transaction_mode = lazydb::model::transaction::TransactionMode::Manual;
+    app.active_console_mut().transaction_state =
+        lazydb::model::transaction::TransactionState::Active;
+
+    let commands = app.update(Action::RunActiveSql);
+    assert!(matches!(
+        commands.as_slice(),
+        [Command::ManualExecute { sql, .. }] if sql == "SAVEPOINT checkpoint;"
+    ));
 }
 
 #[test]
