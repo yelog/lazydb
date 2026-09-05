@@ -453,6 +453,111 @@ fn press_keys(workspace: &mut EditorWorkspace, id: Uuid, keys: &str) {
 }
 
 #[test]
+fn current_scope_includes_visual_char_endpoint() {
+    let (mut workspace, id) = normal_fixture("SELECT 1; SELECT 2;");
+    press_keys(&mut workspace, id, "v7l");
+
+    let scope = workspace
+        .current_scope(id, crate::sql::SqlDialect::Generic)
+        .unwrap()
+        .unwrap();
+    assert_eq!(scope.kind, crate::sql::ScopeKind::VisualChar);
+    assert_eq!(scope.sql, "SELECT 1");
+}
+
+#[test]
+fn current_scope_visual_line_uses_complete_selected_lines() {
+    let (mut workspace, id) = normal_fixture("SELECT 1;\nSELECT 2;\nSELECT 3;");
+    press_keys(&mut workspace, id, "Vj");
+
+    let scope = workspace
+        .current_scope(id, crate::sql::SqlDialect::Generic)
+        .unwrap()
+        .unwrap();
+    assert_eq!(scope.kind, crate::sql::ScopeKind::VisualLine);
+    assert_eq!(scope.sql, "SELECT 1;\nSELECT 2;");
+}
+
+#[test]
+fn standalone_r_runs_current_sql_in_normal_and_visual_modes() {
+    let (mut workspace, id) = normal_fixture("SELECT 1;");
+    workspace.press(id, EditorKey::Character('R')).unwrap();
+    assert_eq!(workspace.drain_effects(), vec![EditorEffect::RunCurrent]);
+    assert_eq!(workspace.mode(id).unwrap(), EditorMode::Normal);
+
+    press_keys(&mut workspace, id, "v6l");
+    workspace.press(id, EditorKey::Character('R')).unwrap();
+    assert_eq!(workspace.drain_effects(), vec![EditorEffect::RunCurrent]);
+    assert_eq!(workspace.mode(id).unwrap(), EditorMode::VisualChar);
+}
+
+#[test]
+fn run_key_preserves_visual_shapes_and_does_not_replace_text() {
+    for (selection, mode) in [
+        ("V", EditorMode::VisualLine),
+        ("\u{16}", EditorMode::VisualBlock),
+    ] {
+        let (mut workspace, id) = normal_fixture("SELECT 1;\nSELECT 2;");
+        if selection == "\u{16}" {
+            workspace.press(id, EditorKey::Control('v')).unwrap();
+        } else {
+            press_keys(&mut workspace, id, selection);
+        }
+        workspace.press(id, EditorKey::Character('R')).unwrap();
+
+        assert_eq!(workspace.drain_effects(), vec![EditorEffect::RunCurrent]);
+        assert_eq!(workspace.mode(id).unwrap(), mode);
+        assert_eq!(workspace.text(id).unwrap(), "SELECT 1;\nSELECT 2;");
+    }
+}
+
+#[test]
+fn run_key_does_not_intercept_insert_replace_or_operator_arguments() {
+    let (mut workspace, id) = fixture("");
+    press_keys(&mut workspace, id, "R");
+    assert!(
+        !workspace
+            .drain_effects()
+            .contains(&EditorEffect::RunCurrent)
+    );
+    assert_eq!(workspace.text(id).unwrap(), "R");
+
+    let (mut workspace, id) = normal_fixture("abc");
+    press_keys(&mut workspace, id, "rR");
+    assert!(
+        !workspace
+            .drain_effects()
+            .contains(&EditorEffect::RunCurrent)
+    );
+    assert_eq!(workspace.text(id).unwrap(), "Rbc");
+}
+
+#[test]
+fn leader_run_keys_remain_distinct_for_current_and_full_buffer() {
+    let (mut workspace, id) = normal_fixture("SELECT 1;");
+    press_keys(&mut workspace, id, " r");
+    assert_eq!(workspace.drain_effects(), vec![EditorEffect::RunCurrent]);
+
+    press_keys(&mut workspace, id, " R");
+    assert_eq!(workspace.drain_effects(), vec![EditorEffect::RunAll]);
+}
+
+#[test]
+fn visual_leader_supports_scope_actions_without_leaking_normal_actions() {
+    let (mut workspace, id) = normal_fixture("SELECT 1;");
+    press_keys(&mut workspace, id, "v6l r");
+    assert_eq!(workspace.drain_effects(), vec![EditorEffect::RunCurrent]);
+    assert_eq!(workspace.mode(id).unwrap(), EditorMode::VisualChar);
+
+    press_keys(&mut workspace, id, " R");
+    assert_eq!(workspace.drain_effects(), vec![EditorEffect::RunAll]);
+
+    press_keys(&mut workspace, id, " q");
+    assert!(workspace.drain_effects().is_empty());
+    assert_eq!(workspace.mode(id).unwrap(), EditorMode::VisualChar);
+}
+
+#[test]
 fn read_only_sessions_support_visual_yank_without_mutation() {
     let (mut workspace, id) = read_only_fixture("alpha beta\ngamma delta");
     let revision = workspace.revision(id).unwrap();

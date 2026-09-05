@@ -232,6 +232,21 @@ type VimKeyManager = modalkit::editing::key::KeyManager<
     modalkit::prelude::RepeatType,
 >;
 
+fn editor_vim_keys()
+-> modalkit::env::vim::keybindings::VimMachine<modalkit::key::TerminalKey, LazyDbApplicationInfo> {
+    use modalkit::env::vim::{VimMode, keybindings::InputStep};
+    use modalkit::keybindings::{EdgeEvent, EdgeRepeat};
+
+    let mut keys = modalkit::env::vim::keybindings::default_vim_keys();
+    let run = InputStep::new().actions(vec![modalkit::actions::Action::Application(
+        ApplicationAction::Effect(EditorEffect::RunCurrent),
+    )]);
+    let path = [(EdgeRepeat::Once, EdgeEvent::Key("R".parse().unwrap()))];
+    keys.add_mapping(VimMode::Normal, &path, &run);
+    keys.add_mapping(VimMode::Visual, &path, &run);
+    keys
+}
+
 fn mode_from_key_manager(keys: &VimKeyManager) -> EditorMode {
     match keys.show_mode().as_deref() {
         Some("-- INSERT --") => EditorMode::Insert,
@@ -290,7 +305,7 @@ impl EditorWorkspace {
             sessions: HashMap::new(),
             registers: HashMap::new(),
             effects: Vec::new(),
-            keys: VimKeyManager::new(modalkit::env::vim::keybindings::default_vim_keys()),
+            keys: VimKeyManager::new(editor_vim_keys()),
             pending_binding: None,
             current_sequence: Vec::new(),
             last_sequence: None,
@@ -320,7 +335,7 @@ impl EditorWorkspace {
         let group_id = buffer.create_group();
         buffer.set_leader(group_id, modalkit::editing::cursor::Cursor::new(0, 0));
         let buffer = std::sync::Arc::new(std::sync::RwLock::new(buffer));
-        let mut keys = VimKeyManager::new(modalkit::env::vim::keybindings::default_vim_keys());
+        let mut keys = VimKeyManager::new(editor_vim_keys());
         let mode = if capability == EditorSessionCapability::Editable {
             keys.input_key(modalkit::key::TerminalKey::from(KeyEvent::new(
                 KeyCode::Char('i'),
@@ -954,11 +969,19 @@ impl EditorWorkspace {
                             })
                             .collect();
                         ScopeSelection::block(ranges)
+                    } else if kind == ScopeKind::VisualLine {
+                        let first_row = cursor.get_y().min(anchor.get_y());
+                        let last_row = cursor.get_y().max(anchor.get_y());
+                        let start = line_bounds(&text, first_row).0;
+                        let end = line_bounds(&text, last_row).1;
+                        ScopeSelection::contiguous(kind, TextRange::new(start, end))
                     } else {
-                        ScopeSelection::contiguous(
-                            kind,
-                            TextRange::new(start.min(end), start.max(end)),
-                        )
+                        let (start, end) = if start <= end {
+                            (start, inclusive_position_end(&text, end))
+                        } else {
+                            (end, inclusive_position_end(&text, start))
+                        };
+                        ScopeSelection::contiguous(kind, TextRange::new(start, end))
                     }
                 })
         });
@@ -1250,7 +1273,13 @@ impl EditorWorkspace {
                 }
                 Ok(())
             }
-            (EditorMode::Normal, EditorKey::Character(' ' | '\\')) => {
+            (
+                EditorMode::Normal
+                | EditorMode::VisualChar
+                | EditorMode::VisualLine
+                | EditorMode::VisualBlock,
+                EditorKey::Character(' ' | '\\'),
+            ) => {
                 self.sessions
                     .get_mut(&id)
                     .ok_or(EditorError::MissingSession(id))?
@@ -1555,8 +1584,12 @@ impl EditorWorkspace {
                 (PendingBinding::Leader, 'r') => self.effects.push(EditorEffect::RunCurrent),
                 (PendingBinding::Leader, 'R') => self.effects.push(EditorEffect::RunAll),
                 (PendingBinding::Leader, 'y') => self.effects.push(EditorEffect::CopyStatement),
-                (PendingBinding::Leader, 'Y') => self.effects.push(EditorEffect::CopyBuffer),
+                (PendingBinding::Leader, 'Y') if mode_before == EditorMode::Normal => {
+                    self.effects.push(EditorEffect::CopyBuffer)
+                }
                 (PendingBinding::Leader, 'f') => self.effects.push(EditorEffect::FormatCurrent),
+                (PendingBinding::Leader, 's' | 'q' | 'x' | '?' | 'd' | 't')
+                    if mode_before != EditorMode::Normal => {}
                 (PendingBinding::Leader, 's') => self.effects.push(EditorEffect::OpenSqlEditorList),
                 (PendingBinding::Leader, 'q') => self.effects.push(EditorEffect::CloseConsole),
                 (PendingBinding::Leader, 'x') => self.effects.push(EditorEffect::DeleteConsole),
@@ -2111,6 +2144,17 @@ fn line_bounds(text: &str, line: usize) -> (usize, usize) {
         .find('\n')
         .map_or(text.len(), |offset| start + offset);
     (start.min(text.len()), end.min(text.len()))
+}
+
+fn inclusive_position_end(text: &str, position: usize) -> usize {
+    position
+        .checked_add(
+            text.get(position..)
+                .and_then(|tail| tail.chars().next())
+                .map_or(0, char::len_utf8),
+        )
+        .unwrap_or(text.len())
+        .min(text.len())
 }
 
 impl EditorKey {

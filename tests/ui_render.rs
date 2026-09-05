@@ -4109,7 +4109,7 @@ fn editor_prompt_uses_bar_cursor() {
 }
 
 #[test]
-fn replace_mode_uses_underline_cursor() {
+fn run_key_does_not_enter_replace_mode() {
     let mut app = fixture();
     app.update(Action::EditorKey(KeyEvent::new(
         KeyCode::Char('R'),
@@ -4117,7 +4117,7 @@ fn replace_mode_uses_underline_cursor() {
     )));
 
     let (_, state) = render_with_state(&app, 120, 36);
-    assert_eq!(state.cursor_style, Some(lazydb::ui::CursorStyle::Underline));
+    assert_eq!(state.cursor_style, Some(lazydb::ui::CursorStyle::Block));
 }
 
 #[test]
