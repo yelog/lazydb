@@ -175,6 +175,45 @@ pub enum McpCommand {
         #[arg(long, value_enum, default_value_t = crate::agent::policy::WritePolicy::Deny)]
         write_policy: crate::agent::policy::WritePolicy,
     },
+    /// Configure a project-scoped MCP server for coding agents.
+    Setup {
+        #[arg(long = "client", value_enum)]
+        client: Vec<McpClient>,
+        #[arg(long, default_value = "project", value_enum)]
+        scope: McpScope,
+        #[arg(long)]
+        project: Option<PathBuf>,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect project-scoped MCP configuration without database I/O.
+    Doctor {
+        #[arg(long = "client", value_enum)]
+        client: Vec<McpClient>,
+        #[arg(long)]
+        project: Option<PathBuf>,
+        #[arg(long)]
+        probe: bool,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum McpClient {
+    ClaudeCode,
+    Codex,
+    Opencode,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum McpScope {
+    #[default]
+    Project,
 }
 
 #[derive(Clone, Debug, Args)]

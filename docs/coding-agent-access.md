@@ -196,3 +196,47 @@ The MCP process loads profile metadata at startup. Restart the MCP session after
 changing profiles, credentials, or MCP command arguments. OpenCode also loads
 its configuration at startup, so fully quit and restart OpenCode after changing
 the MCP configuration.
+
+## Automated Setup
+
+The supported setup entry point is:
+
+```bash
+lazydb mcp setup
+```
+
+It creates project-scoped configuration for Claude Code, Codex, or OpenCode and
+uses `--write-policy deny` by default. The command does not install a coding
+agent, change client approval rules, or copy credentials. Use `--dry-run` to
+preview changes and `lazydb mcp doctor` to inspect configuration without
+connecting to a database. Existing files that contain unsupported comments or
+conflicting `lazydb` entries are reported for manual handling rather than
+rewritten.
+
+Installers and Homebrew print this command after installation but do not modify
+agent configuration automatically. This keeps package installation safe for
+unattended environments and leaves the project choice to the user.
+
+The project directory must be selected explicitly or confirmed by the
+interactive prompt. A project-scoped client configuration does not hide LazyDB
+global profiles; the same profile visibility and selection rules above still
+apply.
+
+The first setup implementation safely creates a new project configuration file
+when the target file does not exist. If the target already exists, it reports a
+conflict instead of rewriting user content; merge the shown server entry
+manually and rerun `lazydb mcp doctor`. This is deliberate until a format-aware
+editor can preserve JSONC comments, TOML comments, and unknown client fields.
+
+Useful non-interactive forms are:
+
+```bash
+lazydb mcp setup --client claude-code --client codex --project . --dry-run --json
+lazydb mcp setup --client opencode --project . --yes --json
+lazydb mcp doctor --project . --json
+```
+
+The current `doctor --probe` flag reports that protocol probing is not yet
+implemented and does not start configured client commands. A successful static
+diagnosis therefore confirms file presence and the generated read-only policy,
+not client trust, process startup, or database connectivity.
