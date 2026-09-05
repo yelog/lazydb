@@ -699,6 +699,7 @@ impl EditorWorkspace {
                 }
             })
             .clone();
+        let statements = statement.map(|_| sql::scan_statements(&full_text, dialect));
         let lines = buffer
             .lines(first_line)
             .take(viewport.height.saturating_add(overscan))
@@ -712,6 +713,16 @@ impl EditorWorkspace {
                     .map(str::len)
                     .sum::<usize>();
                 let line_end = line_start + source.len();
+                let current_statement =
+                    statement.is_some_and(|range| range.start < line_end && range.end > line_start);
+                let statement_background_cells = statement_background_cells(
+                    &source,
+                    line_start,
+                    line_end,
+                    statement,
+                    statements.as_deref().unwrap_or_default(),
+                    &projection.source_to_display_cells,
+                );
                 let mut spans = Vec::new();
                 let mut byte = 0;
                 for highlight in highlights
@@ -768,6 +779,8 @@ impl EditorWorkspace {
                         spans
                     },
                     source_to_display_cells: projection.source_to_display_cells,
+                    current_statement,
+                    statement_background_cells,
                 }
             })
             .collect::<Vec<_>>();
@@ -2041,6 +2054,38 @@ fn render_span(
         current_statement: statement
             .is_some_and(|range| range.start < line_start + end && range.end > line_start + start),
     }
+}
+
+fn statement_background_cells(
+    source: &str,
+    line_start: usize,
+    line_end: usize,
+    current: Option<sql::TextRange>,
+    statements: &[sql::TextRange],
+    source_to_display_cells: &[usize],
+) -> Option<(usize, usize)> {
+    let current = current?;
+    let current_start = current.start.max(line_start);
+    let current_end = current.end.min(line_end);
+    if current_start >= current_end {
+        return None;
+    }
+    let has_sibling = statements
+        .iter()
+        .any(|range| *range != current && range.start < line_end && range.end > line_start);
+    if !has_sibling {
+        return None;
+    }
+
+    let start = source[..current_start.saturating_sub(line_start)]
+        .chars()
+        .count();
+    let end = source[..current_end.saturating_sub(line_start)]
+        .chars()
+        .count();
+    let start = *source_to_display_cells.get(start)?;
+    let end = *source_to_display_cells.get(end)?;
+    (end > start).then_some((start, end))
 }
 
 fn position_to_byte(text: &str, line: usize, column: usize) -> usize {

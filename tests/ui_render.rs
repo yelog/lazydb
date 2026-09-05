@@ -1885,7 +1885,7 @@ fn record_view_navigation_changes_record_and_closes_without_database_io() {
 }
 
 #[test]
-fn sql_editor_underlines_only_the_statement_at_the_cursor() {
+fn sql_editor_marks_only_the_statement_at_the_cursor() {
     let mut app = fixture();
     app.update(Action::ReplaceEditor("SELECT 1;\nSELECT 2;".into()));
     let snapshot = app
@@ -2017,7 +2017,7 @@ fn explorer_search_highlights_matches_across_identifier_separators() {
 }
 
 #[test]
-fn sql_editor_underlines_statement_when_cursor_is_on_internal_space() {
+fn sql_editor_marks_statement_when_cursor_is_on_internal_space() {
     let mut app = fixture();
     app.update(Action::ReplaceEditor("SELECT 1;\nSELECT 2;".into()));
     for _ in 0.."SELECT".len() {
@@ -2046,6 +2046,54 @@ fn sql_editor_underlines_statement_when_cursor_is_on_internal_space() {
             .iter()
             .all(|span| !span.current_statement)
     );
+}
+
+#[test]
+fn sql_editor_statement_indicator_preserves_text_style() {
+    let mut app = fixture();
+    app.update(Action::ReplaceEditor(
+        "SELECT user_name;\nSELECT other_name;".into(),
+    ));
+    let (buffer, _) = render_buffer_with_icons(&app, 100, 24, IconSet::new(IconMode::Ascii));
+    let (select_x, select_y) = find_text_cell(&buffer, "SELECT").expect("first statement");
+    let (other_x, other_y) = find_text_cell(&buffer, "other_name").expect("second statement");
+
+    assert!(
+        !buffer[(select_x, select_y)]
+            .modifier
+            .contains(Modifier::UNDERLINED)
+    );
+    assert!(
+        !buffer[(select_x, select_y)]
+            .modifier
+            .contains(Modifier::BOLD)
+    );
+    assert_eq!(buffer[(select_x, select_y)].bg, Color::Rgb(12, 19, 30));
+    assert!(
+        !buffer[(other_x, other_y)]
+            .modifier
+            .contains(Modifier::UNDERLINED)
+    );
+    assert_eq!(buffer[(other_x, other_y)].bg, Color::Rgb(12, 19, 30));
+
+    let gutter_separator_x = (0..select_x)
+        .find(|x| buffer[(*x, select_y)].symbol() == "┃")
+        .expect("current statement gutter marker");
+    assert_eq!(buffer[(gutter_separator_x, select_y)].symbol(), "┃");
+    assert_eq!(buffer[(gutter_separator_x, other_y)].symbol(), "│");
+}
+
+#[test]
+fn sql_editor_highlights_only_the_current_statement_on_shared_line() {
+    let mut app = fixture();
+    app.update(Action::ReplaceEditor("SELECT 1;SELECT 2;".into()));
+    let (buffer, _) = render_buffer_with_icons(&app, 100, 24, IconSet::new(IconMode::Ascii));
+    let (first_x, y) = find_text_cell(&buffer, "SELECT").expect("first statement");
+    let second_x = first_x + "SELECT 1;".len() as u16;
+
+    assert_eq!(buffer[(first_x, y)].bg, Color::Rgb(17, 28, 43));
+    assert_eq!(buffer[(second_x, y)].symbol(), "S");
+    assert_eq!(buffer[(second_x, y)].bg, Color::Rgb(12, 19, 30));
 }
 
 fn render(app: &App, width: u16, height: u16) -> String {

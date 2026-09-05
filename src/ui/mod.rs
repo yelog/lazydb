@@ -2529,32 +2529,46 @@ fn render_editor(
         } else {
             theme.surface
         });
+        let statement_indicator = if line.current_statement
+            && matches!(
+                snapshot.mode,
+                EditorMode::Normal | EditorMode::Insert | EditorMode::Replace
+            ) {
+            Span::styled(
+                "┃",
+                Style::new().fg(if app.focus == Focus::Editor && app.overlay.is_none() {
+                    theme.accent
+                } else {
+                    theme.muted
+                }),
+            )
+        } else {
+            Span::styled("│", line_style)
+        };
         frame.render_widget(
-            Paragraph::new(format!(" {:>number_width$} │ ", line.line + 1)).style(line_style),
+            Paragraph::new(Line::from(vec![
+                Span::styled(format!(" {:>number_width$} ", line.line + 1), line_style),
+                statement_indicator,
+                Span::styled(" ", line_style),
+            ])),
             Rect::new(inner.x, y, gutter as u16, 1),
         );
-        let content = line
-            .spans
-            .iter()
-            .map(|span| {
-                let foreground = theme.syntax_color(editor_syntax_color(span.kind));
-                Span::styled(
-                    span.text.clone(),
-                    Style::new()
-                        .fg(foreground)
-                        .bg(if selected {
-                            theme.selection
-                        } else {
-                            theme.surface
-                        })
-                        .add_modifier(if span.current_statement {
-                            Modifier::UNDERLINED
-                        } else {
-                            Modifier::empty()
-                        }),
+        let content = editor_line_spans(
+            line,
+            &snapshot,
+            theme,
+            true,
+            (!selected
+                && snapshot.selections.is_empty()
+                && matches!(
+                    snapshot.mode,
+                    EditorMode::Normal | EditorMode::Insert | EditorMode::Replace
                 )
-            })
-            .collect::<Vec<_>>();
+                && app.focus == Focus::Editor
+                && app.overlay.is_none())
+            .then_some(line.statement_background_cells)
+            .flatten(),
+        );
         frame.render_widget(
             Paragraph::new(Line::from(content))
                 .style(Style::new().bg(if selected {
@@ -2631,6 +2645,7 @@ pub(crate) fn editor_line_spans(
     snapshot: &crate::model::editor::EditorRenderSnapshot,
     theme: Theme,
     syntax: bool,
+    statement_background_cells: Option<(usize, usize)>,
 ) -> Vec<Span<'static>> {
     let selected = snapshot
         .selection_cells
@@ -2653,6 +2668,10 @@ pub(crate) fn editor_line_spans(
             });
             let style = Style::new().fg(foreground).bg(if highlighted {
                 theme.selection
+            } else if statement_background_cells.is_some_and(|(start, end)| {
+                display_cell < end && display_cell.saturating_add(width) > start
+            }) {
+                theme.surface_raised
             } else {
                 theme.surface
             });
@@ -2953,7 +2972,7 @@ fn render_output(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, sta
     };
     for (row, line) in snapshot.lines.iter().take(viewport.height).enumerate() {
         let y = inner.y.saturating_add(row as u16);
-        let content = editor_line_spans(line, &snapshot, theme, true);
+        let content = editor_line_spans(line, &snapshot, theme, true, None);
         frame.render_widget(
             Paragraph::new(Line::from(content))
                 .style(Style::new().bg(theme.surface))

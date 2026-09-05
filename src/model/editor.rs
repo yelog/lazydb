@@ -68,6 +68,8 @@ pub struct EditorRenderLine {
     pub spans: Vec<EditorRenderSpan>,
     /// Display-cell offset for every source character boundary, including the end.
     pub source_to_display_cells: Vec<usize>,
+    pub current_statement: bool,
+    pub statement_background_cells: Option<(usize, usize)>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
