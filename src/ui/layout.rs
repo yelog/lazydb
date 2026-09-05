@@ -1,6 +1,6 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
-use crate::model::workspace::{Focus, PaneLayoutMetrics, PaneSizePreferences};
+use crate::model::workspace::{Focus, PaneLayoutMetrics, PaneSizePreferences, PaneSplit};
 
 const MIN_EXPLORER_WIDTH: u16 = 34;
 const MAX_DEFAULT_EXPLORER_WIDTH: u16 = 56;
@@ -187,6 +187,23 @@ impl AppLayout {
             },
         }
     }
+
+    pub fn pane_resize_region(&self, split: PaneSplit) -> Option<Rect> {
+        if !matches!(split, PaneSplit::ExplorerWidth)
+            || !matches!(self.mode, LayoutMode::Standard | LayoutMode::Wide)
+        {
+            return None;
+        }
+        let explorer = self.explorer?;
+        (explorer.height >= 3 && self.tabs.is_some()).then(|| {
+            Rect::new(
+                explorer.right().saturating_sub(1),
+                explorer.y.saturating_add(1),
+                1,
+                explorer.height.saturating_sub(2),
+            )
+        })
+    }
 }
 
 fn explorer_width(area_width: u16, preference: Option<u16>) -> u16 {
@@ -277,6 +294,54 @@ mod tests {
 
         assert_eq!(layout.relation.unwrap().y, layout.tabs.unwrap().bottom());
         assert_eq!(layout.relation.unwrap().x, layout.tabs.unwrap().x);
+    }
+
+    #[test]
+    fn pane_resize_region_tracks_explorer_right_border() {
+        let layout = AppLayout::calculate(
+            Rect::new(7, 3, 120, 36),
+            Focus::Editor,
+            false,
+            PaneSizePreferences::default(),
+            false,
+        );
+        let explorer = layout.explorer.unwrap();
+
+        assert_eq!(
+            layout.pane_resize_region(PaneSplit::ExplorerWidth),
+            Some(Rect::new(
+                explorer.right() - 1,
+                explorer.y + 1,
+                1,
+                explorer.height - 2,
+            ))
+        );
+    }
+
+    #[test]
+    fn pane_resize_region_is_unavailable_when_explorer_is_not_resizable() {
+        for (area, maximized) in [
+            (Rect::new(0, 0, 99, 36), false),
+            (Rect::new(0, 0, 55, 16), false),
+            (Rect::new(0, 0, 120, 36), true),
+        ] {
+            let layout = AppLayout::calculate(
+                area,
+                Focus::Editor,
+                false,
+                PaneSizePreferences::default(),
+                maximized,
+            );
+            assert_eq!(layout.pane_resize_region(PaneSplit::ExplorerWidth), None);
+        }
+        let layout = AppLayout::calculate(
+            Rect::new(0, 0, 120, 36),
+            Focus::Editor,
+            false,
+            PaneSizePreferences::default(),
+            false,
+        );
+        assert_eq!(layout.pane_resize_region(PaneSplit::EditorHeight), None);
     }
 
     #[test]

@@ -8,9 +8,9 @@ use crate::{
         explorer::ExplorerScrollAmount,
         relation::RelationView,
         tab::{GridScrollAmount, WorkspaceTab},
-        workspace::{Focus, Overlay},
+        workspace::{Focus, Overlay, PaneSplit},
     },
-    ui::{HitTarget, ProfileButton, UiState},
+    ui::{HitTarget, PaneResizeDrag, ProfileButton, UiState},
 };
 
 pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
@@ -19,7 +19,11 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
             if app.overlay.is_some() {
                 ui.relation_resize.borrow_mut().take();
                 ui.grid_scrollbar_drag.borrow_mut().take();
+                ui.pane_resize_drag.borrow_mut().take();
                 return None;
+            }
+            if let Some(drag) = *ui.pane_resize_drag.borrow() {
+                return pane_resize_action(drag, event.column, ui, app);
             }
             if let Some(drag) = *ui.grid_scrollbar_drag.borrow() {
                 let travel = drag.track_width.saturating_sub(drag.thumb_width);
@@ -42,6 +46,9 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
             })
         }
         MouseEventKind::Up(MouseButton::Left) => {
+            if let Some(drag) = ui.pane_resize_drag.borrow_mut().take() {
+                return pane_resize_action(drag, event.column, ui, app);
+            }
             ui.relation_resize.borrow_mut().take();
             ui.grid_scrollbar_drag.borrow_mut().take();
             Some(Action::GridEndColumnResize)
@@ -49,6 +56,7 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
         MouseEventKind::Down(MouseButton::Left) => {
             ui.relation_resize.borrow_mut().take();
             ui.grid_scrollbar_drag.borrow_mut().take();
+            ui.pane_resize_drag.borrow_mut().take();
             let Some(target) = ui.target_at(event.column, event.row).cloned() else {
                 ui.clear_click_tracker();
                 return None;
@@ -152,6 +160,22 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                 HitTarget::RelationRetry => Some(Action::RefreshActiveRelation),
                 HitTarget::RelationCancel => Some(Action::CancelActiveRelationRequest),
                 HitTarget::DataQueryInput(input) => Some(Action::FocusDataQueryInput(input)),
+                HitTarget::PaneResize(split) => {
+                    let start_size = match split {
+                        crate::model::workspace::PaneSplit::ExplorerWidth => {
+                            ui.pane_layout.explorer_width
+                        }
+                        crate::model::workspace::PaneSplit::EditorHeight => {
+                            ui.pane_layout.editor_height
+                        }
+                    }?;
+                    *ui.pane_resize_drag.borrow_mut() = Some(PaneResizeDrag {
+                        split,
+                        start_pointer: event.column,
+                        start_size,
+                    });
+                    None
+                }
                 HitTarget::RelationColumnResize { column, width } => {
                     *ui.relation_resize.borrow_mut() = Some((column, width, event.column));
                     Some(Action::GridStartColumnResize { column, width })
@@ -330,6 +354,28 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
     }
 }
 
+fn pane_resize_action(
+    drag: PaneResizeDrag,
+    pointer: u16,
+    ui: &UiState,
+    app: &App,
+) -> Option<Action> {
+    let size = (i32::from(drag.start_size) + i32::from(pointer) - i32::from(drag.start_pointer))
+        .clamp(0, i32::from(u16::MAX)) as u16;
+    let current = match drag.split {
+        crate::model::workspace::PaneSplit::ExplorerWidth => app.pane_sizes.explorer_width,
+        crate::model::workspace::PaneSplit::EditorHeight => app.pane_sizes.editor_height,
+    }
+    .or(match drag.split {
+        crate::model::workspace::PaneSplit::ExplorerWidth => ui.pane_layout.explorer_width,
+        crate::model::workspace::PaneSplit::EditorHeight => ui.pane_layout.editor_height,
+    });
+    (current != Some(size)).then_some(Action::SetPaneSize {
+        split: drag.split,
+        size,
+    })
+}
+
 fn profile_button_action(button: ProfileButton) -> Action {
     match button {
         ProfileButton::Cancel => Action::CloseProfileManager,
@@ -355,6 +401,8 @@ fn focus_at(ui: &UiState, column: u16, row: u16) -> Option<Focus> {
         | HitTarget::RelationColumnResize { .. }
         | HitTarget::GridScrollbarThumb { .. }
         | HitTarget::GridScrollbarPage { .. } => Some(Focus::Results),
+        HitTarget::PaneResize(PaneSplit::ExplorerWidth) => Some(Focus::Explorer),
+        HitTarget::PaneResize(PaneSplit::EditorHeight) => Some(Focus::Editor),
         HitTarget::RelationCancel => Some(Focus::Results),
         HitTarget::Tab(_)
         | HitTarget::TabScrollLeft(_)

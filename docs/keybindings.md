@@ -515,8 +515,13 @@ the drop, and Esc cancels. Printable `y` and `Y` are text input, not shortcuts.
 Left click focuses panels, activates tabs, selects Explorer rows and grid cells,
 and toggles view selectors. Wheel scrolling affects the panel under the pointer.
 Relation DDL scrolls vertically; Relation Data scrolls the grid. Mouse/paste/
-resize/focus events clear pending key sequences. Use `--mouse off` for terminal
- native selection behavior.
+resize/focus events clear pending key sequences; plain pointer movement does not.
+When the Explorer and a main pane are both visible, drag the Explorer's right
+border to change its width. The existing minimum Explorer and right-pane widths
+still apply, and a click without moving the pointer does not save a new width.
+The last applied width is retained if the drag is cancelled by focus loss,
+terminal resize, or a modal. Use `Ctrl-w` followed by `=` to restore automatic
+pane sizes. Use `--mouse off` for terminal native selection behavior.
 
 ## Update Center
 
