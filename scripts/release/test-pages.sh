@@ -1,5 +1,7 @@
 #!/bin/sh
 set -eu
+LC_ALL=C
+export LC_ALL
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
@@ -37,9 +39,9 @@ cmp "$TMP/output/channels/stable.json" "$TMP/output-again/channels/stable.json"
 [ "$(grep -c 'set -eu' "$TMP/output/install.sh")" -eq 1 ]
 [ "$(grep -c 'LAZYDB_CHANNEL_LOCKED=stable' "$TMP/output/install.sh")" -eq 1 ]
 [ "$(grep -c 'LAZYDB_CHANNEL_LOCKED=beta' "$TMP/output/install-beta.sh")" -eq 1 ]
-[ "$(find "$TMP/output" -type f | sort | sed "s#^$TMP/output/##")" = "channels/beta.json
+[ "$(find "$TMP/output" -type f | sort | sed "s#^$TMP/output/##")" = "CNAME
+channels/beta.json
 channels/stable.json
-CNAME
 install-beta.sh
 install-core.sh
 install.ps1
