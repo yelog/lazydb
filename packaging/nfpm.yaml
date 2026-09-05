@@ -8,6 +8,7 @@ license: "MIT OR Apache-2.0"
 contents:
   - src: "${NFPM_BINARY}"
     dst: /usr/bin/lazydb
+    expand: true
   - src: LICENSE-MIT
     dst: /usr/share/licenses/lazydb/LICENSE-MIT
   - src: LICENSE-APACHE
