@@ -77,6 +77,231 @@ fn table_new_column_is_inserted_only_when_details_are_confirmed() {
 }
 
 #[test]
+fn table_change_summary_ignores_focus_and_text_cursor_changes() {
+    let mut draft = TableDraft::new("public");
+    draft.name = "events".into();
+    draft.owner = "postgres".into();
+    draft.columns[0].name = "id".into();
+    draft.columns[0].existing_name = Some("id".into());
+    draft.columns[0].state = DraftRowState::Existing {
+        id: lazydb::db::catalog::CatalogId::new(
+            profile(),
+            lazydb::db::catalog::CatalogKind::Column,
+            ["id"],
+        ),
+    };
+    let baseline = lazydb::db::catalog_mutation::TableDefinition {
+        database: "app".into(),
+        schema: "public".into(),
+        name: "events".into(),
+        owner: "postgres".into(),
+        comment: lazydb::db::catalog::OptionalMetadata::Supported(None),
+        columns: vec![lazydb::db::catalog_mutation::ColumnDefinition {
+            name: "id".into(),
+            ordinal_position: 1,
+            native_type: "text".into(),
+            nullable: true,
+            default_expression: lazydb::db::catalog::OptionalMetadata::Supported(None),
+            identity: lazydb::db::catalog::OptionalMetadata::Supported(Some(false)),
+            generated_expression: lazydb::db::catalog::OptionalMetadata::Supported(None),
+            collation: lazydb::db::catalog::OptionalMetadata::Supported(None),
+            comment: lazydb::db::catalog::OptionalMetadata::Supported(None),
+        }],
+        indexes: vec![],
+        constraints: vec![],
+        baseline_fingerprint: "baseline".into(),
+    };
+
+    draft.focus = TableEditorFocus::Columns;
+    draft.selected_column = 0;
+    assert!(!draft.is_dirty_against(Some(&baseline)));
+    assert_eq!(draft.change_summary(Some(&baseline)).modified_columns, 0);
+}
+
+#[test]
+fn table_change_summary_counts_added_modified_and_removed_columns() {
+    let mut draft = TableDraft::new("public");
+    draft.name = "events".into();
+    draft.columns[0].name = "id".into();
+    draft.columns[0].state = DraftRowState::Existing {
+        id: lazydb::db::catalog::CatalogId::new(
+            profile(),
+            lazydb::db::catalog::CatalogKind::Column,
+            ["id"],
+        ),
+    };
+    draft.columns[0].existing_name = Some("id".into());
+    let mut added = lazydb::model::catalog_editor::ColumnDraft::new_added();
+    added.name = "name".into();
+    draft.columns.push(added);
+    let mut removed = lazydb::model::catalog_editor::ColumnDraft::new_added();
+    removed.name = "legacy".into();
+    removed.state = DraftRowState::Removed {
+        id: lazydb::db::catalog::CatalogId::new(
+            profile(),
+            lazydb::db::catalog::CatalogKind::Column,
+            ["legacy"],
+        ),
+    };
+    draft.columns.push(removed);
+
+    let mut baseline = lazydb::db::catalog_mutation::TableDefinition {
+        database: "app".into(),
+        schema: "public".into(),
+        name: "events".into(),
+        owner: "postgres".into(),
+        comment: lazydb::db::catalog::OptionalMetadata::Supported(None),
+        columns: vec![],
+        indexes: vec![],
+        constraints: vec![],
+        baseline_fingerprint: "baseline".into(),
+    };
+    baseline.columns = vec![lazydb::db::catalog_mutation::ColumnDefinition {
+        name: "id".into(),
+        ordinal_position: 1,
+        native_type: "integer".into(),
+        nullable: true,
+        default_expression: lazydb::db::catalog::OptionalMetadata::Supported(None),
+        identity: lazydb::db::catalog::OptionalMetadata::Supported(Some(false)),
+        generated_expression: lazydb::db::catalog::OptionalMetadata::Supported(None),
+        collation: lazydb::db::catalog::OptionalMetadata::Supported(None),
+        comment: lazydb::db::catalog::OptionalMetadata::Supported(None),
+    }];
+
+    let summary = draft.change_summary(Some(&baseline));
+    assert_eq!(summary.added_columns, 1);
+    assert_eq!(summary.modified_columns, 1);
+    assert_eq!(summary.removed_columns, 1);
+    assert!(summary.is_dirty());
+}
+
+#[test]
+fn table_change_summary_counts_index_and_constraint_changes_as_property_changes() {
+    let mut draft = TableDraft::new("public");
+    draft.indexes.push("CREATE INDEX events_id_idx".into());
+    draft.constraints.push("PRIMARY KEY (id)".into());
+
+    let baseline = lazydb::db::catalog_mutation::TableDefinition {
+        database: "app".into(),
+        schema: "public".into(),
+        name: "events".into(),
+        owner: "postgres".into(),
+        comment: lazydb::db::catalog::OptionalMetadata::Supported(None),
+        columns: vec![],
+        indexes: vec![],
+        constraints: vec![],
+        baseline_fingerprint: "baseline".into(),
+    };
+
+    let summary = draft.change_summary(Some(&baseline));
+    assert!(summary.properties_changed);
+    assert!(summary.is_dirty());
+}
+
+#[test]
+fn table_remove_protects_last_effective_column_and_restores_existing_columns() {
+    let mut draft = TableDraft::new("public");
+    draft.columns[0].name = "id".into();
+    draft.columns[0].existing_name = Some("id".into());
+    draft.columns[0].state = DraftRowState::Existing {
+        id: lazydb::db::catalog::CatalogId::new(
+            profile(),
+            lazydb::db::catalog::CatalogKind::Column,
+            ["id"],
+        ),
+    };
+    draft.remove_selected_column();
+    assert!(matches!(
+        draft.columns[0].state,
+        DraftRowState::Existing { .. }
+    ));
+
+    let mut name = lazydb::model::catalog_editor::ColumnDraft::new_added();
+    name.name = "name".into();
+    draft.columns.push(name);
+    draft.selected_column = 0;
+    draft.remove_selected_column();
+    assert!(draft.selected_column_is_removed());
+    assert!(draft.restore_selected_column());
+    assert!(matches!(
+        draft.columns[0].state,
+        DraftRowState::Existing { .. }
+    ));
+}
+
+#[test]
+fn table_remove_drops_unconfirmed_added_column_without_resetting_other_rows() {
+    let mut draft = TableDraft::new("public");
+    draft.columns[0].name = "id".into();
+    let mut added = lazydb::model::catalog_editor::ColumnDraft::new_added();
+    added.name = "name".into();
+    draft.columns.push(added);
+    draft.selected_column = 1;
+    draft.remove_selected_column();
+    assert_eq!(draft.columns.len(), 1);
+    assert_eq!(draft.columns[0].name.value(), "id");
+}
+
+#[test]
+fn table_column_details_validation_rejects_blank_duplicate_and_conflicting_values() {
+    let mut draft = TableDraft::new("public");
+    draft.columns[0].name = "id".into();
+    draft.begin_add_column_below();
+
+    assert_eq!(
+        draft.validate_column_details(),
+        Some((TableColumnField::Name, "column name is required".into()))
+    );
+    draft.insert('i');
+    draft.insert('d');
+    assert_eq!(
+        draft.validate_column_details(),
+        Some((TableColumnField::Name, "column names must be unique".into()))
+    );
+    draft.insert('2');
+    draft.focus = TableEditorFocus::ColumnDetails(TableColumnField::Type);
+    draft
+        .column_editor
+        .as_mut()
+        .unwrap()
+        .draft
+        .native_type
+        .clear();
+    assert_eq!(
+        draft.validate_column_details(),
+        Some((TableColumnField::Type, "column type is required".into()))
+    );
+    draft.insert('t');
+    draft.focus = TableEditorFocus::ColumnDetails(TableColumnField::Default);
+    draft.insert('1');
+    draft.focus = TableEditorFocus::ColumnDetails(TableColumnField::Identity);
+    draft.toggle_selected_column_identity();
+    assert_eq!(
+        draft.validate_column_details(),
+        Some((
+            TableColumnField::Identity,
+            "identity cannot have a default; clear Default first".into()
+        ))
+    );
+}
+
+#[test]
+fn catalog_editor_exposes_table_summary_against_table_baseline() {
+    let mut editor = state();
+    let mut draft = TableDraft::new("public");
+    draft.name = "events".into();
+    draft.owner = "postgres".into();
+    draft.columns[0].name = "id".into();
+    editor.object_type = Some(CatalogObjectType::Catalog(
+        lazydb::db::catalog::CatalogKind::Table,
+    ));
+    editor.page = CatalogEditorPage::Form;
+    editor.draft = Some(CatalogDraft::Table(draft));
+
+    assert_eq!(editor.table_change_summary().unwrap().added_columns, 1);
+}
+
+#[test]
 fn database_draft_keeps_creation_options_display_only_after_loading() {
     let definition = lazydb::db::catalog_mutation::DatabaseDefinition {
         name: "app".into(),
@@ -219,13 +444,13 @@ fn table_full_general_navigation_is_reversible() {
 }
 
 #[test]
-fn table_column_navigation_crosses_region_boundaries() {
+fn table_column_focus_is_a_single_stop_and_rows_move_separately() {
     let mut draft = TableDraft::new("public");
     draft.begin_add_column_below();
     assert!(draft.confirm_column_details());
     draft.focus = TableEditorFocus::Columns;
     draft.selected_column = 0;
-    draft.focus_next();
+    draft.move_column(1);
     assert_eq!(draft.selected_column, 1);
     assert_eq!(draft.focus, TableEditorFocus::Columns);
     draft.focus_next();
@@ -245,7 +470,7 @@ fn table_columns_move_between_existing_columns_before_general_or_add() {
     assert!(draft.confirm_column_details());
     draft.focus = TableEditorFocus::Columns;
 
-    draft.focus_previous();
+    draft.move_column(-1);
     assert_eq!(draft.selected_column, 0);
     assert_eq!(draft.focus, TableEditorFocus::Columns);
     draft.focus_previous();
@@ -256,7 +481,7 @@ fn table_columns_move_between_existing_columns_before_general_or_add() {
 
     draft.focus = TableEditorFocus::Columns;
     draft.selected_column = 0;
-    draft.focus_next();
+    draft.move_column(1);
     assert_eq!(draft.selected_column, 1);
     assert_eq!(draft.focus, TableEditorFocus::Columns);
     draft.focus_next();
@@ -734,8 +959,8 @@ fn table_draft_validates_columns_and_keeps_one_row_on_remove() {
     assert!(draft.validate().is_ok());
     draft.remove_selected_column();
     assert_eq!(draft.columns.len(), 1);
-    assert_eq!(draft.columns[0].name.value(), "");
-    assert!(draft.validate().is_err());
+    assert_eq!(draft.columns[0].name.value(), "id");
+    assert!(draft.validate().is_ok());
 }
 
 #[test]
@@ -1028,6 +1253,16 @@ fn form_preview_apply_and_cancel_transitions() {
 
     let editor = state();
     assert!(editor.cancel());
+}
+
+#[test]
+fn catalog_preview_scroll_is_bounded_and_resets_when_a_plan_arrives() {
+    let mut editor = state();
+    editor.preview_scroll = 12;
+    editor.scroll_preview(5, 3);
+    assert_eq!(editor.preview_scroll, 3);
+    editor.preview_home();
+    assert_eq!(editor.preview_scroll, 0);
 }
 
 #[test]

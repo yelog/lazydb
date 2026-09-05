@@ -263,6 +263,7 @@ pub enum TableColumnEditTarget {
 pub struct TableColumnEditSession {
     pub target: TableColumnEditTarget,
     pub draft: ColumnDraft,
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -489,6 +490,23 @@ pub struct TableDraft {
     pub column_editor: Option<TableColumnEditSession>,
     pub indexes: Vec<String>,
     pub constraints: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TableChangeSummary {
+    pub properties_changed: bool,
+    pub added_columns: usize,
+    pub modified_columns: usize,
+    pub removed_columns: usize,
+}
+
+impl TableChangeSummary {
+    pub fn is_dirty(self) -> bool {
+        self.properties_changed
+            || self.added_columns > 0
+            || self.modified_columns > 0
+            || self.removed_columns > 0
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1541,6 +1559,100 @@ impl TableDraft {
         Ok(())
     }
 
+    pub fn create_change_summary(&self) -> TableChangeSummary {
+        let properties_changed = !self.name.value().is_empty()
+            || self.owner.value() != ""
+            || !self.comment.value().is_empty()
+            || !self.indexes.is_empty()
+            || !self.constraints.is_empty();
+        let mut summary = TableChangeSummary {
+            properties_changed,
+            ..TableChangeSummary::default()
+        };
+        for column in &self.columns {
+            match column.state {
+                DraftRowState::Added => {
+                    if !is_empty_added_column(column) {
+                        summary.added_columns += 1;
+                    }
+                }
+                DraftRowState::Existing { .. } | DraftRowState::Removed { .. } => {}
+            }
+        }
+        summary
+    }
+
+    pub fn change_summary(
+        &self,
+        baseline: Option<&crate::db::catalog_mutation::TableDefinition>,
+    ) -> TableChangeSummary {
+        let Some(baseline) = baseline else {
+            return self.create_change_summary();
+        };
+        let baseline_columns = baseline
+            .columns
+            .iter()
+            .map(|column| {
+                (
+                    column.name.as_str(),
+                    column_signature(
+                        &column.name,
+                        &column.native_type,
+                        column.nullable,
+                        optional_string(&column.default_expression),
+                        optional_bool(&column.identity),
+                        optional_string(&column.generated_expression),
+                        optional_string(&column.collation),
+                        optional_string(&column.comment),
+                    ),
+                )
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        let mut summary = TableChangeSummary {
+            properties_changed: self.name.value() != baseline.name
+                || self.schema.value() != baseline.schema
+                || self.owner.value() != baseline.owner
+                || self.comment.value() != optional_string(&baseline.comment)
+                || self.indexes != baseline.indexes
+                || self.constraints != baseline.constraints,
+            ..TableChangeSummary::default()
+        };
+        for column in &self.columns {
+            match &column.state {
+                DraftRowState::Added => summary.added_columns += 1,
+                DraftRowState::Removed { .. } => summary.removed_columns += 1,
+                DraftRowState::Existing { .. } => {
+                    let original = column
+                        .existing_name
+                        .as_deref()
+                        .unwrap_or(column.name.value());
+                    let before = baseline_columns.get(original).copied();
+                    let after = column_signature(
+                        column.name.value(),
+                        column.native_type.value(),
+                        column.nullable,
+                        column.default_expression.value(),
+                        column.identity,
+                        column.generated_expression.value(),
+                        column.collation.value(),
+                        column.comment.value(),
+                    );
+                    if before != Some(after) {
+                        summary.modified_columns += 1;
+                    }
+                }
+            }
+        }
+        summary
+    }
+
+    pub fn is_dirty_against(
+        &self,
+        baseline: Option<&crate::db::catalog_mutation::TableDefinition>,
+    ) -> bool {
+        self.change_summary(baseline).is_dirty()
+    }
+
     pub fn validation_focus(&self) -> Option<(Option<usize>, TableEditorFocus, String)> {
         if self.name.value().trim().is_empty() {
             return Some((
@@ -1618,14 +1730,7 @@ impl TableDraft {
                 TableEditorFocus::General(TableGeneralField::Comment)
             }
             TableEditorFocus::General(TableGeneralField::Comment) => TableEditorFocus::Columns,
-            TableEditorFocus::Columns => {
-                if self.selected_column + 1 < self.columns.len() {
-                    self.selected_column += 1;
-                    TableEditorFocus::Columns
-                } else {
-                    TableEditorFocus::Action(TableActionField::AddColumn)
-                }
-            }
+            TableEditorFocus::Columns => TableEditorFocus::Action(TableActionField::AddColumn),
             TableEditorFocus::ColumnDetails(TableColumnField::Name) => {
                 TableEditorFocus::ColumnDetails(TableColumnField::Type)
             }
@@ -1673,14 +1778,7 @@ impl TableDraft {
             TableEditorFocus::General(TableGeneralField::Comment) => {
                 TableEditorFocus::General(TableGeneralField::Owner)
             }
-            TableEditorFocus::Columns => {
-                if self.selected_column > 0 {
-                    self.selected_column -= 1;
-                    TableEditorFocus::Columns
-                } else {
-                    TableEditorFocus::General(TableGeneralField::Comment)
-                }
-            }
+            TableEditorFocus::Columns => TableEditorFocus::General(TableGeneralField::Comment),
             TableEditorFocus::ColumnDetails(TableColumnField::Name) => {
                 if self.column_editor.is_some() {
                     TableEditorFocus::ColumnDetails(TableColumnField::Identity)
@@ -1728,6 +1826,7 @@ impl TableDraft {
                 index: self.selected_column,
             },
             draft: column,
+            error: None,
         });
         self.focus = TableEditorFocus::ColumnDetails(TableColumnField::Name);
         true
@@ -1752,6 +1851,7 @@ impl TableDraft {
         self.column_editor = Some(TableColumnEditSession {
             target: TableColumnEditTarget::New { insert_at },
             draft: column,
+            error: None,
         });
         self.focus = TableEditorFocus::ColumnDetails(TableColumnField::Name);
     }
@@ -1777,6 +1877,35 @@ impl TableDraft {
         }
         self.focus = TableEditorFocus::Columns;
         true
+    }
+
+    pub fn validate_column_details(&self) -> Option<(TableColumnField, String)> {
+        let session = self.column_editor.as_ref()?;
+        let column = &session.draft;
+        if column.name.value().trim().is_empty() {
+            return Some((TableColumnField::Name, "column name is required".into()));
+        }
+        if column.native_type.value().trim().is_empty() {
+            return Some((TableColumnField::Type, "column type is required".into()));
+        }
+        let target_index = match session.target {
+            TableColumnEditTarget::Existing { index } => Some(index),
+            TableColumnEditTarget::New { .. } => None,
+        };
+        if self.columns.iter().enumerate().any(|(index, existing)| {
+            Some(index) != target_index
+                && !matches!(existing.state, DraftRowState::Removed { .. })
+                && existing.name.value().trim() == column.name.value().trim()
+        }) {
+            return Some((TableColumnField::Name, "column names must be unique".into()));
+        }
+        if column.identity && !column.default_expression.value().trim().is_empty() {
+            return Some((
+                TableColumnField::Identity,
+                "identity cannot have a default; clear Default first".into(),
+            ));
+        }
+        None
     }
 
     pub fn cancel_column_details(&mut self) {
@@ -1805,9 +1934,16 @@ impl TableDraft {
     }
 
     pub fn remove_selected_column(&mut self) {
-        if self.columns.len() == 1 {
-            self.columns[0] = ColumnDraft::new_added();
-            self.selected_column = 0;
+        if self.columns.get(self.selected_column).is_none() {
+            return;
+        }
+        if self
+            .columns
+            .iter()
+            .filter(|column| !matches!(column.state, DraftRowState::Removed { .. }))
+            .count()
+            <= 1
+        {
             self.focus = TableEditorFocus::Columns;
             return;
         }
@@ -1827,6 +1963,23 @@ impl TableDraft {
         self.focus = TableEditorFocus::Columns;
     }
 
+    pub fn restore_selected_column(&mut self) -> bool {
+        let Some(column) = self.columns.get_mut(self.selected_column) else {
+            return false;
+        };
+        let DraftRowState::Removed { id } = &column.state else {
+            return false;
+        };
+        column.state = DraftRowState::Existing { id: id.clone() };
+        self.focus = TableEditorFocus::Columns;
+        true
+    }
+
+    pub fn selected_column_is_removed(&self) -> bool {
+        self.selected_column()
+            .is_some_and(|column| matches!(column.state, DraftRowState::Removed { .. }))
+    }
+
     pub fn toggle_selected_column_nullable(&mut self) {
         if let Some(column) = self
             .column_editor
@@ -1844,9 +1997,6 @@ impl TableDraft {
             .map(|session| &mut session.draft)
         {
             column.identity = !column.identity;
-            if column.identity {
-                column.default_expression.set("");
-            }
         }
     }
 
@@ -1953,6 +2103,66 @@ impl TableDraft {
             input.finish_edit_group();
         }
     }
+}
+
+fn optional_string(value: &crate::db::catalog::OptionalMetadata<String>) -> &str {
+    match value {
+        crate::db::catalog::OptionalMetadata::Supported(Some(value)) => value,
+        _ => "",
+    }
+}
+
+fn optional_bool(value: &crate::db::catalog::OptionalMetadata<bool>) -> bool {
+    matches!(
+        value,
+        crate::db::catalog::OptionalMetadata::Supported(Some(true))
+    )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ColumnSignature<'a> {
+    name: &'a str,
+    native_type: &'a str,
+    nullable: bool,
+    default_expression: &'a str,
+    identity: bool,
+    generated_expression: &'a str,
+    collation: &'a str,
+    comment: &'a str,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn column_signature<'a>(
+    name: &'a str,
+    native_type: &'a str,
+    nullable: bool,
+    default_expression: &'a str,
+    identity: bool,
+    generated_expression: &'a str,
+    collation: &'a str,
+    comment: &'a str,
+) -> ColumnSignature<'a> {
+    ColumnSignature {
+        name,
+        native_type,
+        nullable,
+        default_expression,
+        identity,
+        generated_expression,
+        collation,
+        comment,
+    }
+}
+
+fn is_empty_added_column(column: &ColumnDraft) -> bool {
+    column.name.value().is_empty()
+        && column.native_type.value() == "text"
+        && column.nullable
+        && column.default_expression.value().is_empty()
+        && !column.identity
+        && column.generated_expression.value().is_empty()
+        && column.collation.value().is_empty()
+        && column.comment.value().is_empty()
 }
 
 impl ColumnDraft {
@@ -2458,6 +2668,7 @@ pub struct CatalogEditorState {
     pub plan: Option<CatalogMutationPlan>,
     pub error: Option<String>,
     pub owner_picker: OwnerPickerState,
+    pub preview_scroll: usize,
 }
 
 impl CatalogEditorState {
@@ -2491,11 +2702,24 @@ impl CatalogEditorState {
             plan: None,
             error: None,
             owner_picker: OwnerPickerState::default(),
+            preview_scroll: 0,
         }
     }
 
     pub fn is_busy(&self) -> bool {
         self.operation.is_some()
+    }
+
+    pub fn table_change_summary(&self) -> Option<TableChangeSummary> {
+        let (CatalogDraft::Table(draft), baseline) = (self.draft.as_ref()?, self.baseline.as_ref())
+        else {
+            return None;
+        };
+        let baseline = match baseline {
+            Some(CatalogObjectDefinition::Table(definition)) => Some(definition),
+            _ => None,
+        };
+        Some(draft.change_summary(baseline))
     }
 
     /// True when a catalog form focuses the owner field, which the owner picker owns.
@@ -2753,6 +2977,23 @@ impl CatalogEditorState {
         true
     }
 
+    pub fn scroll_preview(&mut self, delta: isize, max_offset: usize) {
+        let next = if delta < 0 {
+            self.preview_scroll.saturating_sub(delta.unsigned_abs())
+        } else {
+            self.preview_scroll.saturating_add(delta as usize)
+        };
+        self.preview_scroll = next.min(max_offset);
+    }
+
+    pub fn preview_home(&mut self) {
+        self.preview_scroll = 0;
+    }
+
+    pub fn preview_end(&mut self, max_offset: usize) {
+        self.preview_scroll = max_offset;
+    }
+
     pub fn planning_failed(&mut self, request_id: u64, message: impl Into<String>) -> bool {
         if self.operation != Some(CatalogEditorOperation::Planning { request_id }) {
             return false;
@@ -2772,6 +3013,7 @@ impl CatalogEditorState {
         }
         self.operation = None;
         self.plan = Some(plan);
+        self.preview_scroll = 0;
         self.page = CatalogEditorPage::SqlPreview;
         true
     }

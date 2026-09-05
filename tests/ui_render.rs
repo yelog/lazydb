@@ -382,7 +382,7 @@ fn catalog_preview_keeps_sql_and_footer_visible_around_sanitized_failure() {
         anchor,
         object_type: Some(CatalogObjectType::Catalog(CatalogKind::Schema)),
         page: CatalogEditorPage::SqlPreview,
-        operation: Some(CatalogEditorOperation::Applying { request_id: 9 }),
+        operation: None,
         catalog_epoch: 0,
         options: vec![CatalogMutationOption {
             object_type: CatalogObjectType::Catalog(CatalogKind::Schema),
@@ -394,17 +394,19 @@ fn catalog_preview_keeps_sql_and_footer_visible_around_sanitized_failure() {
         plan: Some(plan),
         error: Some("database denied\nsecret".into()),
         owner_picker: Default::default(),
+        preview_scroll: 0,
     });
     app.overlay = Some(Overlay::CatalogEditor);
 
     let output = render(&app, 100, 20);
     assert!(output.contains("CREATE SCHEMA events"), "{output}");
+    assert!(output.contains("SQL PREVIEW"), "{output}");
     assert!(output.contains("target: appsecret"), "{output}");
     assert!(!output.contains("target: app\nsecret"), "{output}");
-    assert!(output.contains("Applying..."), "{output}");
+    assert!(!output.contains("Applying changes..."), "{output}");
     assert!(output.contains("database deniedsecret"), "{output}");
-    assert!(!output.contains("Enter apply"), "{output}");
-    assert!(output.contains("Esc cancel"), "{output}");
+    assert!(output.contains("Enter apply"), "{output}");
+    assert!(output.contains("Esc return to form"), "{output}");
     assert!(!output.contains("\nsecret"), "{output}");
 }
 
@@ -483,11 +485,28 @@ fn catalog_editor_busy_renders_real_cancel_control() {
     app.catalog_editor.as_mut().unwrap().begin_loading(1);
     app.overlay = Some(Overlay::CatalogEditor);
     let output = render(&app, 100, 30);
-    assert!(output.contains("Esc cancels"), "{output}");
+    assert!(output.contains("Please wait..."), "{output}");
     assert!(output.contains("Esc cancel"), "{output}");
     app.update(Action::CatalogEditorCancel);
     assert!(app.catalog_editor.is_none());
     assert!(app.overlay.is_none());
+
+    let mut app = App::new(vec![]);
+    app.catalog_editor = Some(lazydb::model::catalog_editor::CatalogEditorState::new(
+        lazydb::db::catalog_mutation::CatalogMutationMode::Create,
+        lazydb::db::catalog_mutation::CatalogMutationAnchor::Profile {
+            profile_id: uuid::Uuid::nil(),
+        },
+        0,
+        vec![],
+    ));
+    app.catalog_editor.as_mut().unwrap().operation =
+        Some(CatalogEditorOperation::Applying { request_id: 1 });
+    app.catalog_editor.as_mut().unwrap().page = CatalogEditorPage::Loading;
+    app.overlay = Some(Overlay::CatalogEditor);
+    let output = render(&app, 100, 30);
+    assert!(output.contains("schema mutation is running"), "{output}");
+    assert!(output.contains("Esc wait for completion"), "{output}");
 }
 
 #[test]
@@ -512,6 +531,7 @@ fn role_editor_renders_secret_as_status_only() {
         plan: None,
         error: None,
         owner_picker: Default::default(),
+        preview_scroll: 0,
     });
     app.overlay = Some(Overlay::CatalogEditor);
     let output = render(&app, 100, 30);
@@ -539,6 +559,7 @@ fn table_editor_renders_general_and_columns_sections() {
         plan: None,
         error: None,
         owner_picker: Default::default(),
+        preview_scroll: 0,
         draft: Some(lazydb::model::catalog_editor::CatalogDraft::Table(
             lazydb::model::catalog_editor::TableDraft {
                 name: "events".into(),
@@ -571,6 +592,219 @@ fn table_editor_renders_general_and_columns_sections() {
 }
 
 #[test]
+fn table_editor_baseline_hit_regions_stay_inside_the_rendered_window() {
+    let mut app = App::new(Vec::new());
+    app.catalog_editor = Some(lazydb::model::catalog_editor::CatalogEditorState {
+        mode: CatalogMutationMode::Create,
+        anchor: CatalogMutationAnchor::Profile {
+            profile_id: uuid::Uuid::nil(),
+        },
+        object_type: Some(CatalogObjectType::Catalog(CatalogKind::Table)),
+        page: CatalogEditorPage::Form,
+        operation: None,
+        catalog_epoch: 0,
+        options: vec![],
+        selected_option: 0,
+        baseline: None,
+        plan: None,
+        error: None,
+        owner_picker: Default::default(),
+        preview_scroll: 0,
+        draft: Some(lazydb::model::catalog_editor::CatalogDraft::Table(
+            lazydb::model::catalog_editor::TableDraft::new("public"),
+        )),
+    });
+    app.overlay = Some(Overlay::CatalogEditor);
+
+    for (width, height) in [(56, 16), (80, 24), (100, 30)] {
+        let (buffer, state) = render_buffer_with_icons(&app, width, height, IconSet::default());
+        let window = buffer.area;
+        assert!(state.hit_regions.iter().all(|region| {
+            region.area.x >= window.x
+                && region.area.y >= window.y
+                && region.area.right() <= window.right()
+                && region.area.bottom() <= window.bottom()
+        }));
+    }
+}
+
+#[test]
+fn table_editor_baseline_column_rows_are_disjoint_and_selectable() {
+    let mut app = App::new(Vec::new());
+    let mut draft = lazydb::model::catalog_editor::TableDraft::new("public");
+    draft.columns = (0..4)
+        .map(|index| {
+            let mut column = lazydb::model::catalog_editor::ColumnDraft::new_added();
+            column.name = format!("column_{index}").into();
+            column
+        })
+        .collect();
+    draft.selected_column = 2;
+    draft.focus = lazydb::model::catalog_editor::TableEditorFocus::Columns;
+    app.catalog_editor = Some(lazydb::model::catalog_editor::CatalogEditorState {
+        mode: CatalogMutationMode::Create,
+        anchor: CatalogMutationAnchor::Profile {
+            profile_id: uuid::Uuid::nil(),
+        },
+        object_type: Some(CatalogObjectType::Catalog(CatalogKind::Table)),
+        page: CatalogEditorPage::Form,
+        operation: None,
+        catalog_epoch: 0,
+        options: vec![],
+        selected_option: 0,
+        baseline: None,
+        plan: None,
+        error: None,
+        owner_picker: Default::default(),
+        preview_scroll: 0,
+        draft: Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)),
+    });
+    app.overlay = Some(Overlay::CatalogEditor);
+
+    let (buffer, state) = render_buffer_with_icons(&app, 100, 30, IconSet::default());
+    let rows = state
+        .hit_regions
+        .iter()
+        .filter_map(|region| match region.target {
+            HitTarget::CatalogEditorTableColumn(_) => Some(region.area),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 4);
+    assert!(rows.windows(2).all(|pair| pair[0].bottom() <= pair[1].y));
+    assert!(rows.iter().all(|row| {
+        row.x >= buffer.area.x
+            && row.y >= buffer.area.y
+            && row.right() <= buffer.area.right()
+            && row.bottom() <= buffer.area.bottom()
+    }));
+}
+
+#[test]
+fn table_editor_discard_confirmation_renders_both_choices_and_hit_regions() {
+    let mut app = App::new(Vec::new());
+    app.overlay = Some(Overlay::CatalogEditorDiscardConfirm {
+        focus: lazydb::model::workspace::CatalogEditorDiscardFocus::KeepEditing,
+    });
+
+    let (buffer, state) = render_buffer_with_icons(&app, 80, 24, IconSet::default());
+    let mut output = String::new();
+    for y in 0..buffer.area.height {
+        for x in 0..buffer.area.width {
+            output.push_str(buffer[(x, y)].symbol());
+        }
+    }
+    assert!(output.contains("Discard unsaved table changes?"));
+    assert!(output.contains("Keep Editing"));
+    assert!(output.contains("Discard Changes"));
+    assert!(
+        state
+            .hit_regions
+            .iter()
+            .any(|region| { region.target == HitTarget::CatalogEditorDiscardKeepEditing })
+    );
+    assert!(
+        state
+            .hit_regions
+            .iter()
+            .any(|region| { region.target == HitTarget::CatalogEditorDiscardChanges })
+    );
+}
+
+#[test]
+fn table_editor_marks_removed_columns_and_exposes_restore_action() {
+    let mut app = App::new(Vec::new());
+    let mut draft = lazydb::model::catalog_editor::TableDraft::new("public");
+    draft.columns[0].name = "id".into();
+    draft.columns[0].state = lazydb::model::catalog_editor::DraftRowState::Removed {
+        id: CatalogId::new(uuid::Uuid::nil(), CatalogKind::Column, ["id"]),
+    };
+    draft.columns.push({
+        let mut column = lazydb::model::catalog_editor::ColumnDraft::new_added();
+        column.name = "name".into();
+        column
+    });
+    draft.selected_column = 0;
+    draft.focus = lazydb::model::catalog_editor::TableEditorFocus::Columns;
+    app.catalog_editor = Some(lazydb::model::catalog_editor::CatalogEditorState {
+        mode: CatalogMutationMode::Create,
+        anchor: CatalogMutationAnchor::Profile {
+            profile_id: uuid::Uuid::nil(),
+        },
+        object_type: Some(CatalogObjectType::Catalog(CatalogKind::Table)),
+        page: CatalogEditorPage::Form,
+        operation: None,
+        catalog_epoch: 0,
+        options: vec![],
+        selected_option: 0,
+        baseline: None,
+        plan: None,
+        error: None,
+        owner_picker: Default::default(),
+        preview_scroll: 0,
+        draft: Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)),
+    });
+    app.overlay = Some(Overlay::CatalogEditor);
+
+    let (buffer, state) = render_buffer_with_icons(&app, 100, 30, IconSet::default());
+    let mut output = String::new();
+    for y in 0..buffer.area.height {
+        for x in 0..buffer.area.width {
+            output.push_str(buffer[(x, y)].symbol());
+        }
+    }
+    assert!(output.contains("REMOVED"), "{output}");
+    assert!(output.contains("Restore Column"), "{output}");
+    assert!(
+        state
+            .hit_regions
+            .iter()
+            .any(|region| { region.target == HitTarget::CatalogEditorRestoreTableColumn })
+    );
+}
+
+#[test]
+fn table_editor_column_list_has_headers_and_bounds_wide_values() {
+    let mut app = App::new(Vec::new());
+    let mut draft = lazydb::model::catalog_editor::TableDraft::new("public");
+    draft.name = "events".into();
+    draft.columns[0].name = "用户活动记录名称非常长".into();
+    draft.columns[0].native_type = "character varying(4096) with custom metadata".into();
+    draft.focus = lazydb::model::catalog_editor::TableEditorFocus::Columns;
+    app.catalog_editor = Some(lazydb::model::catalog_editor::CatalogEditorState {
+        mode: CatalogMutationMode::Create,
+        anchor: CatalogMutationAnchor::Profile {
+            profile_id: uuid::Uuid::nil(),
+        },
+        object_type: Some(CatalogObjectType::Catalog(CatalogKind::Table)),
+        page: CatalogEditorPage::Form,
+        operation: None,
+        catalog_epoch: 0,
+        options: vec![],
+        selected_option: 0,
+        baseline: None,
+        plan: None,
+        error: None,
+        owner_picker: Default::default(),
+        preview_scroll: 0,
+        draft: Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)),
+    });
+    app.overlay = Some(Overlay::CatalogEditor);
+
+    let (buffer, _) = render_buffer_with_icons(&app, 100, 30, IconSet::default());
+    let mut output = String::new();
+    for y in 0..buffer.area.height {
+        for x in 0..buffer.area.width {
+            output.push_str(buffer[(x, y)].symbol());
+        }
+    }
+    assert!(output.contains("NAME"), "{output}");
+    assert!(output.contains("TYPE"), "{output}");
+    assert!(output.contains("NULLABLE"), "{output}");
+    assert!(output.contains("…"), "{output}");
+}
+
+#[test]
 fn table_editor_focus_drives_sections_details_actions_and_context_hints() {
     let mut app = App::new(Vec::new());
     app.catalog_editor = Some(lazydb::model::catalog_editor::CatalogEditorState {
@@ -590,6 +824,7 @@ fn table_editor_focus_drives_sections_details_actions_and_context_hints() {
         plan: None,
         error: None,
         owner_picker: Default::default(),
+        preview_scroll: 0,
         draft: Some(lazydb::model::catalog_editor::CatalogDraft::Table(
             lazydb::model::catalog_editor::TableDraft {
                 name: "events".into(),
@@ -613,6 +848,10 @@ fn table_editor_focus_drives_sections_details_actions_and_context_hints() {
     assert!(general.contains("GENERAL"), "{general}");
     assert!(general.contains("COLUMNS"), "{general}");
     assert!(general.contains("events"), "{general}");
+    assert!(
+        general.contains("Changes  table properties changed"),
+        "{general}"
+    );
     assert!(general.contains("[ Review SQL ]"), "{general}");
     assert!(general.contains("[ Cancel ]"), "{general}");
     assert!(
@@ -649,8 +888,8 @@ fn table_editor_focus_drives_sections_details_actions_and_context_hints() {
         draft.focus = lazydb::model::catalog_editor::TableEditorFocus::Columns;
     }
     let (columns, _) = render_with_state(&app, 100, 30);
-    assert!(columns.contains("a add column below"), "{columns}");
-    assert!(columns.contains("e edit selected column"), "{columns}");
+    assert!(columns.contains("a add below"), "{columns}");
+    assert!(columns.contains("e edit column"), "{columns}");
 
     if let Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)) = app
         .catalog_editor
@@ -736,6 +975,7 @@ fn compact_table_editor_hides_inline_details_and_keeps_actions_reachable() {
         plan: None,
         error: None,
         owner_picker: Default::default(),
+        preview_scroll: 0,
         draft: Some(lazydb::model::catalog_editor::CatalogDraft::Table(
             lazydb::model::catalog_editor::TableDraft::new("public"),
         )),
@@ -744,7 +984,7 @@ fn compact_table_editor_hides_inline_details_and_keeps_actions_reachable() {
 
     let (_, state) = render_with_state(&app, 56, 16);
     let output = render(&app, 56, 16);
-    assert!(output.contains("app.public. Tables"), "{output}");
+    assert!(output.contains("app / public / Tables"), "{output}");
     assert!(output.contains("Esc"), "{output}");
     let action_rows: Vec<_> = state
         .hit_regions
@@ -793,6 +1033,7 @@ fn very_small_table_editor_keeps_selected_column_reachable() {
         plan: None,
         error: None,
         owner_picker: Default::default(),
+        preview_scroll: 0,
         draft: Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)),
     });
     app.overlay = Some(Overlay::CatalogEditor);
@@ -830,6 +1071,7 @@ fn table_column_details_modal_renders_all_fields_and_controls_at_compact_size() 
         plan: None,
         error: None,
         owner_picker: Default::default(),
+        preview_scroll: 0,
         draft: Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)),
     });
     app.overlay = Some(Overlay::CatalogEditor);
@@ -871,6 +1113,46 @@ fn table_column_details_modal_renders_all_fields_and_controls_at_compact_size() 
 }
 
 #[test]
+fn table_column_details_modal_keeps_validation_error_above_controls() {
+    let mut app = App::new(Vec::new());
+    let mut draft = lazydb::model::catalog_editor::TableDraft::new("public");
+    draft.begin_edit_selected_column();
+    draft.column_editor.as_mut().unwrap().error = Some("column type is required".into());
+    app.catalog_editor = Some(lazydb::model::catalog_editor::CatalogEditorState {
+        mode: CatalogMutationMode::Create,
+        anchor: CatalogMutationAnchor::Profile {
+            profile_id: uuid::Uuid::nil(),
+        },
+        object_type: Some(CatalogObjectType::Catalog(CatalogKind::Table)),
+        page: CatalogEditorPage::Form,
+        operation: None,
+        catalog_epoch: 0,
+        options: vec![],
+        selected_option: 0,
+        baseline: None,
+        plan: None,
+        error: None,
+        owner_picker: Default::default(),
+        preview_scroll: 0,
+        draft: Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)),
+    });
+    app.overlay = Some(Overlay::CatalogEditor);
+
+    let (buffer, _) = render_buffer_with_icons(&app, 80, 24, IconSet::default());
+    let mut rows = Vec::new();
+    for y in 0..buffer.area.height {
+        let line = (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect::<String>();
+        if line.contains("column type is required") || line.contains("Confirm") {
+            rows.push((y, line));
+        }
+    }
+    assert_eq!(rows.len(), 2);
+    assert!(rows[0].0 < rows[1].0);
+}
+
+#[test]
 fn table_editor_scrolls_selected_column_into_the_rendered_window() {
     let mut app = App::new(Vec::new());
     let mut draft = lazydb::model::catalog_editor::TableDraft::new("public");
@@ -900,6 +1182,7 @@ fn table_editor_scrolls_selected_column_into_the_rendered_window() {
         plan: None,
         error: None,
         owner_picker: Default::default(),
+        preview_scroll: 0,
         draft: Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)),
     });
     app.overlay = Some(Overlay::CatalogEditor);
@@ -942,6 +1225,7 @@ fn table_editor_hides_details_for_last_column_at_list_capacity() {
         plan: None,
         error: None,
         owner_picker: Default::default(),
+        preview_scroll: 0,
         draft: Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)),
     });
     app.overlay = Some(Overlay::CatalogEditor);
@@ -978,6 +1262,7 @@ fn constraint_editor_renders_typed_fields() {
         plan: None,
         error: None,
         owner_picker: Default::default(),
+        preview_scroll: 0,
         draft: Some(lazydb::model::catalog_editor::CatalogDraft::Constraint(
             lazydb::model::catalog_editor::ConstraintDraft::new(
                 lazydb::db::catalog_mutation::ConstraintDefinitionKind::Check {
@@ -1340,6 +1625,7 @@ fn view_editor_fixture() -> App {
         plan: None,
         error: None,
         owner_picker: Default::default(),
+        preview_scroll: 0,
         draft: Some(lazydb::model::catalog_editor::CatalogDraft::View(
             lazydb::model::catalog_editor::ViewDraft {
                 name: "v".into(),
@@ -1381,6 +1667,7 @@ fn index_editor_renders_typed_fields() {
         plan: None,
         error: None,
         owner_picker: Default::default(),
+        preview_scroll: 0,
         draft: Some(lazydb::model::catalog_editor::CatalogDraft::Index(
             lazydb::model::catalog_editor::IndexDraft {
                 name: "idx".into(),
@@ -1426,6 +1713,7 @@ fn materialized_view_editor_renders_data_state_and_read_only_query() {
         plan: None,
         error: None,
         owner_picker: Default::default(),
+        preview_scroll: 0,
         draft: Some(
             lazydb::model::catalog_editor::CatalogDraft::MaterializedView(
                 lazydb::model::catalog_editor::MaterializedViewDraft {
@@ -1509,6 +1797,7 @@ fn sequence_editor_renders_sections_bounds_and_all_fields() {
         plan: None,
         error: None,
         owner_picker: Default::default(),
+        preview_scroll: 0,
         draft: Some(lazydb::model::catalog_editor::CatalogDraft::Sequence(
             lazydb::model::catalog_editor::SequenceDraft {
                 name: "orders".into(),

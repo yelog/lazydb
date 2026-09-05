@@ -3502,11 +3502,73 @@ impl App {
                     self.overlay = Some(Overlay::CatalogEditor);
                     return Vec::new();
                 }
+                if matches!(
+                    self.overlay,
+                    Some(Overlay::CatalogEditorDiscardConfirm { .. })
+                ) {
+                    self.overlay = Some(Overlay::CatalogEditor);
+                    return Vec::new();
+                }
+                if self.catalog_editor.as_ref().is_some_and(|editor| {
+                    matches!(
+                        editor.operation,
+                        Some(crate::model::catalog_editor::CatalogEditorOperation::Applying { .. })
+                    )
+                }) {
+                    self.notify_warning(
+                        "Catalog",
+                        "Wait for the schema mutation to finish before closing",
+                    );
+                    return Vec::new();
+                }
                 if self.catalog_editor.is_some() {
-                    self.catalog_editor = None;
-                    if self.overlay == Some(Overlay::CatalogEditor) {
-                        self.overlay = None;
+                    let dirty = self
+                        .catalog_editor
+                        .as_ref()
+                        .and_then(CatalogEditorState::table_change_summary)
+                        .is_some_and(|summary| summary.is_dirty());
+                    if dirty {
+                        self.overlay = Some(Overlay::CatalogEditorDiscardConfirm {
+                            focus: crate::model::workspace::CatalogEditorDiscardFocus::KeepEditing,
+                        });
+                    } else {
+                        self.catalog_editor = None;
+                        if self.overlay == Some(Overlay::CatalogEditor) {
+                            self.overlay = None;
+                        }
                     }
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorDiscardMove(delta) => {
+                if let Some(Overlay::CatalogEditorDiscardConfirm { focus }) = self.overlay.as_mut()
+                {
+                    if delta != 0 {
+                        *focus = match *focus {
+                            crate::model::workspace::CatalogEditorDiscardFocus::KeepEditing => {
+                                crate::model::workspace::CatalogEditorDiscardFocus::DiscardChanges
+                            }
+                            crate::model::workspace::CatalogEditorDiscardFocus::DiscardChanges => {
+                                crate::model::workspace::CatalogEditorDiscardFocus::KeepEditing
+                            }
+                        };
+                    }
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorDiscardKeepEditing => {
+                self.overlay = Some(Overlay::CatalogEditor);
+                Vec::new()
+            }
+            Action::CatalogEditorDiscardChanges => {
+                if matches!(
+                    self.overlay,
+                    Some(Overlay::CatalogEditorDiscardConfirm {
+                        focus: crate::model::workspace::CatalogEditorDiscardFocus::DiscardChanges,
+                    })
+                ) {
+                    self.catalog_editor = None;
+                    self.overlay = None;
                 }
                 Vec::new()
             }
@@ -3945,7 +4007,15 @@ impl App {
                     .as_mut()
                     .and_then(|editor| editor.draft.as_mut())
                 {
-                    draft.confirm_column_details();
+                    if let Some((field, message)) = draft.validate_column_details() {
+                        draft.focus =
+                            crate::model::catalog_editor::TableEditorFocus::ColumnDetails(field);
+                        if let Some(session) = draft.column_editor.as_mut() {
+                            session.error = Some(message);
+                        }
+                    } else {
+                        draft.confirm_column_details();
+                    }
                 }
                 Vec::new()
             }
@@ -3989,6 +4059,17 @@ impl App {
                 {
                     draft.finish_edit_group();
                     draft.remove_selected_column();
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorRestoreTableColumn => {
+                if let Some(crate::model::catalog_editor::CatalogDraft::Table(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.finish_edit_group();
+                    draft.restore_selected_column();
                 }
                 Vec::new()
             }
@@ -4673,6 +4754,32 @@ impl App {
                     && !editor.is_busy()
                 {
                     editor.page = crate::model::catalog_editor::CatalogEditorPage::Form;
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorPreviewScroll(delta) => {
+                if let Some(editor) = self.catalog_editor.as_mut()
+                    && editor.page == crate::model::catalog_editor::CatalogEditorPage::SqlPreview
+                    && !editor.is_busy()
+                {
+                    editor.scroll_preview(delta, usize::MAX);
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorPreviewHome => {
+                if let Some(editor) = self.catalog_editor.as_mut()
+                    && editor.page == crate::model::catalog_editor::CatalogEditorPage::SqlPreview
+                {
+                    editor.preview_home();
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorPreviewEnd => {
+                if let Some(editor) = self.catalog_editor.as_mut()
+                    && editor.page == crate::model::catalog_editor::CatalogEditorPage::SqlPreview
+                    && let Some(plan) = editor.plan.as_ref()
+                {
+                    editor.preview_end(plan.sql().lines().count());
                 }
                 Vec::new()
             }
@@ -7933,6 +8040,14 @@ impl App {
     }
 
     fn workspace_exit_check(&self) -> WorkspaceExitCheck {
+        if self.catalog_editor.as_ref().is_some_and(|editor| {
+            matches!(
+                editor.operation,
+                Some(crate::model::catalog_editor::CatalogEditorOperation::Applying { .. })
+            )
+        }) {
+            return WorkspaceExitCheck::Running;
+        }
         if self.tabs.iter().any(|tab| {
             tab.as_console()
                 .is_some_and(|tab| tab.query_status == QueryStatus::Running)

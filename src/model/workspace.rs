@@ -171,6 +171,15 @@ pub enum Overlay {
         plan: Box<crate::db::catalog_mutation::CatalogMutationPlan>,
         input: crate::model::text_input::TextInput,
     },
+    CatalogEditorDiscardConfirm {
+        focus: CatalogEditorDiscardFocus,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CatalogEditorDiscardFocus {
+    KeepEditing,
+    DiscardChanges,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

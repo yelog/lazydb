@@ -393,6 +393,18 @@ impl Keymap {
                 _ => None,
             };
         }
+        if matches!(
+            app.overlay,
+            Some(Overlay::CatalogEditorDiscardConfirm { .. })
+        ) {
+            return match event.code {
+                KeyCode::Up => Some(Action::CatalogEditorDiscardMove(-1)),
+                KeyCode::Down => Some(Action::CatalogEditorDiscardMove(1)),
+                KeyCode::Enter => Some(Action::CatalogEditorDiscardChanges),
+                KeyCode::Esc => Some(Action::CatalogEditorCancel),
+                _ => None,
+            };
+        }
         if let Some(Overlay::NotificationHistory(history)) = app.overlay.as_ref() {
             self.pending = None;
             if history.clear_confirm {
@@ -1555,8 +1567,12 @@ fn map_configured_navigation(
 fn map_catalog_editor(event: KeyEvent, app: &App) -> Option<Action> {
     let editor = app.catalog_editor.as_ref()?;
     if editor.is_busy() {
+        let applying = matches!(
+            editor.operation,
+            Some(crate::model::catalog_editor::CatalogEditorOperation::Applying { .. })
+        );
         return match event.code {
-            KeyCode::Esc => Some(Action::CatalogEditorCancel),
+            KeyCode::Esc if !applying => Some(Action::CatalogEditorCancel),
             _ => None,
         };
     }
@@ -1610,6 +1626,12 @@ fn map_catalog_editor(event: KeyEvent, app: &App) -> Option<Action> {
             map_catalog_editor_form(event, editor)
         }
         crate::model::catalog_editor::CatalogEditorPage::SqlPreview => match event.code {
+            KeyCode::Up => Some(Action::CatalogEditorPreviewScroll(-1)),
+            KeyCode::Down => Some(Action::CatalogEditorPreviewScroll(1)),
+            KeyCode::PageUp => Some(Action::CatalogEditorPreviewScroll(-10)),
+            KeyCode::PageDown => Some(Action::CatalogEditorPreviewScroll(10)),
+            KeyCode::Home => Some(Action::CatalogEditorPreviewHome),
+            KeyCode::End => Some(Action::CatalogEditorPreviewEnd),
             KeyCode::Enter => Some(Action::CatalogEditorApply),
             KeyCode::Esc => Some(Action::CatalogEditorBack),
             _ => None,
@@ -1759,13 +1781,16 @@ fn map_table_editor(
             KeyCode::Char('e') if editor_table_has_selected_column(editor) => {
                 Some(Action::CatalogEditorOpenTableColumnDetails)
             }
+            KeyCode::Char('r') if editor_table_selected_column_is_removed(editor) => {
+                Some(Action::CatalogEditorRestoreTableColumn)
+            }
             KeyCode::Tab if event.modifiers.contains(KeyModifiers::SHIFT) => {
                 Some(Action::CatalogEditorFieldPrevious)
             }
             KeyCode::Tab => Some(Action::CatalogEditorFieldNext),
             KeyCode::BackTab => Some(Action::CatalogEditorFieldPrevious),
-            KeyCode::Up => Some(Action::CatalogEditorFieldPrevious),
-            KeyCode::Down => Some(Action::CatalogEditorFieldNext),
+            KeyCode::Up => Some(Action::CatalogEditorMoveTableColumn(-1)),
+            KeyCode::Down => Some(Action::CatalogEditorMoveTableColumn(1)),
             _ => None,
         };
     }
@@ -1784,7 +1809,11 @@ fn map_table_editor(
         (
             TableEditorFocus::Action(TableActionField::RemoveColumn),
             KeyCode::Enter | KeyCode::Char(' '),
-        ) => Some(Action::CatalogEditorRemoveTableColumn),
+        ) => Some(if editor_table_selected_column_is_removed(editor) {
+            Action::CatalogEditorRestoreTableColumn
+        } else {
+            Action::CatalogEditorRemoveTableColumn
+        }),
         (
             TableEditorFocus::Action(TableActionField::Review),
             KeyCode::Enter | KeyCode::Char(' '),
@@ -1872,7 +1901,17 @@ fn editor_table_has_selected_column(
     matches!(
         editor.draft.as_ref(),
         Some(crate::model::catalog_editor::CatalogDraft::Table(draft))
-            if draft.selected_column().is_some()
+            if draft.selected_column().is_some() && !draft.selected_column_is_removed()
+    )
+}
+
+fn editor_table_selected_column_is_removed(
+    editor: &crate::model::catalog_editor::CatalogEditorState,
+) -> bool {
+    matches!(
+        editor.draft.as_ref(),
+        Some(crate::model::catalog_editor::CatalogDraft::Table(draft))
+            if draft.selected_column_is_removed()
     )
 }
 

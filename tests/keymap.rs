@@ -301,11 +301,11 @@ fn table_editor_keymap_dispatches_by_focus_region() {
     );
     assert_eq!(
         keymap.map(key(KeyCode::Up), &app),
-        Some(Action::CatalogEditorFieldPrevious)
+        Some(Action::CatalogEditorMoveTableColumn(-1))
     );
     assert_eq!(
         keymap.map(key(KeyCode::Down), &app),
-        Some(Action::CatalogEditorFieldNext)
+        Some(Action::CatalogEditorMoveTableColumn(1))
     );
     assert_eq!(
         keymap.map(key(KeyCode::Esc), &app),
@@ -421,6 +421,7 @@ fn materialized_view_keymap_app() -> App {
         plan: None,
         error: None,
         owner_picker: Default::default(),
+        preview_scroll: 0,
     });
     app.overlay = Some(Overlay::CatalogEditor);
     app
@@ -589,9 +590,9 @@ fn table_editor_columns_keymap_keeps_parent_navigation() {
 
     assert_eq!(
         keymap.map(key(KeyCode::Up), &app),
-        Some(Action::CatalogEditorFieldPrevious)
+        Some(Action::CatalogEditorMoveTableColumn(-1))
     );
-    app.update(Action::CatalogEditorFieldPrevious);
+    app.update(Action::CatalogEditorMoveTableColumn(-1));
     let Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)) = app
         .catalog_editor
         .as_ref()
@@ -603,9 +604,9 @@ fn table_editor_columns_keymap_keeps_parent_navigation() {
 
     assert_eq!(
         keymap.map(key(KeyCode::Down), &app),
-        Some(Action::CatalogEditorFieldNext)
+        Some(Action::CatalogEditorMoveTableColumn(1))
     );
-    app.update(Action::CatalogEditorFieldNext);
+    app.update(Action::CatalogEditorMoveTableColumn(1));
     assert_eq!(
         keymap.map(key(KeyCode::Tab), &app),
         Some(Action::CatalogEditorFieldNext)
@@ -624,6 +625,48 @@ fn table_editor_columns_keymap_keeps_parent_navigation() {
             lazydb::model::catalog_editor::TableActionField::AddColumn
         )
     );
+}
+
+#[test]
+fn table_editor_tab_leaves_columns_without_visiting_each_row() {
+    let mut app = table_editor_app();
+    let mut keymap = Keymap::default();
+    let Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)) = app
+        .catalog_editor
+        .as_mut()
+        .and_then(|editor| editor.draft.as_mut())
+    else {
+        panic!("table draft expected");
+    };
+    draft.columns = (0..100)
+        .map(|index| {
+            let mut column = lazydb::model::catalog_editor::ColumnDraft::new_added();
+            column.name = format!("column_{index}").into();
+            column
+        })
+        .collect();
+    draft.selected_column = 99;
+    draft.focus = lazydb::model::catalog_editor::TableEditorFocus::Columns;
+
+    assert_eq!(
+        keymap.map(key(KeyCode::Tab), &app),
+        Some(Action::CatalogEditorFieldNext)
+    );
+    app.update(Action::CatalogEditorFieldNext);
+    let Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)) = app
+        .catalog_editor
+        .as_ref()
+        .and_then(|editor| editor.draft.as_ref())
+    else {
+        panic!("table draft expected");
+    };
+    assert_eq!(
+        draft.focus,
+        lazydb::model::catalog_editor::TableEditorFocus::Action(
+            lazydb::model::catalog_editor::TableActionField::AddColumn
+        )
+    );
+    assert_eq!(draft.selected_column, 99);
 }
 
 #[test]
@@ -707,6 +750,7 @@ fn constraint_editor_maps_field_navigation_and_text_input() {
         plan: None,
         error: None,
         owner_picker: Default::default(),
+        preview_scroll: 0,
         draft: Some(lazydb::model::catalog_editor::CatalogDraft::Constraint(
             lazydb::model::catalog_editor::ConstraintDraft::new(
                 lazydb::db::catalog_mutation::ConstraintDefinitionKind::Check {
@@ -751,6 +795,7 @@ fn role_editor_uses_catalog_editor_field_keymap() {
         plan: None,
         error: None,
         owner_picker: Default::default(),
+        preview_scroll: 0,
     });
     app.overlay = Some(lazydb::model::workspace::Overlay::CatalogEditor);
     let mut keymap = Keymap::default();
@@ -1060,6 +1105,18 @@ fn catalog_editor_picker_and_preview_own_their_keys() {
         keymap.map(key(KeyCode::Esc), &app),
         Some(Action::CatalogEditorBack)
     );
+    assert_eq!(
+        keymap.map(key(KeyCode::PageDown), &app),
+        Some(Action::CatalogEditorPreviewScroll(10))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Home), &app),
+        Some(Action::CatalogEditorPreviewHome)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::End), &app),
+        Some(Action::CatalogEditorPreviewEnd)
+    );
 }
 
 #[test]
@@ -1214,6 +1271,7 @@ fn schema_editor_with_owner_choices() -> App {
         plan: None,
         error: None,
         owner_picker: Default::default(),
+        preview_scroll: 0,
         draft: Some(lazydb::model::catalog_editor::CatalogDraft::Schema(
             lazydb::model::catalog_editor::SchemaDraft {
                 name: "sales".into(),
@@ -1348,6 +1406,7 @@ fn view_editor_form_owns_navigation_and_preview_keys() {
         plan: None,
         error: None,
         owner_picker: Default::default(),
+        preview_scroll: 0,
         draft: Some(lazydb::model::catalog_editor::CatalogDraft::View(
             lazydb::model::catalog_editor::ViewDraft {
                 name: "v".into(),
@@ -2038,6 +2097,7 @@ fn maps_column_details_navigation_and_toggle_keys() {
         plan: None,
         error: None,
         owner_picker: Default::default(),
+        preview_scroll: 0,
         draft: Some(lazydb::model::catalog_editor::CatalogDraft::Table(
             lazydb::model::catalog_editor::TableDraft::new("public"),
         )),
@@ -2371,6 +2431,7 @@ fn materialized_view_editor(
         plan: None,
         error: None,
         owner_picker: Default::default(),
+        preview_scroll: 0,
     });
     app.focus = lazydb::model::workspace::Focus::Explorer;
     app.overlay = Some(Overlay::CatalogEditor);

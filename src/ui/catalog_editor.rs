@@ -5,6 +5,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Clear, Paragraph, Wrap},
 };
+use unicode_width::UnicodeWidthStr;
 
 use crate::{
     app::App,
@@ -169,21 +170,42 @@ fn loading(frame: &mut Frame<'_>, area: Rect, editor: &CatalogEditorState, theme
         })
         .unwrap_or("Working");
     let content_area = Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1));
+    let applying = matches!(
+        editor.operation,
+        Some(CatalogEditorOperation::Applying { .. })
+    );
+    let message = if applying {
+        "The schema mutation is running. Please wait."
+    } else {
+        "Please wait..."
+    };
+    let safe_cancel_message = if applying {
+        ""
+    } else {
+        "Esc cancels when the operation is safe to cancel"
+    };
+    let footer = if applying {
+        vec![ShortcutHint::new("Esc", "wait for completion")]
+    } else {
+        vec![ShortcutHint::new("Esc", "cancel")]
+    };
+    let mut lines = vec![
+        Line::from(Span::styled(
+            operation,
+            Style::new().fg(theme.warning).add_modifier(Modifier::BOLD),
+        )),
+        Line::raw(message),
+    ];
+    if !safe_cancel_message.is_empty() {
+        lines.push(Line::raw(safe_cancel_message));
+    }
     frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(Span::styled(
-                operation,
-                Style::new().fg(theme.warning).add_modifier(Modifier::BOLD),
-            )),
-            Line::raw("Please wait..."),
-            Line::raw("Esc cancels when the operation is safe to cancel"),
-        ])
-        .wrap(Wrap { trim: true }),
+        Paragraph::new(lines).wrap(Wrap { trim: true }),
         content_area,
     );
     frame.render_widget(
         Paragraph::new(shortcut_hints::line(
-            &[ShortcutHint::new("Esc", "cancel")],
+            &footer,
             area.width,
             theme,
             theme.surface,
@@ -213,8 +235,14 @@ fn form(
             Constraint::Length(2),
         ])
         .split(area);
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
+    let target = format!("TARGET  {}", sanitize_terminal_text(&target_label(editor)));
+    let header = if matches!(editor.draft, Some(CatalogDraft::Table(_))) {
+        Line::from(Span::styled(
+            target,
+            Style::new().fg(theme.muted).bg(theme.surface),
+        ))
+    } else {
+        Line::from(vec![
             Span::styled(
                 format!("{} DETAILS", title.to_uppercase()),
                 Style::new()
@@ -223,15 +251,12 @@ fn form(
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!(
-                    "  TARGET  {}",
-                    sanitize_terminal_text(&target_label(editor))
-                ),
+                format!("  {target}"),
                 Style::new().fg(theme.muted).bg(theme.surface),
             ),
-        ])),
-        chunks[0],
-    );
+        ])
+    };
+    frame.render_widget(Paragraph::new(header), chunks[0]);
     if let Some(CatalogDraft::Database(draft)) = editor.draft.as_ref() {
         render_database(frame, chunks[1], draft, theme);
     } else if let Some(CatalogDraft::Role(draft)) = editor.draft.as_ref() {
@@ -249,7 +274,7 @@ fn form(
             &editor.owner_picker,
         );
     } else if let Some(CatalogDraft::Table(draft)) = editor.draft.as_ref() {
-        render_table(frame, chunks[1], draft, ui, theme);
+        render_table(frame, chunks[1], draft, editor.baseline.as_ref(), ui, theme);
     } else if let Some(CatalogDraft::Index(draft)) = editor.draft.as_ref() {
         render_index(frame, chunks[1], draft, theme);
     } else if let Some(CatalogDraft::Constraint(draft)) = editor.draft.as_ref() {
@@ -1340,6 +1365,7 @@ fn render_table(
     frame: &mut Frame<'_>,
     area: Rect,
     draft: &TableDraft,
+    baseline: Option<&crate::db::catalog_mutation::CatalogObjectDefinition>,
     ui: &mut UiState,
     theme: Theme,
 ) {
@@ -1352,29 +1378,13 @@ fn render_table(
     // column list of its selected row.
     let full_list_capacity = area.height.saturating_sub(16);
     let compact = area.height <= 10 || full_list_capacity == 0;
-    let general_heading = Rect::new(area.x, area.y, area.width / 2, 1);
-    let columns_heading = Rect::new(
-        general_heading.right(),
-        area.y,
-        area.width.saturating_sub(general_heading.width),
-        1,
-    );
+    let general_heading = Rect::new(area.x, area.y, area.width, 1);
     render_catalog_section_heading(frame, general_heading, "GENERAL", general_focus, theme);
-    render_catalog_section_heading(frame, columns_heading, "COLUMNS", columns_focus, theme);
     ui.hit_regions.push(HitRegion {
-        area: Rect::new(area.x, area.y, area.width / 2, 1),
+        area: general_heading,
         target: HitTarget::CatalogEditorTableField(TableEditorFocus::General(
             TableGeneralField::Name,
         )),
-    });
-    ui.hit_regions.push(HitRegion {
-        area: Rect::new(
-            area.x + area.width / 2,
-            area.y,
-            area.width.saturating_sub(area.width / 2),
-            1,
-        ),
-        target: HitTarget::CatalogEditorTableField(TableEditorFocus::Columns),
     });
     if !compact {
         let general = [
@@ -1431,6 +1441,15 @@ fn render_table(
     }
     // Keep the action row and shortcut footer inside the form's available area.
     let content_bottom = area.bottom().saturating_sub(2);
+    let baseline = match baseline {
+        Some(crate::db::catalog_mutation::CatalogObjectDefinition::Table(definition)) => {
+            Some(definition)
+        }
+        _ => None,
+    };
+    let summary = draft.change_summary(baseline);
+    let show_summary = !compact && area.height >= 20;
+    let list_bottom = content_bottom.saturating_sub(u16::from(show_summary));
     let columns_y = if compact {
         area.y.saturating_add(2)
     } else {
@@ -1445,8 +1464,30 @@ fn render_table(
             theme,
         );
     }
-    let list_start = columns_y.saturating_add(1);
-    let list_capacity = content_bottom.saturating_sub(list_start);
+    let header_y = columns_y.saturating_add(1);
+    let list_start = columns_y.saturating_add(2);
+    let list_capacity = list_bottom.saturating_sub(list_start);
+    if header_y < list_bottom {
+        let (name_width, type_width, nullable_width) = table_column_widths(area.width);
+        let header = format!(
+            "  {:<name_width$} {:<type_width$} {:<nullable_width$}",
+            "NAME",
+            "TYPE",
+            "NULLABLE",
+            name_width = usize::from(name_width),
+            type_width = usize::from(type_width),
+            nullable_width = usize::from(nullable_width),
+        );
+        frame.render_widget(
+            Paragraph::new(header).style(
+                Style::new()
+                    .fg(theme.muted)
+                    .bg(theme.surface)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Rect::new(area.x, header_y, area.width, 1),
+        );
+    }
     let visible_start = if list_capacity == 0 {
         0
     } else {
@@ -1462,24 +1503,64 @@ fn render_table(
         .skip(visible_start)
         .take(usize::from(list_capacity))
     {
-        let y = columns_y.saturating_add(1 + (index - visible_start) as u16);
+        let y = columns_y.saturating_add(2 + (index - visible_start) as u16);
         let active = index == draft.selected_column
             && matches!(
                 draft.focus,
                 TableEditorFocus::Columns | TableEditorFocus::ColumnDetails(_)
             );
-        let style = Style::new().fg(theme.text).bg(if active {
-            theme.selection
+        let removed = matches!(
+            &column.state,
+            crate::model::catalog_editor::DraftRowState::Removed { .. }
+        );
+        let added = matches!(
+            &column.state,
+            crate::model::catalog_editor::DraftRowState::Added
+        );
+        let style = Style::new()
+            .fg(if removed {
+                theme.row_deleted
+            } else {
+                theme.text
+            })
+            .bg(if active {
+                theme.selection
+            } else {
+                theme.surface
+            });
+        let (name_width, type_width, nullable_width) = table_column_widths(area.width);
+        let name = truncate_cells(
+            sanitize_terminal_text(column.name.value()).if_empty("<unnamed>"),
+            usize::from(name_width),
+        );
+        let native_type = truncate_cells(
+            sanitize_terminal_text(column.native_type.value()),
+            usize::from(type_width),
+        );
+        let nullable = if removed {
+            "REMOVED"
+        } else if column.nullable {
+            "NULL"
         } else {
-            theme.surface
-        });
+            "NOT NULL"
+        };
         frame.render_widget(
             Paragraph::new(format!(
-                "{} {:<20} {:<20} {}",
+                "{}{} {:<name_width$} {:<type_width$} {:<nullable_width$}",
                 if active { "›" } else { " " },
-                sanitize_terminal_text(column.name.value()).if_empty("<unnamed>"),
-                sanitize_terminal_text(column.native_type.value()),
-                if column.nullable { "NULL" } else { "NOT NULL" }
+                if removed {
+                    "-"
+                } else if added {
+                    "+"
+                } else {
+                    " "
+                },
+                name,
+                native_type,
+                truncate_cells(nullable.to_owned(), usize::from(nullable_width)),
+                name_width = usize::from(name_width),
+                type_width = usize::from(type_width),
+                nullable_width = usize::from(nullable_width),
             ))
             .style(style),
             Rect::new(area.x, y, area.width, 1),
@@ -1489,6 +1570,46 @@ fn render_table(
             target: HitTarget::CatalogEditorTableColumn(index),
         });
     }
+    if show_summary {
+        let summary_text = if summary.is_dirty() {
+            format!(
+                "Changes  {}{} added  {} modified  {} removed",
+                if summary.properties_changed {
+                    "table properties changed · "
+                } else {
+                    ""
+                },
+                summary.added_columns,
+                summary.modified_columns,
+                summary.removed_columns
+            )
+        } else {
+            "Changes  No changes".into()
+        };
+        frame.render_widget(
+            Paragraph::new(summary_text).style(Style::new().fg(theme.muted).bg(theme.surface)),
+            Rect::new(area.x, content_bottom.saturating_sub(1), area.width, 1),
+        );
+    }
+    let column_action = if draft.selected_column_is_removed() {
+        (
+            if compact {
+                "[ Restore ]"
+            } else {
+                "[ Restore Column ]"
+            },
+            HitTarget::CatalogEditorRestoreTableColumn,
+        )
+    } else {
+        (
+            if compact {
+                "[ Remove ]"
+            } else {
+                "[ Remove Column ]"
+            },
+            HitTarget::CatalogEditorRemoveTableColumn,
+        )
+    };
     let actions = if compact {
         [
             (
@@ -1497,9 +1618,9 @@ fn render_table(
                 HitTarget::CatalogEditorAddTableColumn,
             ),
             (
-                "[ Remove ]",
+                column_action.0,
                 TableEditorFocus::Action(TableActionField::RemoveColumn),
-                HitTarget::CatalogEditorRemoveTableColumn,
+                column_action.1,
             ),
             (
                 "[ SQL ]",
@@ -1520,9 +1641,9 @@ fn render_table(
                 HitTarget::CatalogEditorAddTableColumn,
             ),
             (
-                "[ Remove Column ]",
+                column_action.0,
                 TableEditorFocus::Action(TableActionField::RemoveColumn),
-                HitTarget::CatalogEditorRemoveTableColumn,
+                column_action.1,
             ),
             (
                 "[ Review SQL ]",
@@ -1565,9 +1686,11 @@ fn render_table(
     } else {
         match draft.focus {
             TableEditorFocus::Columns => vec![
-                ShortcutHint::new("Tab/Shift-Tab/Up/Down", "move focus"),
-                ShortcutHint::new("a", "add column below"),
-                ShortcutHint::new("e", "edit selected column"),
+                ShortcutHint::new("Up/Down", "move row"),
+                ShortcutHint::new("Tab/Shift-Tab", "move focus"),
+                ShortcutHint::new("a", "add below"),
+                ShortcutHint::new("e", "edit column"),
+                ShortcutHint::new("r", "restore"),
                 ShortcutHint::new("Esc", "close/cancel editor"),
             ],
             TableEditorFocus::ColumnDetails(_) => Vec::new(),
@@ -1596,6 +1719,35 @@ fn render_table(
     );
 }
 
+fn table_column_widths(width: u16) -> (u16, u16, u16) {
+    let available = width.saturating_sub(4);
+    (
+        available.saturating_mul(2) / 5,
+        available.saturating_mul(2) / 5,
+        available / 5,
+    )
+}
+
+fn truncate_cells(value: String, width: usize) -> String {
+    if value.width() <= width {
+        return value;
+    }
+    let mut output = String::new();
+    let mut used = 0;
+    for character in value.chars() {
+        let character_width = unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
+        if used + character_width + 1 > width {
+            break;
+        }
+        output.push(character);
+        used += character_width;
+    }
+    if width > 0 {
+        output.push('…');
+    }
+    output
+}
+
 fn render_table_column_details_modal(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -1607,7 +1759,7 @@ fn render_table_column_details_modal(
     let popup = super::centered(
         area,
         72.min(area.width.saturating_sub(4)),
-        14.min(area.height),
+        16.min(area.height),
     );
     frame.render_widget(Clear, popup);
     let block = super::panel_block(" COLUMN DETAILS ", true, theme);
@@ -1642,6 +1794,13 @@ fn render_table_column_details_modal(
             focus,
             ui,
             theme,
+        );
+    }
+    if let Some(error) = session.error.as_deref() {
+        frame.render_widget(
+            Paragraph::new(format!("x {}", sanitize_terminal_text(error)))
+                .style(Style::new().fg(theme.error).bg(theme.surface)),
+            Rect::new(inner.x, inner.y.saturating_add(6), inner.width, 1),
         );
     }
     let nullable = Rect::new(inner.x, inner.y.saturating_add(4), inner.width, 1);
@@ -1679,7 +1838,7 @@ fn render_table_column_details_modal(
             target: HitTarget::CatalogEditorTableField(TableEditorFocus::ColumnDetails(field)),
         });
     }
-    let footer = Rect::new(inner.x, inner.y.saturating_add(7), inner.width, 1);
+    let footer = Rect::new(inner.x, inner.y.saturating_add(8), inner.width, 1);
     frame.render_widget(
         Paragraph::new(shortcut_hints::line(
             &[
@@ -1696,7 +1855,7 @@ fn render_table_column_details_modal(
         .alignment(ratatui::layout::Alignment::Center),
         footer,
     );
-    let controls = Rect::new(inner.x, inner.y.saturating_add(6), inner.width, 1);
+    let controls = Rect::new(inner.x, inner.y.saturating_add(7), inner.width, 1);
     let confirm_width = 13.min(controls.width);
     let cancel_x = controls.x.saturating_add(confirm_width.saturating_add(3));
     let cancel_width = 12.min(controls.right().saturating_sub(cancel_x));
@@ -1989,7 +2148,7 @@ fn preview(frame: &mut Frame<'_>, area: Rect, editor: &CatalogEditorState, theme
         .map(|plan| sanitize_terminal_text(&plan.sql()))
         .unwrap_or_else(|| "No mutation plan is available yet.".into());
     let footer_hints = if editor.is_busy() {
-        vec![ShortcutHint::new("Esc", "cancel")]
+        vec![ShortcutHint::new("Esc", "wait for completion")]
     } else {
         vec![
             ShortcutHint::new("Enter", "apply"),
@@ -2007,8 +2166,30 @@ fn preview(frame: &mut Frame<'_>, area: Rect, editor: &CatalogEditorState, theme
             sanitize_terminal_text(&target_label(editor))
         )),
     ];
+    if matches!(
+        editor.baseline.as_ref(),
+        Some(crate::db::catalog_mutation::CatalogObjectDefinition::Table(
+            _
+        ))
+    ) && let Some(summary) = editor.table_change_summary()
+    {
+        lines.push(Line::raw(format!(
+            "changes: {} added, {} modified, {} removed",
+            summary.added_columns, summary.modified_columns, summary.removed_columns
+        )));
+    }
+    if let Some(plan) = editor.plan.as_ref() {
+        if plan.destructive {
+            lines.push(Line::styled("WARNING: destructive mutation", theme.warning));
+        }
+        lines.extend(
+            plan.warnings
+                .iter()
+                .map(|warning| Line::styled(sanitize_terminal_text(warning), theme.warning)),
+        );
+    }
     if editor.is_busy() {
-        lines.push(Line::styled("Applying...", theme.warning));
+        lines.push(Line::styled("Applying changes...", theme.warning));
     }
     lines.extend([Line::raw(""), Line::raw(sql), Line::raw("")]);
     if let Some(error) = editor.error.as_deref() {
@@ -2019,7 +2200,14 @@ fn preview(frame: &mut Frame<'_>, area: Rect, editor: &CatalogEditorState, theme
     }
     let footer_area = Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1);
     let body_area = Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1));
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), body_area);
+    let max_scroll = lines.len().saturating_sub(usize::from(body_area.height));
+    let scroll = editor.preview_scroll.min(max_scroll);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: true })
+            .scroll((scroll as u16, 0)),
+        body_area,
+    );
     frame.render_widget(Paragraph::new(footer), footer_area);
 }
 
@@ -2028,7 +2216,21 @@ fn target_label(editor: &CatalogEditorState) -> String {
         crate::db::catalog_mutation::CatalogMutationAnchor::Profile { profile_id } => {
             format!("profile {profile_id}")
         }
-        crate::db::catalog_mutation::CatalogMutationAnchor::Catalog(id) => id.native_path.join("."),
+        crate::db::catalog_mutation::CatalogMutationAnchor::Catalog(id) => {
+            let visible = match id.kind {
+                crate::db::catalog::CatalogKind::Table
+                | crate::db::catalog::CatalogKind::View
+                | crate::db::catalog::CatalogKind::MaterializedView => id.native_path.len().min(3),
+                crate::db::catalog::CatalogKind::Column => id.native_path.len().min(4),
+                _ => id.native_path.len(),
+            };
+            id.native_path
+                .iter()
+                .take(visible)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" / ")
+        }
         crate::db::catalog_mutation::CatalogMutationAnchor::Group { schema, group } => {
             let label = match group {
                 crate::db::catalog::ObjectGroup::Tables => "Tables",
@@ -2040,7 +2242,13 @@ fn target_label(editor: &CatalogEditorState) -> String {
                 crate::db::catalog::ObjectGroup::Types => "Types",
                 crate::db::catalog::ObjectGroup::Triggers => "Triggers",
             };
-            format!("{}. {label}", schema.native_path.join("."))
+            let path = schema
+                .native_path
+                .iter()
+                .take(2)
+                .cloned()
+                .collect::<Vec<_>>();
+            format!("{} / {label}", path.join(" / "))
         }
     }
 }
