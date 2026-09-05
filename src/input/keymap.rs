@@ -135,6 +135,10 @@ impl Keymap {
         if self.bindings.matches("quit", event) {
             return Some(Action::Quit);
         }
+        if self.bindings.matches("terminal-selection", event) {
+            self.pending = None;
+            return Some(Action::ToggleTerminalSelection);
+        }
         if self.bindings.matches("update", event) && app.overlay.is_none() {
             self.pending = None;
             return Some(Action::OpenUpdateCenter);
@@ -249,8 +253,60 @@ impl Keymap {
                 KeyCode::Char('l') | KeyCode::Right => Some(Action::RecordViewMoveRow(1)),
                 KeyCode::Char('G') | KeyCode::End => Some(Action::RecordViewJumpLastField),
                 KeyCode::Home => Some(Action::RecordViewJumpFirstField),
+                KeyCode::Char('y') => Some(Action::CopyRecordViewCell),
+                KeyCode::Char('Y') => Some(Action::CopyRecordViewRow {
+                    include_headers: false,
+                }),
+                KeyCode::Enter => Some(Action::ViewRecordViewValue),
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('v') => {
                     Some(Action::CloseRecordView)
+                }
+                _ => None,
+            };
+        }
+        if matches!(app.overlay, Some(Overlay::TextDetail(_))) {
+            self.pending = None;
+            return match event.code {
+                KeyCode::Esc | KeyCode::Char('q') => Some(Action::CloseTextDetail),
+                KeyCode::Up | KeyCode::Char('k') => {
+                    app.overlay.as_ref().and_then(|overlay| match overlay {
+                        Overlay::TextDetail(view) => Some(Action::ReadOnlyEditorScroll {
+                            session_id: view.session_id,
+                            rows: -1,
+                            columns: 0,
+                        }),
+                        _ => None,
+                    })
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    app.overlay.as_ref().and_then(|overlay| match overlay {
+                        Overlay::TextDetail(view) => Some(Action::ReadOnlyEditorScroll {
+                            session_id: view.session_id,
+                            rows: 1,
+                            columns: 0,
+                        }),
+                        _ => None,
+                    })
+                }
+                KeyCode::Left | KeyCode::Char('h') => {
+                    app.overlay.as_ref().and_then(|overlay| match overlay {
+                        Overlay::TextDetail(view) => Some(Action::ReadOnlyEditorScroll {
+                            session_id: view.session_id,
+                            rows: 0,
+                            columns: -1,
+                        }),
+                        _ => None,
+                    })
+                }
+                KeyCode::Right | KeyCode::Char('l') => {
+                    app.overlay.as_ref().and_then(|overlay| match overlay {
+                        Overlay::TextDetail(view) => Some(Action::ReadOnlyEditorScroll {
+                            session_id: view.session_id,
+                            rows: 0,
+                            columns: 1,
+                        }),
+                        _ => None,
+                    })
                 }
                 _ => None,
             };
@@ -3389,6 +3445,32 @@ mod tests {
         keymap.map(key(KeyCode::Char('g')), &app);
         keymap.clear_pending();
         assert!(keymap.sequence_state(&app, Instant::now()).is_none());
+    }
+
+    #[test]
+    fn terminal_selection_binding_maps_before_context_specific_keys() {
+        let mut app = App::new(Vec::new());
+        app.focus = Focus::Results;
+        let mut keymap = Keymap::default();
+
+        assert_eq!(
+            keymap.map(
+                KeyEvent::new(
+                    KeyCode::Char('s'),
+                    KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                ),
+                &app,
+            ),
+            Some(Action::ToggleTerminalSelection)
+        );
+        assert!(keymap.sequence_state(&app, Instant::now()).is_none());
+        assert_eq!(
+            keymap.map(
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                &app,
+            ),
+            Some(Action::Quit)
+        );
     }
 
     #[test]

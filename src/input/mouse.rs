@@ -13,14 +13,50 @@ use crate::{
     ui::{HitTarget, PaneResizeDrag, ProfileButton, UiState},
 };
 
+fn editor_position(
+    position: crate::ui::text_selection::TextPosition,
+) -> crate::model::editor::EditorPosition {
+    crate::model::editor::EditorPosition {
+        line: position.line,
+        column: position.column,
+    }
+}
+
 pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
     match event.kind {
         MouseEventKind::Drag(MouseButton::Left) => {
+            if matches!(app.overlay, Some(Overlay::TextDetail(_)))
+                && *ui.mouse_gesture.borrow() == Some(crate::ui::text_selection::GestureOwner::Text)
+            {
+                let target = ui.text_selection_target.as_ref()?;
+                let end = target.source_at(event.column, event.row)?;
+                let gesture = ui.text_gesture.borrow().as_ref().copied()?;
+                ui.update_text_gesture(end);
+                return Some(Action::SetTextDetailSelection {
+                    session_id: target.session_id,
+                    start: editor_position(gesture.start),
+                    end: editor_position(end),
+                    revision: gesture.revision,
+                });
+            }
             if app.overlay.is_some() {
                 ui.relation_resize.borrow_mut().take();
                 ui.grid_scrollbar_drag.borrow_mut().take();
                 ui.pane_resize_drag.borrow_mut().take();
+                ui.cancel_mouse_gesture();
                 return None;
+            }
+            if *ui.mouse_gesture.borrow() == Some(crate::ui::text_selection::GestureOwner::Text) {
+                let target = ui.text_selection_target.as_ref()?;
+                let end = target.source_at(event.column, event.row)?;
+                let gesture = ui.text_gesture.borrow().as_ref().copied()?;
+                ui.update_text_gesture(end);
+                return Some(Action::SetEditorMouseSelection {
+                    session_id: target.session_id,
+                    start: editor_position(gesture.start),
+                    end: editor_position(end),
+                    revision: gesture.revision,
+                });
             }
             if let Some(drag) = *ui.pane_resize_drag.borrow() {
                 return pane_resize_action(drag, event.column, ui, app);
@@ -46,23 +82,74 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
             })
         }
         MouseEventKind::Up(MouseButton::Left) => {
+            if *ui.mouse_gesture.borrow() == Some(crate::ui::text_selection::GestureOwner::Text) {
+                ui.end_mouse_gesture();
+                return None;
+            }
             if let Some(drag) = ui.pane_resize_drag.borrow_mut().take() {
+                ui.mouse_gesture.borrow_mut().take();
                 return pane_resize_action(drag, event.column, ui, app);
+            }
+            let was_column_resize = ui.relation_resize.borrow_mut().take().is_some();
+            let was_scrollbar_drag = ui.grid_scrollbar_drag.borrow_mut().take().is_some();
+            if was_column_resize || was_scrollbar_drag {
+                ui.mouse_gesture.borrow_mut().take();
+                Some(Action::GridEndColumnResize)
+            } else {
+                None
+            }
+        }
+        MouseEventKind::Down(MouseButton::Left) => {
+            if ui.mouse_gesture.borrow().is_some() {
+                return None;
             }
             ui.relation_resize.borrow_mut().take();
             ui.grid_scrollbar_drag.borrow_mut().take();
-            Some(Action::GridEndColumnResize)
-        }
-        MouseEventKind::Down(MouseButton::Left) => {
-            ui.relation_resize.borrow_mut().take();
-            ui.grid_scrollbar_drag.borrow_mut().take();
             ui.pane_resize_drag.borrow_mut().take();
+            if let Some(Overlay::TextDetail(view)) = app.overlay.as_ref() {
+                if let Some(target) = ui.target_at(event.column, event.row).cloned() {
+                    return match target {
+                        HitTarget::TextDetailCopySelection => {
+                            Some(Action::CopyTextDetailSelection {
+                                session_id: view.session_id,
+                                revision: view.revision,
+                            })
+                        }
+                        HitTarget::TextDetailCopyAll => Some(Action::CopyTextDetailAll {
+                            session_id: view.session_id,
+                        }),
+                        HitTarget::TextDetailClose => Some(Action::CloseTextDetail),
+                        HitTarget::OpenTextDetail(request) => Some(Action::OpenTextDetail(request)),
+                        _ => None,
+                    };
+                }
+                let position = ui
+                    .text_selection_target
+                    .as_ref()
+                    .and_then(|target| target.source_at(event.column, event.row));
+                return position.map(|position| {
+                    ui.begin_text_gesture(crate::ui::text_selection::TextGesture {
+                        start: position,
+                        end: position,
+                        revision: view.revision,
+                    });
+                    Action::SetTextDetailSelection {
+                        session_id: view.session_id,
+                        start: editor_position(position),
+                        end: editor_position(position),
+                        revision: view.revision,
+                    }
+                });
+            }
             let Some(target) = ui.target_at(event.column, event.row).cloned() else {
                 ui.clear_click_tracker();
                 return None;
             };
             if !matches!(target, HitTarget::ExplorerRow(_)) {
                 ui.clear_click_tracker();
+            }
+            if let HitTarget::OpenTextDetail(request) = target {
+                return Some(Action::OpenTextDetail(request));
             }
             if let Some(overlay) = &app.overlay
                 && (overlay != &Overlay::ProfileManager
@@ -102,6 +189,7 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                             | HitTarget::TransactionExitChoice(_)
                             | HitTarget::TransactionExitCancel
                             | HitTarget::UpdateButton { .. }
+                            | HitTarget::OpenTextDetail(_)
                     ))
             {
                 return None;
@@ -128,6 +216,23 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
             {
                 return None;
             }
+            if app.overlay.is_none()
+                && let Some(text_target) = ui.text_selection_target.as_ref()
+                && let Some(position) = text_target.source_at(event.column, event.row)
+            {
+                let revision = app.editor_revision(text_target.session_id);
+                ui.begin_text_gesture(crate::ui::text_selection::TextGesture {
+                    start: position,
+                    end: position,
+                    revision,
+                });
+                return Some(Action::SetEditorMouseSelection {
+                    session_id: text_target.session_id,
+                    start: editor_position(position),
+                    end: editor_position(position),
+                    revision,
+                });
+            }
             match target {
                 HitTarget::Focus(focus) => Some(Action::Focus(focus)),
                 HitTarget::Tab(index) => Some(Action::ActivateTab(index)),
@@ -136,6 +241,7 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                 }
                 HitTarget::CloseTab(id) => Some(Action::CloseTab(id)),
                 HitTarget::DismissNotification(id) => Some(Action::DismissNotification(id)),
+                HitTarget::OpenTextDetail(request) => Some(Action::OpenTextDetail(request)),
                 HitTarget::ExplorerRow(id) => {
                     if ui.track_explorer_click(&id, Instant::now()) {
                         Some(Action::ExplorerPrimary)
@@ -174,10 +280,14 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                         start_pointer: event.column,
                         start_size,
                     });
+                    *ui.mouse_gesture.borrow_mut() =
+                        Some(crate::ui::text_selection::GestureOwner::PaneResize);
                     None
                 }
                 HitTarget::RelationColumnResize { column, width } => {
                     *ui.relation_resize.borrow_mut() = Some((column, width, event.column));
+                    *ui.mouse_gesture.borrow_mut() =
+                        Some(crate::ui::text_selection::GestureOwner::RelationColumnResize);
                     Some(Action::GridStartColumnResize { column, width })
                 }
                 HitTarget::GridScrollbarThumb {
@@ -195,6 +305,8 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                         pointer_offset: event.column.saturating_sub(thumb_x),
                         max_offset,
                     });
+                    *ui.mouse_gesture.borrow_mut() =
+                        Some(crate::ui::text_selection::GestureOwner::GridScrollbar);
                     Some(Action::GridSetColumnOffset { offset })
                 }
                 HitTarget::GridScrollbarPage { offset } => {
@@ -259,6 +371,14 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                     Some(Action::ConfirmTransactionExitChoice(choice))
                 }
                 HitTarget::TransactionExitCancel => Some(Action::CancelTransactionExit),
+                HitTarget::TextDetailCopySelection => None,
+                HitTarget::TextDetailCopyAll => None,
+                HitTarget::TextDetailClose => None,
+                HitTarget::RecordViewCopyCell => Some(Action::CopyRecordViewCell),
+                HitTarget::RecordViewCopyRow => Some(Action::CopyRecordViewRow {
+                    include_headers: false,
+                }),
+                HitTarget::RecordViewViewValue => Some(Action::ViewRecordViewValue),
                 HitTarget::RelationFirstPage => Some(Action::RelationFirstPage),
                 HitTarget::RelationPreviousPage => Some(Action::RelationPreviousPage),
                 HitTarget::RelationPageSize => {
@@ -286,6 +406,13 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
             }
         }
         MouseEventKind::ScrollDown => {
+            if let Some(Overlay::TextDetail(view)) = app.overlay.as_ref() {
+                return Some(Action::ReadOnlyEditorScroll {
+                    session_id: view.session_id,
+                    rows: 3,
+                    columns: 0,
+                });
+            }
             if app.overlay.is_some() {
                 return None;
             }
@@ -306,6 +433,13 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
             }
         }
         MouseEventKind::ScrollUp => {
+            if let Some(Overlay::TextDetail(view)) = app.overlay.as_ref() {
+                return Some(Action::ReadOnlyEditorScroll {
+                    session_id: view.session_id,
+                    rows: -3,
+                    columns: 0,
+                });
+            }
             if app.overlay.is_some() {
                 return None;
             }
@@ -416,6 +550,7 @@ fn focus_at(ui: &UiState, column: u16, row: u16) -> Option<Focus> {
         | HitTarget::TabScrollRight(_)
         | HitTarget::CloseTab(_)
         | HitTarget::DismissNotification(_)
+        | HitTarget::OpenTextDetail(_)
         | HitTarget::Help
         | HitTarget::UpdateCenter
         | HitTarget::UpdateButton { .. }
@@ -450,6 +585,12 @@ fn focus_at(ui: &UiState, column: u16, row: u16) -> Option<Focus> {
         | HitTarget::TransactionMenuItem(_)
         | HitTarget::TransactionMenuCancel => None,
         HitTarget::TransactionExitChoice(_) | HitTarget::TransactionExitCancel => None,
+        HitTarget::TextDetailCopySelection
+        | HitTarget::TextDetailCopyAll
+        | HitTarget::TextDetailClose
+        | HitTarget::RecordViewCopyCell
+        | HitTarget::RecordViewCopyRow
+        | HitTarget::RecordViewViewValue => None,
         HitTarget::RelationFirstPage
         | HitTarget::RelationPreviousPage
         | HitTarget::RelationPageSize

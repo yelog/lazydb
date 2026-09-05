@@ -483,6 +483,127 @@ impl EditorWorkspace {
         })
     }
 
+    /// Clamp a source coordinate to a valid editor cursor without changing the session.
+    pub(crate) fn mouse_position(
+        &self,
+        id: Uuid,
+        position: EditorPosition,
+    ) -> Result<EditorPosition, EditorError> {
+        let text = self.text(id)?;
+        let line_count = text.matches('\n').count();
+        let line = position.line.min(line_count);
+        let line_start = text
+            .split_inclusive('\n')
+            .take(line)
+            .map(str::len)
+            .sum::<usize>();
+        let line_end = text[line_start..]
+            .find('\n')
+            .map_or(text.len(), |offset| line_start + offset);
+        let column = text[line_start..line_end]
+            .chars()
+            .count()
+            .min(position.column);
+        Ok(EditorPosition { line, column })
+    }
+
+    /// Set a charwise mouse selection and return its exact source text.
+    ///
+    /// This updates only Modalkit's cursor group. It intentionally does not pass
+    /// through an editing action, so revisions, undo history, and read-only
+    /// capability remain unchanged.
+    pub(crate) fn set_mouse_selection(
+        &mut self,
+        id: Uuid,
+        start: EditorPosition,
+        end: EditorPosition,
+    ) -> Result<String, EditorError> {
+        let text = self.text(id)?;
+        let start = self.mouse_position(id, start)?;
+        let end = self.mouse_position(id, end)?;
+        let start_offset = char_position_to_byte(&text, start);
+        let end_offset = char_position_to_byte(&text, end);
+        let (first, last) = if start_offset <= end_offset {
+            (start, end)
+        } else {
+            (end, start)
+        };
+        let first_offset = char_position_to_byte(&text, first);
+        let last_offset = char_position_to_byte(&text, last);
+        let last_end = text[last_offset..]
+            .chars()
+            .next()
+            .map_or(last_offset, |character| {
+                if character == '\n' {
+                    last_offset
+                } else {
+                    last_offset + character.len_utf8()
+                }
+            });
+        let selected = text[first_offset..last_end].to_owned();
+
+        let session = self
+            .sessions
+            .get_mut(&id)
+            .ok_or(EditorError::MissingSession(id))?;
+        session.position = end;
+        let mut buffer = session
+            .buffer
+            .write()
+            .map_err(|_| EditorError::Operation("buffer lock poisoned".into()))?;
+        buffer.set_group(
+            session.group_id,
+            modalkit::editing::cursor::CursorGroup::new(
+                modalkit::editing::cursor::CursorState::Selection(
+                    modalkit::editing::cursor::Cursor::new(end.line, end.column),
+                    modalkit::editing::cursor::Cursor::new(start.line, start.column),
+                    modalkit::prelude::TargetShape::CharWise,
+                ),
+                Vec::new(),
+            ),
+        );
+        Ok(selected)
+    }
+
+    pub(crate) fn mouse_selection(&self, id: Uuid) -> Result<Option<String>, EditorError> {
+        let text = self.text(id)?;
+        let session = self
+            .sessions
+            .get(&id)
+            .ok_or(EditorError::MissingSession(id))?;
+        let selection = session
+            .buffer
+            .write()
+            .map_err(|_| EditorError::Operation("buffer lock poisoned".into()))?
+            .get_leader_selection(session.group_id);
+        let Some((start, end, _)) = selection else {
+            return Ok(None);
+        };
+        let start = EditorPosition {
+            line: start.get_y(),
+            column: start.get_x(),
+        };
+        let end = EditorPosition {
+            line: end.get_y(),
+            column: end.get_x(),
+        };
+        let start_offset = char_position_to_byte(&text, start);
+        let end_offset = char_position_to_byte(&text, end);
+        let end_offset = text[end_offset..]
+            .chars()
+            .next()
+            .map_or(end_offset, |character| {
+                if character == '\n' {
+                    end_offset
+                } else {
+                    end_offset + character.len_utf8()
+                }
+            });
+        Ok(Some(
+            text[start_offset.min(end_offset)..start_offset.max(end_offset)].to_owned(),
+        ))
+    }
+
     pub(crate) fn revision(&self, id: Uuid) -> Result<u64, EditorError> {
         self.sessions
             .get(&id)

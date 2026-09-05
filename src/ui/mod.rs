@@ -12,6 +12,8 @@ pub mod query_bar;
 pub mod record_view;
 pub mod relation;
 mod shortcut_hints;
+pub mod text_detail;
+pub mod text_selection;
 pub mod theme;
 
 use ratatui::{
@@ -148,6 +150,7 @@ pub enum HitTarget {
     CatalogEditorColumnDetailsCancel,
     CatalogOwnerChoice(String),
     DismissNotification(u64),
+    OpenTextDetail(crate::model::text_detail::TextDetailRequest),
     RelationFirstPage,
     RelationPreviousPage,
     RelationPageSize,
@@ -166,6 +169,27 @@ pub enum HitTarget {
     TransactionMenuCancel,
     TransactionExitChoice(crate::model::transaction::TransactionExitChoice),
     TransactionExitCancel,
+    TextDetailCopySelection,
+    TextDetailCopyAll,
+    TextDetailClose,
+    RecordViewCopyCell,
+    RecordViewCopyRow,
+    RecordViewViewValue,
+}
+
+pub(crate) fn readonly_detail_request(
+    title: impl Into<String>,
+    text: impl Into<String>,
+) -> crate::model::text_detail::TextDetailRequest {
+    let text = crate::security::sanitize_terminal_text(&text.into());
+    crate::model::text_detail::TextDetailRequest::new(
+        title,
+        Uuid::nil(),
+        0,
+        text.clone(),
+        text,
+        None,
+    )
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -192,11 +216,15 @@ pub struct UiState {
     pub explorer_viewport_rows: Option<usize>,
     pub ddl_viewport: Option<DdlViewportMetrics>,
     pub cursor_style: Option<CursorStyle>,
+    pub terminal_selection_mode: bool,
     pub pane_layout: PaneLayoutMetrics,
     pub click_tracker: RefCell<Option<(crate::model::explorer::ExplorerNodeId, Instant)>>,
     pub relation_resize: RefCell<Option<(usize, u16, u16)>>,
     pub grid_scrollbar_drag: RefCell<Option<GridScrollbarDrag>>,
     pub pane_resize_drag: RefCell<Option<PaneResizeDrag>>,
+    pub mouse_gesture: RefCell<Option<text_selection::GestureOwner>>,
+    pub text_gesture: RefCell<Option<text_selection::TextGesture>>,
+    pub text_selection_target: Option<text_selection::TextSelectionTarget>,
     pub(crate) animations: animation::AnimationState,
     pub(crate) result_area: Option<Rect>,
     pub(crate) activity_icons: icons::IconSet,
@@ -261,11 +289,15 @@ impl UiState {
             explorer_viewport_rows: None,
             ddl_viewport: None,
             cursor_style: None,
+            terminal_selection_mode: false,
             pane_layout: PaneLayoutMetrics::default(),
             click_tracker: RefCell::new(None),
             relation_resize: RefCell::new(None),
             grid_scrollbar_drag: RefCell::new(None),
             pane_resize_drag: RefCell::new(None),
+            mouse_gesture: RefCell::new(None),
+            text_gesture: RefCell::new(None),
+            text_selection_target: None,
             animations: animation::AnimationState::new(mode, Instant::now()),
             result_area: None,
             activity_icons: icons::IconSet::default(),
@@ -328,6 +360,41 @@ impl UiState {
 
     pub fn clear_click_tracker(&self) {
         *self.click_tracker.borrow_mut() = None;
+    }
+
+    pub fn begin_text_gesture(&self, gesture: text_selection::TextGesture) -> bool {
+        let mut owner = self.mouse_gesture.borrow_mut();
+        if owner.is_some() {
+            return false;
+        }
+        *owner = Some(text_selection::GestureOwner::Text);
+        *self.text_gesture.borrow_mut() = Some(gesture);
+        true
+    }
+
+    pub fn update_text_gesture(&self, end: text_selection::TextPosition) -> bool {
+        if *self.mouse_gesture.borrow() != Some(text_selection::GestureOwner::Text) {
+            return false;
+        }
+        if let Some(gesture) = self.text_gesture.borrow_mut().as_mut() {
+            gesture.end = end;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn end_mouse_gesture(&self) -> Option<text_selection::GestureOwner> {
+        let owner = self.mouse_gesture.borrow_mut().take();
+        if owner == Some(text_selection::GestureOwner::Text) {
+            self.text_gesture.borrow_mut().take();
+        }
+        owner
+    }
+
+    pub fn cancel_mouse_gesture(&self) {
+        self.mouse_gesture.borrow_mut().take();
+        self.text_gesture.borrow_mut().take();
     }
 }
 
@@ -557,6 +624,7 @@ pub fn render_with_state_using_icons_sequence_and_theme(
     state.explorer_viewport_rows = None;
     state.ddl_viewport = None;
     state.cursor_style = None;
+    state.text_selection_target = None;
     state.result_area = None;
 
     if layout.mode == LayoutMode::TooSmall {
@@ -583,7 +651,7 @@ pub fn render_with_state_using_icons_sequence_and_theme(
             });
             dashboard::render(frame, area, app, theme, state);
         }
-        render_footer(frame, layout.footer, app, theme, sequence);
+        render_footer(frame, layout.footer, app, theme, sequence, state);
     } else if is_relation {
         if let Some(area) = layout.explorer {
             state.hit_regions.push(HitRegion {
@@ -599,7 +667,7 @@ pub fn render_with_state_using_icons_sequence_and_theme(
             });
             relation::render(frame, area, app, theme, state);
         }
-        render_footer(frame, layout.footer, app, theme, sequence);
+        render_footer(frame, layout.footer, app, theme, sequence, state);
         state.hit_regions.push(HitRegion {
             area: layout.footer,
             target: HitTarget::Help,
@@ -637,7 +705,7 @@ pub fn render_with_state_using_icons_sequence_and_theme(
             }
         }
         if !matches!(app.overlay, Some(Overlay::CatalogEditor)) {
-            render_footer(frame, layout.footer, app, theme, sequence);
+            render_footer(frame, layout.footer, app, theme, sequence, state);
         }
         state.hit_regions.push(HitRegion {
             area: layout.footer,
@@ -799,6 +867,7 @@ fn overlay_key(overlay: &Overlay) -> u8 {
         Overlay::Update(_) => 21,
         Overlay::NotificationHistory(_) => 17,
         Overlay::RecordView(_) => 2,
+        Overlay::TextDetail(_) => 23,
         Overlay::ProfileManager => 3,
         Overlay::CatalogEditor => 18,
         Overlay::ProfileAccess { .. } => 4,
@@ -1387,7 +1456,10 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, sta
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled("  /  ", Style::new().fg(theme.border).bg(theme.surface)),
-        Span::styled(database, Style::new().fg(theme.action).bg(theme.surface)),
+        Span::styled(
+            database.clone(),
+            Style::new().fg(theme.action).bg(theme.surface),
+        ),
     ];
     let line = Line::from(spans);
     frame.render_widget(
@@ -1456,6 +1528,24 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, sta
         state.hit_regions.push(HitRegion {
             area: Rect::new(profile_x, area.y, profile_width, 1),
             target: HitTarget::HeaderProfile,
+        });
+    }
+    let database_x = profile_x
+        .saturating_add(profile_width)
+        .saturating_add("  /  ".cell_width());
+    let database_width = database.cell_width();
+    if database_width > 0 && database_x < main_area.right() {
+        state.hit_regions.push(HitRegion {
+            area: Rect::new(
+                database_x,
+                area.y,
+                database_width.min(main_area.right().saturating_sub(database_x)),
+                1,
+            ),
+            target: HitTarget::OpenTextDetail(readonly_detail_request(
+                "Connection database",
+                database,
+            )),
         });
     }
 }
@@ -2349,6 +2439,34 @@ fn completion_replacement_start_cell(
     )
 }
 
+pub(crate) fn register_text_selection_target(
+    state: &mut UiState,
+    session_id: Uuid,
+    text_viewport: Rect,
+    snapshot: &crate::model::editor::EditorRenderSnapshot,
+) {
+    state.text_selection_target = Some(text_selection::TextSelectionTarget {
+        session_id,
+        hit_maps: snapshot
+            .lines
+            .iter()
+            .take(usize::from(text_viewport.height))
+            .enumerate()
+            .map(|(row, line)| text_selection::TextHitMap {
+                area: Rect::new(
+                    text_viewport.x,
+                    text_viewport.y.saturating_add(row as u16),
+                    text_viewport.width,
+                    1,
+                ),
+                line: line.line,
+                source_to_display_cells: line.source_to_display_cells.clone(),
+                horizontal_offset: snapshot.horizontal_offset,
+            })
+            .collect(),
+    });
+}
+
 fn render_editor(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -2377,6 +2495,9 @@ fn render_editor(
         viewport.width.min(u16::MAX as usize) as u16,
         viewport.height.min(u16::MAX as usize) as u16,
     );
+    if let Some(session_id) = app.active_console_opt().map(|tab| tab.id) {
+        register_text_selection_target(state, session_id, text_viewport, &snapshot);
+    }
     let replacement_start_x = app
         .active_console_opt()
         .and_then(|tab| tab.completion.as_ref())
@@ -2979,6 +3100,19 @@ fn render_output(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, sta
     let Ok(snapshot) = app.active_output_editor_snapshot(viewport) else {
         return;
     };
+    if let Some(session_id) = app.active_console_opt().map(|tab| tab.output_editor_id) {
+        register_text_selection_target(
+            state,
+            session_id,
+            Rect::new(
+                inner.x.saturating_add(3),
+                inner.y,
+                viewport.width as u16,
+                viewport.height as u16,
+            ),
+            &snapshot,
+        );
+    }
     for (row, line) in snapshot.lines.iter().take(viewport.height).enumerate() {
         let y = inner.y.saturating_add(row as u16);
         let content = editor_line_spans(line, &snapshot, theme, true, None);
@@ -3007,7 +3141,16 @@ fn render_footer(
     app: &App,
     theme: Theme,
     _sequence: Option<&crate::input::keymap::KeySequenceState>,
+    state: &UiState,
 ) {
+    if state.terminal_selection_mode {
+        frame.render_widget(
+            Paragraph::new(" TERMINAL SELECTION  |  mouse released  |  press Esc to return ")
+                .style(Style::new().fg(theme.warning).bg(theme.surface)),
+            area,
+        );
+        return;
+    }
     let (mode, mode_color) = match app.focus {
         Focus::Editor => match app.active_editor_mode() {
             EditorMode::Normal => ("NORMAL", theme.accent),
@@ -3076,6 +3219,7 @@ fn render_overlay(
             notifications::render_history(frame, area, app, history, theme, state)
         }
         Overlay::RecordView(view) => record_view::render(frame, area, app, view, theme, state),
+        Overlay::TextDetail(view) => text_detail::render(frame, area, app, view, theme, state),
         Overlay::ProfileManager => {
             profiles::render_profile_manager(frame, area, app, state, theme, icons)
         }
@@ -4583,6 +4727,25 @@ fn render_help(
             .wrap(Wrap { trim: false }),
         chunks[2],
     );
+    for (offset, shortcut) in entries.iter().enumerate().skip(start).take(visible_height) {
+        let row = Rect::new(
+            chunks[2].x,
+            chunks[2].y.saturating_add(offset as u16 - start as u16),
+            chunks[2].width,
+            1,
+        );
+        state.hit_regions.push(HitRegion {
+            area: row,
+            target: HitTarget::OpenTextDetail(readonly_detail_request(
+                "Keyboard shortcut",
+                format!(
+                    "{}  {}",
+                    crate::help::configured_sequence(shortcut, Some(&help.bindings)),
+                    shortcut.description
+                ),
+            )),
+        });
+    }
     frame.render_widget(
         Paragraph::new("Up/Down select   Enter run   Esc close   Ctrl-W/U/A/E edit")
             .style(Style::new().fg(theme.muted).bg(theme.surface_raised)),

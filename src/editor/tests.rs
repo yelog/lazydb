@@ -147,6 +147,47 @@ fn unicode_positions_are_character_based() {
 }
 
 #[test]
+fn mouse_selection_returns_exact_source_text_for_unicode_and_reverse_drag() {
+    let (mut workspace, id) = fixture("SELECT 数据\n🙂 FROM users");
+
+    let selected = workspace
+        .set_mouse_selection(
+            id,
+            EditorPosition { line: 1, column: 5 },
+            EditorPosition { line: 0, column: 7 },
+        )
+        .unwrap();
+
+    assert_eq!(selected, "数据\n🙂 FROM");
+    assert_eq!(workspace.mouse_selection(id).unwrap(), Some(selected));
+}
+
+#[test]
+fn mouse_selection_preserves_revision_history_and_read_only_capability() {
+    let (mut workspace, id) = read_only_fixture("alpha beta");
+    let revision = workspace.revision(id).unwrap();
+
+    assert_eq!(
+        workspace
+            .set_mouse_selection(
+                id,
+                EditorPosition { line: 0, column: 0 },
+                EditorPosition { line: 0, column: 4 },
+            )
+            .unwrap(),
+        "alpha"
+    );
+    assert_eq!(workspace.text(id).unwrap(), "alpha beta");
+    assert_eq!(workspace.revision(id).unwrap(), revision);
+    assert!(workspace.drain_effects().is_empty());
+
+    workspace.undo(id).unwrap();
+    assert_eq!(workspace.text(id).unwrap(), "alpha beta");
+    assert_eq!(workspace.revision(id).unwrap(), revision);
+    assert!(workspace.drain_effects().is_empty());
+}
+
+#[test]
 fn multiline_paste_is_one_revision_and_undo_step() {
     let (mut workspace, id) = fixture("ab");
     workspace.move_cursor_to_end(id).unwrap();

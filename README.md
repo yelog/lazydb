@@ -112,7 +112,10 @@ Ensure `$HOME/.local/bin` is in `PATH`. To upgrade an offline installation,
 - **Neovim integration:** Run the standalone `lazydb.nvim` floating-terminal
   plugin with one LazyDB process per Neovim tab.
 - **Terminal-native UI:** Use keyboard navigation, mouse hit regions, truecolor
-  themes, responsive 80-column focus mode, and configurable motion feedback.
+  themes, responsive 80-column focus mode, configurable motion feedback, and
+  mouse drag selection in rendered text views. Explicit copy commands/buttons
+  copy complete cell, row, SQL, or detail values where documented; drag alone
+  never writes to the clipboard.
 
 ## Supported Databases
 
@@ -204,6 +207,15 @@ The complete built-in application defaults are in
 [`config/default.toml`](config/default.toml). This file is embedded into the
 binary and is the authoritative source of defaults; a user `settings.toml` only
 needs to contain overrides. Explicit command-line options take precedence.
+
+Clipboard writes use the system clipboard by default. Set
+`[terminal.clipboard].backend = "osc52"` in `settings.toml` to send OSC 52
+sequences instead, or use `"off"` to disable clipboard writes. `max_bytes`
+limits the encoded OSC 52 payload and oversized values are rejected rather than
+truncated. `Ctrl-Shift-s` releases mouse capture for terminal-native
+selection; `Esc` restores it. `Ctrl-c` remains the quit key outside
+context-specific cancellation. Terminal, SSH, and tmux clipboard behavior is
+environment-dependent and requires manual QA in the actual terminal path.
 Common options include:
 
 ```bash

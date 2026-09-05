@@ -123,6 +123,7 @@ fn shortcut_context_with_overlay(app: &App, include_help: bool) -> ShortcutConte
             return match overlay {
                 Overlay::Help(_) => ShortcutContext::Help,
                 Overlay::RecordView(_) => ShortcutContext::RecordView,
+                Overlay::TextDetail(_) => ShortcutContext::Message,
                 Overlay::ProfileManager => {
                     match app.profile_manager.as_ref().map(|state| state.page) {
                         Some(ProfileManagerPage::Scope) => ShortcutContext::ProfileManagerScope,
@@ -264,6 +265,7 @@ fn shortcut_context_with_overlay(app: &App, include_help: bool) -> ShortcutConte
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum HelpShortcutId {
     Help,
+    TerminalSelection,
     FocusExplorer,
     FocusExplorerLeader,
     FocusResults,
@@ -781,6 +783,25 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
         "? (also F1)",
         "open this help panel",
         display
+    ),
+    row!(
+        TerminalSelection,
+        [
+            Explorer,
+            EditorNormal,
+            EditorInsert,
+            EditorVisual,
+            SqlResultsData,
+            SqlOutput,
+            RelationDataBrowse,
+            RelationDataEdit,
+            RelationDataVisual,
+            RelationDataBusy,
+            RelationDdl,
+            Dashboard
+        ],
+        "Ctrl-Shift-s",
+        "release mouse for terminal-native selection"
     ),
     row!(
         FocusExplorer,
@@ -2660,6 +2681,7 @@ pub(crate) fn configured_sequence(
 ) -> String {
     let command = match shortcut.id {
         HelpShortcutId::Help => Some("help"),
+        HelpShortcutId::TerminalSelection => Some("terminal-selection"),
         HelpShortcutId::OpenDashboard => Some("open-dashboard"),
         HelpShortcutId::FocusExplorerLeader => Some("open-explorer"),
         HelpShortcutId::OpenSqlEditors => Some("open-editors"),

@@ -977,6 +977,65 @@ impl App {
         })]
     }
 
+    fn copy_editor_selection(
+        &mut self,
+        session_id: Uuid,
+        start: crate::model::editor::EditorPosition,
+        end: crate::model::editor::EditorPosition,
+        revision: u64,
+    ) -> Vec<Command> {
+        if self.editor.revision(session_id).ok() != Some(revision) {
+            return Vec::new();
+        }
+        let Ok(text) = self.editor.set_mouse_selection(session_id, start, end) else {
+            return Vec::new();
+        };
+        if text.is_empty() {
+            return Vec::new();
+        }
+        vec![Command::WriteClipboard(ClipboardPayload {
+            description: format!("Text selection: {} chars", text.chars().count()),
+            text,
+            sensitive: false,
+        })]
+    }
+
+    fn active_read_only_session_id(&self) -> Option<Uuid> {
+        match self.tabs.get(self.active_tab) {
+            Some(WorkspaceTab::Sql(tab))
+                if self.focus == Focus::Results
+                    && matches!(tab.result_view, ResultView::Output | ResultView::Plan) =>
+            {
+                Some(tab.output_editor_id)
+            }
+            Some(WorkspaceTab::Relation(tab))
+                if self.focus == Focus::Results && tab.view == RelationView::Ddl =>
+            {
+                Some(tab.ddl_editor_id)
+            }
+            _ => None,
+        }
+    }
+
+    fn copy_active_read_only_selection(&mut self) -> Vec<Command> {
+        let Some(session_id) = self.active_read_only_session_id() else {
+            return self.copy_editor_statement();
+        };
+        let Ok(Some(text)) = self.editor.mouse_selection(session_id) else {
+            self.notify_warning("Clipboard", "Nothing selected");
+            return Vec::new();
+        };
+        if text.is_empty() {
+            self.notify_warning("Clipboard", "Nothing selected");
+            return Vec::new();
+        }
+        vec![Command::WriteClipboard(ClipboardPayload {
+            description: format!("Text selection: {} chars", text.chars().count()),
+            text,
+            sensitive: false,
+        })]
+    }
+
     fn copy_grid_cell(&mut self) -> Vec<Command> {
         let Some((columns, row, _, _)) = self.active_record_snapshot() else {
             self.notify_warning("Clipboard", "Nothing to copy in the current Data view");
@@ -1008,6 +1067,88 @@ impl App {
             .collect()
     }
 
+    fn grid_value_detail(
+        &self,
+        column: usize,
+    ) -> Option<crate::model::text_detail::TextDetailRequest> {
+        let (columns, row, _, _) = self.active_record_snapshot()?;
+        let value = row.get(column)?;
+        let source_session_id = self.active_console_opt().map_or(Uuid::nil(), |tab| tab.id);
+        let source_revision = self
+            .active_console_opt()
+            .map_or(0, |tab| self.editor_revision(tab.id));
+        let title = columns
+            .get(column)
+            .map_or_else(|| "Cell value".into(), |column| column.name.clone());
+        Some(crate::model::text_detail::TextDetailRequest::new(
+            title,
+            source_session_id,
+            source_revision,
+            value.preview(80).text,
+            value.clipboard_text(),
+            None,
+        ))
+    }
+
+    fn copy_record_view_cell(&mut self) -> Vec<Command> {
+        let Some((columns, row, _, _)) = self.active_record_snapshot() else {
+            return Vec::new();
+        };
+        let column = match &self.overlay {
+            Some(Overlay::RecordView(view)) => view.selected_field,
+            _ => return Vec::new(),
+        };
+        let Some(value) = row.get(column) else {
+            return Vec::new();
+        };
+        let label = columns
+            .get(column)
+            .map_or("cell", |meta| meta.name.as_str());
+        let mut payload = copy_cell(label, value);
+        payload.sensitive = self.active_process_grid();
+        vec![Command::WriteClipboard(payload)]
+    }
+
+    fn copy_record_view_row(&mut self, include_headers: bool) -> Vec<Command> {
+        let Some((columns, row, _, _)) = self.active_record_snapshot() else {
+            return Vec::new();
+        };
+        copy_row_tsv(&columns, &row, include_headers)
+            .map(|mut payload| {
+                payload.sensitive = self.active_process_grid();
+                Command::WriteClipboard(payload)
+            })
+            .into_iter()
+            .collect()
+    }
+
+    fn record_view_value_detail(&self) -> Option<crate::model::text_detail::TextDetailRequest> {
+        let (columns, row, _, _) = self.active_record_snapshot()?;
+        let column = match &self.overlay {
+            Some(Overlay::RecordView(view)) => view.selected_field,
+            _ => return None,
+        };
+        let value = row.get(column)?;
+        let source_session_id = self.active_console_opt().map_or(Uuid::nil(), |tab| tab.id);
+        let source_revision = self
+            .active_console_opt()
+            .map_or(0, |tab| self.editor_revision(tab.id));
+        let title = columns
+            .get(column)
+            .map_or_else(|| "Cell value".into(), |column| column.name.clone());
+        Some(crate::model::text_detail::TextDetailRequest::new(
+            title,
+            source_session_id,
+            source_revision,
+            value.preview(80).text,
+            value.clipboard_text(),
+            Some(Box::new(Overlay::RecordView(match &self.overlay {
+                Some(Overlay::RecordView(view)) => view.clone(),
+                _ => return None,
+            }))),
+        ))
+    }
+
     fn active_process_grid(&self) -> bool {
         matches!(
             self.tabs.get(self.active_tab),
@@ -1029,6 +1170,10 @@ impl App {
         self.active_console_opt()
             .and_then(|tab| self.editor.revision(tab.id).ok())
             .unwrap_or_default()
+    }
+
+    pub(crate) fn editor_revision(&self, id: Uuid) -> u64 {
+        self.editor.revision(id).unwrap_or_default()
     }
 
     pub fn active_editor_mode(&self) -> EditorMode {
@@ -1119,6 +1264,19 @@ impl App {
             return Err(EditorError::MissingSession(Uuid::nil()));
         };
         self.editor.viewport(tab.ddl_editor_id)
+    }
+
+    pub(crate) fn text_detail_snapshot(
+        &self,
+        session_id: Uuid,
+        viewport: EditorViewport,
+    ) -> Result<EditorRenderSnapshot, EditorError> {
+        self.editor.render_snapshot_with_dialect_and_ranges(
+            session_id,
+            viewport,
+            self.sql_dialect(),
+            &[],
+        )
     }
 
     pub fn active_profile(&self) -> Option<&ConnectionProfile> {
@@ -1775,7 +1933,16 @@ impl App {
                         | Action::GridSetColumnOffset { .. }
                         | Action::CopyGridCell
                         | Action::CopyGridRow { .. }
+                        | Action::ViewGridCell
+                        | Action::CopyRecordViewCell
+                        | Action::CopyRecordViewRow { .. }
+                        | Action::ViewRecordViewValue
                         | Action::OpenRecordView
+                        | Action::OpenTextDetail(_)
+                        | Action::SetTextDetailSelection { .. }
+                        | Action::CopyTextDetailSelection { .. }
+                        | Action::CopyTextDetailAll { .. }
+                        | Action::CloseTextDetail
                         | Action::RecordViewMoveFields(_)
                         | Action::RecordViewJumpFirstField
                         | Action::RecordViewJumpLastField
@@ -3090,6 +3257,107 @@ impl App {
             Action::CloseRecordView => {
                 if matches!(self.overlay, Some(Overlay::RecordView(_))) {
                     self.overlay = None;
+                }
+                Vec::new()
+            }
+            Action::OpenTextDetail(request) => {
+                if !(request.source_session_id == Uuid::nil() && request.source_revision == 0)
+                    && self.editor.revision(request.source_session_id).ok()
+                        != Some(request.source_revision)
+                {
+                    return Vec::new();
+                }
+                let session_id = Uuid::new_v4();
+                let display_text = crate::security::sanitize_terminal_text(&request.display_text);
+                self.editor.open_read_only(session_id, &display_text);
+                self.overlay = Some(Overlay::TextDetail(
+                    crate::model::text_detail::TextDetailState {
+                        title: request.title,
+                        session_id,
+                        source_session_id: request.source_session_id,
+                        source_revision: request.source_revision,
+                        revision: self.editor.revision(session_id).unwrap_or_default(),
+                        copy_text: request.copy_text,
+                        return_overlay: request.return_overlay,
+                    },
+                ));
+                Vec::new()
+            }
+            Action::ViewGridCell => self
+                .grid_value_detail(self.active_grid_column())
+                .map_or_else(Vec::new, |request| {
+                    self.update(Action::OpenTextDetail(request))
+                }),
+            Action::CopyRecordViewCell => self.copy_record_view_cell(),
+            Action::CopyRecordViewRow { include_headers } => {
+                self.copy_record_view_row(include_headers)
+            }
+            Action::ViewRecordViewValue => self
+                .record_view_value_detail()
+                .map_or_else(Vec::new, |request| {
+                    self.update(Action::OpenTextDetail(request))
+                }),
+            Action::SetTextDetailSelection {
+                session_id,
+                start,
+                end,
+                revision,
+            } => {
+                if matches!(self.overlay, Some(Overlay::TextDetail(_)))
+                    && self.editor.revision(session_id).ok() == Some(revision)
+                {
+                    let _ = self.editor.set_mouse_selection(session_id, start, end);
+                }
+                Vec::new()
+            }
+            Action::CopyTextDetailSelection {
+                session_id,
+                revision,
+            } => {
+                let Some(Overlay::TextDetail(view)) = self.overlay.as_ref() else {
+                    return Vec::new();
+                };
+                if view.session_id != session_id
+                    || (!(view.source_session_id == Uuid::nil() && view.source_revision == 0)
+                        && self.editor.revision(view.source_session_id).ok()
+                            != Some(view.source_revision))
+                    || self.editor.revision(session_id).ok() != Some(revision)
+                {
+                    return Vec::new();
+                }
+                let Ok(Some(text)) = self.editor.mouse_selection(session_id) else {
+                    return Vec::new();
+                };
+                if text.is_empty() {
+                    return Vec::new();
+                }
+                vec![Command::WriteClipboard(ClipboardPayload {
+                    description: format!("Text selection: {} chars", text.chars().count()),
+                    text,
+                    sensitive: false,
+                })]
+            }
+            Action::CopyTextDetailAll { session_id } => {
+                let Some(Overlay::TextDetail(view)) = self.overlay.as_ref() else {
+                    return Vec::new();
+                };
+                if view.session_id != session_id
+                    || (!(view.source_session_id == Uuid::nil() && view.source_revision == 0)
+                        && self.editor.revision(view.source_session_id).ok()
+                            != Some(view.source_revision))
+                {
+                    return Vec::new();
+                }
+                vec![Command::WriteClipboard(ClipboardPayload {
+                    description: format!("{}: complete text", view.title),
+                    text: view.copy_text.clone(),
+                    sensitive: false,
+                })]
+            }
+            Action::CloseTextDetail => {
+                if let Some(Overlay::TextDetail(view)) = self.overlay.take() {
+                    self.editor.close_console(view.session_id);
+                    self.overlay = view.return_overlay.map(|overlay| *overlay);
                 }
                 Vec::new()
             }
@@ -5657,6 +5925,23 @@ impl App {
                 text,
                 sensitive: false,
             })],
+            Action::CopyEditorSelection {
+                session_id,
+                start,
+                end,
+                revision,
+            } => self.copy_editor_selection(session_id, start, end, revision),
+            Action::SetEditorMouseSelection {
+                session_id,
+                start,
+                end,
+                revision,
+            } => {
+                if self.editor.revision(session_id).ok() == Some(revision) {
+                    let _ = self.editor.set_mouse_selection(session_id, start, end);
+                }
+                Vec::new()
+            }
             Action::CopyEditorStatement => self.copy_editor_statement(),
             Action::CopyEditorBuffer => self.copy_editor_buffer(),
             Action::CopyGridCell => self.copy_grid_cell(),
@@ -5665,6 +5950,7 @@ impl App {
                 self.notify_error("Clipboard", &message);
                 Vec::new()
             }
+            Action::Osc52Clipboard { .. } => Vec::new(),
             Action::EditorViewportChanged(viewport) => {
                 let id = match self.tabs.get(self.active_tab) {
                     Some(WorkspaceTab::Sql(tab))
@@ -7920,6 +8206,7 @@ impl App {
                     self.defer_intent(DeferredIntent::Quit, ids)
                 }
             },
+            Action::ToggleTerminalSelection => Vec::new(),
         }
     }
 
@@ -9601,7 +9888,12 @@ impl App {
                 EditorEffect::ResizePane(resize) => Action::ResizePane(resize),
                 EditorEffect::ResetPaneSizes => Action::ResetPaneSizes,
                 EditorEffect::TogglePaneMaximized => Action::TogglePaneMaximized,
-                EditorEffect::CopyStatement => Action::CopyEditorStatement,
+                EditorEffect::CopyStatement => {
+                    if self.active_read_only_session_id().is_some() {
+                        return self.copy_active_read_only_selection();
+                    }
+                    Action::CopyEditorStatement
+                }
                 EditorEffect::CopyBuffer => Action::CopyEditorBuffer,
                 EditorEffect::Message(_)
                 | EditorEffect::BackwardSearch
@@ -10504,7 +10796,7 @@ impl App {
             .push_source(level, title, body, source, Instant::now());
     }
 
-    fn notify_info(&mut self, title: &str, body: impl Into<String>) {
+    pub(crate) fn notify_info(&mut self, title: &str, body: impl Into<String>) {
         self.notify(NotificationLevel::Info, title, body);
     }
 
@@ -10512,11 +10804,11 @@ impl App {
         self.notify(NotificationLevel::Success, title, body);
     }
 
-    fn notify_warning(&mut self, title: &str, body: impl Into<String>) {
+    pub(crate) fn notify_warning(&mut self, title: &str, body: impl Into<String>) {
         self.notify(NotificationLevel::Warning, title, body);
     }
 
-    fn notify_error(&mut self, title: &str, body: impl Into<String>) {
+    pub(crate) fn notify_error(&mut self, title: &str, body: impl Into<String>) {
         self.notify(NotificationLevel::Error, title, body);
     }
 

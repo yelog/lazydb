@@ -15,6 +15,7 @@ pub mod relation;
 pub mod relation_edit;
 pub mod sql_editor_list;
 pub mod tab;
+pub mod text_detail;
 pub mod text_input;
 pub mod transaction;
 pub mod update;

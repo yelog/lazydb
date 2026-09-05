@@ -297,6 +297,54 @@ fn dashboard_overview_uses_rates_capacity_percentages_and_metric_icons() {
 }
 
 #[test]
+fn readonly_regions_register_help_dashboard_and_relation_detail_targets() {
+    let mut app = App::new(Vec::new());
+    app.overlay = Some(Overlay::Help(lazydb::help::HelpState::new(
+        lazydb::help::ShortcutContext::EditorNormal,
+        lazydb::help::ShortcutCapabilities::default(),
+    )));
+    let (_, help_state) = render_with_state(&app, 100, 30);
+    assert!(
+        help_state
+            .hit_regions
+            .iter()
+            .any(|region| { matches!(region.target, HitTarget::OpenTextDetail(_)) })
+    );
+
+    app.overlay = None;
+    app.tabs.clear();
+    app.tabs.push(WorkspaceTab::Dashboard(
+        lazydb::model::dashboard::DashboardTab::new(),
+    ));
+    app.active_tab = 0;
+    let (_, dashboard_state) = render_with_state(&app, 120, 36);
+    assert!(
+        dashboard_state
+            .hit_regions
+            .iter()
+            .any(|region| { matches!(region.target, HitTarget::OpenTextDetail(_)) })
+    );
+}
+
+#[test]
+fn connected_header_database_summary_is_readonly_detail_target() {
+    let app = fixture();
+    let (_, state) = render_with_state(&app, 120, 36);
+    let detail = state
+        .hit_regions
+        .iter()
+        .find_map(|region| match &region.target {
+            HitTarget::OpenTextDetail(request) if request.title == "Connection database" => {
+                Some(request)
+            }
+            _ => None,
+        })
+        .expect("database detail target");
+    assert_eq!(detail.display_text, ":memory:");
+    assert_eq!(detail.copy_text, ":memory:");
+}
+
+#[test]
 #[allow(dead_code)]
 fn catalog_editor_overlay_renders_picker_shell_and_context() {
     let mut app = App::new(Vec::new());
@@ -2183,6 +2231,80 @@ fn record_view_navigation_changes_record_and_closes_without_database_io() {
     assert!(render(&app, 100, 30).contains("ROW 2 / 2"));
     assert!(app.update(Action::CloseRecordView).is_empty());
     assert!(app.overlay.is_none());
+}
+
+#[test]
+fn record_view_copy_uses_selected_field_instead_of_grid_column() {
+    let mut app = fixture();
+    app.focus = Focus::Results;
+    app.active_console_mut().grid.selected_column = 0;
+    app.update(Action::OpenRecordView);
+    app.update(Action::RecordViewViewportChanged {
+        tab_id: app.active_console().id,
+        visible_fields: 18,
+    });
+    app.update(Action::RecordViewMoveFields(1));
+
+    let commands = app.update(Action::CopyRecordViewCell);
+    assert!(matches!(
+        commands.as_slice(),
+        [lazydb::action::Command::WriteClipboard(payload)] if payload.text == "Ada"
+    ));
+}
+
+#[test]
+fn record_view_value_detail_keeps_preview_and_complete_value_without_query_io() {
+    let mut app = fixture();
+    let long_value = "0123456789".repeat(20);
+    app.active_console_mut().outcome = Some(QueryOutcome {
+        result_sets: vec![ResultSet {
+            columns: vec![ColumnMeta {
+                name: "payload".into(),
+                type_name: "TEXT".into(),
+            }],
+            rows: vec![vec![CellValue::Text(long_value.clone())]],
+            affected_rows: 0,
+        }],
+        stats: QueryStats::new(Duration::ZERO, Duration::ZERO, 1),
+    });
+    app.focus = Focus::Results;
+    app.update(Action::OpenRecordView);
+    let generation = app.active_console().generation;
+
+    assert!(app.update(Action::ViewRecordViewValue).is_empty());
+    let Some(Overlay::TextDetail(detail)) = app.overlay.as_ref() else {
+        panic!("value detail did not open");
+    };
+    assert!(app.editor_text(detail.session_id).unwrap().len() < long_value.len());
+    assert_eq!(detail.copy_text, long_value);
+    assert_eq!(app.active_console().generation, generation);
+}
+
+#[test]
+fn grid_value_detail_uses_complete_value_without_query_io() {
+    let mut app = fixture();
+    let long_value = "grid-value-".repeat(20);
+    app.active_console_mut().outcome = Some(QueryOutcome {
+        result_sets: vec![ResultSet {
+            columns: vec![ColumnMeta {
+                name: "payload".into(),
+                type_name: "TEXT".into(),
+            }],
+            rows: vec![vec![CellValue::Text(long_value.clone())]],
+            affected_rows: 0,
+        }],
+        stats: QueryStats::new(Duration::ZERO, Duration::ZERO, 1),
+    });
+    app.focus = Focus::Results;
+    let generation = app.active_console().generation;
+
+    app.update(Action::ViewGridCell);
+    let Some(Overlay::TextDetail(detail)) = app.overlay.as_ref() else {
+        panic!("grid value detail did not open");
+    };
+    assert!(app.editor_text(detail.session_id).unwrap().len() < long_value.len());
+    assert_eq!(detail.copy_text, long_value);
+    assert_eq!(app.active_console().generation, generation);
 }
 
 #[test]
