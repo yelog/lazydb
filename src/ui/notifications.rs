@@ -13,6 +13,7 @@ use crate::{
     model::notification::{
         HistorySearchPhase, Notification, NotificationHistoryState, NotificationLevel,
     },
+    model::text_detail::TextDetailRequest,
     security::sanitize_terminal_text,
     ui::{HitRegion, HitTarget, UiState, icons::IconSet, theme::Theme},
 };
@@ -59,6 +60,15 @@ pub(crate) fn render(
         let area = Rect::new(viewport.right().saturating_sub(width), y, width, height);
         draw_card(frame, area, notification, theme, icons);
         let close_width = icons.close().width().max(1) as u16 + 2;
+        state.hit_regions.push(HitRegion {
+            area: Rect::new(
+                area.x,
+                area.y.saturating_add(1),
+                area.width.saturating_sub(close_width),
+                area.height.saturating_sub(1),
+            ),
+            target: HitTarget::OpenTextDetail(notification_detail_request(notification)),
+        });
         state.hit_regions.push(HitRegion {
             area: Rect::new(
                 area.right().saturating_sub(close_width),
@@ -149,6 +159,12 @@ pub(crate) fn render_history(
         }
     }
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), body[0]);
+    if narrow && let Some(notification) = entries.get(selected) {
+        state.hit_regions.push(HitRegion {
+            area: body[0],
+            target: HitTarget::OpenTextDetail(notification_detail_request(notification)),
+        });
+    }
     if !narrow && let Some(notification) = entries.get(selected) {
         frame.render_widget(
             Paragraph::new(vec![
@@ -193,6 +209,18 @@ pub(crate) fn render_history(
         frame.set_cursor_position(Position::new(x, chunks[0].y));
     }
     let _ = matches;
+}
+
+fn notification_detail_request(notification: &Notification) -> TextDetailRequest {
+    let body = sanitize_terminal_text(&notification.body);
+    TextDetailRequest::new(
+        notification.title.clone(),
+        uuid::Uuid::nil(),
+        0,
+        body.clone(),
+        body,
+        None,
+    )
 }
 
 fn centered_history(area: Rect, narrow: bool) -> Rect {
@@ -325,6 +353,7 @@ fn truncate_cells(value: &str, width: usize) -> String {
 mod tests {
     use super::*;
     use ratatui::buffer::CellWidth;
+    use std::time::Instant;
 
     #[test]
     fn width_and_text_helpers_use_display_cells() {
@@ -352,5 +381,56 @@ mod tests {
         let popup = centered_history(Rect::new(0, 0, 60, 24), true);
         assert_eq!(popup.width, 58);
         assert!(popup.height <= 22);
+    }
+
+    #[test]
+    fn notification_detail_request_copies_complete_sanitized_body() {
+        let body = "first\nsecond\u{1b}[31m";
+        let request = notification_detail_request(&Notification {
+            id: 1,
+            level: NotificationLevel::Error,
+            title: "Error".into(),
+            body: body.into(),
+            created_at: chrono::Local::now(),
+            source: None,
+        });
+
+        assert_eq!(request.display_text, sanitize_terminal_text(body));
+        assert_eq!(request.copy_text, sanitize_terminal_text(body));
+        assert_eq!(request.source_session_id, uuid::Uuid::nil());
+        assert_eq!(request.source_revision, 0);
+    }
+
+    #[test]
+    fn narrow_history_registers_an_explicit_detail_target_for_selected_row() {
+        let mut app = App::new(Vec::new());
+        app.notifications.push(
+            NotificationLevel::Info,
+            "Title",
+            "Complete body",
+            Instant::now(),
+        );
+        let history = NotificationHistoryState::new();
+        let mut ui = UiState::new();
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 20))
+            .expect("test terminal");
+        terminal
+            .draw(|frame| {
+                render_history(
+                    frame,
+                    frame.area(),
+                    &app,
+                    &history,
+                    Theme::default(),
+                    &mut ui,
+                );
+            })
+            .expect("render history");
+
+        assert!(
+            ui.hit_regions
+                .iter()
+                .any(|region| { matches!(region.target, HitTarget::OpenTextDetail(_)) })
+        );
     }
 }

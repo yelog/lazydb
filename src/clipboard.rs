@@ -1,4 +1,40 @@
 use crate::db::{query::ColumnMeta, value::CellValue};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Osc52Error {
+    PayloadTooLarge {
+        encoded_bytes: usize,
+        max_bytes: usize,
+    },
+}
+
+impl std::fmt::Display for Osc52Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PayloadTooLarge {
+                encoded_bytes,
+                max_bytes,
+            } => write!(
+                f,
+                "clipboard payload is too large after encoding ({encoded_bytes} bytes; limit {max_bytes})"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for Osc52Error {}
+
+pub fn osc52_sequence(text: &str, max_bytes: usize) -> Result<String, Osc52Error> {
+    let encoded = STANDARD.encode(text.as_bytes());
+    if encoded.len() > max_bytes {
+        return Err(Osc52Error::PayloadTooLarge {
+            encoded_bytes: encoded.len(),
+            max_bytes,
+        });
+    }
+    Ok(format!("\x1b]52;c;{encoded}\x07"))
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClipboardPayload {
@@ -92,7 +128,7 @@ impl<T> Pipe for T {}
 
 #[cfg(test)]
 mod tests {
-    use super::{ClipboardPayload, copy_cell, copy_row_tsv};
+    use super::{ClipboardPayload, Osc52Error, copy_cell, copy_row_tsv, osc52_sequence};
     use crate::db::{query::ColumnMeta, value::CellValue};
 
     #[test]
@@ -146,6 +182,26 @@ mod tests {
         assert_eq!(
             copy_cell("payload", &CellValue::Bytes(vec![0, 1, 2, 255])).text,
             "0x000102FF"
+        );
+    }
+
+    #[test]
+    fn osc52_encodes_utf8_and_empty_payload() {
+        assert_eq!(
+            osc52_sequence("你好", 100).unwrap(),
+            "\x1b]52;c;5L2g5aW9\x07"
+        );
+        assert_eq!(osc52_sequence("", 0).unwrap(), "\x1b]52;c;\x07");
+    }
+
+    #[test]
+    fn osc52_rejects_encoded_payload_over_limit_without_truncating() {
+        assert_eq!(
+            osc52_sequence("hello", 4),
+            Err(Osc52Error::PayloadTooLarge {
+                encoded_bytes: 8,
+                max_bytes: 4
+            })
         );
     }
 }

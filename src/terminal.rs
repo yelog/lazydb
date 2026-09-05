@@ -26,6 +26,7 @@ static KEYBOARD_ENHANCEMENT_ENABLED: AtomicBool = AtomicBool::new(false);
 pub struct TerminalSession {
     terminal: Tui,
     mouse_enabled: bool,
+    mouse_captured: bool,
 }
 
 impl TerminalSession {
@@ -69,7 +70,25 @@ impl TerminalSession {
         Ok(Self {
             terminal,
             mouse_enabled,
+            mouse_captured: mouse_enabled,
         })
+    }
+
+    pub fn mouse_captured(&self) -> bool {
+        self.mouse_captured
+    }
+
+    pub fn set_mouse_capture(&mut self, enabled: bool) -> io::Result<()> {
+        if enabled == self.mouse_captured {
+            return Ok(());
+        }
+        if enabled {
+            execute!(self.terminal.backend_mut(), EnableMouseCapture)?;
+        } else {
+            execute!(self.terminal.backend_mut(), DisableMouseCapture)?;
+        }
+        self.mouse_captured = enabled;
+        Ok(())
     }
 
     pub fn draw<F>(&mut self, render: F) -> io::Result<()>
@@ -87,6 +106,17 @@ impl TerminalSession {
         };
         execute!(self.terminal.backend_mut(), style)
     }
+
+    pub fn write_osc52(&mut self, text: &str, max_bytes: usize) -> io::Result<()> {
+        write_osc52_to(self.terminal.backend_mut(), text, max_bytes)
+    }
+}
+
+fn write_osc52_to(writer: &mut impl io::Write, text: &str, max_bytes: usize) -> io::Result<()> {
+    let sequence = crate::clipboard::osc52_sequence(text, max_bytes)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    writer.write_all(sequence.as_bytes())?;
+    writer.flush()
 }
 
 impl Drop for TerminalSession {
@@ -135,5 +165,24 @@ pub fn restore_terminal() {
 fn disable_keyboard_enhancement(writer: &mut impl io::Write) {
     if KEYBOARD_ENHANCEMENT_ENABLED.swap(false, Ordering::Relaxed) {
         let _ = execute!(writer, PopKeyboardEnhancementFlags);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::write_osc52_to;
+
+    #[test]
+    fn osc52_is_written_as_one_flushed_terminal_sequence() {
+        let mut output = Vec::new();
+        write_osc52_to(&mut output, "a\n你", 100).unwrap();
+        assert_eq!(output, b"\x1b]52;c;YQrkvaA=\x07");
+    }
+
+    #[test]
+    fn osc52_size_errors_are_not_written() {
+        let mut output = Vec::new();
+        assert!(write_osc52_to(&mut output, "hello", 4).is_err());
+        assert!(output.is_empty());
     }
 }

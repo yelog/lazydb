@@ -65,6 +65,7 @@ presentation.
 | `F1` | Open contextual Help |
 | `?` | Open Help outside Editor search/input states |
 | `Ctrl-c` | Quit globally; context-specific cancellation may also be offered by its modal |
+| `Ctrl-Shift-s` | Release mouse capture for terminal-native text selection; press `Esc` to return |
 | `Tab` / `Shift-Tab` | Move focus between workspace panes where applicable |
 | `Ctrl-PageUp` / `Ctrl-PageDown` | Previous/next workspace tab |
 | `Q` | Quit from Editor Normal mode |
@@ -413,7 +414,10 @@ Relation DDL is a read-only Vim text view.
 | `Esc`, `q`, `v` | Close Record View |
 
 Record View is read-only and is only available when the active result has at
-least one row and one column.
+least one row and one column. Its mouse buttons copy the selected cell or row;
+the `Enter view value` button opens the complete value in a text-detail view.
+That view provides separate `Copy selection` and `Copy all` buttons. `Copy all`
+copies the complete value, while dragging selects text in the displayed detail.
 
 ## Data Query Inputs and Completion
 
@@ -548,7 +552,25 @@ border to change its width. The existing minimum Explorer and right-pane widths
 still apply, and a click without moving the pointer does not save a new width.
 The last applied width is retained if the drag is cancelled by focus loss,
 terminal resize, or a modal. Use `Ctrl-w` followed by `=` to restore automatic
-pane sizes. Use `--mouse off` for terminal native selection behavior.
+pane sizes.
+
+When mouse capture is enabled, left-button drag selects text in the SQL Editor,
+SQL Output/Plan, Relation DDL, and text-detail views. The selection is
+charwise, can span visible lines, and remains available to the view's explicit
+copy action. Dragging does not replace grid cell selection, grid scrollbar or
+column resizing, pane resizing, or form/selector controls. Those regions keep
+their existing mouse behavior.
+
+`Ctrl-Shift-s` temporarily releases LazyDB's mouse capture so the terminal can
+perform its native selection; press `Esc` to restore capture. `--mouse off`
+leaves capture disabled, so LazyDB cannot toggle this mode itself. `Ctrl-c`
+remains the quit key outside context-specific cancellation and is not a copy
+shortcut.
+
+The exact terminal behavior of native selection and OSC 52 depends on the
+terminal and any SSH or tmux layers in use. Those combinations require manual
+QA in a real terminal; the automated tests do not prove clipboard delivery
+through SSH or tmux.
 
 ## Update Center
 

@@ -13,10 +13,7 @@ use crate::{
     model::dashboard::{MetricKey, downsample_series},
 };
 
-use super::{
-    icons::{DashboardMetric, IconSet},
-    theme::Theme,
-};
+use super::{icons::DashboardMetric, theme::Theme};
 
 pub(crate) fn render(
     frame: &mut Frame<'_>,
@@ -82,7 +79,7 @@ pub(crate) fn render(
     }
     frame.render_widget(
         Paragraph::new(Line::styled(
-            status,
+            status.clone(),
             Style::new().fg(if tab.error.is_some() || tab.metadata_error.is_some() {
                 theme.error
             } else {
@@ -92,6 +89,15 @@ pub(crate) fn render(
         .alignment(Alignment::Right),
         header[1],
     );
+    if !header[1].is_empty() {
+        state.hit_regions.push(super::HitRegion {
+            area: header[1],
+            target: super::HitTarget::OpenTextDetail(super::readonly_detail_request(
+                "Dashboard status",
+                status.as_str(),
+            )),
+        });
+    }
 
     match tab.page {
         crate::model::dashboard::DashboardPage::Processes => render_processes(
@@ -103,10 +109,10 @@ pub(crate) fn render(
             app.focus == crate::model::workspace::Focus::Results,
         ),
         crate::model::dashboard::DashboardPage::Charts => {
-            render_overview(frame, vertical[1], theme, tab, state.activity_icons)
+            render_overview(frame, vertical[1], theme, tab, state)
         }
         crate::model::dashboard::DashboardPage::Overview => {
-            render_overview(frame, vertical[1], theme, tab, state.activity_icons)
+            render_overview(frame, vertical[1], theme, tab, state)
         }
     }
 }
@@ -116,8 +122,9 @@ fn render_overview(
     area: Rect,
     theme: Theme,
     tab: &crate::model::dashboard::DashboardTab,
-    icons: IconSet,
+    state: &mut super::UiState,
 ) {
+    let icons = state.activity_icons;
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -232,9 +239,16 @@ fn render_overview(
         _ => "Waiting for the first monitoring sample...".into(),
     };
     frame.render_widget(
-        Paragraph::new(metadata).style(Style::new().fg(theme.muted)),
+        Paragraph::new(metadata.clone()).style(Style::new().fg(theme.muted)),
         rows[2],
     );
+    state.hit_regions.push(super::HitRegion {
+        area: rows[2],
+        target: super::HitTarget::OpenTextDetail(super::readonly_detail_request(
+            "Dashboard metadata",
+            metadata.clone(),
+        )),
+    });
     render_history(frame, rows[3], theme, tab);
 }
 

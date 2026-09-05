@@ -6,7 +6,7 @@ use std::{
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lazydb::{
-    action::Action,
+    action::{Action, Command},
     app::App,
     model::{
         tab::CompletionPopup,
@@ -110,6 +110,180 @@ fn insert_escape_closes_completion_and_exits_insert_mode() {
         lazydb::model::editor::EditorMode::Normal
     );
     assert_eq!(app.active_editor_text().unwrap(), original);
+}
+
+#[test]
+fn editor_copy_actions_emit_complete_clipboard_payloads() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::ReplaceEditor("SELECT 1;".into()));
+
+    let commands = app.update(Action::CopyEditorBuffer);
+    assert!(matches!(
+        commands.as_slice(),
+        [Command::WriteClipboard(payload)] if payload == &lazydb::clipboard::ClipboardPayload {
+            text: "SELECT 1;".into(),
+            description: "SQL buffer".into(),
+            sensitive: false,
+        }
+    ));
+    let commands = app.update(Action::CopyEditorYank("SELECT".into()));
+    assert!(matches!(
+        commands.as_slice(),
+        [Command::WriteClipboard(payload)] if payload == &lazydb::clipboard::ClipboardPayload {
+            text: "SELECT".into(),
+            description: "SQL selection: 6 chars".into(),
+            sensitive: false,
+        }
+    ));
+
+    let session_id = app.active_console().id;
+    let revision = app.active_editor_revision();
+    app.update(Action::SetEditorMouseSelection {
+        session_id,
+        start: lazydb::model::editor::EditorPosition { line: 0, column: 0 },
+        end: lazydb::model::editor::EditorPosition { line: 0, column: 5 },
+        revision,
+    });
+    let commands = app.update(Action::CopyEditorSelection {
+        session_id,
+        start: lazydb::model::editor::EditorPosition { line: 0, column: 0 },
+        end: lazydb::model::editor::EditorPosition { line: 0, column: 5 },
+        revision,
+    });
+    assert!(matches!(
+        commands.as_slice(),
+        [Command::WriteClipboard(payload)] if payload == &lazydb::clipboard::ClipboardPayload {
+            text: "SELECT".into(),
+            description: "Text selection: 6 chars".into(),
+            sensitive: false,
+        }
+    ));
+
+    app.update(Action::ReplaceEditor("changed".into()));
+    assert!(
+        app.update(Action::CopyEditorSelection {
+            session_id,
+            start: lazydb::model::editor::EditorPosition { line: 0, column: 0 },
+            end: lazydb::model::editor::EditorPosition { line: 0, column: 5 },
+            revision,
+        })
+        .is_empty()
+    );
+}
+
+#[test]
+fn clipboard_failure_keeps_selection_usable_without_echoing_payload() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::ReplaceEditor("secret selection".into()));
+    let session_id = app.active_console().id;
+    let revision = app.active_editor_revision();
+
+    app.update(Action::SetEditorMouseSelection {
+        session_id,
+        start: lazydb::model::editor::EditorPosition { line: 0, column: 0 },
+        end: lazydb::model::editor::EditorPosition { line: 0, column: 5 },
+        revision,
+    });
+    app.update(Action::ClipboardWriteFailed {
+        message: "Clipboard unavailable".into(),
+    });
+
+    let notification = app.notifications.history().next().unwrap();
+    assert_eq!(notification.title, "Clipboard");
+    assert_eq!(notification.body, "Clipboard unavailable");
+    assert!(!notification.body.contains("secret selection"));
+
+    let commands = app.update(Action::CopyEditorSelection {
+        session_id,
+        start: lazydb::model::editor::EditorPosition { line: 0, column: 0 },
+        end: lazydb::model::editor::EditorPosition { line: 0, column: 5 },
+        revision,
+    });
+    assert!(matches!(
+        commands.as_slice(),
+        [Command::WriteClipboard(payload)] if payload.text == "secret"
+    ));
+}
+
+#[test]
+fn text_detail_selection_and_copy_keep_the_selection_and_reject_stale_sources() {
+    let mut app = App::new(Vec::new());
+    let source_session_id = app.active_console().id;
+    let source_revision = app.active_editor_revision();
+    let detail = lazydb::model::text_detail::TextDetailRequest::new(
+        "VALUE",
+        source_session_id,
+        source_revision,
+        "safe display",
+        "complete\nvalue",
+        None,
+    );
+
+    app.update(Action::OpenTextDetail(detail));
+    let (detail_session_id, detail_revision) = match app.overlay.as_ref() {
+        Some(Overlay::TextDetail(view)) => (view.session_id, view.revision),
+        other => panic!("expected text detail, got {other:?}"),
+    };
+    app.update(Action::SetTextDetailSelection {
+        session_id: detail_session_id,
+        start: lazydb::model::editor::EditorPosition { line: 0, column: 0 },
+        end: lazydb::model::editor::EditorPosition { line: 0, column: 3 },
+        revision: detail_revision,
+    });
+    let commands = app.update(Action::CopyTextDetailSelection {
+        session_id: detail_session_id,
+        revision: detail_revision,
+    });
+    assert!(
+        matches!(commands.as_slice(), [Command::WriteClipboard(payload)] if payload.text == "safe")
+    );
+    assert!(matches!(app.overlay, Some(Overlay::TextDetail(_))));
+
+    let commands = app.update(Action::CopyTextDetailAll {
+        session_id: detail_session_id,
+    });
+    assert!(
+        matches!(commands.as_slice(), [Command::WriteClipboard(payload)] if payload.text == "complete\nvalue")
+    );
+
+    app.update(Action::ReplaceEditor("changed".into()));
+    assert!(
+        app.update(Action::CopyTextDetailSelection {
+            session_id: detail_session_id,
+            revision: detail_revision,
+        })
+        .is_empty()
+    );
+}
+
+#[test]
+fn text_detail_escape_closes_to_return_overlay_and_copy_button_preserves_selection() {
+    let mut app = App::new(Vec::new());
+    app.overlay = Some(Overlay::NotificationHistory(Default::default()));
+    let return_overlay = app.overlay.clone().map(Box::new);
+    let detail = lazydb::model::text_detail::TextDetailRequest::new(
+        "DETAIL",
+        app.active_console().id,
+        app.active_editor_revision(),
+        "one two",
+        "one two",
+        return_overlay,
+    );
+    app.update(Action::OpenTextDetail(detail));
+    let session_id = match app.overlay.as_ref() {
+        Some(Overlay::TextDetail(view)) => view.session_id,
+        _ => panic!("detail was not opened"),
+    };
+    app.update(Action::SetTextDetailSelection {
+        session_id,
+        start: lazydb::model::editor::EditorPosition { line: 0, column: 0 },
+        end: lazydb::model::editor::EditorPosition { line: 0, column: 2 },
+        revision: 0,
+    });
+    app.update(Action::CopyTextDetailAll { session_id });
+    assert!(matches!(app.overlay, Some(Overlay::TextDetail(_))));
+    app.update(Action::CloseTextDetail);
+    assert!(matches!(app.overlay, Some(Overlay::NotificationHistory(_))));
 }
 
 fn editor_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {

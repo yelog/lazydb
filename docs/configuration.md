@@ -102,7 +102,7 @@ The complete schema and current values are best read directly in
 
 | Section | Settings |
 | --- | --- |
-| `terminal` | `mouse`, `color` |
+| `terminal` | `mouse`, `color`, `clipboard.backend`, `clipboard.max_bytes` |
 | `ui` | `icons`, `motion` |
 | `execution` | `confirmation` |
 | `connections` | `default_access` |
@@ -148,6 +148,34 @@ A key sequence remains active for 750 milliseconds by default, and
 | `--icons MODE` | `nerd-font`, `unicode`, `ascii` | `nerd-font` | Select branded Nerd Font glyphs, standard Unicode fallbacks, or ASCII-only output. |
 | `--motion MODE` | `full`, `reduced`, `off` | `full` | Select full loading animation, reduced animation, or no animation. |
 | `--confirm-execution POLICY` | `risky`, `always` | `risky` | Confirm only risky SQL statements, or confirm every execution. |
+
+Clipboard output uses the system clipboard by default. To explicitly send copy
+operations as OSC 52 to the terminal, or disable clipboard writes, set:
+
+```toml
+[terminal.clipboard]
+backend = "osc52" # "system", "osc52", or "off"
+max_bytes = 1000000
+```
+
+`max_bytes` limits the base64-encoded OSC 52 payload. Oversized payloads are
+rejected without truncation. OSC 52 is write-only and has no reliable delivery
+confirmation, so successful sends are reported as sent to the terminal
+clipboard. The system backend does not fall back to OSC 52, and no tmux
+passthrough or automatic backend selection is performed. The terminal must
+support OSC 52 and may need its own permission setting; SSH and tmux forwarding
+are environment-dependent and are not established by LazyDB.
+
+Clipboard copy actions are explicit: keyboard commands and view buttons issue a
+copy request, while mouse drag only creates a text selection in supported text
+views. Dragging does not copy grid cells, rows, form fields, or selector text.
+The complete-value paths are the selected grid cell/row commands, Record View's
+cell/row buttons, and the text-detail view's `Copy all` button. `Copy selection`
+copies only the selected text currently displayed in that detail view.
+
+The default `Ctrl-c` quit binding is unchanged. `Ctrl-Shift-s` is the separate
+global command that releases mouse capture for terminal-native selection; it is
+not a clipboard write and `Esc` restores capture.
 
 `--color`, `--mouse`, `--icons`, `--motion`, and `--confirm-execution` override
 `settings.toml` for the current process. The `--config` option is also accepted by agent and

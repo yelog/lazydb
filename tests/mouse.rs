@@ -21,7 +21,10 @@ use lazydb::{
         workspace::{Focus, Overlay, PaneLayoutMetrics, PaneSplit},
     },
     profile::{DatabaseKind, import_connection_url},
-    ui::{self, HitRegion, HitTarget, ProfileButton, UiState},
+    ui::{
+        self, HitRegion, HitTarget, ProfileButton, UiState,
+        text_selection::{TextGesture, TextHitMap, TextPosition, TextSelectionTarget},
+    },
 };
 use ratatui::{Terminal, backend::TestBackend, layout::Rect};
 use uuid::Uuid;
@@ -49,6 +52,115 @@ fn maps_catalog_editor_field_clicks() {
         ),
         Some(Action::CatalogEditorFocusField(1))
     );
+}
+
+fn text_target(session_id: Uuid) -> TextSelectionTarget {
+    TextSelectionTarget {
+        session_id,
+        hit_maps: vec![TextHitMap {
+            area: Rect::new(10, 5, 20, 1),
+            line: 0,
+            source_to_display_cells: (0..=20).collect(),
+            horizontal_offset: 0,
+        }],
+    }
+}
+
+#[test]
+fn mouse_down_drag_up_routes_selection_for_each_text_source() {
+    let sources = ["sql-editor", "output", "plan", "relation-ddl"];
+    for source in sources {
+        let app = App::new(Vec::new());
+        let mut ui = UiState::new();
+        let session_id = Uuid::new_v4();
+        ui.text_selection_target = Some(text_target(session_id));
+        ui.hit_regions.push(HitRegion {
+            area: Rect::new(0, 0, 40, 20),
+            target: HitTarget::Focus(Focus::Results),
+        });
+
+        let down = map_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 11, 5),
+            &ui,
+            &app,
+        );
+        assert!(
+            matches!(down, Some(Action::SetEditorMouseSelection { .. })),
+            "{source}"
+        );
+        let drag = map_mouse(
+            mouse(MouseEventKind::Drag(MouseButton::Left), 15, 5),
+            &ui,
+            &app,
+        );
+        assert!(
+            matches!(drag, Some(Action::SetEditorMouseSelection { .. })),
+            "{source}"
+        );
+        let up = map_mouse(
+            mouse(MouseEventKind::Up(MouseButton::Left), 15, 5),
+            &ui,
+            &app,
+        );
+        assert_eq!(up, None, "{source}");
+        assert!(ui.mouse_gesture.borrow().is_none(), "{source}");
+        assert!(ui.text_gesture.borrow().is_none(), "{source}");
+    }
+}
+
+#[test]
+fn text_mouse_gesture_captures_revision_and_positions() {
+    let app = App::new(Vec::new());
+    let mut ui = UiState::new();
+    let session_id = Uuid::new_v4();
+    ui.text_selection_target = Some(text_target(session_id));
+    ui.text_gesture.replace(Some(TextGesture {
+        start: TextPosition { line: 0, column: 1 },
+        end: TextPosition { line: 0, column: 4 },
+        revision: 7,
+    }));
+    ui.mouse_gesture
+        .replace(Some(lazydb::ui::text_selection::GestureOwner::Text));
+    let action = map_mouse(
+        mouse(MouseEventKind::Up(MouseButton::Left), 14, 5),
+        &ui,
+        &app,
+    );
+    assert_eq!(action, None);
+    assert!(ui.mouse_gesture.borrow().is_none());
+    assert!(ui.text_gesture.borrow().is_none());
+}
+
+#[test]
+fn overlay_hit_target_takes_precedence_over_underlying_text_selection() {
+    let mut app = App::new(Vec::new());
+    app.overlay = Some(Overlay::TargetSelector {
+        candidates: Vec::new(),
+        selected: 0,
+    });
+    let mut ui = UiState::new();
+    let session_id = Uuid::new_v4();
+    ui.text_selection_target = Some(text_target(session_id));
+    ui.hit_regions.extend([
+        HitRegion {
+            area: Rect::new(10, 5, 20, 1),
+            target: HitTarget::Focus(Focus::Editor),
+        },
+        HitRegion {
+            area: Rect::new(10, 5, 20, 1),
+            target: HitTarget::TargetSelectorCancel,
+        },
+    ]);
+
+    assert_eq!(
+        map_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 12, 5),
+            &ui,
+            &app,
+        ),
+        Some(Action::CancelTargetSelector)
+    );
+    assert!(ui.mouse_gesture.borrow().is_none());
 }
 
 #[test]
@@ -1268,6 +1380,107 @@ fn help_and_message_overlays_block_background_mouse_input() {
 }
 
 #[test]
+fn readonly_detail_target_wins_over_background_and_opens_from_help() {
+    let mut app = App::new(Vec::new());
+    app.overlay = Some(Overlay::Help(lazydb::help::HelpState::new(
+        lazydb::help::ShortcutContext::EditorNormal,
+        lazydb::help::ShortcutCapabilities::default(),
+    )));
+    let mut ui = UiState::new();
+    ui.hit_regions.extend([
+        HitRegion {
+            area: Rect::new(0, 0, 20, 1),
+            target: HitTarget::HeaderProfile,
+        },
+        HitRegion {
+            area: Rect::new(0, 0, 20, 1),
+            target: HitTarget::OpenTextDetail(lazydb::model::text_detail::TextDetailRequest::new(
+                "Help",
+                Uuid::nil(),
+                0,
+                "Ctrl-C close",
+                "Ctrl-C close",
+                None,
+            )),
+        },
+    ]);
+
+    assert!(matches!(
+        map_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 4, 0),
+            &ui,
+            &app
+        ),
+        Some(Action::OpenTextDetail(_))
+    ));
+}
+
+#[test]
+fn rendered_help_rows_open_readonly_detail_without_consuming_form_input() {
+    let mut app = App::new(Vec::new());
+    app.overlay = Some(Overlay::Help(lazydb::help::HelpState::new(
+        lazydb::help::ShortcutContext::EditorNormal,
+        lazydb::help::ShortcutCapabilities::default(),
+    )));
+    let mut state = UiState::new();
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal
+        .draw(|frame| ui::render_with_state(frame, &app, &mut state))
+        .unwrap();
+    let region = state
+        .hit_regions
+        .iter()
+        .find(|region| matches!(region.target, HitTarget::OpenTextDetail(_)))
+        .expect("help detail region");
+
+    assert!(matches!(
+        map_mouse(
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                region.area.x,
+                region.area.y,
+            ),
+            &state,
+            &app,
+        ),
+        Some(Action::OpenTextDetail(_))
+    ));
+}
+
+#[test]
+fn readonly_detail_targets_do_not_enable_password_form_selection() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::OpenProfileManager);
+    let (output, state) = {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut state = UiState::new();
+        terminal
+            .draw(|frame| ui::render_with_state(frame, &app, &mut state))
+            .unwrap();
+        (terminal.backend().to_string(), state)
+    };
+
+    assert!(output.contains("Password"));
+    let password = state
+        .hit_regions
+        .iter()
+        .find(|region| region.target == HitTarget::ProfileField(ProfileField::Password))
+        .expect("password field region");
+    assert_eq!(
+        map_mouse(
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                password.area.x,
+                password.area.y,
+            ),
+            &state,
+            &app,
+        ),
+        Some(Action::ProfileFocusField(ProfileField::Password))
+    );
+}
+
+#[test]
 fn header_profile_hit_region_uses_terminal_display_width() {
     for (name, expected_width) in [("数据库", 6), ("ｶﾞ", 2), ("\u{7}", 6)] {
         let profile = import_connection_url(":memory:", Some(name))
@@ -1509,6 +1722,168 @@ fn pane_border_click_without_movement_preserves_automatic_size() {
         None
     );
     assert!(ui.pane_resize_drag.borrow().is_none());
+}
+
+#[test]
+fn dragging_while_an_overlay_is_open_cancels_pending_resizes() {
+    let mut app = App::new(Vec::new());
+    app.overlay = Some(Overlay::Help(lazydb::help::HelpState::new(
+        lazydb::help::ShortcutContext::EditorNormal,
+        lazydb::help::ShortcutCapabilities::default(),
+    )));
+    let ui = UiState::new();
+    *ui.pane_resize_drag.borrow_mut() = Some(lazydb::ui::PaneResizeDrag {
+        split: PaneSplit::ExplorerWidth,
+        start_pointer: 10,
+        start_size: 40,
+    });
+    *ui.grid_scrollbar_drag.borrow_mut() = Some(lazydb::ui::GridScrollbarDrag {
+        track_x: 10,
+        track_width: 20,
+        thumb_width: 4,
+        pointer_offset: 1,
+        max_offset: 5,
+    });
+
+    assert_eq!(
+        map_mouse(
+            mouse(MouseEventKind::Drag(MouseButton::Left), 20, 10),
+            &ui,
+            &app
+        ),
+        None
+    );
+    assert!(ui.pane_resize_drag.borrow().is_none());
+    assert!(ui.grid_scrollbar_drag.borrow().is_none());
+    assert!(ui.relation_resize.borrow().is_none());
+}
+
+#[test]
+fn text_gesture_does_not_fall_through_to_grid_resize() {
+    let app = App::new(Vec::new());
+    let ui = UiState::new();
+    assert!(
+        ui.begin_text_gesture(lazydb::ui::text_selection::TextGesture {
+            start: lazydb::ui::text_selection::TextPosition { line: 0, column: 1 },
+            end: lazydb::ui::text_selection::TextPosition { line: 0, column: 1 },
+            revision: 7,
+        })
+    );
+
+    assert_eq!(
+        map_mouse(
+            mouse(MouseEventKind::Drag(MouseButton::Left), 40, 10),
+            &ui,
+            &app
+        ),
+        None
+    );
+    assert!(ui.text_gesture.borrow().is_some());
+    assert!(ui.relation_resize.borrow().is_none());
+    assert!(ui.grid_scrollbar_drag.borrow().is_none());
+    assert!(ui.pane_resize_drag.borrow().is_none());
+
+    assert_eq!(
+        map_mouse(
+            mouse(MouseEventKind::Up(MouseButton::Left), 40, 10),
+            &ui,
+            &app
+        ),
+        None
+    );
+    assert!(ui.mouse_gesture.borrow().is_none());
+    assert!(ui.text_gesture.borrow().is_none());
+}
+
+#[test]
+fn completed_mouse_selection_remains_available_for_explicit_copy() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::ReplaceEditor("SELECT 1;".into()));
+    let session_id = app.active_console().id;
+    let revision = app.active_editor_revision();
+    let mut ui = UiState::new();
+    ui.text_selection_target = Some(text_target(session_id));
+    ui.hit_regions.push(HitRegion {
+        area: Rect::new(0, 0, 40, 20),
+        target: HitTarget::Focus(Focus::Editor),
+    });
+
+    let down = map_mouse(
+        mouse(MouseEventKind::Down(MouseButton::Left), 11, 5),
+        &ui,
+        &app,
+    )
+    .unwrap();
+    app.update(down);
+    let drag = map_mouse(
+        mouse(MouseEventKind::Drag(MouseButton::Left), 15, 5),
+        &ui,
+        &app,
+    )
+    .unwrap();
+    app.update(drag);
+    assert_eq!(
+        map_mouse(
+            mouse(MouseEventKind::Up(MouseButton::Left), 15, 5),
+            &ui,
+            &app,
+        ),
+        None
+    );
+
+    assert!(matches!(
+        app.update(Action::CopyEditorSelection {
+            session_id,
+            start: lazydb::model::editor::EditorPosition { line: 0, column: 1 },
+            end: lazydb::model::editor::EditorPosition { line: 0, column: 5 },
+            revision,
+        })
+        .as_slice(),
+        [lazydb::action::Command::WriteClipboard(payload)] if payload.text == "ELECT"
+    ));
+}
+
+#[test]
+fn mouse_gesture_owner_locks_until_release() {
+    let app = App::new(Vec::new());
+    let mut ui = UiState::new();
+    ui.pane_layout = lazydb::model::workspace::PaneLayoutMetrics {
+        explorer_width: Some(40),
+        editor_height: Some(10),
+    };
+    ui.hit_regions.push(HitRegion {
+        area: Rect::new(39, 3, 1, 20),
+        target: HitTarget::PaneResize(PaneSplit::ExplorerWidth),
+    });
+
+    assert_eq!(
+        map_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 39, 10),
+            &ui,
+            &app
+        ),
+        None
+    );
+    assert_eq!(
+        *ui.mouse_gesture.borrow(),
+        Some(lazydb::ui::text_selection::GestureOwner::PaneResize)
+    );
+    assert!(
+        !ui.begin_text_gesture(lazydb::ui::text_selection::TextGesture {
+            start: lazydb::ui::text_selection::TextPosition { line: 0, column: 0 },
+            end: lazydb::ui::text_selection::TextPosition { line: 0, column: 0 },
+            revision: 1,
+        })
+    );
+    assert_eq!(
+        map_mouse(
+            mouse(MouseEventKind::Up(MouseButton::Left), 39, 10),
+            &ui,
+            &app
+        ),
+        None
+    );
+    assert!(ui.mouse_gesture.borrow().is_none());
 }
 
 fn assert_click_maps(ui: &UiState, app: &App, target: &HitTarget, expected: Action) {

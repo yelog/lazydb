@@ -56,6 +56,10 @@ pub(crate) mod transaction;
 
 use transaction::ForcedCloseHandle;
 
+fn clipboard_write_failure_message() -> String {
+    "Clipboard unavailable".to_owned()
+}
+
 #[derive(Clone, Debug)]
 struct ActiveConnection {
     profile_id: Uuid,
@@ -233,6 +237,7 @@ pub struct Runtime {
     manual_transactions: HashMap<Uuid, ManualTransactionEntry>,
     relation_transactions: HashMap<Uuid, ManualTransactionEntry>,
     relation_mutation_blocked: Arc<StdMutex<HashSet<(Uuid, ConnectionIdentity)>>>,
+    clipboard: crate::config::ClipboardConfig,
 }
 
 #[derive(Debug)]
@@ -330,7 +335,15 @@ impl Runtime {
             manual_transactions: HashMap::new(),
             relation_transactions: HashMap::new(),
             relation_mutation_blocked: Arc::new(StdMutex::new(HashSet::new())),
+            clipboard: crate::config::ClipboardConfig {
+                backend: crate::config::ClipboardBackend::System,
+                max_bytes: 1_000_000,
+            },
         }
+    }
+
+    pub fn set_clipboard_config(&mut self, clipboard: crate::config::ClipboardConfig) {
+        self.clipboard = clipboard;
     }
 
     pub fn set_workspace_store(&mut self, store: WorkspaceStore) {
@@ -720,6 +733,19 @@ impl Runtime {
                 }
             }
             Command::WriteClipboard(payload) => {
+                match self.clipboard.backend {
+                    crate::config::ClipboardBackend::Off => {
+                        let _ = self.event_sender.send(Action::ClipboardWriteFailed {
+                            message: "Clipboard is disabled by configuration".to_owned(),
+                        });
+                        return;
+                    }
+                    crate::config::ClipboardBackend::Osc52 => {
+                        let _ = self.event_sender.send(Action::Osc52Clipboard { payload });
+                        return;
+                    }
+                    crate::config::ClipboardBackend::System => {}
+                }
                 let sender = self.event_sender.clone();
                 task::spawn_blocking(move || {
                     let description = payload.description.clone();
@@ -727,8 +753,8 @@ impl Runtime {
                         .and_then(|mut clipboard| clipboard.set_text(payload.text));
                     let action = match result {
                         Ok(()) => Action::ClipboardWritten { description },
-                        Err(error) => Action::ClipboardWriteFailed {
-                            message: format!("Clipboard unavailable: {error}"),
+                        Err(_) => Action::ClipboardWriteFailed {
+                            message: clipboard_write_failure_message(),
                         },
                     };
                     let _ = sender.send(action);
@@ -4023,8 +4049,10 @@ pub async fn run_tui(cli: Cli) -> Result<RunOutcome> {
         event_sender,
     );
     runtime.set_workspace_store(workspace_store);
+    runtime.set_clipboard_config(settings.terminal.clipboard);
     let mut terminal = TerminalSession::enter(settings.terminal.mouse != MouseMode::Off)
         .context("failed to initialize terminal")?;
+    let mut terminal_selection_mode = false;
     let icons = crate::ui::icons::IconSet::new(settings.ui.icons);
     let theme = crate::ui::theme::Theme::for_color_mode(settings.terminal.color);
     let mut terminal_events = EventStream::new();
@@ -4083,16 +4111,54 @@ pub async fn run_tui(cli: Cli) -> Result<RunOutcome> {
                         let Some(terminal_event) = terminal_event else { break; };
                         match terminal_event.context("terminal input failed")? {
                         Event::Key(key) => {
+                            if terminal_selection_mode && key.code == crossterm::event::KeyCode::Esc {
+                                match terminal.set_mouse_capture(true) {
+                                            Ok(()) => {
+                                                terminal_selection_mode = false;
+                                                ui_state.terminal_selection_mode = false;
+                                                redraw = true;
+                                    }
+                                    Err(error) => app.notify_warning(
+                                        "Terminal",
+                                        format!("Could not restore mouse capture: {error}"),
+                                    ),
+                                }
+                            } else {
                             let now = std::time::Instant::now();
                             let before = keymap.sequence_state(&app, now);
                             let cancelled_pane_drag = ui_state.pane_resize_drag.borrow_mut().take().is_some();
                             if let Some(action) = keymap.map(key, &app) {
-                                apply_action(&mut app, &mut runtime, action);
+                                if action == Action::ToggleTerminalSelection {
+                                    if !terminal.mouse_captured() {
+                                        app.notify_warning(
+                                            "Terminal",
+                                            "Mouse capture is disabled (--mouse off)",
+                                        );
+                                    } else {
+                                        match terminal.set_mouse_capture(false) {
+                                            Ok(()) => {
+                                                terminal_selection_mode = true;
+                                                ui_state.terminal_selection_mode = true;
+                                                app.notify_info(
+                                                    "Terminal selection",
+                                                    "Mouse released for terminal selection. Press Esc to return.",
+                                                );
+                                            }
+                                            Err(error) => app.notify_warning(
+                                                "Terminal",
+                                                format!("Could not release mouse capture: {error}"),
+                                            ),
+                                        }
+                                    }
+                                } else {
+                                    apply_action(&mut app, &mut runtime, action);
+                                }
                                 redraw = true;
                             }
                             redraw |= cancelled_pane_drag;
                             let after = keymap.sequence_state(&app, now);
                             redraw |= sequence_redraw_needed(&before, &after);
+                            }
                         }
                         Event::Mouse(mouse) => {
                             let now = std::time::Instant::now();
@@ -4131,6 +4197,10 @@ pub async fn run_tui(cli: Cli) -> Result<RunOutcome> {
                             let now = std::time::Instant::now();
                             let before = keymap.sequence_state(&app, now);
                             keymap.clear_pending();
+                            ui_state.cancel_mouse_gesture();
+                            ui_state.pane_resize_drag.borrow_mut().take();
+                            ui_state.grid_scrollbar_drag.borrow_mut().take();
+                            ui_state.relation_resize.borrow_mut().take();
                             redraw = true;
                             let after = keymap.sequence_state(&app, now);
                             redraw |= sequence_redraw_needed(&before, &after);
@@ -4140,7 +4210,17 @@ pub async fn run_tui(cli: Cli) -> Result<RunOutcome> {
                 Some(action) = event_receiver.recv() => {
                     let now = std::time::Instant::now();
                     let before = keymap.sequence_state(&app, now);
-                    apply_action(&mut app, &mut runtime, action);
+                    if let Action::Osc52Clipboard { payload } = action {
+                        match terminal.write_osc52(&payload.text, settings.terminal.clipboard.max_bytes) {
+                            Ok(()) => app.notify_info(
+                                "Clipboard",
+                                format!("Sent {} to terminal clipboard", payload.description),
+                            ),
+                            Err(error) => app.notify_error("Clipboard", error.to_string()),
+                        }
+                    } else {
+                        apply_action(&mut app, &mut runtime, action);
+                    }
                     redraw = true;
                     let after = keymap.sequence_state(&app, now);
                     redraw |= sequence_redraw_needed(&before, &after);
@@ -4456,6 +4536,14 @@ pub fn load_startup_profiles(cli: &Cli) -> Result<StartupProfiles> {
 mod tests {
     use super::*;
     use crate::{db::transaction::WorkerDisposition, profile::import_connection_url};
+
+    #[test]
+    fn clipboard_failure_feedback_is_not_payload_bearing() {
+        let message = clipboard_write_failure_message();
+
+        assert_eq!(message, "Clipboard unavailable");
+        assert!(!message.contains("secret"));
+    }
 
     #[tokio::test]
     async fn quarantine_removal_requires_exact_connection_identity() {

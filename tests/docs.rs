@@ -60,6 +60,27 @@ fn keyboard_reference_is_dedicated_and_complete() {
     assert!(keys.contains("0` / `^"));
     assert!(keys.contains("Printable `y` and `Y` are text input"));
     assert!(keys.contains("capability-aware"));
+    assert!(keys.contains("Ctrl-Shift-s"));
+    assert!(keys.contains("left-button drag selects text"));
+    assert!(keys.contains("Copy all"));
+    assert!(keys.contains("Ctrl-c`\nremains the quit key"));
+
+    let configuration = include_str!("../docs/configuration.md");
+    for term in [
+        "backend = \"osc52\"",
+        "max_bytes",
+        "SSH and tmux",
+        "drag only creates a text selection",
+        "default `Ctrl-c` quit binding is unchanged",
+    ] {
+        assert!(
+            configuration.contains(term),
+            "missing configuration term {term}"
+        );
+    }
+
+    assert!(readme.contains("Ctrl-Shift-s"));
+    assert!(readme.contains("drag alone\n  never writes to the clipboard"));
 
     let architecture = include_str!("../docs/architecture.md");
     for term in [

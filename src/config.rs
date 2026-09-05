@@ -17,6 +17,7 @@ const MIN_UPDATE_CHECK_INTERVAL_HOURS: u64 = 1;
 const SUPPORTED_COMMANDS: &[&str] = &[
     "help",
     "quit",
+    "terminal-selection",
     "notification-history",
     "update",
     "focus-next-pane",
@@ -112,6 +113,33 @@ pub struct AppConfig {
 pub struct TerminalConfig {
     pub mouse: MouseMode,
     pub color: ColorMode,
+    #[serde(default)]
+    pub clipboard: ClipboardConfig,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ClipboardConfig {
+    pub backend: ClipboardBackend,
+    pub max_bytes: usize,
+}
+
+impl Default for ClipboardConfig {
+    fn default() -> Self {
+        Self {
+            backend: ClipboardBackend::System,
+            max_bytes: 1_000_000,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ClipboardBackend {
+    #[default]
+    System,
+    Osc52,
+    Off,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
@@ -515,7 +543,9 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{AppConfig, ConfigError, ConnectionAccessDefault, DEFAULT_CONFIG_TOML};
+    use super::{
+        AppConfig, ClipboardBackend, ConfigError, ConnectionAccessDefault, DEFAULT_CONFIG_TOML,
+    };
     use crate::{cli::MotionMode, ui::icons::IconMode};
 
     #[test]
@@ -528,6 +558,7 @@ mod tests {
             config.connections.default_access,
             ConnectionAccessDefault::Global
         );
+        assert_eq!(config.terminal.clipboard.backend, ClipboardBackend::System);
     }
 
     #[test]
@@ -551,6 +582,20 @@ mod tests {
         assert_eq!(config.ui.motion, MotionMode::Reduced);
         assert_eq!(config.ui.icons, IconMode::NerdFont);
         assert_eq!(config.dashboard.refresh_interval_seconds, 5);
+    }
+
+    #[test]
+    fn clipboard_backend_is_recursively_overridden() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("settings.toml");
+        fs::write(
+            &path,
+            "[terminal.clipboard]\nbackend = \"osc52\"\nmax_bytes = 42\n",
+        )
+        .unwrap();
+        let config = AppConfig::load(path).unwrap();
+        assert_eq!(config.terminal.clipboard.backend, ClipboardBackend::Osc52);
+        assert_eq!(config.terminal.clipboard.max_bytes, 42);
     }
 
     #[test]
@@ -651,6 +696,13 @@ mod tests {
         assert!(bindings.matches(
             "quit",
             KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+        ));
+        assert!(bindings.matches(
+            "terminal-selection",
+            KeyEvent::new(
+                KeyCode::Char('s'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            )
         ));
         assert!(bindings.matches(
             "focus-previous-pane",

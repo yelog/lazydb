@@ -104,8 +104,33 @@ pub(crate) fn render(
     let mut list_state = ListState::default().with_selected(selected);
     frame.render_stateful_widget(list, chunks[1], &mut list_state);
     frame.render_widget(
-        Paragraph::new("j/k fields   h/l records   gg/G first/last field   Esc close")
+        Paragraph::new("y copy cell   Y copy row   Enter view value   Esc close")
             .style(Style::new().fg(theme.muted).bg(theme.surface_raised)),
         chunks[2],
     );
+    let button_y = chunks[2].y;
+    state.hit_regions.extend([
+        super::HitRegion {
+            area: Rect::new(chunks[2].x, button_y, 12.min(chunks[2].width), 1),
+            target: super::HitTarget::RecordViewCopyCell,
+        },
+        super::HitRegion {
+            area: Rect::new(
+                chunks[2].x.saturating_add(14),
+                button_y,
+                12.min(chunks[2].width.saturating_sub(14)),
+                1,
+            ),
+            target: super::HitTarget::RecordViewCopyRow,
+        },
+        super::HitRegion {
+            area: Rect::new(
+                chunks[2].x.saturating_add(28),
+                button_y,
+                14.min(chunks[2].width.saturating_sub(28)),
+                1,
+            ),
+            target: super::HitTarget::RecordViewViewValue,
+        },
+    ]);
 }

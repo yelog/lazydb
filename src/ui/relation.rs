@@ -204,6 +204,16 @@ fn render_data(
             .style(Style::new().fg(theme.muted).bg(theme.surface)),
             footer,
         );
+        state.hit_regions.push(HitRegion {
+            area: footer,
+            target: HitTarget::OpenTextDetail(super::readonly_detail_request(
+                "Relation snapshot",
+                format!(
+                    "SQL: {sql}\nRows: {}\nSnapshot: {provenance}",
+                    result.rows.len()
+                ),
+            )),
+        });
         super::pagination::render(
             frame,
             body[3],
@@ -391,6 +401,7 @@ fn render_status(
     theme: Theme,
     state: &mut super::UiState,
 ) {
+    let detail_message = sanitize_terminal_text(message);
     let message = clean(message);
     let label = if retry {
         "r  retry"
@@ -400,22 +411,50 @@ fn render_status(
         ""
     };
     let text = if label.is_empty() {
-        message
+        message.clone()
     } else {
         format!("{}  [{}]", message, label)
     };
+    let retry_width = if retry { 10 } else { 0 };
+    let cancel_width = if cancel { 14 } else { 0 };
+    let message_area = Rect::new(
+        area.x,
+        area.y,
+        area.width.saturating_sub(retry_width + cancel_width),
+        area.height,
+    );
     frame.render_widget(
         Paragraph::new(text).style(Style::new().fg(theme.warning).bg(theme.surface_raised)),
-        area,
+        message_area,
     );
-    if retry || cancel {
+    if !message_area.is_empty() {
         state.hit_regions.push(HitRegion {
-            area,
-            target: if retry {
-                HitTarget::RelationRetry
-            } else {
-                HitTarget::RelationCancel
-            },
+            area: message_area,
+            target: HitTarget::OpenTextDetail(crate::model::text_detail::TextDetailRequest::new(
+                "Relation error",
+                uuid::Uuid::nil(),
+                0,
+                detail_message.clone(),
+                detail_message,
+                None,
+            )),
+        });
+    }
+    if retry {
+        state.hit_regions.push(HitRegion {
+            area: Rect::new(message_area.right(), area.y, retry_width, area.height),
+            target: HitTarget::RelationRetry,
+        });
+    }
+    if cancel {
+        state.hit_regions.push(HitRegion {
+            area: Rect::new(
+                message_area.right().saturating_add(retry_width),
+                area.y,
+                cancel_width,
+                area.height,
+            ),
+            target: HitTarget::RelationCancel,
         });
     }
 }
@@ -531,6 +570,16 @@ fn render_ddl_editor(
         frame.render_widget(block, area);
         return;
     };
+    if let Some(tab) = app.tabs.get(app.active_tab)
+        && let crate::model::tab::WorkspaceTab::Relation(tab) = tab
+    {
+        super::register_text_selection_target(
+            state,
+            tab.ddl_editor_id,
+            Rect::new(inner.x, inner.y, inner.width, inner.height),
+            &snapshot,
+        );
+    }
     frame.render_widget(block, area);
     for (row, line) in snapshot.lines.iter().take(viewport.height).enumerate() {
         let y = inner.y.saturating_add(row as u16);
@@ -569,6 +618,63 @@ fn ddl_text(sql: &str) -> String {
 
 fn clean(value: &str) -> String {
     sanitize_terminal_text(value).chars().take(240).collect()
+}
+
+#[cfg(test)]
+mod relation_status_tests {
+    use super::*;
+
+    #[test]
+    fn relation_error_detail_keeps_retry_and_cancel_targets_independent() {
+        let mut state = super::super::UiState::new();
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 4))
+            .expect("test terminal");
+        terminal
+            .draw(|frame| {
+                render_status(
+                    frame,
+                    frame.area(),
+                    "relation failed",
+                    true,
+                    true,
+                    Theme::default(),
+                    &mut state,
+                );
+            })
+            .expect("render relation error");
+
+        let detail = state
+            .hit_regions
+            .iter()
+            .find(|region| matches!(region.target, HitTarget::OpenTextDetail(_)))
+            .expect("detail target");
+        assert!(
+            state
+                .hit_regions
+                .iter()
+                .any(|region| region.target == HitTarget::RelationRetry)
+        );
+        assert!(
+            state
+                .hit_regions
+                .iter()
+                .any(|region| region.target == HitTarget::RelationCancel)
+        );
+        assert!(
+            !state
+                .hit_regions
+                .iter()
+                .filter(|region| region.target == HitTarget::RelationRetry)
+                .any(|region| region.area.intersects(detail.area))
+        );
+        assert!(
+            !state
+                .hit_regions
+                .iter()
+                .filter(|region| region.target == HitTarget::RelationCancel)
+                .any(|region| region.area.intersects(detail.area))
+        );
+    }
 }
 pub(crate) fn provenance_label(value: RelationSnapshotProvenance) -> &'static str {
     match value {

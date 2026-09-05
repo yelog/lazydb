@@ -10,6 +10,10 @@ version = 1
 mouse = "auto"
 color = "auto"
 
+[terminal.clipboard]
+backend = "system"
+max_bytes = 1000000
+
 [ui]
 icons = "nerd-font"
 motion = "full"
@@ -40,6 +44,8 @@ sequence_timeout_ms = 750
 help = ["F1", "?"]
 # Ctrl-C exits the application outside cancellation handling.
 quit = ["Ctrl-c"]
+# Temporarily release mouse capture for terminal-native text selection.
+terminal-selection = ["Ctrl-Shift-s"]
 # F8 opens notification history.
 notification-history = ["F8"]
 # F9 opens the update center.

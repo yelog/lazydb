@@ -127,7 +127,6 @@ pub(crate) fn render(
             x = x.saturating_add(width).saturating_add(1);
         }
     }
-
     let mut boundary_x = data_start_x(table_area, number_width);
     for column in &visible {
         boundary_x = boundary_x.saturating_add(column.rendered_width);

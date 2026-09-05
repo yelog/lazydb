@@ -128,6 +128,7 @@ pub enum Action {
     },
     RestartForUpdate,
     DismissOverlay,
+    ToggleTerminalSelection,
     DismissNotification(u64),
     OpenNotificationHistory,
     NotificationHistorySearchOpen,
@@ -402,17 +403,38 @@ pub enum Action {
     },
     EditorPaste(String),
     CopyEditorYank(String),
+    CopyEditorSelection {
+        session_id: Uuid,
+        start: crate::model::editor::EditorPosition,
+        end: crate::model::editor::EditorPosition,
+        revision: u64,
+    },
+    SetEditorMouseSelection {
+        session_id: Uuid,
+        start: crate::model::editor::EditorPosition,
+        end: crate::model::editor::EditorPosition,
+        revision: u64,
+    },
     CopyEditorStatement,
     CopyEditorBuffer,
     CopyGridCell,
     CopyGridRow {
         include_headers: bool,
     },
+    ViewGridCell,
+    CopyRecordViewCell,
+    CopyRecordViewRow {
+        include_headers: bool,
+    },
+    ViewRecordViewValue,
     ClipboardWritten {
         description: String,
     },
     ClipboardWriteFailed {
         message: String,
+    },
+    Osc52Clipboard {
+        payload: ClipboardPayload,
     },
     EditorViewportChanged(crate::model::editor::EditorViewport),
     EditorScroll {
@@ -893,6 +915,21 @@ pub enum Action {
     RecordViewJumpLastField,
     RecordViewMoveRow(isize),
     CloseRecordView,
+    OpenTextDetail(crate::model::text_detail::TextDetailRequest),
+    SetTextDetailSelection {
+        session_id: Uuid,
+        start: crate::model::editor::EditorPosition,
+        end: crate::model::editor::EditorPosition,
+        revision: u64,
+    },
+    CopyTextDetailSelection {
+        session_id: Uuid,
+        revision: u64,
+    },
+    CopyTextDetailAll {
+        session_id: Uuid,
+    },
+    CloseTextDetail,
     RecordViewViewportChanged {
         tab_id: Uuid,
         visible_fields: usize,
