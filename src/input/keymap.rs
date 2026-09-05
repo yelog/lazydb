@@ -342,6 +342,16 @@ impl Keymap {
                 _ => None,
             };
         }
+        if matches!(app.overlay, Some(Overlay::TransactionMenu { .. })) {
+            self.pending = None;
+            return match event.code {
+                KeyCode::Enter => Some(Action::ConfirmTransactionMenu),
+                KeyCode::Esc | KeyCode::Char('q') => Some(Action::CancelTransactionMenu),
+                KeyCode::Down | KeyCode::Char('j') => Some(Action::MoveTransactionMenu(1)),
+                KeyCode::Up | KeyCode::Char('k') => Some(Action::MoveTransactionMenu(-1)),
+                _ => None,
+            };
+        }
         if matches!(app.overlay, Some(Overlay::CatalogDropConfirm { .. })) {
             self.pending = None;
             if is_text_redo(event) {

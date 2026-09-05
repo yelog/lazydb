@@ -23,6 +23,18 @@ The configurable Leader commands currently include `Space b` (Dashboard),
 `Space c` (Explorer), `Space s` (console manager), `Space r/R` (run the current
 statement or complete buffer), and `Space d` (execution target selector).
 
+In the SQL Editor, the target and transaction status shown on the editor's
+top-right border are also mouse controls. Clicking the target opens the same
+execution-target selector as `Space d`; clicking a target row highlights it and
+`Enter` confirms the selection. The selector contains the profile default and
+currently loaded catalog targets.
+
+Clicking the transaction status opens the transaction menu. Select `Auto` or
+`Manual`, or choose transaction resolution when an active manual transaction
+needs to be ended. Running queries, aborted transactions, and unknown outcomes
+keep their existing safety restrictions. Transaction confirmation buttons are
+also clickable; clicking outside a safety confirmation does not confirm it.
+
 ## Conventions
 
 `Ctrl-x` means hold Control while pressing `x`; `Shift-F5` means hold Shift

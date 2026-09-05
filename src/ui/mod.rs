@@ -154,6 +154,14 @@ pub enum HitTarget {
     ResultPageSize,
     ResultNextPage,
     ResultLastPage,
+    EditorExecutionTarget,
+    EditorTransactionMenu,
+    TargetSelectorRow(usize),
+    TargetSelectorCancel,
+    TransactionMenuItem(usize),
+    TransactionMenuCancel,
+    TransactionExitChoice(crate::model::transaction::TransactionExitChoice),
+    TransactionExitCancel,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -590,12 +598,12 @@ pub fn render_with_state_using_icons_sequence_and_theme(
             }
         } else {
             if let Some(area) = layout.editor {
-                let completion_anchor = render_editor(frame, area, app, theme, state);
-                render_completion_popup(frame, app, theme, state, completion_anchor, icons);
                 state.hit_regions.push(HitRegion {
                     area,
                     target: HitTarget::Focus(Focus::Editor),
                 });
+                let completion_anchor = render_editor(frame, area, app, theme, state);
+                render_completion_popup(frame, app, theme, state, completion_anchor, icons);
             }
             if let Some(area) = layout.result_tabs {
                 render_result_tabs(frame, area, app, theme, state);
@@ -761,6 +769,7 @@ fn overlay_key(overlay: &Overlay) -> u8 {
         Overlay::TransactionExitConfirm { .. } => 9,
         Overlay::RelationTransactionConfirm { .. } => 10,
         Overlay::ClearTransactionOutcome { .. } => 11,
+        Overlay::TransactionMenu { .. } => 22,
         Overlay::TargetSelector { .. } => 12,
         Overlay::DeleteConsole { .. } => 13,
         Overlay::SqlEditorList(_) => 14,
@@ -2436,9 +2445,27 @@ fn render_editor(
         ));
     }
     if show_target {
-        context.push(Span::raw(target_segment));
+        context.push(Span::raw(&target_segment));
     }
-    context.push(Span::raw(transaction_segment));
+    context.push(Span::raw(&transaction_segment));
+    let context_right = area.right().saturating_sub(1);
+    let transaction_x = context_right.saturating_sub(transaction_segment.cell_width() as u16);
+    state.hit_regions.push(HitRegion {
+        area: Rect::new(
+            transaction_x,
+            area.y,
+            transaction_segment.cell_width() as u16,
+            1,
+        ),
+        target: HitTarget::EditorTransactionMenu,
+    });
+    if show_target {
+        let target_x = transaction_x.saturating_sub(target_segment.cell_width() as u16);
+        state.hit_regions.push(HitRegion {
+            area: Rect::new(target_x, area.y, target_segment.cell_width() as u16, 1),
+            target: HitTarget::EditorExecutionTarget,
+        });
+    }
     let block = base_block
         .title_top(Line::raw(left_title).left_aligned())
         .title_top(Line::from(context).right_aligned());
@@ -3030,7 +3057,7 @@ fn render_overlay(
             );
         }
         Overlay::TransactionExitConfirm { prompt, choice } => {
-            render_transaction_exit_overlay(frame, area, app, prompt, *choice, theme);
+            render_transaction_exit_overlay(frame, area, app, prompt, *choice, theme, state);
         }
         Overlay::RelationTransactionConfirm { tab_id, choice } => {
             use crate::model::transaction::TransactionExitChoice;
@@ -3076,55 +3103,97 @@ fn render_overlay(
                 popup,
             );
         }
+        Overlay::TransactionMenu { selected } => {
+            render_transaction_menu(frame, area, app, *selected, theme, state);
+        }
         Overlay::TargetSelector {
             candidates,
             selected,
         } => {
-            let height = (candidates.len() as u16).saturating_add(6).clamp(8, 24);
+            const MAX_VISIBLE_ROWS: usize = 16;
+            let visible_count = candidates.len().min(MAX_VISIBLE_ROWS);
+            let height = (visible_count as u16).saturating_add(6).clamp(8, 24);
             let popup = centered(area, 68, height);
             frame.render_widget(Clear, popup);
             let current = app
                 .active_console_opt()
                 .and_then(|tab| tab.execution_target.as_ref());
+            let start = selected
+                .saturating_sub(visible_count.saturating_sub(1))
+                .min(candidates.len().saturating_sub(visible_count));
+            let end = start.saturating_add(visible_count);
             let mut lines = vec![Line::from(Span::styled(
                 " EXECUTION TARGET ",
                 theme.title(true),
             ))];
-            lines.extend(candidates.iter().enumerate().map(|(index, target)| {
-                let marker = if index == *selected { ">" } else { " " };
-                let current_marker = if current == Some(target) {
-                    " current"
-                } else {
-                    ""
-                };
-                let label = format!(
-                    "{marker} {}{}{}",
-                    target.database,
-                    target
-                        .schema
-                        .as_deref()
-                        .map(|schema| format!(".{schema}"))
-                        .unwrap_or_default(),
-                    current_marker,
-                );
-                Line::from(Span::styled(
-                    label,
-                    if index == *selected {
-                        Style::new()
-                            .fg(theme.text)
-                            .bg(theme.selection)
-                            .add_modifier(Modifier::BOLD)
-                    } else if current == Some(target) {
-                        Style::new().fg(theme.accent)
-                    } else {
-                        Style::new().fg(theme.text)
-                    },
-                ))
-            }));
+            lines.extend(
+                candidates[start..end]
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, target)| {
+                        let index = start + offset;
+                        let marker = if index == *selected { ">" } else { " " };
+                        let current_marker = if current == Some(target) {
+                            " current"
+                        } else {
+                            ""
+                        };
+                        let label = format!(
+                            "{marker} {}{}{}",
+                            sanitize_terminal_text(&target.database),
+                            target
+                                .schema
+                                .as_deref()
+                                .map(|schema| format!(".{}", sanitize_terminal_text(schema)))
+                                .unwrap_or_default(),
+                            current_marker,
+                        );
+                        Line::from(Span::styled(
+                            truncate_to_cells(&label, popup.width.saturating_sub(2) as usize),
+                            if index == *selected {
+                                Style::new()
+                                    .fg(theme.text)
+                                    .bg(theme.selection)
+                                    .add_modifier(Modifier::BOLD)
+                            } else if current == Some(target) {
+                                Style::new().fg(theme.accent)
+                            } else {
+                                Style::new().fg(theme.text)
+                            },
+                        ))
+                    }),
+            );
             lines.push(Line::raw(""));
             lines.push(Line::raw(
                 "j/k or Up/Down select  Enter confirm  Esc cancel",
             ));
+            let cancel_y = popup.y.saturating_add(3 + visible_count as u16);
+            if cancel_y < popup.bottom() {
+                state.hit_regions.push(HitRegion {
+                    area: Rect::new(
+                        popup.x.saturating_add(1),
+                        cancel_y,
+                        popup.width.saturating_sub(2),
+                        1,
+                    ),
+                    target: HitTarget::TargetSelectorCancel,
+                });
+            }
+            for (offset, _) in candidates[start..end].iter().enumerate() {
+                let index = start + offset;
+                let row = popup.y.saturating_add(2 + offset as u16);
+                if row < popup.bottom() {
+                    state.hit_regions.push(HitRegion {
+                        area: Rect::new(
+                            popup.x.saturating_add(1),
+                            row,
+                            popup.width.saturating_sub(2),
+                            1,
+                        ),
+                        target: HitTarget::TargetSelectorRow(index),
+                    });
+                }
+            }
             frame.render_widget(
                 Paragraph::new(lines)
                     .block(panel_block(" TARGET SELECTOR ", true, theme))
@@ -3207,6 +3276,78 @@ fn render_overlay(
             render_explorer_add(frame, area, app, menu, state, theme, icons)
         }
     }
+}
+
+fn render_transaction_menu(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    selected: usize,
+    theme: Theme,
+    state: &mut UiState,
+) {
+    use crate::model::transaction::TransactionMode;
+
+    let popup = centered(area, 58, 9);
+    frame.render_widget(Clear, popup);
+    let availability = app.transaction_menu_availability();
+    let labels = ["Auto", "Manual", "Resolve Transaction", "Cancel"];
+    let mut lines = vec![Line::from(Span::styled(
+        " TRANSACTION MODE ",
+        theme.title(true),
+    ))];
+    for (index, label) in labels.iter().enumerate() {
+        let (enabled, reason) = availability[index];
+        let current = app.active_console_opt().is_some_and(|tab| {
+            matches!(
+                (index, tab.transaction_mode),
+                (0, TransactionMode::Auto) | (1, TransactionMode::Manual)
+            )
+        });
+        let marker = if index == selected { ">" } else { " " };
+        let suffix = if current {
+            " (current)"
+        } else if !enabled {
+            reason
+        } else {
+            ""
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{marker} {label}{suffix}"),
+            if enabled {
+                if index == selected {
+                    theme.selection
+                } else {
+                    theme.text
+                }
+            } else {
+                theme.muted
+            },
+        )));
+        let row = popup.y.saturating_add(2 + index as u16);
+        if row < popup.bottom() {
+            state.hit_regions.push(HitRegion {
+                area: Rect::new(
+                    popup.x.saturating_add(1),
+                    row,
+                    popup.width.saturating_sub(2),
+                    1,
+                ),
+                target: if index == 3 {
+                    HitTarget::TransactionMenuCancel
+                } else {
+                    HitTarget::TransactionMenuItem(index)
+                },
+            });
+        }
+    }
+    lines.push(Line::raw("Up/Down select; Enter choose; Esc cancels"));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(panel_block(" TRANSACTION ", true, theme))
+            .style(Style::new().fg(theme.text).bg(theme.surface_raised)),
+        popup,
+    );
 }
 
 fn render_explorer_add(
@@ -3330,6 +3471,7 @@ fn render_transaction_exit_overlay(
     prompt: &crate::model::transaction::DeferredTransactionPrompt,
     choice: crate::model::transaction::TransactionExitChoice,
     theme: Theme,
+    state: &mut UiState,
 ) {
     use crate::model::transaction::{DeferredIntent, TransactionState};
 
@@ -3423,7 +3565,7 @@ fn render_transaction_exit_overlay(
             footer_area,
         );
     } else {
-        render_transaction_exit_actions(frame, action_area, choice, commit_enabled, theme);
+        render_transaction_exit_actions(frame, action_area, choice, commit_enabled, theme, state);
         frame.render_widget(
             Paragraph::new("Tab/←/→ select   Enter confirm   Esc cancel")
                 .style(Style::new().fg(theme.muted).bg(theme.surface))
@@ -3508,6 +3650,7 @@ fn render_transaction_exit_actions(
     choice: crate::model::transaction::TransactionExitChoice,
     commit_enabled: bool,
     theme: Theme,
+    state: &mut UiState,
 ) {
     use crate::model::transaction::TransactionExitChoice;
 
@@ -3545,6 +3688,12 @@ fn render_transaction_exit_actions(
             Paragraph::new(label).style(style),
             Rect::new(x, area.y, width, 1),
         );
+        if enabled {
+            state.hit_regions.push(HitRegion {
+                area: Rect::new(x, area.y, width, 1),
+                target: HitTarget::TransactionExitChoice(action),
+            });
+        }
         x = x.saturating_add(width).saturating_add(gap);
     }
     frame.render_widget(
@@ -3556,6 +3705,10 @@ fn render_transaction_exit_actions(
         ),
         Rect::new(x, area.y, cancel.cell_width(), 1),
     );
+    state.hit_regions.push(HitRegion {
+        area: Rect::new(x, area.y, cancel.cell_width(), 1),
+        target: HitTarget::TransactionExitCancel,
+    });
 }
 
 fn render_unknown_transaction_actions(

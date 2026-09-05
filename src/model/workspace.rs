@@ -146,6 +146,9 @@ pub enum Overlay {
         connection: ConnectionIdentity,
         transaction_generation: u64,
     },
+    TransactionMenu {
+        selected: usize,
+    },
     TargetSelector {
         candidates: Vec<ExecutionTarget>,
         selected: usize,
