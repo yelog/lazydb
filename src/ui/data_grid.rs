@@ -61,16 +61,8 @@ pub(crate) fn render(
     }
 
     let table_area = block.inner(area);
-    let displayed_rows = edit
-        .map(|session| {
-            session
-                .rows
-                .iter()
-                .map(|row| row.current.as_slice())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_else(|| result.rows.iter().map(Vec::as_slice).collect());
-    let widths = automatic_widths(result, icons)
+    let row_count = edit.map_or(result.rows.len(), |session| session.rows.len());
+    let widths = automatic_widths(result, edit, icons)
         .into_iter()
         .enumerate()
         .map(|(index, width)| {
@@ -80,7 +72,7 @@ pub(crate) fn render(
                 .unwrap_or(width)
         })
         .collect::<Vec<_>>();
-    let number_width = row_number_width(displayed_rows.len());
+    let number_width = row_number_width(row_count);
     let fixed_width = number_width.saturating_add(1);
     let available = table_area
         .width
@@ -103,12 +95,8 @@ pub(crate) fn render(
     let constraints = grid_constraints(&visible, number_width);
 
     let visible_rows = table_area.height.saturating_sub(1 + u16::from(overflow)) as usize;
-    let row_offset = row_viewport_start(
-        displayed_rows.len(),
-        visible_rows,
-        grid.row_offset,
-        grid.selected_row,
-    );
+    let row_offset =
+        row_viewport_start(row_count, visible_rows, grid.row_offset, grid.selected_row);
     state.grid_viewport = Some(crate::model::tab::DataGridViewport {
         tab_id,
         column_offset: first,
@@ -116,13 +104,8 @@ pub(crate) fn render(
         visible_rows,
     });
     let row_y = table_area.y.saturating_add(1);
-    for (screen_row, row_index) in displayed_rows
-        .iter()
-        .skip(row_offset)
-        .take(visible_rows)
-        .enumerate()
-        .map(|(screen_row, _)| (screen_row, row_offset.saturating_add(screen_row)))
-    {
+    for screen_row in 0..visible_rows.min(row_count.saturating_sub(row_offset)) {
+        let row_index = row_offset.saturating_add(screen_row);
         let mut x = data_start_x(table_area, number_width);
         for column in &visible {
             let width = column.rendered_width;
@@ -161,47 +144,45 @@ pub(crate) fn render(
     }
 
     let header = Row::new(header_cells(&visible, result, number_width, theme, icons));
-    let rows = displayed_rows
-        .iter()
-        .skip(row_offset)
-        .take(visible_rows)
-        .enumerate()
-        .map(|(screen_row, row)| {
-            let row_index = row_offset.saturating_add(screen_row);
-            let editable = edit.and_then(|session| session.rows.get(row_index));
-            let row_style = editable.and_then(|row| match row.state {
-                crate::model::relation_edit::EditableRowState::Deleted => Some(
-                    Style::new()
-                        .fg(theme.muted)
-                        .bg(theme.row_deleted_background)
-                        .add_modifier(Modifier::DIM),
-                ),
-                crate::model::relation_edit::EditableRowState::Updated { .. } => None,
-                crate::model::relation_edit::EditableRowState::InsertDraft
-                | crate::model::relation_edit::EditableRowState::Inserted => {
-                    Some(Style::new().fg(theme.row_inserted))
-                }
-                crate::model::relation_edit::EditableRowState::Conflict { .. } => {
-                    Some(Style::new().fg(theme.row_deleted))
-                }
-                crate::model::relation_edit::EditableRowState::Clean => None,
-            });
-            let changed_columns = editable.and_then(|row| match &row.state {
-                crate::model::relation_edit::EditableRowState::Updated { changed_columns } => {
-                    Some(changed_columns)
-                }
-                _ => None,
-            });
-            Row::new(body_cells(
-                &visible,
-                row_index,
-                number_width,
-                row,
-                row_style,
-                changed_columns,
-                theme,
-            ))
+    let rows = (0..visible_rows.min(row_count.saturating_sub(row_offset))).map(|screen_row| {
+        let row_index = row_offset.saturating_add(screen_row);
+        let row = edit
+            .map(|session| session.rows[row_index].current.as_slice())
+            .unwrap_or_else(|| result.rows[row_index].as_slice());
+        let editable = edit.and_then(|session| session.rows.get(row_index));
+        let row_style = editable.and_then(|row| match row.state {
+            crate::model::relation_edit::EditableRowState::Deleted => Some(
+                Style::new()
+                    .fg(theme.muted)
+                    .bg(theme.row_deleted_background)
+                    .add_modifier(Modifier::DIM),
+            ),
+            crate::model::relation_edit::EditableRowState::Updated { .. } => None,
+            crate::model::relation_edit::EditableRowState::InsertDraft
+            | crate::model::relation_edit::EditableRowState::Inserted => {
+                Some(Style::new().fg(theme.row_inserted))
+            }
+            crate::model::relation_edit::EditableRowState::Conflict { .. } => {
+                Some(Style::new().fg(theme.row_deleted))
+            }
+            crate::model::relation_edit::EditableRowState::Clean => None,
         });
+        let changed_columns = editable.and_then(|row| match &row.state {
+            crate::model::relation_edit::EditableRowState::Updated { changed_columns } => {
+                Some(changed_columns)
+            }
+            _ => None,
+        });
+        Row::new(body_cells(
+            &visible,
+            row_index,
+            number_width,
+            row,
+            row_style,
+            changed_columns,
+            theme,
+        ))
+    });
     let selected_row_deleted = edit
         .and_then(|session| session.rows.get(grid.selected_row))
         .is_some_and(|row| {
@@ -230,7 +211,7 @@ pub(crate) fn render(
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("▌");
-    let selected_cell = (!displayed_rows.is_empty()).then(|| {
+    let selected_cell = (row_count > 0).then(|| {
         let selected_column = visible
             .iter()
             .position(|column| column.index == grid.selected_column)
@@ -273,16 +254,29 @@ pub(crate) fn render(
     }
 }
 
-fn automatic_widths(result: &ResultSet, icons: IconSet) -> Vec<u16> {
+fn automatic_widths(
+    result: &ResultSet,
+    edit: Option<&crate::model::relation_edit::RelationEditSession>,
+    icons: IconSet,
+) -> Vec<u16> {
+    let rows = edit
+        .map(|session| session.rows.iter().map(|row| row.current.as_slice()))
+        .into_iter()
+        .flatten()
+        .chain(
+            edit.is_none()
+                .then(|| result.rows.iter().map(Vec::as_slice))
+                .into_iter()
+                .flatten(),
+        );
     result
         .columns
         .iter()
         .enumerate()
         .map(|(column_index, column)| {
             let header = column_header_text(column, icons);
-            let content = result
-                .rows
-                .iter()
+            let content = rows
+                .clone()
                 .filter_map(|row| row.get(column_index))
                 .map(|value| value.preview(40).text)
                 .map(|text| UnicodeWidthStr::width(text.as_str()))

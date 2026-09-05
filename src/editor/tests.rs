@@ -44,6 +44,67 @@ fn insert_text(workspace: &mut EditorWorkspace, id: Uuid, text: &str) {
 }
 
 #[test]
+fn rendering_replaces_old_revision_highlights() {
+    let (mut workspace, id) = fixture("select 1");
+    let viewport = EditorViewport {
+        width: 80,
+        height: 10,
+    };
+
+    workspace
+        .render_snapshot_with_dialect(id, viewport, crate::sql::SqlDialect::Postgres)
+        .unwrap();
+    assert_eq!(workspace.analysis_cache.borrow().len(), 1);
+
+    for character in [' ', 'f', 'r', 'o', 'm', ' ', 't', 'a', 'b', 'l', 'e'] {
+        workspace
+            .press(id, EditorKey::Character(character))
+            .unwrap();
+        workspace
+            .render_snapshot_with_dialect(id, viewport, crate::sql::SqlDialect::Postgres)
+            .unwrap();
+    }
+    assert_eq!(workspace.analysis_cache.borrow().len(), 1);
+}
+
+#[test]
+fn closing_console_releases_its_highlight_cache() {
+    let (mut workspace, id) = fixture("select 1");
+    let other_id = Uuid::new_v4();
+    workspace.open_console(other_id, "select 2");
+    let viewport = EditorViewport {
+        width: 80,
+        height: 10,
+    };
+
+    workspace
+        .render_snapshot_with_dialect(id, viewport, crate::sql::SqlDialect::Postgres)
+        .unwrap();
+    workspace
+        .render_snapshot_with_dialect(other_id, viewport, crate::sql::SqlDialect::Postgres)
+        .unwrap();
+    assert_eq!(workspace.analysis_cache.borrow().len(), 2);
+
+    workspace.close_console(id);
+    assert_eq!(workspace.analysis_cache.borrow().len(), 1);
+    assert!(
+        workspace
+            .analysis_cache
+            .borrow()
+            .keys()
+            .all(|key| key.console_id == other_id)
+    );
+}
+
+#[test]
+fn line_count_does_not_require_a_render_snapshot() {
+    let (workspace, id) = fixture("select 1\nselect 2");
+
+    assert_eq!(workspace.line_count(id).unwrap(), 2);
+    assert!(workspace.analysis_cache.borrow().is_empty());
+}
+
+#[test]
 fn session_starts_insert_and_transitions_with_escape_and_i() {
     let (mut workspace, id) = fixture("");
     assert_eq!(workspace.mode(id).unwrap(), EditorMode::Insert);

@@ -93,7 +93,7 @@ impl From<QueryOutcome> for QueryOutcomeJson {
             execution_ms: outcome.stats.execution.as_millis(),
             fetch_ms: outcome.stats.fetch.as_millis(),
             row_count: outcome.stats.row_count,
-            truncated: false,
+            truncated: outcome.stats.truncated,
         }
     }
 }

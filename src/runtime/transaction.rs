@@ -371,7 +371,7 @@ mod tests {
         InputValue, MetadataFingerprint, MutationResult, RelationMutation, RelationMutationRequest,
         RowLocator, UpdateCellMutation,
     };
-    use crate::db::query::QueryOutcomeAccumulator;
+    use crate::db::query::{QueryBudget, QueryOutcomeAccumulator};
     use crate::db::value::CellValue;
     use crate::{
         identity::ConnectionIdentity,
@@ -414,11 +414,11 @@ mod tests {
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }
             if sql == "count" {
-                let mut outcome = QueryOutcomeAccumulator::new();
+                let mut outcome = QueryOutcomeAccumulator::with_budget(QueryBudget::UNBOUNDED);
                 outcome.row(Vec::new(), vec![CellValue::Integer(1234)]);
                 return Ok(outcome.finish());
             }
-            Ok(QueryOutcomeAccumulator::new().finish())
+            Ok(QueryOutcomeAccumulator::with_budget(QueryBudget::UNBOUNDED).finish())
         }
         async fn commit(&mut self) -> Result<(), TransactionError> {
             self.log.lock().unwrap().push("commit".into());

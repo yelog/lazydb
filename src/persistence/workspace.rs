@@ -206,6 +206,9 @@ impl WorkspaceStore {
         }
         for (id, text) in &snapshot.sql {
             let path = self.sql_dir.join(format!("{id}.sql"));
+            if fs::read_to_string(&path).ok().as_deref() == Some(text.as_str()) {
+                continue;
+            }
             let temporary = path.with_extension("sql.tmp");
             let mut file = File::create(&temporary)?;
             file.write_all(text.as_bytes())?;

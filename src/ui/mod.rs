@@ -2303,11 +2303,8 @@ fn render_editor(
     let base_block = panel_block("", app.focus == Focus::Editor, theme);
     let inner = base_block.inner(area);
     let number_width = app
-        .active_editor_render_snapshot(EditorViewport {
-            width: 0,
-            height: 0,
-        })
-        .map(|snapshot| snapshot.total_lines.max(1).to_string().len().max(2))
+        .active_editor_line_count()
+        .map(|line_count| line_count.to_string().len().max(2))
         .unwrap_or(2);
     let gutter = number_width.saturating_add(4);
     let viewport = EditorViewport {

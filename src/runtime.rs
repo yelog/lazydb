@@ -1752,7 +1752,16 @@ impl Runtime {
                 });
                 return;
             };
-            match database.execute(&sql).await {
+            match database
+                .execute_with_budget(
+                    &sql,
+                    crate::db::query::QueryBudget {
+                        max_rows: 10_000,
+                        max_bytes: 16 * 1024 * 1024,
+                    },
+                )
+                .await
+            {
                 Ok(outcome) => {
                     let _ = sender.send(Action::QueryFinished {
                         tab_id,
@@ -2042,7 +2051,16 @@ impl Runtime {
                 });
                 return;
             };
-            match database.execute(&sql).await {
+            match database
+                .execute_with_budget(
+                    &sql,
+                    crate::db::query::QueryBudget {
+                        max_rows: 10_000,
+                        max_bytes: 16 * 1024 * 1024,
+                    },
+                )
+                .await
+            {
                 Ok(outcome) => {
                     let _ = sender.send(Action::DerivedQueryFinished {
                         tab_id,
