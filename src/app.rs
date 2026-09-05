@@ -12141,6 +12141,57 @@ impl App {
         ) {
             return self.load_relation_metadata_for_save(connection);
         }
+        let allow_keyless_insert = self
+            .profiles
+            .iter()
+            .find(|profile| profile.id == connection.profile_id)
+            .is_some_and(|profile| profile.kind == crate::profile::DatabaseKind::Postgres);
+        let Some((keyless, has_insert, has_existing_mutation)) =
+            self.tabs.get(self.active_tab).and_then(|tab| {
+                let WorkspaceTab::Relation(tab) = tab else {
+                    return None;
+                };
+                let edit = tab.edit.as_ref()?;
+                let metadata = match &tab.ddl {
+                    RelationLoad::Ready(ddl) => {
+                        crate::db::mutation::metadata_fingerprint(&ddl.value)
+                    }
+                    _ => return None,
+                };
+                Some((
+                    metadata.primary_key.is_empty(),
+                    edit.rows.iter().any(|row| {
+                        matches!(
+                            row.state,
+                            crate::model::relation_edit::EditableRowState::InsertDraft
+                        )
+                    }),
+                    edit.rows.iter().any(|row| {
+                        matches!(
+                            row.state,
+                            crate::model::relation_edit::EditableRowState::Updated { .. }
+                                | crate::model::relation_edit::EditableRowState::Deleted
+                        )
+                    }),
+                ))
+            })
+        else {
+            return self.load_relation_metadata_for_save(connection);
+        };
+        if keyless && has_existing_mutation {
+            self.notify_warning(
+                "Relation",
+                "Cannot update or delete existing rows without a primary key; no changes were saved",
+            );
+            return Vec::new();
+        }
+        if keyless && has_insert && !allow_keyless_insert {
+            self.notify_warning(
+                "Relation",
+                "Grid inserts without a primary key are not supported for this database driver",
+            );
+            return Vec::new();
+        }
         let Some((mut requests, snapshot)) =
             self.relation_context(|tab, edit, columns, metadata, target, scope| {
                 let pk_columns = metadata
@@ -12152,8 +12203,8 @@ impl App {
                             .iter()
                             .position(|(column, _, _)| column == name)
                     })
-                    .collect::<Option<Vec<_>>>()?;
-                if columns.is_empty() || pk_columns.is_empty() {
+                    .collect::<Option<Vec<_>>>();
+                if columns.is_empty() {
                     return None;
                 }
                 let result_indexes = metadata
@@ -12181,6 +12232,7 @@ impl App {
                         crate::model::relation_edit::EditableRowState::Updated {
                             changed_columns,
                         } => {
+                            let pk_columns = pk_columns.as_ref()?;
                             let mut changed_columns =
                                 changed_columns.iter().copied().collect::<Vec<_>>();
                             changed_columns.sort_by_key(|column| pk_columns.contains(column));
@@ -12210,6 +12262,9 @@ impl App {
                             }
                         }
                         crate::model::relation_edit::EditableRowState::InsertDraft => {
+                            if metadata.primary_key.is_empty() && !allow_keyless_insert {
+                                return None;
+                            }
                             let supplied = row
                                 .supplied_columns
                                 .iter()
@@ -12234,6 +12289,7 @@ impl App {
                             ));
                         }
                         crate::model::relation_edit::EditableRowState::Deleted => {
+                            let pk_columns = pk_columns.as_ref()?;
                             deleted.push(DeleteRowMutation {
                                 row: RowLocator {
                                     columns: pk_columns.clone(),
@@ -14307,6 +14363,159 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn relation_save_allows_postgres_insert_without_primary_key() {
+        let mut profile = import_connection_url("postgres://localhost/items", Some("items"))
+            .unwrap()
+            .profile;
+        let profile_id = profile.id;
+        profile.catalog_scope =
+            CatalogScope::for_profile(DatabaseKind::Postgres, "items", Some("main"));
+        let connection = ConnectionIdentity {
+            profile_id,
+            generation: 1,
+        };
+        let relation_id =
+            CatalogId::new(profile_id, CatalogKind::Table, ["items", "main", "items"]);
+        let relation_key = RelationKey {
+            profile_id,
+            object_id: relation_id.clone(),
+        };
+        let mut app = App::new(vec![profile.clone()]);
+        app.connection.profile_id = Some(profile_id);
+        app.connection.generation = connection.generation;
+        app.connection.status = ConnectionStatus::Connected;
+        app.connection.target = Some(ExecutionTarget {
+            profile_id,
+            database: "items".into(),
+            schema: Some("main".into()),
+        });
+        let result = ResultSet {
+            columns: vec![
+                crate::db::query::ColumnMeta {
+                    name: "id".into(),
+                    type_name: "bigint".into(),
+                },
+                crate::db::query::ColumnMeta {
+                    name: "name".into(),
+                    type_name: "text".into(),
+                },
+            ],
+            rows: Vec::new(),
+            affected_rows: 0,
+        };
+        let mut tab = RelationTab::with_descriptor(
+            RelationDescriptor {
+                key: relation_key,
+                qualified_name: QualifiedName {
+                    database: Some("items".into()),
+                    schema: Some("main".into()),
+                    object: "items".into(),
+                },
+                kind: CatalogKind::Table,
+                title: "items".into(),
+            },
+            RelationView::Data,
+        );
+        tab.data = RelationLoad::Ready(OwnedSnapshot {
+            value: crate::db::RelationPreview {
+                sql: "SELECT * FROM main.items".into(),
+                result: QueryOutcome::from_result_set(result, Duration::ZERO, Duration::ZERO),
+                pagination: crate::model::pagination::ResultPagination::from_page(
+                    crate::model::pagination::PageRequest::first(
+                        crate::model::pagination::PageSize::default(),
+                    ),
+                    0,
+                ),
+            },
+            attribution: SnapshotAttribution {
+                connection,
+                profile_id,
+                scope: profile.catalog_scope.clone(),
+            },
+        });
+        let mut edit = RelationEditSession::from_rows(Vec::new());
+        let first = edit.insert_row(0, vec![CellValue::Null, CellValue::Text("one".into())]);
+        edit.update_cell(0, 1, CellValue::Text("one".into()));
+        let second = edit.insert_row(1, vec![CellValue::Null, CellValue::Text("two".into())]);
+        edit.update_cell(1, 1, CellValue::Text("two".into()));
+        assert_ne!(first, second);
+        tab.edit = Some(edit);
+        tab.ddl = RelationLoad::Ready(OwnedSnapshot {
+            value: test_relation_ddl_without_primary_key(connection, relation_id),
+            attribution: SnapshotAttribution {
+                connection,
+                profile_id,
+                scope: profile.catalog_scope,
+            },
+        });
+        app.tabs.push(WorkspaceTab::Relation(tab));
+        app.active_tab = app.tabs.len() - 1;
+
+        let commands = app.update(Action::RelationCommit);
+        let first_request = match commands.as_slice() {
+            [Command::RelationMutation { request }]
+                if request.metadata.primary_key.is_empty()
+                    && matches!(
+                        &request.operation,
+                        RelationMutation::InsertRow(mutation)
+                            if mutation.columns == vec![1]
+                                && mutation.values == vec![InputValue::Value(CellValue::Text("one".into()))]
+                    ) =>
+            {
+                request.clone()
+            }
+            _ => panic!("expected first insert command, got {commands:?}"),
+        };
+        let second_commands = app.update(Action::RelationMutationSucceeded {
+            request: first_request.clone(),
+            result: MutationResult::Inserted {
+                row: vec![CellValue::Integer(1), CellValue::Text("one".into())],
+            },
+        });
+        let second_request = match second_commands.as_slice() {
+            [Command::RelationMutation { request }]
+                if matches!(
+                    &request.operation,
+                    RelationMutation::InsertRow(mutation)
+                        if mutation.columns == vec![1]
+                            && mutation.values == vec![InputValue::Value(CellValue::Text("two".into()))]
+                ) =>
+            {
+                request.clone()
+            }
+            _ => panic!("expected second insert command, got {second_commands:?}"),
+        };
+        let commit_commands = app.update(Action::RelationMutationSucceeded {
+            request: second_request,
+            result: MutationResult::Inserted {
+                row: vec![CellValue::Integer(2), CellValue::Text("two".into())],
+            },
+        });
+        assert!(matches!(
+            commit_commands.as_slice(),
+            [Command::RelationCommit { .. }]
+        ));
+        let finish_commands = app.update(Action::RelationCommitted {
+            tab_id: first_request.tab_id,
+            generation: first_request.edit_generation,
+            connection: first_request.connection,
+        });
+        assert!(finish_commands.is_empty());
+        let WorkspaceTab::Relation(tab) = &app.tabs[app.active_tab] else {
+            panic!("expected relation tab")
+        };
+        assert!(tab.edit.as_ref().unwrap().pending_save.is_empty());
+        assert!(
+            tab.edit
+                .as_ref()
+                .unwrap()
+                .rows
+                .iter()
+                .all(|row| { matches!(row.state, EditableRowState::Clean) })
+        );
+    }
+
     fn test_relation_ddl(request: RelationRequest, relation_id: CatalogId) -> RelationDdl {
         let profile_id = request.connection.profile_id;
         let qualified = QualifiedName {
@@ -14395,6 +14604,38 @@ mod tests {
             sql: "CREATE TABLE items (id integer primary key, name text)".into(),
             provenance: DdlProvenance::NativeCatalog,
         }
+    }
+
+    fn test_relation_ddl_without_primary_key(
+        connection: ConnectionIdentity,
+        relation_id: CatalogId,
+    ) -> RelationDdl {
+        let request = RelationRequest {
+            tab_id: Uuid::new_v4(),
+            tab_generation: 0,
+            request_id: 0,
+            connection,
+            relation: RelationKey {
+                profile_id: connection.profile_id,
+                object_id: relation_id.clone(),
+            },
+            kind: RelationRequestKind::Ddl,
+            scope: CatalogScope::for_profile(DatabaseKind::Postgres, "items", Some("main")),
+            options: Default::default(),
+            page: crate::model::pagination::PageRequest::first(
+                crate::model::pagination::PageSize::default(),
+            ),
+        };
+        let mut ddl = test_relation_ddl(request, relation_id);
+        ddl.children.entries.retain(|entry| {
+            !matches!(
+                entry.metadata,
+                CatalogMetadata::Constraint(ConstraintMetadata::PrimaryKey { .. })
+            )
+        });
+        ddl.children.total_count = CatalogCount::Exact(2);
+        ddl.sql = "CREATE TABLE items (id bigint NOT NULL, name text)".into();
+        ddl
     }
 
     #[test]
