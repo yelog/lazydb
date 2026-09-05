@@ -31,13 +31,63 @@ fn typing_refreshes_an_open_completion_without_flicker() {
     assert!(app.active_console().completion.is_some());
 
     let commands = app.update(Action::EditorKey(KeyEvent::new(
-        KeyCode::Char(' '),
+        KeyCode::Char('e'),
         KeyModifiers::NONE,
     )));
 
     let after = app.active_console().completion.as_ref().unwrap();
-    assert_eq!(app.active_editor_text().unwrap(), "sel ");
+    assert_eq!(app.active_editor_text().unwrap(), "sele");
     assert!(!after.candidates.is_empty());
+    assert!(
+        !commands
+            .iter()
+            .any(|command| { matches!(command, lazydb::action::Command::ScheduleCompletion(_)) })
+    );
+}
+
+#[test]
+fn typing_space_after_a_statement_closes_completion_without_scheduling() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::ReplaceEditor("select * from users;".into()));
+    app.active_console_mut().completion = Some(CompletionPopup {
+        candidates: vec![CompletionCandidate {
+            label: "users".into(),
+            insert_text: "users".into(),
+            kind: CompletionKind::Table,
+            detail: None,
+            replace: TextRange::new(19, 19),
+            score: CompletionScore {
+                context: 1,
+                name_match: 1,
+                schema: 0,
+            },
+        }],
+        selected: 0,
+    });
+    assert!(app.active_console().completion.is_some());
+
+    let commands = app.update(Action::EditorKey(KeyEvent::new(
+        KeyCode::Char(' '),
+        KeyModifiers::NONE,
+    )));
+
+    assert!(app.active_console().completion.is_none());
+    assert!(
+        !commands
+            .iter()
+            .any(|command| { matches!(command, lazydb::action::Command::ScheduleCompletion(_)) })
+    );
+}
+
+#[test]
+fn empty_editor_does_not_schedule_completion_after_entering_insert_mode() {
+    let mut app = App::new(Vec::new());
+    let commands = app.update(Action::EditorKey(KeyEvent::new(
+        KeyCode::Char('i'),
+        KeyModifiers::NONE,
+    )));
+
+    assert!(app.active_console().completion.is_none());
     assert!(
         !commands
             .iter()

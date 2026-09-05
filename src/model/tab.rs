@@ -1,6 +1,8 @@
 use uuid::Uuid;
 
+use crate::db::catalog::CatalogId;
 use crate::db::query::QueryOutcome;
+use crate::identity::ConnectionIdentity;
 use crate::sql::{CompletionCandidate, TextRange};
 
 use super::execution_target::ExecutionTarget;
@@ -179,6 +181,7 @@ pub struct ConsoleTab {
     pub grid: DataGridState,
     pub pagination: ResultPagination,
     pub completion: Option<CompletionPopup>,
+    pub completion_request: Option<CompletionRequest>,
     pub transaction_generation: u64,
     pub transaction_mode: TransactionMode,
     pub transaction_state: TransactionState,
@@ -228,6 +231,16 @@ pub struct CompletionPopup {
     pub selected: usize,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompletionRequest {
+    pub revision: u64,
+    pub cursor: usize,
+    pub connection: Option<ConnectionIdentity>,
+    pub catalog_generation: u64,
+    pub explicit: bool,
+    pub relation_children: Vec<CatalogId>,
+}
+
 impl ConsoleTab {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
@@ -242,6 +255,7 @@ impl ConsoleTab {
             grid: DataGridState::default(),
             pagination: default_pagination(),
             completion: None,
+            completion_request: None,
             transaction_generation: 0,
             transaction_mode: TransactionMode::Auto,
             transaction_state: TransactionState::Idle,

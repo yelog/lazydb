@@ -358,9 +358,33 @@ fn insert_context_does_not_leak_into_statement_or_relation_completion() {
 }
 
 #[test]
-fn insert_space_triggers_completion() {
-    assert!(should_offer_completion("insert ", "insert ".len()));
-    assert!(should_offer_completion("INSERT ", "INSERT ".len()));
+fn automatic_completion_requires_an_identifier_prefix() {
+    for sql in [
+        "",
+        " ",
+        "\n",
+        "select ",
+        "select * from users;",
+        "select * from users;\n",
+    ] {
+        assert!(!should_offer_completion(sql, sql.len()), "{sql:?}");
+    }
+    for sql in [
+        "s",
+        "select * from us",
+        "select u.",
+        "select u1.",
+        "select * from public.",
+    ] {
+        assert!(should_offer_completion(sql, sql.len()), "{sql:?}");
+    }
+}
+
+#[test]
+fn automatic_completion_ignores_non_identifier_dots_and_literals() {
+    for sql in ["1.", "select 'users'", "-- users", "select * from users; "] {
+        assert!(!should_offer_completion(sql, sql.len()), "{sql:?}");
+    }
 }
 
 #[test]
@@ -373,7 +397,7 @@ fn ddl_completion_trigger_matches_structural_context() {
         "CREATE INDEX ix ON ",
         "ALTER TABLE users DROP COLUMN ",
     ] {
-        assert!(should_offer_completion(sql, sql.len()), "{sql}");
+        assert!(!should_offer_completion(sql, sql.len()), "{sql}");
     }
     for sql in [
         "SELECT 'CREATE '",

@@ -55,8 +55,9 @@ use crate::{
             RelationMutationHistory,
         },
         tab::{
-            CompletionPopup, ConsoleRecord, ConsoleTab, DataGridState, DerivedResultState,
-            ExecutionResult, LastExecution, OutputEntry, OutputKind, ResultView, WorkspaceTab,
+            CompletionPopup, CompletionRequest, ConsoleRecord, ConsoleTab, DataGridState,
+            DerivedResultState, ExecutionResult, LastExecution, OutputEntry, OutputKind,
+            ResultView, WorkspaceTab,
         },
         transaction::{
             self, DeferredIntent, DeferredIntentQueue, DeferredTransactionPrompt, TransactionEvent,
@@ -5413,6 +5414,7 @@ impl App {
                     return Vec::new();
                 }
                 if self.active_editor_mode() != EditorMode::Insert {
+                    self.clear_completion_request();
                     self.active_console_mut().completion = None;
                 }
                 self.apply_editor_effects(CompletionAfterEdit::Schedule)
@@ -5440,6 +5442,7 @@ impl App {
                     return Vec::new();
                 }
                 if self.active_editor_mode() != EditorMode::Insert {
+                    self.clear_completion_request();
                     self.active_console_mut().completion = None;
                 }
                 self.apply_editor_effects(CompletionAfterEdit::Schedule)
@@ -5498,10 +5501,14 @@ impl App {
                 let _ = self.editor.set_text(id, &text);
                 vec![self.persist_workspace_command()]
             }
-            Action::CompletionExplicit => self.complete_now(),
+            Action::CompletionExplicit => self.complete_now(false),
             Action::CompletionDue(key) => {
-                if self.completion_key() == Some(key) {
-                    self.complete_now()
+                if self.completion_key() == Some(key) && self.completion_request_is_current() {
+                    let automatic = self
+                        .active_console_opt()
+                        .and_then(|tab| tab.completion_request.as_ref())
+                        .is_some_and(|request| !request.explicit);
+                    self.complete_now(automatic)
                 } else {
                     Vec::new()
                 }
@@ -5528,6 +5535,7 @@ impl App {
                 Vec::new()
             }
             Action::CompletionDismiss => {
+                self.clear_completion_request();
                 if let Some(tab) = self.active_console_opt_mut() {
                     tab.completion = None;
                 }
@@ -9058,23 +9066,31 @@ impl App {
             let action = match effect {
                 EditorEffect::Changed { .. } => {
                     if matches!(completion, CompletionAfterEdit::Suppress) {
+                        self.clear_completion_request();
                         self.active_console_mut().completion = None;
                         continue;
                     }
                     if self.active_editor_mode() != EditorMode::Insert {
+                        self.clear_completion_request();
+                        self.active_console_mut().completion = None;
+                        continue;
+                    }
+                    let (text, cursor) = self.active_editor_text_and_cursor();
+                    if !sql::should_offer_completion_for_dialect(&text, cursor, self.sql_dialect())
+                    {
+                        self.clear_completion_request();
                         self.active_console_mut().completion = None;
                         continue;
                     }
                     let completion_is_open = self
                         .active_console_opt()
                         .is_some_and(|tab| tab.completion.is_some());
-                    if self
-                        .active_editor_text()
-                        .is_ok_and(|text| text.ends_with('.'))
+                    if text.as_bytes().get(cursor.saturating_sub(1)) == Some(&b'.')
                         || completion_is_open
                     {
-                        commands.extend(self.complete_now());
+                        commands.extend(self.complete_now(true));
                     } else if let Some(key) = self.completion_key() {
+                        self.set_completion_request(false, Vec::new());
                         commands.push(Command::ScheduleCompletion(key));
                     }
                     continue;
@@ -9138,15 +9154,29 @@ impl App {
             return None;
         }
         let tab = self.active_console_opt()?;
+        let (_, cursor) = self.active_editor_text_and_cursor();
         Some(CompletionScheduleKey {
             console_id: tab.id,
             document_revision: self.active_editor_revision(),
+            cursor,
             connection: self.connection.active_identity()?,
             catalog_generation: self.explorer.catalog_generation,
         })
     }
 
-    fn complete_now(&mut self) -> Vec<Command> {
+    fn completion_request_is_current(&self) -> bool {
+        let Some(tab) = self.active_console_opt() else {
+            return false;
+        };
+        let Some(request) = tab.completion_request.as_ref() else {
+            return false;
+        };
+        request.revision == self.active_editor_revision()
+            && request.cursor == self.active_editor_text_and_cursor().1
+            && request.connection == self.connection.active_identity()
+    }
+
+    fn complete_now(&mut self, automatic: bool) -> Vec<Command> {
         if self.active_console_opt().is_none() {
             return Vec::new();
         }
@@ -9176,6 +9206,12 @@ impl App {
             .as_ref()
             .map(|snapshot| cursor_byte(&text, snapshot.cursor.line, snapshot.cursor.column))
             .unwrap_or(text.len());
+        if automatic && !sql::should_offer_completion_for_dialect(&text, cursor, self.sql_dialect())
+        {
+            self.clear_completion_request();
+            self.active_console_mut().completion = None;
+            return Vec::new();
+        }
         let completion_target = self
             .active_console_opt()
             .and_then(|tab| tab.execution_target.as_ref())
@@ -9196,7 +9232,7 @@ impl App {
             completion_context,
         );
         let mut commands = Vec::new();
-        for relation in dependencies.relation_children {
+        for relation in &dependencies.relation_children {
             let owner = crate::model::explorer::ExplorerOwnerId::Catalog(relation.clone());
             let loaded = self
                 .explorer
@@ -9213,12 +9249,13 @@ impl App {
                 });
             if !loaded {
                 commands.extend(self.start_catalog_request(
-                    CatalogTarget::relation_children(relation).unwrap(),
+                    CatalogTarget::relation_children(relation.clone()).unwrap(),
                     None,
                     CatalogRequestIntent::Completion,
                 ));
             }
         }
+        let relation_children = dependencies.relation_children.clone();
         let candidates = sql::complete(
             &text,
             cursor,
@@ -9241,7 +9278,48 @@ impl App {
                 .unwrap_or(0),
             candidates,
         });
+        self.set_completion_request(!automatic, relation_children);
         commands
+    }
+
+    fn active_editor_text_and_cursor(&self) -> (String, usize) {
+        let text = self.active_editor_text().unwrap_or_default();
+        let cursor = self
+            .active_editor_render_snapshot(EditorViewport {
+                width: 0,
+                height: 0,
+            })
+            .ok()
+            .map(|snapshot| cursor_byte(&text, snapshot.cursor.line, snapshot.cursor.column))
+            .unwrap_or(text.len());
+        (text, cursor)
+    }
+
+    fn set_completion_request(
+        &mut self,
+        explicit: bool,
+        relation_children: Vec<crate::db::catalog::CatalogId>,
+    ) {
+        let (_, cursor) = self.active_editor_text_and_cursor();
+        let revision = self.active_editor_revision();
+        let connection = self.connection.active_identity();
+        let generation = self.explorer.catalog_generation;
+        if let Some(tab) = self.active_console_opt_mut() {
+            tab.completion_request = Some(CompletionRequest {
+                revision,
+                cursor,
+                connection,
+                catalog_generation: generation,
+                explicit,
+                relation_children,
+            });
+        }
+    }
+
+    fn clear_completion_request(&mut self) {
+        if let Some(tab) = self.active_console_opt_mut() {
+            tab.completion_request = None;
+        }
     }
 
     fn accept_completion(&mut self) -> Vec<Command> {
@@ -9255,6 +9333,7 @@ impl App {
         let Some(popup) = self.active_console_mut().completion.take() else {
             return Vec::new();
         };
+        self.clear_completion_request();
         let Some(candidate) = popup.candidates.get(popup.selected).cloned() else {
             return Vec::new();
         };
@@ -10245,7 +10324,29 @@ impl App {
         if matches!(&request.key.target, CatalogTarget::RelationChildren { .. })
             && self.active_console_opt().is_some()
         {
-            commands.extend(self.complete_now());
+            let relation = match &request.key.target {
+                CatalogTarget::RelationChildren { relation } => relation,
+                _ => unreachable!(),
+            };
+            if self.completion_request_is_current()
+                && self
+                    .active_console_opt()
+                    .and_then(|tab| tab.completion_request.as_ref())
+                    .is_some_and(|completion| {
+                        completion.catalog_generation <= self.explorer.catalog_generation
+                    })
+                && self.active_console_opt().is_some_and(|tab| {
+                    tab.completion_request
+                        .as_ref()
+                        .is_some_and(|completion| completion.relation_children.contains(relation))
+                })
+            {
+                let automatic = self
+                    .active_console_opt()
+                    .and_then(|tab| tab.completion_request.as_ref())
+                    .is_some_and(|request| !request.explicit);
+                commands.extend(self.complete_now(automatic));
+            }
         }
         commands.extend(self.load_active_relation(false));
         commands
