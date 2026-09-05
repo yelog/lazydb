@@ -245,7 +245,7 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                 HitTarget::TargetSelectorRow(index) => Some(Action::SelectTargetSelector(index)),
                 HitTarget::TargetSelectorCancel => Some(Action::CancelTargetSelector),
                 HitTarget::EditorExecutionTarget => Some(Action::OpenTargetSelector),
-                HitTarget::EditorTransactionMenu => Some(Action::OpenTransactionMenu),
+                HitTarget::EditorTransactionMenu => Some(Action::ActivateEditorTransaction),
                 HitTarget::TransactionMenuItem(index) => Some(Action::SelectTransactionMenu(index)),
                 HitTarget::TransactionMenuCancel => Some(Action::CancelTransactionMenu),
                 HitTarget::TransactionExitChoice(choice) => {

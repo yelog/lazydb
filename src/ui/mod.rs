@@ -3225,7 +3225,11 @@ fn render_overlay(
             lines.push(Line::raw(
                 "j/k or Up/Down select  Enter confirm  Esc cancel",
             ));
-            let cancel_y = popup.y.saturating_add(3 + visible_count as u16);
+            lines.push(Line::from(Span::styled(
+                " Cancel ",
+                Style::new().fg(theme.text).bg(theme.surface_raised),
+            )));
+            let cancel_y = popup.y.saturating_add(4 + visible_count as u16);
             if cancel_y < popup.bottom() {
                 state.hit_regions.push(HitRegion {
                     area: Rect::new(
@@ -3363,23 +3367,26 @@ fn render_transaction_menu(
             )
         });
         let marker = if index == selected { ">" } else { " " };
-        let suffix = if current {
-            " (current)"
-        } else if !enabled {
+        let suffix = if !enabled {
             reason
+        } else if current {
+            " (current)"
         } else {
             ""
         };
         lines.push(Line::from(Span::styled(
             format!("{marker} {label}{suffix}"),
-            if enabled {
-                if index == selected {
-                    theme.selection
-                } else {
-                    theme.text
-                }
+            if index == selected && enabled {
+                Style::new()
+                    .fg(theme.text)
+                    .bg(theme.selection)
+                    .add_modifier(Modifier::BOLD)
+            } else if !enabled {
+                Style::new().fg(theme.muted).bg(theme.surface_raised)
+            } else if current {
+                Style::new().fg(theme.accent).bg(theme.surface_raised)
             } else {
-                theme.muted
+                Style::new().fg(theme.text).bg(theme.surface_raised)
             },
         )));
         let row = popup.y.saturating_add(2 + index as u16);
@@ -3403,7 +3410,7 @@ fn render_transaction_menu(
     frame.render_widget(
         Paragraph::new(lines)
             .block(panel_block(" TRANSACTION ", true, theme))
-            .style(Style::new().fg(theme.text).bg(theme.surface_raised)),
+            .style(Style::new().bg(theme.surface_raised)),
         popup,
     );
 }

@@ -121,6 +121,18 @@ fn transaction_menu_renders_state_aware_disabled_reasons() {
 }
 
 #[test]
+fn transaction_menu_selected_row_uses_readable_selection_style() {
+    let mut app = fixture();
+    app.update(Action::OpenTransactionMenu);
+    let (buffer, _) = render_buffer_with_icons(&app, 100, 30, IconSet::new(IconMode::Ascii));
+    let x = find_ascii_cells(&buffer, 12, "Auto").expect("selected transaction mode");
+    let cell = &buffer[(x, 12)];
+    assert_eq!(cell.bg, Color::Rgb(26, 55, 70));
+    assert!(cell.modifier.contains(Modifier::BOLD));
+    assert_ne!(cell.fg, Color::Rgb(105, 126, 146));
+}
+
+#[test]
 fn record_view_renders_the_selected_row_as_ordered_fields() {
     let mut app = fixture();
     app.focus = Focus::Results;
@@ -4751,6 +4763,7 @@ fn target_selector_renders_real_target_and_navigation_hint() {
     assert!(output.contains(":memory:.main"));
     assert!(output.contains("current"));
     assert!(output.contains("Enter confirm"));
+    assert!(output.contains("Cancel"));
     assert!(!output.contains("Target selector is available"));
 }
 

@@ -116,7 +116,7 @@ fn rendered_editor_header_maps_target_and_transaction_clicks() {
         &ui_state,
         &app,
         &HitTarget::EditorTransactionMenu,
-        Action::OpenTransactionMenu,
+        Action::ActivateEditorTransaction,
     );
     assert_click_maps(
         &ui_state,
@@ -195,7 +195,7 @@ fn rendered_transaction_confirmation_buttons_map_to_safe_actions() {
 }
 
 #[test]
-fn selecting_target_selector_row_preserves_overlay_until_confirmation() {
+fn selecting_target_selector_row_confirms_on_click() {
     let target = lazydb::model::execution_target::ExecutionTarget {
         profile_id: Uuid::nil(),
         database: "db".into(),
@@ -209,10 +209,34 @@ fn selecting_target_selector_row_preserves_overlay_until_confirmation() {
 
     app.update(Action::SelectTargetSelector(0));
 
-    assert!(matches!(
-        app.overlay,
-        Some(Overlay::TargetSelector { selected: 0, .. })
-    ));
+    assert!(app.overlay.is_none());
+}
+
+#[test]
+fn idle_transaction_header_click_toggles_mode_without_opening_menu() {
+    let profile = import_connection_url("sqlite::memory:", Some("transaction-click"))
+        .unwrap()
+        .profile;
+    let mut app = App::new(vec![profile.clone()]);
+    app.update(Action::ConnectionSucceeded {
+        profile_id: profile.id,
+        generation: 1,
+        server: ServerInfo {
+            kind: DatabaseKind::Sqlite,
+            version: "3.50.0".into(),
+            database: ":memory:".into(),
+            current_user: None,
+        },
+        mutation_capabilities: Default::default(),
+    });
+
+    app.update(Action::ActivateEditorTransaction);
+
+    assert_eq!(
+        app.active_console().transaction_mode,
+        lazydb::model::transaction::TransactionMode::Manual
+    );
+    assert!(app.overlay.is_none());
 }
 
 #[test]

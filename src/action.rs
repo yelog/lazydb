@@ -439,6 +439,7 @@ pub enum Action {
     ConfirmTargetSelector,
     CancelTargetSelector,
     SetTransactionMode(crate::model::transaction::TransactionMode),
+    ActivateEditorTransaction,
     OpenTransactionControl,
     OpenTransactionMenu,
     SelectTransactionMenu(usize),

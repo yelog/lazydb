@@ -236,6 +236,36 @@ fn space_tt_requires_exit_confirmation_for_active_manual_transaction() {
 }
 
 #[test]
+fn transaction_header_activation_preserves_active_manual_transaction() {
+    let mut app = App::new(Vec::new());
+    app.active_console_mut().transaction_mode = TransactionMode::Manual;
+    app.active_console_mut().transaction_state = TransactionState::Active;
+
+    app.update(Action::ActivateEditorTransaction);
+
+    assert_eq!(
+        app.active_console().transaction_mode,
+        TransactionMode::Manual
+    );
+    assert!(matches!(app.overlay, Some(Overlay::TransactionMenu { .. })));
+}
+
+#[test]
+fn transaction_header_activation_does_not_clear_unknown_outcome() {
+    let mut app = App::new(Vec::new());
+    app.active_console_mut().transaction_mode = TransactionMode::Manual;
+    app.active_console_mut().transaction_state = TransactionState::OutcomeUnknown;
+
+    app.update(Action::ActivateEditorTransaction);
+
+    assert_eq!(
+        app.active_console().transaction_state,
+        TransactionState::OutcomeUnknown
+    );
+    assert!(matches!(app.overlay, Some(Overlay::TransactionMenu { .. })));
+}
+
+#[test]
 fn space_tc_opens_transaction_panel_and_space_tr_is_unused() {
     let mut app = App::new(Vec::new());
     app.active_console_mut().transaction_mode = TransactionMode::Manual;

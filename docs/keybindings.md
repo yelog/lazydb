@@ -25,15 +25,21 @@ statement or complete buffer), and `Space d` (execution target selector).
 
 In the SQL Editor, the target and transaction status shown on the editor's
 top-right border are also mouse controls. Clicking the target opens the same
-execution-target selector as `Space d`; clicking a target row highlights it and
-`Enter` confirms the selection. The selector contains the profile default and
-currently loaded catalog targets.
+execution-target selector as `Space d`; clicking a valid target row confirms it
+immediately, just like selecting it and pressing `Enter`. The selector contains
+the profile default and currently loaded catalog targets, even when only two
+targets are available. Selecting the current target is a no-op.
 
-Clicking the transaction status opens the transaction menu. Select `Auto` or
-`Manual`, or choose transaction resolution when an active manual transaction
-needs to be ended. Running queries, aborted transactions, and unknown outcomes
-keep their existing safety restrictions. Transaction confirmation buttons are
-also clickable; clicking outside a safety confirmation does not confirm it.
+When the current SQL Editor transaction is idle, clicking the transaction status
+toggles between `Auto` and `Manual` immediately. With an active, aborted, or
+unknown-outcome transaction, the transaction menu remains available so the
+existing resolution and confirmation flow can enforce its safety restrictions.
+Running queries and in-progress transaction operations never bypass those
+restrictions. Inside either selector, arrow keys or `j/k` move without applying
+the choice, `Enter` confirms the selected valid row, a valid mouse click confirms
+immediately, and `Esc` cancels. Disabled rows cannot be activated. Transaction
+confirmation buttons are also clickable; clicking outside a safety confirmation
+does not confirm it.
 
 ## Conventions
 

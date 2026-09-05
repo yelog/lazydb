@@ -1823,6 +1823,7 @@ impl App {
                         | Action::RelationUndo
                         | Action::RelationRedo
                         | Action::OpenTransactionControl
+                        | Action::ActivateEditorTransaction
                         | Action::OpenTransactionMenu
                         | Action::MoveTransactionMenu(_)
                         | Action::ConfirmTransactionMenu
@@ -1933,6 +1934,7 @@ impl App {
                     | Action::CancelActiveQuery
                     | Action::ConfirmManualCancellation
                     | Action::SetTransactionMode(_)
+                    | Action::ActivateEditorTransaction
                     | Action::OpenTransactionControl
                     | Action::CommitTransaction
                     | Action::RollbackTransaction
@@ -5823,6 +5825,7 @@ impl App {
                     && index < candidates.len()
                 {
                     *selected = index;
+                    return self.update(Action::ConfirmTargetSelector);
                 }
                 Vec::new()
             }
@@ -5931,18 +5934,73 @@ impl App {
                 }]
             }
             Action::SetTransactionMode(mode) => {
-                if mode == TransactionMode::Auto
-                    && self.transaction_needs_exit(self.active_console().id)
+                let Some(tab) = self.active_console_opt() else {
+                    return Vec::new();
+                };
+                if tab.query_status == QueryStatus::Running
+                    || matches!(
+                        tab.transaction_state,
+                        TransactionState::Starting
+                            | TransactionState::Committing
+                            | TransactionState::RollingBack
+                    )
                 {
-                    return self
-                        .defer_intent(DeferredIntent::SetMode(mode), [self.active_console().id]);
+                    self.notify_warning(
+                        "Transaction",
+                        "Wait for the current query or transaction operation to finish",
+                    );
+                    return Vec::new();
+                }
+                if mode == tab.transaction_mode {
+                    return Vec::new();
+                }
+                if mode == TransactionMode::Auto && self.transaction_needs_exit(tab.id) {
+                    return self.defer_intent(DeferredIntent::SetMode(mode), [tab.id]);
                 }
                 self.set_transaction_mode(mode)
+            }
+            Action::ActivateEditorTransaction => {
+                let Some(tab) = self.active_console_opt() else {
+                    return Vec::new();
+                };
+                if tab.query_status == QueryStatus::Running
+                    || matches!(
+                        tab.transaction_state,
+                        TransactionState::Starting
+                            | TransactionState::Committing
+                            | TransactionState::RollingBack
+                    )
+                {
+                    self.notify_warning(
+                        "Transaction",
+                        "Wait for the current query or transaction operation to finish",
+                    );
+                    return Vec::new();
+                }
+                if tab.transaction_state == TransactionState::Idle {
+                    let mode = match tab.transaction_mode {
+                        TransactionMode::Auto => TransactionMode::Manual,
+                        TransactionMode::Manual => TransactionMode::Auto,
+                    };
+                    return self.update(Action::SetTransactionMode(mode));
+                }
+                self.update(Action::OpenTransactionMenu)
             }
             Action::OpenTransactionControl => self.open_transaction_control(),
             Action::OpenTransactionMenu => {
                 if self.active_console_opt().is_some() {
-                    self.overlay = Some(Overlay::TransactionMenu { selected: 0 });
+                    let availability = self.transaction_menu_availability();
+                    let current = self
+                        .active_console_opt()
+                        .map(|tab| match tab.transaction_mode {
+                            TransactionMode::Auto => 0,
+                            TransactionMode::Manual => 1,
+                        });
+                    let selected = current
+                        .filter(|index| availability[*index].0)
+                        .or_else(|| availability.iter().position(|(enabled, _)| *enabled))
+                        .unwrap_or(3);
+                    self.overlay = Some(Overlay::TransactionMenu { selected });
                 }
                 Vec::new()
             }
@@ -5957,8 +6015,19 @@ impl App {
                 Vec::new()
             }
             Action::MoveTransactionMenu(delta) => {
-                if let Some(Overlay::TransactionMenu { selected }) = self.overlay.as_mut() {
-                    *selected = (*selected as isize + delta).rem_euclid(4) as usize;
+                let availability = self.transaction_menu_availability();
+                if let Some(Overlay::TransactionMenu { selected }) = self.overlay.as_mut()
+                    && delta != 0
+                {
+                    let step = if delta.is_positive() { 1 } else { -1 };
+                    let mut candidate = (*selected as isize).rem_euclid(4);
+                    for _ in 0..4 {
+                        candidate = (candidate + step).rem_euclid(4);
+                        if availability[candidate as usize].0 {
+                            *selected = candidate as usize;
+                            break;
+                        }
+                    }
                 }
                 Vec::new()
             }
@@ -5967,7 +6036,10 @@ impl App {
                     return Vec::new();
                 };
                 let availability = self.transaction_menu_availability();
-                if !availability[selected].0 {
+                if !availability
+                    .get(selected)
+                    .is_some_and(|(enabled, _)| *enabled)
+                {
                     return Vec::new();
                 }
                 self.overlay = None;
