@@ -198,8 +198,15 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                 HitTarget::CatalogEditorRemoveTableColumn => {
                     Some(Action::CatalogEditorRemoveTableColumn)
                 }
+                HitTarget::CatalogEditorRestoreTableColumn => {
+                    Some(Action::CatalogEditorRestoreTableColumn)
+                }
                 HitTarget::CatalogEditorReview => Some(Action::CatalogEditorPreview),
                 HitTarget::CatalogEditorCancel => Some(Action::CatalogEditorCancel),
+                HitTarget::CatalogEditorDiscardKeepEditing => {
+                    Some(Action::CatalogEditorDiscardKeepEditing)
+                }
+                HitTarget::CatalogEditorDiscardChanges => Some(Action::CatalogEditorDiscardChanges),
                 HitTarget::CatalogEditorColumnDetailsConfirm => {
                     Some(Action::CatalogEditorConfirmTableColumnDetails)
                 }
@@ -359,8 +366,11 @@ fn focus_at(ui: &UiState, column: u16, row: u16) -> Option<Focus> {
         | HitTarget::CatalogEditorTableColumn(_)
         | HitTarget::CatalogEditorAddTableColumn
         | HitTarget::CatalogEditorRemoveTableColumn
+        | HitTarget::CatalogEditorRestoreTableColumn
         | HitTarget::CatalogEditorReview
         | HitTarget::CatalogEditorCancel
+        | HitTarget::CatalogEditorDiscardKeepEditing
+        | HitTarget::CatalogEditorDiscardChanges
         | HitTarget::CatalogEditorColumnDetailsConfirm
         | HitTarget::CatalogEditorColumnDetailsCancel
         | HitTarget::CatalogOwnerChoice(_) => None,

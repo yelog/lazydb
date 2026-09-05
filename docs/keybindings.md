@@ -178,6 +178,16 @@ the editor and late responses are rejected by request identity and stale checks.
 a form mutation, and `Enter` applies the SQL preview. `Esc` cancels the picker
 or form, returns from preview, or cancels a busy editor.
 
+In a Table form, `Up/Down` moves within the selected column list and
+`Tab/Shift-Tab` moves between the list and form controls. `e` opens the selected
+column details, `a` adds a column below it, and `r` restores a removed existing
+column. Removing the last effective column is blocked.
+
+In SQL Preview, `Up/Down` scrolls the generated SQL, `PageUp/PageDown` moves by
+pages, and `Home/End` jumps to the beginning or end. `Enter` applies the plan
+and `Esc` returns to the form. While the mutation is applying, the editor stays
+open and input is blocked until the result arrives.
+
 ## SQL Editor
 
 ### Normal

@@ -138,8 +138,11 @@ pub enum HitTarget {
     CatalogEditorTableColumn(usize),
     CatalogEditorAddTableColumn,
     CatalogEditorRemoveTableColumn,
+    CatalogEditorRestoreTableColumn,
     CatalogEditorReview,
     CatalogEditorCancel,
+    CatalogEditorDiscardKeepEditing,
+    CatalogEditorDiscardChanges,
     CatalogEditorColumnDetailsConfirm,
     CatalogEditorColumnDetailsCancel,
     CatalogOwnerChoice(String),
@@ -766,6 +769,7 @@ fn overlay_key(overlay: &Overlay) -> u8 {
         Overlay::SqlEditorList(_) => 14,
         Overlay::PageSizeSelector { .. } => 15,
         Overlay::CatalogDropConfirm { .. } | Overlay::CatalogEditorDestructiveConfirm { .. } => 16,
+        Overlay::CatalogEditorDiscardConfirm { .. } => 17,
     }
 }
 
@@ -3199,6 +3203,54 @@ fn render_overlay(
         }
         Overlay::CatalogEditorDestructiveConfirm { plan, input } => {
             render_catalog_mutation_confirm(frame, area, plan, input, theme);
+        }
+        Overlay::CatalogEditorDiscardConfirm { focus } => {
+            use crate::model::workspace::CatalogEditorDiscardFocus;
+            let popup = centered(area, 72.min(area.width), 9.min(area.height));
+            frame.render_widget(Clear, popup);
+            let selected = |candidate| {
+                if *focus == candidate {
+                    theme.base().bg(theme.selection)
+                } else {
+                    theme.base()
+                }
+            };
+            let lines = vec![
+                Line::from(Span::styled(
+                    "Discard unsaved table changes?",
+                    theme.title(true),
+                )),
+                Line::raw("Your draft has not been applied to the database."),
+                Line::styled(
+                    "Keep Editing",
+                    selected(CatalogEditorDiscardFocus::KeepEditing),
+                ),
+                Line::styled(
+                    "Discard Changes",
+                    selected(CatalogEditorDiscardFocus::DiscardChanges),
+                ),
+                Line::raw("Up/Down select  Enter confirm  Esc keep editing"),
+            ];
+            for (offset, target) in [
+                (2, HitTarget::CatalogEditorDiscardKeepEditing),
+                (3, HitTarget::CatalogEditorDiscardChanges),
+            ] {
+                state.hit_regions.push(HitRegion {
+                    area: Rect::new(
+                        popup.x + 1,
+                        popup.y + 1 + offset,
+                        popup.width.saturating_sub(2),
+                        1,
+                    ),
+                    target,
+                });
+            }
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .block(panel_block(" TABLE EDITOR ", true, theme))
+                    .style(Style::new().bg(theme.surface_raised)),
+                popup,
+            );
         }
         Overlay::ProfileGroup(group) => {
             render_profile_group_overlay(frame, area, app, group, state, theme);

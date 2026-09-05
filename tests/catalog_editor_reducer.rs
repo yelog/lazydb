@@ -121,6 +121,7 @@ fn simple_catalog_editor(mode: CatalogMutationMode, draft: CatalogDraft) -> App 
         plan: None,
         error: None,
         owner_picker: Default::default(),
+        preview_scroll: 0,
     });
     app
 }
@@ -745,6 +746,95 @@ fn table_column_details_actions_open_confirm_and_cancel_atomically() {
     app.update(Action::CatalogEditorInsert('2'));
     app.update(Action::CatalogEditorConfirmTableColumnDetails);
     assert_eq!(draft(&app).columns[0].name.value(), "id2");
+}
+
+#[test]
+fn dirty_table_cancel_opens_discard_confirmation_and_keeps_or_discards_draft() {
+    let mut app = table_editor_for_paste();
+    let Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)) = app
+        .catalog_editor
+        .as_mut()
+        .and_then(|editor| editor.draft.as_mut())
+    else {
+        panic!("table draft expected");
+    };
+    draft.name = "events".into();
+    assert!(app.update(Action::CatalogEditorCancel).is_empty());
+    assert!(matches!(
+        app.overlay,
+        Some(
+            lazydb::model::workspace::Overlay::CatalogEditorDiscardConfirm {
+                focus: lazydb::model::workspace::CatalogEditorDiscardFocus::KeepEditing
+            }
+        )
+    ));
+
+    app.update(Action::CatalogEditorDiscardKeepEditing);
+    assert_eq!(
+        app.overlay,
+        Some(lazydb::model::workspace::Overlay::CatalogEditor)
+    );
+    assert!(app.catalog_editor.is_some());
+
+    app.update(Action::CatalogEditorCancel);
+    app.update(Action::CatalogEditorDiscardMove(1));
+    app.update(Action::CatalogEditorDiscardChanges);
+    assert!(app.catalog_editor.is_none());
+    assert!(app.overlay.is_none());
+}
+
+#[test]
+fn applying_table_editor_cannot_be_closed_by_cancel_action() {
+    let mut app = table_editor_for_paste();
+    app.catalog_editor.as_mut().unwrap().operation =
+        Some(lazydb::model::catalog_editor::CatalogEditorOperation::Applying { request_id: 1 });
+    app.overlay = Some(lazydb::model::workspace::Overlay::CatalogEditor);
+
+    assert!(app.update(Action::CatalogEditorCancel).is_empty());
+    assert_eq!(
+        app.overlay,
+        Some(lazydb::model::workspace::Overlay::CatalogEditor)
+    );
+    assert!(app.catalog_editor.is_some());
+    assert!(
+        app.notifications
+            .history()
+            .any(|notification| { notification.body.contains("finish before closing") })
+    );
+}
+
+#[test]
+fn applying_table_editor_blocks_global_quit() {
+    let mut app = table_editor_for_paste();
+    app.catalog_editor.as_mut().unwrap().operation =
+        Some(lazydb::model::catalog_editor::CatalogEditorOperation::Applying { request_id: 1 });
+    app.overlay = Some(lazydb::model::workspace::Overlay::CatalogEditor);
+
+    assert!(app.update(Action::Quit).is_empty());
+    assert!(!app.should_quit);
+    assert!(app.notifications.history().any(|notification| {
+        notification
+            .body
+            .contains("running SQL or relation loads to finish before quitting")
+    }));
+}
+
+#[test]
+fn invalid_column_details_confirmation_keeps_parent_draft_unchanged() {
+    let mut app = table_editor_for_paste();
+    app.update(Action::CatalogEditorOpenTableColumnDetails);
+    let before = draft(&app).columns[0].name.value().to_owned();
+    app.update(Action::CatalogEditorConfirmTableColumnDetails);
+
+    let table = draft(&app);
+    assert_eq!(table.columns[0].name.value(), before);
+    assert!(table.column_editor.as_ref().unwrap().error.is_some());
+    assert_eq!(
+        table.focus,
+        lazydb::model::catalog_editor::TableEditorFocus::ColumnDetails(
+            lazydb::model::catalog_editor::TableColumnField::Name,
+        )
+    );
 }
 
 #[test]
@@ -1403,6 +1493,7 @@ fn table_column_selection_and_add_actions_sync_focus_and_details() {
             lazydb::model::catalog_editor::TableColumnField::Name
         )
     );
+    draft_mut(&mut app).insert('n');
     app.update(Action::CatalogEditorConfirmTableColumnDetails);
     let final_draft = draft(&app);
     assert_eq!(final_draft.selected_column, 1);
@@ -1477,6 +1568,7 @@ fn catalog_mutation_failure_from_an_old_connection_is_ignored() {
         plan: Some(plan.clone()),
         error: None,
         owner_picker: Default::default(),
+        preview_scroll: 0,
     });
 
     app.update(Action::CatalogMutationFailed {

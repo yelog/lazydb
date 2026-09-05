@@ -198,6 +198,7 @@ fn shortcut_context_with_overlay(app: &App, include_help: bool) -> ShortcutConte
                 Overlay::CatalogEditorDestructiveConfirm { .. } => {
                     ShortcutContext::CatalogEditorPreview
                 }
+                Overlay::CatalogEditorDiscardConfirm { .. } => ShortcutContext::CatalogEditorForm,
                 Overlay::NotificationHistory(_) => ShortcutContext::NotificationHistory,
                 Overlay::Update(_) => ShortcutContext::Message,
             };
@@ -2372,8 +2373,8 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
     row!(
         CatalogEditorTableColumnsMove,
         [CatalogEditorTableColumns],
-        "Tab/Shift-Tab/Up/Down",
-        "move focus",
+        "Up/Down",
+        "move selected row",
         display
     ),
     row!(
