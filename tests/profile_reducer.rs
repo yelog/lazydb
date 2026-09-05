@@ -1327,7 +1327,7 @@ fn deleting_or_saving_a_pending_profile_clears_its_connection_state() {
     });
     assert!(matches!(
         commands.as_slice(),
-        [Command::Disconnect { connection }, Command::PersistWorkspace(_)]
+        [Command::Disconnect { connection }, Command::PersistWorkspace { .. }]
             if *connection == ConnectionIdentity { profile_id, generation: 1 }
     ));
 
@@ -1602,7 +1602,7 @@ fn deleting_an_active_profile_retires_it_before_disconnect_completes() {
     });
     assert!(matches!(
         commands.as_slice(),
-        [Command::Disconnect { connection: disconnected }, Command::PersistWorkspace(_)]
+        [Command::Disconnect { connection: disconnected }, Command::PersistWorkspace { .. }]
             if *disconnected == connection
     ));
     assert!(app.connection.profile_id.is_none());

@@ -238,6 +238,8 @@ pub struct App {
     pending_editor_target_switch: Option<(Uuid, Uuid, u64)>,
     pub sql_editor_list: crate::model::sql_editor_list::SqlEditorListState,
     workspaces: HashMap<Uuid, ConnectionWorkspace>,
+    workspace_save: crate::model::workspace_save::SaveState,
+    workspace_save_closing: bool,
     pub notifications: NotificationCenter,
     dashboard_refresh_interval_millis: u64,
     default_connection_access: crate::config::ConnectionAccessDefault,
@@ -617,6 +619,8 @@ impl App {
             pending_editor_target_switch: None,
             sql_editor_list: Default::default(),
             workspaces: HashMap::new(),
+            workspace_save: Default::default(),
+            workspace_save_closing: false,
             notifications: NotificationCenter::default(),
             dashboard_refresh_interval_millis: crate::persistence::settings::AppSettings::default()
                 .dashboard_refresh_interval_millis(),
@@ -936,6 +940,13 @@ impl App {
         self.editor.text(tab_id)
     }
 
+    pub fn active_editor_line_count(&self) -> Result<usize, EditorError> {
+        let Some(tab) = self.active_console_opt() else {
+            return Err(EditorError::MissingSession(Uuid::nil()));
+        };
+        self.editor.line_count(tab.id)
+    }
+
     fn copy_editor_statement(&mut self) -> Vec<Command> {
         let Some(tab) = self.active_console_opt() else {
             return Vec::new();
@@ -1118,42 +1129,46 @@ impl App {
     }
 
     pub fn workspace_snapshot(&self) -> WorkspaceSnapshot {
-        let active_workspace = self.active_workspace_profile.map(|profile_id| {
-            (
-                profile_id,
-                ConnectionWorkspace {
-                    tabs: self.tabs.clone(),
-                    sql_editors: self.sql_editors.clone(),
-                    sql: self
-                        .sql_editors
-                        .iter()
-                        .map(|record| (record.id, self.editor_text(record.id).unwrap_or_default()))
-                        .collect(),
-                    active_tab_id: self.active_tab_id(),
-                },
-            )
-        });
-        let mut workspaces = self.workspaces.clone();
-        if let Some((profile_id, workspace)) = active_workspace.clone() {
-            workspaces.insert(profile_id, workspace);
+        let active_profile = self.active_workspace_profile;
+        let mut workspace_ids = self.workspaces.keys().copied().collect::<Vec<_>>();
+        if let Some(profile_id) = active_profile
+            && !workspace_ids.contains(&profile_id)
+        {
+            workspace_ids.push(profile_id);
         }
-        let mut workspaces = workspaces.into_iter().collect::<Vec<_>>();
-        workspaces.sort_by_key(|(profile_id, _)| {
+        workspace_ids.sort_by_key(|profile_id| {
             self.profiles
                 .iter()
                 .position(|profile| profile.id == *profile_id)
                 .unwrap_or(usize::MAX)
         });
-        let has_profile_workspaces = !workspaces.is_empty();
-        let sql = workspaces
-            .iter()
-            .flat_map(|(_, workspace)| workspace.sql.iter().cloned())
-            .collect();
-        let profiles = workspaces
-            .into_iter()
-            .map(|(profile_id, workspace)| self.persisted_workspace(profile_id, workspace))
-            .collect::<Vec<_>>();
-        let legacy_consoles = if active_workspace.is_none() && !has_profile_workspaces {
+        let has_profile_workspaces = !workspace_ids.is_empty();
+        let mut profiles = Vec::with_capacity(workspace_ids.len());
+        let mut sql = Vec::new();
+        for profile_id in workspace_ids {
+            if active_profile == Some(profile_id) {
+                sql.extend(
+                    self.sql_editors
+                        .iter()
+                        .map(|record| (record.id, self.editor_text(record.id).unwrap_or_default())),
+                );
+                profiles.push(self.persisted_workspace_from_parts(
+                    profile_id,
+                    &self.tabs,
+                    &self.sql_editors,
+                    self.active_tab_id(),
+                ));
+            } else if let Some(workspace) = self.workspaces.get(&profile_id) {
+                sql.extend(workspace.sql.iter().cloned());
+                profiles.push(self.persisted_workspace_from_parts(
+                    profile_id,
+                    &workspace.tabs,
+                    &workspace.sql_editors,
+                    workspace.active_tab_id,
+                ));
+            }
+        }
+        let legacy_consoles = if active_profile.is_none() && !has_profile_workspaces {
             self.sql_editors
                 .iter()
                 .map(|record| self.persisted_console(record, None))
@@ -1161,7 +1176,7 @@ impl App {
         } else {
             Vec::new()
         };
-        let sql = if active_workspace.is_none() && !has_profile_workspaces {
+        let sql = if active_profile.is_none() && !has_profile_workspaces {
             self.sql_editors
                 .iter()
                 .map(|record| (record.id, self.editor_text(record.id).unwrap_or_default()))
@@ -1195,25 +1210,24 @@ impl App {
         }
     }
 
-    fn persisted_workspace(
+    fn persisted_workspace_from_parts(
         &self,
         profile_id: Uuid,
-        workspace: ConnectionWorkspace,
+        tabs: &[WorkspaceTab],
+        sql_editors: &[ConsoleRecord],
+        active_tab_id: Option<Uuid>,
     ) -> PersistedProfileWorkspace {
-        let consoles = workspace
-            .sql_editors
+        let consoles = sql_editors
             .iter()
             .map(|record| {
-                let tab = workspace
-                    .tabs
+                let tab = tabs
                     .iter()
                     .find(|tab| tab.id() == record.id)
                     .and_then(WorkspaceTab::as_console);
                 self.persisted_console(record, tab)
             })
             .collect();
-        let tabs = workspace
-            .tabs
+        let tabs = tabs
             .iter()
             .map(|tab| match tab {
                 WorkspaceTab::Sql(tab) => PersistedTab::Console { console_id: tab.id },
@@ -1236,7 +1250,7 @@ impl App {
             .collect();
         PersistedProfileWorkspace {
             profile_id,
-            active_tab: workspace.active_tab_id,
+            active_tab: active_tab_id,
             consoles,
             tabs,
         }
@@ -1458,8 +1472,15 @@ impl App {
         }
     }
 
-    fn persist_workspace_command(&self) -> Command {
-        Command::PersistWorkspace(self.workspace_snapshot())
+    fn persist_workspace_command(&mut self) -> Command {
+        let revision = self.workspace_save.offered().unwrap_or_else(|| {
+            self.notify_error("Workspace", "Workspace save revision exhausted");
+            self.workspace_save.current_revision
+        });
+        Command::PersistWorkspace {
+            revision,
+            snapshot: self.workspace_snapshot(),
+        }
     }
 
     fn execute_help_shortcut(&mut self, id: crate::help::HelpShortcutId) -> Vec<Command> {
@@ -2002,11 +2023,46 @@ impl App {
                     | Action::ConfirmDeleteConsole
                     | Action::CancelDeleteConsole
                     | Action::OpenNotificationHistory
+                    | Action::WorkspaceSaveSucceeded { .. }
+                    | Action::WorkspaceSaveFailed { .. }
+                    | Action::WorkspaceSaveRetry
+                    | Action::WorkspaceSaveFlushed { .. }
             )
         {
             return Vec::new();
         }
         match action {
+            Action::WorkspaceSaveSucceeded { revision } => {
+                self.notify_info("Workspace", format!("Saved workspace revision {revision}"));
+                self.workspace_save.succeeded(revision);
+                vec![Command::CompleteWorkspaceSave {
+                    revision,
+                    succeeded: true,
+                }]
+            }
+            Action::WorkspaceSaveFailed { revision, message } => {
+                self.workspace_save.failed(revision);
+                self.notify_error(
+                    "Workspace",
+                    format!("Workspace save {revision} failed: {message}"),
+                );
+                vec![Command::CompleteWorkspaceSave {
+                    revision,
+                    succeeded: false,
+                }]
+            }
+            Action::WorkspaceSaveRetry => {
+                self.workspace_save.status = crate::model::workspace_save::SaveStatus::Saving;
+                vec![Command::RetryWorkspaceSave]
+            }
+            Action::WorkspaceSaveFlushed { revision } => {
+                if !self.workspace_save.is_acknowledged(revision) {
+                    return Vec::new();
+                }
+                self.workspace_save_closing = false;
+                self.should_quit = true;
+                vec![Command::Quit]
+            }
             Action::OpenDashboard => {
                 if !self.has_active_workspace() {
                     return Vec::new();
@@ -7836,8 +7892,11 @@ impl App {
             }
             Action::Quit => match self.workspace_exit_check() {
                 WorkspaceExitCheck::Ready => {
-                    self.should_quit = true;
-                    vec![Command::Quit]
+                    let command = self.persist_workspace_command();
+                    let revision = self.workspace_save.current_revision;
+                    self.workspace_save_closing = true;
+                    self.workspace_save.begin_closing();
+                    vec![command, Command::FlushWorkspace { revision }]
                 }
                 WorkspaceExitCheck::Running => {
                     self.notify_warning(
@@ -13826,12 +13885,17 @@ fn format_execution_log(
     );
     let stats = &outcome.stats;
     let total_ms = stats.total().as_millis();
+    let truncation = if stats.truncated {
+        " (result truncated; narrow the query or use pagination)"
+    } else {
+        ""
+    };
     let summary = if last.draft.statement_count == 1
         && last.draft.risks.len() == 1
         && last.draft.risks[0] == sql::SqlRisk::ReadOnly
     {
         format!(
-            "[{timestamp}] {} rows retrieved starting from 1 in {total_ms} ms (execution: {} ms, fetching: {} ms)",
+            "[{timestamp}] {} rows retrieved starting from 1 in {total_ms} ms (execution: {} ms, fetching: {} ms){truncation}",
             stats.row_count,
             stats.execution.as_millis(),
             stats.fetch.as_millis(),
@@ -13843,7 +13907,7 @@ fn format_execution_log(
             .map(|result| result.affected_rows)
             .sum::<u64>();
         format!(
-            "[{timestamp}] {affected_rows} row(s) affected in {total_ms} ms (execution: {} ms, fetching: {} ms)",
+            "[{timestamp}] {affected_rows} row(s) affected in {total_ms} ms (execution: {} ms, fetching: {} ms){truncation}",
             stats.execution.as_millis(),
             stats.fetch.as_millis(),
         )
@@ -14289,6 +14353,27 @@ mod tests {
         assert_eq!(tab.query.error, None);
         assert_eq!(tab.query.completion, None);
         assert_eq!(tab.derived, None);
+    }
+
+    #[test]
+    fn truncated_query_result_is_explained_in_console_output() {
+        let (mut app, tab_id, generation) = connected_query_app("SELECT id FROM users");
+        let connection = app.connection.active_identity().unwrap();
+        let mut outcome = empty_outcome();
+        outcome.stats.truncated = true;
+        outcome.stats.row_count = 10;
+
+        app.update(Action::QueryFinished {
+            tab_id,
+            generation,
+            connection,
+            outcome,
+        });
+
+        let output = app
+            .editor_text(app.active_console().output_editor_id)
+            .unwrap();
+        assert!(output.contains("result truncated; narrow the query or use pagination"));
     }
 
     #[test]
@@ -15408,7 +15493,7 @@ mod tests {
         assert!(
             commands
                 .iter()
-                .any(|command| matches!(command, Command::PersistWorkspace(_)))
+                .any(|command| matches!(command, Command::PersistWorkspace { .. }))
         );
     }
 
@@ -15556,7 +15641,7 @@ mod tests {
         assert!(
             commands
                 .iter()
-                .any(|command| matches!(command, Command::PersistWorkspace(_)))
+                .any(|command| matches!(command, Command::PersistWorkspace { .. }))
         );
     }
 
@@ -15611,7 +15696,7 @@ mod tests {
         assert!(
             commands
                 .iter()
-                .any(|command| matches!(command, Command::PersistWorkspace(_)))
+                .any(|command| matches!(command, Command::PersistWorkspace { .. }))
         );
     }
 
@@ -15647,7 +15732,7 @@ mod tests {
                 .unwrap()
                 .open
         );
-        let Command::PersistWorkspace(snapshot) = &commands[0] else {
+        let Command::PersistWorkspace { snapshot, .. } = &commands[0] else {
             panic!("expected workspace persistence")
         };
         assert_eq!(
@@ -16276,11 +16361,15 @@ mod tests {
             })
         }));
 
+        let commands = app.update(Action::Quit);
         assert!(matches!(
-            app.update(Action::Quit).as_slice(),
-            [Command::Quit]
+            commands.as_slice(),
+            [
+                Command::PersistWorkspace { .. },
+                Command::FlushWorkspace { .. }
+            ]
         ));
-        assert!(app.should_quit);
+        assert!(!app.should_quit);
     }
 
     #[test]

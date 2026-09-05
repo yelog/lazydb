@@ -58,7 +58,10 @@ use super::{
     },
     ddl::{DdlSection, assemble_ddl},
     mutation::{InputValue, MutationResult, RelationMutation, RelationMutationRequest},
-    query::{ColumnMeta, QueryOutcome, QueryOutcomeAccumulator, RELATION_PREVIEW_LIMIT, ResultSet},
+    query::{
+        ColumnMeta, QueryBudget, QueryOutcome, QueryOutcomeAccumulator, RELATION_PREVIEW_LIMIT,
+        ResultSet,
+    },
     value::CellValue,
 };
 
@@ -3086,8 +3089,17 @@ LIMIT 2001
     }
 
     pub(crate) async fn execute_pool(&self, sql: &str) -> Result<QueryOutcome, DatabaseError> {
+        self.execute_pool_with_budget(sql, QueryBudget::UNBOUNDED)
+            .await
+    }
+
+    pub(crate) async fn execute_pool_with_budget(
+        &self,
+        sql: &str,
+        budget: QueryBudget,
+    ) -> Result<QueryOutcome, DatabaseError> {
         let mut stream = sqlx::raw_sql(AssertSqlSafe(sql)).fetch_many(&self.pool);
-        self.collect_stream(&mut stream).await
+        self.collect_stream(&mut stream, budget).await
     }
 
     pub(crate) async fn execute_connection(
@@ -3096,7 +3108,8 @@ LIMIT 2001
         sql: &str,
     ) -> Result<QueryOutcome, DatabaseError> {
         let mut stream = sqlx::raw_sql(AssertSqlSafe(sql)).fetch_many(&mut *connection);
-        self.collect_stream(&mut stream).await
+        self.collect_stream(&mut stream, QueryBudget::UNBOUNDED)
+            .await
     }
 
     pub(crate) async fn execute_catalog_mutation(
@@ -3144,14 +3157,18 @@ LIMIT 2001
             .ok_or_else(|| DatabaseError::configuration("catalog mutation plan has no statements"))
     }
 
-    async fn collect_stream<E>(&self, stream: &mut E) -> Result<QueryOutcome, DatabaseError>
+    async fn collect_stream<E>(
+        &self,
+        stream: &mut E,
+        budget: QueryBudget,
+    ) -> Result<QueryOutcome, DatabaseError>
     where
         E: futures_util::TryStream<
                 Ok = Either<sqlx::postgres::PgQueryResult, PgRow>,
                 Error = sqlx::Error,
             > + Unpin,
     {
-        let mut accumulator = QueryOutcomeAccumulator::new();
+        let mut accumulator = QueryOutcomeAccumulator::with_budget(budget);
         while let Some(event) = stream
             .try_next()
             .await

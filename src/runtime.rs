@@ -105,11 +105,109 @@ struct ManualTransactionEntry {
     forced_close_handle: ForcedCloseHandle,
 }
 
+struct WorkspaceSaveQueue {
+    store: WorkspaceStore,
+    pending: Option<(u64, crate::persistence::workspace::WorkspaceSnapshot)>,
+    failed: Option<(u64, crate::persistence::workspace::WorkspaceSnapshot)>,
+    active: Option<JoinHandle<()>>,
+    next_revision: u64,
+    flushing: Option<u64>,
+}
+
+impl WorkspaceSaveQueue {
+    fn new(store: WorkspaceStore) -> Self {
+        Self {
+            store,
+            pending: None,
+            failed: None,
+            active: None,
+            next_revision: 0,
+            flushing: None,
+        }
+    }
+
+    fn offer(&mut self, revision: u64, snapshot: crate::persistence::workspace::WorkspaceSnapshot) {
+        self.next_revision = self.next_revision.max(revision);
+        self.pending = Some((revision, snapshot));
+    }
+
+    fn flush(&mut self, revision: u64, sender: mpsc::UnboundedSender<Action>) {
+        self.flushing = Some(revision);
+        self.poll(sender);
+    }
+
+    fn poll(&mut self, sender: mpsc::UnboundedSender<Action>) {
+        if self.active.as_ref().is_some_and(|task| !task.is_finished()) {
+            return;
+        }
+        if let Some(active) = self.active.take()
+            && !active.is_finished()
+        {
+            self.active = Some(active);
+            return;
+        }
+        let Some((revision, snapshot)) = self.pending.take() else {
+            if let Some(revision) = self.flushing {
+                let _ = sender.send(Action::WorkspaceSaveFlushed { revision });
+                self.flushing = None;
+            }
+            return;
+        };
+        let store = self.store.clone();
+        let retry_snapshot = snapshot.clone();
+        self.failed = Some((revision, retry_snapshot));
+        self.active = Some(tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || store.save(&snapshot))
+                .await
+                .unwrap_or_else(|error| {
+                    Err(crate::persistence::workspace::WorkspaceError::Invalid(
+                        format!("workspace save worker failed: {error}"),
+                    ))
+                });
+            let action = match result {
+                Ok(()) => Action::WorkspaceSaveSucceeded { revision },
+                Err(error) => Action::WorkspaceSaveFailed {
+                    revision,
+                    message: error.to_string(),
+                },
+            };
+            let _ = sender.send(action);
+        }));
+    }
+
+    fn complete(&mut self, revision: u64, succeeded: bool, sender: mpsc::UnboundedSender<Action>) {
+        // The worker sends its completion action only after the blocking save
+        // returns. Dropping this completed wrapper releases the queue slot even
+        // if Tokio has not observed the outer task as finished yet.
+        self.active.take();
+        if succeeded
+            && self
+                .failed
+                .as_ref()
+                .is_some_and(|(failed_revision, _)| *failed_revision == revision)
+        {
+            self.failed = None;
+        }
+        if self.next_revision < revision {
+            return;
+        }
+        self.poll(sender);
+    }
+
+    fn retry(&mut self, sender: mpsc::UnboundedSender<Action>) {
+        if self.pending.is_none() {
+            self.pending = self.failed.take();
+        }
+        self.poll(sender);
+    }
+}
+
 pub struct Runtime {
     registry: Arc<Mutex<ProfileRegistry>>,
     profile_store: ProfileStore,
     workspace_store: Option<WorkspaceStore>,
     workspace_mutation: Arc<Mutex<()>>,
+    workspace_save: Option<WorkspaceSaveQueue>,
     secret_store: Arc<dyn SecretStore>,
     local_credential_store: LocalCredentialStore,
     profile_mutation: Arc<Mutex<()>>,
@@ -206,6 +304,7 @@ impl Runtime {
             profile_store,
             workspace_store: None,
             workspace_mutation: Arc::new(Mutex::new(())),
+            workspace_save: None,
             secret_store,
             local_credential_store,
             profile_mutation: Arc::new(Mutex::new(())),
@@ -235,6 +334,7 @@ impl Runtime {
     }
 
     pub fn set_workspace_store(&mut self, store: WorkspaceStore) {
+        self.workspace_save = Some(WorkspaceSaveQueue::new(store.clone()));
         self.workspace_store = Some(store);
     }
 
@@ -580,13 +680,33 @@ impl Runtime {
                     let _ = sender.send(Action::StartUpdateCheck { automatic: true });
                 }));
             }
-            Command::PersistWorkspace(snapshot) => {
-                if let Some(store) = self.workspace_store.clone() {
-                    let mutation = Arc::clone(&self.workspace_mutation);
-                    self.background_tasks.push(tokio::spawn(async move {
-                        let _guard = mutation.lock().await;
-                        let _ = tokio::task::spawn_blocking(move || store.save(&snapshot)).await;
-                    }));
+            Command::PersistWorkspace { revision, snapshot } => {
+                if let Some(queue) = self.workspace_save.as_mut() {
+                    queue.offer(revision, snapshot);
+                    queue.poll(self.event_sender.clone());
+                }
+            }
+            Command::FlushWorkspace { revision } => {
+                if let Some(queue) = self.workspace_save.as_mut() {
+                    queue.flush(revision, self.event_sender.clone());
+                }
+            }
+            Command::ContinueWorkspaceSave => {
+                if let Some(queue) = self.workspace_save.as_mut() {
+                    queue.poll(self.event_sender.clone());
+                }
+            }
+            Command::CompleteWorkspaceSave {
+                revision,
+                succeeded,
+            } => {
+                if let Some(queue) = self.workspace_save.as_mut() {
+                    queue.complete(revision, succeeded, self.event_sender.clone());
+                }
+            }
+            Command::RetryWorkspaceSave => {
+                if let Some(queue) = self.workspace_save.as_mut() {
+                    queue.retry(self.event_sender.clone());
                 }
             }
             Command::DeleteSqlFile(id) => {
@@ -1752,7 +1872,16 @@ impl Runtime {
                 });
                 return;
             };
-            match database.execute(&sql).await {
+            match database
+                .execute_with_budget(
+                    &sql,
+                    crate::db::query::QueryBudget {
+                        max_rows: 10_000,
+                        max_bytes: 16 * 1024 * 1024,
+                    },
+                )
+                .await
+            {
                 Ok(outcome) => {
                     let _ = sender.send(Action::QueryFinished {
                         tab_id,
@@ -2042,7 +2171,16 @@ impl Runtime {
                 });
                 return;
             };
-            match database.execute(&sql).await {
+            match database
+                .execute_with_budget(
+                    &sql,
+                    crate::db::query::QueryBudget {
+                        max_rows: 10_000,
+                        max_bytes: 16 * 1024 * 1024,
+                    },
+                )
+                .await
+            {
                 Ok(outcome) => {
                     let _ = sender.send(Action::DerivedQueryFinished {
                         tab_id,
@@ -3032,6 +3170,11 @@ impl Runtime {
         }
         for task in self.background_tasks.drain(..) {
             task.abort();
+            let _ = task.await;
+        }
+        if let Some(queue) = self.workspace_save.as_mut()
+            && let Some(task) = queue.active.take()
+        {
             let _ = task.await;
         }
         for task in self.profile_tasks.drain(..) {
@@ -4112,6 +4255,40 @@ fn sequence_redraw_needed(
     current: &Option<crate::input::keymap::KeySequenceState>,
 ) -> bool {
     previous != current
+}
+
+#[cfg(test)]
+mod workspace_save_tests {
+    use super::WorkspaceSaveQueue;
+    use crate::persistence::workspace::WorkspaceSnapshot;
+
+    fn snapshot() -> WorkspaceSnapshot {
+        WorkspaceSnapshot {
+            active_profile: None,
+            profiles: Vec::new(),
+            sql: Vec::new(),
+            active_console: uuid::Uuid::nil(),
+            consoles: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn offering_new_snapshots_keeps_only_the_latest_pending_revision() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::persistence::workspace::WorkspaceStore::new(
+            temp.path().join("workspace.toml"),
+            temp.path().join("sql"),
+        );
+        let mut queue = WorkspaceSaveQueue::new(store);
+        queue.offer(1, snapshot());
+        queue.offer(2, snapshot());
+
+        assert_eq!(
+            queue.pending.as_ref().map(|(revision, _)| *revision),
+            Some(2)
+        );
+        assert_eq!(queue.next_revision, 2);
+    }
 }
 
 fn sync_editor_viewport(app: &mut App, runtime: &mut Runtime, state: &UiState) {

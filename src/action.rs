@@ -902,6 +902,17 @@ pub enum Action {
         column: usize,
     },
     ToggleResultView,
+    WorkspaceSaveSucceeded {
+        revision: u64,
+    },
+    WorkspaceSaveFailed {
+        revision: u64,
+        message: String,
+    },
+    WorkspaceSaveFlushed {
+        revision: u64,
+    },
+    WorkspaceSaveRetry,
     Quit,
 }
 
@@ -1074,7 +1085,19 @@ pub enum Command {
         query_generation: u64,
         transaction_generation: u64,
     },
-    PersistWorkspace(crate::persistence::workspace::WorkspaceSnapshot),
+    PersistWorkspace {
+        revision: u64,
+        snapshot: crate::persistence::workspace::WorkspaceSnapshot,
+    },
+    FlushWorkspace {
+        revision: u64,
+    },
+    ContinueWorkspaceSave,
+    CompleteWorkspaceSave {
+        revision: u64,
+        succeeded: bool,
+    },
+    RetryWorkspaceSave,
     DeleteSqlFile(Uuid),
     WriteClipboard(ClipboardPayload),
     CheckSecretStoreAvailability,

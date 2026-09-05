@@ -36,7 +36,7 @@ use super::{
     catalog_mutation::CatalogMutationCapabilities,
     ddl::{DdlSection, assemble_ddl},
     monitor::{MonitorMetadata, MonitorSnapshot, ProcessSnapshot},
-    query::{ColumnMeta, QueryOutcome, QueryStats, RELATION_PREVIEW_LIMIT, ResultSet},
+    query::{ColumnMeta, QueryBudget, QueryOutcome, QueryStats, RELATION_PREVIEW_LIMIT, ResultSet},
     value::CellValue,
 };
 use crate::{
@@ -1601,7 +1601,16 @@ impl MsSqlAdapter {
 
     pub async fn execute_pool(&self, sql: &str) -> Result<QueryOutcome, DatabaseError> {
         let pool = self.pool_for_database(&self.settings.database).await?;
-        execute_pool(&pool, sql).await
+        execute_pool(&pool, sql, QueryBudget::UNBOUNDED).await
+    }
+
+    pub(crate) async fn execute_pool_with_budget(
+        &self,
+        sql: &str,
+        budget: QueryBudget,
+    ) -> Result<QueryOutcome, DatabaseError> {
+        let pool = self.pool_for_database(&self.settings.database).await?;
+        execute_pool(&pool, sql, budget).await
     }
 
     pub async fn preview_relation(
@@ -2058,6 +2067,7 @@ fn qualified_name_sql(name: &QualifiedName) -> String {
 async fn execute_pool(
     pool: &MsSqlConnectionPool,
     sql: &str,
+    mut budget: QueryBudget,
 ) -> Result<QueryOutcome, DatabaseError> {
     let batches = crate::sql::split_sql_server_batches(sql).map_err(|error| DatabaseError {
         category: ErrorCategory::Sql,
@@ -2069,27 +2079,38 @@ async fn execute_pool(
     let mut execution = std::time::Duration::ZERO;
     let mut fetch = std::time::Duration::ZERO;
     let mut row_count = 0;
+    let mut fetched_row_count: usize = 0;
+    let mut truncated = false;
 
     for (index, batch) in batches.into_iter().enumerate() {
-        let outcome = execute_one_batch(&mut lease, batch)
+        let outcome = execute_one_batch(&mut lease, batch, &mut budget)
             .await
             .map_err(|error| batch_error(index + 1, error))?;
         result_sets.extend(outcome.result_sets);
         execution += outcome.stats.execution;
         fetch += outcome.stats.fetch;
         row_count += outcome.stats.row_count;
+        fetched_row_count += outcome.stats.fetched_row_count;
+        truncated |= outcome.stats.truncated;
     }
 
     lease.mark_reusable();
     Ok(QueryOutcome {
         result_sets,
-        stats: QueryStats::new(execution, fetch, row_count),
+        stats: QueryStats {
+            execution,
+            fetch,
+            row_count,
+            fetched_row_count,
+            truncated,
+        },
     })
 }
 
 async fn execute_one_batch(
     client: &mut TdsClient,
     sql: &str,
+    budget: &mut QueryBudget,
 ) -> Result<QueryOutcome, DatabaseError> {
     let started = std::time::Instant::now();
     let affected_rows_column = format!("__lazydb_affected_rows_{}", Uuid::new_v4().simple());
@@ -2107,6 +2128,8 @@ async fn execute_one_batch(
     let mut result_sets = Vec::new();
     let mut current = None;
     let mut affected_rows = None;
+    let mut fetched_row_count: usize = 0;
+    let mut truncated = false;
 
     while let Some(item) = stream
         .try_next()
@@ -2132,10 +2155,34 @@ async fn execute_one_batch(
                 current = None;
             }
             QueryItem::Row(row) => {
+                fetched_row_count = fetched_row_count.saturating_add(1);
                 let result_set = current.as_mut().ok_or_else(|| {
                     decode_error("SQL Server returned a row before its result metadata")
                 })?;
-                result_set.rows.push(decode_row(row));
+                let decoded = decode_row(row);
+                let row_bytes = if budget.max_bytes == usize::MAX {
+                    0
+                } else {
+                    decoded
+                        .iter()
+                        .map(|cell| serde_json::to_vec(cell).map_or(0, |value| value.len()))
+                        .fold(0usize, usize::saturating_add)
+                };
+                if budget.max_rows > 0
+                    && (budget.max_bytes == usize::MAX || row_bytes <= budget.max_bytes)
+                {
+                    result_set.rows.push(decoded);
+                    if budget.max_rows != usize::MAX {
+                        budget.max_rows = budget.max_rows.saturating_sub(1);
+                    }
+                    if budget.max_bytes != usize::MAX {
+                        budget.max_bytes = budget.max_bytes.saturating_sub(row_bytes);
+                    }
+                } else {
+                    truncated = true;
+                    // Exhaust the shared budget so later batches cannot resume retention.
+                    budget.max_rows = 0;
+                }
             }
         }
     }
@@ -2165,7 +2212,13 @@ async fn execute_one_batch(
     let row_count = result_sets.iter().map(|set| set.rows.len()).sum();
     Ok(QueryOutcome {
         result_sets,
-        stats: QueryStats::new(execution, total.saturating_sub(execution), row_count),
+        stats: QueryStats {
+            execution,
+            fetch: total.saturating_sub(execution),
+            row_count,
+            fetched_row_count,
+            truncated,
+        },
     })
 }
 
@@ -2201,7 +2254,8 @@ impl TransactionBackend for MsSqlTransactionBackend {
         let mut fetch = std::time::Duration::ZERO;
         let mut row_count = 0;
         for (index, batch) in batches.into_iter().enumerate() {
-            let outcome = execute_one_batch(client, batch)
+            let mut budget = QueryBudget::UNBOUNDED;
+            let outcome = execute_one_batch(client, batch, &mut budget)
                 .await
                 .map_err(|error| TransactionError(batch_error(index + 1, error).to_string()))?;
             result_sets.extend(outcome.result_sets);

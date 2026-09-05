@@ -130,6 +130,35 @@ fn workspace_round_trip_preserves_open_and_closed_console_sql_and_names() {
 }
 
 #[test]
+fn saving_an_unchanged_sql_document_does_not_rewrite_its_file() {
+    let temp = TempDir::new().unwrap();
+    let store = WorkspaceStore::new(temp.path().join("workspace.toml"), temp.path().join("sql"));
+    let profile_id = Uuid::new_v4();
+    let console_id = Uuid::new_v4();
+    let snapshot = WorkspaceSnapshot {
+        active_profile: Some(profile_id),
+        profiles: vec![PersistedProfileWorkspace {
+            profile_id,
+            active_tab: Some(console_id),
+            consoles: vec![console(profile_id, console_id, "console", true)],
+            tabs: vec![PersistedTab::Console { console_id }],
+        }],
+        sql: vec![(console_id, "select 1;".into())],
+        active_console: Uuid::nil(),
+        consoles: Vec::new(),
+    };
+
+    store.save(&snapshot).unwrap();
+    let path = temp.path().join("sql").join(format!("{console_id}.sql"));
+    let first_modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    store.save(&snapshot).unwrap();
+    let second_modified = std::fs::metadata(path).unwrap().modified().unwrap();
+
+    assert_eq!(first_modified, second_modified);
+}
+
+#[test]
 fn missing_workspace_is_empty_and_unsupported_version_is_rejected() {
     let temp = TempDir::new().unwrap();
     let manifest = temp.path().join("workspace.toml");

@@ -615,7 +615,7 @@ fn maps_tabs_tree_rows_and_result_cells_from_rendered_hit_regions() {
 
     assert!(matches!(
         app.update(Action::NewConsole).as_slice(),
-        [Command::PersistWorkspace(_)]
+        [Command::PersistWorkspace { .. }]
     ));
 }
 

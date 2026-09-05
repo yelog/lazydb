@@ -39,7 +39,10 @@ use super::{
     catalog_mutation::CatalogMutationCapabilities,
     ddl::{DdlSection, assemble_ddl},
     mutation::{InputValue, MutationResult, RelationMutation, RelationMutationRequest},
-    query::{ColumnMeta, QueryOutcome, QueryOutcomeAccumulator, RELATION_PREVIEW_LIMIT, ResultSet},
+    query::{
+        ColumnMeta, QueryBudget, QueryOutcome, QueryOutcomeAccumulator, RELATION_PREVIEW_LIMIT,
+        ResultSet,
+    },
     sanitize_terminal_text,
     value::CellValue,
 };
@@ -500,8 +503,17 @@ impl MySqlAdapter {
     }
 
     pub(crate) async fn execute_pool(&self, sql: &str) -> Result<QueryOutcome, DatabaseError> {
+        self.execute_pool_with_budget(sql, QueryBudget::UNBOUNDED)
+            .await
+    }
+
+    pub(crate) async fn execute_pool_with_budget(
+        &self,
+        sql: &str,
+        budget: QueryBudget,
+    ) -> Result<QueryOutcome, DatabaseError> {
         let mut stream = sqlx::raw_sql(AssertSqlSafe(sql)).fetch_many(&self.pool);
-        self.collect_stream(&mut stream).await
+        self.collect_stream(&mut stream, budget).await
     }
 
     pub(crate) async fn execute_connection(
@@ -510,17 +522,22 @@ impl MySqlAdapter {
         sql: &str,
     ) -> Result<QueryOutcome, DatabaseError> {
         let mut stream = sqlx::raw_sql(AssertSqlSafe(sql)).fetch_many(&mut *connection);
-        self.collect_stream(&mut stream).await
+        self.collect_stream(&mut stream, QueryBudget::UNBOUNDED)
+            .await
     }
 
-    async fn collect_stream<E>(&self, stream: &mut E) -> Result<QueryOutcome, DatabaseError>
+    async fn collect_stream<E>(
+        &self,
+        stream: &mut E,
+        budget: QueryBudget,
+    ) -> Result<QueryOutcome, DatabaseError>
     where
         E: futures_util::TryStream<
                 Ok = Either<sqlx::mysql::MySqlQueryResult, MySqlRow>,
                 Error = sqlx::Error,
             > + Unpin,
     {
-        let mut accumulator = QueryOutcomeAccumulator::new();
+        let mut accumulator = QueryOutcomeAccumulator::with_budget(budget);
         while let Some(event) = stream
             .try_next()
             .await

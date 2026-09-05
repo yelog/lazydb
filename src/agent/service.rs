@@ -9,7 +9,7 @@ use crate::{
         selection::{AgentError, SelectedAgentProfile, select_profile},
         types::{AgentConnection, AgentContext, AgentQueryResult, AgentTarget, QueryOutcomeJson},
     },
-    db::DatabaseConnection,
+    db::{DatabaseConnection, query::QueryBudget},
     persistence::{
         credentials::CredentialResolver, local_credentials::LocalCredentialStore, paths::AppPaths,
         profiles::ProfileStore, secrets::NativeSecretStore,
@@ -127,14 +127,22 @@ impl AgentService {
                 code: super::selection::AgentErrorCode::DatabaseFailure,
                 message: error.to_string(),
             })?;
-        let outcome = connection.execute(sql).await.map_err(|error| AgentError {
-            code: super::selection::AgentErrorCode::DatabaseFailure,
-            message: error.to_string(),
-        });
+        let outcome = connection
+            .execute_with_budget(
+                sql,
+                QueryBudget {
+                    max_rows: self.max_rows,
+                    max_bytes: self.max_result_bytes,
+                },
+            )
+            .await
+            .map_err(|error| AgentError {
+                code: super::selection::AgentErrorCode::DatabaseFailure,
+                message: error.to_string(),
+            });
         connection.close().await;
         let outcome = outcome?;
-        let mut json = QueryOutcomeJson::from(outcome);
-        bound_result(&mut json, self.max_rows, self.max_result_bytes)?;
+        let json = QueryOutcomeJson::from(outcome);
         Ok(AgentQueryResult {
             target: AgentTarget {
                 connection: project_connection(selected.profile, selected.scope),
@@ -203,10 +211,19 @@ impl AgentService {
                 code: super::selection::AgentErrorCode::DatabaseFailure,
                 message: error.to_string(),
             })?;
-        let result = connection.execute(sql).await.map_err(|error| AgentError {
-            code: super::selection::AgentErrorCode::DatabaseFailure,
-            message: error.to_string(),
-        });
+        let result = connection
+            .execute_with_budget(
+                sql,
+                QueryBudget {
+                    max_rows: self.max_rows,
+                    max_bytes: self.max_result_bytes,
+                },
+            )
+            .await
+            .map_err(|error| AgentError {
+                code: super::selection::AgentErrorCode::DatabaseFailure,
+                message: error.to_string(),
+            });
         connection.close().await;
         let outcome = result?;
         Ok(AgentQueryResult {
@@ -237,41 +254,4 @@ fn project_connection(profile: &ConnectionProfile, scope: AgentProfileScope) -> 
         user: profile.user.clone(),
         read_only: profile.read_only,
     }
-}
-
-fn bound_result(
-    outcome: &mut QueryOutcomeJson,
-    max_rows: usize,
-    max_bytes: usize,
-) -> Result<(), AgentError> {
-    let mut rows = 0;
-    let mut bytes = 0;
-    let mut truncated = false;
-    for result in &mut outcome.result_sets {
-        result.rows.retain(|row| {
-            if rows >= max_rows {
-                truncated = true;
-                return false;
-            }
-            let cell_sizes = row
-                .iter()
-                .map(|cell| serde_json::to_vec(cell).map_or(0, |value| value.len()))
-                .collect::<Vec<_>>();
-            if cell_sizes.iter().any(|size| *size > max_bytes) {
-                truncated = true;
-                return false;
-            }
-            let row_bytes: usize = cell_sizes.into_iter().sum();
-            if bytes + row_bytes > max_bytes {
-                truncated = true;
-                return false;
-            }
-            rows += 1;
-            bytes += row_bytes;
-            true
-        });
-    }
-    outcome.row_count = rows;
-    outcome.truncated = truncated;
-    Ok(())
 }

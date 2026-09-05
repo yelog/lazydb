@@ -328,6 +328,9 @@ impl EditorWorkspace {
     }
 
     fn open_session(&mut self, id: Uuid, text: &str, capability: EditorSessionCapability) {
+        self.analysis_cache
+            .get_mut()
+            .retain(|key, _| key.console_id != id);
         let mut buffer = modalkit::editing::buffer::EditBuffer::from_str(
             ContentId(id),
             &encode_editor_text(text),
@@ -379,6 +382,9 @@ impl EditorWorkspace {
 
     pub(crate) fn close_console(&mut self, id: Uuid) {
         self.sessions.remove(&id);
+        self.analysis_cache
+            .borrow_mut()
+            .retain(|key, _| key.console_id != id);
     }
 
     pub(crate) fn has_session(&self, id: Uuid) -> bool {
@@ -630,6 +636,18 @@ impl EditorWorkspace {
         })
     }
 
+    pub(crate) fn line_count(&self, id: Uuid) -> Result<usize, EditorError> {
+        let session = self
+            .sessions
+            .get(&id)
+            .ok_or(EditorError::MissingSession(id))?;
+        let buffer = session
+            .buffer
+            .read()
+            .map_err(|_| EditorError::Operation("buffer lock poisoned".into()))?;
+        Ok(buffer.get_lines().max(1))
+    }
+
     pub(crate) fn render_snapshot(
         &self,
         id: Uuid,
@@ -697,6 +715,9 @@ impl EditorWorkspace {
             dialect,
             highlight_ranges: sql_ranges.map(<[sql::TextRange]>::to_vec),
         };
+        self.analysis_cache
+            .borrow_mut()
+            .retain(|cached, _| cached.console_id != id || *cached == key);
         let highlights = self
             .analysis_cache
             .borrow_mut()

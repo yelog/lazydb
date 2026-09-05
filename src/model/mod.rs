@@ -19,3 +19,4 @@ pub mod text_input;
 pub mod transaction;
 pub mod update;
 pub mod workspace;
+pub mod workspace_save;

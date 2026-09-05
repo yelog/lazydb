@@ -33,7 +33,7 @@ use self::{
     mssql::MsSqlAdapter,
     mysql::MySqlAdapter,
     postgres::PostgresAdapter,
-    query::QueryOutcome,
+    query::{QueryBudget, QueryOutcome},
     sqlite::SqliteAdapter,
 };
 
@@ -387,11 +387,19 @@ impl DatabaseConnection {
     }
 
     pub async fn execute(&self, sql: &str) -> Result<QueryOutcome, DatabaseError> {
+        self.execute_with_budget(sql, QueryBudget::UNBOUNDED).await
+    }
+
+    pub(crate) async fn execute_with_budget(
+        &self,
+        sql: &str,
+        budget: QueryBudget,
+    ) -> Result<QueryOutcome, DatabaseError> {
         match self {
-            Self::Postgres(adapter) => adapter.execute_pool(sql).await,
-            Self::MySql(adapter) => adapter.execute_pool(sql).await,
-            Self::Sqlite(adapter) => adapter.execute_pool(sql).await,
-            Self::SqlServer(adapter) => adapter.execute_pool(sql).await,
+            Self::Postgres(adapter) => adapter.execute_pool_with_budget(sql, budget).await,
+            Self::MySql(adapter) => adapter.execute_pool_with_budget(sql, budget).await,
+            Self::Sqlite(adapter) => adapter.execute_pool_with_budget(sql, budget).await,
+            Self::SqlServer(adapter) => adapter.execute_pool_with_budget(sql, budget).await,
         }
     }
 
