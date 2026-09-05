@@ -35,6 +35,20 @@ installation. To install the beta channel, set `$env:LAZYDB_CHANNEL = "beta"`
 before running the command. You can also download the Windows ZIP from the
 [latest GitHub Release](https://github.com/yelog/lazydb/releases/latest).
 
+After installation, configure database access for Claude Code, Codex, or
+OpenCode from the target project:
+
+```bash
+lazydb mcp setup
+```
+
+The setup command uses a project-scoped MCP configuration and denies database
+writes by default. It does not install a coding agent or copy credentials.
+Native script installers may offer an opt-in reminder on an interactive first
+install. Use `--mcp-setup skip` or `LAZYDB_MCP_SETUP=skip` for unattended runs;
+the prompt never changes configuration automatically because the installer does
+not know which project should receive the MCP entry.
+
 LazyDB can also be installed via Homebrew, Cargo, or by building from source. See
 
 ```bash

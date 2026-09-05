@@ -18,6 +18,14 @@ class Lazydb < Formula
     bin.install "lazydb"
   end
 
+  def caveats
+    <<~EOS
+      To configure LazyDB for Claude Code, Codex, or OpenCode, run:
+        lazydb mcp setup
+      from inside your project.
+    EOS
+  end
+
   test do
     assert_match version.to_s, shell_output("#{bin}/lazydb version --json")
   end

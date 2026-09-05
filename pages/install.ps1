@@ -1,6 +1,8 @@
 $ErrorActionPreference = 'Stop'
 
 $channel = if ($env:LAZYDB_CHANNEL) { $env:LAZYDB_CHANNEL } else { 'stable' }
+$mcpSetup = if ($env:LAZYDB_MCP_SETUP) { $env:LAZYDB_MCP_SETUP } else { 'auto' }
+if ($mcpSetup -notin @('auto', 'skip', 'ask')) { throw "invalid MCP setup mode: $mcpSetup" }
 if ($channel -notin @('stable', 'beta')) { throw "invalid channel: $channel" }
 $baseUrl = if ($env:LAZYDB_CHANNEL_BASE_URL) { $env:LAZYDB_CHANNEL_BASE_URL.TrimEnd('/') } else { 'https://lazydb.yelog.org/channels' }
 $target = 'x86_64-pc-windows-msvc'
@@ -42,6 +44,13 @@ try {
         Write-Host "Added $installDir to the user PATH. Open a new terminal to use lazydb."
     }
     Write-Host "lazydb $($manifest.version) installed ($channel)"
+    Write-Host 'To configure database access for Claude Code, Codex, or OpenCode, run `lazydb mcp setup` inside your project.'
+    if ($mcpSetup -eq 'ask' -and [Environment]::UserInteractive -and $Host.Name -notmatch 'ServerRemoteHost') {
+        $answer = Read-Host 'Configure LazyDB MCP now? [y/N]'
+        if ($answer -match '^(?i:y|yes)$') {
+            Write-Host 'MCP setup must be run from the target project directory. Run `lazydb mcp setup` there.'
+        }
+    }
 } finally {
     Remove-Item $manifestPath, $archivePath, $extractDir -Recurse -Force -ErrorAction SilentlyContinue
 }

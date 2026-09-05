@@ -135,3 +135,4 @@ with os.fdopen(fd, 'w', encoding='utf-8') as stream: json.dump(state, stream, in
 os.replace(path, sys.argv[1])
 PY
 printf 'lazydb %s installed (%s)\n' "$RELEASE_VERSION" "$CHANNEL"
+printf '%s\n' 'To configure database access for Claude Code, Codex, or OpenCode, run `lazydb mcp setup` inside your project.'

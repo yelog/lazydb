@@ -7,18 +7,21 @@ CHANNEL=${LAZYDB_CHANNEL:-$DEFAULT_CHANNEL}
 VERSION=${LAZYDB_VERSION:-}
 INSTALL_DIR=${LAZYDB_INSTALL_DIR:-"$HOME/.local/bin"}
 BASE_URL=${LAZYDB_CHANNEL_BASE_URL:-https://lazydb.yelog.org/channels}
+MCP_SETUP=${LAZYDB_MCP_SETUP:-auto}
 
-usage() { printf '%s\n' 'Usage: install.sh [--channel stable|beta] [--version VERSION] [--install-dir PATH]'; }
+usage() { printf '%s\n' 'Usage: install.sh [--channel stable|beta] [--version VERSION] [--install-dir PATH] [--mcp-setup auto|skip|ask]'; }
 die() { printf 'lazydb installer: %s\n' "$*" >&2; exit 1; }
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --channel) [ "$#" -gt 1 ] || die '--channel needs a value'; CHANNEL=$2; shift 2 ;;
         --version) [ "$#" -gt 1 ] || die '--version needs a value'; VERSION=$2; shift 2 ;;
         --install-dir) [ "$#" -gt 1 ] || die '--install-dir needs a value'; INSTALL_DIR=$2; shift 2 ;;
+        --mcp-setup) [ "$#" -gt 1 ] || die '--mcp-setup needs a value'; MCP_SETUP=$2; shift 2 ;;
         --help) usage; exit 0 ;;
         *) die "unknown argument: $1" ;;
     esac
 done
+case "$MCP_SETUP" in auto|skip|ask) ;; *) die "invalid MCP setup mode: $MCP_SETUP" ;; esac
 case "$CHANNEL" in stable|beta) ;; *) die "invalid channel: $CHANNEL" ;; esac
 [ -z "${LAZYDB_CHANNEL_LOCKED:-}" ] || [ "$CHANNEL" = "$LAZYDB_CHANNEL_LOCKED" ] || die "channel is fixed to $LAZYDB_CHANNEL_LOCKED"
 [ -n "${HOME:-}" ] || die 'HOME is required'
@@ -113,6 +116,8 @@ data=json.load(open(sys.argv[1], encoding='utf-8'))
 if data.get('version') != sys.argv[2]: raise SystemExit('binary reported version %r' % data.get('version'))
 PY
 DEST="$RELEASES/$RELEASE_VERSION"
+FIRST_INSTALL=1
+if [ -e "$DEST" ]; then FIRST_INSTALL=0; fi
 if [ ! -e "$DEST" ]; then mkdir -p "$RELEASES"; mv "$STAGED" "$DEST"; fi
 ln -sfn "$DEST" "$TMP/current.new"; mv -f "$TMP/current.new" "$DATA_HOME/current"
 mkdir -p "$INSTALL_DIR"; ln -sfn "$DATA_HOME/current/lazydb" "$INSTALL_DIR/lazydb"
@@ -125,3 +130,14 @@ with os.fdopen(fd, 'w', encoding='utf-8') as stream: json.dump(state, stream, in
 os.replace(path, sys.argv[1])
 PY
 printf 'lazydb %s installed (%s)\n' "$RELEASE_VERSION" "$CHANNEL"
+printf '%s\n' 'To configure database access for Claude Code, Codex, or OpenCode, run `lazydb mcp setup` inside your project.'
+if [ "$MCP_SETUP" != skip ] && { [ "$MCP_SETUP" = ask ] || [ "$FIRST_INSTALL" = 1 ]; } && [ -r /dev/tty ] && [ -w /dev/tty ] && "$DATA_HOME/current/lazydb" mcp setup --help >/dev/null 2>&1; then
+    printf '%s' 'Configure LazyDB MCP now? [y/N] ' > /dev/tty
+    answer=
+    IFS= read -r answer < /dev/tty || answer=
+    case "$answer" in
+        y|Y|yes|YES)
+            printf '%s\n' 'MCP setup must be run from the target project directory. Run `lazydb mcp setup` there.' > /dev/tty
+            ;;
+    esac
+fi
