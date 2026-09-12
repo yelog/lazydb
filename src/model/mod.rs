@@ -8,6 +8,7 @@ pub mod editor;
 pub mod execution_target;
 pub mod explorer;
 pub mod explorer_add;
+pub mod history_tab;
 pub mod notification;
 pub mod pagination;
 pub mod pending_execution;

@@ -3235,6 +3235,7 @@ fn active_data_query_has_focus(app: &App) -> bool {
         Some(crate::model::tab::WorkspaceTab::Relation(tab)) => tab.query.focus.is_some(),
         Some(crate::model::tab::WorkspaceTab::Sql(tab)) => tab.query.focus.is_some(),
         Some(crate::model::tab::WorkspaceTab::Dashboard(_)) => false,
+        Some(crate::model::tab::WorkspaceTab::History(_)) => false,
         None => false,
     }
 }

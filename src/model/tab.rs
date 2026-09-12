@@ -13,6 +13,7 @@ use crate::sql::ExecutionDraft;
 use super::dashboard::DashboardTab;
 use super::data_query::DataQueryOptions;
 use super::data_query::DataQueryState;
+use super::history_tab::HistoryTab;
 use super::pagination::{PageRequest, PageSize, ResultPagination};
 use super::relation::RelationTab;
 
@@ -21,6 +22,7 @@ pub enum TabKind {
     Sql,
     Relation,
     Dashboard,
+    History,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -79,6 +81,7 @@ pub enum WorkspaceTab {
     Sql(ConsoleTab),
     Relation(RelationTab),
     Dashboard(DashboardTab),
+    History(HistoryTab),
 }
 
 impl WorkspaceTab {
@@ -87,6 +90,7 @@ impl WorkspaceTab {
             Self::Sql(tab) => tab.id,
             Self::Relation(tab) => tab.id,
             Self::Dashboard(tab) => tab.id,
+            Self::History(tab) => tab.id,
         }
     }
 
@@ -95,6 +99,7 @@ impl WorkspaceTab {
             Self::Sql(tab) => &tab.name,
             Self::Relation(tab) => tab.title(),
             Self::Dashboard(_) => "Dashboard",
+            Self::History(_) => HistoryTab::TITLE,
         }
     }
 
@@ -103,6 +108,7 @@ impl WorkspaceTab {
             Self::Sql(_) => TabKind::Sql,
             Self::Relation(_) => TabKind::Relation,
             Self::Dashboard(_) => TabKind::Dashboard,
+            Self::History(_) => TabKind::History,
         }
     }
 
@@ -111,6 +117,7 @@ impl WorkspaceTab {
             Self::Sql(tab) => Some(tab),
             Self::Relation(_) => None,
             Self::Dashboard(_) => None,
+            Self::History(_) => None,
         }
     }
 
@@ -119,6 +126,7 @@ impl WorkspaceTab {
             Self::Sql(tab) => Some(tab),
             Self::Relation(_) => None,
             Self::Dashboard(_) => None,
+            Self::History(_) => None,
         }
     }
 }

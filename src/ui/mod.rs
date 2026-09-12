@@ -1211,6 +1211,7 @@ fn animation_observation(app: &App) -> animation::AnimationObservation {
             }
         }
         WorkspaceTab::Dashboard(_) => {}
+        WorkspaceTab::History(_) => {}
     }
     observation
 }
@@ -2001,6 +2002,7 @@ fn render_tabs(
                         .map(|profile| profile.name.clone())
                         .unwrap_or_else(|| "未绑定".to_owned()),
                     WorkspaceTab::Sql(_) => unreachable!(),
+                    WorkspaceTab::History(_) => "全部连接".to_owned(),
                 };
                 format!("{} @{connection_name}", tab.title())
             };
@@ -2030,6 +2032,7 @@ fn render_tabs(
                             .map(|server| icons.database(server.kind))
                     })
                     .unwrap_or_else(|| icons.catalog(CatalogKind::Database)),
+                WorkspaceTab::History(_) => icons.catalog(CatalogKind::Table),
             };
             let label = format!(" {icon} {title} ");
             let can_close = index != 0 || tab.as_console().is_some();

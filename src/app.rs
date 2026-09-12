@@ -954,6 +954,7 @@ impl App {
                 )),
                 WorkspaceTab::Sql(_) => None,
                 WorkspaceTab::Dashboard(_) => None,
+                WorkspaceTab::History(_) => None,
             })
             .collect::<Vec<_>>();
         for (id, text) in relation_sessions {
@@ -1361,6 +1362,7 @@ impl App {
             Some(WorkspaceTab::Sql(tab)) => tab.grid.selected_column,
             Some(WorkspaceTab::Relation(tab)) => tab.grid.selected_column,
             Some(WorkspaceTab::Dashboard(tab)) => tab.grid.selected_column,
+            Some(WorkspaceTab::History(_)) => 0,
             None => 0,
         }
     }
@@ -1698,6 +1700,7 @@ impl App {
             .collect();
         let tabs = tabs
             .iter()
+            .filter(|tab| !matches!(tab, WorkspaceTab::History(_)))
             .map(|tab| match tab {
                 WorkspaceTab::Sql(tab) => PersistedTab::Console { console_id: tab.id },
                 WorkspaceTab::Relation(tab) => {
@@ -1715,6 +1718,7 @@ impl App {
                     page: tab.page,
                     refresh_enabled: tab.refresh_enabled,
                 },
+                WorkspaceTab::History(_) => unreachable!(),
             })
             .collect();
         PersistedProfileWorkspace {
@@ -3374,6 +3378,20 @@ impl App {
                     });
                 }
                 commands
+            }
+            Action::OpenSqlHistory => {
+                if let Some(index) = self
+                    .tabs
+                    .iter()
+                    .position(|tab| matches!(tab, WorkspaceTab::History(_)))
+                {
+                    self.active_tab = index;
+                } else {
+                    self.tabs.push(WorkspaceTab::History(Default::default()));
+                    self.active_tab = self.tabs.len() - 1;
+                }
+                self.focus = Focus::Results;
+                vec![self.persist_workspace_command()]
             }
             Action::DashboardSetPage(page) => {
                 let Some(WorkspaceTab::Dashboard(tab)) = self.tabs.get_mut(self.active_tab) else {
@@ -20442,6 +20460,7 @@ mod tests {
             WorkspaceTab::Relation(tab) => tab.descriptor.key.clone(),
             WorkspaceTab::Sql(_) => unreachable!(),
             WorkspaceTab::Dashboard(_) => unreachable!(),
+            WorkspaceTab::History(_) => unreachable!(),
         };
         let scope = app.profiles[0].catalog_scope.clone();
         let request = RelationRequest {

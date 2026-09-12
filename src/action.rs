@@ -38,6 +38,7 @@ use crate::{
 pub enum Action {
     NewConsole,
     OpenDashboard,
+    OpenSqlHistory,
     DashboardSetPage(crate::model::dashboard::DashboardPage),
     DashboardRefresh,
     DashboardTogglePolling,
