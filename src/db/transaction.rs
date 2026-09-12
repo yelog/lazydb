@@ -88,6 +88,30 @@ impl RelationMutationDiagnostic {
 const RELATION_DIAGNOSTIC_PREFIX: &str = "[lazydb-relation-diagnostic]";
 
 impl TransactionError {
+    pub fn history_snapshot(&self) -> super::HistoryErrorSnapshot {
+        if let Some(diagnostic) = self.relation_diagnostic() {
+            return super::HistoryErrorSnapshot {
+                category: match diagnostic.category {
+                    RelationMutationCategory::Constraint => super::ErrorCategory::Constraint,
+                    RelationMutationCategory::ConnectionUnknown => super::ErrorCategory::Network,
+                    RelationMutationCategory::UnsupportedComparison => {
+                        super::ErrorCategory::Unsupported
+                    }
+                    RelationMutationCategory::Conflict
+                    | RelationMutationCategory::TypeMismatch
+                    | RelationMutationCategory::InvalidRequest => super::ErrorCategory::Sql,
+                },
+                code: diagnostic.sqlstate,
+                message: diagnostic.message,
+            };
+        }
+        super::HistoryErrorSnapshot {
+            category: super::ErrorCategory::Internal,
+            code: None,
+            message: self.0.clone(),
+        }
+    }
+
     pub fn relation(diagnostic: RelationMutationDiagnostic) -> Self {
         // This is an internal bridge format. It deliberately contains only the
         // already-redacted, actionable fields and never server DETAIL/values.
