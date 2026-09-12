@@ -30,7 +30,14 @@ async fn recorder_flushes_concurrent_events_and_keeps_completion_idempotent() {
         .unwrap();
     let recorder = HistoryRecorder::new(store.clone(), 8);
     let id = Uuid::new_v4();
-    recorder.start(execution(id)).await.unwrap();
+    let transaction_id = execution(id).transaction_id.unwrap();
+    let mut entry = execution(id);
+    entry.transaction_id = Some(transaction_id);
+    recorder.start(entry).await.unwrap();
+    recorder
+        .resolve_transaction(transaction_id, HistoryTransactionOutcome::RolledBack)
+        .await
+        .unwrap();
 
     let first = recorder.clone();
     let second = recorder.clone();
@@ -45,6 +52,10 @@ async fn recorder_flushes_concurrent_events_and_keeps_completion_idempotent() {
     let saved = store.detail(id).await.unwrap().unwrap();
     assert_eq!(saved.status, HistoryExecutionStatus::Succeeded);
     assert_eq!(saved.affected_rows, Some(2));
+    assert_eq!(
+        saved.transaction_outcome,
+        HistoryTransactionOutcome::RolledBack
+    );
 }
 
 #[tokio::test]

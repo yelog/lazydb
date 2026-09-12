@@ -136,6 +136,7 @@ struct ProfileRegistry {
 struct ManualTransactionEntry {
     connection: ConnectionIdentity,
     target: ExecutionTarget,
+    transaction_id: Uuid,
     transaction_generation: u64,
     request_sender: tokio::sync::mpsc::UnboundedSender<crate::db::transaction::TransactionRequest>,
     worker_handle: JoinHandle<crate::db::transaction::WorkerDisposition>,
@@ -3011,6 +3012,7 @@ impl Runtime {
             ManualTransactionEntry {
                 connection,
                 target,
+                transaction_id: Uuid::new_v4(),
                 transaction_generation,
                 request_sender: proxy.clone(),
                 worker_handle,
@@ -3037,15 +3039,52 @@ impl Runtime {
         self.reap_finished_manual_worker(tab_id);
         let (reply, result) = tokio::sync::oneshot::channel();
         let (cancel, cancel_receiver) = tokio::sync::oneshot::channel();
+        let history_sql = sql.clone();
         self.ensure_manual_worker(
             connection,
             target,
             tab_id,
             query_generation,
             transaction_generation,
-            Some((sql, cancel_receiver, reply)),
+            None,
         );
         if let Some(entry) = self.manual_transactions.get_mut(&tab_id) {
+            let execution_id = Uuid::new_v4();
+            let operation_id = Uuid::new_v4();
+            let transaction_id = entry.transaction_id;
+            let recorder = self.history_recorder.clone();
+            let history = crate::model::sql_history::ExecutionHistory {
+                execution_id,
+                operation_id,
+                transaction_id: Some(transaction_id),
+                sql: history_sql,
+                status: crate::model::sql_history::HistoryExecutionStatus::Running,
+                certainty: crate::model::sql_history::HistoryResultCertainty::Confirmed,
+                transaction_outcome: crate::model::sql_history::HistoryTransactionOutcome::Pending,
+                affected_rows: None,
+                returned_rows: None,
+            };
+            if let Some(recorder) = &recorder {
+                let recorder = recorder.clone();
+                let request_sender = entry.request_sender.clone();
+                let request_sql = sql;
+                self.background_tasks.push(tokio::spawn(async move {
+                    let _ = recorder.start(history).await;
+                    let _ = request_sender.send(TransactionRequest::Execute {
+                        query_generation,
+                        sql: request_sql,
+                        cancel: cancel_receiver,
+                        reply,
+                    });
+                }));
+            } else {
+                let _ = entry.request_sender.send(TransactionRequest::Execute {
+                    query_generation,
+                    sql,
+                    cancel: cancel_receiver,
+                    reply,
+                });
+            }
             entry.cancellation_sender = Some(cancel);
             let sender = self.event_sender.clone();
             self.query_tasks.insert(
@@ -3053,6 +3092,16 @@ impl Runtime {
                 tokio::spawn(async move {
                     match result.await {
                         Ok(Ok(outcome)) => {
+                            if let Some(recorder) = &recorder {
+                                let _ = recorder
+                                    .finish(
+                                        execution_id,
+                                        crate::model::sql_history::HistoryExecutionStatus::Succeeded,
+                                        None,
+                                        Some(outcome.stats.row_count),
+                                    )
+                                    .await;
+                            }
                             let _ = sender.send(Action::ManualQueryFinished {
                                 tab_id,
                                 query_generation,
@@ -3062,6 +3111,16 @@ impl Runtime {
                             });
                         }
                         Ok(Err(error)) => {
+                            if let Some(recorder) = &recorder {
+                                let _ = recorder
+                                    .finish(
+                                        execution_id,
+                                        crate::model::sql_history::HistoryExecutionStatus::Failed,
+                                        None,
+                                        None,
+                                    )
+                                    .await;
+                            }
                             let _ = sender.send(Action::ManualQueryFailed {
                                 tab_id,
                                 query_generation,
@@ -3071,6 +3130,16 @@ impl Runtime {
                             });
                         }
                         Err(_) => {
+                            if let Some(recorder) = &recorder {
+                                let _ = recorder
+                                    .finish(
+                                        execution_id,
+                                        crate::model::sql_history::HistoryExecutionStatus::Interrupted,
+                                        None,
+                                        None,
+                                    )
+                                    .await;
+                            }
                             let _ = sender.send(Action::ManualQueryFailed {
                                 tab_id,
                                 query_generation,
@@ -3178,9 +3247,19 @@ impl Runtime {
             return;
         }
         let sender = self.event_sender.clone();
+        let recorder = self.history_recorder.clone();
+        let transaction_id = entry.transaction_id;
         self.background_tasks.push(tokio::spawn(async move {
             match result.await {
                 Ok(Ok(())) => {
+                    if let Some(recorder) = &recorder {
+                        let _ = recorder
+                            .resolve_transaction(
+                                transaction_id,
+                                crate::model::sql_history::HistoryTransactionOutcome::Committed,
+                            )
+                            .await;
+                    }
                     let _ = sender.send(Action::ManualCommitted {
                         tab_id,
                         query_generation,
@@ -3240,9 +3319,19 @@ impl Runtime {
             return;
         }
         let sender = self.event_sender.clone();
+        let recorder = self.history_recorder.clone();
+        let transaction_id = entry.transaction_id;
         self.background_tasks.push(tokio::spawn(async move {
             match result.await {
                 Ok(Ok(())) => {
+                    if let Some(recorder) = &recorder {
+                        let _ = recorder
+                            .resolve_transaction(
+                                transaction_id,
+                                crate::model::sql_history::HistoryTransactionOutcome::RolledBack,
+                            )
+                            .await;
+                    }
                     let _ = sender.send(Action::ManualRolledBack {
                         tab_id,
                         query_generation,
@@ -3373,6 +3462,7 @@ impl Runtime {
         let sender = self.event_sender.clone();
         let worker_target = target.clone();
         let forced_close = ForcedCloseHandle::new();
+        let transaction_id = Uuid::new_v4();
         let worker_forced_close = forced_close.clone();
         let worker_handle = tokio::spawn(async move {
             let Some(database) = active_database_for_target(
@@ -3466,6 +3556,7 @@ impl Runtime {
             ManualTransactionEntry {
                 connection,
                 target,
+                transaction_id,
                 transaction_generation,
                 request_sender: proxy,
                 worker_handle,
@@ -5336,6 +5427,7 @@ mod tests {
                     database: ":memory:".to_owned(),
                     schema: Some("main".to_owned()),
                 },
+                transaction_id: Uuid::nil(),
                 transaction_generation: 1,
                 request_sender,
                 worker_handle,

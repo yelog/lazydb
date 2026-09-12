@@ -87,3 +87,26 @@ fn unknown_transaction_outcome_is_not_changed_by_clear_outcome() {
         HistoryTransactionOutcome::Unknown
     );
 }
+
+#[test]
+fn transaction_resolution_can_be_projected_after_statement_completion() {
+    let transaction_id = Uuid::new_v4();
+    let mut reducer = HistoryEventReducer::new(ExecutionHistory {
+        transaction_id: Some(transaction_id),
+        ..execution()
+    });
+    reducer.apply(HistoryEvent::Finished {
+        status: HistoryExecutionStatus::Succeeded,
+        certainty: HistoryResultCertainty::Confirmed,
+        affected_rows: Some(4),
+        returned_rows: None,
+    });
+    reducer.apply(HistoryEvent::TransactionResolved {
+        outcome: HistoryTransactionOutcome::Committed,
+    });
+    assert_eq!(reducer.execution().transaction_id, Some(transaction_id));
+    assert_eq!(
+        reducer.execution().transaction_outcome,
+        HistoryTransactionOutcome::Committed
+    );
+}

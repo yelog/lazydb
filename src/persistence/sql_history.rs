@@ -122,6 +122,22 @@ impl HistoryStore {
         Ok(())
     }
 
+    pub async fn resolve_transaction(
+        &self,
+        transaction_id: Uuid,
+        outcome: HistoryTransactionOutcome,
+    ) -> Result<(), HistoryStoreError> {
+        sqlx::query(
+            "UPDATE history_executions SET transaction_outcome = ?
+             WHERE transaction_id = ? AND transaction_outcome IN ('pending', 'unknown')",
+        )
+        .bind(transaction_outcome_name(outcome))
+        .bind(transaction_id.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn detail(
         &self,
         execution_id: Uuid,

@@ -4,7 +4,9 @@ use tokio::sync::{Mutex, Notify, mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::{
-    model::sql_history::{ExecutionHistory, HistoryExecutionStatus, HistoryResultCertainty},
+    model::sql_history::{
+        ExecutionHistory, HistoryExecutionStatus, HistoryResultCertainty, HistoryTransactionOutcome,
+    },
     persistence::sql_history::{HistoryStore, HistoryStoreError},
 };
 
@@ -26,6 +28,10 @@ enum HistoryCommand {
         certainty: HistoryResultCertainty,
         affected_rows: Option<u64>,
         returned_rows: Option<usize>,
+    },
+    ResolveTransaction {
+        transaction_id: Uuid,
+        outcome: HistoryTransactionOutcome,
     },
     Flush(oneshot::Sender<Result<(), HistoryRecorderError>>),
     Shutdown(oneshot::Sender<Result<(), HistoryRecorderError>>),
@@ -68,6 +74,15 @@ impl HistoryRecorder {
                                 returned_rows,
                             )
                             .await
+                        {
+                            record_failure(&worker_failure, error).await;
+                        }
+                    }
+                    HistoryCommand::ResolveTransaction {
+                        transaction_id,
+                        outcome,
+                    } => {
+                        if let Err(error) = store.resolve_transaction(transaction_id, outcome).await
                         {
                             record_failure(&worker_failure, error).await;
                         }
@@ -132,6 +147,18 @@ impl HistoryRecorder {
         let (reply, result) = oneshot::channel();
         self.send(HistoryCommand::Flush(reply)).await?;
         result.await.map_err(|_| HistoryRecorderError::Closed)?
+    }
+
+    pub async fn resolve_transaction(
+        &self,
+        transaction_id: Uuid,
+        outcome: HistoryTransactionOutcome,
+    ) -> Result<(), HistoryRecorderError> {
+        self.send(HistoryCommand::ResolveTransaction {
+            transaction_id,
+            outcome,
+        })
+        .await
     }
 
     pub async fn shutdown(&self) -> Result<(), HistoryRecorderError> {
