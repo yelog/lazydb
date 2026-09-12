@@ -8,6 +8,7 @@ pub mod mcp;
 pub(crate) mod opencode_config;
 pub use opencode_config::Format as OpenCodeFormat;
 pub mod policy;
+pub mod probe;
 pub mod selection;
 pub mod service;
 pub mod setup;

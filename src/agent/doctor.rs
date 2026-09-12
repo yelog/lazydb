@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 use crate::cli::McpClient;
@@ -72,10 +72,25 @@ pub async fn run_with_options(
     if std::env::var_os("OPENCODE_CONFIG_CONTENT").is_some() {
         warnings.push("OPENCODE_CONFIG_CONTENT is set and may override file configuration".into());
     }
+    let mut probe_failed = false;
     if probe {
-        warnings.push("--probe is not implemented; no configured client was started".to_owned());
+        if clients_contains_opencode(&reports) {
+            match probe_opencode(&project, &locations, client_config.as_deref()).await {
+                Ok(report) => warnings.push(format!(
+                    "MCP probe: {} tools discovered at {}",
+                    report.tool_count.unwrap_or_default(),
+                    report.stage
+                )),
+                Err(error) => {
+                    probe_failed = true;
+                    warnings.push(format!("MCP probe failed: {error}"));
+                }
+            }
+        } else {
+            warnings.push("--probe currently supports OpenCode local servers only".into());
+        }
     }
-    let failed = reports.iter().any(|report| report.status == "failed");
+    let failed = probe_failed || reports.iter().any(|report| report.status == "failed");
     let status = if failed {
         "failed"
     } else if reports.iter().any(|report| report.status == "warning") {
@@ -115,6 +130,71 @@ pub async fn run_with_options(
         output.push_str(&format!("\nwarning: {warning}"));
     }
     Ok(output)
+}
+
+fn clients_contains_opencode(reports: &[ClientReport]) -> bool {
+    reports.iter().any(|report| report.client == "opencode")
+}
+
+async fn probe_opencode(
+    project: &std::path::Path,
+    locations: &super::client_config::Locations,
+    explicit: Option<&std::path::Path>,
+) -> Result<super::probe::ProbeReport> {
+    use super::client_config as cfg;
+    let mut sources = locations.sources(McpClient::Opencode, project);
+    if let Some(path) = explicit {
+        sources.retain(|source| source.path == path);
+    }
+    let mut selected = None;
+    for source in sources {
+        let Some(text) = cfg::read_optional(&source.path)? else {
+            continue;
+        };
+        let value = cfg::parse(McpClient::Opencode, &text)?;
+        if let Some(entry) = cfg::effective_entry(McpClient::Opencode, &value, &source, project)? {
+            selected = Some(entry.clone());
+        }
+    }
+    let value = selected.context("no OpenCode LazyDB server is configured")?;
+    if value.get("disabled").and_then(|value| value.as_bool()) == Some(true) {
+        bail!("OpenCode LazyDB server is disabled");
+    }
+    if value.get("type").and_then(|value| value.as_str()) != Some("local") {
+        bail!("probe supports local OpenCode servers only");
+    }
+    let command = value
+        .get("command")
+        .and_then(|value| value.as_array())
+        .context("OpenCode local server command must be an array")?
+        .iter()
+        .map(|value| value.as_str().map(str::to_owned))
+        .collect::<Option<Vec<_>>>()
+        .context("OpenCode server command must contain strings")?;
+    let cwd = value
+        .get("cwd")
+        .and_then(|value| value.as_str())
+        .map(|cwd| project.join(cwd));
+    let environment = value
+        .get("environment")
+        .and_then(|value| value.as_object())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|(key, value)| {
+                    value.as_str().map(|value| (key.clone(), value.to_owned()))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    super::probe::run(
+        &command,
+        cwd.as_deref(),
+        &environment,
+        std::time::Duration::from_secs(30),
+        std::time::Duration::from_secs(30),
+    )
+    .await
 }
 
 fn inspect_client(

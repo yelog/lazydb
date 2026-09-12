@@ -144,17 +144,24 @@ async fn recognizes_generated_read_only_configuration() {
 }
 
 #[tokio::test]
-async fn probe_is_explicit_and_does_not_start_client_commands_yet() {
+async fn probe_reports_missing_server_without_starting_a_command() {
     let dir = tempdir().unwrap();
-    let output = doctor::run(
+    let config = dir.path().join("opencode.json");
+    std::fs::write(&config, "{}\n").unwrap();
+    let output = doctor::run_with_options(
         vec![McpClient::Opencode],
         Some(dir.path().to_owned()),
+        Some(config),
+        true,
+        true,
         None,
-        true,
-        true,
     )
     .await
     .unwrap();
-    assert!(output.contains("not implemented"));
-    assert!(output.contains("no configured client was started"));
+    assert!(output.contains("MCP probe failed"));
+    assert!(
+        output.contains("no OpenCode LazyDB server is configured"),
+        "{output}"
+    );
+    assert!(output.contains("\"status\":\"failed\""));
 }
