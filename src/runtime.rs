@@ -298,6 +298,7 @@ pub struct Runtime {
     relation_mutation_blocked: Arc<StdMutex<HashSet<(Uuid, ConnectionIdentity)>>>,
     clipboard: crate::config::ClipboardConfig,
     history_recorder: Option<crate::history::HistoryRecorder>,
+    history_executions: HashMap<(Uuid, u64), Uuid>,
 }
 
 #[derive(Debug)]
@@ -403,6 +404,7 @@ impl Runtime {
                 max_bytes: 1_000_000,
             },
             history_recorder: None,
+            history_executions: HashMap::new(),
         }
     }
 
@@ -421,6 +423,8 @@ impl Runtime {
 
     pub fn dispatch(&mut self, command: Command) {
         self.query_tasks.retain(|_, task| !task.is_finished());
+        self.history_executions
+            .retain(|key, _| self.query_tasks.contains_key(key));
         self.catalog_drop_plan_tasks
             .retain(|_, task| !task.is_finished());
         self.catalog_drop_execute_tasks
@@ -681,6 +685,21 @@ impl Runtime {
             Command::CancelQuery { tab_id, generation } => {
                 if let Some(task) = self.query_tasks.remove(&(tab_id, generation)) {
                     task.abort();
+                }
+                if let Some(execution_id) = self.history_executions.remove(&(tab_id, generation))
+                    && let Some(recorder) = self.history_recorder.clone()
+                {
+                    tokio::spawn(async move {
+                        let _ = recorder
+                            .finish_with_certainty(
+                                execution_id,
+                                crate::model::sql_history::HistoryExecutionStatus::Cancelled,
+                                crate::model::sql_history::HistoryResultCertainty::Unknown,
+                                None,
+                                None,
+                            )
+                            .await;
+                    });
                 }
             }
             Command::CancelManual {
@@ -2148,6 +2167,8 @@ impl Runtime {
         let recorder = self.history_recorder.clone();
         let execution_id = Uuid::new_v4();
         let operation_id = Uuid::new_v4();
+        self.history_executions
+            .insert((tab_id, generation), execution_id);
         let task = tokio::spawn(async move {
             let history = crate::model::sql_history::ExecutionHistory {
                 execution_id,
@@ -3112,10 +3133,21 @@ impl Runtime {
                         }
                         Ok(Err(error)) => {
                             if let Some(recorder) = &recorder {
+                                let status = if error.0 == "cancelled" {
+                                    crate::model::sql_history::HistoryExecutionStatus::Cancelled
+                                } else {
+                                    crate::model::sql_history::HistoryExecutionStatus::Failed
+                                };
+                                let certainty = if error.0 == "cancelled" {
+                                    crate::model::sql_history::HistoryResultCertainty::Unknown
+                                } else {
+                                    crate::model::sql_history::HistoryResultCertainty::Confirmed
+                                };
                                 let _ = recorder
-                                    .finish(
+                                    .finish_with_certainty(
                                         execution_id,
-                                        crate::model::sql_history::HistoryExecutionStatus::Failed,
+                                        status,
+                                        certainty,
                                         None,
                                         None,
                                     )

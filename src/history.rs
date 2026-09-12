@@ -143,6 +143,24 @@ impl HistoryRecorder {
         .await
     }
 
+    pub async fn finish_with_certainty(
+        &self,
+        execution_id: Uuid,
+        status: HistoryExecutionStatus,
+        certainty: HistoryResultCertainty,
+        affected_rows: Option<u64>,
+        returned_rows: Option<usize>,
+    ) -> Result<(), HistoryRecorderError> {
+        self.send(HistoryCommand::Finish {
+            execution_id,
+            status,
+            certainty,
+            affected_rows,
+            returned_rows,
+        })
+        .await
+    }
+
     pub async fn flush(&self) -> Result<(), HistoryRecorderError> {
         let (reply, result) = oneshot::channel();
         self.send(HistoryCommand::Flush(reply)).await?;
