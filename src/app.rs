@@ -3391,7 +3391,25 @@ impl App {
                     self.active_tab = self.tabs.len() - 1;
                 }
                 self.focus = Focus::Results;
-                vec![self.persist_workspace_command()]
+                let generation =
+                    if let Some(WorkspaceTab::History(tab)) = self.tabs.get_mut(self.active_tab) {
+                        tab.loading = true;
+                        tab.query_generation = tab.query_generation.saturating_add(1);
+                        tab.query_generation
+                    } else {
+                        0
+                    };
+                vec![
+                    Command::LoadSqlHistory {
+                        generation,
+                        request: crate::persistence::sql_history::HistoryPageRequest {
+                            limit: 100,
+                            cursor: None,
+                            search: None,
+                        },
+                    },
+                    self.persist_workspace_command(),
+                ]
             }
             Action::DashboardSetPage(page) => {
                 let Some(WorkspaceTab::Dashboard(tab)) = self.tabs.get_mut(self.active_tab) else {
@@ -10843,6 +10861,20 @@ impl App {
                 }
             }
             Action::ToggleTerminalSelection => Vec::new(),
+            Action::SqlHistoryLoaded { generation, page } => {
+                if let Some(WorkspaceTab::History(tab)) = self.tabs.get_mut(self.active_tab)
+                    && tab.query_generation == generation
+                {
+                    tab.loading = false;
+                    tab.selected_execution = page.items.first().map(|item| item.execution_id);
+                    tab.items = page.items;
+                }
+                Vec::new()
+            }
+            Action::SqlHistoryLoadFailed { message, .. } => {
+                self.notify_warning("SQL History", message);
+                Vec::new()
+            }
         }
     }
 

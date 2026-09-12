@@ -69,7 +69,6 @@ impl HistoryStore {
     }
 
     pub async fn insert(&self, history: ExecutionHistory) -> Result<(), HistoryStoreError> {
-        let now = chrono::Utc::now().timestamp_millis();
         sqlx::query(
             "INSERT INTO history_executions
              (execution_id, operation_id, transaction_id, requested_at, sql, status,
@@ -79,7 +78,7 @@ impl HistoryStore {
         .bind(history.execution_id.to_string())
         .bind(history.operation_id.to_string())
         .bind(history.transaction_id.map(|id| id.to_string()))
-        .bind(now)
+        .bind(history.requested_at)
         .bind(history.sql)
         .bind(status_name(history.status))
         .bind(certainty_name(history.certainty))
@@ -144,7 +143,7 @@ impl HistoryStore {
     ) -> Result<Option<ExecutionHistory>, HistoryStoreError> {
         let row = sqlx::query(
             "SELECT execution_id, operation_id, transaction_id, sql, status, certainty,
-                    transaction_outcome, affected_rows, returned_rows
+                    transaction_outcome, affected_rows, returned_rows, requested_at
              FROM history_executions WHERE execution_id = ?",
         )
         .bind(execution_id.to_string())
@@ -254,6 +253,7 @@ fn row_to_history(row: sqlx::sqlite::SqliteRow) -> Result<ExecutionHistory, Hist
         returned_rows: row
             .get::<Option<i64>, _>("returned_rows")
             .map(|value| value as usize),
+        requested_at: row.get("requested_at"),
     })
 }
 

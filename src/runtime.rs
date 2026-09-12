@@ -298,6 +298,7 @@ pub struct Runtime {
     relation_mutation_blocked: Arc<StdMutex<HashSet<(Uuid, ConnectionIdentity)>>>,
     clipboard: crate::config::ClipboardConfig,
     history_recorder: Option<crate::history::HistoryRecorder>,
+    history_store: Option<crate::persistence::sql_history::HistoryStore>,
     history_executions: HashMap<(Uuid, u64), Uuid>,
 }
 
@@ -404,12 +405,17 @@ impl Runtime {
                 max_bytes: 1_000_000,
             },
             history_recorder: None,
+            history_store: None,
             history_executions: HashMap::new(),
         }
     }
 
     pub fn set_history_recorder(&mut self, recorder: crate::history::HistoryRecorder) {
         self.history_recorder = Some(recorder);
+    }
+
+    pub fn set_history_store(&mut self, store: crate::persistence::sql_history::HistoryStore) {
+        self.history_store = Some(store);
     }
 
     pub fn set_clipboard_config(&mut self, clipboard: crate::config::ClipboardConfig) {
@@ -531,6 +537,10 @@ impl Runtime {
                 generation,
                 sql,
             } => self.run_query(connection, target, tab_id, generation, sql),
+            Command::LoadSqlHistory {
+                generation,
+                request,
+            } => self.load_sql_history(generation, request),
             Command::LoadDashboardMetrics {
                 tab_id,
                 tab_generation,
@@ -2181,6 +2191,7 @@ impl Runtime {
                     crate::model::sql_history::HistoryTransactionOutcome::NotApplicable,
                 affected_rows: None,
                 returned_rows: None,
+                requested_at: chrono::Utc::now().timestamp_millis(),
             };
             if let Some(recorder) = &recorder {
                 let _ = recorder.start(history).await;
@@ -2254,6 +2265,34 @@ impl Runtime {
             }
         });
         self.query_tasks.insert((tab_id, generation), task);
+    }
+
+    fn load_sql_history(
+        &mut self,
+        generation: u64,
+        request: crate::persistence::sql_history::HistoryPageRequest,
+    ) {
+        let Some(store) = self.history_store.clone() else {
+            let _ = self.event_sender.send(Action::SqlHistoryLoadFailed {
+                generation,
+                message: "SQL history database is not available".into(),
+            });
+            return;
+        };
+        let sender = self.event_sender.clone();
+        self.background_tasks.push(tokio::spawn(async move {
+            match store.page(request).await {
+                Ok(page) => {
+                    let _ = sender.send(Action::SqlHistoryLoaded { generation, page });
+                }
+                Err(error) => {
+                    let _ = sender.send(Action::SqlHistoryLoadFailed {
+                        generation,
+                        message: error.to_string(),
+                    });
+                }
+            }
+        }));
     }
 
     fn load_dashboard_metrics(
@@ -3084,6 +3123,7 @@ impl Runtime {
                 transaction_outcome: crate::model::sql_history::HistoryTransactionOutcome::Pending,
                 affected_rows: None,
                 returned_rows: None,
+                requested_at: chrono::Utc::now().timestamp_millis(),
             };
             if let Some(recorder) = &recorder {
                 let recorder = recorder.clone();
@@ -4718,8 +4758,9 @@ pub async fn run_tui(cli: Cli) -> Result<RunOutcome> {
         .await
         .context("failed to open SQL history database")?;
     runtime.set_history_recorder(crate::history::HistoryRecorder::default_capacity(
-        history_store,
+        history_store.clone(),
     ));
+    runtime.set_history_store(history_store);
     runtime.set_workspace_store(workspace_store);
     runtime.set_clipboard_config(settings.terminal.clipboard);
     let mut terminal = TerminalSession::enter(settings.terminal.mouse != MouseMode::Off)

@@ -869,6 +869,14 @@ pub enum Action {
         connection: ConnectionIdentity,
         message: String,
     },
+    SqlHistoryLoaded {
+        generation: u64,
+        page: crate::persistence::sql_history::HistoryPage,
+    },
+    SqlHistoryLoadFailed {
+        generation: u64,
+        message: String,
+    },
     QueryPageFinished {
         tab_id: Uuid,
         generation: u64,
@@ -1086,6 +1094,10 @@ pub enum CatalogEditorCursorTarget {
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 pub enum Command {
+    LoadSqlHistory {
+        generation: u64,
+        request: crate::persistence::sql_history::HistoryPageRequest,
+    },
     TestProfile {
         request_id: u64,
         submission: ProfileSubmission,

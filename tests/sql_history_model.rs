@@ -15,6 +15,7 @@ fn execution() -> ExecutionHistory {
         transaction_outcome: HistoryTransactionOutcome::Pending,
         affected_rows: None,
         returned_rows: None,
+        requested_at: 0,
     }
 }
 

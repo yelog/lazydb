@@ -18,6 +18,7 @@ fn history(id: Uuid, sql: &str) -> ExecutionHistory {
         transaction_outcome: HistoryTransactionOutcome::NotApplicable,
         affected_rows: None,
         returned_rows: None,
+        requested_at: 0,
     }
 }
 

@@ -6,6 +6,8 @@ pub struct HistoryTab {
     pub selected_execution: Option<Uuid>,
     pub list_offset: usize,
     pub query_generation: u64,
+    pub items: Vec<crate::model::sql_history::ExecutionHistory>,
+    pub loading: bool,
 }
 
 impl Default for HistoryTab {
@@ -15,6 +17,8 @@ impl Default for HistoryTab {
             selected_execution: None,
             list_offset: 0,
             query_generation: 0,
+            items: Vec::new(),
+            loading: false,
         }
     }
 }

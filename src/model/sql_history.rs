@@ -44,6 +44,7 @@ pub struct ExecutionHistory {
     pub transaction_outcome: HistoryTransactionOutcome,
     pub affected_rows: Option<u64>,
     pub returned_rows: Option<usize>,
+    pub requested_at: i64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -135,6 +136,7 @@ mod tests {
             transaction_outcome: HistoryTransactionOutcome::NotApplicable,
             affected_rows: None,
             returned_rows: Some(1),
+            requested_at: 0,
         });
         reducer.apply(HistoryEvent::Finished {
             status: HistoryExecutionStatus::Cancelled,

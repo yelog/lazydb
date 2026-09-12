@@ -15,6 +15,7 @@ pub mod record_view;
 pub mod relation;
 pub(crate) mod scrollbar;
 mod shortcut_hints;
+pub(crate) mod sql_history;
 pub(crate) mod sql_preview;
 pub mod text_detail;
 pub mod text_selection;
@@ -772,10 +773,11 @@ pub fn render_with_state_using_icons_sequence_and_theme(
         app.tabs.get(app.active_tab),
         Some(WorkspaceTab::Dashboard(_))
     );
+    let is_history = matches!(app.tabs.get(app.active_tab), Some(WorkspaceTab::History(_)));
     let layout = AppLayout::calculate(
         area,
         app.focus,
-        is_relation || is_dashboard,
+        is_relation || is_dashboard || is_history,
         app.pane_sizes,
         app.pane_maximized,
     );
@@ -858,6 +860,15 @@ pub fn render_with_state_using_icons_sequence_and_theme(
             area: layout.footer,
             target: HitTarget::Help,
         });
+    } else if is_history {
+        if let Some(area) = layout.relation.or(layout.results) {
+            state.hit_regions.push(HitRegion {
+                area,
+                target: HitTarget::Focus(Focus::Results),
+            });
+            sql_history::render(frame, area, app, theme);
+        }
+        render_footer(frame, layout.footer, app, theme, sequence, state);
     } else {
         if let Some(area) = layout.explorer {
             state.hit_regions.push(HitRegion {
