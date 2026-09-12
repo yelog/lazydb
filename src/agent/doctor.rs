@@ -159,14 +159,24 @@ fn inspect_client(
                     name: "source".into(),
                     status: "ok",
                     detail: format!(
-                        "{} ({:?}, {}) contains LazyDB",
+                        "{} ({:?}, {}) contains LazyDB{}",
                         source.path.display(),
                         source.scope,
-                        source.origin
+                        source.origin,
+                        if client == McpClient::Opencode {
+                            cfg::opencode_shadowed_note(&value)
+                        } else {
+                            String::new()
+                        }
                     ),
                 });
                 report.config_path = source.path;
                 if client == McpClient::ClaudeCode {
+                    effective = Some(value);
+                } else if client == McpClient::Opencode {
+                    // V2 replaces an identically named server object at a
+                    // higher-precedence source; it does not recursively merge
+                    // the two server objects.
                     effective = Some(value);
                 } else {
                     let base = effective.get_or_insert_with(|| serde_json::json!({}));

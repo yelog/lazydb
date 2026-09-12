@@ -189,6 +189,16 @@ pub(crate) fn effective_entry<'a>(
     entry(value, &keys(client, source, project))
 }
 
+pub(crate) fn opencode_shadowed_note(value: &Value) -> String {
+    match crate::agent::opencode_config::resolve(value) {
+        Ok(Some(resolved)) if !resolved.shadowed.is_empty() => format!(
+            "; {} lower-priority OpenCode entry shadowed by native V2",
+            resolved.shadowed.len()
+        ),
+        _ => String::new(),
+    }
+}
+
 /// Return the key path to use when adding a new OpenCode entry.
 pub(crate) fn insert_keys(
     client: McpClient,

@@ -59,6 +59,32 @@ async fn reports_native_opencode_v2_disabled_entries() {
 }
 
 #[tokio::test]
+async fn reports_v2_shadowing_and_does_not_merge_server_objects() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("opencode.jsonc");
+    std::fs::write(
+        &path,
+        r#"{"mcp":{"lazydb":{"type":"local","command":["lazydb","mcp","serve","--write-policy","deny"]},"servers":{"lazydb":{"type":"local","disabled":true}}}}"#,
+    )
+    .unwrap();
+    let output = doctor::run_with_options(
+        vec![McpClient::Opencode],
+        Some(dir.path().into()),
+        Some(path),
+        false,
+        true,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(output.contains("disabled"), "{output}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&output).unwrap()["status"],
+        "warning"
+    );
+}
+
+#[tokio::test]
 async fn reports_missing_configs_without_database_io() {
     let dir = tempdir().unwrap();
     let output = doctor::run(
