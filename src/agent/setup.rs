@@ -340,9 +340,18 @@ fn plan_client(
                 "{\n}\n"
             });
         let value = cfg::parse(client, text)?;
-        let keys = cfg::keys(client, &target, project);
+        let keys = if client == McpClient::Opencode {
+            cfg::insert_keys(client, &value)
+        } else {
+            cfg::keys(client, &target, project)
+        };
         let desired = cfg::desired(client, config);
-        if let Some(existing) = cfg::entry(&value, &keys)? {
+        let existing = if client == McpClient::Opencode {
+            cfg::effective_entry(client, &value, &target, project)?
+        } else {
+            cfg::entry(&value, &keys)?
+        };
+        if let Some(existing) = existing {
             if cfg::equivalent(existing, &desired) {
                 plan.status = "unchanged";
                 plan.message = "LazyDB is already configured; no changes".into();

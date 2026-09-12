@@ -165,6 +165,45 @@ pub(crate) fn keys(client: McpClient, source: &Source, project: &Path) -> Vec<St
     keys
 }
 
+/// Find the effective LazyDB entry without making callers know about the
+/// OpenCode V1/V2 layout. Other clients retain their existing key semantics.
+pub(crate) fn effective_entry<'a>(
+    client: McpClient,
+    value: &'a Value,
+    source: &Source,
+    project: &Path,
+) -> Result<Option<&'a Value>> {
+    if client == McpClient::Opencode {
+        let Some(format) = crate::agent::opencode_config::effective_format(value)? else {
+            return Ok(None);
+        };
+        let keys = format
+            .path()
+            .iter()
+            .map(|key| (*key).to_owned())
+            .collect::<Vec<_>>();
+        return entry(value, &keys);
+    }
+    entry(value, &keys(client, source, project))
+}
+
+/// Return the key path to use when adding a new OpenCode entry.
+pub(crate) fn insert_keys(client: McpClient, value: &Value) -> Vec<String> {
+    if client != McpClient::Opencode {
+        return vec!["mcp".into(), "lazydb".into()];
+    }
+    if value
+        .get("mcp")
+        .and_then(Value::as_object)
+        .and_then(|mcp| mcp.get("servers"))
+        .is_some()
+    {
+        vec!["mcp".into(), "servers".into(), "lazydb".into()]
+    } else {
+        vec!["mcp".into(), "lazydb".into()]
+    }
+}
+
 pub(crate) fn parse(client: McpClient, text: &str) -> Result<Value> {
     if client == McpClient::Codex {
         let value: toml::Value =

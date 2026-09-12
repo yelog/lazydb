@@ -134,7 +134,8 @@ fn inspect_client(
                 return Ok(None);
             };
             let value = cfg::parse(client, &text)?;
-            Ok(cfg::entry(&value, &cfg::keys(client, &source, project))?.cloned())
+            let entry = cfg::effective_entry(client, &value, &source, project)?;
+            Ok(entry.cloned())
         })();
         match result {
             Ok(Some(value)) => {

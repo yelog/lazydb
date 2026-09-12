@@ -59,12 +59,19 @@ fn stdio_server_negotiates_and_lists_tools_without_database_io() {
     );
     assert_eq!(initialized["result"]["protocolVersion"], "2025-06-18");
     assert_eq!(initialized["result"]["serverInfo"]["name"], "rmcp");
-    assert_eq!(initialized["result"]["capabilities"]["tools"], serde_json::json!({}));
+    assert_eq!(
+        initialized["result"]["capabilities"]["tools"],
+        serde_json::json!({})
+    );
 
-    writeln!(child.stdin.as_mut().unwrap(), "{}", serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": "notifications/initialized"
-    }))
+    writeln!(
+        child.stdin.as_mut().unwrap(),
+        "{}",
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        })
+    )
     .unwrap();
     child.stdin.as_mut().unwrap().flush().unwrap();
 
@@ -99,7 +106,11 @@ fn stdio_server_negotiates_and_lists_tools_without_database_io() {
 
     drop(child.stdin.take());
     let output = child.wait_with_output().unwrap();
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -107,7 +118,11 @@ fn profile_parse_failure_is_reported_before_mcp_handshake() {
     let temp = TempDir::new().unwrap();
     std::fs::create_dir(temp.path().join(".git")).unwrap();
     let profiles = temp.path().join("profiles.toml");
-    std::fs::write(&profiles, "version = 6\n[[profiles]]\nkind = \"not-a-database\"\n").unwrap();
+    std::fs::write(
+        &profiles,
+        "version = 6\n[[profiles]]\nkind = \"not-a-database\"\n",
+    )
+    .unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_lazydb"))
         .args([
@@ -123,5 +138,8 @@ fn profile_parse_failure_is_reported_before_mcp_handshake() {
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("profile file is invalid"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("profile file is invalid"),
+        "stderr: {stderr}"
+    );
 }
