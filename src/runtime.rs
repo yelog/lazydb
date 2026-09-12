@@ -296,6 +296,7 @@ pub struct Runtime {
     relation_transactions: HashMap<Uuid, ManualTransactionEntry>,
     relation_mutation_blocked: Arc<StdMutex<HashSet<(Uuid, ConnectionIdentity)>>>,
     clipboard: crate::config::ClipboardConfig,
+    history_recorder: Option<crate::history::HistoryRecorder>,
 }
 
 #[derive(Debug)]
@@ -400,7 +401,12 @@ impl Runtime {
                 backend: crate::config::ClipboardBackend::System,
                 max_bytes: 1_000_000,
             },
+            history_recorder: None,
         }
+    }
+
+    pub fn set_history_recorder(&mut self, recorder: crate::history::HistoryRecorder) {
+        self.history_recorder = Some(recorder);
     }
 
     pub fn set_clipboard_config(&mut self, clipboard: crate::config::ClipboardConfig) {
@@ -2138,9 +2144,37 @@ impl Runtime {
     ) {
         let sender = self.event_sender.clone();
         let connection = Arc::clone(&self.connection);
+        let recorder = self.history_recorder.clone();
+        let execution_id = Uuid::new_v4();
+        let operation_id = Uuid::new_v4();
         let task = tokio::spawn(async move {
+            let history = crate::model::sql_history::ExecutionHistory {
+                execution_id,
+                operation_id,
+                transaction_id: None,
+                sql: sql.clone(),
+                status: crate::model::sql_history::HistoryExecutionStatus::Running,
+                certainty: crate::model::sql_history::HistoryResultCertainty::Confirmed,
+                transaction_outcome:
+                    crate::model::sql_history::HistoryTransactionOutcome::NotApplicable,
+                affected_rows: None,
+                returned_rows: None,
+            };
+            if let Some(recorder) = &recorder {
+                let _ = recorder.start(history).await;
+            }
             let database = active_database_for_target(connection, expected, &target).await;
             let Some(database) = database else {
+                if let Some(recorder) = &recorder {
+                    let _ = recorder
+                        .finish(
+                            execution_id,
+                            crate::model::sql_history::HistoryExecutionStatus::Failed,
+                            None,
+                            None,
+                        )
+                        .await;
+                }
                 let _ = sender.send(Action::QueryFailed {
                     tab_id,
                     generation,
@@ -2160,6 +2194,16 @@ impl Runtime {
                 .await
             {
                 Ok(outcome) => {
+                    if let Some(recorder) = &recorder {
+                        let _ = recorder
+                            .finish(
+                                execution_id,
+                                crate::model::sql_history::HistoryExecutionStatus::Succeeded,
+                                None,
+                                Some(outcome.stats.row_count),
+                            )
+                            .await;
+                    }
                     let _ = sender.send(Action::QueryFinished {
                         tab_id,
                         generation,
@@ -2168,6 +2212,16 @@ impl Runtime {
                     });
                 }
                 Err(error) => {
+                    if let Some(recorder) = &recorder {
+                        let _ = recorder
+                            .finish(
+                                execution_id,
+                                crate::model::sql_history::HistoryExecutionStatus::Failed,
+                                None,
+                                None,
+                            )
+                            .await;
+                    }
                     let _ = sender.send(Action::QueryFailed {
                         tab_id,
                         generation,
@@ -4533,6 +4587,12 @@ pub async fn run_tui(cli: Cli) -> Result<RunOutcome> {
         Arc::new(NativeSecretStore),
         event_sender,
     );
+    let history_store = crate::persistence::sql_history::HistoryStore::open(paths.history_file())
+        .await
+        .context("failed to open SQL history database")?;
+    runtime.set_history_recorder(crate::history::HistoryRecorder::default_capacity(
+        history_store,
+    ));
     runtime.set_workspace_store(workspace_store);
     runtime.set_clipboard_config(settings.terminal.clipboard);
     let mut terminal = TerminalSession::enter(settings.terminal.mouse != MouseMode::Off)
