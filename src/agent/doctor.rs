@@ -167,7 +167,13 @@ fn inspect_client(
         }
     }
     if let Some(value) = effective {
-        let disabled = value.get("enabled").and_then(|v| v.as_bool()) == Some(false);
+        let disabled = if client == McpClient::Opencode
+            && value.get("disabled").and_then(|v| v.as_bool()) == Some(true)
+        {
+            true
+        } else {
+            value.get("enabled").and_then(|v| v.as_bool()) == Some(false)
+        };
         let valid = valid_server(client, &value);
         report.status = if valid && !disabled { "ok" } else { "warning" };
         report.checks.push(Check {

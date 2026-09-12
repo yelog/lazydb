@@ -1,6 +1,7 @@
 pub mod catalog;
 pub mod cli;
 pub(crate) mod client_config;
+pub(crate) mod client_runtime;
 pub mod context;
 pub mod doctor;
 pub mod mcp;

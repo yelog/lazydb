@@ -62,6 +62,23 @@ fn preserves_jsonc_and_is_idempotent() {
 }
 
 #[test]
+fn recognizes_and_preserves_native_opencode_v2_layout() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("opencode.jsonc");
+    std::fs::write(
+        &path,
+        "{\n  \"mcp\": {\n    \"servers\": {\n      \"lazydb\": {\n        \"type\": \"local\",\n        \"command\": [\"lazydb\", \"mcp\", \"serve\", \"--project\", \".\", \"--write-policy\", \"deny\"],\n        \"cwd\": \".\"\n      }\n    }\n  }\n}\n",
+    )
+    .unwrap();
+
+    let first = explicit_setup(McpClient::Opencode, &path, dir.path());
+    assert!(first.contains("unchanged"), "{first}");
+    let updated = std::fs::read_to_string(&path).unwrap();
+    assert!(updated.contains("\"servers\""));
+    assert!(!updated.contains("\"mcp\": {\n    \"lazydb\""));
+}
+
+#[test]
 fn preserves_toml_comments_and_does_not_require_server() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("config.toml");
