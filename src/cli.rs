@@ -331,6 +331,8 @@ pub struct AgentTargetArgs {
 pub struct VersionInfo<'a> {
     pub version: &'a str,
     pub cli_api: u16,
+    pub revision: Option<&'a str>,
+    pub drivers: &'a [&'a str],
 }
 
 #[derive(Debug, Serialize)]
@@ -369,6 +371,8 @@ pub fn version_info() -> VersionInfo<'static> {
     VersionInfo {
         version: env!("CARGO_PKG_VERSION"),
         cli_api: CLI_API_VERSION,
+        revision: option_env!("LAZYDB_GIT_REVISION"),
+        drivers: &crate::db::descriptor::DRIVER_NAMES,
     }
 }
 

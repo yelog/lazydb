@@ -58,7 +58,11 @@ fn stdio_server_negotiates_and_lists_tools_without_database_io() {
         }),
     );
     assert_eq!(initialized["result"]["protocolVersion"], "2025-06-18");
-    assert_eq!(initialized["result"]["serverInfo"]["name"], "rmcp");
+    assert_eq!(initialized["result"]["serverInfo"]["name"], "lazydb");
+    assert_eq!(
+        initialized["result"]["serverInfo"]["version"],
+        env!("CARGO_PKG_VERSION")
+    );
     assert_eq!(
         initialized["result"]["capabilities"]["tools"],
         serde_json::json!({})
