@@ -3677,6 +3677,10 @@ impl Runtime {
         {
             connection.database.close().await;
         }
+        if let Some(recorder) = self.history_recorder.take() {
+            let _ = recorder.flush().await;
+            let _ = recorder.shutdown().await;
+        }
     }
 }
 
