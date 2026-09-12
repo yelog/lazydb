@@ -174,9 +174,11 @@ pub(crate) fn effective_entry<'a>(
     project: &Path,
 ) -> Result<Option<&'a Value>> {
     if client == McpClient::Opencode {
-        let Some(format) = crate::agent::opencode_config::effective_format(value)? else {
+        let Some(resolved) = crate::agent::opencode_config::resolve(value)? else {
             return Ok(None);
         };
+        let _shadowed_count = resolved.shadowed.len();
+        let format = resolved.effective.format;
         let keys = format
             .path()
             .iter()
@@ -188,15 +190,20 @@ pub(crate) fn effective_entry<'a>(
 }
 
 /// Return the key path to use when adding a new OpenCode entry.
-pub(crate) fn insert_keys(client: McpClient, value: &Value) -> Vec<String> {
+pub(crate) fn insert_keys(
+    client: McpClient,
+    value: &Value,
+    format: Option<crate::agent::opencode_config::Format>,
+) -> Vec<String> {
     if client != McpClient::Opencode {
         return vec!["mcp".into(), "lazydb".into()];
     }
-    if value
-        .get("mcp")
-        .and_then(Value::as_object)
-        .and_then(|mcp| mcp.get("servers"))
-        .is_some()
+    if format == Some(crate::agent::opencode_config::Format::V2)
+        || value
+            .get("mcp")
+            .and_then(Value::as_object)
+            .and_then(|mcp| mcp.get("servers"))
+            .is_some()
     {
         vec!["mcp".into(), "servers".into(), "lazydb".into()]
     } else {
@@ -237,7 +244,11 @@ pub(crate) fn entry<'a>(value: &'a Value, keys: &[String]) -> Result<Option<&'a 
     Ok(Some(node))
 }
 
-pub(crate) fn desired(client: McpClient, config: Option<&Path>) -> Value {
+pub(crate) fn desired_with_options(
+    client: McpClient,
+    config: Option<&Path>,
+    server_bin: Option<&Path>,
+) -> Value {
     let mut args = Vec::<String>::new();
     if let Some(path) = config {
         args.extend(["--config".into(), path.to_string_lossy().into_owned()]);
@@ -251,7 +262,14 @@ pub(crate) fn desired(client: McpClient, config: Option<&Path>) -> Value {
     args.extend(["--write-policy", "deny"].map(str::to_owned));
     match client {
         McpClient::Opencode => {
-            json!({"type":"local", "command": std::iter::once("lazydb".to_owned()).chain(args).collect::<Vec<_>>(), "cwd":"."})
+            let command = std::iter::once(
+                server_bin
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "lazydb".to_owned()),
+            )
+            .chain(args)
+            .collect::<Vec<_>>();
+            json!({"type":"local", "command": command, "cwd":"."})
         }
         McpClient::ClaudeCode => json!({"type":"stdio", "command":"lazydb", "args":args}),
         McpClient::Codex => json!({"command":"lazydb", "args":args}),
@@ -443,9 +461,10 @@ mod tests {
             scope: McpScope::User,
             origin: "test".into(),
         };
-        let desired = desired(
+        let desired = desired_with_options(
             McpClient::Codex,
             Some(Path::new("C:\\Users\\a\"b\\config.toml")),
+            None,
         );
         let result = insert(
             McpClient::Codex,

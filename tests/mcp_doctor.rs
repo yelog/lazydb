@@ -24,6 +24,7 @@ async fn comments_are_not_servers_and_disabled_entries_are_reported() {
             Some(path.clone()),
             false,
             true,
+            None,
         )
         .await
         .unwrap();
@@ -48,6 +49,7 @@ async fn reports_native_opencode_v2_disabled_entries() {
         Some(path),
         false,
         true,
+        None,
     )
     .await
     .unwrap();
@@ -71,6 +73,22 @@ async fn reports_missing_configs_without_database_io() {
     assert!(output.contains("\"status\":\"warning\""));
     assert!(output.contains("missing"));
     assert!(output.contains("database I/O was not performed"));
+}
+
+#[tokio::test]
+async fn reports_explicit_opencode_runtime_when_requested() {
+    let dir = tempdir().unwrap();
+    let output = doctor::run_with_options(
+        vec![McpClient::Opencode],
+        Some(dir.path().to_owned()),
+        None,
+        false,
+        true,
+        Some("definitely-not-an-opencode-binary".into()),
+    )
+    .await
+    .unwrap();
+    assert!(output.contains("OpenCode runtime"), "{output}");
 }
 
 #[tokio::test]

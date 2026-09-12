@@ -7,8 +7,8 @@
 use anyhow::{Result, bail};
 use serde_json::Value;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Format {
+#[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
+pub enum Format {
     V1,
     V2,
 }
@@ -32,13 +32,12 @@ impl Format {
 #[derive(Clone, Debug)]
 pub(crate) struct Candidate {
     pub format: Format,
-    pub value: Value,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct Resolved {
     pub effective: Candidate,
-    pub shadowed: Vec<Candidate>,
+    pub(crate) shadowed: Vec<Candidate>,
 }
 
 pub(crate) fn resolve(root: &Value) -> Result<Option<Resolved>> {
@@ -54,10 +53,7 @@ pub(crate) fn resolve(root: &Value) -> Result<Option<Resolved>> {
             if !value.is_object() {
                 bail!("OpenCode {} LazyDB entry must be an object", format.name());
             }
-            candidates.push(Candidate {
-                format,
-                value: value.clone(),
-            });
+            candidates.push(Candidate { format });
         }
     }
 
@@ -68,10 +64,6 @@ pub(crate) fn resolve(root: &Value) -> Result<Option<Resolved>> {
         effective,
         shadowed: candidates.into_iter().skip(1).collect(),
     }))
-}
-
-pub(crate) fn effective_format(root: &Value) -> Result<Option<Format>> {
-    Ok(resolve(root)?.map(|resolved| resolved.effective.format))
 }
 
 fn value_at<'a>(root: &'a Value, path: &[&str]) -> Result<Option<&'a Value>> {
@@ -109,7 +101,7 @@ mod tests {
         });
         let resolved = resolve(&root).unwrap().unwrap();
         assert_eq!(resolved.effective.format, Format::V2);
-        assert_eq!(resolved.effective.value["disabled"], true);
+        assert_eq!(resolved.effective.format, Format::V2);
     }
 
     #[test]

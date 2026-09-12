@@ -27,7 +27,7 @@ pub async fn run(
     probe: bool,
     json: bool,
 ) -> Result<String> {
-    run_with_options(clients, project, None, probe, json).await
+    run_with_options(clients, project, None, probe, json, None).await
 }
 
 pub async fn run_with_options(
@@ -36,6 +36,7 @@ pub async fn run_with_options(
     client_config: Option<PathBuf>,
     probe: bool,
     json: bool,
+    opencode_bin: Option<PathBuf>,
 ) -> Result<String> {
     let project = project.unwrap_or(std::env::current_dir()?).canonicalize()?;
     let clients = if clients.is_empty() {
@@ -53,6 +54,20 @@ pub async fn run_with_options(
         .map(|client| inspect_client(client, &project, &locations, client_config.as_deref()))
         .collect::<Vec<_>>();
     let mut warnings = vec!["database I/O was not performed".to_owned()];
+    if let Some(program) = opencode_bin {
+        let detected = super::client_runtime::detect(
+            &program.to_string_lossy(),
+            std::time::Duration::from_secs(2),
+        );
+        warnings.push(format!(
+            "OpenCode runtime: {:?}{}",
+            detected.runtime,
+            detected
+                .version
+                .map(|version| format!(" ({version})"))
+                .unwrap_or_default()
+        ));
+    }
     warnings.push("static file inspection only: client startup, project trust, remote/managed settings and CLI overrides are not verified".into());
     if std::env::var_os("OPENCODE_CONFIG_CONTENT").is_some() {
         warnings.push("OPENCODE_CONFIG_CONTENT is set and may override file configuration".into());

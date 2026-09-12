@@ -275,6 +275,10 @@ pub enum McpCommand {
         yes: bool,
         #[arg(long)]
         json: bool,
+        #[arg(long, value_enum, default_value = "auto")]
+        opencode_format: String,
+        #[arg(long)]
+        server_bin: Option<PathBuf>,
     },
     /// Inspect user and project MCP configuration without database I/O.
     Doctor {
@@ -288,6 +292,8 @@ pub enum McpCommand {
         probe: bool,
         #[arg(long)]
         json: bool,
+        #[arg(long)]
+        opencode_bin: Option<PathBuf>,
     },
 }
 

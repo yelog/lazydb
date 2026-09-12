@@ -15,6 +15,8 @@ pub struct SetupOptions {
     pub dry_run: bool,
     pub yes: bool,
     pub json: bool,
+    pub opencode_format: Option<crate::agent::opencode_config::Format>,
+    pub server_bin: Option<PathBuf>,
 }
 
 /// Compatibility entry point for callers that explicitly select a scope.
@@ -36,6 +38,8 @@ pub fn run(
         dry_run,
         yes,
         json,
+        opencode_format: None,
+        server_bin: None,
     })
 }
 
@@ -107,6 +111,8 @@ pub fn run_with_options(mut options: SetupOptions) -> Result<String> {
             &project,
             config.as_deref(),
             &sources,
+            options.opencode_format,
+            options.server_bin.as_deref(),
         ));
     }
     let actionable = plans.iter().any(|p| matches!(p.status, "create" | "add"));
@@ -313,6 +319,8 @@ fn plan_client(
     project: &Path,
     config: Option<&Path>,
     sources: &[Source],
+    opencode_format: Option<crate::agent::opencode_config::Format>,
+    server_bin: Option<&Path>,
 ) -> ClientPlan {
     let mut plan = ClientPlan {
         client: client_name(client).into(),
@@ -341,11 +349,11 @@ fn plan_client(
             });
         let value = cfg::parse(client, text)?;
         let keys = if client == McpClient::Opencode {
-            cfg::insert_keys(client, &value)
+            cfg::insert_keys(client, &value, opencode_format)
         } else {
             cfg::keys(client, &target, project)
         };
-        let desired = cfg::desired(client, config);
+        let desired = cfg::desired_with_options(client, config, server_bin);
         let existing = if client == McpClient::Opencode {
             cfg::effective_entry(client, &value, &target, project)?
         } else {
@@ -456,11 +464,21 @@ mod tests {
             dry_run: true,
             yes: false,
             json: true,
+            opencode_format: None,
+            server_bin: None,
         };
         let target =
             select_target(McpClient::Opencode, &sources, &project, &options, false).unwrap();
         assert_eq!(target.path, user);
-        let plan = plan_client(McpClient::Opencode, target, &project, None, &sources);
+        let plan = plan_client(
+            McpClient::Opencode,
+            target,
+            &project,
+            None,
+            &sources,
+            None,
+            None,
+        );
         assert_eq!(plan.status, "add");
         assert!(!project.join("opencode.json").exists());
         assert_eq!(

@@ -28,6 +28,33 @@ fn parses_setup_options_with_unspecified_scope() {
     ));
 }
 
+#[test]
+fn parses_opencode_format_and_binary_options() {
+    let cli = Cli::try_parse_from([
+        "lazydb",
+        "mcp",
+        "setup",
+        "--client",
+        "opencode",
+        "--opencode-format",
+        "v2",
+        "--server-bin",
+        "/tmp/lazydb custom",
+        "--dry-run",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(Command::Mcp {
+            command: McpCommand::Setup {
+                opencode_format,
+                server_bin: Some(path),
+                ..
+            }
+        }) if opencode_format == "v2" && path.to_string_lossy() == "/tmp/lazydb custom"
+    ));
+}
+
 fn explicit_setup(client: McpClient, path: &std::path::Path, project: &std::path::Path) -> String {
     lazydb::agent::setup::run_with_options(lazydb::agent::setup::SetupOptions {
         clients: vec![client],
@@ -38,6 +65,8 @@ fn explicit_setup(client: McpClient, path: &std::path::Path, project: &std::path
         dry_run: false,
         yes: true,
         json: true,
+        opencode_format: None,
+        server_bin: None,
     })
     .unwrap()
 }
@@ -108,6 +137,8 @@ fn explicit_project_scope_uses_project_directory_without_using_cwd() {
         dry_run: false,
         yes: true,
         json: true,
+        opencode_format: None,
+        server_bin: None,
     });
     assert!(result.is_ok());
     assert!(config.exists());
@@ -154,6 +185,8 @@ fn claude_local_only_updates_current_project_node() {
         dry_run: false,
         yes: true,
         json: true,
+        opencode_format: None,
+        server_bin: None,
     })
     .unwrap();
     assert!(output.contains("added"));
@@ -193,6 +226,8 @@ fn rejects_unsupported_scope_and_multiple_explicit_clients() {
             dry_run: true,
             yes: false,
             json: true,
+            opencode_format: None,
+            server_bin: None,
         })
         .is_err()
     );
