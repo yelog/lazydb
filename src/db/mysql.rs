@@ -1461,7 +1461,7 @@ impl MySqlAdapter {
             metadata.default_expression = OptionalMetadata::Supported(if generated {
                 None
             } else {
-                row.try_get(5).map_err(decode_error)?
+                normalize_default_expression(row.try_get(5).map_err(decode_error)?)
             });
             metadata.identity = OptionalMetadata::Unsupported;
             metadata.auto_increment = OptionalMetadata::Supported(Some(
@@ -3134,6 +3134,16 @@ fn empty_as_none(value: Option<String>) -> Option<String> {
                 .to_owned()
         })
         .filter(|value| !value.is_empty())
+}
+
+fn normalize_default_expression(value: Option<String>) -> Option<String> {
+    value.map(|value| {
+        value
+            .strip_prefix('\'')
+            .and_then(|value| value.strip_suffix('\''))
+            .unwrap_or(&value)
+            .to_owned()
+    })
 }
 
 fn catalog_target_not_found(target: &CatalogTarget) -> DatabaseError {
