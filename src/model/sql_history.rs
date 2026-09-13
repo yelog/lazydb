@@ -45,6 +45,7 @@ pub struct ExecutionHistory {
     pub affected_rows: Option<u64>,
     pub returned_rows: Option<usize>,
     pub requested_at: i64,
+    pub elapsed_millis: Option<u128>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -137,6 +138,7 @@ mod tests {
             affected_rows: None,
             returned_rows: Some(1),
             requested_at: 0,
+            elapsed_millis: None,
         });
         reducer.apply(HistoryEvent::Finished {
             status: HistoryExecutionStatus::Cancelled,

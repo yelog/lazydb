@@ -22,6 +22,7 @@ fn app_with_history(sql: &str) -> App {
             affected_rows: Some(2),
             returned_rows: None,
             requested_at: 0,
+            elapsed_millis: Some(4),
         }],
         ..HistoryTab::default()
     }));

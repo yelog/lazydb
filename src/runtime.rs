@@ -707,6 +707,7 @@ impl Runtime {
                                 crate::model::sql_history::HistoryResultCertainty::Unknown,
                                 None,
                                 None,
+                                None,
                             )
                             .await;
                     });
@@ -2192,6 +2193,7 @@ impl Runtime {
                 affected_rows: None,
                 returned_rows: None,
                 requested_at: chrono::Utc::now().timestamp_millis(),
+                elapsed_millis: None,
             };
             if let Some(recorder) = &recorder {
                 let _ = recorder.start(history).await;
@@ -2229,11 +2231,13 @@ impl Runtime {
                 Ok(outcome) => {
                     if let Some(recorder) = &recorder {
                         let _ = recorder
-                            .finish(
+                            .finish_with_certainty(
                                 execution_id,
                                 crate::model::sql_history::HistoryExecutionStatus::Succeeded,
+                                crate::model::sql_history::HistoryResultCertainty::Confirmed,
                                 None,
                                 Some(outcome.stats.row_count),
+                                Some(outcome.stats.total().as_millis()),
                             )
                             .await;
                     }
@@ -2247,9 +2251,11 @@ impl Runtime {
                 Err(error) => {
                     if let Some(recorder) = &recorder {
                         let _ = recorder
-                            .finish(
+                            .finish_with_certainty(
                                 execution_id,
                                 crate::model::sql_history::HistoryExecutionStatus::Failed,
+                                crate::model::sql_history::HistoryResultCertainty::Confirmed,
+                                None,
                                 None,
                                 None,
                             )
@@ -3124,6 +3130,7 @@ impl Runtime {
                 affected_rows: None,
                 returned_rows: None,
                 requested_at: chrono::Utc::now().timestamp_millis(),
+                elapsed_millis: None,
             };
             if let Some(recorder) = &recorder {
                 let recorder = recorder.clone();
@@ -3155,11 +3162,13 @@ impl Runtime {
                         Ok(Ok(outcome)) => {
                             if let Some(recorder) = &recorder {
                                 let _ = recorder
-                                    .finish(
+                                    .finish_with_certainty(
                                         execution_id,
                                         crate::model::sql_history::HistoryExecutionStatus::Succeeded,
+                                        crate::model::sql_history::HistoryResultCertainty::Confirmed,
                                         None,
                                         Some(outcome.stats.row_count),
+                                        Some(outcome.stats.total().as_millis()),
                                     )
                                     .await;
                             }
@@ -3190,6 +3199,7 @@ impl Runtime {
                                         certainty,
                                         None,
                                         None,
+                                        None,
                                     )
                                     .await;
                             }
@@ -3204,9 +3214,11 @@ impl Runtime {
                         Err(_) => {
                             if let Some(recorder) = &recorder {
                                 let _ = recorder
-                                    .finish(
+                                    .finish_with_certainty(
                                         execution_id,
                                         crate::model::sql_history::HistoryExecutionStatus::Interrupted,
+                                        crate::model::sql_history::HistoryResultCertainty::Unknown,
+                                        None,
                                         None,
                                         None,
                                     )

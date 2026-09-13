@@ -28,6 +28,7 @@ enum HistoryCommand {
         certainty: HistoryResultCertainty,
         affected_rows: Option<u64>,
         returned_rows: Option<usize>,
+        elapsed_millis: Option<u128>,
     },
     ResolveTransaction {
         transaction_id: Uuid,
@@ -64,6 +65,7 @@ impl HistoryRecorder {
                         certainty,
                         affected_rows,
                         returned_rows,
+                        elapsed_millis,
                     } => {
                         if let Err(error) = store
                             .finish(
@@ -72,6 +74,7 @@ impl HistoryRecorder {
                                 certainty,
                                 affected_rows,
                                 returned_rows,
+                                elapsed_millis,
                             )
                             .await
                         {
@@ -126,10 +129,10 @@ impl HistoryRecorder {
         affected_rows: Option<u64>,
         returned_rows: Option<usize>,
     ) -> Result<(), HistoryRecorderError> {
-        self.send(HistoryCommand::Finish {
+        self.finish_with_certainty(
             execution_id,
             status,
-            certainty: if matches!(
+            if matches!(
                 status,
                 HistoryExecutionStatus::Interrupted | HistoryExecutionStatus::TimedOut
             ) {
@@ -139,7 +142,8 @@ impl HistoryRecorder {
             },
             affected_rows,
             returned_rows,
-        })
+            None,
+        )
         .await
     }
 
@@ -150,6 +154,7 @@ impl HistoryRecorder {
         certainty: HistoryResultCertainty,
         affected_rows: Option<u64>,
         returned_rows: Option<usize>,
+        elapsed_millis: Option<u128>,
     ) -> Result<(), HistoryRecorderError> {
         self.send(HistoryCommand::Finish {
             execution_id,
@@ -157,6 +162,7 @@ impl HistoryRecorder {
             certainty,
             affected_rows,
             returned_rows,
+            elapsed_millis,
         })
         .await
     }

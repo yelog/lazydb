@@ -20,6 +20,7 @@ fn execution(id: Uuid) -> ExecutionHistory {
         affected_rows: None,
         returned_rows: None,
         requested_at: 0,
+        elapsed_millis: None,
     }
 }
 

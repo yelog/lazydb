@@ -19,6 +19,7 @@ fn history(id: Uuid, sql: &str) -> ExecutionHistory {
         affected_rows: None,
         returned_rows: None,
         requested_at: 0,
+        elapsed_millis: None,
     }
 }
 
@@ -40,6 +41,7 @@ async fn store_round_trips_full_sql_and_updates_completion_idempotently() {
             HistoryResultCertainty::Confirmed,
             Some(0),
             Some(1),
+            Some(12),
         )
         .await
         .unwrap();
@@ -50,6 +52,7 @@ async fn store_round_trips_full_sql_and_updates_completion_idempotently() {
             HistoryResultCertainty::Confirmed,
             Some(0),
             Some(1),
+            Some(12),
         )
         .await
         .unwrap();
