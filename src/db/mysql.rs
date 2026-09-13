@@ -3125,7 +3125,15 @@ fn checked_u32(value: u64, description: &str) -> Result<u32, DatabaseError> {
 }
 
 fn empty_as_none(value: Option<String>) -> Option<String> {
-    value.filter(|value| !value.is_empty())
+    value
+        .map(|value| {
+            value
+                .strip_prefix('\'')
+                .and_then(|value| value.strip_suffix('\''))
+                .unwrap_or(&value)
+                .to_owned()
+        })
+        .filter(|value| !value.is_empty())
 }
 
 fn catalog_target_not_found(target: &CatalogTarget) -> DatabaseError {

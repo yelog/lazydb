@@ -1721,7 +1721,8 @@ async fn connecting_second_profile_keeps_first_runtime_console_usable() {
             Action::CatalogPageLoaded(_)
             | Action::CatalogPageFailed { .. }
             | Action::DiagnosticDue(_)
-            | Action::CompletionDue(_) => {
+            | Action::CompletionDue(_)
+            | Action::ConnectionSucceeded { .. } => {
                 dispatch(&mut app, &mut runtime, query_finished);
             }
             other => panic!("unexpected action before A query finished: {other:?}"),
