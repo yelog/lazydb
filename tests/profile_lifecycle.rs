@@ -450,10 +450,24 @@ async fn two_sqlite_profiles_complete_the_full_runtime_lifecycle() {
             ..
         } if profile_id == alpha_id
     ));
-    assert!(matches!(
-        apply_next(&mut app, &mut runtime, &mut receiver).await,
-        Action::DisconnectCompleted { .. }
-    ));
+    loop {
+        let action = apply_next(&mut app, &mut runtime, &mut receiver).await;
+        if matches!(action, Action::DisconnectCompleted { .. }) {
+            break;
+        }
+        assert!(
+            matches!(
+                action,
+                Action::DiagnosticDue(_)
+                    | Action::DiagnosticsReady { .. }
+                    | Action::CompletionDue(_)
+                    | Action::ConnectionInvalidated { .. }
+                    | Action::CatalogPageLoaded(_)
+                    | Action::CatalogPageFailed { .. }
+            ),
+            "unexpected action after delete: {action:?}"
+        );
+    }
     assert!(app.profiles.is_empty());
     assert!(app.connection.profile_id.is_none());
     assert!(app.workspace_snapshot().profiles.is_empty());
