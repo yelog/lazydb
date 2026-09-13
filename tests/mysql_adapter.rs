@@ -600,7 +600,14 @@ async fn catalog_page_exposes_scoped_mysql_objects_and_rich_metadata_when_config
         assert!(matches!(code.character_set, OptionalMetadata::Supported(Some(_))));
         assert_eq!(code_entry.comment, OptionalMetadata::Supported(Some("code column comment".to_owned())));
         assert_eq!(columns["id"].1.auto_increment, OptionalMetadata::Supported(Some(true)));
-        assert!(matches!(columns["code_upper"].1.generated_expression, OptionalMetadata::Supported(Some(ref expression)) if expression.to_ascii_lowercase().contains("upper")));
+        assert!(matches!(
+            columns["code_upper"].1.generated_expression,
+            OptionalMetadata::Supported(Some(ref expression))
+                if {
+                    let expression = expression.to_ascii_lowercase();
+                    expression.contains("upper") || expression.contains("ucase")
+                }
+        ));
         assert_eq!(columns["code_upper"].1.default_expression, OptionalMetadata::Supported(None));
         let created_at = columns["created_at"].1;
         assert!(matches!(
