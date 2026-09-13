@@ -1983,12 +1983,16 @@ impl MySqlAdapter {
                     "constraint ordinal",
                 )?,
                 column,
-                referenced_database: (kind == CatalogKind::ForeignKey)
-                    .then(|| row.try_get(8).map_err(decode_error))
-                    .transpose()?,
-                referenced_relation: (kind == CatalogKind::ForeignKey)
-                    .then(|| row.try_get(9).map_err(decode_error))
-                    .transpose()?,
+                referenced_database: if kind == CatalogKind::ForeignKey {
+                    row.try_get::<Option<String>, _>(8).map_err(decode_error)?
+                } else {
+                    None
+                },
+                referenced_relation: if kind == CatalogKind::ForeignKey {
+                    row.try_get::<Option<String>, _>(9).map_err(decode_error)?
+                } else {
+                    None
+                },
                 referenced_column: if kind == CatalogKind::ForeignKey {
                     row.try_get(10).map_err(decode_error)?
                 } else {
