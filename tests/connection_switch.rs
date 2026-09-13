@@ -259,17 +259,23 @@ async fn run_marker_query(
 }
 
 #[test]
-fn pending_switch_keeps_active_identity_and_rejects_new_queries() {
+fn pending_switch_keeps_active_identity_and_allows_its_existing_console() {
     let first = memory_profile("first");
     let second = memory_profile("second");
     let first_id = first.id;
     let second_id = second.id;
     let mut app = App::new(vec![first, second]);
 
-    let first_generation = match app.update(Action::RequestConnect(first_id)).as_slice() {
-        [Command::Connect { generation, .. }] => *generation,
-        commands => panic!("unexpected commands: {commands:?}"),
-    };
+    let first_generation = app
+        .sessions
+        .start_attempt(ExecutionTarget::from_profile(
+            app.profiles
+                .iter()
+                .find(|profile| profile.id == first_id)
+                .unwrap(),
+        ))
+        .unwrap()
+        .generation;
     app.update(Action::ConnectionSucceeded {
         profile_id: first_id,
         generation: first_generation,
@@ -290,8 +296,12 @@ fn pending_switch_keeps_active_identity_and_rejects_new_queries() {
     assert_eq!(app.connection.status, ConnectionStatus::Connecting);
 
     app.update(Action::ReplaceEditor("SELECT 1".into()));
-    assert!(app.update(Action::RunActiveSql).is_empty());
-    assert_eq!(app.active_console().query_status, QueryStatus::Idle);
+    let commands = app.update(Action::RunActiveSql);
+    assert!(
+        matches!(commands.as_slice(), [Command::RunQueryPage { connection, .. }] if *connection == ConnectionIdentity { profile_id: first_id, generation: first_generation }),
+        "{commands:?}"
+    );
+    assert_eq!(app.active_console().query_status, QueryStatus::Running);
 
     app.update(Action::ConnectionFailed {
         profile_id: second_id,
@@ -398,16 +408,7 @@ fn successful_switch_keeps_profile_workspaces_available_together() {
             .any(|command| matches!(command, Command::PersistWorkspace { .. }))
     );
 
-    let first_generation = match app.update(Action::RequestConnect(first_id)).as_slice() {
-        [Command::Connect { generation, .. }] => *generation,
-        commands => panic!("unexpected commands: {commands:?}"),
-    };
-    app.update(Action::ConnectionSucceeded {
-        profile_id: first_id,
-        generation: first_generation,
-        server: server("first-again"),
-        mutation_capabilities: Default::default(),
-    });
+    assert!(app.update(Action::RequestConnect(first_id)).is_empty());
     assert_eq!(app.active_workspace_profile, Some(first_id));
     assert_eq!(app.active_console().id, first_tab);
     assert_eq!(app.active_editor_text().unwrap(), "SELECT first");
@@ -1199,7 +1200,7 @@ fn profile_root_safe_switch_keeps_old_online_while_target_links_then_fails_local
 }
 
 #[test]
-fn profile_root_successful_switch_clears_old_catalog_and_syncs_target() {
+fn opening_second_profile_preserves_first_connection_state() {
     let first = memory_profile("first");
     let second = memory_profile("second");
     let first_id = first.id;
@@ -1224,6 +1225,26 @@ fn profile_root_successful_switch_clears_old_catalog_and_syncs_target() {
         .normalized
         .expanded
         .insert(ExplorerNodeId::Profile(first_id));
+    let first_database = CatalogEntry::database(
+        CatalogId::new(first_id, CatalogKind::Database, ["first_db"]),
+        QualifiedName {
+            database: Some("first_db".into()),
+            schema: None,
+            object: "first_db".into(),
+        },
+        "database",
+        OptionalMetadata::Supported(None),
+        true,
+    )
+    .unwrap();
+    app.explorer
+        .normalized
+        .profiles
+        .get_mut(&first_id)
+        .unwrap()
+        .catalog
+        .insert(first_database)
+        .unwrap();
 
     let second_generation = match app
         .update(Action::RequestProfileConnect {
@@ -1243,18 +1264,23 @@ fn profile_root_successful_switch_clears_old_catalog_and_syncs_target() {
 
     assert_eq!(
         app.explorer.normalized.profiles[&first_id].status,
-        ExplorerConnectionStatus::Offline
+        ExplorerConnectionStatus::Online
+    );
+    assert!(
+        app.explorer
+            .normalized
+            .expanded
+            .contains(&ExplorerNodeId::Profile(first_id))
     );
     assert!(
         app.explorer.normalized.profiles[&first_id]
             .catalog
-            .is_empty()
-    );
-    assert!(
-        !app.explorer
-            .normalized
-            .expanded
-            .contains(&ExplorerNodeId::Profile(first_id))
+            .get(&CatalogId::new(
+                first_id,
+                CatalogKind::Database,
+                ["first_db"]
+            ))
+            .is_some()
     );
     assert_eq!(
         app.explorer.normalized.profiles[&second_id].status,
@@ -1263,17 +1289,194 @@ fn profile_root_successful_switch_clears_old_catalog_and_syncs_target() {
 }
 
 #[test]
-fn installed_connection_success_reconciles_without_clearing_a_newer_attempt() {
+fn late_success_for_an_older_connect_attempt_does_not_steal_selected_connection() {
+    let first = memory_profile("first");
+    let second = memory_profile("second");
+    let first_id = first.id;
+    let second_id = second.id;
+    let mut app = App::new(vec![first, second]);
+    let first_generation = match app.update(Action::RequestConnect(first_id)).as_slice() {
+        [Command::Connect { generation, .. }] => *generation,
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+    let second_generation = match app.update(Action::RequestConnect(second_id)).as_slice() {
+        [Command::Connect { generation, .. }] => *generation,
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+
+    app.update(Action::ConnectionSucceeded {
+        profile_id: second_id,
+        generation: second_generation,
+        server: server("second"),
+        mutation_capabilities: Default::default(),
+    });
+    app.update(Action::ConnectionSucceeded {
+        profile_id: first_id,
+        generation: first_generation,
+        server: server("first"),
+        mutation_capabilities: Default::default(),
+    });
+
+    assert_eq!(app.connection.profile_id, Some(second_id));
+    assert_eq!(app.connection.generation, second_generation);
+    assert_eq!(
+        app.sessions
+            .get_by_identity(ConnectionIdentity {
+                profile_id: first_id,
+                generation: first_generation,
+            })
+            .map(|session| session.status.clone()),
+        Some(lazydb::model::session::SessionStatus::Connected)
+    );
+    assert_eq!(
+        app.sessions
+            .get_by_identity(ConnectionIdentity {
+                profile_id: second_id,
+                generation: second_generation,
+            })
+            .map(|session| session.status.clone()),
+        Some(lazydb::model::session::SessionStatus::Connected)
+    );
+}
+
+#[test]
+fn second_profile_connection_does_not_clear_first_catalog_entries() {
     let first = memory_profile("first");
     let second = memory_profile("second");
     let first_id = first.id;
     let second_id = second.id;
     let mut app = App::new(vec![first, second]);
 
-    let old_generation = match app.update(Action::RequestConnect(first_id)).as_slice() {
+    let first_generation = match app
+        .update(Action::RequestProfileConnect {
+            profile_id: first_id,
+        })
+        .as_slice()
+    {
         [Command::Connect { generation, .. }] => *generation,
         commands => panic!("unexpected commands: {commands:?}"),
     };
+    app.update(Action::ConnectionSucceeded {
+        profile_id: first_id,
+        generation: first_generation,
+        server: server("first"),
+        mutation_capabilities: Default::default(),
+    });
+    let first_entry = CatalogEntry::database(
+        CatalogId::new(first_id, CatalogKind::Database, ["first_db"]),
+        QualifiedName {
+            database: Some("first_db".into()),
+            schema: None,
+            object: "first_db".into(),
+        },
+        "database",
+        OptionalMetadata::Supported(None),
+        true,
+    )
+    .unwrap();
+    app.explorer
+        .normalized
+        .profiles
+        .get_mut(&first_id)
+        .unwrap()
+        .catalog
+        .insert(first_entry)
+        .unwrap();
+
+    let second_generation = match app
+        .update(Action::RequestProfileConnect {
+            profile_id: second_id,
+        })
+        .as_slice()
+    {
+        [Command::Connect { generation, .. }] => *generation,
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+    app.update(Action::ConnectionSucceeded {
+        profile_id: second_id,
+        generation: second_generation,
+        server: server("second"),
+        mutation_capabilities: Default::default(),
+    });
+
+    assert!(
+        app.explorer.normalized.profiles[&first_id]
+            .catalog
+            .get(&CatalogId::new(
+                first_id,
+                CatalogKind::Database,
+                ["first_db"]
+            ))
+            .is_some()
+    );
+}
+
+#[test]
+fn console_query_uses_its_session_when_another_profile_is_globally_active() {
+    let first = memory_profile("first");
+    let second = memory_profile("second");
+    let first_id = first.id;
+    let second_id = second.id;
+    let first_target = ExecutionTarget::from_profile(&first);
+    let mut app = App::new(vec![first, second]);
+
+    let first_generation = match app.update(Action::RequestConnect(first_id)).as_slice() {
+        [Command::Connect { generation, .. }] => *generation,
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+    app.update(Action::ConnectionSucceeded {
+        profile_id: first_id,
+        generation: first_generation,
+        server: server("first"),
+        mutation_capabilities: Default::default(),
+    });
+    let first_identity = ConnectionIdentity {
+        profile_id: first_id,
+        generation: first_generation,
+    };
+
+    let second_generation = match app.update(Action::RequestConnect(second_id)).as_slice() {
+        [Command::Connect { generation, .. }] => *generation,
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+    app.update(Action::ConnectionSucceeded {
+        profile_id: second_id,
+        generation: second_generation,
+        server: server("second"),
+        mutation_capabilities: Default::default(),
+    });
+    assert_eq!(app.connection.profile_id, Some(second_id));
+
+    app.active_console_mut().execution_target = Some(first_target.clone());
+    app.active_console_mut().execution_connection = Some(first_identity);
+    app.update(Action::ReplaceEditor("SELECT 1".into()));
+    let commands = app.update(Action::RunActiveSql);
+
+    assert!(matches!(
+        commands.as_slice(),
+        [Command::RunQueryPage { connection, target, .. }]
+            if *connection == first_identity && target == &first_target
+    ));
+}
+
+#[test]
+fn connection_success_reconciles_without_clearing_a_newer_attempt() {
+    let first = memory_profile("first");
+    let second = memory_profile("second");
+    let first_id = first.id;
+    let second_id = second.id;
+    let mut app = App::new(vec![first, second]);
+
+    let old_generation = app
+        .sessions
+        .start_attempt(ExecutionTarget::from_profile(
+            app.profiles
+                .iter()
+                .find(|profile| profile.id == first_id)
+                .unwrap(),
+        ))
+        .unwrap()
+        .generation;
     let current_generation = match app.update(Action::RequestConnect(second_id)).as_slice() {
         [Command::Connect { generation, .. }] => *generation,
         commands => panic!("unexpected commands: {commands:?}"),
@@ -1290,11 +1493,11 @@ fn installed_connection_success_reconciles_without_clearing_a_newer_attempt() {
         generation: old_generation,
         message: "stale".into(),
     });
-    assert_eq!(app.connection.profile_id, Some(first_id));
-    assert_eq!(app.connection.generation, old_generation);
+    assert_eq!(app.connection.profile_id, None);
+    assert_eq!(app.connection.generation, 0);
     assert_eq!(app.connection.pending_profile_id, Some(second_id));
     assert_eq!(app.connection.pending_generation, Some(current_generation));
-    assert_eq!(app.connection.server, Some(server("stale")));
+    assert_eq!(app.connection.server, None);
     assert_eq!(app.connection.status, ConnectionStatus::Connecting);
 
     app.update(Action::ConnectionFailed {
@@ -1302,9 +1505,10 @@ fn installed_connection_success_reconciles_without_clearing_a_newer_attempt() {
         generation: current_generation,
         message: "unreachable".into(),
     });
-    assert_eq!(app.connection.profile_id, Some(first_id));
+    assert_eq!(app.connection.profile_id, None);
+    assert_eq!(app.connection.generation, 0);
     assert!(app.connection.pending_profile_id.is_none());
-    assert_eq!(app.connection.status, ConnectionStatus::Connected);
+    assert_eq!(app.connection.status, ConnectionStatus::Failed);
 }
 
 #[test]
@@ -1477,7 +1681,7 @@ fn active_invalidation_caches_and_hides_workspace_but_stale_invalidation_is_igno
 }
 
 #[tokio::test]
-async fn successful_switch_installs_the_new_database_and_rejects_stale_commands() {
+async fn connecting_second_profile_keeps_first_runtime_console_usable() {
     let temp = TempDir::new().unwrap();
     let first = file_profile(&temp.path().join("first.db"), "first", "alpha").await;
     let second = file_profile(&temp.path().join("second.db"), "second", "beta").await;
@@ -1502,7 +1706,14 @@ async fn successful_switch_installs_the_new_database_and_rejects_stale_commands(
     assert!(matches!(commands.as_slice(), [Command::Connect { .. }]));
     assert_eq!(app.connection.profile_id, Some(first_id));
     assert_eq!(app.connection.pending_profile_id, Some(second_id));
-    assert!(dispatch(&mut app, &mut runtime, Action::RunActiveSql).is_empty());
+    let commands = dispatch(&mut app, &mut runtime, Action::RunActiveSql);
+    assert!(
+        matches!(commands.as_slice(), [Command::RunQueryPage { connection, .. }] if *connection == first_identity),
+        "{commands:?}"
+    );
+    let query_finished = next_action(&mut receiver).await;
+    assert!(matches!(query_finished, Action::QueryPageFinished { .. }));
+    dispatch(&mut app, &mut runtime, query_finished);
 
     let connected = next_action(&mut receiver).await;
     assert!(matches!(
@@ -1592,11 +1803,25 @@ async fn late_disconnect_cannot_close_a_new_generation_of_the_same_profile() {
     let mut app = App::new(vec![profile]);
 
     let old = connect(&mut app, &mut runtime, &mut receiver, profile_id).await;
-    let commands = dispatch(&mut app, &mut runtime, Action::RequestConnect(profile_id));
-    let new_generation = match commands.as_slice() {
-        [Command::Connect { generation, .. }] => *generation,
-        commands => panic!("unexpected commands: {commands:?}"),
-    };
+    let new_generation = old.generation + 1;
+    let target = ExecutionTarget::from_profile(
+        app.profiles
+            .iter()
+            .find(|profile| profile.id == profile_id)
+            .unwrap(),
+    );
+    app.sessions.register_attempt(
+        target.clone(),
+        ConnectionIdentity {
+            profile_id,
+            generation: new_generation,
+        },
+    );
+    runtime.dispatch(Command::Connect {
+        profile_id,
+        generation: new_generation,
+        target,
+    });
     let connected = next_connection_result(&mut app, &mut runtime, &mut receiver, profile_id).await;
     assert!(matches!(
         connected,
@@ -1613,8 +1838,18 @@ async fn late_disconnect_cannot_close_a_new_generation_of_the_same_profile() {
         app.connection.active_identity(),
         Some(ConnectionIdentity {
             profile_id,
-            generation: new_generation,
+            generation: old.generation,
         })
+    );
+    assert_eq!(
+        app.sessions
+            .get_by_identity(ConnectionIdentity {
+                profile_id,
+                generation: new_generation
+            })
+            .unwrap()
+            .status,
+        lazydb::model::session::SessionStatus::Connected
     );
     assert_eq!(app.connection.status, ConnectionStatus::Connected);
 
@@ -1656,7 +1891,7 @@ fn catalog_request(connection: ConnectionIdentity) -> CatalogRequest {
 }
 
 #[tokio::test]
-async fn runtime_rejects_a_reused_connection_generation() {
+async fn runtime_accepts_same_generation_for_independent_profiles() {
     let temp = TempDir::new().unwrap();
     let first = file_profile(&temp.path().join("first.db"), "first", "alpha").await;
     let second = file_profile(&temp.path().join("second.db"), "second", "beta").await;
@@ -1678,11 +1913,14 @@ async fn runtime_rejects_a_reused_connection_generation() {
         generation: first_identity.generation,
         target: second_target,
     });
-    assert!(
-        timeout(Duration::from_millis(100), receiver.recv())
-            .await
-            .is_err()
-    );
+    assert!(matches!(
+        next_action(&mut receiver).await,
+        Action::ConnectionSucceeded {
+            profile_id: connected_id,
+            generation,
+            ..
+        } if connected_id == second_id && generation == first_identity.generation
+    ));
     assert_eq!(
         run_marker_query(&mut app, &mut runtime, &mut receiver).await,
         "alpha"

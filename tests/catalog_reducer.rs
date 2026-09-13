@@ -698,6 +698,41 @@ fn newer_request_wins_and_every_wrong_request_dimension_is_ignored() {
 }
 
 #[test]
+fn catalog_requests_route_to_selected_profile_session_not_global_connection() {
+    let (mut app, first) = connected_app();
+    let first_request = initial_request(&mut app, &first);
+    app.update(Action::CatalogPageLoaded(page(
+        &first_request,
+        vec![database(first.id, "first_db")],
+        None,
+    )));
+    let mut second = import_connection_url(":memory:", Some("second"))
+        .unwrap()
+        .profile;
+    second.catalog_scope.databases = lazydb::profile::CatalogSelection::All;
+    app.profiles.push(second.clone());
+    app.explorer.normalized.add_profile(second.id);
+
+    let second_generation = match app.update(Action::RequestConnect(second.id)).as_slice() {
+        [Command::Connect { generation, .. }] => *generation,
+        commands => panic!("unexpected commands: {commands:?}"),
+    };
+    app.update(Action::ConnectionSucceeded {
+        profile_id: second.id,
+        generation: second_generation,
+        server: server(),
+        mutation_capabilities: Default::default(),
+    });
+
+    app.explorer.normalized.selected = Some(ExplorerNodeId::Profile(first.id));
+    let commands = app.update(Action::RefreshCatalog);
+    assert!(matches!(
+        commands.as_slice(),
+        [Command::LoadCatalogPage(request)] if request.key.connection.profile_id == first.id
+    ));
+}
+
+#[test]
 fn refresh_failure_keeps_old_data_and_first_failure_is_target_local() {
     let (mut app, profile) = connected_app();
     let initial = initial_request(&mut app, &profile);

@@ -296,14 +296,24 @@ T01 基线与契约
 
 ## 7. 交付检查点
 
-- **M1（T01–T04）：** 多目标连接状态与底层资源一致，乱序连接正确。
-- **M2（T05–T06）：** 原始 Explorer 问题完整修复，目录和缓存均隔离。
-- **M3（T07–T09）：** 查询、编辑、事务与生命周期完成隔离。
-- **M4（T10–T11）：** 遗留单连接逻辑收尾，UI、持久化、文档和完整验收完成。
+- **M1（T01–T04）：** 完成。多目标连接状态与底层资源一致，乱序连接正确。
+- **M2（T05–T06）：** 完成。Explorer 目录请求和连接缓存按 profile/session 隔离。
+- **M3（T07–T09）：** 完成。查询等待、Relation/Dashboard 回调、profile 断开和事务身份隔离已覆盖。
+- **M4（T10–T11）：** 完成自动化验收和文档；真实外部数据库驱动并发运行需在配置了相应服务的环境另行验收。
 
 每个检查点记录变更文件、测试命令与结果、未验证驱动环境。需要提交时按检查点或更小的可独立通过单元组织提交，不将仍依赖旧全局连接的中间状态描述为“完整支持多连接”。
 
 ## 8. 实施记录
 
 - 计划创建：完成代码分析；仅已运行原有目录清理测试，结果 PASS。
-- T01–T11：待实施。
+- T01：完成。将旧“切换时清空 A 目录”测试替换为保留状态测试；先观察到 `Offline != Online` 的预期失败，再移除 B 成功时清理旧 profile 的逻辑。复核：新测试 PASS，`cargo test --test connection_switch` 31/31 PASS，`git diff --check` PASS。目录数据断言也已加入。
+- T02：完成。新增 `src/model/session.rs`，在线会话与连接 attempt 分开存储；支持按目标 single-flight、reconnect 失败保留旧在线会话、identity retirement tombstone、profile 范围枚举。
+- T03：完成。attempt 的最新判断改为按完整 `ExecutionTarget` 隔离；同目标新 generation 会取消旧 attempt；安装连接时只替换同目标旧资源，并按旧 identity 定向清理缓存。连接提前返回路径补齐 attempt finish。复核：runtime connections 4/4 PASS，connection_switch 31/31 PASS，`cargo check`、fmt 和 diff check PASS。
+- T04：完成 session request/result 路由；新请求复用目标已连接 session；后请求的 pending 优先保留全局连接 projection，旧 success 不抢占；旧 disconnect 不关闭/清除同 profile 新 generation。
+- T05：完成 profile→catalog session 绑定，catalog callback 与搜索结果按 identity/request/epoch 校验，连接成功不再清空已加载目录。
+- T06：完成基础缓存隔离。连接安装不再清空全局关系/目标缓存；同目标替换时只清理被替换 identity 的 known relations、targets 和 latest catalog requests。复核：catalog_reducer 36/36、connection_switch 32/32、sql_completion 156/156、sql_diagnostics 5/5 PASS。
+- T07：完成。pending execution 按 Console UUID 存储，成功后按目标、文档 revision、事务 generation 校验并分别 dispatch；已连接 Console 可在另一目标连接 pending 时继续执行；关闭 Console 只移除自己的等待项。
+- T08：完成。Relation、Dashboard、derived query、catalog search、owner/事务回调以对象绑定 identity 校验，不要求等于全局 active identity。
+- T09：完成。断开按 identity 清理匹配资源、事务、搜索任务和缓存；profile exit check 限定 profile。修复 Runtime profile 顺序重复、ProfileStore 已知 profile 重复追加/空集合保存，并保留未知 profile 表与未来字段。
+- T10：完成兼容投影收尾。Explorer 不再在 session 安装时清空目录，Disconnected state 检查 SessionRegistry；`ConnectionState` 仅作当前选中连接投影，异步结果以 session identity 为准。
+- T11：完成。全量 `cargo test --lib --tests` 通过；测试框架报告的 ignored 项为显式要求真实数据库或 release 性能环境的用例。`cargo clippy --all-targets -- -D warnings`、`cargo check --no-default-features`、`cargo fmt --check`、`git diff --check` 全部通过。SQLite A/B Runtime 生命周期有集成覆盖；真实 PostgreSQL/MySQL/Oracle 并发目标切换未在本环境运行，仍需用户具备对应服务器后验收。
