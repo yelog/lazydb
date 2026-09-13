@@ -1931,7 +1931,7 @@ impl MySqlAdapter {
              CASE WHEN tc.constraint_type='FOREIGN KEY' THEN kcu.referenced_table_name END, \
              CASE WHEN tc.constraint_type='FOREIGN KEY' THEN kcu.referenced_column_name END, \
              CAST(CASE WHEN tc.constraint_type='FOREIGN KEY' \
-                       THEN kcu.position_in_unique_constraint END AS UNSIGNED) \
+                       THEN kcu.position_in_unique_constraint END AS SIGNED) \
              FROM information_schema.table_constraints tc \
              JOIN information_schema.key_column_usage kcu \
                ON BINARY kcu.constraint_catalog=BINARY tc.constraint_catalog \
@@ -2001,9 +2001,17 @@ impl MySqlAdapter {
                     None
                 },
                 referenced_ordinal: if kind == CatalogKind::ForeignKey {
-                    row.try_get::<Option<u64>, _>(11)
+                    row.try_get::<Option<i64>, _>(11)
                         .map_err(decode_error)?
-                        .map(|value| checked_u32(value, "referenced constraint ordinal"))
+                        .map(|value| {
+                            u64::try_from(value)
+                                .map_err(|_| {
+                                    catalog_internal("invalid MySQL referenced constraint ordinal")
+                                })
+                                .and_then(|value| {
+                                    checked_u32(value, "referenced constraint ordinal")
+                                })
+                        })
                         .transpose()?
                 } else {
                     None
