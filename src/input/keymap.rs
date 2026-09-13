@@ -1565,6 +1565,17 @@ impl Keymap {
         if let Some(action) = map_configured_navigation(event, app, &self.bindings) {
             return Some(action);
         }
+        if matches!(
+            app.tabs.get(app.active_tab),
+            Some(crate::model::tab::WorkspaceTab::History(_))
+        ) && app.focus == Focus::Results
+        {
+            return match event.code {
+                KeyCode::Char('y') => Some(Action::SqlHistoryCopy),
+                KeyCode::Enter => Some(Action::SqlHistoryOpenDetail),
+                _ => map_results(event.code, app),
+            };
+        }
         match app.focus {
             Focus::Explorer => map_explorer(event.code, app),
             Focus::Editor => None,
@@ -2321,6 +2332,7 @@ fn map_pending(
 fn configured_command_action(command: &str, app: &App) -> Option<Action> {
     match command {
         "open-dashboard" if app.dashboard_supported() => Some(Action::OpenDashboard),
+        "open-sql-history" => Some(Action::OpenSqlHistory),
         "open-explorer" => Some(Action::Focus(Focus::Explorer)),
         "open-editors" => Some(Action::OpenSqlEditorList),
         "run-leader-statement" => Some(Action::RunActiveSql),

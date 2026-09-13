@@ -3411,6 +3411,43 @@ impl App {
                     self.persist_workspace_command(),
                 ]
             }
+            Action::SqlHistoryOpenDetail => {
+                let Some(WorkspaceTab::History(tab)) = self.tabs.get(self.active_tab) else {
+                    return Vec::new();
+                };
+                let Some(id) = tab.selected_execution else {
+                    return Vec::new();
+                };
+                let Some(item) = tab.items.iter().find(|item| item.execution_id == id) else {
+                    return Vec::new();
+                };
+                self.update(Action::OpenTextDetail(
+                    crate::model::text_detail::TextDetailRequest::new(
+                        "SQL History",
+                        Uuid::nil(),
+                        0,
+                        &item.sql,
+                        item.sql.clone(),
+                        None,
+                    ),
+                ))
+            }
+            Action::SqlHistoryCopy => {
+                let Some(WorkspaceTab::History(tab)) = self.tabs.get(self.active_tab) else {
+                    return Vec::new();
+                };
+                let Some(id) = tab.selected_execution else {
+                    return Vec::new();
+                };
+                let Some(item) = tab.items.iter().find(|item| item.execution_id == id) else {
+                    return Vec::new();
+                };
+                vec![Command::WriteClipboard(ClipboardPayload {
+                    description: "SQL History: complete SQL".into(),
+                    text: item.sql.clone(),
+                    sensitive: false,
+                })]
+            }
             Action::DashboardSetPage(page) => {
                 let Some(WorkspaceTab::Dashboard(tab)) = self.tabs.get_mut(self.active_tab) else {
                     return Vec::new();

@@ -39,6 +39,8 @@ pub enum Action {
     NewConsole,
     OpenDashboard,
     OpenSqlHistory,
+    SqlHistoryOpenDetail,
+    SqlHistoryCopy,
     DashboardSetPage(crate::model::dashboard::DashboardPage),
     DashboardRefresh,
     DashboardTogglePolling,
