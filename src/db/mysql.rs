@@ -1923,9 +1923,9 @@ impl MySqlAdapter {
     ) -> Result<Vec<MySqlConstraintInfo>, DatabaseError> {
         let rows = sqlx::query(
             "SELECT tc.constraint_catalog, tc.constraint_schema, tc.table_schema, tc.table_name, \
-             tc.constraint_name, tc.constraint_type, kcu.ordinal_position, \
+              tc.constraint_name, tc.constraint_type, CAST(kcu.ordinal_position AS UNSIGNED), \
              kcu.column_name, kcu.referenced_table_schema, kcu.referenced_table_name, \
-             kcu.referenced_column_name, kcu.position_in_unique_constraint \
+              kcu.referenced_column_name, CAST(kcu.position_in_unique_constraint AS UNSIGNED) \
              FROM information_schema.table_constraints tc \
              JOIN information_schema.key_column_usage kcu \
                ON BINARY kcu.constraint_catalog=BINARY tc.constraint_catalog \
