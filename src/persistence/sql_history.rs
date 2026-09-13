@@ -73,8 +73,9 @@ impl HistoryStore {
         sqlx::query(
             "INSERT INTO history_executions
              (execution_id, operation_id, transaction_id, requested_at, sql, status,
-              certainty, transaction_outcome, affected_rows, returned_rows, elapsed_millis)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              certainty, transaction_outcome, affected_rows, returned_rows, elapsed_millis,
+              profile_id, database_name, schema_name)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(history.execution_id.to_string())
         .bind(history.operation_id.to_string())
@@ -87,6 +88,9 @@ impl HistoryStore {
         .bind(history.affected_rows.map(|value| value as i64))
         .bind(history.returned_rows.map(|value| value as i64))
         .bind(history.elapsed_millis.map(|value| value as i64))
+        .bind(history.profile_id.map(|value| value.to_string()))
+        .bind(history.database)
+        .bind(history.schema)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -147,7 +151,8 @@ impl HistoryStore {
     ) -> Result<Option<ExecutionHistory>, HistoryStoreError> {
         let row = sqlx::query(
             "SELECT execution_id, operation_id, transaction_id, sql, status, certainty,
-                    transaction_outcome, affected_rows, returned_rows, requested_at, elapsed_millis
+                    transaction_outcome, affected_rows, returned_rows, requested_at, elapsed_millis,
+                    profile_id, database_name, schema_name
              FROM history_executions WHERE execution_id = ?",
         )
         .bind(execution_id.to_string())
@@ -165,7 +170,8 @@ impl HistoryStore {
             (Some(cursor), Some(search)) => {
                 sqlx::query(
                     "SELECT execution_id, operation_id, transaction_id, sql, status, certainty,
-                        transaction_outcome, affected_rows, returned_rows, requested_at, elapsed_millis
+                        transaction_outcome, affected_rows, returned_rows, requested_at, elapsed_millis,
+                        profile_id, database_name, schema_name
                  FROM history_executions
                  WHERE sql LIKE ? AND (requested_at < ? OR (requested_at = ? AND execution_id < ?))
                  ORDER BY requested_at DESC, execution_id DESC LIMIT ?",
@@ -184,7 +190,8 @@ impl HistoryStore {
             (Some(cursor), None) => {
                 sqlx::query(
                     "SELECT execution_id, operation_id, transaction_id, sql, status, certainty,
-                        transaction_outcome, affected_rows, returned_rows, requested_at, elapsed_millis
+                        transaction_outcome, affected_rows, returned_rows, requested_at, elapsed_millis,
+                        profile_id, database_name, schema_name
                  FROM history_executions
                  WHERE requested_at < ? OR (requested_at = ? AND execution_id < ?)
                  ORDER BY requested_at DESC, execution_id DESC LIMIT ?",
@@ -199,7 +206,8 @@ impl HistoryStore {
             (None, Some(search)) => {
                 sqlx::query(
                     "SELECT execution_id, operation_id, transaction_id, sql, status, certainty,
-                        transaction_outcome, affected_rows, returned_rows, requested_at, elapsed_millis
+                        transaction_outcome, affected_rows, returned_rows, requested_at, elapsed_millis,
+                        profile_id, database_name, schema_name
                  FROM history_executions WHERE sql LIKE ?
                  ORDER BY requested_at DESC, execution_id DESC LIMIT ?",
                 )
@@ -214,7 +222,8 @@ impl HistoryStore {
             (None, None) => {
                 sqlx::query(
                     "SELECT execution_id, operation_id, transaction_id, sql, status, certainty,
-                        transaction_outcome, affected_rows, returned_rows, requested_at, elapsed_millis
+                        transaction_outcome, affected_rows, returned_rows, requested_at, elapsed_millis,
+                        profile_id, database_name, schema_name
                  FROM history_executions ORDER BY requested_at DESC, execution_id DESC LIMIT ?",
                 )
                 .bind(limit)
@@ -276,6 +285,12 @@ fn row_to_history(row: sqlx::sqlite::SqliteRow) -> Result<ExecutionHistory, Hist
         elapsed_millis: row
             .get::<Option<i64>, _>("elapsed_millis")
             .map(|value| value as u128),
+        profile_id: row
+            .try_get::<Option<String>, _>("profile_id")?
+            .map(parse_id)
+            .transpose()?,
+        database: row.try_get("database_name")?,
+        schema: row.try_get("schema_name")?,
     })
 }
 

@@ -8,7 +8,11 @@ CREATE TABLE IF NOT EXISTS history_executions (
     certainty TEXT NOT NULL,
     transaction_outcome TEXT NOT NULL,
     affected_rows INTEGER,
-    returned_rows INTEGER
+    returned_rows INTEGER,
+    elapsed_millis INTEGER,
+    profile_id TEXT,
+    database_name TEXT,
+    schema_name TEXT
 );
 
 CREATE INDEX IF NOT EXISTS history_executions_requested_at

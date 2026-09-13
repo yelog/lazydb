@@ -23,6 +23,9 @@ fn app_with_history(sql: &str) -> App {
             returned_rows: None,
             requested_at: 0,
             elapsed_millis: Some(4),
+            profile_id: None,
+            database: None,
+            schema: None,
         }],
         ..HistoryTab::default()
     }));

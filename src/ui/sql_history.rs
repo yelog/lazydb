@@ -24,13 +24,14 @@ pub(crate) fn render(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme)
                     .affected_rows
                     .map_or_else(|| "—".into(), |rows| rows.to_string());
                 Line::from(format!(
-                    "{}  {:<8} {:<10} {:<8} {:<8} {}",
+                    "{}  {:<8} {:<10} {:<8} {:<8} {:<16} {}",
                     format_timestamp(item.requested_at),
                     item.elapsed_millis
                         .map_or_else(|| "—".into(), |value| format!("{value} ms")),
                     format_status(item.status),
                     format_transaction(item.transaction_outcome),
                     rows,
+                    item.database.as_deref().unwrap_or("—"),
                     item.sql.lines().next().unwrap_or_default()
                 ))
             })

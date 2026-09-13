@@ -2194,6 +2194,9 @@ impl Runtime {
                 returned_rows: None,
                 requested_at: chrono::Utc::now().timestamp_millis(),
                 elapsed_millis: None,
+                profile_id: Some(target.profile_id),
+                database: Some(target.database.clone()),
+                schema: target.schema.clone(),
             };
             if let Some(recorder) = &recorder {
                 let _ = recorder.start(history).await;
@@ -3106,6 +3109,7 @@ impl Runtime {
         let (reply, result) = tokio::sync::oneshot::channel();
         let (cancel, cancel_receiver) = tokio::sync::oneshot::channel();
         let history_sql = sql.clone();
+        let history_target = target.clone();
         self.ensure_manual_worker(
             connection,
             target,
@@ -3131,6 +3135,9 @@ impl Runtime {
                 returned_rows: None,
                 requested_at: chrono::Utc::now().timestamp_millis(),
                 elapsed_millis: None,
+                profile_id: Some(history_target.profile_id),
+                database: Some(history_target.database.clone()),
+                schema: history_target.schema.clone(),
             };
             if let Some(recorder) = &recorder {
                 let recorder = recorder.clone();

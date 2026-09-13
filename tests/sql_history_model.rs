@@ -17,6 +17,9 @@ fn execution() -> ExecutionHistory {
         returned_rows: None,
         requested_at: 0,
         elapsed_millis: None,
+        profile_id: None,
+        database: None,
+        schema: None,
     }
 }
 

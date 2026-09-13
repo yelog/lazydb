@@ -20,6 +20,9 @@ fn history(id: Uuid, sql: &str) -> ExecutionHistory {
         returned_rows: None,
         requested_at: 0,
         elapsed_millis: None,
+        profile_id: None,
+        database: None,
+        schema: None,
     }
 }
 
@@ -62,6 +65,7 @@ async fn store_round_trips_full_sql_and_updates_completion_idempotently() {
     assert_eq!(detail.status, HistoryExecutionStatus::Succeeded);
     assert_eq!(detail.affected_rows, Some(0));
     assert_eq!(detail.returned_rows, Some(1));
+    assert_eq!(detail.database, None);
 }
 
 #[tokio::test]
