@@ -147,7 +147,9 @@ async fn opening_an_older_history_schema_adds_new_summary_columns() {
 #[tokio::test]
 async fn page_filters_by_status_transaction_outcome_and_database() {
     let temp = TempDir::new().unwrap();
-    let store = HistoryStore::open(temp.path().join("history.sqlite3")).await.unwrap();
+    let store = HistoryStore::open(temp.path().join("history.sqlite3"))
+        .await
+        .unwrap();
     let mut success = history(Uuid::new_v4(), "SELECT success");
     success.status = HistoryExecutionStatus::Succeeded;
     success.transaction_outcome = HistoryTransactionOutcome::Committed;

@@ -3405,10 +3405,26 @@ impl App {
                         request: crate::persistence::sql_history::HistoryPageRequest {
                             limit: 100,
                             cursor: None,
-                            search: None,
-                            status: None,
-                            transaction_outcome: None,
-                            database: None,
+                            search: self.tabs.get(self.active_tab).and_then(|tab| match tab {
+                                WorkspaceTab::History(tab) if !tab.search.is_empty() => {
+                                    Some(tab.search.clone())
+                                }
+                                _ => None,
+                            }),
+                            status: self.tabs.get(self.active_tab).and_then(|tab| match tab {
+                                WorkspaceTab::History(tab) => tab.status_filter,
+                                _ => None,
+                            }),
+                            transaction_outcome: self.tabs.get(self.active_tab).and_then(|tab| {
+                                match tab {
+                                    WorkspaceTab::History(tab) => tab.transaction_filter,
+                                    _ => None,
+                                }
+                            }),
+                            database: self.tabs.get(self.active_tab).and_then(|tab| match tab {
+                                WorkspaceTab::History(tab) => tab.database_filter.clone(),
+                                _ => None,
+                            }),
                         },
                     },
                     self.persist_workspace_command(),
@@ -3456,6 +3472,31 @@ impl App {
                     if let Some(item) = tab.items.get(index) {
                         tab.selected_execution = Some(item.execution_id);
                     }
+                }
+                Vec::new()
+            }
+            Action::SqlHistorySearchInsert(character) => {
+                if let Some(WorkspaceTab::History(tab)) = self.tabs.get_mut(self.active_tab) {
+                    tab.search.push(character);
+                    tab.query_generation = tab.query_generation.saturating_add(1);
+                    tab.loading = true;
+                    return vec![Command::LoadSqlHistory {
+                        generation: tab.query_generation,
+                        request: crate::persistence::sql_history::HistoryPageRequest {
+                            limit: 100,
+                            cursor: None,
+                            search: Some(tab.search.clone()),
+                            status: tab.status_filter,
+                            transaction_outcome: tab.transaction_filter,
+                            database: tab.database_filter.clone(),
+                        },
+                    }];
+                }
+                Vec::new()
+            }
+            Action::SqlHistorySearchClear => {
+                if let Some(WorkspaceTab::History(tab)) = self.tabs.get_mut(self.active_tab) {
+                    tab.search.clear();
                 }
                 Vec::new()
             }

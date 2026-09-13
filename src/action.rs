@@ -42,6 +42,8 @@ pub enum Action {
     SqlHistoryOpenDetail,
     SqlHistoryCopy,
     SqlHistorySelect(usize),
+    SqlHistorySearchInsert(char),
+    SqlHistorySearchClear,
     DashboardSetPage(crate::model::dashboard::DashboardPage),
     DashboardRefresh,
     DashboardTogglePolling,

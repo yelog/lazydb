@@ -8,6 +8,10 @@ pub struct HistoryTab {
     pub query_generation: u64,
     pub items: Vec<crate::model::sql_history::ExecutionHistory>,
     pub loading: bool,
+    pub search: String,
+    pub status_filter: Option<crate::model::sql_history::HistoryExecutionStatus>,
+    pub transaction_filter: Option<crate::model::sql_history::HistoryTransactionOutcome>,
+    pub database_filter: Option<String>,
 }
 
 impl Default for HistoryTab {
@@ -19,6 +23,10 @@ impl Default for HistoryTab {
             query_generation: 0,
             items: Vec::new(),
             loading: false,
+            search: String::new(),
+            status_filter: None,
+            transaction_filter: None,
+            database_filter: None,
         }
     }
 }
