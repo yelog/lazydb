@@ -118,13 +118,13 @@ fn stdio_server_negotiates_and_lists_tools_without_database_io() {
 }
 
 #[test]
-fn profile_parse_failure_is_reported_before_mcp_handshake() {
+fn unsupported_profile_version_is_reported_before_mcp_handshake() {
     let temp = TempDir::new().unwrap();
     std::fs::create_dir(temp.path().join(".git")).unwrap();
     let profiles = temp.path().join("profiles.toml");
     std::fs::write(
         &profiles,
-        "version = 6\n[[profiles]]\nkind = \"not-a-database\"\n",
+        "version = 1\nprofiles = []\n",
     )
     .unwrap();
 
@@ -143,7 +143,7 @@ fn profile_parse_failure_is_reported_before_mcp_handshake() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("profile file is invalid"),
+        stderr.contains("profile file version 1 is not supported"),
         "stderr: {stderr}"
     );
 }
