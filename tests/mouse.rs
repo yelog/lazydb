@@ -1161,8 +1161,9 @@ fn rendered_connection_suffix_tab_label_maps_mouse_click_to_activation() {
     let profile = lazydb::profile::import_connection_url("sqlite::memory:", Some("warehouse"))
         .unwrap()
         .profile;
-    let mut app = App::new(vec![profile.clone()]);
+    let mut app = App::new(Vec::new());
     app.update(Action::NewConsole);
+    app.profiles.push(profile.clone());
     let tab_id = app.active_console().id;
     app.active_console_mut().name = "分析".into();
     app.active_console_mut().execution_target =

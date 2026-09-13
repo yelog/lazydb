@@ -1939,6 +1939,7 @@ impl MySqlAdapter {
               AND BINARY kcu.constraint_name=BINARY tc.constraint_name \
              WHERE BINARY tc.constraint_schema=BINARY ? AND BINARY tc.table_name=BINARY ? \
                AND tc.constraint_type IN ('PRIMARY KEY','UNIQUE','FOREIGN KEY') \
+               AND kcu.column_name IS NOT NULL \
              ORDER BY BINARY tc.constraint_catalog, BINARY tc.constraint_schema, \
                       BINARY tc.table_schema, BINARY tc.table_name, \
                       BINARY tc.constraint_name, kcu.ordinal_position",
