@@ -1,6 +1,8 @@
 use std::path::Path;
 
-use sqlx::{Row, SqlitePool, sqlite::SqliteConnectOptions, sqlite::SqlitePoolOptions};
+use sqlx::{
+    QueryBuilder, Row, Sqlite, SqlitePool, sqlite::SqliteConnectOptions, sqlite::SqlitePoolOptions,
+};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -31,6 +33,9 @@ pub struct HistoryPageRequest {
     pub limit: u32,
     pub cursor: Option<HistoryCursor>,
     pub search: Option<String>,
+    pub status: Option<HistoryExecutionStatus>,
+    pub transaction_outcome: Option<HistoryTransactionOutcome>,
+    pub database: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -166,6 +171,51 @@ impl HistoryStore {
         request: HistoryPageRequest,
     ) -> Result<HistoryPage, HistoryStoreError> {
         let limit = request.limit.clamp(1, 500) as i64;
+        let cursor = request.cursor;
+        let mut query = QueryBuilder::<Sqlite>::new(
+            "SELECT execution_id, operation_id, transaction_id, sql, status, certainty,
+             transaction_outcome, affected_rows, returned_rows, requested_at, elapsed_millis,
+             profile_id, database_name, schema_name FROM history_executions WHERE 1 = 1",
+        );
+        if let Some(search) = request.search {
+            query.push(" AND sql LIKE ").push_bind(format!(
+                "%{}%",
+                search.replace('%', "\\%").replace('_', "\\_")
+            ));
+        }
+        if let Some(status) = request.status {
+            query.push(" AND status = ").push_bind(status_name(status));
+        }
+        if let Some(outcome) = request.transaction_outcome {
+            query
+                .push(" AND transaction_outcome = ")
+                .push_bind(transaction_outcome_name(outcome));
+        }
+        if let Some(database) = request.database {
+            query.push(" AND database_name = ").push_bind(database);
+        }
+        if let Some(cursor) = cursor {
+            query
+                .push(" AND (requested_at < ")
+                .push_bind(cursor.requested_at)
+                .push(" OR (requested_at = ")
+                .push_bind(cursor.requested_at)
+                .push(" AND execution_id < ")
+                .push_bind(cursor.execution_id.to_string())
+                .push(")")
+                .push(")");
+        }
+        let rows = query
+            .push(" ORDER BY requested_at DESC, execution_id DESC LIMIT ")
+            .push_bind(limit)
+            .build()
+            .fetch_all(&self.pool)
+            .await?;
+        /*
+         * Keep the query construction in one place. In particular, all
+         * filters are bound values; SQL text is never interpolated.
+         */
+        /*
         let rows = match (request.cursor, request.search) {
             (Some(cursor), Some(search)) => {
                 sqlx::query(
@@ -230,7 +280,7 @@ impl HistoryStore {
                 .fetch_all(&self.pool)
                 .await?
             }
-        };
+        }; */
         let next_cursor = rows
             .last()
             .map(|row| {

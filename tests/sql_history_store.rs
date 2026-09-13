@@ -83,6 +83,9 @@ async fn page_uses_a_stable_cursor_when_timestamps_are_equal() {
             limit: 2,
             cursor: None,
             search: None,
+            status: None,
+            transaction_outcome: None,
+            database: None,
         })
         .await
         .unwrap();
@@ -94,6 +97,9 @@ async fn page_uses_a_stable_cursor_when_timestamps_are_equal() {
             limit: 2,
             cursor: first.next_cursor,
             search: None,
+            status: None,
+            transaction_outcome: None,
+            database: None,
         })
         .await
         .unwrap();
@@ -136,4 +142,33 @@ async fn opening_an_older_history_schema_adds_new_summary_columns() {
     assert_eq!(detail.profile_id, None);
     assert_eq!(detail.database, None);
     assert_eq!(detail.schema, None);
+}
+
+#[tokio::test]
+async fn page_filters_by_status_transaction_outcome_and_database() {
+    let temp = TempDir::new().unwrap();
+    let store = HistoryStore::open(temp.path().join("history.sqlite3")).await.unwrap();
+    let mut success = history(Uuid::new_v4(), "SELECT success");
+    success.status = HistoryExecutionStatus::Succeeded;
+    success.transaction_outcome = HistoryTransactionOutcome::Committed;
+    success.database = Some("app".into());
+    let mut failure = history(Uuid::new_v4(), "SELECT failure");
+    failure.status = HistoryExecutionStatus::Failed;
+    failure.transaction_outcome = HistoryTransactionOutcome::Unknown;
+    failure.database = Some("audit".into());
+    store.insert(success.clone()).await.unwrap();
+    store.insert(failure).await.unwrap();
+
+    let page = store
+        .page(HistoryPageRequest {
+            limit: 10,
+            cursor: None,
+            search: None,
+            status: Some(HistoryExecutionStatus::Succeeded),
+            transaction_outcome: Some(HistoryTransactionOutcome::Committed),
+            database: Some("app".into()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(page.items, vec![success]);
 }
