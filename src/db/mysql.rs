@@ -1440,8 +1440,14 @@ impl MySqlAdapter {
                 "column ordinal",
             )?;
             let name: String = row.try_get(1).map_err(decode_error)?;
-            let extra: String = row.try_get(6).map_err(decode_error)?;
-            let generation_expression: String = row.try_get(7).map_err(decode_error)?;
+            let extra = row
+                .try_get::<Option<String>, _>(6)
+                .map_err(decode_error)?
+                .unwrap_or_default();
+            let generation_expression = row
+                .try_get::<Option<String>, _>(7)
+                .map_err(decode_error)?
+                .unwrap_or_default();
             let generated = !generation_expression.is_empty()
                 || extra.to_ascii_uppercase().contains("VIRTUAL GENERATED")
                 || extra.to_ascii_uppercase().contains("STORED GENERATED");

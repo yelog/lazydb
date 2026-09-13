@@ -1711,9 +1711,22 @@ async fn connecting_second_profile_keeps_first_runtime_console_usable() {
         matches!(commands.as_slice(), [Command::RunQueryPage { connection, .. }] if *connection == first_identity),
         "{commands:?}"
     );
-    let query_finished = next_action(&mut receiver).await;
-    assert!(matches!(query_finished, Action::QueryPageFinished { .. }));
-    dispatch(&mut app, &mut runtime, query_finished);
+    loop {
+        let query_finished = next_action(&mut receiver).await;
+        match query_finished {
+            Action::QueryPageFinished { .. } => {
+                dispatch(&mut app, &mut runtime, query_finished);
+                break;
+            }
+            Action::CatalogPageLoaded(_)
+            | Action::CatalogPageFailed { .. }
+            | Action::DiagnosticDue(_)
+            | Action::CompletionDue(_) => {
+                dispatch(&mut app, &mut runtime, query_finished);
+            }
+            other => panic!("unexpected action before A query finished: {other:?}"),
+        }
+    }
 
     let connected = next_action(&mut receiver).await;
     assert!(matches!(
