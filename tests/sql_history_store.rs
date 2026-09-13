@@ -101,3 +101,34 @@ async fn page_uses_a_stable_cursor_when_timestamps_are_equal() {
             .all(|other| other.execution_id != item.execution_id)
     }));
 }
+
+#[tokio::test]
+async fn opening_an_older_history_schema_adds_new_summary_columns() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("history.sqlite3");
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&path)
+                .create_if_missing(true),
+        )
+        .await
+        .unwrap();
+    sqlx::query(include_str!("../src/persistence/sql_history/schema_v1.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("ALTER TABLE history_executions DROP COLUMN elapsed_millis")
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+
+    let store = HistoryStore::open(&path).await.unwrap();
+    let id = Uuid::new_v4();
+    store.insert(history(id, "SELECT 1")).await.unwrap();
+    assert_eq!(
+        store.detail(id).await.unwrap().unwrap().elapsed_millis,
+        None
+    );
+}

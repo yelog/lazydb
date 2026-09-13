@@ -65,6 +65,7 @@ impl HistoryStore {
             .execute(&pool)
             .await?;
         sqlx::query(SCHEMA).execute(&pool).await?;
+        migrate_columns(&pool).await?;
         Ok(Self { pool })
     }
 
@@ -236,6 +237,21 @@ impl HistoryStore {
             .collect::<Result<_, _>>()?;
         Ok(HistoryPage { items, next_cursor })
     }
+}
+
+async fn migrate_columns(pool: &SqlitePool) -> Result<(), HistoryStoreError> {
+    let columns = sqlx::query("PRAGMA table_info(history_executions)")
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .map(|row| row.get::<String, _>("name"))
+        .collect::<std::collections::HashSet<_>>();
+    if !columns.contains("elapsed_millis") {
+        sqlx::query("ALTER TABLE history_executions ADD COLUMN elapsed_millis INTEGER")
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
 }
 
 fn row_to_history(row: sqlx::sqlite::SqliteRow) -> Result<ExecutionHistory, HistoryStoreError> {
