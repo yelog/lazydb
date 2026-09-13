@@ -609,6 +609,7 @@ async fn catalog_page_exposes_scoped_mysql_objects_and_rich_metadata_when_config
                 }
         ));
         assert_eq!(columns["code_upper"].1.default_expression, OptionalMetadata::Supported(None));
+        let created_at = columns["created_at"].1;
         assert!(matches!(
             &created_at.default_expression,
             OptionalMetadata::Supported(Some(value))
