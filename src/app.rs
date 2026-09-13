@@ -901,7 +901,10 @@ impl App {
     /// Merge a restored profile workspace into the shared document surface.
     /// Existing editor sessions are deliberately left untouched so switching
     /// connections cannot discard another Console's text or history.
-    fn append_workspace(&mut self, workspace: ConnectionWorkspace) {
+    fn append_workspace(&mut self, profile_id: Uuid, workspace: ConnectionWorkspace) {
+        if let Some(editor) = self.workspace_editors.remove(&profile_id) {
+            self.editor.merge_sessions_from(editor);
+        }
         let existing_ids = self
             .tabs
             .iter()
@@ -1082,7 +1085,7 @@ impl App {
                 .iter()
                 .map(WorkspaceTab::id)
                 .collect::<HashSet<_>>();
-            self.append_workspace(workspace);
+            self.append_workspace(profile_id, workspace);
             if let Some(active_tab) = self
                 .tabs
                 .iter()

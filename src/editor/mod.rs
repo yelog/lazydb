@@ -404,6 +404,15 @@ impl EditorWorkspace {
             .retain(|key, _| key.console_id != id);
     }
 
+    pub(crate) fn merge_sessions_from(&mut self, mut other: Self) {
+        for (id, session) in other.sessions.drain() {
+            self.sessions.entry(id).or_insert(session);
+        }
+        self.analysis_cache
+            .get_mut()
+            .extend(other.analysis_cache.into_inner());
+    }
+
     pub(crate) fn has_session(&self, id: Uuid) -> bool {
         self.sessions.contains_key(&id)
     }
