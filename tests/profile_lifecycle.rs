@@ -36,6 +36,9 @@ async fn apply_next(
     receiver: &mut mpsc::UnboundedReceiver<Action>,
 ) -> Action {
     let action = next_action(receiver).await;
+    if let Action::ProfileSaveFailed { message, .. } = &action {
+        panic!("profile save failed: {message}");
+    }
     dispatch(app, runtime, action.clone());
     action
 }
@@ -158,10 +161,17 @@ async fn query(
         ) {
             break;
         }
-        assert!(matches!(
-            action,
-            Action::DiagnosticDue(_) | Action::CompletionDue(_)
-        ));
+        assert!(
+            matches!(
+                action,
+                Action::DiagnosticDue(_)
+                    | Action::CompletionDue(_)
+                    | Action::ConnectionInvalidated { .. }
+                    | Action::CatalogPageLoaded(_)
+                    | Action::CatalogPageFailed { .. }
+            ),
+            "unexpected intermediate action: {action:?}"
+        );
     }
     assert!(app.active_console().outcome.is_some());
 }
@@ -216,15 +226,17 @@ async fn two_sqlite_profiles_complete_the_full_runtime_lifecycle() {
     )
     .await;
 
-    dispatch(
+    let reconnect = dispatch(
         &mut app,
         &mut runtime,
         Action::RequestProfileConnect {
             profile_id: alpha_id,
         },
     );
-    apply_until_connection_succeeds(&mut app, &mut runtime, &mut receiver).await;
-    drain_catalog(&mut app, &mut runtime, &mut receiver).await;
+    assert!(
+        reconnect.is_empty(),
+        "already-online profile should be reused"
+    );
     assert_eq!(app.connection.profile_id, Some(alpha_id));
     query(
         &mut app,
@@ -272,10 +284,19 @@ async fn two_sqlite_profiles_complete_the_full_runtime_lifecycle() {
         &mut runtime,
         Action::ProfileSave { connect: false },
     );
-    assert!(matches!(
-        apply_next(&mut app, &mut runtime, &mut receiver).await,
-        Action::ProfileSaved { connect: false, .. }
-    ));
+    loop {
+        let action = apply_next(&mut app, &mut runtime, &mut receiver).await;
+        if matches!(action, Action::ProfileSaved { connect: false, .. }) {
+            break;
+        }
+        assert!(
+            matches!(
+                action,
+                Action::DiagnosticDue(_) | Action::CompletionDue(_) | Action::CatalogPageLoaded(_)
+            ),
+            "unexpected intermediate action: {action:?}"
+        );
+    }
     assert_eq!(app.connection.profile_id, Some(alpha_id));
     assert_eq!(
         app.connection.status,
@@ -309,15 +330,14 @@ async fn two_sqlite_profiles_complete_the_full_runtime_lifecycle() {
     );
     reloaded_runtime.shutdown().await;
 
-    dispatch(
+    let reconnect = dispatch(
         &mut app,
         &mut runtime,
         Action::RequestProfileConnect {
             profile_id: alpha_id,
         },
     );
-    apply_until_connection_succeeds(&mut app, &mut runtime, &mut receiver).await;
-    drain_catalog(&mut app, &mut runtime, &mut receiver).await;
+    assert!(reconnect.is_empty());
 
     let beta_console_ids = app
         .workspace_snapshot()
@@ -344,12 +364,18 @@ async fn two_sqlite_profiles_complete_the_full_runtime_lifecycle() {
         if matches!(action, Action::ProfileDeleted { .. }) {
             break (action, commands);
         }
-        assert!(matches!(
-            action,
-            Action::DiagnosticDue(_)
-                | Action::CompletionDue(_)
-                | Action::DisconnectCompleted { .. }
-        ));
+        assert!(
+            matches!(
+                action,
+                Action::DiagnosticDue(_)
+                    | Action::CompletionDue(_)
+                    | Action::DisconnectCompleted { .. }
+                    | Action::ConnectionInvalidated { .. }
+                    | Action::CatalogPageLoaded(_)
+                    | Action::CatalogPageFailed { .. }
+            ),
+            "unexpected action before delete: {action:?}"
+        );
     };
     assert!(matches!(
         deleted,
@@ -376,9 +402,11 @@ async fn two_sqlite_profiles_complete_the_full_runtime_lifecycle() {
             .iter()
             .any(|workspace| { workspace.profile_id == beta_id })
     );
+    let persisted_after_delete = ProfileStore::new(store_path.clone()).load().unwrap();
     assert_eq!(
-        ProfileStore::new(store_path.clone()).load().unwrap().len(),
-        1
+        persisted_after_delete.len(),
+        1,
+        "{persisted_after_delete:#?}"
     );
 
     dispatch(
@@ -394,12 +422,18 @@ async fn two_sqlite_profiles_complete_the_full_runtime_lifecycle() {
         if matches!(action, Action::ProfileDeleted { .. }) {
             break action;
         }
-        assert!(matches!(
-            action,
-            Action::DiagnosticDue(_)
-                | Action::CompletionDue(_)
-                | Action::DisconnectCompleted { .. }
-        ));
+        assert!(
+            matches!(
+                action,
+                Action::DiagnosticDue(_)
+                    | Action::CompletionDue(_)
+                    | Action::DisconnectCompleted { .. }
+                    | Action::ConnectionInvalidated { .. }
+                    | Action::CatalogPageLoaded(_)
+                    | Action::CatalogPageFailed { .. }
+            ),
+            "unexpected action before delete: {action:?}"
+        );
     };
     assert!(matches!(
         deleted,

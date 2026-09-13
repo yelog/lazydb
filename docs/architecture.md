@@ -23,8 +23,9 @@ The monitoring dashboard is a separate workspace tab. Its native read-only
 queries live in the concrete PostgreSQL/MySQL adapters, while the dashboard
 model owns typed snapshots, elapsed-time counter rates, time-bounded history,
 and process filtering. Runtime schedules single-flight metric and process
-loads and tags every result with the dashboard tab generation and active
-connection identity, so stale results cannot update a switched or closed tab.
+loads and tags every result with the dashboard tab generation and its bound
+`ConnectionIdentity`; results are checked against that session, not against the
+globally projected active connection.
 
 ## Reducer Boundary
 
@@ -33,10 +34,14 @@ actions and returns commands. It does not access the terminal, filesystem, Tokio
 or SQLx. This makes tabs, focus, editor behavior, and stale-event rejection
 deterministic unit-test targets.
 
-The runtime executes commands and emits actions through a Tokio channel. A
-connection generation prevents a late connection result from replacing a newer
-connection. Each console has its own generation so a cancelled or old query
-cannot overwrite a newer run.
+The runtime executes commands and emits actions through a Tokio channel.
+`SessionRegistry` is the App-side authority for connection attempts and connected
+sessions, keyed by the complete `ExecutionTarget`. `ConnectionIdentity` scopes
+result acceptance to its session, so a later attempt for an unrelated target
+cannot invalidate it. `ConnectionState` remains a temporary projection for the
+selected connection and is not a liveness check for other sessions. Each console
+has its own query generation so a cancelled or old query cannot overwrite a newer
+run.
 
 The Explorer is a normalized, UUID-keyed tree. Its top-level roots are ordered
 saved or session profiles, and each root carries provenance and connection
@@ -53,8 +58,8 @@ Explorer search has two projections. `/` is a synchronous find over a snapshot o
 the normal `visible()` projection, so collapsed descendants and unloaded pages are
 never searched and no database command is emitted. It highlights primary labels
 in the normal tree and cycles confirmed matches with `n/N`. `f` uses the independent
-server-backed catalog contract: debounced requests carry active connection and
-query generations plus `CatalogScope`, and adapters enumerate native catalog pages
+server-backed catalog contract: debounced requests carry the search session's
+connection identity and query generations plus `CatalogScope`, and adapters enumerate native catalog pages
 without materializing them in the normal tree. Its results are a temporary,
 ancestor-preserving tree projection with highlighted matches; locating one merges
 only its real ancestor chain and object into the normalized tree, leaving lazy-page
@@ -76,14 +81,18 @@ without connecting, while preserving its SQL document and editor history.
 
 Runtime connections are keyed by the complete target plus `ConnectionIdentity`.
 Different profiles and database/schema targets can connect and execute concurrently;
-duplicate attempts for the same target are single-flight. Query, relation,
-dashboard, completion, diagnostic, and transaction results carry their originating
-tab/target identity and stale results are discarded without requiring that target to
-remain focused. A disconnected target leaves its Console document available.
+duplicate attempts for the same target are single-flight. Connected sessions and
+new attempts are stored separately so a failed reconnect does not evict a working
+session. Query, relation, dashboard, catalog, completion, diagnostic, and
+transaction results carry their originating tab/target identity and stale results
+are discarded without requiring that target to remain focused. Disconnecting a
+profile retires its sessions without affecting unrelated profiles. A disconnected
+target leaves its Console document available.
 
-SQL execution captures an immutable Console/request snapshot. If the target is
-offline, the first execution establishes the connection and resumes that exact
-request once; changing tabs or editing the document does not redirect it. Workspace
+SQL execution captures an immutable Console/request snapshot. Pending executions
+are indexed by Console UUID. If the target is offline, the first execution establishes
+the connection and resumes each matching, still-current request once; changing tabs
+or editing the document does not redirect or mutate its SQL snapshot. Workspace
 format v5 stores global Console documents, tab order, target bindings, active tab,
 and recent targets. Console labels render the document name with an `@connection`
 suffix, while the persisted document name remains unchanged.
@@ -240,10 +249,11 @@ so existing roles cannot currently be selected and edited from Explorer.
 ## Transaction Boundary
 
 AUTO queries carry both `ConnectionIdentity` and the exact `ExecutionTarget`.
-Runtime records both on the active connection and rejects a mismatch before any
-database I/O. PostgreSQL/MySQL target changes build a candidate pool before the
-old pool is closed. SQLite keeps the profile file and reuses its single pool so
-discovered attached aliases remain available while the active target changes.
+Runtime looks up that exact session and rejects a mismatch before any database I/O.
+Replacing a session builds a candidate pool before the old pool for that target is
+closed. Other profiles and targets remain installed and usable. SQLite keeps the
+profile file and reuses its single pool so discovered attached aliases remain
+available while the selected target changes.
 MANUAL mode owns one serial worker and one physical connection per console.
 Adapters drive SQLx's concrete `TransactionManager` directly on that connection;
 the worker never sends transaction controls through a random pool connection.

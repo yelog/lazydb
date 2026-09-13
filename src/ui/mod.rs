@@ -578,7 +578,9 @@ enum DisconnectedWorkspace {
 
 impl DisconnectedWorkspace {
     fn for_app(app: &App) -> Option<Self> {
-        (app.connection.status == ConnectionStatus::Disconnected).then_some({
+        (app.connection.status == ConnectionStatus::Disconnected
+            && app.sessions.iter().next().is_none())
+        .then_some({
             if app.profiles.is_empty() {
                 Self::NoProfiles
             } else {

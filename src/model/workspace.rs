@@ -384,6 +384,7 @@ pub struct VisibleExplorerViewport {
 #[derive(Clone, Debug, Default)]
 pub struct ExplorerState {
     pub normalized: ExplorerTreeState,
+    pub catalog_sessions: HashMap<Uuid, ConnectionIdentity>,
     pub nodes: Vec<CatalogNode>,
     pub expanded: HashSet<CatalogId>,
     pub selected: usize,

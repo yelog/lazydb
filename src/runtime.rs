@@ -291,7 +291,7 @@ pub struct Runtime {
     profile_tasks: Vec<JoinHandle<()>>,
     completion_tasks: HashMap<Uuid, JoinHandle<()>>,
     diagnostic_tasks: HashMap<Uuid, JoinHandle<()>>,
-    catalog_search_task: Option<JoinHandle<()>>,
+    catalog_search_tasks: HashMap<(ConnectionIdentity, u64), JoinHandle<()>>,
     manual_transactions: HashMap<Uuid, ManualTransactionEntry>,
     relation_transactions: HashMap<Uuid, ManualTransactionEntry>,
     relation_mutation_blocked: Arc<StdMutex<HashSet<(Uuid, ConnectionIdentity)>>>,
@@ -392,7 +392,7 @@ impl Runtime {
             profile_tasks: Vec::new(),
             completion_tasks: HashMap::new(),
             diagnostic_tasks: HashMap::new(),
-            catalog_search_task: None,
+            catalog_search_tasks: HashMap::new(),
             manual_transactions: HashMap::new(),
             relation_transactions: HashMap::new(),
             relation_mutation_blocked: Arc::new(StdMutex::new(HashSet::new())),
@@ -463,9 +463,6 @@ impl Runtime {
                 generation,
                 target,
             } => {
-                if let Some(task) = self.catalog_search_task.take() {
-                    task.abort();
-                }
                 self.connect(profile_id, generation, target);
             }
             Command::LoadCatalogPage(request) => self.load_catalog_page(request),
@@ -493,7 +490,7 @@ impl Runtime {
             Command::LoadCatalogOwnerContext(request) => self.load_catalog_owner_context(request),
             Command::SearchCatalog(request) => self.search_catalog(request),
             Command::CancelCatalogSearch => {
-                if let Some(task) = self.catalog_search_task.take() {
+                for (_, task) in self.catalog_search_tasks.drain() {
                     task.abort();
                 }
             }
@@ -1239,9 +1236,14 @@ impl Runtime {
     }
 
     fn disconnect(&mut self, expected: ConnectionIdentity) {
-        if let Some(task) = self.catalog_search_task.take() {
-            task.abort();
-        }
+        self.catalog_search_tasks.retain(|(identity, _), task| {
+            if *identity == expected {
+                task.abort();
+                false
+            } else {
+                true
+            }
+        });
         let connection = Arc::clone(&self.connection);
         let known_relations = Arc::clone(&self.known_relations);
         let known_relation_targets = Arc::clone(&self.known_relation_targets);
@@ -1298,13 +1300,16 @@ impl Runtime {
             let _mutation_guard = mutation.lock().await;
             let active = {
                 let mut guard = connection.lock().await;
-                guard
+                let keys = guard
                     .keys()
-                    .find(|key| key.identity == expected)
+                    .filter(|key| key.identity == expected)
                     .cloned()
-                    .and_then(|key| guard.remove(&key))
+                    .collect::<Vec<_>>();
+                keys.into_iter()
+                    .filter_map(|key| guard.remove(&key))
+                    .collect::<Vec<_>>()
             };
-            if let Some(active) = active {
+            if !active.is_empty() {
                 if let Ok(mut known) = known_relations.lock() {
                     known.retain(|(identity, _)| *identity != expected);
                 }
@@ -1314,7 +1319,9 @@ impl Runtime {
                 if let Ok(mut latest) = latest_catalog_requests.lock() {
                     latest.retain(|(connection, _), _| *connection != expected);
                 }
-                active.database.close().await;
+                for active in active {
+                    active.database.close().await;
+                }
             }
             let _ = sender.send(Action::DisconnectCompleted {
                 connection: expected,
@@ -1345,6 +1352,12 @@ impl Runtime {
             }
         }
         self.background_tasks.push(tokio::spawn(async move {
+            let finish_attempt = || {
+                attempts
+                    .lock()
+                    .expect("connection attempt mutex poisoned")
+                    .finish(&key);
+            };
             let mutation_guard = mutation.lock().await;
             let profile = {
                 let registry = registry.lock().await;
@@ -1354,6 +1367,7 @@ impl Runtime {
                 })
             };
             let Some((profile, profile_revision)) = profile else {
+                finish_attempt();
                 let _ = sender.send(Action::ConnectionFailed {
                     profile_id,
                     generation,
@@ -1371,6 +1385,7 @@ impl Runtime {
             {
                 Ok(password) => password,
                 Err(message) => {
+                    finish_attempt();
                     let _ = sender.send(Action::CredentialsRequired {
                         profile_id,
                         generation,
@@ -1381,6 +1396,7 @@ impl Runtime {
             };
             drop(mutation_guard);
             if !target.is_valid(&profile) {
+                finish_attempt();
                 let _ = sender.send(Action::ConnectionFailed {
                     profile_id,
                     generation,
@@ -1425,6 +1441,7 @@ impl Runtime {
                     let mutation_guard = mutation.lock().await;
                     if !profile_revision_is_current(&registry, &profile, profile_revision).await {
                         database.close().await;
+                        finish_attempt();
                         return;
                     }
                     let mut active = connection.lock().await;
@@ -1435,32 +1452,51 @@ impl Runtime {
                         if !attempt_guard.is_current(&key) {
                             None
                         } else {
-                            if let Ok(mut known) = known_relations.lock() {
-                                known.clear();
-                            }
-                            if let Ok(mut targets) = known_relation_targets.lock() {
-                                targets.clear();
-                            }
-                            if let Ok(mut latest) = latest_catalog_requests.lock() {
-                                latest.retain(|(connection, _), _| {
-                                    connection.profile_id != profile_id
+                            let replaced = active
+                                .keys()
+                                .find(|active_key| active_key.target == target)
+                                .cloned()
+                                .and_then(|active_key| {
+                                    active
+                                        .remove(&active_key)
+                                        .map(|connection| (active_key, connection))
                                 });
+                            if let Some((replaced_key, _)) = &replaced {
+                                if let Ok(mut known) = known_relations.lock() {
+                                    known
+                                        .retain(|(identity, _)| *identity != replaced_key.identity);
+                                }
+                                if let Ok(mut targets) = known_relation_targets.lock() {
+                                    targets.retain(|(identity, _), _| {
+                                        *identity != replaced_key.identity
+                                    });
+                                }
+                                if let Ok(mut latest) = latest_catalog_requests.lock() {
+                                    latest.retain(|(identity, _), _| {
+                                        *identity != replaced_key.identity
+                                    });
+                                }
                             }
-                            Some(active.insert(
-                                key.clone(),
-                                ActiveConnection {
-                                    database:
-                                        candidate.take().expect("connection candidate exists"),
-                                },
+                            Some((
+                                replaced,
+                                active.insert(
+                                    key.clone(),
+                                    ActiveConnection {
+                                        database: candidate
+                                            .take()
+                                            .expect("connection candidate exists"),
+                                    },
+                                ),
                             ))
                         }
                     };
                     drop(active);
-                    let Some(previous) = installation else {
+                    let Some((replaced, previous)) = installation else {
                         let candidate = candidate.take().expect("connection candidate exists");
                         if !reused_sqlite {
                             candidate.close().await;
                         }
+                        finish_attempt();
                         return;
                     };
                     let _ = sender.send(Action::ConnectionSucceeded {
@@ -1470,6 +1506,11 @@ impl Runtime {
                         mutation_capabilities,
                     });
                     drop(mutation_guard);
+                    if let Some((replaced_key, replaced)) = replaced
+                        && replaced_key.identity != expected
+                    {
+                        replaced.database.close().await;
+                    }
                     if let Some(previous) = previous
                         && !reused_sqlite
                     {
@@ -1489,10 +1530,7 @@ impl Runtime {
                     }
                 }
             }
-            attempts
-                .lock()
-                .expect("connection attempt mutex poisoned")
-                .finish(&key);
+            finish_attempt();
         }));
     }
 
@@ -2035,12 +2073,13 @@ impl Runtime {
     }
 
     fn search_catalog(&mut self, request: crate::db::catalog::CatalogSearchRequest) {
-        if let Some(task) = self.catalog_search_task.take() {
+        let key = (request.connection, request.session_id);
+        if let Some(task) = self.catalog_search_tasks.remove(&key) {
             task.abort();
         }
         let sender = self.event_sender.clone();
         let connection = Arc::clone(&self.connection);
-        self.catalog_search_task = Some(tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             sleep(Duration::from_millis(150)).await;
             let Some(database) = active_database(Arc::clone(&connection), request.connection).await
             else {
@@ -2066,7 +2105,8 @@ impl Runtime {
                     }
                 }
             }
-        }));
+        });
+        self.catalog_search_tasks.insert(key, task);
     }
 
     fn load_relation(&mut self, request: crate::model::relation::RelationRequest) {
@@ -3456,6 +3496,10 @@ impl Runtime {
             task.abort();
             let _ = task.await;
         }
+        for (_, task) in self.catalog_search_tasks.drain() {
+            task.abort();
+            let _ = task.await;
+        }
         for task in self.background_tasks.drain(..) {
             task.abort();
             let _ = task.await;
@@ -3937,7 +3981,7 @@ async fn save_profile_transaction(
         credentials_changed,
     };
 
-    if !next.profiles.contains_key(&profile_id) {
+    if !next.order.contains(&profile_id) {
         next.order.push(profile_id);
     }
     next.profiles.insert(profile_id, profile.clone());
@@ -4030,9 +4074,11 @@ impl ProfileRegistry {
     }
 
     fn ordered_persisted_profiles(&self) -> Vec<ConnectionProfile> {
+        let mut seen = HashSet::new();
         self.order
             .iter()
             .filter(|profile_id| self.persisted.contains(profile_id))
+            .filter(|profile_id| seen.insert(**profile_id))
             .filter_map(|profile_id| self.profiles.get(profile_id).cloned())
             .collect()
     }

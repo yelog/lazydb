@@ -382,32 +382,78 @@ fn preserve_unavailable_profiles(
     let Some(existing_profiles) = existing_document["profiles"].as_array_of_tables() else {
         return Ok(generated.to_owned());
     };
-    let mut unavailable = Vec::new();
-    for table in existing_profiles.iter() {
-        let table_value = toml::from_str::<toml::Value>(&table.to_string());
-        let known_profile = table_value
-            .ok()
-            .and_then(|value| value.try_into::<ConnectionProfile>().ok())
-            .is_some();
-        if !known_profile {
-            unavailable.push(table.clone());
-        }
-    }
-    if unavailable.is_empty() {
-        return Ok(generated.to_owned());
-    }
     let mut document = generated
         .parse::<toml_edit::DocumentMut>()
         .map_err(|error| PersistenceError::InvalidStructure(error.to_string()))?;
-    let profiles = document["profiles"]
-        .as_array_of_tables_mut()
-        .ok_or_else(|| {
-            PersistenceError::InvalidStructure("profiles must be an array".to_owned())
-        })?;
-    for table in unavailable {
-        profiles.push(table);
+    let mut generated_profiles = document["profiles"]
+        .as_array_of_tables()
+        .cloned()
+        .unwrap_or_default();
+    let mut unavailable = Vec::new();
+    for old_profile in existing_profiles.iter() {
+        let existing_id = old_profile["id"].as_str();
+        if let Some(current) = existing_id.and_then(|id| {
+            generated_profiles
+                .iter_mut()
+                .find(|table| table["id"].as_str() == Some(id))
+        }) {
+            merge_missing_profile_fields(current, old_profile);
+            continue;
+        }
+        let known_profile = old_profile["kind"].as_str().is_some_and(|kind| {
+            [
+                "postgres",
+                "mysql",
+                "mariadb",
+                "oracle",
+                "sqlserver",
+                "sqlite",
+            ]
+            .iter()
+            .any(|known| kind.eq_ignore_ascii_case(known))
+        }) && existing_id.is_some()
+            && old_profile["name"].as_str().is_some();
+        if !known_profile {
+            unavailable.push(old_profile.clone());
+        }
+    }
+    if !unavailable.is_empty() {
+        for table in unavailable {
+            generated_profiles.push(table);
+        }
+    }
+    if !generated_profiles.is_empty() {
+        document["profiles"] = generated_profiles.into();
     }
     Ok(document.to_string())
+}
+
+fn merge_missing_profile_fields(current: &mut toml_edit::Table, previous: &toml_edit::Table) {
+    for (key, previous_item) in previous.iter() {
+        if matches!(key, "secret_ref" | "password" | "secret") {
+            continue;
+        }
+        match (current.get_mut(key), previous_item) {
+            (
+                Some(toml_edit::Item::Table(current_table)),
+                toml_edit::Item::Table(previous_table),
+            ) => {
+                merge_missing_profile_fields(current_table, previous_table);
+            }
+            (
+                Some(toml_edit::Item::ArrayOfTables(current_tables)),
+                toml_edit::Item::ArrayOfTables(previous_tables),
+            ) => {
+                if current_tables.is_empty() {
+                    *current_tables = previous_tables.clone();
+                }
+            }
+            (Some(_), _) => {}
+            (None, _) => {
+                current.insert(key, previous_item.clone());
+            }
+        }
+    }
 }
 
 fn normalize_v3_profile(mut profile: ConnectionProfile) -> ConnectionProfile {
