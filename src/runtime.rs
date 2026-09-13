@@ -136,6 +136,7 @@ struct ProfileRegistry {
 struct ManualTransactionEntry {
     connection: ConnectionIdentity,
     target: ExecutionTarget,
+    transaction_id: Uuid,
     transaction_generation: u64,
     request_sender: tokio::sync::mpsc::UnboundedSender<crate::db::transaction::TransactionRequest>,
     worker_handle: JoinHandle<crate::db::transaction::WorkerDisposition>,
@@ -296,6 +297,9 @@ pub struct Runtime {
     relation_transactions: HashMap<Uuid, ManualTransactionEntry>,
     relation_mutation_blocked: Arc<StdMutex<HashSet<(Uuid, ConnectionIdentity)>>>,
     clipboard: crate::config::ClipboardConfig,
+    history_recorder: Option<crate::history::HistoryRecorder>,
+    history_store: Option<crate::persistence::sql_history::HistoryStore>,
+    history_executions: HashMap<(Uuid, u64), Uuid>,
 }
 
 #[derive(Debug)]
@@ -400,7 +404,18 @@ impl Runtime {
                 backend: crate::config::ClipboardBackend::System,
                 max_bytes: 1_000_000,
             },
+            history_recorder: None,
+            history_store: None,
+            history_executions: HashMap::new(),
         }
+    }
+
+    pub fn set_history_recorder(&mut self, recorder: crate::history::HistoryRecorder) {
+        self.history_recorder = Some(recorder);
+    }
+
+    pub fn set_history_store(&mut self, store: crate::persistence::sql_history::HistoryStore) {
+        self.history_store = Some(store);
     }
 
     pub fn set_clipboard_config(&mut self, clipboard: crate::config::ClipboardConfig) {
@@ -414,6 +429,8 @@ impl Runtime {
 
     pub fn dispatch(&mut self, command: Command) {
         self.query_tasks.retain(|_, task| !task.is_finished());
+        self.history_executions
+            .retain(|key, _| self.query_tasks.contains_key(key));
         self.catalog_drop_plan_tasks
             .retain(|_, task| !task.is_finished());
         self.catalog_drop_execute_tasks
@@ -530,6 +547,10 @@ impl Runtime {
                 generation,
                 sql,
             } => self.run_query(connection, target, tab_id, generation, sql),
+            Command::LoadSqlHistory {
+                generation,
+                request,
+            } => self.load_sql_history(generation, request),
             Command::LoadDashboardMetrics {
                 tab_id,
                 tab_generation,
@@ -684,6 +705,22 @@ impl Runtime {
             Command::CancelQuery { tab_id, generation } => {
                 if let Some(task) = self.query_tasks.remove(&(tab_id, generation)) {
                     task.abort();
+                }
+                if let Some(execution_id) = self.history_executions.remove(&(tab_id, generation))
+                    && let Some(recorder) = self.history_recorder.clone()
+                {
+                    tokio::spawn(async move {
+                        let _ = recorder
+                            .finish_with_certainty(
+                                execution_id,
+                                crate::model::sql_history::HistoryExecutionStatus::Cancelled,
+                                crate::model::sql_history::HistoryResultCertainty::Unknown,
+                                None,
+                                None,
+                                None,
+                            )
+                            .await;
+                    });
                 }
             }
             Command::CancelManual {
@@ -2157,9 +2194,44 @@ impl Runtime {
     ) {
         let sender = self.event_sender.clone();
         let connection = Arc::clone(&self.connection);
+        let recorder = self.history_recorder.clone();
+        let execution_id = Uuid::new_v4();
+        let operation_id = Uuid::new_v4();
+        self.history_executions
+            .insert((tab_id, generation), execution_id);
         let task = tokio::spawn(async move {
+            let history = crate::model::sql_history::ExecutionHistory {
+                execution_id,
+                operation_id,
+                transaction_id: None,
+                sql: sql.clone(),
+                status: crate::model::sql_history::HistoryExecutionStatus::Running,
+                certainty: crate::model::sql_history::HistoryResultCertainty::Confirmed,
+                transaction_outcome:
+                    crate::model::sql_history::HistoryTransactionOutcome::NotApplicable,
+                affected_rows: None,
+                returned_rows: None,
+                requested_at: chrono::Utc::now().timestamp_millis(),
+                elapsed_millis: None,
+                profile_id: Some(target.profile_id),
+                database: Some(target.database.clone()),
+                schema: target.schema.clone(),
+            };
+            if let Some(recorder) = &recorder {
+                let _ = recorder.start(history).await;
+            }
             let database = active_database_for_target(connection, expected, &target).await;
             let Some(database) = database else {
+                if let Some(recorder) = &recorder {
+                    let _ = recorder
+                        .finish(
+                            execution_id,
+                            crate::model::sql_history::HistoryExecutionStatus::Failed,
+                            None,
+                            None,
+                        )
+                        .await;
+                }
                 let _ = sender.send(Action::QueryFailed {
                     tab_id,
                     generation,
@@ -2179,6 +2251,18 @@ impl Runtime {
                 .await
             {
                 Ok(outcome) => {
+                    if let Some(recorder) = &recorder {
+                        let _ = recorder
+                            .finish_with_certainty(
+                                execution_id,
+                                crate::model::sql_history::HistoryExecutionStatus::Succeeded,
+                                crate::model::sql_history::HistoryResultCertainty::Confirmed,
+                                None,
+                                Some(outcome.stats.row_count),
+                                Some(outcome.stats.total().as_millis()),
+                            )
+                            .await;
+                    }
                     let _ = sender.send(Action::QueryFinished {
                         tab_id,
                         generation,
@@ -2187,6 +2271,18 @@ impl Runtime {
                     });
                 }
                 Err(error) => {
+                    if let Some(recorder) = &recorder {
+                        let _ = recorder
+                            .finish_with_certainty(
+                                execution_id,
+                                crate::model::sql_history::HistoryExecutionStatus::Failed,
+                                crate::model::sql_history::HistoryResultCertainty::Confirmed,
+                                None,
+                                None,
+                                None,
+                            )
+                            .await;
+                    }
                     let _ = sender.send(Action::QueryFailed {
                         tab_id,
                         generation,
@@ -2197,6 +2293,34 @@ impl Runtime {
             }
         });
         self.query_tasks.insert((tab_id, generation), task);
+    }
+
+    fn load_sql_history(
+        &mut self,
+        generation: u64,
+        request: crate::persistence::sql_history::HistoryPageRequest,
+    ) {
+        let Some(store) = self.history_store.clone() else {
+            let _ = self.event_sender.send(Action::SqlHistoryLoadFailed {
+                generation,
+                message: "SQL history database is not available".into(),
+            });
+            return;
+        };
+        let sender = self.event_sender.clone();
+        self.background_tasks.push(tokio::spawn(async move {
+            match store.page(request).await {
+                Ok(page) => {
+                    let _ = sender.send(Action::SqlHistoryLoaded { generation, page });
+                }
+                Err(error) => {
+                    let _ = sender.send(Action::SqlHistoryLoadFailed {
+                        generation,
+                        message: error.to_string(),
+                    });
+                }
+            }
+        }));
     }
 
     fn load_dashboard_metrics(
@@ -2336,8 +2460,10 @@ impl Runtime {
         dialect: crate::sql::SqlDialect,
         mut page: crate::model::pagination::PageRequest,
     ) {
+        let operation_id = Uuid::new_v4();
         let sender = self.event_sender.clone();
         let connection = Arc::clone(&self.connection);
+        let recorder = self.history_recorder.clone();
         let task = tokio::spawn(async move {
             let Some(database) = active_database_for_target(connection, expected, &target).await
             else {
@@ -2362,10 +2488,58 @@ impl Runtime {
                 }
             };
             let total = if page.resolve_total {
+                let count_execution_id = Uuid::new_v4();
+                if let Some(recorder) = &recorder {
+                    let _ = recorder
+                        .start(crate::model::sql_history::ExecutionHistory {
+                            execution_id: count_execution_id,
+                            operation_id,
+                            transaction_id: None,
+                            sql: query.count_sql.clone(),
+                            status: crate::model::sql_history::HistoryExecutionStatus::Running,
+                            certainty: crate::model::sql_history::HistoryResultCertainty::Confirmed,
+                            transaction_outcome:
+                                crate::model::sql_history::HistoryTransactionOutcome::NotApplicable,
+                            affected_rows: None,
+                            returned_rows: None,
+                            requested_at: chrono::Utc::now().timestamp_millis(),
+                            elapsed_millis: None,
+                            profile_id: Some(target.profile_id),
+                            database: Some(target.database.clone()),
+                            schema: target.schema.clone(),
+                        })
+                        .await;
+                }
                 match database.execute(&query.count_sql).await {
                     Ok(outcome) => match count_from_outcome(&outcome) {
-                        Ok(total) => Some(total),
+                        Ok(total) => {
+                            if let Some(recorder) = &recorder {
+                                let _ = recorder
+                                    .finish_with_certainty(
+                                        count_execution_id,
+                                        crate::model::sql_history::HistoryExecutionStatus::Succeeded,
+                                        crate::model::sql_history::HistoryResultCertainty::Confirmed,
+                                        None,
+                                        Some(outcome.stats.row_count),
+                                        Some(outcome.stats.total().as_millis()),
+                                    )
+                                    .await;
+                            }
+                            Some(total)
+                        }
                         Err(error) => {
+                            if let Some(recorder) = &recorder {
+                                let _ = recorder
+                                    .finish_with_certainty(
+                                        count_execution_id,
+                                        crate::model::sql_history::HistoryExecutionStatus::Failed,
+                                        crate::model::sql_history::HistoryResultCertainty::Confirmed,
+                                        None,
+                                        None,
+                                        Some(outcome.stats.total().as_millis()),
+                                    )
+                                    .await;
+                            }
                             let _ = sender.send(Action::QueryPageFailed {
                                 tab_id,
                                 generation,
@@ -2376,6 +2550,18 @@ impl Runtime {
                         }
                     },
                     Err(error) => {
+                        if let Some(recorder) = &recorder {
+                            let _ = recorder
+                                .finish_with_certainty(
+                                    count_execution_id,
+                                    crate::model::sql_history::HistoryExecutionStatus::Failed,
+                                    crate::model::sql_history::HistoryResultCertainty::Confirmed,
+                                    None,
+                                    None,
+                                    None,
+                                )
+                                .await;
+                        }
                         let _ = sender.send(Action::QueryPageFailed {
                             tab_id,
                             generation,
@@ -2404,8 +2590,42 @@ impl Runtime {
                     return;
                 }
             };
+            let page_execution_id = Uuid::new_v4();
+            if let Some(recorder) = &recorder {
+                let _ = recorder
+                    .start(crate::model::sql_history::ExecutionHistory {
+                        execution_id: page_execution_id,
+                        operation_id,
+                        transaction_id: None,
+                        sql: query.page_sql.clone(),
+                        status: crate::model::sql_history::HistoryExecutionStatus::Running,
+                        certainty: crate::model::sql_history::HistoryResultCertainty::Confirmed,
+                        transaction_outcome:
+                            crate::model::sql_history::HistoryTransactionOutcome::NotApplicable,
+                        affected_rows: None,
+                        returned_rows: None,
+                        requested_at: chrono::Utc::now().timestamp_millis(),
+                        elapsed_millis: None,
+                        profile_id: Some(target.profile_id),
+                        database: Some(target.database.clone()),
+                        schema: target.schema.clone(),
+                    })
+                    .await;
+            }
             match database.execute(&query.page_sql).await {
                 Ok(mut outcome) => {
+                    if let Some(recorder) = &recorder {
+                        let _ = recorder
+                            .finish_with_certainty(
+                                page_execution_id,
+                                crate::model::sql_history::HistoryExecutionStatus::Succeeded,
+                                crate::model::sql_history::HistoryResultCertainty::Confirmed,
+                                None,
+                                Some(outcome.stats.row_count),
+                                Some(outcome.stats.total().as_millis()),
+                            )
+                            .await;
+                    }
                     let fetched = outcome.stats.row_count;
                     if let Some(result) = outcome.result_sets.first_mut() {
                         result.rows.truncate(page.size.get());
@@ -2431,6 +2651,18 @@ impl Runtime {
                     });
                 }
                 Err(error) => {
+                    if let Some(recorder) = &recorder {
+                        let _ = recorder
+                            .finish_with_certainty(
+                                page_execution_id,
+                                crate::model::sql_history::HistoryExecutionStatus::Failed,
+                                crate::model::sql_history::HistoryResultCertainty::Confirmed,
+                                None,
+                                None,
+                                None,
+                            )
+                            .await;
+                    }
                     let _ = sender.send(Action::QueryPageFailed {
                         tab_id,
                         generation,
@@ -2976,6 +3208,7 @@ impl Runtime {
             ManualTransactionEntry {
                 connection,
                 target,
+                transaction_id: Uuid::new_v4(),
                 transaction_generation,
                 request_sender: proxy.clone(),
                 worker_handle,
@@ -3002,15 +3235,58 @@ impl Runtime {
         self.reap_finished_manual_worker(tab_id);
         let (reply, result) = tokio::sync::oneshot::channel();
         let (cancel, cancel_receiver) = tokio::sync::oneshot::channel();
+        let history_sql = sql.clone();
+        let history_target = target.clone();
         self.ensure_manual_worker(
             connection,
             target,
             tab_id,
             query_generation,
             transaction_generation,
-            Some((sql, cancel_receiver, reply)),
+            None,
         );
         if let Some(entry) = self.manual_transactions.get_mut(&tab_id) {
+            let execution_id = Uuid::new_v4();
+            let operation_id = Uuid::new_v4();
+            let transaction_id = entry.transaction_id;
+            let recorder = self.history_recorder.clone();
+            let history = crate::model::sql_history::ExecutionHistory {
+                execution_id,
+                operation_id,
+                transaction_id: Some(transaction_id),
+                sql: history_sql,
+                status: crate::model::sql_history::HistoryExecutionStatus::Running,
+                certainty: crate::model::sql_history::HistoryResultCertainty::Confirmed,
+                transaction_outcome: crate::model::sql_history::HistoryTransactionOutcome::Pending,
+                affected_rows: None,
+                returned_rows: None,
+                requested_at: chrono::Utc::now().timestamp_millis(),
+                elapsed_millis: None,
+                profile_id: Some(history_target.profile_id),
+                database: Some(history_target.database.clone()),
+                schema: history_target.schema.clone(),
+            };
+            if let Some(recorder) = &recorder {
+                let recorder = recorder.clone();
+                let request_sender = entry.request_sender.clone();
+                let request_sql = sql;
+                self.background_tasks.push(tokio::spawn(async move {
+                    let _ = recorder.start(history).await;
+                    let _ = request_sender.send(TransactionRequest::Execute {
+                        query_generation,
+                        sql: request_sql,
+                        cancel: cancel_receiver,
+                        reply,
+                    });
+                }));
+            } else {
+                let _ = entry.request_sender.send(TransactionRequest::Execute {
+                    query_generation,
+                    sql,
+                    cancel: cancel_receiver,
+                    reply,
+                });
+            }
             entry.cancellation_sender = Some(cancel);
             let sender = self.event_sender.clone();
             self.query_tasks.insert(
@@ -3018,6 +3294,18 @@ impl Runtime {
                 tokio::spawn(async move {
                     match result.await {
                         Ok(Ok(outcome)) => {
+                            if let Some(recorder) = &recorder {
+                                let _ = recorder
+                                    .finish_with_certainty(
+                                        execution_id,
+                                        crate::model::sql_history::HistoryExecutionStatus::Succeeded,
+                                        crate::model::sql_history::HistoryResultCertainty::Confirmed,
+                                        None,
+                                        Some(outcome.stats.row_count),
+                                        Some(outcome.stats.total().as_millis()),
+                                    )
+                                    .await;
+                            }
                             let _ = sender.send(Action::ManualQueryFinished {
                                 tab_id,
                                 query_generation,
@@ -3027,6 +3315,28 @@ impl Runtime {
                             });
                         }
                         Ok(Err(error)) => {
+                            if let Some(recorder) = &recorder {
+                                let status = if error.0 == "cancelled" {
+                                    crate::model::sql_history::HistoryExecutionStatus::Cancelled
+                                } else {
+                                    crate::model::sql_history::HistoryExecutionStatus::Failed
+                                };
+                                let certainty = if error.0 == "cancelled" {
+                                    crate::model::sql_history::HistoryResultCertainty::Unknown
+                                } else {
+                                    crate::model::sql_history::HistoryResultCertainty::Confirmed
+                                };
+                                let _ = recorder
+                                    .finish_with_certainty(
+                                        execution_id,
+                                        status,
+                                        certainty,
+                                        None,
+                                        None,
+                                        None,
+                                    )
+                                    .await;
+                            }
                             let _ = sender.send(Action::ManualQueryFailed {
                                 tab_id,
                                 query_generation,
@@ -3036,6 +3346,18 @@ impl Runtime {
                             });
                         }
                         Err(_) => {
+                            if let Some(recorder) = &recorder {
+                                let _ = recorder
+                                    .finish_with_certainty(
+                                        execution_id,
+                                        crate::model::sql_history::HistoryExecutionStatus::Interrupted,
+                                        crate::model::sql_history::HistoryResultCertainty::Unknown,
+                                        None,
+                                        None,
+                                        None,
+                                    )
+                                    .await;
+                            }
                             let _ = sender.send(Action::ManualQueryFailed {
                                 tab_id,
                                 query_generation,
@@ -3143,9 +3465,19 @@ impl Runtime {
             return;
         }
         let sender = self.event_sender.clone();
+        let recorder = self.history_recorder.clone();
+        let transaction_id = entry.transaction_id;
         self.background_tasks.push(tokio::spawn(async move {
             match result.await {
                 Ok(Ok(())) => {
+                    if let Some(recorder) = &recorder {
+                        let _ = recorder
+                            .resolve_transaction(
+                                transaction_id,
+                                crate::model::sql_history::HistoryTransactionOutcome::Committed,
+                            )
+                            .await;
+                    }
                     let _ = sender.send(Action::ManualCommitted {
                         tab_id,
                         query_generation,
@@ -3205,9 +3537,19 @@ impl Runtime {
             return;
         }
         let sender = self.event_sender.clone();
+        let recorder = self.history_recorder.clone();
+        let transaction_id = entry.transaction_id;
         self.background_tasks.push(tokio::spawn(async move {
             match result.await {
                 Ok(Ok(())) => {
+                    if let Some(recorder) = &recorder {
+                        let _ = recorder
+                            .resolve_transaction(
+                                transaction_id,
+                                crate::model::sql_history::HistoryTransactionOutcome::RolledBack,
+                            )
+                            .await;
+                    }
                     let _ = sender.send(Action::ManualRolledBack {
                         tab_id,
                         query_generation,
@@ -3338,6 +3680,7 @@ impl Runtime {
         let sender = self.event_sender.clone();
         let worker_target = target.clone();
         let forced_close = ForcedCloseHandle::new();
+        let transaction_id = Uuid::new_v4();
         let worker_forced_close = forced_close.clone();
         let worker_handle = tokio::spawn(async move {
             let Some(database) = active_database_for_target(
@@ -3431,6 +3774,7 @@ impl Runtime {
             ManualTransactionEntry {
                 connection,
                 target,
+                transaction_id,
                 transaction_generation,
                 request_sender: proxy,
                 worker_handle,
@@ -3518,6 +3862,10 @@ impl Runtime {
             .map(|(_, connection)| connection)
         {
             connection.database.close().await;
+        }
+        if let Some(recorder) = self.history_recorder.take() {
+            let _ = recorder.flush().await;
+            let _ = recorder.shutdown().await;
         }
     }
 }
@@ -4552,6 +4900,13 @@ pub async fn run_tui(cli: Cli) -> Result<RunOutcome> {
         Arc::new(NativeSecretStore),
         event_sender,
     );
+    let history_store = crate::persistence::sql_history::HistoryStore::open(paths.history_file())
+        .await
+        .context("failed to open SQL history database")?;
+    runtime.set_history_recorder(crate::history::HistoryRecorder::default_capacity(
+        history_store.clone(),
+    ));
+    runtime.set_history_store(history_store);
     runtime.set_workspace_store(workspace_store);
     runtime.set_clipboard_config(settings.terminal.clipboard);
     let mut terminal = TerminalSession::enter(settings.terminal.mouse != MouseMode::Off)
@@ -5317,6 +5672,7 @@ mod tests {
                     database: ":memory:".to_owned(),
                     schema: Some("main".to_owned()),
                 },
+                transaction_id: Uuid::nil(),
                 transaction_generation: 1,
                 request_sender,
                 worker_handle,

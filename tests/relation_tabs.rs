@@ -1516,6 +1516,7 @@ fn relation_view(app: &lazydb::app::App) -> RelationView {
         WorkspaceTab::Relation(tab) => tab.view,
         WorkspaceTab::Sql(_) => panic!("expected relation tab"),
         WorkspaceTab::Dashboard(_) => panic!("expected relation tab"),
+        WorkspaceTab::History(_) => panic!("expected relation tab"),
     }
 }
 
@@ -1524,6 +1525,7 @@ fn relation_query(app: &lazydb::app::App) -> &lazydb::model::data_query::DataQue
         WorkspaceTab::Relation(tab) => &tab.query,
         WorkspaceTab::Sql(_) => panic!("expected relation tab"),
         WorkspaceTab::Dashboard(_) => panic!("expected relation tab"),
+        WorkspaceTab::History(_) => panic!("expected relation tab"),
     }
 }
 
@@ -1534,6 +1536,7 @@ fn relation_query_mut(
         WorkspaceTab::Relation(tab) => &mut tab.query,
         WorkspaceTab::Sql(_) => panic!("expected relation tab"),
         WorkspaceTab::Dashboard(_) => panic!("expected relation tab"),
+        WorkspaceTab::History(_) => panic!("expected relation tab"),
     }
 }
 
@@ -1605,6 +1608,7 @@ fn relation_tab_at(app: &lazydb::app::App, index: usize) -> &RelationTab {
         WorkspaceTab::Relation(tab) => tab,
         WorkspaceTab::Sql(_) => panic!("expected relation tab"),
         WorkspaceTab::Dashboard(_) => panic!("expected relation tab"),
+        WorkspaceTab::History(_) => panic!("expected relation tab"),
     }
 }
 

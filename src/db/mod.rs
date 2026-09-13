@@ -75,6 +75,13 @@ pub enum ErrorCategory {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HistoryErrorSnapshot {
+    pub category: ErrorCategory,
+    pub code: Option<String>,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DatabaseErrorPosition {
     Original(usize),
     Internal { position: usize, query: String },
@@ -99,6 +106,14 @@ pub struct DatabaseError {
 }
 
 impl DatabaseError {
+    pub fn history_snapshot(&self) -> HistoryErrorSnapshot {
+        HistoryErrorSnapshot {
+            category: self.category,
+            code: self.code.clone(),
+            message: self.message.clone(),
+        }
+    }
+
     pub fn configuration(message: impl AsRef<str>) -> Self {
         Self {
             category: ErrorCategory::Configuration,

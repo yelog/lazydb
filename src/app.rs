@@ -1000,6 +1000,7 @@ impl App {
                 )),
                 WorkspaceTab::Sql(_) => None,
                 WorkspaceTab::Dashboard(_) => None,
+                WorkspaceTab::History(_) => None,
             })
             .collect::<Vec<_>>();
         for (id, text) in relation_sessions {
@@ -1410,6 +1411,7 @@ impl App {
             Some(WorkspaceTab::Sql(tab)) => tab.grid.selected_column,
             Some(WorkspaceTab::Relation(tab)) => tab.grid.selected_column,
             Some(WorkspaceTab::Dashboard(tab)) => tab.grid.selected_column,
+            Some(WorkspaceTab::History(_)) => 0,
             None => 0,
         }
     }
@@ -1752,6 +1754,7 @@ impl App {
             .collect();
         let tabs = tabs
             .iter()
+            .filter(|tab| !matches!(tab, WorkspaceTab::History(_)))
             .map(|tab| match tab {
                 WorkspaceTab::Sql(tab) => PersistedTab::Console { console_id: tab.id },
                 WorkspaceTab::Relation(tab) => {
@@ -1769,6 +1772,7 @@ impl App {
                     page: tab.page,
                     refresh_enabled: tab.refresh_enabled,
                 },
+                WorkspaceTab::History(_) => unreachable!(),
             })
             .collect();
         PersistedProfileWorkspace {
@@ -4325,6 +4329,196 @@ impl App {
                     });
                 }
                 commands
+            }
+            Action::OpenSqlHistory => {
+                if let Some(index) = self
+                    .tabs
+                    .iter()
+                    .position(|tab| matches!(tab, WorkspaceTab::History(_)))
+                {
+                    self.active_tab = index;
+                } else {
+                    self.tabs.push(WorkspaceTab::History(Default::default()));
+                    self.active_tab = self.tabs.len() - 1;
+                }
+                self.focus = Focus::Results;
+                let generation =
+                    if let Some(WorkspaceTab::History(tab)) = self.tabs.get_mut(self.active_tab) {
+                        tab.loading = true;
+                        tab.query_generation = tab.query_generation.saturating_add(1);
+                        tab.query_generation
+                    } else {
+                        0
+                    };
+                vec![
+                    Command::LoadSqlHistory {
+                        generation,
+                        request: crate::persistence::sql_history::HistoryPageRequest {
+                            limit: 100,
+                            cursor: None,
+                            search: self.tabs.get(self.active_tab).and_then(|tab| match tab {
+                                WorkspaceTab::History(tab) if !tab.search.is_empty() => {
+                                    Some(tab.search.clone())
+                                }
+                                _ => None,
+                            }),
+                            status: self.tabs.get(self.active_tab).and_then(|tab| match tab {
+                                WorkspaceTab::History(tab) => tab.status_filter,
+                                _ => None,
+                            }),
+                            transaction_outcome: self.tabs.get(self.active_tab).and_then(|tab| {
+                                match tab {
+                                    WorkspaceTab::History(tab) => tab.transaction_filter,
+                                    _ => None,
+                                }
+                            }),
+                            database: self.tabs.get(self.active_tab).and_then(|tab| match tab {
+                                WorkspaceTab::History(tab) => tab.database_filter.clone(),
+                                _ => None,
+                            }),
+                        },
+                    },
+                    self.persist_workspace_command(),
+                ]
+            }
+            Action::SqlHistoryOpenDetail => {
+                let Some(WorkspaceTab::History(tab)) = self.tabs.get(self.active_tab) else {
+                    return Vec::new();
+                };
+                let Some(id) = tab.selected_execution else {
+                    return Vec::new();
+                };
+                let Some(item) = tab.items.iter().find(|item| item.execution_id == id) else {
+                    return Vec::new();
+                };
+                self.update(Action::OpenTextDetail(
+                    crate::model::text_detail::TextDetailRequest::new(
+                        "SQL History",
+                        Uuid::nil(),
+                        0,
+                        &item.sql,
+                        item.sql.clone(),
+                        None,
+                    ),
+                ))
+            }
+            Action::SqlHistoryCopy => {
+                let Some(WorkspaceTab::History(tab)) = self.tabs.get(self.active_tab) else {
+                    return Vec::new();
+                };
+                let Some(id) = tab.selected_execution else {
+                    return Vec::new();
+                };
+                let Some(item) = tab.items.iter().find(|item| item.execution_id == id) else {
+                    return Vec::new();
+                };
+                vec![Command::WriteClipboard(ClipboardPayload {
+                    description: "SQL History: complete SQL".into(),
+                    text: item.sql.clone(),
+                    sensitive: false,
+                })]
+            }
+            Action::SqlHistorySelect(index) => {
+                if let Some(WorkspaceTab::History(tab)) = self.tabs.get_mut(self.active_tab) {
+                    if let Some(item) = tab.items.get(index) {
+                        tab.selected_execution = Some(item.execution_id);
+                    }
+                }
+                Vec::new()
+            }
+            Action::SqlHistorySearchInsert(character) => {
+                if let Some(WorkspaceTab::History(tab)) = self.tabs.get_mut(self.active_tab) {
+                    tab.search.push(character);
+                    tab.query_generation = tab.query_generation.saturating_add(1);
+                    tab.loading = true;
+                    return vec![Command::LoadSqlHistory {
+                        generation: tab.query_generation,
+                        request: crate::persistence::sql_history::HistoryPageRequest {
+                            limit: 100,
+                            cursor: None,
+                            search: Some(tab.search.clone()),
+                            status: tab.status_filter,
+                            transaction_outcome: tab.transaction_filter,
+                            database: tab.database_filter.clone(),
+                        },
+                    }];
+                }
+                Vec::new()
+            }
+            Action::SqlHistorySearchClear => {
+                if let Some(WorkspaceTab::History(tab)) = self.tabs.get_mut(self.active_tab) {
+                    tab.search.clear();
+                    tab.query_generation = tab.query_generation.saturating_add(1);
+                    tab.loading = true;
+                    return vec![Command::LoadSqlHistory {
+                        generation: tab.query_generation,
+                        request: crate::persistence::sql_history::HistoryPageRequest {
+                            limit: 100,
+                            cursor: None,
+                            search: None,
+                            status: tab.status_filter,
+                            transaction_outcome: tab.transaction_filter,
+                            database: tab.database_filter.clone(),
+                        },
+                    }];
+                }
+                Vec::new()
+            }
+            Action::SqlHistoryMove(delta) => {
+                if let Some(WorkspaceTab::History(tab)) = self.tabs.get_mut(self.active_tab)
+                    && !tab.items.is_empty()
+                {
+                    let current = tab
+                        .selected_execution
+                        .and_then(|id| tab.items.iter().position(|item| item.execution_id == id))
+                        .unwrap_or(0);
+                    let next =
+                        (current as isize + delta).rem_euclid(tab.items.len() as isize) as usize;
+                    tab.selected_execution = Some(tab.items[next].execution_id);
+                }
+                Vec::new()
+            }
+            Action::SqlHistoryCycleStatus | Action::SqlHistoryCycleTransaction => {
+                let Some(WorkspaceTab::History(tab)) = self.tabs.get_mut(self.active_tab) else {
+                    return Vec::new();
+                };
+                if matches!(action, Action::SqlHistoryCycleStatus) {
+                    use crate::model::sql_history::HistoryExecutionStatus::*;
+                    tab.status_filter = match tab.status_filter {
+                        None => Some(Succeeded),
+                        Some(Succeeded) => Some(Failed),
+                        Some(Failed) => Some(TimedOut),
+                        Some(TimedOut) => Some(Cancelled),
+                        Some(Cancelled) => Some(Running),
+                        Some(Running) => None,
+                        Some(_) => None,
+                    };
+                } else {
+                    use crate::model::sql_history::HistoryTransactionOutcome::*;
+                    tab.transaction_filter = match tab.transaction_filter {
+                        None => Some(Pending),
+                        Some(Pending) => Some(Committed),
+                        Some(Committed) => Some(RolledBack),
+                        Some(RolledBack) => Some(Unknown),
+                        Some(Unknown) => None,
+                        Some(_) => None,
+                    };
+                }
+                tab.query_generation = tab.query_generation.saturating_add(1);
+                tab.loading = true;
+                Some(Command::LoadSqlHistory {
+                    generation: tab.query_generation,
+                    request: crate::persistence::sql_history::HistoryPageRequest {
+                        limit: 100,
+                        cursor: None,
+                        search: (!tab.search.is_empty()).then(|| tab.search.clone()),
+                        status: tab.status_filter,
+                        transaction_outcome: tab.transaction_filter,
+                        database: tab.database_filter.clone(),
+                    },
+                })
+                .into_iter()
+                .collect()
             }
             Action::DashboardSetPage(page) => {
                 let Some(WorkspaceTab::Dashboard(tab)) = self.tabs.get_mut(self.active_tab) else {
@@ -12007,6 +12201,20 @@ impl App {
                 }
             }
             Action::ToggleTerminalSelection => Vec::new(),
+            Action::SqlHistoryLoaded { generation, page } => {
+                if let Some(WorkspaceTab::History(tab)) = self.tabs.get_mut(self.active_tab)
+                    && tab.query_generation == generation
+                {
+                    tab.loading = false;
+                    tab.selected_execution = page.items.first().map(|item| item.execution_id);
+                    tab.items = page.items;
+                }
+                Vec::new()
+            }
+            Action::SqlHistoryLoadFailed { message, .. } => {
+                self.notify_warning("SQL History", message);
+                Vec::new()
+            }
         }
     }
 
@@ -21637,6 +21845,7 @@ mod tests {
             WorkspaceTab::Relation(tab) => tab.descriptor.key.clone(),
             WorkspaceTab::Sql(_) => unreachable!(),
             WorkspaceTab::Dashboard(_) => unreachable!(),
+            WorkspaceTab::History(_) => unreachable!(),
         };
         let scope = app.profiles[0].catalog_scope.clone();
         let request = RelationRequest {

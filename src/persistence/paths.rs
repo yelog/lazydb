@@ -65,6 +65,10 @@ impl AppPaths {
     pub fn workspace_sql_dir(&self) -> PathBuf {
         self.state_dir.join("sql")
     }
+
+    pub fn history_file(&self) -> PathBuf {
+        self.state_dir.join("sql-history.sqlite3")
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -154,6 +158,7 @@ fn has_lazydb_data(path: &Path) -> bool {
         "credential.key",
         "settings.toml",
         "workspace.toml",
+        "sql-history.sqlite3",
         "install.json",
         "current",
         "releases",

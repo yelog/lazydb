@@ -8,6 +8,7 @@ pub mod config;
 pub mod db;
 pub(crate) mod editor;
 pub mod help;
+pub mod history;
 pub mod identity;
 pub mod input;
 pub mod installation;

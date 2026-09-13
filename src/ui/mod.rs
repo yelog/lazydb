@@ -16,6 +16,7 @@ pub mod record_view;
 pub mod relation;
 pub(crate) mod scrollbar;
 mod shortcut_hints;
+pub(crate) mod sql_history;
 pub(crate) mod sql_preview;
 pub mod text_detail;
 pub mod text_selection;
@@ -192,6 +193,7 @@ pub enum HitTarget {
     OpenNotificationHistoryAt(u64),
     OpenTextDetail(crate::model::text_detail::TextDetailRequest),
     NotificationHistoryRow(usize),
+    SqlHistoryRow(usize),
     RelationFirstPage,
     RelationPreviousPage,
     RelationPageSize,
@@ -775,10 +777,11 @@ pub fn render_with_state_using_icons_sequence_and_theme(
         app.tabs.get(app.active_tab),
         Some(WorkspaceTab::Dashboard(_))
     );
+    let is_history = matches!(app.tabs.get(app.active_tab), Some(WorkspaceTab::History(_)));
     let layout = AppLayout::calculate(
         area,
         app.focus,
-        is_relation || is_dashboard,
+        is_relation || is_dashboard || is_history,
         app.pane_sizes,
         app.pane_maximized,
     );
@@ -871,6 +874,23 @@ pub fn render_with_state_using_icons_sequence_and_theme(
             area: layout.footer,
             target: HitTarget::Help,
         });
+    } else if is_history {
+        if let Some(area) = layout.relation.or(layout.results) {
+            state.hit_regions.push(HitRegion {
+                area,
+                target: HitTarget::Focus(Focus::Results),
+            });
+            sql_history::render(frame, area, app, theme);
+            if let Some(WorkspaceTab::History(tab)) = app.tabs.get(app.active_tab) {
+                for index in 0..tab.items.len().min(area.height.saturating_sub(2) as usize) {
+                    state.hit_regions.push(HitRegion {
+                        area: Rect::new(area.x, area.y + 1 + index as u16, area.width, 1),
+                        target: HitTarget::SqlHistoryRow(index),
+                    });
+                }
+            }
+        }
+        render_footer(frame, layout.footer, app, theme, sequence, state);
     } else {
         if let Some(area) = layout.explorer {
             state.hit_regions.push(HitRegion {
@@ -1235,6 +1255,7 @@ fn animation_observation(app: &App) -> animation::AnimationObservation {
             }
         }
         WorkspaceTab::Dashboard(_) => {}
+        WorkspaceTab::History(_) => {}
     }
     observation
 }
@@ -2025,6 +2046,7 @@ fn render_tabs(
                         .map(|profile| profile.name.clone())
                         .unwrap_or_else(|| "未绑定".to_owned()),
                     WorkspaceTab::Sql(_) => unreachable!(),
+                    WorkspaceTab::History(_) => "全部连接".to_owned(),
                 };
                 format!("{} @{connection_name}", tab.title())
             };
@@ -2054,6 +2076,7 @@ fn render_tabs(
                             .map(|server| icons.database(server.kind))
                     })
                     .unwrap_or_else(|| icons.catalog(CatalogKind::Database)),
+                WorkspaceTab::History(_) => icons.catalog(CatalogKind::Table),
             };
             let label = format!(" {icon} {title} ");
             let can_close = index != 0 || tab.as_console().is_some();
