@@ -3527,6 +3527,48 @@ impl App {
                 }
                 Vec::new()
             }
+            Action::SqlHistoryCycleStatus | Action::SqlHistoryCycleTransaction => {
+                let Some(WorkspaceTab::History(tab)) = self.tabs.get_mut(self.active_tab) else {
+                    return Vec::new();
+                };
+                if matches!(action, Action::SqlHistoryCycleStatus) {
+                    use crate::model::sql_history::HistoryExecutionStatus::*;
+                    tab.status_filter = match tab.status_filter {
+                        None => Some(Succeeded),
+                        Some(Succeeded) => Some(Failed),
+                        Some(Failed) => Some(TimedOut),
+                        Some(TimedOut) => Some(Cancelled),
+                        Some(Cancelled) => Some(Running),
+                        Some(Running) => None,
+                        Some(_) => None,
+                    };
+                } else {
+                    use crate::model::sql_history::HistoryTransactionOutcome::*;
+                    tab.transaction_filter = match tab.transaction_filter {
+                        None => Some(Pending),
+                        Some(Pending) => Some(Committed),
+                        Some(Committed) => Some(RolledBack),
+                        Some(RolledBack) => Some(Unknown),
+                        Some(Unknown) => None,
+                        Some(_) => None,
+                    };
+                }
+                tab.query_generation = tab.query_generation.saturating_add(1);
+                tab.loading = true;
+                Some(Command::LoadSqlHistory {
+                    generation: tab.query_generation,
+                    request: crate::persistence::sql_history::HistoryPageRequest {
+                        limit: 100,
+                        cursor: None,
+                        search: (!tab.search.is_empty()).then(|| tab.search.clone()),
+                        status: tab.status_filter,
+                        transaction_outcome: tab.transaction_filter,
+                        database: tab.database_filter.clone(),
+                    },
+                })
+                .into_iter()
+                .collect()
+            }
             Action::DashboardSetPage(page) => {
                 let Some(WorkspaceTab::Dashboard(tab)) = self.tabs.get_mut(self.active_tab) else {
                     return Vec::new();
