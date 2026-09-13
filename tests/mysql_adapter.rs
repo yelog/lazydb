@@ -572,8 +572,12 @@ async fn catalog_page_exposes_scoped_mysql_objects_and_rich_metadata_when_config
             ))
             .await
             .unwrap();
-        assert_eq!(children.total_count, CatalogCount::Exact(14));
-        assert_eq!(children.entries.len(), 14);
+        let expected_children = if supports_functional_indexes { 14 } else { 13 };
+        assert_eq!(
+            children.total_count,
+            CatalogCount::Exact(expected_children as u64)
+        );
+        assert_eq!(children.entries.len(), expected_children);
         let columns = children
             .entries
             .iter()
