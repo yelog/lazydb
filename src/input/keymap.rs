@@ -1573,6 +1573,8 @@ impl Keymap {
             return match event.code {
                 KeyCode::Char('y') => Some(Action::SqlHistoryCopy),
                 KeyCode::Enter => Some(Action::SqlHistoryOpenDetail),
+                KeyCode::Char('j') | KeyCode::Down => Some(Action::SqlHistoryMove(1)),
+                KeyCode::Char('k') | KeyCode::Up => Some(Action::SqlHistoryMove(-1)),
                 KeyCode::Backspace => Some(Action::SqlHistorySearchClear),
                 KeyCode::Char(_character) if !event.modifiers.is_empty() => None,
                 KeyCode::Char(character) => Some(Action::SqlHistorySearchInsert(character)),

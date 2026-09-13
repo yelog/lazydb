@@ -3513,6 +3513,20 @@ impl App {
                 }
                 Vec::new()
             }
+            Action::SqlHistoryMove(delta) => {
+                if let Some(WorkspaceTab::History(tab)) = self.tabs.get_mut(self.active_tab)
+                    && !tab.items.is_empty()
+                {
+                    let current = tab
+                        .selected_execution
+                        .and_then(|id| tab.items.iter().position(|item| item.execution_id == id))
+                        .unwrap_or(0);
+                    let next =
+                        (current as isize + delta).rem_euclid(tab.items.len() as isize) as usize;
+                    tab.selected_execution = Some(tab.items[next].execution_id);
+                }
+                Vec::new()
+            }
             Action::DashboardSetPage(page) => {
                 let Some(WorkspaceTab::Dashboard(tab)) = self.tabs.get_mut(self.active_tab) else {
                     return Vec::new();
