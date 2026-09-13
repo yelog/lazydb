@@ -7383,6 +7383,32 @@ fn tiny_terminal_wins_over_profile_overlay() {
 }
 
 #[test]
+fn omni_renders_above_underlying_overlay_with_its_own_cursor_and_hit_barrier() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::ShowHelp);
+    app.update(Action::OpenOmni);
+    for character in "> format".chars() {
+        app.update(Action::OmniEdit(
+            lazydb::model::text_input::TextInputEdit::Insert(character),
+        ));
+    }
+
+    let (output, state) = render_with_state(&app, 80, 24);
+    assert!(output.contains("OMNI"));
+    assert!(state.cursor.is_some());
+    assert_eq!(state.target_at(0, 0), Some(&HitTarget::Omni));
+    assert!(output.contains("Format SQL"));
+}
+
+#[test]
+fn omni_tiny_terminal_is_safe_and_keeps_escape_available() {
+    let mut app = App::new(Vec::new());
+    app.update(Action::OpenOmni);
+    let _output = render(&app, 9, 4);
+    assert!(app.omni.is_some());
+}
+
+#[test]
 fn disconnected_explorer_points_to_the_profile_manager() {
     let output = render(&App::new(Vec::new()), 120, 36);
     assert!(output.contains("No profiles"));

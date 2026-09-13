@@ -40,6 +40,8 @@ preset = "vim"
 sequence_timeout_ms = 750
 
 [keybindings.global]
+# F2 opens the global action and object switcher.
+omni = ["F2"]
 # F1 opens contextual Help.
 # ? opens contextual Help outside editor input states.
 help = ["F1", "?"]

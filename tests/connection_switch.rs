@@ -323,6 +323,11 @@ fn failed_switch_keeps_visible_workspace_and_editor_text_unchanged() {
         mutation_capabilities: Default::default(),
     });
     app.update(Action::ReplaceEditor("SELECT first".into()));
+    app.update(Action::EditorKey(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('l'),
+        crossterm::event::KeyModifiers::NONE,
+    )));
+    let first_position = app.active_editor_position();
     let first_tab = app.active_console().id;
 
     let second_generation = match app.update(Action::RequestConnect(second_id)).as_slice() {
@@ -332,6 +337,7 @@ fn failed_switch_keeps_visible_workspace_and_editor_text_unchanged() {
     assert_eq!(app.active_workspace_profile, Some(first_id));
     assert_eq!(app.active_console().id, first_tab);
     assert_eq!(app.active_editor_text().unwrap(), "SELECT first");
+    assert_eq!(app.active_editor_position(), first_position);
 
     app.update(Action::ConnectionFailed {
         profile_id: second_id,

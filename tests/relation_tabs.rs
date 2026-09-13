@@ -101,6 +101,102 @@ fn opening_relation_is_a_semantic_action() {
 }
 
 #[test]
+fn explicit_catalog_id_opens_relation_without_changing_explorer_selection() {
+    let profile = lazydb::profile::import_connection_url("sqlite::memory:", Some("local"))
+        .unwrap()
+        .profile;
+    let profile_id = profile.id;
+    let mut app = lazydb::app::App::new(vec![profile.clone()]);
+    app.update(Action::ConnectionSucceeded {
+        profile_id,
+        generation: 1,
+        server: lazydb::db::ServerInfo {
+            kind: lazydb::profile::DatabaseKind::Sqlite,
+            version: "3".into(),
+            database: ":memory:".into(),
+            current_user: None,
+        },
+        mutation_capabilities: Default::default(),
+    });
+
+    let database_id = CatalogId::new(profile_id, CatalogKind::Database, [":memory:"]);
+    let schema_id = CatalogId::new(profile_id, CatalogKind::Schema, [":memory:", "main"]);
+    let table_id = CatalogId::new(
+        profile_id,
+        CatalogKind::Table,
+        [":memory:", "main", "users"],
+    );
+    let database = CatalogEntry::database(
+        database_id.clone(),
+        QualifiedName {
+            database: Some(":memory:".into()),
+            schema: None,
+            object: ":memory:".into(),
+        },
+        "database",
+        OptionalMetadata::Unsupported,
+        true,
+    )
+    .unwrap();
+    let schema = CatalogEntry::schema(
+        schema_id.clone(),
+        database_id,
+        QualifiedName {
+            database: Some(":memory:".into()),
+            schema: Some("main".into()),
+            object: "main".into(),
+        },
+        "schema",
+        OptionalMetadata::Unsupported,
+        true,
+    )
+    .unwrap();
+    let table = CatalogEntry::relation(
+        table_id.clone(),
+        schema_id,
+        QualifiedName {
+            database: Some(":memory:".into()),
+            schema: Some("main".into()),
+            object: "users".into(),
+        },
+        "table",
+        OptionalMetadata::Unsupported,
+        true,
+    )
+    .unwrap();
+    let tree = &mut app
+        .explorer
+        .normalized
+        .profiles
+        .get_mut(&profile_id)
+        .unwrap()
+        .catalog;
+    tree.insert_subtree(vec![database, schema, table]).unwrap();
+    let other_id = CatalogId::new(
+        profile_id,
+        CatalogKind::Table,
+        [":memory:", "main", "other"],
+    );
+    app.explorer.normalized.selected = Some(lazydb::model::explorer::ExplorerNodeId::Catalog(
+        other_id.clone(),
+    ));
+
+    app.update(Action::OpenCatalogRelation {
+        id: table_id.clone(),
+        view: RelationView::Data,
+    });
+
+    assert_eq!(
+        app.explorer.selected_id(),
+        Some(&lazydb::model::explorer::ExplorerNodeId::Catalog(other_id))
+    );
+    assert!(app.tabs.iter().any(|tab| matches!(
+        tab,
+        WorkspaceTab::Relation(tab) if tab.descriptor.key.object_id == table_id
+    )));
+}
+
+#[test]
 fn relation_view_reducer_switches_between_data_and_ddl() {
     let mut app = lazydb::app::App::new(Vec::new());
     app.tabs

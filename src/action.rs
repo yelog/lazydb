@@ -37,6 +37,7 @@ use crate::{
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
     NewConsole,
+    NewConsoleNamed(String),
     OpenDashboard,
     DashboardSetPage(crate::model::dashboard::DashboardPage),
     DashboardRefresh,
@@ -165,6 +166,20 @@ pub enum Action {
     HelpPaste(String),
     HelpMove(isize),
     ExecuteHelpShortcut(HelpShortcutId),
+    OpenOmni,
+    OmniEdit(crate::model::text_input::TextInputEdit),
+    OmniPaste(String),
+    OmniMove(isize),
+    OmniSelect(usize),
+    OmniConfirm,
+    OmniCancel,
+    OmniDismiss,
+    OmniShowActions,
+    OmniResumeInteraction(Uuid),
+    ExecuteSemanticCommand {
+        id: crate::commands::CommandId,
+        context: crate::commands::CommandContext,
+    },
     SubstituteYes,
     SubstituteNo,
     SubstituteAll,
@@ -576,6 +591,10 @@ pub enum Action {
     OpenSelectedRelation {
         view: crate::model::relation::RelationView,
     },
+    OpenCatalogRelation {
+        id: crate::db::catalog::CatalogId,
+        view: crate::model::relation::RelationView,
+    },
     SetRelationView(crate::model::relation::RelationView),
     SetResultView(crate::model::tab::ResultView),
     RefreshActiveRelation,
@@ -813,8 +832,12 @@ pub enum Action {
         category: ErrorCategory,
         message: String,
     },
-    CatalogSearchSucceeded(CatalogSearchPage),
+    CatalogSearchSucceeded {
+        owner: CatalogSearchOwner,
+        page: CatalogSearchPage,
+    },
     CatalogSearchFailed {
+        owner: CatalogSearchOwner,
         connection: ConnectionIdentity,
         session_id: u64,
         generation: u64,
@@ -1134,8 +1157,15 @@ pub enum Command {
     },
     LoadCatalogObjectDefinition(CatalogObjectDefinitionRequest),
     LoadCatalogOwnerContext(CatalogOwnerContextRequest),
-    SearchCatalog(CatalogSearchRequest),
-    CancelCatalogSearch,
+    SearchCatalog {
+        owner: CatalogSearchOwner,
+        request: CatalogSearchRequest,
+    },
+    CancelCatalogSearch {
+        owner: CatalogSearchOwner,
+        session_id: u64,
+        generation: u64,
+    },
     PlanCatalogDrop(CatalogDropRequest),
     ExecuteCatalogDrop(CatalogDropPlan),
     PlanCatalogMutation {
@@ -1299,6 +1329,12 @@ pub enum Command {
         delay_ms: u64,
     },
     Quit,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum CatalogSearchOwner {
+    Explorer,
+    Omni,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

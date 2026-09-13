@@ -95,4 +95,10 @@ fn keyboard_reference_is_dedicated_and_complete() {
             "missing architecture term {term}"
         );
     }
+
+    let omni = include_str!("../docs/omni-bar.md");
+    assert!(omni.contains("Press `F2`"));
+    assert!(omni.contains("`Escape`"));
+    assert!(omni.contains("remote search requires"));
+    assert!(readme.contains("docs/omni-bar.md"));
 }

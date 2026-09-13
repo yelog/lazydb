@@ -238,6 +238,7 @@ pub struct App {
     pub pane_sizes: PaneSizePreferences,
     pane_layout: PaneLayoutMetrics,
     pub overlay: Option<Overlay>,
+    pub omni: Option<crate::model::omni::OmniState>,
     pub profile_manager: Option<ProfileManagerState>,
     pub catalog_editor: Option<CatalogEditorState>,
     pub system_credential_availability: crate::persistence::secrets::SecretStoreAvailability,
@@ -249,6 +250,11 @@ pub struct App {
     connection_request_generation: u64,
     connection_terminal_generation: u64,
     next_search_session: u64,
+    next_omni_session: u64,
+    pending_navigation: Option<PendingNavigation>,
+    suspended_interactions: HashMap<Uuid, SuspendedInteraction>,
+    navigation_history: crate::model::navigation::NavigationHistory,
+    pending_return_location: Option<crate::model::navigation::WorkspaceLocation>,
     pending_catalog_selection: Option<(CatalogTarget, CatalogSelectionHint)>,
     editor: EditorWorkspace,
     confirmation_policy: ConfirmationPolicy,
@@ -263,6 +269,8 @@ pub struct App {
     transaction_op_started_at: Option<(Uuid, Instant)>,
     pub sql_editor_list: crate::model::sql_editor_list::SqlEditorListState,
     workspaces: HashMap<Uuid, ConnectionWorkspace>,
+    workspace_editors: HashMap<Uuid, EditorWorkspace>,
+    workspace_focus: HashMap<Uuid, Focus>,
     workspace_save: crate::model::workspace_save::SaveState,
     workspace_save_closing: bool,
     workspace_quit_save: crate::model::workspace_save::QuitSaveState,
@@ -297,6 +305,25 @@ pub(crate) struct CatalogCreateSelection {
     pub anchor: CatalogMutationAnchor,
     pub catalog_epoch: u64,
     pub options: Vec<CatalogObjectType>,
+}
+
+#[derive(Clone, Debug)]
+struct PendingNavigation {
+    profile_id: Uuid,
+    generation: u64,
+    intent: crate::commands::UserIntent,
+    descriptor: Option<RelationDescriptor>,
+}
+
+struct SuspendedInteraction {
+    profile_id: Option<Uuid>,
+    tab_id: Option<Uuid>,
+    state: SuspendedInteractionState,
+}
+
+enum SuspendedInteractionState {
+    ProfileManager(Box<ProfileManagerState>),
+    CatalogEditor(Box<CatalogEditorState>),
 }
 
 fn selection_target_contains(target: &CatalogTarget, selection: &CatalogSelectionHint) -> bool {
@@ -672,6 +699,7 @@ impl App {
             pane_sizes: PaneSizePreferences::default(),
             pane_layout: PaneLayoutMetrics::default(),
             overlay: None,
+            omni: None,
             profile_manager: None,
             catalog_editor: None,
             system_credential_availability:
@@ -684,6 +712,11 @@ impl App {
             connection_request_generation: 0,
             connection_terminal_generation: 0,
             next_search_session: 0,
+            next_omni_session: 0,
+            pending_navigation: None,
+            suspended_interactions: HashMap::new(),
+            navigation_history: Default::default(),
+            pending_return_location: None,
             pending_catalog_selection: None,
             editor,
             confirmation_policy,
@@ -698,6 +731,8 @@ impl App {
             transaction_op_started_at: None,
             sql_editor_list: Default::default(),
             workspaces: HashMap::new(),
+            workspace_editors: HashMap::new(),
+            workspace_focus: HashMap::new(),
             workspace_save: Default::default(),
             workspace_save_closing: false,
             workspace_quit_save: Default::default(),
@@ -833,6 +868,9 @@ impl App {
 
     fn snapshot_active_workspace(&mut self) -> Option<(Uuid, ConnectionWorkspace)> {
         let profile_id = self.active_workspace_profile?;
+        self.workspace_editors
+            .insert(profile_id, std::mem::take(&mut self.editor));
+        self.workspace_focus.insert(profile_id, self.focus);
         for record in &mut self.sql_editors {
             if let Some(tab) = self
                 .tabs
@@ -923,19 +961,24 @@ impl App {
     fn install_workspace(&mut self, profile_id: Uuid, workspace: ConnectionWorkspace) {
         self.tabs = workspace.tabs;
         self.sql_editors = workspace.sql_editors;
-        self.editor = EditorWorkspace::new();
-        for (id, text) in &workspace.sql {
-            self.editor.open_console(*id, text);
-            if let Some(tab) = self
-                .tabs
-                .iter()
-                .find(|tab| tab.id() == *id)
-                .and_then(WorkspaceTab::as_console)
-            {
-                self.editor
-                    .open_read_only(tab.output_editor_id, &output_text(tab));
-            }
-        }
+        self.editor = self
+            .workspace_editors
+            .remove(&profile_id)
+            .unwrap_or_else(|| {
+                let mut editor = EditorWorkspace::new();
+                for (id, text) in &workspace.sql {
+                    editor.open_console(*id, text);
+                    if let Some(tab) = self
+                        .tabs
+                        .iter()
+                        .find(|tab| tab.id() == *id)
+                        .and_then(WorkspaceTab::as_console)
+                    {
+                        editor.open_read_only(tab.output_editor_id, &output_text(tab));
+                    }
+                }
+                editor
+            });
         let relation_sessions = self
             .tabs
             .iter()
@@ -965,6 +1008,9 @@ impl App {
             .unwrap_or(0)
             .min(self.tabs.len().saturating_sub(1));
         self.active_workspace_profile = Some(profile_id);
+        if let Some(focus) = self.workspace_focus.remove(&profile_id) {
+            self.focus = focus;
+        }
         self.normalize_focus();
     }
 
@@ -1379,6 +1425,11 @@ impl App {
         self.active_console_opt()
             .and_then(|tab| self.editor.mode(tab.id).ok())
             .unwrap_or(EditorMode::Normal)
+    }
+
+    pub fn active_editor_position(&self) -> Option<crate::model::editor::EditorPosition> {
+        self.active_console_opt()
+            .and_then(|tab| self.editor.position(tab.id).ok())
     }
 
     pub(crate) fn pane_layout_metrics(&self) -> PaneLayoutMetrics {
@@ -2030,6 +2081,10 @@ impl App {
             return Vec::new();
         }
         self.overlay = None;
+        if let Some(command_id) = crate::commands::command_for_help(id) {
+            let context = self.omni_context();
+            return self.execute_semantic_command(command_id, context);
+        }
         use crate::help::HelpShortcutId as Id;
         let editor_key = |code| Action::EditorKey(KeyEvent::new(code, KeyModifiers::NONE));
         let editor_control_key =
@@ -2284,8 +2339,901 @@ impl App {
         }
     }
 
+    fn omni_context(&self) -> crate::commands::CommandContext {
+        let tab = self.tabs.get(self.active_tab);
+        let target = tab
+            .and_then(WorkspaceTab::as_console)
+            .and_then(|console| console.execution_target.clone());
+        let catalog_id = match self.explorer.selected_id() {
+            Some(ExplorerNodeId::Catalog(id)) => Some(id.clone()),
+            _ => None,
+        };
+        crate::commands::CommandContext {
+            profile_id: target
+                .as_ref()
+                .map(|target| target.profile_id)
+                .or_else(|| catalog_id.as_ref().map(|id| id.profile_id())),
+            target,
+            tab_id: tab.map(WorkspaceTab::id),
+            catalog_id,
+        }
+    }
+
+    fn refresh_omni_items(&mut self) {
+        let Some(mut omni) = self.omni.take() else {
+            return;
+        };
+        use crate::{
+            commands::{COMMANDS, CommandContext, CommandId},
+            model::omni::{OmniItem, OmniItemAction, OmniItemId, OmniStep},
+        };
+
+        let mut items = Vec::new();
+        for session_id in self.suspended_interactions.keys() {
+            if let Some(interaction) = self.suspended_interactions.get(session_id) {
+                let (title, owner) = match interaction.state {
+                    SuspendedInteractionState::ProfileManager(_) => {
+                        ("Resume connection profile edit", "Profile")
+                    }
+                    SuspendedInteractionState::CatalogEditor(_) => {
+                        ("Resume catalog object edit", "Catalog")
+                    }
+                };
+                let mut item = OmniItem::new(
+                    OmniItemId::SuspendedSession(*session_id),
+                    title,
+                    owner,
+                    "Resume",
+                    OmniItemAction::ResumeInteraction(*session_id),
+                );
+                item.context.profile_id = interaction.profile_id;
+                item.context.tab_id = interaction.tab_id;
+                items.push(item);
+            }
+        }
+        for location in self.navigation_history.iter().rev() {
+            let item_id = OmniItemId::Tab(location.tab_id);
+            if items.iter().any(|item| item.id == item_id) {
+                continue;
+            }
+            let mut item = OmniItem::new(
+                item_id.clone(),
+                location.title.clone(),
+                "Previous location",
+                "Recent",
+                OmniItemAction::OpenTab(location.tab_id),
+            );
+            item.context.profile_id = location.profile_id;
+            item.context.target = location.target.clone();
+            item.context.tab_id = Some(location.tab_id);
+            items.push(item);
+        }
+        if let Some(location) = self.navigation_history.iter().next_back() {
+            let mut item = OmniItem::new(
+                OmniItemId::Command(CommandId::ReturnToPreviousLocation),
+                "Return to Previous Location",
+                location.title.clone(),
+                "Navigation",
+                OmniItemAction::Command(CommandId::ReturnToPreviousLocation),
+            );
+            item.context.profile_id = location.profile_id;
+            item.context.target = location.target.clone();
+            item.context.tab_id = Some(location.tab_id);
+            items.push(item);
+        }
+        if omni.step == OmniStep::Root {
+            for spec in COMMANDS {
+                let context = if matches!(
+                    spec.id,
+                    CommandId::RunStatement
+                        | CommandId::RunBuffer
+                        | CommandId::FormatSql
+                        | CommandId::CloseTab
+                ) {
+                    omni.origin.clone()
+                } else {
+                    CommandContext::default()
+                };
+                let mut item = OmniItem::new(
+                    OmniItemId::Command(spec.id),
+                    spec.title,
+                    spec.category,
+                    "Command",
+                    OmniItemAction::Command(spec.id),
+                );
+                item.keywords = spec
+                    .aliases
+                    .iter()
+                    .map(|alias| (*alias).to_owned())
+                    .collect();
+                item.context = context.clone();
+                item.availability = crate::commands::availability(spec.id, &context);
+                items.push(item);
+            }
+
+            if omni.filter != crate::model::omni::OmniFilter::Commands {
+                for profile in &self.profiles {
+                    let mut item = OmniItem::new(
+                        OmniItemId::Profile(profile.id),
+                        profile.name.clone(),
+                        format!("{:?} / {:?}", profile.kind, profile.access),
+                        "Connection",
+                        OmniItemAction::OpenProfile(profile.id),
+                    );
+                    item.context.profile_id = Some(profile.id);
+                    items.push(item);
+                }
+
+                let mut records = self.sql_editors.iter().collect::<Vec<_>>();
+                for workspace in self.workspaces.values() {
+                    records.extend(workspace.sql_editors.iter());
+                }
+                records.sort_by_key(|record| record.id);
+                records.dedup_by_key(|record| record.id);
+                for record in records {
+                    let profile_id = record
+                        .execution_target
+                        .as_ref()
+                        .map(|target| target.profile_id);
+                    let profile_name = profile_id
+                        .and_then(|id| self.profiles.iter().find(|profile| profile.id == id))
+                        .map_or_else(|| "unbound".to_owned(), |profile| profile.name.clone());
+                    let mut item = OmniItem::new(
+                        OmniItemId::Console {
+                            profile_id,
+                            console_id: record.id,
+                        },
+                        record.name.clone(),
+                        profile_name,
+                        "Console",
+                        OmniItemAction::OpenConsole {
+                            profile_id,
+                            console_id: record.id,
+                        },
+                    );
+                    item.context.profile_id = profile_id;
+                    item.context.target = record.execution_target.clone();
+                    item.context.tab_id = Some(record.id);
+                    item.opened = record.open;
+                    items.push(item);
+                }
+
+                for profile in self.explorer.normalized.profiles.values() {
+                    for entry in profile.catalog.entries().values() {
+                        if !entry.kind.is_relation() {
+                            continue;
+                        }
+                        let id = entry.id.clone();
+                        let mut item = OmniItem::new(
+                            OmniItemId::Catalog(id.clone()),
+                            entry.qualified_name.object.clone(),
+                            format!(
+                                "{} / {} / {}",
+                                self.profiles
+                                    .iter()
+                                    .find(|candidate| candidate.id == id.profile_id())
+                                    .map_or("Connection", |candidate| candidate.name.as_str()),
+                                entry.qualified_name.database.as_deref().unwrap_or_default(),
+                                entry.qualified_name.schema.as_deref().unwrap_or_default()
+                            ),
+                            "Table",
+                            OmniItemAction::OpenRelation {
+                                id: id.clone(),
+                                view: RelationView::Data,
+                            },
+                        );
+                        item.context.profile_id = Some(id.profile_id());
+                        item.context.catalog_id = Some(id);
+                        items.push(item);
+                    }
+                }
+            }
+        } else if let OmniStep::ObjectActions(item_id) = &omni.step {
+            if let OmniItemId::Catalog(id) = item_id {
+                let mut data = OmniItem::new(
+                    OmniItemId::Command(CommandId::OpenRelation),
+                    "Open Table Data",
+                    "Open or activate the data tab",
+                    "Action",
+                    OmniItemAction::OpenRelation {
+                        id: id.clone(),
+                        view: RelationView::Data,
+                    },
+                );
+                data.context.catalog_id = Some(id.clone());
+                data.context.profile_id = Some(id.profile_id());
+                let mut ddl = data.clone();
+                ddl.id = OmniItemId::Command(CommandId::ShowRelationDdl);
+                ddl.title = "Show Table DDL".to_owned();
+                ddl.action = OmniItemAction::OpenRelation {
+                    id: id.clone(),
+                    view: RelationView::Ddl,
+                };
+                items.extend([data, ddl]);
+            }
+        } else if omni.step == OmniStep::PickConnection {
+            for profile in &self.profiles {
+                let mut item = OmniItem::new(
+                    OmniItemId::Profile(profile.id),
+                    profile.name.clone(),
+                    format!("{:?}", profile.kind),
+                    "Connection",
+                    OmniItemAction::OpenProfile(profile.id),
+                );
+                item.context.profile_id = Some(profile.id);
+                items.push(item);
+            }
+        }
+        omni.set_items(items);
+        self.omni = Some(omni);
+    }
+
+    fn omni_search_command(&self) -> Option<Command> {
+        let omni = self.omni.as_ref()?;
+        if omni.filter == crate::model::omni::OmniFilter::Commands
+            || omni.parsed_query().trim().is_empty()
+        {
+            return None;
+        }
+        let connection = self.connection.active_identity()?;
+        if self.connection.status != ConnectionStatus::Connected {
+            return None;
+        }
+        let profile = self.profiles.iter().find(|profile| {
+            profile.id == connection.profile_id
+                && omni
+                    .profile_scope
+                    .is_none_or(|profile_id| profile_id == profile.id)
+        })?;
+        let request = crate::db::catalog::CatalogSearchRequest {
+            connection,
+            session_id: omni.session_id,
+            generation: omni.query_generation,
+            query: omni.parsed_query(),
+            scope: profile.catalog_scope.clone(),
+            limit: crate::db::catalog::MAX_CATALOG_SEARCH_RESULTS,
+        };
+        request.validate().ok()?;
+        Some(Command::SearchCatalog {
+            owner: crate::action::CatalogSearchOwner::Omni,
+            request,
+        })
+    }
+
+    fn replace_omni_search(&self, previous: Option<Command>) -> Vec<Command> {
+        let next = self.omni_search_command();
+        let mut commands = Vec::new();
+        if let Some(Command::SearchCatalog { owner, request }) = previous
+            && next.as_ref().is_none_or(|command| {
+                !matches!(
+                    command,
+                    Command::SearchCatalog { owner: next_owner, request: next_request }
+                        if *next_owner == owner
+                            && next_request.session_id == request.session_id
+                            && next_request.generation == request.generation
+                )
+            })
+        {
+            commands.push(Command::CancelCatalogSearch {
+                owner,
+                session_id: request.session_id,
+                generation: request.generation,
+            });
+        }
+        if let Some(next) = next {
+            commands.push(next);
+        }
+        commands
+    }
+
+    fn suspend_omni_origin(&mut self, omni: &mut crate::model::omni::OmniState) -> bool {
+        let Some(overlay) = omni.origin_overlay.take() else {
+            return true;
+        };
+        let busy = match &overlay {
+            Overlay::ProfileManager => self
+                .profile_manager
+                .as_ref()
+                .is_some_and(|manager| manager.operation.is_some()),
+            Overlay::CatalogEditor => self
+                .catalog_editor
+                .as_ref()
+                .is_none_or(CatalogEditorState::is_busy),
+            Overlay::ExecutionConfirm { .. }
+            | Overlay::TransactionExitConfirm { .. }
+            | Overlay::ManualCancelConfirm { .. }
+            | Overlay::RelationTransactionConfirm { .. }
+            | Overlay::ClearTransactionOutcome { .. }
+            | Overlay::CatalogDropConfirm { .. }
+            | Overlay::CatalogEditorDestructiveConfirm { .. }
+            | Overlay::CatalogEditorDiscardConfirm { .. }
+            | Overlay::SubstituteConfirm { .. } => true,
+            _ => false,
+        };
+        if busy {
+            omni.status = Some("Finish or cancel the current operation before navigating".into());
+            omni.origin_overlay = Some(overlay);
+            return false;
+        }
+        if matches!(overlay, Overlay::ProfileManager | Overlay::CatalogEditor) {
+            let session_id = Uuid::new_v4();
+            let profile_id = match (
+                &overlay,
+                self.profile_manager.as_ref(),
+                self.catalog_editor.as_ref(),
+            ) {
+                (Overlay::ProfileManager, Some(manager), _) => manager
+                    .draft
+                    .as_ref()
+                    .map(|draft| draft.profile_id())
+                    .filter(|profile_id| {
+                        self.profiles
+                            .iter()
+                            .any(|profile| profile.id == *profile_id)
+                    }),
+                (Overlay::CatalogEditor, _, Some(editor)) => match &editor.anchor {
+                    crate::db::catalog_mutation::CatalogMutationAnchor::Profile { profile_id } => {
+                        Some(*profile_id)
+                    }
+                    crate::db::catalog_mutation::CatalogMutationAnchor::Catalog(id) => {
+                        Some(id.profile_id())
+                    }
+                    crate::db::catalog_mutation::CatalogMutationAnchor::Group {
+                        schema, ..
+                    } => Some(schema.profile_id()),
+                },
+                _ => None,
+            }
+            .or(self.active_workspace_profile)
+            .or(self.connection.profile_id);
+            let state = if overlay == Overlay::ProfileManager {
+                let Some(manager) = self.profile_manager.take() else {
+                    omni.status = Some("The profile form is no longer available".into());
+                    omni.origin_overlay = Some(overlay);
+                    return false;
+                };
+                SuspendedInteractionState::ProfileManager(Box::new(manager))
+            } else {
+                let Some(editor) = self.catalog_editor.take() else {
+                    omni.status = Some("The catalog form is no longer available".into());
+                    omni.origin_overlay = Some(overlay);
+                    return false;
+                };
+                SuspendedInteractionState::CatalogEditor(Box::new(editor))
+            };
+            self.suspended_interactions.insert(
+                session_id,
+                SuspendedInteraction {
+                    profile_id,
+                    tab_id: self.active_tab_id(),
+                    state,
+                },
+            );
+            omni.suspended_sessions.push(session_id);
+        }
+        self.overlay = None;
+        true
+    }
+
+    fn apply_omni_search_page(&mut self, page: crate::db::catalog::CatalogSearchPage) {
+        let Some(omni) = self.omni.as_mut().filter(|omni| {
+            omni.session_id == page.session_id && omni.query_generation == page.generation
+        }) else {
+            return;
+        };
+        let mut items = Vec::with_capacity(omni.items.len() + page.hits.len());
+        items.extend(
+            omni.items
+                .iter()
+                .filter(|item| !matches!(item.id, crate::model::omni::OmniItemId::Catalog(_)))
+                .cloned(),
+        );
+        for hit in page.hits {
+            let relation = hit
+                .entry
+                .kind
+                .is_relation()
+                .then(|| hit.entry.id.clone())
+                .or_else(|| hit.entry.relation_id.clone());
+            let Some(id) = relation else { continue };
+            let mut item = crate::model::omni::OmniItem::new(
+                crate::model::omni::OmniItemId::Catalog(id.clone()),
+                hit.entry.qualified_name.object.clone(),
+                hit.qualified_path(),
+                "Table",
+                crate::model::omni::OmniItemAction::OpenRelation {
+                    id: id.clone(),
+                    view: RelationView::Data,
+                },
+            );
+            item.context.profile_id = Some(id.profile_id());
+            item.context.catalog_id = Some(id.clone());
+            item.keywords.extend(
+                hit.ancestors
+                    .iter()
+                    .map(|ancestor| ancestor.qualified_name.object.clone()),
+            );
+            items.push(item);
+        }
+        omni.status = page
+            .truncated
+            .then(|| "More matches exist; refine the query".to_owned());
+        omni.set_items(items);
+    }
+
+    fn confirm_omni_item(&mut self) -> Vec<Command> {
+        let Some(mut omni) = self.omni.take() else {
+            return Vec::new();
+        };
+        if let crate::model::omni::OmniStep::NameConsole { profile_id, target } = &omni.step {
+            let profile_id = *profile_id;
+            let target = target.clone();
+            if profile_id.is_some() && self.active_workspace_profile != profile_id {
+                self.notify_warning("Omni", "Connect to this profile before creating a Console");
+                return Vec::new();
+            }
+            if let Some(target) = target
+                && self.connection.profile_id != Some(target.profile_id)
+            {
+                self.notify_warning("Omni", "Connect to this profile before creating a Console");
+                return Vec::new();
+            }
+            let name = omni.query().trim().to_owned();
+            if !self.suspend_omni_origin(&mut omni) {
+                self.omni = Some(omni);
+                return Vec::new();
+            }
+            self.omni = None;
+            return self.update(if name.is_empty() {
+                Action::NewConsole
+            } else {
+                Action::NewConsoleNamed(name)
+            });
+        }
+        if omni.step == crate::model::omni::OmniStep::Root
+            && let Some((crate::commands::CommandId::NewConsole, context)) = omni.command_intent()
+        {
+            let step = if context.profile_id.is_some() {
+                crate::model::omni::OmniStep::NameConsole {
+                    profile_id: context.profile_id,
+                    target: context.target,
+                }
+            } else if self.profiles.is_empty() {
+                crate::model::omni::OmniStep::NameConsole {
+                    profile_id: None,
+                    target: None,
+                }
+            } else {
+                crate::model::omni::OmniStep::PickConnection
+            };
+            omni.push_step(step);
+            self.omni = Some(omni);
+            self.refresh_omni_items();
+            return Vec::new();
+        }
+        if omni.step == crate::model::omni::OmniStep::Root
+            && let Some((id, context)) = omni.command_intent()
+        {
+            if !self.suspend_omni_origin(&mut omni) {
+                self.omni = Some(omni);
+                return Vec::new();
+            }
+            self.omni = None;
+            return self.update(Action::ExecuteSemanticCommand { id, context });
+        }
+        let Some(item) = omni.selected_item().cloned() else {
+            self.omni = Some(omni);
+            return Vec::new();
+        };
+        match item.action {
+            crate::model::omni::OmniItemAction::OpenProfile(profile_id) => {
+                omni.profile_scope = Some(profile_id);
+                omni.filter = crate::model::omni::OmniFilter::All;
+                omni.query.clear();
+                if omni.step == crate::model::omni::OmniStep::PickConnection {
+                    omni.push_step(crate::model::omni::OmniStep::NameConsole {
+                        profile_id: Some(profile_id),
+                        target: None,
+                    });
+                } else {
+                    omni.query_changed();
+                }
+                self.omni = Some(omni);
+                self.refresh_omni_items();
+                Vec::new()
+            }
+            crate::model::omni::OmniItemAction::ShowRelationActions(id) => {
+                omni.push_step(crate::model::omni::OmniStep::ObjectActions(
+                    crate::model::omni::OmniItemId::Catalog(id),
+                ));
+                self.omni = Some(omni);
+                self.refresh_omni_items();
+                Vec::new()
+            }
+            crate::model::omni::OmniItemAction::OpenRelation { id, view } => {
+                if !self.suspend_omni_origin(&mut omni) {
+                    self.omni = Some(omni);
+                    return Vec::new();
+                }
+                self.omni = None;
+                self.navigate_to_relation(id, view)
+            }
+            crate::model::omni::OmniItemAction::OpenConsole {
+                profile_id,
+                console_id,
+            } => {
+                if !self.suspend_omni_origin(&mut omni) {
+                    self.omni = Some(omni);
+                    return Vec::new();
+                }
+                self.omni = None;
+                if let Some(profile_id) = profile_id
+                    && self.active_workspace_profile != Some(profile_id)
+                {
+                    return self.navigate_to_console(profile_id, console_id);
+                }
+                self.record_active_location();
+                self.update(Action::ActivateSqlEditor(console_id))
+            }
+            crate::model::omni::OmniItemAction::OpenTab(tab_id) => {
+                self.record_active_location();
+                if let Some(index) = self.tabs.iter().position(|tab| tab.id() == tab_id) {
+                    self.update(Action::ActivateTab(index))
+                } else if self.sql_editors.iter().any(|record| record.id == tab_id) {
+                    self.update(Action::ActivateSqlEditor(tab_id))
+                } else {
+                    self.omni = Some(omni);
+                    self.notify_warning("Navigation", "This workspace tab is no longer available");
+                    Vec::new()
+                }
+            }
+            crate::model::omni::OmniItemAction::Command(id) => {
+                if !self.suspend_omni_origin(&mut omni) {
+                    self.omni = Some(omni);
+                    return Vec::new();
+                }
+                self.omni = None;
+                self.update(Action::ExecuteSemanticCommand {
+                    id,
+                    context: item.context,
+                })
+            }
+            crate::model::omni::OmniItemAction::ResumeInteraction(session_id) => {
+                self.omni = Some(omni);
+                self.update(Action::OmniResumeInteraction(session_id))
+            }
+            _ => {
+                self.omni = Some(omni);
+                Vec::new()
+            }
+        }
+    }
+
+    fn execute_semantic_command(
+        &mut self,
+        id: crate::commands::CommandId,
+        context: crate::commands::CommandContext,
+    ) -> Vec<Command> {
+        use crate::commands::{CommandAvailability, UserIntent};
+
+        if let CommandAvailability::Disabled(reason) = crate::commands::availability(id, &context) {
+            self.notify_warning("Command unavailable", reason);
+            return Vec::new();
+        }
+        let Some(intent) = crate::commands::intent_for_command(id, &context) else {
+            self.notify_warning("Command unavailable", "Select a target first");
+            return Vec::new();
+        };
+        match intent {
+            UserIntent::OpenDashboard => self.update(Action::OpenDashboard),
+            UserIntent::RunStatement { context } => {
+                if !self.activate_context_tab(&context) {
+                    self.notify_warning(
+                        "Command unavailable",
+                        "The source Console is no longer open",
+                    );
+                    return Vec::new();
+                }
+                self.record_active_location();
+                self.update(Action::RunActiveSql)
+            }
+            UserIntent::RunBuffer { context } => {
+                if !self.activate_context_tab(&context) {
+                    self.notify_warning(
+                        "Command unavailable",
+                        "The source Console is no longer open",
+                    );
+                    return Vec::new();
+                }
+                self.update(Action::RunAllSql)
+            }
+            UserIntent::OpenConsoleManager => self.update(Action::OpenSqlEditorList),
+            UserIntent::CloseTab { tab_id } => self.update(Action::CloseTab(tab_id)),
+            UserIntent::OpenTab { tab_id } => {
+                if let Some(index) = self.tabs.iter().position(|tab| tab.id() == tab_id) {
+                    self.record_active_location();
+                    self.update(Action::ActivateTab(index))
+                } else {
+                    self.update(Action::ActivateSqlEditor(tab_id))
+                }
+            }
+            UserIntent::NewConsole { .. } => self.update(Action::NewConsole),
+            UserIntent::OpenRelation { catalog_id, view } => {
+                self.navigate_to_relation(catalog_id, view)
+            }
+            UserIntent::FormatSql { context } => {
+                if !self.activate_context_tab(&context) {
+                    self.notify_warning(
+                        "Command unavailable",
+                        "The source Console is no longer open",
+                    );
+                    return Vec::new();
+                }
+                self.format_current();
+                Vec::new()
+            }
+            UserIntent::TransactionControl { context } => {
+                if let Some(tab_id) = context.tab_id
+                    && let Some(index) = self.tabs.iter().position(|tab| tab.id() == tab_id)
+                {
+                    self.active_tab = index;
+                    self.focus = match self.tabs.get(index) {
+                        Some(WorkspaceTab::Relation(_)) => Focus::Results,
+                        _ => Focus::Editor,
+                    };
+                }
+                self.update(Action::OpenTransactionControl)
+            }
+            UserIntent::ReturnToPreviousLocation => self.return_to_previous_location(),
+            UserIntent::OpenNotificationHistory => self.update(Action::OpenNotificationHistory),
+            UserIntent::OpenUpdateCenter => self.update(Action::OpenUpdateCenter),
+            UserIntent::FocusExplorer => self.update(Action::Focus(Focus::Explorer)),
+            UserIntent::FocusResults => self.update(Action::Focus(Focus::Results)),
+            UserIntent::FocusEditor => self.update(Action::Focus(Focus::Editor)),
+            UserIntent::CyclePaneFocus => self.update(Action::FocusNext),
+            UserIntent::TogglePaneMaximized => self.update(Action::TogglePaneMaximized),
+            UserIntent::ResetPaneSizes => self.update(Action::ResetPaneSizes),
+            UserIntent::OpenConsole { .. } => Vec::new(),
+        }
+    }
+
+    fn activate_context_tab(&mut self, context: &crate::commands::CommandContext) -> bool {
+        let Some(tab_id) = context.tab_id else {
+            return false;
+        };
+        let Some(index) = self.tabs.iter().position(|tab| tab.id() == tab_id) else {
+            return false;
+        };
+        self.active_tab = index;
+        self.focus = Focus::Editor;
+        true
+    }
+
+    fn navigate_to_relation(
+        &mut self,
+        id: crate::db::catalog::CatalogId,
+        view: RelationView,
+    ) -> Vec<Command> {
+        self.record_active_location();
+        let profile_id = id.profile_id();
+        if !self.profiles.iter().any(|profile| profile.id == profile_id) {
+            self.notify_warning(
+                "Navigation",
+                "The connection for this object no longer exists",
+            );
+            return Vec::new();
+        }
+        let cached_relation =
+            self.explorer
+                .normalized
+                .profiles
+                .get(&profile_id)
+                .and_then(|profile| {
+                    let relation_id = profile.catalog.owning_relation_id(&id)?.clone();
+                    let entry = profile.catalog.get(&relation_id)?;
+                    Some((relation_id, entry.clone()))
+                });
+        let Some((relation_id, entry)) = cached_relation else {
+            self.notify_warning(
+                "Navigation",
+                "Refresh this connection's catalog before opening the object",
+            );
+            return Vec::new();
+        };
+        let descriptor = RelationDescriptor {
+            key: RelationKey {
+                profile_id,
+                object_id: relation_id,
+            },
+            qualified_name: entry.qualified_name.clone(),
+            kind: entry.kind,
+            title: entry.qualified_name.object.clone(),
+        };
+        if self.connection.profile_id == Some(profile_id)
+            && self.connection.status == ConnectionStatus::Connected
+        {
+            return self.open_relation_descriptor(descriptor, view);
+        }
+        let commands = self.request_connection(profile_id);
+        let Some(generation) = commands.iter().find_map(|command| match command {
+            Command::Connect {
+                profile_id: requested,
+                generation,
+                ..
+            } if *requested == profile_id => Some(*generation),
+            _ => None,
+        }) else {
+            self.notify_warning(
+                "Navigation",
+                "Cannot switch connections while a query or unresolved transaction is active",
+            );
+            return commands;
+        };
+        self.pending_navigation = Some(PendingNavigation {
+            profile_id,
+            generation,
+            intent: crate::commands::UserIntent::OpenRelation {
+                catalog_id: id,
+                view,
+            },
+            descriptor: Some(descriptor),
+        });
+        commands
+    }
+
+    fn navigate_to_console(&mut self, profile_id: Uuid, console_id: Uuid) -> Vec<Command> {
+        self.record_active_location();
+        if !self.profiles.iter().any(|profile| profile.id == profile_id) {
+            self.notify_warning("Navigation", "The Console's connection no longer exists");
+            return Vec::new();
+        }
+        let commands = self.request_connection(profile_id);
+        let Some(generation) = commands.iter().find_map(|command| match command {
+            Command::Connect {
+                profile_id: requested,
+                generation,
+                ..
+            } if *requested == profile_id => Some(*generation),
+            _ => None,
+        }) else {
+            return commands;
+        };
+        self.pending_navigation = Some(PendingNavigation {
+            profile_id,
+            generation,
+            intent: crate::commands::UserIntent::OpenConsole {
+                profile_id: Some(profile_id),
+                console_id,
+            },
+            descriptor: None,
+        });
+        commands
+    }
+
+    fn open_relation_descriptor(
+        &mut self,
+        descriptor: RelationDescriptor,
+        view: RelationView,
+    ) -> Vec<Command> {
+        let key = descriptor.key.clone();
+        if let Some(index) = self
+            .tabs
+            .iter()
+            .position(|tab| matches!(tab, WorkspaceTab::Relation(tab) if tab.descriptor.key == key))
+        {
+            self.active_tab = index;
+            if let WorkspaceTab::Relation(tab) = &mut self.tabs[index] {
+                tab.view = view;
+            }
+            self.focus = Focus::Results;
+            return self.load_active_relation(false);
+        }
+        self.tabs
+            .push(WorkspaceTab::Relation(RelationTab::with_descriptor(
+                descriptor, view,
+            )));
+        if let Some(WorkspaceTab::Relation(tab)) = self.tabs.last() {
+            self.editor.open_read_only(tab.ddl_editor_id, "");
+        }
+        self.active_tab = self.tabs.len() - 1;
+        self.focus = Focus::Results;
+        self.load_active_relation(true)
+    }
+
+    fn record_active_location(&mut self) {
+        if self.pending_return_location.is_some() {
+            return;
+        }
+        let Some(tab) = self.tabs.get(self.active_tab) else {
+            return;
+        };
+        self.navigation_history
+            .push(crate::model::navigation::WorkspaceLocation::from_tab(
+                self.active_workspace_profile,
+                tab,
+            ));
+    }
+
+    fn return_to_previous_location(&mut self) -> Vec<Command> {
+        let Some(location) = self.navigation_history.pop() else {
+            self.notify_info("Navigation", "No previous location");
+            return Vec::new();
+        };
+        self.pending_return_location = Some(location.clone());
+        if let Some(profile_id) = location.profile_id
+            && self.active_workspace_profile != Some(profile_id)
+        {
+            let commands = self.request_connection(profile_id);
+            let Some(generation) = commands.iter().find_map(|command| match command {
+                Command::Connect {
+                    profile_id: requested,
+                    generation,
+                    ..
+                } if *requested == profile_id => Some(*generation),
+                _ => None,
+            }) else {
+                self.navigation_history.push(location);
+                return commands;
+            };
+            self.pending_navigation = Some(PendingNavigation {
+                profile_id,
+                generation,
+                intent: crate::commands::UserIntent::OpenTab {
+                    tab_id: location.tab_id,
+                },
+                descriptor: None,
+            });
+            return commands;
+        }
+        let commands = self.open_location_tab(&location);
+        self.pending_return_location = None;
+        commands
+    }
+
+    fn open_location_tab(
+        &mut self,
+        location: &crate::model::navigation::WorkspaceLocation,
+    ) -> Vec<Command> {
+        if let Some(index) = self.tabs.iter().position(|tab| tab.id() == location.tab_id) {
+            self.active_tab = index;
+            self.normalize_focus();
+            return Vec::new();
+        }
+        if location.profile_id.is_some() && location.profile_id != self.active_workspace_profile {
+            self.notify_warning("Navigation", "The previous location is no longer available");
+            return Vec::new();
+        }
+        if self
+            .sql_editors
+            .iter()
+            .any(|record| record.id == location.tab_id)
+        {
+            self.update(Action::ActivateSqlEditor(location.tab_id))
+        } else {
+            self.notify_warning("Navigation", "The previous location is no longer available");
+            Vec::new()
+        }
+    }
+
     pub fn update(&mut self, action: Action) -> Vec<Command> {
+        if self.omni.is_some() && matches!(action, Action::EditorKey(_) | Action::EditorPaste(_)) {
+            return Vec::new();
+        }
         if self.active_console_opt().is_none()
+            && !matches!(
+                action,
+                Action::OpenOmni
+                    | Action::OmniEdit(_)
+                    | Action::OmniPaste(_)
+                    | Action::OmniMove(_)
+                    | Action::OmniSelect(_)
+                    | Action::OmniConfirm
+                    | Action::OmniCancel
+                    | Action::OmniDismiss
+                    | Action::OmniShowActions
+                    | Action::ExecuteSemanticCommand { .. }
+                    | Action::NewConsoleNamed(_)
+            )
             && !((self.is_active_relation_tab()
                 || matches!(
                     self.tabs.get(self.active_tab),
@@ -3688,7 +4636,24 @@ impl App {
                 Vec::new()
             }
             Action::DashboardMetricsDue | Action::DashboardProcessesDue => Vec::new(),
-            Action::NewConsole => self.create_and_activate_sql_editor(),
+            Action::NewConsole => {
+                if !self.profiles.is_empty()
+                    && self.connection.active_identity().is_none()
+                    && self.tabs.is_empty()
+                {
+                    return Vec::new();
+                }
+                self.create_and_activate_sql_editor()
+            }
+            Action::NewConsoleNamed(name) => {
+                if !self.profiles.is_empty()
+                    && self.connection.active_identity().is_none()
+                    && self.tabs.is_empty()
+                {
+                    return Vec::new();
+                }
+                self.create_and_activate_sql_editor_named(name)
+            }
             Action::CloseActiveTab => {
                 if self.has_active_workspace() && !self.tabs.is_empty() {
                     let id = self.tabs[self.active_tab].id();
@@ -4076,6 +5041,7 @@ impl App {
                 if self.tabs.is_empty() {
                     return Vec::new();
                 }
+                self.record_active_location();
                 self.clear_active_data_query_focus();
                 self.active_tab = (self.active_tab + 1) % self.tabs.len();
                 self.normalize_focus_after_tab_switch();
@@ -4090,6 +5056,7 @@ impl App {
                 if self.tabs.is_empty() {
                     return Vec::new();
                 }
+                self.record_active_location();
                 self.clear_active_data_query_focus();
                 self.active_tab = self
                     .active_tab
@@ -4105,6 +5072,7 @@ impl App {
             }
             Action::ActivateTab(index) => {
                 if index < self.tabs.len() {
+                    self.record_active_location();
                     self.clear_active_data_query_focus();
                     self.active_tab = index;
                     self.normalize_focus();
@@ -4434,6 +5402,148 @@ impl App {
                     self.key_bindings.clone(),
                 )));
                 Vec::new()
+            }
+            Action::OpenOmni => {
+                if let Some(omni) = self.omni.take() {
+                    self.overlay = omni.origin_overlay;
+                    return Vec::new();
+                }
+                self.next_omni_session = self.next_omni_session.saturating_add(1);
+                let context = self.omni_context();
+                let mut omni = crate::model::omni::OmniState::new(self.next_omni_session, context);
+                omni.origin_overlay = self.overlay.take();
+                omni.origin_tab_id = self.active_tab_id();
+                omni.origin_profile_id = self.active_workspace_profile;
+                self.overlay = None;
+                self.omni = Some(omni);
+                self.refresh_omni_items();
+                Vec::new()
+            }
+            Action::OmniEdit(edit) => {
+                let old_search = self.omni_search_command();
+                if let Some(omni) = self.omni.as_mut() {
+                    omni.edit(edit);
+                    self.refresh_omni_items();
+                }
+                self.replace_omni_search(old_search)
+            }
+            Action::OmniPaste(value) => {
+                let old_search = self.omni_search_command();
+                if let Some(omni) = self.omni.as_mut() {
+                    omni.paste(&value);
+                    self.refresh_omni_items();
+                }
+                self.replace_omni_search(old_search)
+            }
+            Action::OmniMove(delta) => {
+                if let Some(omni) = self.omni.as_mut() {
+                    omni.move_selection(delta);
+                }
+                Vec::new()
+            }
+            Action::OmniSelect(index) => {
+                if let Some(omni) = self.omni.as_mut() {
+                    omni.selected = omni.visible_items().get(index).map(|item| item.id.clone());
+                }
+                Vec::new()
+            }
+            Action::OmniCancel => {
+                if let Some(mut omni) = self.omni.take() {
+                    if omni.pop_step() {
+                        self.omni = Some(omni);
+                        self.refresh_omni_items();
+                    } else {
+                        self.overlay = omni.origin_overlay;
+                    }
+                }
+                Vec::new()
+            }
+            Action::OmniDismiss => {
+                if let Some(omni) = self.omni.take() {
+                    self.overlay = omni.origin_overlay;
+                }
+                Vec::new()
+            }
+            Action::OmniResumeInteraction(session_id) => {
+                let Some(interaction) = self.suspended_interactions.remove(&session_id) else {
+                    return Vec::new();
+                };
+                if interaction.profile_id.is_some()
+                    && interaction.profile_id != self.active_workspace_profile
+                {
+                    self.suspended_interactions.insert(session_id, interaction);
+                    if let Some(omni) = self.omni.as_mut() {
+                        omni.status =
+                            Some("Connect to the owning profile before resuming this edit".into());
+                    }
+                    return Vec::new();
+                }
+                if interaction
+                    .tab_id
+                    .is_some_and(|tab_id| !self.tabs.iter().any(|tab| tab.id() == tab_id))
+                {
+                    self.suspended_interactions.insert(session_id, interaction);
+                    if let Some(omni) = self.omni.as_mut() {
+                        omni.status = Some("The owning tab is no longer open".into());
+                    }
+                    return Vec::new();
+                }
+                self.omni = None;
+                match interaction.state {
+                    SuspendedInteractionState::ProfileManager(manager) => {
+                        if self.profile_manager.is_some() {
+                            self.suspended_interactions.insert(
+                                session_id,
+                                SuspendedInteraction {
+                                    profile_id: interaction.profile_id,
+                                    tab_id: interaction.tab_id,
+                                    state: SuspendedInteractionState::ProfileManager(manager),
+                                },
+                            );
+                            self.notify_warning(
+                                "Resume edit",
+                                "Another profile form is already active",
+                            );
+                        } else {
+                            self.profile_manager = Some(*manager);
+                            self.overlay = Some(Overlay::ProfileManager);
+                        }
+                    }
+                    SuspendedInteractionState::CatalogEditor(editor) => {
+                        if self.catalog_editor.is_some() {
+                            self.suspended_interactions.insert(
+                                session_id,
+                                SuspendedInteraction {
+                                    profile_id: interaction.profile_id,
+                                    tab_id: interaction.tab_id,
+                                    state: SuspendedInteractionState::CatalogEditor(editor),
+                                },
+                            );
+                            self.notify_warning(
+                                "Resume edit",
+                                "Another catalog form is already active",
+                            );
+                        } else {
+                            self.catalog_editor = Some(*editor);
+                            self.overlay = Some(Overlay::CatalogEditor);
+                        }
+                    }
+                }
+                Vec::new()
+            }
+            Action::OmniShowActions => {
+                if let Some(omni) = self.omni.as_mut()
+                    && let Some(item) = omni.selected_item()
+                    && matches!(item.id, crate::model::omni::OmniItemId::Catalog(_))
+                {
+                    let id = item.id.clone();
+                    omni.push_step(crate::model::omni::OmniStep::ObjectActions(id));
+                }
+                Vec::new()
+            }
+            Action::OmniConfirm => self.confirm_omni_item(),
+            Action::ExecuteSemanticCommand { id, context } => {
+                self.execute_semantic_command(id, context)
             }
             Action::OpenRecordView => {
                 if self.focus == Focus::Results {
@@ -8526,6 +9636,7 @@ impl App {
                 }
             }
             Action::OpenSelectedRelation { view } => self.open_selected_relation(view),
+            Action::OpenCatalogRelation { id, view } => self.open_catalog_relation(&id, view),
             Action::SetRelationView(view) => {
                 self.clear_active_data_query_focus();
                 if let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab) {
@@ -9147,6 +10258,36 @@ impl App {
                 }
                 let mut commands = std::mem::take(&mut workspace_commands);
                 commands.extend(commands_for_catalog);
+                if self.pending_navigation.as_ref().is_some_and(|navigation| {
+                    navigation.profile_id == profile_id && navigation.generation == generation
+                }) {
+                    if let Some(navigation) = self.pending_navigation.take() {
+                        self.pending_return_location = None;
+                        match navigation.intent {
+                            crate::commands::UserIntent::OpenRelation { view, .. } => {
+                                if let Some(descriptor) = navigation.descriptor {
+                                    commands
+                                        .extend(self.open_relation_descriptor(descriptor, view));
+                                }
+                            }
+                            crate::commands::UserIntent::OpenTab { tab_id } => {
+                                if let Some(index) =
+                                    self.tabs.iter().position(|tab| tab.id() == tab_id)
+                                {
+                                    self.active_tab = index;
+                                    self.normalize_focus();
+                                } else if self.sql_editors.iter().any(|record| record.id == tab_id)
+                                {
+                                    commands.extend(self.update(Action::ActivateSqlEditor(tab_id)));
+                                }
+                            }
+                            crate::commands::UserIntent::OpenConsole { console_id, .. } => {
+                                commands.extend(self.update(Action::ActivateSqlEditor(console_id)));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
                 if should_activate_workspace {
                     commands.extend(self.dashboard_metadata_commands(ConnectionIdentity {
                         profile_id,
@@ -9214,6 +10355,14 @@ impl App {
                         pending_profile_id == profile_id && pending_generation == generation
                     });
                 if self.pending_connection_matches(profile_id, generation) {
+                    if self.pending_navigation.as_ref().is_some_and(|navigation| {
+                        navigation.profile_id == profile_id && navigation.generation == generation
+                    }) {
+                        self.pending_navigation = None;
+                        if let Some(location) = self.pending_return_location.take() {
+                            self.navigation_history.push(location);
+                        }
+                    }
                     let target_console = self
                         .pending_editor_target_switch
                         .filter(|(_, pending_profile_id, pending_generation)| {
@@ -9529,19 +10678,39 @@ impl App {
                 );
                 self.catalog_relation_resolution_failed(connection, catalog_epoch, request_id)
             }
-            Action::CatalogSearchSucceeded(page) => {
-                if self.database_command_identity() == Some(page.connection) {
-                    let _ = page;
+            Action::CatalogSearchSucceeded { owner, page } => {
+                match owner {
+                    crate::action::CatalogSearchOwner::Explorer => {
+                        if self.database_command_identity() == Some(page.connection)
+                            && let Some(search) = self.explorer.search.as_mut().filter(|search| {
+                                search.session_id == page.session_id
+                                    && search.generation == page.generation
+                                    && search.connection == Some(page.connection)
+                            })
+                        {
+                            let _ = search;
+                        }
+                    }
+                    crate::action::CatalogSearchOwner::Omni => {
+                        self.apply_omni_search_page(page);
+                    }
                 }
                 Vec::new()
             }
             Action::CatalogSearchFailed {
+                owner,
                 connection,
                 session_id,
                 generation,
                 message,
             } => {
-                if self.database_command_identity() == Some(connection)
+                if owner == crate::action::CatalogSearchOwner::Omni {
+                    if let Some(omni) = self.omni.as_mut().filter(|omni| {
+                        omni.session_id == session_id && omni.query_generation == generation
+                    }) {
+                        omni.status = Some(message);
+                    }
+                } else if self.database_command_identity() == Some(connection)
                     && let Some(search) = self.explorer.search.as_mut().filter(|search| {
                         search.session_id == session_id && search.generation == generation
                     })
@@ -10342,11 +11511,21 @@ impl App {
             }
             Action::ExplorerFindOpen => {
                 if self.focus == Focus::Explorer {
-                    let cancel = self.explorer.search.is_some();
+                    let cancel_search = self.explorer.search.as_ref().and_then(|search| {
+                        matches!(
+                            search.lifecycle,
+                            crate::model::workspace::ExplorerSearchLifecycle::Loading
+                        )
+                        .then_some((search.session_id, search.generation))
+                    });
                     self.explorer.search = None;
                     self.explorer.open_find();
-                    if cancel {
-                        return vec![Command::CancelCatalogSearch];
+                    if let Some((session_id, generation)) = cancel_search {
+                        return vec![Command::CancelCatalogSearch {
+                            owner: crate::action::CatalogSearchOwner::Explorer,
+                            session_id,
+                            generation,
+                        }];
                     }
                 }
                 Vec::new()
@@ -11626,6 +12805,11 @@ impl App {
     }
 
     fn create_and_activate_sql_editor(&mut self) -> Vec<Command> {
+        let name = self.next_console_name();
+        self.create_and_activate_sql_editor_named(name)
+    }
+
+    fn create_and_activate_sql_editor_named(&mut self, name: String) -> Vec<Command> {
         if self.active_workspace_profile.is_none()
             && let Some(target) = self.default_console_target()
         {
@@ -11642,7 +12826,6 @@ impl App {
         if !self.has_active_workspace() {
             return Vec::new();
         }
-        let name = self.next_console_name();
         self.create_sql_editor_named(name);
         self.active_tab = self.tabs.len().saturating_sub(1);
         self.focus = Focus::Editor;
@@ -15667,6 +16850,15 @@ impl App {
         else {
             return Vec::new();
         };
+        self.record_active_location();
+        self.open_catalog_relation(&selected_id, view)
+    }
+
+    fn open_catalog_relation(
+        &mut self,
+        selected_id: &crate::db::catalog::CatalogId,
+        view: RelationView,
+    ) -> Vec<Command> {
         let Some(profile) = self
             .explorer
             .normalized
@@ -15675,10 +16867,10 @@ impl App {
         else {
             return Vec::new();
         };
-        let Some(entry) = profile.catalog.get(&selected_id) else {
+        let Some(entry) = profile.catalog.get(selected_id) else {
             return Vec::new();
         };
-        let Some(relation_id) = profile.catalog.owning_relation_id(&selected_id).cloned() else {
+        let Some(relation_id) = profile.catalog.owning_relation_id(selected_id).cloned() else {
             return Vec::new();
         };
         let Some(relation) = profile.catalog.get(&relation_id) else {

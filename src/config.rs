@@ -16,6 +16,7 @@ const MIN_KEY_SEQUENCE_TIMEOUT_MS: u64 = 1;
 const MIN_UPDATE_CHECK_INTERVAL_HOURS: u64 = 1;
 const SUPPORTED_COMMANDS: &[&str] = &[
     "help",
+    "omni",
     "quit",
     "terminal-selection",
     "notification-history",
@@ -703,6 +704,7 @@ mod tests {
         let bindings = AppConfig::default().keybindings.key_bindings().unwrap();
 
         assert!(bindings.matches("help", KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE)));
+        assert!(bindings.matches("omni", KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE)));
         assert!(bindings.matches(
             "quit",
             KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)

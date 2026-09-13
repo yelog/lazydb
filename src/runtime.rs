@@ -291,7 +291,7 @@ pub struct Runtime {
     profile_tasks: Vec<JoinHandle<()>>,
     completion_tasks: HashMap<Uuid, JoinHandle<()>>,
     diagnostic_tasks: HashMap<Uuid, JoinHandle<()>>,
-    catalog_search_task: Option<JoinHandle<()>>,
+    catalog_search_tasks: HashMap<(crate::action::CatalogSearchOwner, u64), (u64, JoinHandle<()>)>,
     manual_transactions: HashMap<Uuid, ManualTransactionEntry>,
     relation_transactions: HashMap<Uuid, ManualTransactionEntry>,
     relation_mutation_blocked: Arc<StdMutex<HashSet<(Uuid, ConnectionIdentity)>>>,
@@ -392,7 +392,7 @@ impl Runtime {
             profile_tasks: Vec::new(),
             completion_tasks: HashMap::new(),
             diagnostic_tasks: HashMap::new(),
-            catalog_search_task: None,
+            catalog_search_tasks: HashMap::new(),
             manual_transactions: HashMap::new(),
             relation_transactions: HashMap::new(),
             relation_mutation_blocked: Arc::new(StdMutex::new(HashSet::new())),
@@ -463,7 +463,7 @@ impl Runtime {
                 generation,
                 target,
             } => {
-                if let Some(task) = self.catalog_search_task.take() {
+                for (_, (_, task)) in self.catalog_search_tasks.drain() {
                     task.abort();
                 }
                 self.connect(profile_id, generation, target);
@@ -491,9 +491,19 @@ impl Runtime {
                 self.load_catalog_object_definition(request)
             }
             Command::LoadCatalogOwnerContext(request) => self.load_catalog_owner_context(request),
-            Command::SearchCatalog(request) => self.search_catalog(request),
-            Command::CancelCatalogSearch => {
-                if let Some(task) = self.catalog_search_task.take() {
+            Command::SearchCatalog { owner, request } => self.search_catalog(owner, request),
+            Command::CancelCatalogSearch {
+                owner,
+                session_id,
+                generation,
+            } => {
+                let key = (owner, session_id);
+                if self
+                    .catalog_search_tasks
+                    .get(&key)
+                    .is_some_and(|(current_generation, _)| *current_generation == generation)
+                    && let Some((_, task)) = self.catalog_search_tasks.remove(&key)
+                {
                     task.abort();
                 }
             }
@@ -1239,7 +1249,7 @@ impl Runtime {
     }
 
     fn disconnect(&mut self, expected: ConnectionIdentity) {
-        if let Some(task) = self.catalog_search_task.take() {
+        for (_, (_, task)) in self.catalog_search_tasks.drain() {
             task.abort();
         }
         let connection = Arc::clone(&self.connection);
@@ -2034,13 +2044,19 @@ impl Runtime {
         self.catalog_drop_execute_tasks.insert(key, task);
     }
 
-    fn search_catalog(&mut self, request: crate::db::catalog::CatalogSearchRequest) {
-        if let Some(task) = self.catalog_search_task.take() {
+    fn search_catalog(
+        &mut self,
+        owner: crate::action::CatalogSearchOwner,
+        request: crate::db::catalog::CatalogSearchRequest,
+    ) {
+        let task_key = (owner, request.session_id);
+        let task_generation = request.generation;
+        if let Some((_, task)) = self.catalog_search_tasks.remove(&task_key) {
             task.abort();
         }
         let sender = self.event_sender.clone();
         let connection = Arc::clone(&self.connection);
-        self.catalog_search_task = Some(tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             sleep(Duration::from_millis(150)).await;
             let Some(database) = active_database(Arc::clone(&connection), request.connection).await
             else {
@@ -2052,12 +2068,13 @@ impl Runtime {
             match database.search_catalog(&request).await {
                 Ok(page) => {
                     if active_database(connection, identity).await.is_some() {
-                        let _ = sender.send(Action::CatalogSearchSucceeded(page));
+                        let _ = sender.send(Action::CatalogSearchSucceeded { owner, page });
                     }
                 }
                 Err(error) => {
                     if active_database(connection, identity).await.is_some() {
                         let _ = sender.send(Action::CatalogSearchFailed {
+                            owner,
                             connection: identity,
                             session_id,
                             generation,
@@ -2066,7 +2083,9 @@ impl Runtime {
                     }
                 }
             }
-        }));
+        });
+        self.catalog_search_tasks
+            .insert(task_key, (task_generation, task));
     }
 
     fn load_relation(&mut self, request: crate::model::relation::RelationRequest) {
@@ -4825,8 +4844,30 @@ fn apply_startup_action_with_runtime(app: &mut App, runtime: &mut Runtime, selec
 }
 
 fn apply_action(app: &mut App, runtime: &mut Runtime, action: Action) {
+    let finished_search = match &action {
+        Action::CatalogSearchSucceeded { owner, page } => {
+            Some((*owner, page.session_id, page.generation))
+        }
+        Action::CatalogSearchFailed {
+            owner,
+            session_id,
+            generation,
+            ..
+        } => Some((*owner, *session_id, *generation)),
+        _ => None,
+    };
     for command in app.update(action) {
         runtime.dispatch(command);
+    }
+    if let Some((owner, session_id, generation)) = finished_search {
+        let key = (owner, session_id);
+        if runtime
+            .catalog_search_tasks
+            .get(&key)
+            .is_some_and(|(current_generation, _)| *current_generation == generation)
+        {
+            runtime.catalog_search_tasks.remove(&key);
+        }
     }
 }
 
