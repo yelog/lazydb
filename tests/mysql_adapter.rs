@@ -696,9 +696,6 @@ async fn catalog_page_exposes_scoped_mysql_objects_and_rich_metadata_when_config
         assert!(view_ddl.sql.starts_with("-- Object\n\nCREATE"));
         assert!(!view_ddl.sql.contains("-- Triggers"));
 
-        let DatabaseConnection::MySql(adapter) = &database else {
-            unreachable!("MySQL fixture returned another adapter")
-        };
         let search_request = CatalogSearchRequest {
             connection: ConnectionIdentity { profile_id, generation: 7 },
             session_id: 11,
@@ -707,7 +704,7 @@ async fn catalog_page_exposes_scoped_mysql_objects_and_rich_metadata_when_config
             scope: scope.clone(),
             limit: 100,
         };
-        let search = adapter.search_catalog(&search_request).await.unwrap();
+        let search = database.search_catalog(&search_request).await.unwrap();
         search.validate_for(&search_request).unwrap();
         assert_eq!(search.connection, search_request.connection);
         assert_eq!(search.session_id, 11);
@@ -741,7 +738,7 @@ async fn catalog_page_exposes_scoped_mysql_objects_and_rich_metadata_when_config
             query: selected_database.to_ascii_uppercase(),
             ..search_request.clone()
         };
-        let namespaces = adapter.search_catalog(&namespace_request).await.unwrap();
+        let namespaces = database.search_catalog(&namespace_request).await.unwrap();
         let namespace_hits = namespaces
             .hits
             .iter()
@@ -758,7 +755,7 @@ async fn catalog_page_exposes_scoped_mysql_objects_and_rich_metadata_when_config
                 query: excluded_database.clone(),
                 ..search_request.clone()
             };
-            assert!(adapter.search_catalog(&excluded_request).await.unwrap().hits.is_empty());
+            assert!(database.search_catalog(&excluded_request).await.unwrap().hits.is_empty());
         }
 
         let literal_request = CatalogSearchRequest {
@@ -766,7 +763,7 @@ async fn catalog_page_exposes_scoped_mysql_objects_and_rich_metadata_when_config
             limit: 100,
             ..search_request.clone()
         };
-        let literal = adapter.search_catalog(&literal_request).await.unwrap();
+        let literal = database.search_catalog(&literal_request).await.unwrap();
         assert!(!literal.hits.is_empty());
         assert!(literal.hits.iter().all(|hit| hit.qualified_path().to_lowercase().contains("%second")));
         assert!(literal.hits.iter().any(|hit| hit.entry.qualified_name.object == second));
@@ -778,7 +775,7 @@ async fn catalog_page_exposes_scoped_mysql_objects_and_rich_metadata_when_config
             limit: 1,
             ..search_request.clone()
         };
-        let limited = adapter.search_catalog(&limited_request).await.unwrap();
+        let limited = database.search_catalog(&limited_request).await.unwrap();
         assert_eq!(limited.hits.len(), 1);
         assert!(limited.truncated);
         assert_eq!(limited.hits[0].entry.kind, CatalogKind::Table);
@@ -787,7 +784,7 @@ async fn catalog_page_exposes_scoped_mysql_objects_and_rich_metadata_when_config
             connection: ConnectionIdentity { profile_id: Uuid::new_v4(), generation: 7 },
             ..search_request.clone()
         };
-        let error = adapter.search_catalog(&wrong_profile).await.unwrap_err();
+        let error = database.search_catalog(&wrong_profile).await.unwrap_err();
         assert_eq!(error.code.as_deref(), Some("invalid_catalog_request"));
 
         let wrong_case = selected_database.to_ascii_uppercase();
