@@ -8,6 +8,7 @@ pub mod icons;
 pub mod layout;
 pub mod loading;
 pub mod notifications;
+mod omni;
 pub mod pagination;
 pub mod profiles;
 pub mod query_bar;
@@ -229,6 +230,8 @@ pub enum HitTarget {
     KeySequencePopup,
     TextDetailCopyAll,
     TextDetailClose,
+    Omni,
+    OmniItem(usize),
     RecordViewCopyCell,
     RecordViewCopyRow,
     RecordViewViewValue,
@@ -815,6 +818,16 @@ pub fn render_with_state_using_icons_sequence_and_theme(
 
     if layout.mode == LayoutMode::TooSmall {
         render_too_small(frame, area, theme);
+        if app.omni.is_some() {
+            state.hit_regions.clear();
+            state.cursor = None;
+            dim_background(frame, area, theme);
+            state.hit_regions.push(HitRegion {
+                area,
+                target: HitTarget::Omni,
+            });
+            omni::render(frame, app, state, theme);
+        }
         return;
     }
 
@@ -946,6 +959,17 @@ pub fn render_with_state_using_icons_sequence_and_theme(
                 .animations
                 .start_effect(animation::EffectKind::Result, result_area);
         }
+        state.animations.render_effect(frame, Instant::now());
+    }
+    if app.omni.is_some() {
+        state.cursor = None;
+        state.animations.prepare_overlay(26, centered(area, 88, 22));
+        dim_background(frame, area, theme);
+        state.hit_regions.push(HitRegion {
+            area,
+            target: HitTarget::Omni,
+        });
+        omni::render(frame, app, state, theme);
         state.animations.render_effect(frame, Instant::now());
     }
     if let Some(sequence) = sequence {

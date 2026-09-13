@@ -53,6 +53,9 @@ Oracle MySQL, SQL Server, and SQLite.
 
 ## Quickstart
 
+Press `F2` anywhere in the workspace to open the global Omni Bar for commands,
+connections, consoles, tables, and navigation. See the [Omni Bar guide](docs/omni-bar.md).
+
 ### Installing and running LazyDB
 
 Run the following on Mac or Linux to install LazyDB

@@ -89,6 +89,7 @@ Relation Data while edits or transaction restrictions are pending.
 | Keys | Behavior |
 | --- | --- |
 | `F1` | Open contextual Help |
+| `F2` | Open the global Omni action and object switcher |
 | `?` | Open Help outside Editor search/input states |
 | `Ctrl-c` | Quit globally; context-specific cancellation may also be offered by its modal |
 | `Ctrl-Shift-s` | Release mouse capture for terminal-native text selection; press `Esc` to return |

@@ -60,6 +60,27 @@ ancestor-preserving tree projection with highlighted matches; locating one merge
 only its real ancestor chain and object into the normalized tree, leaving lazy-page
 completion state unchanged.
 
+The Omni Bar is a top-level interaction layer rendered above the workspace and
+the current overlay. Its session owns query generations, stable result IDs, scope
+filters, origin tab/profile identity, and a short in-memory navigation history.
+Local commands, profiles, consoles, tabs, and loaded catalog entries are merged
+without database I/O. Remote catalog search is tagged with a consumer owner and
+session ID; Explorer and Omni cancellation are isolated while both continue to
+use the validated `CatalogSearchRequest` contract. Opening a relation by
+`CatalogId` does not mutate Explorer selection. Cross-profile navigation carries
+its final intent and matching connection generation, and only resumes after that
+connection succeeds. A failed or stale connection result cannot open a target.
+
+F2 opens Omni from any keymap context. Escape unwinds its parameter steps and
+then returns to the exact underlying overlay; Ctrl-C dismisses Omni without
+quitting. Idle Profile Manager and Catalog Editor overlays can be moved into an
+in-memory, owner-tagged suspended interaction and explicitly resumed. Busy
+operations and confirmation dialogs are not suspended. Suspended form state and
+credentials are not persisted. During an in-process profile switch, App moves
+the actual `EditorWorkspace` into a profile-keyed runtime cache, preserving
+cursor, Vim mode, undo history, and editor prompt state; persisted workspaces
+remain text-based snapshots and are rebuilt on process restart.
+
 The editor is an App-owned `EditorWorkspace` keyed by console UUID. Modalkit
 types stay behind that boundary; actions and UI consume LazyDB-owned editor
 snapshots, effects, selections, and UTF-8 byte ranges. SQL scope, risk,

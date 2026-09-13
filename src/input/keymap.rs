@@ -102,6 +102,17 @@ impl Keymap {
         if matches!(event.kind, KeyEventKind::Release) {
             return None;
         }
+        if app.omni.is_some() {
+            self.pending = None;
+            if event.kind == KeyEventKind::Repeat && self.bindings.matches("omni", event) {
+                return None;
+            }
+            return map_omni(event, app);
+        }
+        if self.bindings.matches("omni", event) {
+            self.pending = None;
+            return (event.kind != KeyEventKind::Repeat).then_some(Action::OpenOmni);
+        }
         if app.overlay == Some(Overlay::CatalogEditor)
             && app
                 .catalog_editor
@@ -2330,6 +2341,9 @@ fn configured_command_action(command: &str, app: &App) -> Option<Action> {
 }
 
 pub fn map_paste(value: String, app: &App) -> Vec<Action> {
+    if app.omni.is_some() {
+        return vec![Action::OmniPaste(value)];
+    }
     if app
         .overlay
         .as_ref()
@@ -2386,6 +2400,55 @@ pub fn map_paste(value: String, app: &App) -> Vec<Action> {
         return Vec::new();
     }
     vec![Action::EditorPaste(value)]
+}
+
+fn map_omni(event: KeyEvent, app: &App) -> Option<Action> {
+    app.omni.as_ref()?;
+    if app.key_bindings.matches("omni", event) {
+        return Some(Action::OmniDismiss);
+    }
+    match (event.modifiers, event.code) {
+        (KeyModifiers::CONTROL, KeyCode::Char('c')) => Some(Action::OmniDismiss),
+        (KeyModifiers::NONE, KeyCode::Esc) => Some(Action::OmniCancel),
+        (KeyModifiers::NONE, KeyCode::Enter) => Some(Action::OmniConfirm),
+        (KeyModifiers::NONE, KeyCode::Tab) => Some(Action::OmniShowActions),
+        (KeyModifiers::NONE, KeyCode::Up) => Some(Action::OmniMove(-1)),
+        (KeyModifiers::NONE, KeyCode::Down) => Some(Action::OmniMove(1)),
+        (KeyModifiers::NONE, KeyCode::Char(character)) => Some(Action::OmniEdit(
+            crate::model::text_input::TextInputEdit::Insert(character),
+        )),
+        (KeyModifiers::NONE, KeyCode::Backspace) => Some(Action::OmniEdit(
+            crate::model::text_input::TextInputEdit::Backspace,
+        )),
+        (KeyModifiers::NONE, KeyCode::Delete) => Some(Action::OmniEdit(
+            crate::model::text_input::TextInputEdit::Delete,
+        )),
+        (KeyModifiers::NONE, KeyCode::Left) => Some(Action::OmniEdit(
+            crate::model::text_input::TextInputEdit::MoveLeft,
+        )),
+        (KeyModifiers::NONE, KeyCode::Right) => Some(Action::OmniEdit(
+            crate::model::text_input::TextInputEdit::MoveRight,
+        )),
+        (KeyModifiers::NONE, KeyCode::Home) => Some(Action::OmniEdit(
+            crate::model::text_input::TextInputEdit::MoveHome,
+        )),
+        (KeyModifiers::NONE, KeyCode::End) => Some(Action::OmniEdit(
+            crate::model::text_input::TextInputEdit::MoveEnd,
+        )),
+        (KeyModifiers::CONTROL, KeyCode::Char('w')) => Some(Action::OmniEdit(
+            crate::model::text_input::TextInputEdit::DeletePreviousWord,
+        )),
+        (KeyModifiers::CONTROL, KeyCode::Char('u')) => Some(Action::OmniEdit(
+            crate::model::text_input::TextInputEdit::DeleteToStart,
+        )),
+        (KeyModifiers::CONTROL, KeyCode::Char('z')) => Some(Action::OmniEdit(
+            crate::model::text_input::TextInputEdit::Undo,
+        )),
+        (KeyModifiers::CONTROL, KeyCode::Char('y')) => Some(Action::OmniEdit(
+            crate::model::text_input::TextInputEdit::Redo,
+        )),
+        _ => None,
+    }
 }
 
 fn is_relation_data_focus(app: &App) -> bool {
@@ -4160,14 +4223,14 @@ mod tests {
         config
             .keybindings
             .global
-            .insert("help".into(), vec!["F2".into()]);
+            .insert("help".into(), vec!["F3".into()]);
         let bindings = config.keybindings.key_bindings().unwrap();
         let mut keymap =
             Keymap::with_sequence_timeout_and_bindings(Duration::from_millis(750), bindings);
         let mut app = App::new(Vec::new());
         app.focus = Focus::Results;
 
-        assert_eq!(keymap.map(key(KeyCode::F(2)), &app), Some(Action::ShowHelp));
+        assert_eq!(keymap.map(key(KeyCode::F(3)), &app), Some(Action::ShowHelp));
         assert_eq!(keymap.map(key(KeyCode::F(1)), &app), None);
     }
 

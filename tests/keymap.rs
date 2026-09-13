@@ -2994,20 +2994,21 @@ fn relation_help_executes_space_tc_transaction_control() {
     let mut app = App::new(Vec::new());
     let mut relation = lazydb::model::relation::RelationTab::new("users");
     relation.transaction_state = lazydb::model::transaction::TransactionState::Active;
+    relation.edit = Some(lazydb::model::relation_edit::RelationEditSession::default());
     app.tabs
         .push(lazydb::model::tab::WorkspaceTab::Relation(relation));
     app.active_tab = app.tabs.len() - 1;
     app.focus = Focus::Results;
 
     app.update(Action::ShowHelp);
-    app.update(Action::HelpPaste("commit or roll back transaction".into()));
+    app.update(Action::HelpPaste("review and commit changes".into()));
     assert_eq!(
         app.help_selected_id(),
-        Some(lazydb::help::HelpShortcutId::TransactionControl)
+        Some(lazydb::help::HelpShortcutId::RelationCommit)
     );
 
     app.update(Action::ExecuteHelpShortcut(
-        lazydb::help::HelpShortcutId::TransactionControl,
+        lazydb::help::HelpShortcutId::RelationCommit,
     ));
     assert!(matches!(
         app.overlay,
