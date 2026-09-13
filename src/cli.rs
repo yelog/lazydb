@@ -278,6 +278,8 @@ pub enum McpCommand {
         #[arg(long, value_enum, default_value = "auto")]
         opencode_format: String,
         #[arg(long)]
+        opencode_bin: Option<PathBuf>,
+        #[arg(long)]
         server_bin: Option<PathBuf>,
     },
     /// Inspect user and project MCP configuration without database I/O.

@@ -16,6 +16,7 @@ pub struct SetupOptions {
     pub yes: bool,
     pub json: bool,
     pub opencode_format: Option<crate::agent::opencode_config::Format>,
+    pub opencode_bin: Option<PathBuf>,
     pub server_bin: Option<PathBuf>,
 }
 
@@ -39,6 +40,7 @@ pub fn run(
         yes,
         json,
         opencode_format: None,
+        opencode_bin: None,
         server_bin: None,
     })
 }
@@ -101,6 +103,20 @@ pub fn run_with_options(mut options: SetupOptions) -> Result<String> {
         .transpose()
         .context("cannot resolve LazyDB --config")?;
     let locations = Locations::discover()?;
+    let detected_opencode_format = if options.clients.contains(&McpClient::Opencode) {
+        options.opencode_format.or_else(|| {
+            options.opencode_bin.as_ref().and_then(|program| {
+                let detected = super::client_runtime::detect(
+                    &program.to_string_lossy(),
+                    std::time::Duration::from_secs(2),
+                );
+                (detected.runtime == super::client_runtime::OpenCodeRuntime::V2)
+                    .then_some(crate::agent::opencode_config::Format::V2)
+            })
+        })
+    } else {
+        options.opencode_format
+    };
     let mut plans = Vec::new();
     for client in options.clients.iter().copied() {
         let sources = locations.sources(client, &project);
@@ -111,7 +127,7 @@ pub fn run_with_options(mut options: SetupOptions) -> Result<String> {
             &project,
             config.as_deref(),
             &sources,
-            options.opencode_format,
+            detected_opencode_format,
             options.server_bin.as_deref(),
         ));
     }
@@ -465,6 +481,7 @@ mod tests {
             yes: false,
             json: true,
             opencode_format: None,
+            opencode_bin: None,
             server_bin: None,
         };
         let target =
@@ -485,5 +502,40 @@ mod tests {
             std::fs::read_to_string(user).unwrap(),
             "{\"model\":\"custom\"}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn auto_format_uses_detected_v2_runtime_for_new_entry() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let config = dir.path().join("opencode.json");
+        std::fs::write(&config, "{}\n").unwrap();
+        let executable = dir.path().join("opencode2");
+        std::fs::write(&executable, "#!/bin/sh\nprintf 'opencode v2.0.2\\n'\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let output = run_with_options(SetupOptions {
+            clients: vec![McpClient::Opencode],
+            scope: Some(McpScope::User),
+            client_config: Some(config.clone()),
+            project: Some(project.clone()),
+            config: None,
+            dry_run: false,
+            yes: true,
+            json: true,
+            opencode_format: None,
+            opencode_bin: Some(executable),
+            server_bin: None,
+        })
+        .unwrap();
+        assert!(output.contains("added"), "{output}");
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(config).unwrap()).unwrap();
+        assert!(value["mcp"]["servers"]["lazydb"].is_object());
+        assert!(value["mcp"]["lazydb"].is_null());
     }
 }

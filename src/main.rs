@@ -29,6 +29,7 @@ async fn main() -> Result<()> {
                     yes,
                     json,
                     opencode_format,
+                    opencode_bin,
                     server_bin,
                 } => {
                     let output = lazydb::agent::setup::run_with_options(
@@ -50,6 +51,7 @@ async fn main() -> Result<()> {
                                     _ => anyhow::bail!("invalid OpenCode format"),
                                 })
                             },
+                            opencode_bin,
                             server_bin,
                         },
                     )?;

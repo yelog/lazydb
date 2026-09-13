@@ -38,6 +38,8 @@ fn parses_opencode_format_and_binary_options() {
         "opencode",
         "--opencode-format",
         "v2",
+        "--opencode-bin",
+        "/opt/opencode2",
         "--server-bin",
         "/tmp/lazydb custom",
         "--dry-run",
@@ -48,10 +50,11 @@ fn parses_opencode_format_and_binary_options() {
         Some(Command::Mcp {
             command: McpCommand::Setup {
                 opencode_format,
+                opencode_bin: Some(opencode_bin),
                 server_bin: Some(path),
                 ..
             }
-        }) if opencode_format == "v2" && path.to_string_lossy() == "/tmp/lazydb custom"
+        }) if opencode_format == "v2" && opencode_bin.to_string_lossy() == "/opt/opencode2" && path.to_string_lossy() == "/tmp/lazydb custom"
     ));
 }
 
@@ -66,6 +69,7 @@ fn explicit_setup(client: McpClient, path: &std::path::Path, project: &std::path
         yes: true,
         json: true,
         opencode_format: None,
+        opencode_bin: None,
         server_bin: None,
     })
     .unwrap()
@@ -138,6 +142,7 @@ fn explicit_project_scope_uses_project_directory_without_using_cwd() {
         yes: true,
         json: true,
         opencode_format: None,
+        opencode_bin: None,
         server_bin: None,
     });
     assert!(result.is_ok());
@@ -186,6 +191,7 @@ fn claude_local_only_updates_current_project_node() {
         yes: true,
         json: true,
         opencode_format: None,
+        opencode_bin: None,
         server_bin: None,
     })
     .unwrap();
@@ -227,6 +233,7 @@ fn rejects_unsupported_scope_and_multiple_explicit_clients() {
             yes: false,
             json: true,
             opencode_format: None,
+            opencode_bin: None,
             server_bin: None,
         })
         .is_err()
