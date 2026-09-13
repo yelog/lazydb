@@ -1924,9 +1924,12 @@ impl MySqlAdapter {
         let rows = sqlx::query(
             "SELECT tc.constraint_catalog, tc.constraint_schema, tc.table_schema, tc.table_name, \
               tc.constraint_name, tc.constraint_type, CAST(kcu.ordinal_position AS UNSIGNED), \
-             kcu.column_name, kcu.referenced_table_schema, kcu.referenced_table_name, \
-              kcu.referenced_column_name, \
-              CAST(COALESCE(kcu.position_in_unique_constraint, 0) AS UNSIGNED) \
+             kcu.column_name, \
+             CASE WHEN tc.constraint_type='FOREIGN KEY' THEN kcu.referenced_table_schema END, \
+             CASE WHEN tc.constraint_type='FOREIGN KEY' THEN kcu.referenced_table_name END, \
+             CASE WHEN tc.constraint_type='FOREIGN KEY' THEN kcu.referenced_column_name END, \
+             CAST(CASE WHEN tc.constraint_type='FOREIGN KEY' \
+                       THEN kcu.position_in_unique_constraint END AS UNSIGNED) \
              FROM information_schema.table_constraints tc \
              JOIN information_schema.key_column_usage kcu \
                ON BINARY kcu.constraint_catalog=BINARY tc.constraint_catalog \
@@ -1967,14 +1970,25 @@ impl MySqlAdapter {
                         "constraint ordinal",
                     )?,
                     column: row.try_get(7).map_err(decode_error)?,
-                    referenced_database: row.try_get(8).map_err(decode_error)?,
-                    referenced_relation: row.try_get(9).map_err(decode_error)?,
-                    referenced_column: row.try_get(10).map_err(decode_error)?,
-                    referenced_ordinal: row
-                        .try_get::<Option<u64>, _>(11)
-                        .map_err(decode_error)?
-                        .map(|value| checked_u32(value, "referenced constraint ordinal"))
+                    referenced_database: (kind == CatalogKind::ForeignKey)
+                        .then(|| row.try_get(8).map_err(decode_error))
                         .transpose()?,
+                    referenced_relation: (kind == CatalogKind::ForeignKey)
+                        .then(|| row.try_get(9).map_err(decode_error))
+                        .transpose()?,
+                    referenced_column: if kind == CatalogKind::ForeignKey {
+                        row.try_get(10).map_err(decode_error)?
+                    } else {
+                        None
+                    },
+                    referenced_ordinal: if kind == CatalogKind::ForeignKey {
+                        row.try_get::<Option<u64>, _>(11)
+                            .map_err(decode_error)?
+                            .map(|value| checked_u32(value, "referenced constraint ordinal"))
+                            .transpose()?
+                    } else {
+                        None
+                    },
                 })
             })
             .collect::<Result<Vec<_>, DatabaseError>>()?;

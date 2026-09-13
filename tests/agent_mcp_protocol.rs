@@ -122,11 +122,7 @@ fn unsupported_profile_version_is_reported_before_mcp_handshake() {
     let temp = TempDir::new().unwrap();
     std::fs::create_dir(temp.path().join(".git")).unwrap();
     let profiles = temp.path().join("profiles.toml");
-    std::fs::write(
-        &profiles,
-        "version = 1\nprofiles = []\n",
-    )
-    .unwrap();
+    std::fs::write(&profiles, "version = 1\nprofiles = []\n").unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_lazydb"))
         .args([

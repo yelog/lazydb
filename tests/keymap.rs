@@ -3058,8 +3058,9 @@ fn editor_leader_opens_connection_target_selector() {
 fn global_leader_opens_console_manager_and_current_console_target_selector() {
     let profile = profile("target");
     let profile_id = profile.id;
-    let mut app = App::new(vec![profile]);
+    let mut app = App::new(Vec::new());
     app.update(Action::NewConsole);
+    app.profiles.push(profile);
     app.focus = Focus::Results;
     let console_id = app.active_console().id;
     let mut keymap = Keymap::default();
