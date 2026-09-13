@@ -601,6 +601,7 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                 HitTarget::NotificationHistoryRow(index) => {
                     Some(Action::NotificationHistorySelect(index))
                 }
+                HitTarget::SqlHistoryRow(index) => Some(Action::SqlHistorySelect(index)),
                 HitTarget::ExplorerRow(id) => {
                     if ui.track_explorer_click(&id, Instant::now()) {
                         Some(Action::ExplorerPrimary)
@@ -1037,6 +1038,7 @@ fn focus_at(ui: &UiState, column: u16, row: u16) -> Option<Focus> {
         | HitTarget::GridColumnSort(_)
         | HitTarget::DataQueryInput(_)
         | HitTarget::RelationColumnResize { .. }
+        | HitTarget::SqlHistoryRow(_)
         | HitTarget::GridScrollbarThumb { .. }
         | HitTarget::GridScrollbarPage { .. } => Some(Focus::Results),
         HitTarget::ExplorerScrollbarPage { .. } | HitTarget::ExplorerScrollbarThumb { .. } => {

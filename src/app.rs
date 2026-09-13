@@ -3448,6 +3448,14 @@ impl App {
                     sensitive: false,
                 })]
             }
+            Action::SqlHistorySelect(index) => {
+                if let Some(WorkspaceTab::History(tab)) = self.tabs.get_mut(self.active_tab) {
+                    if let Some(item) = tab.items.get(index) {
+                        tab.selected_execution = Some(item.execution_id);
+                    }
+                }
+                Vec::new()
+            }
             Action::DashboardSetPage(page) => {
                 let Some(WorkspaceTab::Dashboard(tab)) = self.tabs.get_mut(self.active_tab) else {
                     return Vec::new();

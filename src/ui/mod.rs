@@ -192,6 +192,7 @@ pub enum HitTarget {
     OpenNotificationHistoryAt(u64),
     OpenTextDetail(crate::model::text_detail::TextDetailRequest),
     NotificationHistoryRow(usize),
+    SqlHistoryRow(usize),
     RelationFirstPage,
     RelationPreviousPage,
     RelationPageSize,
@@ -867,6 +868,14 @@ pub fn render_with_state_using_icons_sequence_and_theme(
                 target: HitTarget::Focus(Focus::Results),
             });
             sql_history::render(frame, area, app, theme);
+            if let Some(WorkspaceTab::History(tab)) = app.tabs.get(app.active_tab) {
+                for index in 0..tab.items.len().min(area.height.saturating_sub(2) as usize) {
+                    state.hit_regions.push(HitRegion {
+                        area: Rect::new(area.x, area.y + 1 + index as u16, area.width, 1),
+                        target: HitTarget::SqlHistoryRow(index),
+                    });
+                }
+            }
         }
         render_footer(frame, layout.footer, app, theme, sequence, state);
     } else {
