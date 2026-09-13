@@ -40,7 +40,15 @@ pub(crate) fn render(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme)
     frame.render_widget(
         Paragraph::new(lines)
             .style(Style::default().fg(theme.text))
-            .block(Block::default().borders(Borders::ALL).title("SQL History")),
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(if tab.search.is_empty() {
+                        "SQL History"
+                    } else {
+                        "SQL History / search"
+                    }),
+            ),
         area,
     );
 }

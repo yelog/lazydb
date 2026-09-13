@@ -3497,6 +3497,19 @@ impl App {
             Action::SqlHistorySearchClear => {
                 if let Some(WorkspaceTab::History(tab)) = self.tabs.get_mut(self.active_tab) {
                     tab.search.clear();
+                    tab.query_generation = tab.query_generation.saturating_add(1);
+                    tab.loading = true;
+                    return vec![Command::LoadSqlHistory {
+                        generation: tab.query_generation,
+                        request: crate::persistence::sql_history::HistoryPageRequest {
+                            limit: 100,
+                            cursor: None,
+                            search: None,
+                            status: tab.status_filter,
+                            transaction_outcome: tab.transaction_filter,
+                            database: tab.database_filter.clone(),
+                        },
+                    }];
                 }
                 Vec::new()
             }
