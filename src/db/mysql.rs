@@ -1425,7 +1425,7 @@ impl MySqlAdapter {
         let rows = sqlx::query(
             "SELECT ordinal_position, column_name, column_type, data_type, is_nullable, \
              column_default, extra, generation_expression, numeric_precision, numeric_scale, \
-             character_maximum_length, collation_name, character_set_name, column_comment \
+              CAST(character_maximum_length AS SIGNED), collation_name, character_set_name, column_comment \
              FROM information_schema.columns WHERE BINARY table_schema=BINARY ? AND BINARY table_name=BINARY ? \
              ORDER BY ordinal_position",
         )
@@ -1488,7 +1488,10 @@ impl MySqlAdapter {
                     .transpose()?,
             );
             metadata.character_maximum_length = OptionalMetadata::Supported(
-                row.try_get::<Option<u64>, _>(10).map_err(decode_error)?,
+                row.try_get::<Option<i64>, _>(10)
+                    .map_err(decode_error)?
+                    .map(non_negative_count)
+                    .transpose()?,
             );
             metadata.collation =
                 OptionalMetadata::Supported(row.try_get(11).map_err(decode_error)?);
