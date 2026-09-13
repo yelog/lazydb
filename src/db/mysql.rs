@@ -1441,8 +1441,10 @@ impl MySqlAdapter {
             )?;
             let name: String = row.try_get(1).map_err(decode_error)?;
             let extra: String = row.try_get(6).map_err(decode_error)?;
-            let generation_expression: String = row.try_get(7).map_err(decode_error)?;
-            let generated = !generation_expression.is_empty()
+            let generation_expression: Option<String> = row.try_get(7).map_err(decode_error)?;
+            let generated = generation_expression
+                .as_deref()
+                .is_some_and(|expression| !expression.is_empty())
                 || extra.to_ascii_uppercase().contains("VIRTUAL GENERATED")
                 || extra.to_ascii_uppercase().contains("STORED GENERATED");
             let mut metadata = ColumnMetadata::new(
@@ -1464,7 +1466,7 @@ impl MySqlAdapter {
                     .any(|part| part.eq_ignore_ascii_case("auto_increment")),
             ));
             metadata.generated_expression = OptionalMetadata::Supported(if generated {
-                empty_as_none(Some(generation_expression))
+                empty_as_none(generation_expression)
             } else {
                 None
             });
