@@ -82,6 +82,7 @@ async fn drain_catalog(
                     | Action::CatalogPageFailed { .. }
                     | Action::DisconnectCompleted { .. }
                     | Action::DiagnosticDue(_)
+                    | Action::DiagnosticsReady { .. }
             ),
             "unexpected catalog action: {action:?}"
         );
@@ -165,6 +166,7 @@ async fn query(
             matches!(
                 action,
                 Action::DiagnosticDue(_)
+                    | Action::DiagnosticsReady { .. }
                     | Action::CompletionDue(_)
                     | Action::ConnectionInvalidated { .. }
                     | Action::CatalogPageLoaded(_)
@@ -292,7 +294,10 @@ async fn two_sqlite_profiles_complete_the_full_runtime_lifecycle() {
         assert!(
             matches!(
                 action,
-                Action::DiagnosticDue(_) | Action::CompletionDue(_) | Action::CatalogPageLoaded(_)
+                Action::DiagnosticDue(_)
+                    | Action::DiagnosticsReady { .. }
+                    | Action::CompletionDue(_)
+                    | Action::CatalogPageLoaded(_)
             ),
             "unexpected intermediate action: {action:?}"
         );
@@ -368,6 +373,7 @@ async fn two_sqlite_profiles_complete_the_full_runtime_lifecycle() {
             matches!(
                 action,
                 Action::DiagnosticDue(_)
+                    | Action::DiagnosticsReady { .. }
                     | Action::CompletionDue(_)
                     | Action::DisconnectCompleted { .. }
                     | Action::ConnectionInvalidated { .. }
@@ -426,6 +432,7 @@ async fn two_sqlite_profiles_complete_the_full_runtime_lifecycle() {
             matches!(
                 action,
                 Action::DiagnosticDue(_)
+                    | Action::DiagnosticsReady { .. }
                     | Action::CompletionDue(_)
                     | Action::DisconnectCompleted { .. }
                     | Action::ConnectionInvalidated { .. }
