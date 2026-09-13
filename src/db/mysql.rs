@@ -1448,6 +1448,13 @@ impl MySqlAdapter {
                 .try_get::<Option<String>, _>(7)
                 .map_err(decode_error)?
                 .unwrap_or_default();
+            let generation_expression = if generation_expression.is_empty() {
+                row.try_get::<Option<String>, _>(5)
+                    .map_err(decode_error)?
+                    .unwrap_or_default()
+            } else {
+                generation_expression
+            };
             let generated = !generation_expression.is_empty()
                 || extra.to_ascii_uppercase().contains("VIRTUAL GENERATED")
                 || extra.to_ascii_uppercase().contains("STORED GENERATED");
