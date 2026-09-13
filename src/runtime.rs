@@ -2441,8 +2441,10 @@ impl Runtime {
         dialect: crate::sql::SqlDialect,
         mut page: crate::model::pagination::PageRequest,
     ) {
+        let operation_id = Uuid::new_v4();
         let sender = self.event_sender.clone();
         let connection = Arc::clone(&self.connection);
+        let recorder = self.history_recorder.clone();
         let task = tokio::spawn(async move {
             let Some(database) = active_database_for_target(connection, expected, &target).await
             else {
@@ -2467,10 +2469,58 @@ impl Runtime {
                 }
             };
             let total = if page.resolve_total {
+                let count_execution_id = Uuid::new_v4();
+                if let Some(recorder) = &recorder {
+                    let _ = recorder
+                        .start(crate::model::sql_history::ExecutionHistory {
+                            execution_id: count_execution_id,
+                            operation_id,
+                            transaction_id: None,
+                            sql: query.count_sql.clone(),
+                            status: crate::model::sql_history::HistoryExecutionStatus::Running,
+                            certainty: crate::model::sql_history::HistoryResultCertainty::Confirmed,
+                            transaction_outcome:
+                                crate::model::sql_history::HistoryTransactionOutcome::NotApplicable,
+                            affected_rows: None,
+                            returned_rows: None,
+                            requested_at: chrono::Utc::now().timestamp_millis(),
+                            elapsed_millis: None,
+                            profile_id: Some(target.profile_id),
+                            database: Some(target.database.clone()),
+                            schema: target.schema.clone(),
+                        })
+                        .await;
+                }
                 match database.execute(&query.count_sql).await {
                     Ok(outcome) => match count_from_outcome(&outcome) {
-                        Ok(total) => Some(total),
+                        Ok(total) => {
+                            if let Some(recorder) = &recorder {
+                                let _ = recorder
+                                    .finish_with_certainty(
+                                        count_execution_id,
+                                        crate::model::sql_history::HistoryExecutionStatus::Succeeded,
+                                        crate::model::sql_history::HistoryResultCertainty::Confirmed,
+                                        None,
+                                        Some(outcome.stats.row_count),
+                                        Some(outcome.stats.total().as_millis()),
+                                    )
+                                    .await;
+                            }
+                            Some(total)
+                        }
                         Err(error) => {
+                            if let Some(recorder) = &recorder {
+                                let _ = recorder
+                                    .finish_with_certainty(
+                                        count_execution_id,
+                                        crate::model::sql_history::HistoryExecutionStatus::Failed,
+                                        crate::model::sql_history::HistoryResultCertainty::Confirmed,
+                                        None,
+                                        None,
+                                        Some(outcome.stats.total().as_millis()),
+                                    )
+                                    .await;
+                            }
                             let _ = sender.send(Action::QueryPageFailed {
                                 tab_id,
                                 generation,
@@ -2481,6 +2531,18 @@ impl Runtime {
                         }
                     },
                     Err(error) => {
+                        if let Some(recorder) = &recorder {
+                            let _ = recorder
+                                .finish_with_certainty(
+                                    count_execution_id,
+                                    crate::model::sql_history::HistoryExecutionStatus::Failed,
+                                    crate::model::sql_history::HistoryResultCertainty::Confirmed,
+                                    None,
+                                    None,
+                                    None,
+                                )
+                                .await;
+                        }
                         let _ = sender.send(Action::QueryPageFailed {
                             tab_id,
                             generation,
@@ -2509,8 +2571,42 @@ impl Runtime {
                     return;
                 }
             };
+            let page_execution_id = Uuid::new_v4();
+            if let Some(recorder) = &recorder {
+                let _ = recorder
+                    .start(crate::model::sql_history::ExecutionHistory {
+                        execution_id: page_execution_id,
+                        operation_id,
+                        transaction_id: None,
+                        sql: query.page_sql.clone(),
+                        status: crate::model::sql_history::HistoryExecutionStatus::Running,
+                        certainty: crate::model::sql_history::HistoryResultCertainty::Confirmed,
+                        transaction_outcome:
+                            crate::model::sql_history::HistoryTransactionOutcome::NotApplicable,
+                        affected_rows: None,
+                        returned_rows: None,
+                        requested_at: chrono::Utc::now().timestamp_millis(),
+                        elapsed_millis: None,
+                        profile_id: Some(target.profile_id),
+                        database: Some(target.database.clone()),
+                        schema: target.schema.clone(),
+                    })
+                    .await;
+            }
             match database.execute(&query.page_sql).await {
                 Ok(mut outcome) => {
+                    if let Some(recorder) = &recorder {
+                        let _ = recorder
+                            .finish_with_certainty(
+                                page_execution_id,
+                                crate::model::sql_history::HistoryExecutionStatus::Succeeded,
+                                crate::model::sql_history::HistoryResultCertainty::Confirmed,
+                                None,
+                                Some(outcome.stats.row_count),
+                                Some(outcome.stats.total().as_millis()),
+                            )
+                            .await;
+                    }
                     let fetched = outcome.stats.row_count;
                     if let Some(result) = outcome.result_sets.first_mut() {
                         result.rows.truncate(page.size.get());
@@ -2536,6 +2632,18 @@ impl Runtime {
                     });
                 }
                 Err(error) => {
+                    if let Some(recorder) = &recorder {
+                        let _ = recorder
+                            .finish_with_certainty(
+                                page_execution_id,
+                                crate::model::sql_history::HistoryExecutionStatus::Failed,
+                                crate::model::sql_history::HistoryResultCertainty::Confirmed,
+                                None,
+                                None,
+                                None,
+                            )
+                            .await;
+                    }
                     let _ = sender.send(Action::QueryPageFailed {
                         tab_id,
                         generation,
