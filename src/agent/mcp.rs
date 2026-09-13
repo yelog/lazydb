@@ -1,5 +1,6 @@
 use std::{path::PathBuf, sync::Arc};
 
+use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
 use rmcp::schemars;
 use rmcp::schemars::JsonSchema;
 use rmcp::{
@@ -213,7 +214,12 @@ impl AgentMcpServer {
 }
 
 #[tool_handler(router = self.tool_router)]
-impl rmcp::ServerHandler for AgentMcpServer {}
+impl rmcp::ServerHandler for AgentMcpServer {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::new("lazydb", env!("CARGO_PKG_VERSION")))
+    }
+}
 
 pub async fn run(
     project: Option<PathBuf>,

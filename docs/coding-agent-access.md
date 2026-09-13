@@ -76,29 +76,49 @@ require approval. Never put passwords in this file.
 
 ## OpenCode
 
-Create or merge the project `opencode.json`:
+Create or merge the project `opencode.json` (OpenCode V2 native format):
 
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
-    "lazydb": {
-      "type": "local",
-      "command": ["lazydb", "mcp", "serve", "--project", ".", "--write-policy", "deny"],
-      "cwd": "."
+    "servers": {
+      "lazydb": {
+        "type": "local",
+        "command": ["lazydb", "mcp", "serve", "--project", ".", "--write-policy", "deny"],
+        "cwd": ".",
+        "codemode": false
+      }
     }
   },
-  "permission": {
-    "lazydb_get_context": "allow",
-    "lazydb_list_connections": "allow",
-    "lazydb_search_schema": "allow",
-    "lazydb_describe_object": "allow",
-    "lazydb_query": "allow",
-    "lazydb_execute_change": "ask",
-    "lazydb_execute_file": "ask"
-  }
+  "permissions": [
+    { "action": "lazydb_get_context", "resource": "*", "effect": "allow" },
+    { "action": "lazydb_list_connections", "resource": "*", "effect": "allow" },
+    { "action": "lazydb_search_schema", "resource": "*", "effect": "allow" },
+    { "action": "lazydb_describe_object", "resource": "*", "effect": "allow" },
+    { "action": "lazydb_query", "resource": "*", "effect": "allow" },
+    { "action": "lazydb_execute_change", "resource": "*", "effect": "ask" },
+    { "action": "lazydb_execute_file", "resource": "*", "effect": "ask" }
+  ]
 }
 ```
+
+OpenCode V1 uses the same MCP server command under `mcp.lazydb`. LazyDB setup
+reads both layouts and preserves the existing layout. Use
+`--opencode-format v1` or `--opencode-format v2` to select the format for a new
+entry; `auto` preserves an existing entry and can detect an explicit
+`opencode1`/`opencode2` entrypoint.
+
+Use the diagnostic command before starting OpenCode:
+
+```bash
+lazydb mcp doctor --client opencode --opencode-bin opencode2 --probe --json
+```
+
+`--probe` verifies the local process, MCP initialization, and `tools/list`; it
+does not execute a database query. If it reports a profile parsing error,
+rebuild LazyDB and point the server command at that verified binary. The
+installed binary and the profiles file must support the same database drivers.
 
 For an explicitly writable development or staging session, use this variant
 instead of the secure read-only example above:
@@ -106,19 +126,22 @@ instead of the secure read-only example above:
 ```jsonc
 {
   "mcp": {
-    "lazydb": {
+    "servers": {
+      "lazydb": {
       "type": "local",
       "command": [
         "lazydb", "mcp", "serve", "--project", ".",
         "--write-policy", "non-production"
       ],
-      "cwd": "."
+      "cwd": ".",
+      "codemode": false
+      }
     }
   },
-  "permission": {
-    "lazydb_execute_change": "ask",
-    "lazydb_execute_file": "ask"
-  }
+  "permissions": [
+    { "action": "lazydb_execute_change", "resource": "*", "effect": "ask" },
+    { "action": "lazydb_execute_file", "resource": "*", "effect": "ask" }
+  ]
 }
 ```
 

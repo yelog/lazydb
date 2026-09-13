@@ -28,6 +28,9 @@ async fn main() -> Result<()> {
                     dry_run,
                     yes,
                     json,
+                    opencode_format,
+                    opencode_bin,
+                    server_bin,
                 } => {
                     let output = lazydb::agent::setup::run_with_options(
                         lazydb::agent::setup::SetupOptions {
@@ -39,6 +42,17 @@ async fn main() -> Result<()> {
                             dry_run,
                             yes,
                             json,
+                            opencode_format: if opencode_format == "auto" {
+                                None
+                            } else {
+                                Some(match opencode_format.as_str() {
+                                    "v1" => lazydb::agent::OpenCodeFormat::V1,
+                                    "v2" => lazydb::agent::OpenCodeFormat::V2,
+                                    _ => anyhow::bail!("invalid OpenCode format"),
+                                })
+                            },
+                            opencode_bin,
+                            server_bin,
                         },
                     )?;
                     println!("{output}");
@@ -49,6 +63,7 @@ async fn main() -> Result<()> {
                     project,
                     probe,
                     json,
+                    opencode_bin,
                 } => {
                     let output = lazydb::agent::doctor::run_with_options(
                         client,
@@ -56,6 +71,7 @@ async fn main() -> Result<()> {
                         client_config,
                         probe,
                         json,
+                        opencode_bin,
                     )
                     .await?;
                     println!("{output}");

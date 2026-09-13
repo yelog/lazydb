@@ -351,10 +351,10 @@ Task 1 基线
 | --- | --- | --- | --- |
 | 已安装 LazyDB 启动 | 0.1.4，真实 profiles | 已复现失败 | unknown variant oracle；2026-09-12 调查 |
 | 已安装 LazyDB 隔离握手 | 0.1.4，空 profiles，2025-06-18 | 已通过基础协议探测 | 7 个工具；非 OpenCode 端到端验证 |
-| 当前源码构建启动 | 待填写 | 待执行 | |
-| setup/doctor/probe 自动测试 | 待填写 | 待执行 | |
-| 独立 OpenCode V1 | 待填写 | 待执行 | 本机尚未确认独立 V1 |
-| OpenCode V2 + V1 配置 | 待填写 | 待执行 | |
-| OpenCode V2 + native tools | 待填写 | 待执行 | |
-| OpenCode V2 + Code Mode | 待填写 | 待执行 | |
-| 格式、编译和 lint | 待填写 | 待执行 | |
+| 当前源码构建启动 | target/debug/lazydb，空 profiles | 已通过 | MCP initialize 与 tools/list 成功，7 个工具 |
+| setup/doctor/probe 自动测试 | cargo test 相关 suites | 已通过 | setup 14、doctor 7、probe 2、协议 2 |
+| 独立 OpenCode V1 | `~/.config/opencode/opencode1` | 部分验证 | 版本 1.18.30；脚本可运行，未完成端到端 MCP 连接 |
+| OpenCode V2 + V1 配置 | `~/.config/opencode/opencode2` | 阻塞 | 版本 2.0.2；隔离配置下 `mcp list` 超时，无输出 |
+| OpenCode V2 + native tools | opencode2 2.0.2 | 未验证 | 客户端命令超时，不能声明通过 |
+| OpenCode V2 + Code Mode | opencode2 2.0.2 | 未验证 | 客户端命令超时，不能声明通过 |
+| 格式、编译和 lint | cargo check、clippy、diff check | 已通过 | `cargo clippy --all-targets -- -D warnings` 通过 |

@@ -275,6 +275,12 @@ pub enum McpCommand {
         yes: bool,
         #[arg(long)]
         json: bool,
+        #[arg(long, value_enum, default_value = "auto")]
+        opencode_format: String,
+        #[arg(long)]
+        opencode_bin: Option<PathBuf>,
+        #[arg(long)]
+        server_bin: Option<PathBuf>,
     },
     /// Inspect user and project MCP configuration without database I/O.
     Doctor {
@@ -288,6 +294,8 @@ pub enum McpCommand {
         probe: bool,
         #[arg(long)]
         json: bool,
+        #[arg(long)]
+        opencode_bin: Option<PathBuf>,
     },
 }
 
@@ -325,6 +333,8 @@ pub struct AgentTargetArgs {
 pub struct VersionInfo<'a> {
     pub version: &'a str,
     pub cli_api: u16,
+    pub revision: Option<&'a str>,
+    pub drivers: &'a [&'a str],
 }
 
 #[derive(Debug, Serialize)]
@@ -363,6 +373,8 @@ pub fn version_info() -> VersionInfo<'static> {
     VersionInfo {
         version: env!("CARGO_PKG_VERSION"),
         cli_api: CLI_API_VERSION,
+        revision: option_env!("LAZYDB_GIT_REVISION"),
+        drivers: &crate::db::descriptor::DRIVER_NAMES,
     }
 }
 

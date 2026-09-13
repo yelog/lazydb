@@ -28,6 +28,36 @@ fn parses_setup_options_with_unspecified_scope() {
     ));
 }
 
+#[test]
+fn parses_opencode_format_and_binary_options() {
+    let cli = Cli::try_parse_from([
+        "lazydb",
+        "mcp",
+        "setup",
+        "--client",
+        "opencode",
+        "--opencode-format",
+        "v2",
+        "--opencode-bin",
+        "/opt/opencode2",
+        "--server-bin",
+        "/tmp/lazydb custom",
+        "--dry-run",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(Command::Mcp {
+            command: McpCommand::Setup {
+                opencode_format,
+                opencode_bin: Some(opencode_bin),
+                server_bin: Some(path),
+                ..
+            }
+        }) if opencode_format == "v2" && opencode_bin.to_string_lossy() == "/opt/opencode2" && path.to_string_lossy() == "/tmp/lazydb custom"
+    ));
+}
+
 fn explicit_setup(client: McpClient, path: &std::path::Path, project: &std::path::Path) -> String {
     lazydb::agent::setup::run_with_options(lazydb::agent::setup::SetupOptions {
         clients: vec![client],
@@ -38,6 +68,9 @@ fn explicit_setup(client: McpClient, path: &std::path::Path, project: &std::path
         dry_run: false,
         yes: true,
         json: true,
+        opencode_format: None,
+        opencode_bin: None,
+        server_bin: None,
     })
     .unwrap()
 }
@@ -59,6 +92,23 @@ fn preserves_jsonc_and_is_idempotent() {
     );
     assert_eq!(std::fs::read_to_string(path).unwrap(), updated);
     assert!(!dir.path().join("opencode.json").exists());
+}
+
+#[test]
+fn recognizes_and_preserves_native_opencode_v2_layout() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("opencode.jsonc");
+    std::fs::write(
+        &path,
+        "{\n  \"mcp\": {\n    \"servers\": {\n      \"lazydb\": {\n        \"type\": \"local\",\n        \"command\": [\"lazydb\", \"mcp\", \"serve\", \"--project\", \".\", \"--write-policy\", \"deny\"],\n        \"cwd\": \".\"\n      }\n    }\n  }\n}\n",
+    )
+    .unwrap();
+
+    let first = explicit_setup(McpClient::Opencode, &path, dir.path());
+    assert!(first.contains("unchanged"), "{first}");
+    let updated = std::fs::read_to_string(&path).unwrap();
+    assert!(updated.contains("\"servers\""));
+    assert!(!updated.contains("\"mcp\": {\n    \"lazydb\""));
 }
 
 #[test]
@@ -91,6 +141,9 @@ fn explicit_project_scope_uses_project_directory_without_using_cwd() {
         dry_run: false,
         yes: true,
         json: true,
+        opencode_format: None,
+        opencode_bin: None,
+        server_bin: None,
     });
     assert!(result.is_ok());
     assert!(config.exists());
@@ -137,6 +190,9 @@ fn claude_local_only_updates_current_project_node() {
         dry_run: false,
         yes: true,
         json: true,
+        opencode_format: None,
+        opencode_bin: None,
+        server_bin: None,
     })
     .unwrap();
     assert!(output.contains("added"));
@@ -176,6 +232,9 @@ fn rejects_unsupported_scope_and_multiple_explicit_clients() {
             dry_run: true,
             yes: false,
             json: true,
+            opencode_format: None,
+            opencode_bin: None,
+            server_bin: None,
         })
         .is_err()
     );
