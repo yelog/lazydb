@@ -124,7 +124,9 @@ fn empty_workspace_keeps_focus_in_explorer() {
     let profile = import_connection_url(":memory:", Some("saved"))
         .unwrap()
         .profile;
+    let profile_id = profile.id;
     let mut app = App::new(vec![profile]);
+    app.active_workspace_profile = Some(profile_id);
     assert!(app.tabs.is_empty());
 
     for action in [
@@ -1460,7 +1462,9 @@ fn console_lifecycle_can_run_offline_with_a_profile_workspace() {
     let profile = import_connection_url(":memory:", Some("saved"))
         .unwrap()
         .profile;
+    let profile_id = profile.id;
     let mut app = App::new(vec![profile]);
+    app.active_workspace_profile = Some(profile_id);
 
     let commands = app.update(Action::NewConsole);
     assert!(
@@ -1468,7 +1472,7 @@ fn console_lifecycle_can_run_offline_with_a_profile_workspace() {
             .iter()
             .all(|command| !matches!(command, Command::Connect { .. }))
     );
-    assert!(app.active_workspace_profile.is_some());
+    assert_eq!(app.active_workspace_profile, Some(profile_id));
     assert_eq!(app.sql_editors.len(), 1);
     let id = app.active_console().id;
     app.update(Action::CloseActiveTab);

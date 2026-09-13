@@ -1924,7 +1924,7 @@ impl MySqlAdapter {
         let rows = sqlx::query(
             "SELECT tc.constraint_catalog, tc.constraint_schema, tc.table_schema, tc.table_name, \
               tc.constraint_name, tc.constraint_type, CAST(kcu.ordinal_position AS UNSIGNED), \
-             COALESCE(kcu.column_name, '') AS column_name, \
+             kcu.column_name, \
              CASE WHEN tc.constraint_type='FOREIGN KEY' THEN kcu.referenced_table_schema END, \
              CASE WHEN tc.constraint_type='FOREIGN KEY' THEN kcu.referenced_table_name END, \
              CASE WHEN tc.constraint_type='FOREIGN KEY' THEN kcu.referenced_column_name END, \
@@ -1958,8 +1958,8 @@ impl MySqlAdapter {
                 "FOREIGN KEY" => CatalogKind::ForeignKey,
                 _ => return Err(catalog_internal("unexpected MySQL constraint type")),
             };
-            let column: String = row.try_get(7).map_err(decode_error)?;
-            if column.is_empty() {
+            let column: Option<String> = row.try_get(7).map_err(decode_error)?;
+            let Some(column) = column else {
                 if kind == CatalogKind::ForeignKey {
                     return Err(catalog_internal(format!(
                         "MySQL foreign key `{}` has no source column",
@@ -1970,7 +1970,7 @@ impl MySqlAdapter {
                 // KEY_COLUMN_USAGE without a source column. They are not
                 // column constraints, so leave them to index metadata.
                 continue;
-            }
+            };
             parts.push(MySqlConstraintPart {
                 catalog: row.try_get(0).map_err(decode_error)?,
                 schema: row.try_get(1).map_err(decode_error)?,

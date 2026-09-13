@@ -3239,6 +3239,7 @@ impl App {
                     | Action::OmniDismiss
                     | Action::OmniShowActions
                     | Action::ExecuteSemanticCommand { .. }
+                    | Action::NewConsole
                     | Action::NewConsoleNamed(_)
             )
             && !((self.is_active_relation_tab()
@@ -4833,24 +4834,8 @@ impl App {
                 Vec::new()
             }
             Action::DashboardMetricsDue | Action::DashboardProcessesDue => Vec::new(),
-            Action::NewConsole => {
-                if !self.profiles.is_empty()
-                    && self.connection.active_identity().is_none()
-                    && self.tabs.is_empty()
-                {
-                    return Vec::new();
-                }
-                self.create_and_activate_sql_editor()
-            }
-            Action::NewConsoleNamed(name) => {
-                if !self.profiles.is_empty()
-                    && self.connection.active_identity().is_none()
-                    && self.tabs.is_empty()
-                {
-                    return Vec::new();
-                }
-                self.create_and_activate_sql_editor_named(name)
-            }
+            Action::NewConsole => self.create_and_activate_sql_editor(),
+            Action::NewConsoleNamed(name) => self.create_and_activate_sql_editor_named(name),
             Action::CloseActiveTab => {
                 if self.has_active_workspace() && !self.tabs.is_empty() {
                     let id = self.tabs[self.active_tab].id();

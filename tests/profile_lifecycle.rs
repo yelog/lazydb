@@ -272,10 +272,11 @@ async fn two_sqlite_profiles_complete_the_full_runtime_lifecycle() {
         &mut runtime,
         Action::ProfileSave { connect: false },
     );
-    assert!(matches!(
-        apply_next(&mut app, &mut runtime, &mut receiver).await,
-        Action::ProfileSaved { connect: false, .. }
-    ));
+    let saved = apply_next(&mut app, &mut runtime, &mut receiver).await;
+    assert!(
+        matches!(saved, Action::ProfileSaved { connect: false, .. }),
+        "expected saved profile event, got {saved:?}"
+    );
     assert_eq!(app.connection.profile_id, Some(alpha_id));
     assert_eq!(
         app.connection.status,
