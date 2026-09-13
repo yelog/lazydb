@@ -2124,6 +2124,8 @@ fn console_tabs_render_profile_suffix_without_mutating_persisted_name() {
         .unwrap()
         .profile;
     let mut app = App::new(vec![profile.clone()]);
+    app.connection.profile_id = Some(profile.id);
+    app.connection.status = lazydb::model::workspace::ConnectionStatus::Connected;
     app.update(Action::NewConsole);
     let target = ExecutionTarget::from_profile(&profile);
     let console = app.active_console_mut();
@@ -2142,6 +2144,8 @@ fn console_tab_hitbox_matches_the_rendered_truncated_unicode_label() {
         .unwrap()
         .profile;
     let mut app = App::new(vec![profile.clone()]);
+    app.connection.profile_id = Some(profile.id);
+    app.connection.status = lazydb::model::workspace::ConnectionStatus::Connected;
     app.update(Action::NewConsole);
     app.active_console_mut().name = "分析与结果".into();
     app.active_console_mut().execution_target = Some(ExecutionTarget::from_profile(&profile));
@@ -2155,6 +2159,8 @@ fn console_manager_renders_profile_and_connection_state_and_searches_all_target_
         .unwrap()
         .profile;
     let mut app = App::new(vec![profile.clone()]);
+    app.connection.profile_id = Some(profile.id);
+    app.connection.status = lazydb::model::workspace::ConnectionStatus::Connected;
     app.update(Action::NewConsole);
     let id = app.active_console().id;
     app.active_console_mut().name = "analysis".into();

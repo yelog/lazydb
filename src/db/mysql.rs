@@ -1924,7 +1924,7 @@ impl MySqlAdapter {
         let rows = sqlx::query(
             "SELECT tc.constraint_catalog, tc.constraint_schema, tc.table_schema, tc.table_name, \
               tc.constraint_name, tc.constraint_type, CAST(kcu.ordinal_position AS UNSIGNED), \
-             kcu.column_name, \
+             COALESCE(kcu.column_name, '') AS column_name, \
              CASE WHEN tc.constraint_type='FOREIGN KEY' THEN kcu.referenced_table_schema END, \
              CASE WHEN tc.constraint_type='FOREIGN KEY' THEN kcu.referenced_table_name END, \
              CASE WHEN tc.constraint_type='FOREIGN KEY' THEN kcu.referenced_column_name END, \
@@ -1949,50 +1949,61 @@ impl MySqlAdapter {
         .fetch_all(&mut *connection)
         .await
         .map_err(sql_error)?;
-        let parts = rows
-            .into_iter()
-            .map(|row| {
-                let native_kind: String = row.try_get(5).map_err(decode_error)?;
-                let kind = match native_kind.as_str() {
-                    "PRIMARY KEY" => CatalogKind::PrimaryKey,
-                    "UNIQUE" => CatalogKind::UniqueConstraint,
-                    "FOREIGN KEY" => CatalogKind::ForeignKey,
-                    _ => return Err(catalog_internal("unexpected MySQL constraint type")),
-                };
-                Ok(MySqlConstraintPart {
-                    catalog: row.try_get(0).map_err(decode_error)?,
-                    schema: row.try_get(1).map_err(decode_error)?,
-                    table_schema: row.try_get(2).map_err(decode_error)?,
-                    table: row.try_get(3).map_err(decode_error)?,
-                    name: row.try_get(4).map_err(decode_error)?,
-                    kind,
-                    ordinal: checked_u32(
-                        row.try_get::<u64, _>(6).map_err(decode_error)?,
-                        "constraint ordinal",
-                    )?,
-                    column: row.try_get(7).map_err(decode_error)?,
-                    referenced_database: (kind == CatalogKind::ForeignKey)
-                        .then(|| row.try_get(8).map_err(decode_error))
-                        .transpose()?,
-                    referenced_relation: (kind == CatalogKind::ForeignKey)
-                        .then(|| row.try_get(9).map_err(decode_error))
-                        .transpose()?,
-                    referenced_column: if kind == CatalogKind::ForeignKey {
-                        row.try_get(10).map_err(decode_error)?
-                    } else {
-                        None
-                    },
-                    referenced_ordinal: if kind == CatalogKind::ForeignKey {
-                        row.try_get::<Option<u64>, _>(11)
-                            .map_err(decode_error)?
-                            .map(|value| checked_u32(value, "referenced constraint ordinal"))
-                            .transpose()?
-                    } else {
-                        None
-                    },
-                })
-            })
-            .collect::<Result<Vec<_>, DatabaseError>>()?;
+        let mut parts = Vec::with_capacity(rows.len());
+        for row in rows {
+            let native_kind: String = row.try_get(5).map_err(decode_error)?;
+            let kind = match native_kind.as_str() {
+                "PRIMARY KEY" => CatalogKind::PrimaryKey,
+                "UNIQUE" => CatalogKind::UniqueConstraint,
+                "FOREIGN KEY" => CatalogKind::ForeignKey,
+                _ => return Err(catalog_internal("unexpected MySQL constraint type")),
+            };
+            let column: String = row.try_get(7).map_err(decode_error)?;
+            if column.is_empty() {
+                if kind == CatalogKind::ForeignKey {
+                    return Err(catalog_internal(format!(
+                        "MySQL foreign key `{}` has no source column",
+                        row.try_get::<String, _>(4).map_err(decode_error)?
+                    )));
+                }
+                // MariaDB may expose expression-only key parts in
+                // KEY_COLUMN_USAGE without a source column. They are not
+                // column constraints, so leave them to index metadata.
+                continue;
+            }
+            parts.push(MySqlConstraintPart {
+                catalog: row.try_get(0).map_err(decode_error)?,
+                schema: row.try_get(1).map_err(decode_error)?,
+                table_schema: row.try_get(2).map_err(decode_error)?,
+                table: row.try_get(3).map_err(decode_error)?,
+                name: row.try_get(4).map_err(decode_error)?,
+                kind,
+                ordinal: checked_u32(
+                    row.try_get::<u64, _>(6).map_err(decode_error)?,
+                    "constraint ordinal",
+                )?,
+                column,
+                referenced_database: (kind == CatalogKind::ForeignKey)
+                    .then(|| row.try_get(8).map_err(decode_error))
+                    .transpose()?,
+                referenced_relation: (kind == CatalogKind::ForeignKey)
+                    .then(|| row.try_get(9).map_err(decode_error))
+                    .transpose()?,
+                referenced_column: if kind == CatalogKind::ForeignKey {
+                    row.try_get(10).map_err(decode_error)?
+                } else {
+                    None
+                },
+                referenced_ordinal: if kind == CatalogKind::ForeignKey {
+                    row.try_get::<Option<u64>, _>(11)
+                        .map_err(decode_error)?
+                        .map(|value| checked_u32(value, "referenced constraint ordinal"))
+                        .transpose()?
+                } else {
+                    None
+                },
+            });
+        }
         group_constraint_parts(parts)
     }
 
