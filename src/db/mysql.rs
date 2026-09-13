@@ -1488,10 +1488,7 @@ impl MySqlAdapter {
                     .transpose()?,
             );
             metadata.character_maximum_length = OptionalMetadata::Supported(
-                row.try_get::<Option<i64>, _>(10)
-                    .map_err(decode_error)?
-                    .map(non_negative_count)
-                    .transpose()?,
+                row.try_get::<Option<u64>, _>(10).map_err(decode_error)?,
             );
             metadata.collation =
                 OptionalMetadata::Supported(row.try_get(11).map_err(decode_error)?);
