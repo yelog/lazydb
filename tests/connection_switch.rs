@@ -1711,6 +1711,7 @@ async fn connecting_second_profile_keeps_first_runtime_console_usable() {
         matches!(commands.as_slice(), [Command::RunQueryPage { connection, .. }] if *connection == first_identity),
         "{commands:?}"
     );
+    let mut second_connected = false;
     loop {
         let query_finished = next_action(&mut receiver).await;
         match query_finished {
@@ -1723,21 +1724,36 @@ async fn connecting_second_profile_keeps_first_runtime_console_usable() {
             | Action::DiagnosticDue(_)
             | Action::CompletionDue(_)
             | Action::ConnectionSucceeded { .. } => {
+                if matches!(
+                    &query_finished,
+                    Action::ConnectionSucceeded { profile_id, .. } if *profile_id == second_id
+                ) {
+                    second_connected = true;
+                }
                 dispatch(&mut app, &mut runtime, query_finished);
             }
             other => panic!("unexpected action before A query finished: {other:?}"),
         }
     }
 
-    let connected = next_action(&mut receiver).await;
-    assert!(matches!(
-        connected,
-        Action::ConnectionSucceeded {
-            profile_id: connected_id,
-            ..
-        } if connected_id == second_id
-    ));
-    dispatch(&mut app, &mut runtime, connected);
+    if !second_connected {
+        loop {
+            let connected = next_action(&mut receiver).await;
+            match connected {
+                Action::ConnectionSucceeded { profile_id, .. } if profile_id == second_id => {
+                    dispatch(&mut app, &mut runtime, connected);
+                    break;
+                }
+                Action::CatalogPageLoaded(_)
+                | Action::CatalogPageFailed { .. }
+                | Action::DiagnosticDue(_)
+                | Action::CompletionDue(_) => {
+                    dispatch(&mut app, &mut runtime, connected);
+                }
+                other => panic!("unexpected action while waiting for B connection: {other:?}"),
+            }
+        }
+    }
     drain_catalog(&mut app, &mut runtime, &mut receiver).await;
     assert_eq!(app.connection.profile_id, Some(second_id));
     assert!(app.connection.pending_profile_id.is_none());

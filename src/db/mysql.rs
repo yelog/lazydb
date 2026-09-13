@@ -1425,7 +1425,7 @@ impl MySqlAdapter {
         let rows = sqlx::query(
             "SELECT ordinal_position, column_name, column_type, data_type, is_nullable, \
              column_default, extra, \
-             CASE WHEN is_generated = 'ALWAYS' THEN generation_expression ELSE NULL END, \
+             generation_expression, \
              numeric_precision, numeric_scale, \
               CAST(character_maximum_length AS SIGNED), collation_name, character_set_name, column_comment \
              FROM information_schema.columns WHERE BINARY table_schema=BINARY ? AND BINARY table_name=BINARY ? \
