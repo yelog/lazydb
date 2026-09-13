@@ -255,10 +255,27 @@ async fn migrate_columns(pool: &SqlitePool) -> Result<(), HistoryStoreError> {
         .into_iter()
         .map(|row| row.get::<String, _>("name"))
         .collect::<std::collections::HashSet<_>>();
-    if !columns.contains("elapsed_millis") {
-        sqlx::query("ALTER TABLE history_executions ADD COLUMN elapsed_millis INTEGER")
-            .execute(pool)
-            .await?;
+    for (column, query) in [
+        (
+            "elapsed_millis",
+            "ALTER TABLE history_executions ADD COLUMN elapsed_millis INTEGER",
+        ),
+        (
+            "profile_id",
+            "ALTER TABLE history_executions ADD COLUMN profile_id TEXT",
+        ),
+        (
+            "database_name",
+            "ALTER TABLE history_executions ADD COLUMN database_name TEXT",
+        ),
+        (
+            "schema_name",
+            "ALTER TABLE history_executions ADD COLUMN schema_name TEXT",
+        ),
+    ] {
+        if !columns.contains(column) {
+            sqlx::query(query).execute(pool).await?;
+        }
     }
     Ok(())
 }

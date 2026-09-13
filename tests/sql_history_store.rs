@@ -131,8 +131,9 @@ async fn opening_an_older_history_schema_adds_new_summary_columns() {
     let store = HistoryStore::open(&path).await.unwrap();
     let id = Uuid::new_v4();
     store.insert(history(id, "SELECT 1")).await.unwrap();
-    assert_eq!(
-        store.detail(id).await.unwrap().unwrap().elapsed_millis,
-        None
-    );
+    let detail = store.detail(id).await.unwrap().unwrap();
+    assert_eq!(detail.elapsed_millis, None);
+    assert_eq!(detail.profile_id, None);
+    assert_eq!(detail.database, None);
+    assert_eq!(detail.schema, None);
 }
