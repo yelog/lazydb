@@ -2144,6 +2144,7 @@ impl Runtime {
                 return;
             }
             let mut next = snapshot;
+            let expected_collection = next.ordered_persisted_collection();
             let profile = next
                 .profiles
                 .get_mut(&profile_id)
@@ -2166,7 +2167,9 @@ impl Runtime {
             }
             let access = profile.access.clone();
             let collection = next.ordered_persisted_collection();
-            if let Err(message) = save_profiles(profile_store, collection).await {
+            if let Err(message) =
+                save_profiles(profile_store, expected_collection, collection).await
+            {
                 let _ = sender.send(Action::ProfileAccessUpdateFailed {
                     request_id,
                     profile_id,
@@ -2196,6 +2199,7 @@ impl Runtime {
             let _guard = profile_mutation.lock().await;
             let snapshot = registry.lock().await.clone();
             let mut collection = snapshot.ordered_collection();
+            let expected_persisted = snapshot.ordered_persisted_collection();
             let result = match mutation {
                 ProfileOrganizationMutation::CreateGroup { id, name } => {
                     crate::model::profile_organization::create_group(&mut collection, id, name)
@@ -2248,7 +2252,7 @@ impl Runtime {
                     .cloned()
                     .collect(),
             };
-            if let Err(error) = save_profiles(store, persisted).await {
+            if let Err(error) = save_profiles(store, expected_persisted, persisted).await {
                 let _ = sender.send(Action::ProfileOrganizationSaveFailed {
                     request_id,
                     message: error,
@@ -5635,6 +5639,15 @@ async fn save_profile_transaction(
     local_credential_store: LocalCredentialStore,
     submission: ProfileSubmission,
 ) -> Result<SavedProfile, String> {
+    let lock_store = profile_store.clone();
+    let transaction_lock = task::spawn_blocking(move || {
+        crate::persistence::profile_transaction::ProfileLock::acquire(lock_store.path())
+    })
+    .await
+    .map_err(|_| "Profile transaction worker failed".to_owned())?
+    .map_err(|error| {
+        sanitize_terminal_text(&format!("Unable to save connection profiles: {error}"))
+    })?;
     let snapshot = registry.lock().await.clone();
     let ProfileSubmission {
         mut profile,
@@ -5643,6 +5656,7 @@ async fn save_profile_transaction(
     } = submission;
     let profile_id = profile.id;
     let old_profile = snapshot.profiles.get(&profile_id).cloned();
+    let expected_collection = snapshot.ordered_persisted_collection();
     let mut next = snapshot;
     let mut previous_secret = None;
     let mut warning = None;
@@ -5813,7 +5827,14 @@ async fn save_profile_transaction(
     *next.revisions.entry(profile_id).or_default() += 1;
     next.persisted.insert(profile_id);
     let collection = next.ordered_persisted_collection();
-    if let Err(primary) = save_profiles(profile_store, collection).await {
+    if let Err(primary) = save_profiles_with_lock(
+        profile_store,
+        expected_collection,
+        collection,
+        transaction_lock.clone(),
+    )
+    .await
+    {
         return Err(
             rollback_after_failure(&secret_store, profile_id, previous_secret, primary).await,
         );
@@ -5834,12 +5855,22 @@ async fn delete_profile_transaction(
     connection: Arc<Mutex<HashMap<ConnectionKey, ActiveConnection>>>,
     profile_id: Uuid,
 ) -> Result<Option<ConnectionIdentity>, String> {
+    let lock_store = profile_store.clone();
+    let transaction_lock = task::spawn_blocking(move || {
+        crate::persistence::profile_transaction::ProfileLock::acquire(lock_store.path())
+    })
+    .await
+    .map_err(|_| "Profile transaction worker failed".to_owned())?
+    .map_err(|error| {
+        sanitize_terminal_text(&format!("Unable to save connection profiles: {error}"))
+    })?;
     let snapshot = registry.lock().await.clone();
     let profile = snapshot
         .profiles
         .get(&profile_id)
         .cloned()
         .ok_or_else(|| "Connection profile no longer exists".to_owned())?;
+    let expected_collection = snapshot.ordered_persisted_collection();
     let mut previous_secret = None;
     if profile.credential_policy.keyring_reference().is_some() {
         validate_secret_reference(&profile)?;
@@ -5865,7 +5896,14 @@ async fn delete_profile_transaction(
 
     if was_persisted {
         let collection = next.ordered_persisted_collection();
-        if let Err(primary) = save_profiles(profile_store, collection).await {
+        if let Err(primary) = save_profiles_with_lock(
+            profile_store,
+            expected_collection,
+            collection,
+            transaction_lock.clone(),
+        )
+        .await
+        {
             return Err(rollback_after_failure(
                 &secret_store,
                 profile_id,
@@ -6175,14 +6213,31 @@ async fn rollback_after_failure(
 
 async fn save_profiles(
     profile_store: ProfileStore,
+    expected: ProfileCollection,
     collection: ProfileCollection,
 ) -> Result<(), String> {
-    task::spawn_blocking(move || profile_store.save(&collection))
+    task::spawn_blocking(move || profile_store.reconcile_save(&expected, collection))
         .await
         .map_err(|_| "Profile persistence task failed".to_owned())?
         .map_err(|error| {
             sanitize_terminal_text(&format!("Unable to save connection profiles: {error}"))
         })
+}
+
+async fn save_profiles_with_lock(
+    profile_store: ProfileStore,
+    expected: ProfileCollection,
+    collection: ProfileCollection,
+    lock: crate::persistence::profile_transaction::ProfileLock,
+) -> Result<(), String> {
+    task::spawn_blocking(move || {
+        profile_store.reconcile_save_with_lock(&lock, &expected, collection)
+    })
+    .await
+    .map_err(|_| "Profile persistence task failed".to_owned())?
+    .map_err(|error| {
+        sanitize_terminal_text(&format!("Unable to save connection profiles: {error}"))
+    })
 }
 
 fn secret_store_unavailable(error: SecretStoreError) -> bool {
@@ -6197,12 +6252,13 @@ fn secret_error(context: &str, error: SecretStoreError) -> String {
 }
 
 fn local_credential_store_for(profile_store: &ProfileStore) -> LocalCredentialStore {
-    let key_path = profile_store
-        .path()
-        .parent()
-        .map(|parent| parent.join("credential.key"))
-        .unwrap_or_else(|| std::path::PathBuf::from("credential.key"));
-    LocalCredentialStore::new(key_path, "lazydb")
+    LocalCredentialStore::new(profile_store.credential_key_path(), "lazydb").with_fallback_key_path(
+        profile_store
+            .path()
+            .parent()
+            .map(|parent| parent.join("credential.key"))
+            .unwrap_or_else(|| std::path::PathBuf::from("credential.key")),
+    )
 }
 
 async fn profile_revision_is_current(
@@ -7212,7 +7268,8 @@ pub fn load_startup_profiles(cli: &Cli) -> Result<StartupProfiles> {
     } else {
         AppPaths::discover()?.profiles_file()
     };
-    let store = ProfileStore::new(profile_path);
+    let credential_key_path = AppPaths::discover()?.credential_key_file();
+    let store = ProfileStore::new(profile_path).with_credential_key_path(credential_key_path);
     let report = store
         .load_report()
         .context("failed to load connection profiles")?;

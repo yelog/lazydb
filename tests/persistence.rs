@@ -291,11 +291,14 @@ fn successful_save_leaves_no_temporary_file() {
 
     store.save(&[]).unwrap();
 
-    let names = fs::read_dir(temp.path().join("nested"))
+    let mut names = fs::read_dir(temp.path().join("nested"))
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
         .collect::<Vec<_>>();
-    assert_eq!(names, vec!["connections.toml"]);
+    names.sort();
+    let mut expected = vec!["connections.toml", "connections.toml.lock"];
+    expected.sort();
+    assert_eq!(names, expected);
 }
 
 #[test]

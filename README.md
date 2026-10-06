@@ -333,6 +333,15 @@ lazydb agent query --project . --connection orders-dev \
   --sql 'SELECT * FROM users LIMIT 20'
 ```
 
+Create a saved, project-scoped connection without opening the TUI (provide the
+password through the environment, not the URL or process arguments):
+
+```bash
+lazydb connections add --name orders-dev \
+  --url 'postgresql://app@localhost:5432/orders' \
+  --scope project --project . --password-env ORDERS_DB_PASSWORD --json
+```
+
 For SQL files, use an explicitly supplied project-relative path:
 
 ```bash

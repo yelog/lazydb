@@ -22,6 +22,25 @@ override `read_only`, database grants, or the MCP server write policy.
 
 ## CLI
 
+Connections can be created without starting the TUI. Set the password in the
+calling environment rather than placing it in the URL or process arguments:
+
+```bash
+lazydb connections add --name orders-dev \
+  --url 'postgresql://app@localhost:5432/orders' \
+  --scope project --project . \
+  --password-env ORDERS_DB_PASSWORD --json
+lazydb agent connections --project .
+lazydb agent query --project . --connection orders-dev --sql 'SELECT 1'
+```
+
+The password is saved using LazyDB's local encrypted credential store. `add`
+does not connect to the database; use `lazydb connections test orders-dev` to
+check connectivity. Use `--upsert` together with an explicit `--scope` for
+repeatable project setup. `--config` overrides the profile file while the
+credential key remains in the LazyDB application directory. Restart an already
+running MCP or LSP process after changing profiles so it reloads the new file.
+
 ```bash
 lazydb agent connections --project .
 lazydb agent context --project .

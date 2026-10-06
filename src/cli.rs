@@ -113,6 +113,14 @@ pub enum Command {
         #[command(subcommand)]
         command: AgentCommand,
     },
+    /// Create, inspect, and test saved database connections.
+    Connections {
+        /// Emit machine-readable JSON.
+        #[arg(long, global = true)]
+        json: bool,
+        #[command(subcommand)]
+        command: ConnectionsCommand,
+    },
     /// Run an agent protocol server.
     Mcp {
         #[command(subcommand)]
@@ -126,6 +134,56 @@ pub enum Command {
     Uninstall(UninstallArgs),
     /// Move the complete LazyDB application root to another directory.
     MigrateHome(MigrateHomeArgs),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ConnectionsCommand {
+    /// Create or update a saved connection profile without opening the TUI.
+    Add {
+        #[arg(long)]
+        name: String,
+        #[arg(long, value_enum)]
+        scope: Option<ConnectionScope>,
+        #[arg(long)]
+        project: Option<PathBuf>,
+        #[arg(long, conflicts_with = "password_stdin")]
+        password_env: Option<String>,
+        #[arg(long, conflicts_with = "password_env")]
+        password_stdin: bool,
+        #[arg(long)]
+        upsert: bool,
+        #[arg(long, conflicts_with = "read_only")]
+        read_write: bool,
+    },
+    /// List connections visible to this project.
+    List {
+        #[arg(long)]
+        project: Option<PathBuf>,
+        #[arg(long)]
+        all: bool,
+    },
+    /// Show a saved connection by its name or UUID.
+    Show {
+        selector: String,
+        #[arg(long)]
+        project: Option<PathBuf>,
+        #[arg(long)]
+        all: bool,
+    },
+    /// Test a saved connection without modifying its profile.
+    Test {
+        selector: String,
+        #[arg(long)]
+        project: Option<PathBuf>,
+        #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u64).range(1..=300))]
+        timeout: u64,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum ConnectionScope {
+    Project,
+    Global,
 }
 
 #[derive(Debug, Args)]
@@ -342,7 +400,7 @@ pub struct VersionInfo<'a> {
 pub struct Capabilities<'a> {
     pub version: &'a str,
     pub cli_api: u16,
-    pub features: [&'a str; 7],
+    pub features: [&'a str; 8],
     pub drivers: &'a [&'a str; 7],
 }
 
@@ -391,6 +449,7 @@ pub fn capabilities() -> Capabilities<'static> {
             "system-keyring",
             "theme-file-v1",
             "lsp-v1",
+            "connections-v1",
         ],
         drivers: &crate::db::descriptor::DRIVER_NAMES,
     }
@@ -444,7 +503,7 @@ pub fn render_command(command: &Command) -> Result<String, serde_json::Error> {
         Command::Version { json: false } => Ok(format!("lazydb {}", env!("CARGO_PKG_VERSION"))),
         Command::Capabilities { json: true } => serde_json::to_string(&capabilities()),
         Command::Capabilities { json: false } => Ok(format!(
-            "lazydb {} (cli api {})\ndrivers: {}\nfeatures: mouse, read-only, context-help, profile-manager, system-keyring, theme-file-v1, lsp-v1",
+            "lazydb {} (cli api {})\ndrivers: {}\nfeatures: mouse, read-only, context-help, profile-manager, system-keyring, theme-file-v1, lsp-v1, connections-v1",
             env!("CARGO_PKG_VERSION"),
             CLI_API_VERSION,
             crate::db::descriptor::DRIVER_LIST
@@ -468,7 +527,7 @@ pub fn render_command(command: &Command) -> Result<String, serde_json::Error> {
                 report.credential_store.detail,
             ))
         }
-        Command::Agent { .. } | Command::Mcp { .. } => {
+        Command::Agent { .. } | Command::Connections { .. } | Command::Mcp { .. } => {
             Ok("This command requires asynchronous execution".to_owned())
         }
         Command::Lsp(_) => Ok("This command requires asynchronous execution".to_owned()),
@@ -634,7 +693,8 @@ mod tests {
                 "profile-manager",
                 "system-keyring",
                 "theme-file-v1",
-                "lsp-v1"
+                "lsp-v1",
+                "connections-v1"
             ])
         );
     }

@@ -202,6 +202,11 @@ A key sequence remains active for 750 milliseconds by default, and
 | `--profile NAME` | Profile name | None | Select a saved profile at startup. Ignored as the connection source when `--url` is also supplied, although the name is used for the ad-hoc profile when available. |
 | `--url URL` | Connection URL | None | Open a session-only profile. It is never persisted and takes precedence over `--profile`. |
 | `--read-only` | Flag | Off | Force an ad-hoc connection to read-only. For a saved profile, the stored profile setting remains unchanged; adapter behavior is described below. |
+| `connections add --name NAME --url URL` | Connection name and supported URL | None | Create a saved connection without opening the TUI. Use `--scope project|global`, `--project PATH`, and optionally `--password-env VAR` or `--password-stdin`. |
+| `connections add --upsert` | Flag (requires `--scope`) | Off | Update one matching connection while retaining its UUID and saved metadata; repeated identical configuration is a no-op. |
+| `connections list [--all]` | Flag | Project-visible connections | List connections visible to the current project; `--all` includes profiles scoped to other projects. |
+| `connections show SELECTOR` | Name or UUID | None | Show one saved profile without credentials. |
+| `connections test SELECTOR` | Name or UUID; `--timeout 1..300` | 10 seconds | Connect and probe without changing saved configuration. |
 | `--mouse MODE` | `auto`, `on`, `off` | `auto` | Enable mouse input automatically, force it on, or disable it. |
 | `--color MODE` | `auto`, `always`, `never` | `auto` | Select automatic, forced, or disabled terminal color output. |
 | `--icons MODE` | `nerd-font`, `unicode`, `ascii` | `nerd-font` | Select branded Nerd Font glyphs, standard Unicode fallbacks, or ASCII-only output. |
@@ -429,7 +434,8 @@ SSH, glyph rendering depends on the font configured by the local terminal.
 ## Project-Scoped Connections
 
 Saved profiles are stored in the user-level `connections.toml`. Profile file
-version 5 adds connection access metadata. A profile is either global or
+version 6 stores connection groups and access metadata (version 5 profiles
+migrate automatically). A profile is either global or
 project-scoped with a list of canonical project roots; old profile versions
 migrate to global. New saved profiles created from a project default to that
 project. Project association controls Explorer organization, not database

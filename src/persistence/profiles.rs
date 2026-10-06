@@ -22,6 +22,7 @@ const PROFILE_FILE_VERSION: u16 = 6;
 #[derive(Clone, Debug)]
 pub struct ProfileStore {
     path: PathBuf,
+    credential_key_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Error)]
@@ -52,6 +53,8 @@ pub enum PersistenceError {
     MissingParent,
     #[error("profile document is invalid: {0}")]
     InvalidStructure(String),
+    #[error("profile lock failed: {0}")]
+    Lock(#[from] super::profile_transaction::ProfileLockError),
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -185,7 +188,24 @@ struct ProfileFileHeader {
 
 impl ProfileStore {
     pub fn new(path: PathBuf) -> Self {
-        Self { path }
+        Self {
+            path: resolve_profile_path(path),
+            credential_key_path: None,
+        }
+    }
+
+    pub fn with_credential_key_path(mut self, path: PathBuf) -> Self {
+        self.credential_key_path = Some(path);
+        self
+    }
+
+    pub fn credential_key_path(&self) -> PathBuf {
+        self.credential_key_path.clone().unwrap_or_else(|| {
+            self.path
+                .parent()
+                .map(|parent| parent.join("credential.key"))
+                .unwrap_or_else(|| PathBuf::from("credential.key"))
+        })
     }
 
     pub fn path(&self) -> &Path {
@@ -326,6 +346,268 @@ impl ProfileStore {
     where
         T: Into<ProfileCollection>,
     {
+        let _lock = super::profile_transaction::ProfileLock::acquire(&self.path)?;
+        self.save_unlocked(input)
+    }
+
+    /// Re-load and apply a profile mutation while holding the cross-process lock.
+    /// The operation returns whether it changed the collection; unchanged
+    /// operations do not rewrite the file.
+    pub fn mutate<T>(
+        &self,
+        operation: impl FnOnce(&mut ProfileCollection) -> Result<(T, bool), String>,
+    ) -> Result<T, ProfileMutationError> {
+        let _lock = super::profile_transaction::ProfileLock::acquire(&self.path)?;
+        let mut collection = self.load()?;
+        let (result, changed) =
+            operation(&mut collection).map_err(ProfileMutationError::Rejected)?;
+        if changed {
+            self.save_unlocked(collection)?;
+        }
+        Ok(result)
+    }
+
+    /// Commit a TUI snapshot as a three-way merge against the latest file.
+    /// Concurrent changes to unrelated profiles are retained; changes to the
+    /// same profile or group produce a conflict instead of a lost update.
+    pub fn reconcile_save(
+        &self,
+        expected: &ProfileCollection,
+        desired: ProfileCollection,
+    ) -> Result<(), ProfileMutationError> {
+        let _lock = super::profile_transaction::ProfileLock::acquire(&self.path)?;
+        self.reconcile_save_with_lock(&_lock, expected, desired)
+    }
+
+    pub fn reconcile_save_with_lock(
+        &self,
+        lock: &super::profile_transaction::ProfileLock,
+        expected: &ProfileCollection,
+        desired: ProfileCollection,
+    ) -> Result<(), ProfileMutationError> {
+        if !lock.protects(&self.path)? {
+            return Err(ProfileMutationError::Rejected(
+                "profile_conflict: transaction lock protects another profile file".to_owned(),
+            ));
+        }
+        let mut latest = self.load()?;
+        let expected_profiles = expected
+            .profiles
+            .iter()
+            .map(|profile| (profile.id, profile.clone()))
+            .collect::<std::collections::HashMap<_, _>>();
+        let desired_profiles = desired
+            .profiles
+            .iter()
+            .map(|profile| (profile.id, profile.clone()))
+            .collect::<std::collections::HashMap<_, _>>();
+        let latest_profiles = latest
+            .profiles
+            .iter()
+            .map(|profile| (profile.id, profile.clone()))
+            .collect::<std::collections::HashMap<_, _>>();
+        let latest_disk_order = latest
+            .profiles
+            .iter()
+            .map(|profile| profile.id)
+            .collect::<Vec<_>>();
+
+        for (id, old) in &expected_profiles {
+            let new = desired_profiles.get(id);
+            if new.is_some_and(|new| new == old) {
+                continue;
+            }
+            let disk = latest_profiles.get(id);
+            if disk != Some(old) && !(disk.is_none() && new.is_none()) {
+                return Err(ProfileMutationError::Rejected(format!(
+                    "profile_conflict: connection {id} changed in another process"
+                )));
+            }
+            if let Some(new) = new {
+                if let Some(current) = latest.profiles.iter_mut().find(|profile| profile.id == *id)
+                {
+                    *current = new.clone();
+                }
+            } else {
+                latest.profiles.retain(|profile| profile.id != *id);
+            }
+        }
+
+        for profile in &desired.profiles {
+            if !expected_profiles.contains_key(&profile.id) {
+                if latest
+                    .profiles
+                    .iter()
+                    .any(|current| current.id == profile.id)
+                {
+                    return Err(ProfileMutationError::Rejected(format!(
+                        "profile_conflict: connection {} already exists",
+                        profile.id
+                    )));
+                }
+                latest.profiles.push(profile.clone());
+            }
+        }
+
+        let expected_groups = expected
+            .groups
+            .iter()
+            .map(|group| (group.id, group.clone()))
+            .collect::<std::collections::HashMap<_, _>>();
+        let desired_groups = desired
+            .groups
+            .iter()
+            .map(|group| (group.id, group.clone()))
+            .collect::<std::collections::HashMap<_, _>>();
+        let latest_groups = latest
+            .groups
+            .iter()
+            .map(|group| (group.id, group.clone()))
+            .collect::<std::collections::HashMap<_, _>>();
+        for (id, old) in &expected_groups {
+            let new = desired_groups.get(id);
+            if new.is_some_and(|new| new == old) {
+                continue;
+            }
+            if latest_groups.get(id) != Some(old) {
+                return Err(ProfileMutationError::Rejected(format!(
+                    "profile_conflict: connection group {id} changed in another process"
+                )));
+            }
+            if let Some(new) = new {
+                if let Some(current) = latest.groups.iter_mut().find(|group| group.id == *id) {
+                    *current = new.clone();
+                }
+            } else {
+                latest.groups.retain(|group| group.id != *id);
+            }
+        }
+        for group in &desired.groups {
+            if !expected_groups.contains_key(&group.id) {
+                if latest.groups.iter().any(|current| current.id == group.id) {
+                    return Err(ProfileMutationError::Rejected(format!(
+                        "profile_conflict: connection group {} already exists",
+                        group.id
+                    )));
+                }
+                latest.groups.push(group.clone());
+            }
+        }
+
+        let expected_order = expected
+            .profiles
+            .iter()
+            .map(|profile| profile.id)
+            .collect::<Vec<_>>();
+        let desired_order = desired
+            .profiles
+            .iter()
+            .map(|profile| profile.id)
+            .collect::<Vec<_>>();
+        if expected_order != desired_order {
+            let latest_existing_order = latest_disk_order
+                .iter()
+                .copied()
+                .filter(|id| expected_profiles.contains_key(id))
+                .collect::<Vec<_>>();
+            let expected_existing_order = expected_order
+                .iter()
+                .copied()
+                .filter(|id| latest_profiles.contains_key(id))
+                .collect::<Vec<_>>();
+            if latest_existing_order != expected_existing_order {
+                return Err(ProfileMutationError::Rejected(
+                    "profile_conflict: connection order changed in another process".to_owned(),
+                ));
+            }
+            latest.profiles.sort_by_key(|profile| {
+                desired_order
+                    .iter()
+                    .position(|id| *id == profile.id)
+                    .unwrap_or(usize::MAX)
+            });
+        }
+
+        self.save_unlocked(latest)?;
+        Ok(())
+    }
+
+    pub async fn mutate_async<T, F, Fut>(&self, operation: F) -> Result<T, ProfileMutationError>
+    where
+        T: Send + 'static,
+        F: FnOnce(ProfileCollection) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<(ProfileCollection, T, bool), String>>
+            + Send
+            + 'static,
+    {
+        self.mutate_async_with_rollback(operation, || async { Ok(()) })
+            .await
+    }
+
+    pub async fn mutate_async_with_rollback<T, F, Fut, R, RFut>(
+        &self,
+        operation: F,
+        rollback: R,
+    ) -> Result<T, ProfileMutationError>
+    where
+        T: Send + 'static,
+        F: FnOnce(ProfileCollection) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<(ProfileCollection, T, bool), String>>
+            + Send
+            + 'static,
+        R: Fn() -> RFut + Send + Sync + 'static,
+        RFut: std::future::Future<Output = Result<(), String>> + Send + 'static,
+    {
+        let store = self.clone();
+        let lock_store = store.clone();
+        let lock = tokio::task::spawn_blocking(move || {
+            super::profile_transaction::ProfileLock::acquire(&lock_store.path)
+        })
+        .await
+        .map_err(|error| ProfileMutationError::Worker(error.to_string()))??;
+        let load_store = store.clone();
+        let collection = tokio::task::spawn_blocking(move || load_store.load())
+            .await
+            .map_err(|error| ProfileMutationError::Worker(error.to_string()))??;
+        let (collection, result, changed) = match operation(collection).await {
+            Ok(result) => result,
+            Err(message) => {
+                let rollback_result = rollback().await;
+                drop(lock);
+                return match rollback_result {
+                    Ok(()) => Err(ProfileMutationError::Rejected(message)),
+                    Err(rollback_error) => Err(ProfileMutationError::Rejected(format!(
+                        "credential_rollback_failed: {rollback_error}"
+                    ))),
+                };
+            }
+        };
+        if changed {
+            let save_result =
+                match tokio::task::spawn_blocking(move || store.save_unlocked(collection)).await {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(error)) => Err(ProfileMutationError::Persistence(error)),
+                    Err(error) => Err(ProfileMutationError::Worker(error.to_string())),
+                };
+            if let Err(error) = save_result {
+                let rollback_result = rollback().await;
+                drop(lock);
+                return match rollback_result {
+                    Ok(()) => Err(error),
+                    Err(rollback_error) => Err(ProfileMutationError::Rejected(format!(
+                        "credential_rollback_failed: {rollback_error}"
+                    ))),
+                };
+            }
+        }
+        drop(lock);
+        Ok(result)
+    }
+
+    fn save_unlocked<T>(&self, input: T) -> Result<(), PersistenceError>
+    where
+        T: Into<ProfileCollection>,
+    {
         let collection: ProfileCollection = input.into();
         validate_collection(&collection)?;
         let mut profiles = collection.profiles.clone();
@@ -370,6 +652,38 @@ impl ProfileStore {
         }
         result
     }
+}
+
+fn resolve_profile_path(path: PathBuf) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()
+            .map(|current| current.join(&path))
+            .unwrap_or(path)
+    };
+    if let Ok(target) = absolute.canonicalize() {
+        return target;
+    }
+    let (Some(parent), Some(file_name)) = (absolute.parent(), absolute.file_name()) else {
+        return absolute;
+    };
+    match parent.canonicalize() {
+        Ok(parent) => parent.join(file_name),
+        Err(_) => absolute,
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum ProfileMutationError {
+    #[error("profile mutation rejected: {0}")]
+    Rejected(String),
+    #[error("profile lock failed: {0}")]
+    Lock(#[from] super::profile_transaction::ProfileLockError),
+    #[error(transparent)]
+    Persistence(#[from] PersistenceError),
+    #[error("profile mutation worker failed: {0}")]
+    Worker(String),
 }
 
 fn preserve_unavailable_profiles(

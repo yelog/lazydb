@@ -440,6 +440,7 @@ pub struct ConnectionProfile {
 pub struct ImportedProfile {
     pub profile: ConnectionProfile,
     pub transient_password: Option<SecretString>,
+    pub read_only_explicit: bool,
 }
 
 #[derive(Debug, Error)]
@@ -486,6 +487,7 @@ pub struct ParsedConnectionUrl {
     pub sqlite_memory: bool,
     pub ssl_mode: SslMode,
     pub read_only: bool,
+    pub read_only_explicit: bool,
 }
 
 pub fn parse_connection_url(input: &str) -> Result<ParsedConnectionUrl, ProfileError> {
@@ -524,6 +526,8 @@ pub fn parse_connection_url(input: &str) -> Result<ParsedConnectionUrl, ProfileE
             sqlite_memory: true,
             ssl_mode: SslMode::Disable,
             read_only,
+            read_only_explicit: url::form_urlencoded::parse(query.as_bytes())
+                .any(|(key, _)| key.eq_ignore_ascii_case("mode")),
         });
     }
     if normalized.starts_with("sqlite:") || normalized.starts_with("file:") {
@@ -594,6 +598,7 @@ fn parse_jdbc_oracle_url(input: &str) -> Result<ParsedConnectionUrl, ProfileErro
         sqlite_memory: false,
         ssl_mode: SslMode::Prefer,
         read_only: false,
+        read_only_explicit: false,
     })
 }
 
@@ -643,6 +648,7 @@ pub fn import_connection_url(
             catalog_scope,
         },
         transient_password: parsed.password,
+        read_only_explicit: parsed.read_only_explicit,
     })
 }
 
@@ -680,6 +686,7 @@ fn parse_server_url(
     let mut seen_schema = false;
     let mut seen_ssl = false;
     let mut seen_read_only = false;
+    let mut read_only_explicit = false;
     let mut encrypt = None;
     let mut trust_server_certificate = None;
 
@@ -719,6 +726,7 @@ fn parse_server_url(
             trust_server_certificate = Some(parse_bool(&value, "trustServerCertificate")?);
         } else if key.eq_ignore_ascii_case("readOnly") || key.eq_ignore_ascii_case("read_only") {
             reject_duplicate(&mut seen_read_only, "readOnly")?;
+            read_only_explicit = true;
             read_only = parse_bool(&value, "readOnly")?;
         } else if kind == DatabaseKind::SqlServer && is_unsupported_sql_server_property(&key) {
             return Err(ProfileError::UnsupportedProperty(key.into_owned()));
@@ -751,6 +759,7 @@ fn parse_server_url(
         sqlite_memory: false,
         ssl_mode,
         read_only,
+        read_only_explicit,
     })
 }
 
@@ -823,6 +832,7 @@ fn parse_jdbc_sql_server_url(input: &str) -> Result<ParsedConnectionUrl, Profile
         sqlite_memory: false,
         ssl_mode: sql_server_ssl_mode(encrypt, trust_server_certificate)?,
         read_only: read_only.unwrap_or(false),
+        read_only_explicit: read_only.is_some(),
     })
 }
 
@@ -939,6 +949,8 @@ fn parse_sqlite_url(input: &str, jdbc: bool) -> Result<ParsedConnectionUrl, Prof
         sqlite_memory: false,
         ssl_mode: SslMode::Disable,
         read_only,
+        read_only_explicit: url::form_urlencoded::parse(query.as_bytes())
+            .any(|(key, _)| key.eq_ignore_ascii_case("mode")),
     })
 }
 

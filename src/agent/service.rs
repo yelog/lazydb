@@ -39,16 +39,23 @@ impl AgentService {
             message: error.to_string(),
         })?;
         let profile_path = config.unwrap_or_else(|| paths.profiles_file());
-        let profiles = ProfileStore::new(profile_path)
-            .load()
-            .map_err(|error| AgentError {
-                code: super::selection::AgentErrorCode::NoVisibleConnections,
-                message: error.to_string(),
-            })?;
+        let profile_store =
+            ProfileStore::new(profile_path).with_credential_key_path(paths.credential_key_file());
+        let profiles = profile_store.load().map_err(|error| AgentError {
+            code: super::selection::AgentErrorCode::NoVisibleConnections,
+            message: error.to_string(),
+        })?;
         let profiles = profiles.profiles;
         let credentials = CredentialResolver::new(
             Arc::new(NativeSecretStore),
-            LocalCredentialStore::from_paths(&paths, "lazydb"),
+            LocalCredentialStore::new(profile_store.credential_key_path(), "lazydb")
+                .with_fallback_key_path(
+                    profile_store
+                        .path()
+                        .parent()
+                        .map(|parent| parent.join("credential.key"))
+                        .unwrap_or_else(|| PathBuf::from("credential.key")),
+                ),
         );
         Ok(Self::new(project, profiles, credentials))
     }

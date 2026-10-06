@@ -493,13 +493,22 @@ impl CatalogProvider {
     ) -> anyhow::Result<Option<Self>> {
         let project = crate::agent::context::AgentProjectContext::resolve(project)?;
         let paths = AppPaths::discover()?;
-        let profiles = ProfileStore::new(config.unwrap_or_else(|| paths.profiles_file())).load()?;
+        let profile_store = ProfileStore::new(config.unwrap_or_else(|| paths.profiles_file()))
+            .with_credential_key_path(paths.credential_key_file());
+        let profiles = profile_store.load()?;
         let visible = project.visible_profiles(&profiles.profiles);
         let selected = crate::agent::selection::select_profile(&visible, selector)
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         let resolver = CredentialResolver::new(
             std::sync::Arc::new(NativeSecretStore),
-            LocalCredentialStore::from_paths(&paths, "lazydb"),
+            LocalCredentialStore::new(profile_store.credential_key_path(), "lazydb")
+                .with_fallback_key_path(
+                    profile_store
+                        .path()
+                        .parent()
+                        .map(|parent| parent.join("credential.key"))
+                        .unwrap_or_else(|| std::path::PathBuf::from("credential.key")),
+                ),
         );
         let password = resolver.resolve_headless(selected.profile).await?;
         let connection = DatabaseConnection::connect(selected.profile, password.as_ref()).await?;

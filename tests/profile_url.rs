@@ -88,6 +88,15 @@ fn parses_all_server_formats_and_connection_settings() {
     assert_eq!(parsed.default_schema.as_deref(), Some("my schema"));
     assert_eq!(parsed.ssl_mode, SslMode::VerifyFull);
     assert!(parsed.read_only);
+    assert!(parsed.read_only_explicit);
+
+    let omitted = parse_connection_url("postgresql://db/app").unwrap();
+    assert!(!omitted.read_only);
+    assert!(!omitted.read_only_explicit);
+
+    let explicit_false = parse_connection_url("postgresql://db/app?readOnly=false").unwrap();
+    assert!(!explicit_false.read_only);
+    assert!(explicit_false.read_only_explicit);
 }
 
 #[test]

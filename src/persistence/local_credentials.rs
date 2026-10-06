@@ -95,6 +95,7 @@ impl LocalCredentialKeyStore {
 #[derive(Clone)]
 pub struct LocalCredentialStore {
     key_store: LocalCredentialKeyStore,
+    fallback_key_stores: Vec<LocalCredentialKeyStore>,
     service: String,
 }
 
@@ -102,8 +103,17 @@ impl LocalCredentialStore {
     pub fn new(key_path: PathBuf, service: impl Into<String>) -> Self {
         Self {
             key_store: LocalCredentialKeyStore::new(key_path),
+            fallback_key_stores: Vec::new(),
             service: service.into(),
         }
+    }
+
+    pub fn with_fallback_key_path(mut self, path: PathBuf) -> Self {
+        if path != self.key_store.path() {
+            self.fallback_key_stores
+                .push(LocalCredentialKeyStore::new(path));
+        }
+        self
     }
 
     pub fn from_paths(
@@ -160,21 +170,32 @@ impl LocalCredentialStore {
         if ciphertext.len() > MAX_CIPHERTEXT_SIZE {
             return Err(LocalCredentialError::InvalidPayload);
         }
-        let key = self.key_store.load()?;
-        let cipher = XChaCha20Poly1305::new((&key).into());
-        #[allow(deprecated)]
-        let password = cipher
-            .decrypt(
+        let mut last_error = LocalCredentialError::Authentication;
+        for key_store in std::iter::once(&self.key_store).chain(&self.fallback_key_stores) {
+            let key = match key_store.load() {
+                Ok(key) => key,
+                Err(error) => {
+                    last_error = error;
+                    continue;
+                }
+            };
+            let cipher = XChaCha20Poly1305::new((&key).into());
+            #[allow(deprecated)]
+            let password = match cipher.decrypt(
                 XNonce::from_slice(&nonce),
                 Payload {
                     msg: ciphertext.as_ref(),
                     aad: self.associated_data(profile_id).as_bytes(),
                 },
-            )
-            .map_err(|_| LocalCredentialError::Authentication)?;
-        String::from_utf8(password)
-            .map(SecretString::from)
-            .map_err(|_| LocalCredentialError::InvalidPayload)
+            ) {
+                Ok(password) => password,
+                Err(_) => continue,
+            };
+            return String::from_utf8(password)
+                .map(SecretString::from)
+                .map_err(|_| LocalCredentialError::InvalidPayload);
+        }
+        Err(last_error)
     }
 
     fn associated_data(&self, profile_id: Uuid) -> String {

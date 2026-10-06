@@ -713,7 +713,8 @@ async fn profile_save_failure_restores_the_previous_keyring_value() {
         action => panic!("unexpected action: {action:?}"),
     }
     assert!(fake.matches(profile_id, "old-password"));
-    assert_eq!(fake.calls().2, 2);
+    // The transaction lock fails before any keyring operation is attempted.
+    assert_eq!(fake.calls().2, 0);
     runtime.shutdown().await;
 }
 
