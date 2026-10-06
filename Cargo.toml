@@ -70,6 +70,10 @@ tokio = { version = "1.47", features = ["test-util"] }
 lto = "thin"
 strip = "symbols"
 
+[profile.test]
+debug = 0
+incremental = false
+
 [features]
 default = ["driver-oracle"]
 driver-oracle = ["dep:oracle"]

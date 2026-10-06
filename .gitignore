@@ -1,5 +1,6 @@
 # Rust build and coverage output
 /target/
+/.cargo/config.toml
 **/*.rs.bk
 *.profraw
 /coverage/
