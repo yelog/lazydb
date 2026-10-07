@@ -1456,6 +1456,28 @@
 - [`b7c3c0d`](https://github.com/yelog/lazydb/commit/b7c3c0d) fix(release): install quality check components
 - [`ef5b9ce`](https://github.com/yelog/lazydb/commit/ef5b9ce) fix(release): recover v0.1.6 packaging
 
+## [0.1.8] - 2026-10-07
+
+### Added
+
+- Add non-interactive connection profile management with project/global scope, repeatable upserts, encrypted credentials, and JSON output. ([`2fba8bc`](https://github.com/yelog/lazydb/commit/2fba8bc96a6d16f8b7f38cebbeb4d369425d3a49))
+
+### Changed
+
+- Honor system proxy configuration for update requests and preserve actionable request errors. ([`3b57005`](https://github.com/yelog/lazydb/commit/3b57005558565b458d8c296e774a732691bc3490))
+
+### Internal
+
+- Reduce test-profile disk usage. ([`933b697`](https://github.com/yelog/lazydb/commit/933b697a10fd8a7afaba466c6e70c0eb345972f7))
+- Stabilize runtime tests by draining pending app-flow events. ([`bc01be8`](https://github.com/yelog/lazydb/commit/bc01be88d9e0387adfe12bde63765a6284f045f8))
+
+### Commits
+
+- [`2fba8bc`](https://github.com/yelog/lazydb/commit/2fba8bc96a6d16f8b7f38cebbeb4d369425d3a49) feat(connections): add non-interactive profile management
+- [`933b697`](https://github.com/yelog/lazydb/commit/933b697a10fd8a7afaba466c6e70c0eb345972f7) build: reduce test profile disk usage
+- [`3b57005`](https://github.com/yelog/lazydb/commit/3b57005558565b458d8c296e774a732691bc3490) fix(update): honor system proxies and preserve request errors
+- [`bc01be8`](https://github.com/yelog/lazydb/commit/bc01be88d9e0387adfe12bde63765a6284f045f8) test(runtime): drain pending app flow events
+
 ## Unreleased
 
 - Add persistent Explorer connection groups, group membership, and profile ordering.
