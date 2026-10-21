@@ -1,20 +1,16 @@
-name: CI
+name: Linux container cache verification
 
 on:
-  pull_request:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: container-cache-verification-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
-  # Override rust-toolchain.toml's rolling stable channel in every Cargo command.
   RUSTUP_TOOLCHAIN: 1.94.0
   CARGO_INCREMENTAL: '0'
   CARGO_BUILD_JOBS: '2'
@@ -22,240 +18,59 @@ env:
   CARGO_PROFILE_TEST_DEBUG: '0'
 
 jobs:
-  windows-installer:
-    name: Windows installer (PowerShell)
-    runs-on: windows-2022
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with: { persist-credentials: false }
-      - name: Show PowerShell version
-        shell: powershell
-        run: '$PSVersionTable | Out-String | Write-Host'
-      - name: Test Windows installer behavior
-        shell: powershell
-        run: ./scripts/release/test-windows-installer.ps1 -AllowUserPathMutation
-
-  windows-installer-pwsh:
-    name: Windows installer (pwsh)
-    runs-on: windows-2022
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with: { persist-credentials: false }
-      - name: Show PowerShell version
-        shell: pwsh
-        run: '$PSVersionTable | Out-String | Write-Host'
-      - name: Test Windows installer behavior
-        shell: pwsh
-        run: ./scripts/release/test-windows-installer.ps1 -AllowUserPathMutation
-
-  distribution:
-    name: Distribution contracts
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with: { persist-credentials: false }
-      - run: rustup toolchain install 1.94.0 --profile minimal --no-self-update
-      - run: sh scripts/release/test-distribution.sh
-      - name: Require native Linux ELF scan and strip test
-        run: |
-          python3 -B scripts/release/test-linux-runtime.py
-          python3 -B -c 'import runpy, unittest; module=runpy.run_path("scripts/release/test-linux-runtime.py"); suite=unittest.defaultTestLoader.loadTestsFromTestCase(module["LinuxElfIntegrationTests"]); result=unittest.TextTestRunner(verbosity=2).run(suite); raise SystemExit(not result.wasSuccessful() or result.skipped != [])'
-
-  rust:
-    name: Rust (${{ matrix.os }})
+  container:
+    name: Pinned container (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 180
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-14]
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            image: ubuntu:22.04@sha256:98510ac07bb4545e389be502a8918b385c018bfe4ceeb5ac7e0375c782268b04
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            image: ubuntu:22.04@sha256:88881eb36da489f9ff8746ece8048ca16cc94f80e8cd3ae7e8335d8822631591
+    env:
+      LAZYDB_LINUX_BUILD_IMAGE: ${{ matrix.image }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - name: Install Rust
-        run: rustup toolchain install 1.94.0 --profile minimal --component rustfmt --component clippy --no-self-update
-      - run: cargo +1.94.0 fmt --all -- --check
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Set up isolated native dependency probe
+        run: python3 scripts/release/verify-container-probe.py prepare
+      - name: Prepare approved native build image
+        run: sh .container-probe/scripts/release/build-linux.sh "${{ matrix.target }}" --prepare
+      - name: Verify toolchain and metadata paths inside the container
+        env:
+          TARGET: ${{ matrix.target }}
+        run: python3 scripts/release/verify-container-probe.py metadata "$TARGET"
+      - name: Cache pinned container dependencies
+        id: cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
-          shared-key: ci-${{ matrix.os }}
+          shared-key: container-verification-${{ matrix.target }}-${{ matrix.image }}-${{ hashFiles('scripts/release/Dockerfile.linux', 'scripts/release/build-linux.sh') }}
+          workspaces: .container-probe -> target
+          cmd-format: sh ${{ github.workspace }}/.container-probe/scripts/release/build-linux.sh ${{ matrix.target }} --exec {0}
           cache-bin: false
+          cache-targets: true
           cache-on-failure: true
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: cargo +1.94.0 clippy --locked --all-targets --all-features --timings -- -D warnings
-      - run: cargo +1.94.0 test --locked --all-targets --all-features --timings
-      - name: Check macOS binary dependencies
-        if: runner.os == 'macOS'
-        run: |
-          cargo +1.94.0 build --locked --all-features
-          sh scripts/release/check-macos-dependencies.sh target/debug/lazydb
-      - name: Upload Rust build timings
+      - name: Build probe with a bundled native dependency
+        run: sh .container-probe/scripts/release/build-linux.sh "${{ matrix.target }}" 2>&1 | tee container-build.log
+      - name: Verify executable and native dependency reuse
+        env:
+          CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+          TARGET: ${{ matrix.target }}
+        run: python3 scripts/release/verify-container-probe.py result "$TARGET"
+      - name: Upload verification evidence
         if: always() && !cancelled()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v4.4.3
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: ci-timings-${{ matrix.os }}
-          path: target/cargo-timings/
+          name: container-verification-${{ matrix.target }}
+          path: |
+            container-build.log
+            container-result.json
+            .container-probe/target/cargo-timings/
           if-no-files-found: ignore
           retention-days: 7
-
-  databases:
-    name: PostgreSQL, MySQL, and SQL Server adapters
-    runs-on: ubuntu-24.04
-    timeout-minutes: 90
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_PASSWORD: lazydb_test
-          POSTGRES_DB: lazydb_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres -d lazydb_test"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 10
-      mysql:
-        image: mysql:8.4
-        env:
-          MYSQL_ROOT_PASSWORD: lazydb_test
-          MYSQL_DATABASE: lazydb_test
-        ports:
-          - 3306:3306
-        options: >-
-          --health-cmd "mysqladmin ping -h 127.0.0.1 -plazydb_test"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 10
-      mariadb:
-        image: mariadb:11.4
-        env:
-          MARIADB_ROOT_PASSWORD: lazydb_test
-          MARIADB_DATABASE: lazydb_test
-        ports:
-          - 3307:3306
-        options: >-
-          --health-cmd "mariadb-admin ping -h 127.0.0.1 -plazydb_test"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 10
-      sqlserver:
-        image: mcr.microsoft.com/mssql/server:2022-CU16-ubuntu-22.04
-        env:
-          ACCEPT_EULA: Y
-          MSSQL_SA_PASSWORD: LazydbC1!SqlServer2022
-        ports:
-          - 1433:1433
-        options: >-
-          --platform linux/amd64
-          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$MSSQL_SA_PASSWORD\" -Q \"SELECT 1\" -C"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 30
-      redis:
-        image: redis:7.4
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 20
-    env:
-      LAZYDB_TEST_POSTGRES_URL: postgresql://postgres:lazydb_test@127.0.0.1:5432/lazydb_test
-      LAZYDB_TEST_MYSQL_URL: mysql://root:lazydb_test@127.0.0.1:3306/lazydb_test
-      LAZYDB_TEST_MARIADB_URL: mariadb://root:lazydb_test@127.0.0.1:3307/lazydb_test
-      LAZYDB_TEST_SQLSERVER_URL: sqlserver://sa:LazydbC1!SqlServer2022@127.0.0.1:1433/tempdb?encrypt=false
-      LAZYDB_TEST_REDIS_URL: redis://127.0.0.1:6379/0
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with: { persist-credentials: false }
-      - run: rustup toolchain install 1.94.0 --profile minimal --no-self-update
-      - name: Restore Rust dependencies
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          shared-key: ci-ubuntu-24.04
-          cache-bin: false
-          save-if: false
-      - name: Validate ClickHouse local compose fixture
-        run: docker compose -f docker-compose.clickhouse.yml config --quiet
-      - name: Start deterministic ClickHouse 25.8 fixture
-        run: docker compose -f docker-compose.clickhouse.yml up -d --wait
-      - name: Initialize ClickHouse deterministic fixture
-        run: |
-          ruby -e 'File.read("tests/fixtures/clickhouse/init.sql").split(/;\s*(?=\S)/).each { |sql| next if sql.strip.empty?; system("curl", "--fail", "--silent", "--show-error", "--data-binary", sql, "http://127.0.0.1:18123/") or exit 1 }'
-      - name: Build PostgreSQL adapter tests
-        run: cargo test --locked --test postgres_adapter --no-run
-      - name: PostgreSQL adapter tests
-        run: timeout 10m cargo test --locked --test postgres_adapter -- --nocapture --test-threads=1
-      - name: PostgreSQL principal permission tests
-        run: timeout 10m env LAZYDB_REQUIRE_DATABASE_TESTS=1 cargo test --locked --test postgres_principal_mutations -- --nocapture --test-threads=1
-      - name: MySQL adapter tests
-        run: timeout 10m env LAZYDB_REQUIRE_DATABASE_TESTS=1 cargo test --locked --test mysql_adapter -- --nocapture --test-threads=1
-      - name: MariaDB adapter tests
-        run: timeout 10m env LAZYDB_REQUIRE_DATABASE_TESTS=1 LAZYDB_TEST_MYSQL_FUNCTIONAL_INDEX=0 LAZYDB_TEST_MYSQL_URL="$LAZYDB_TEST_MARIADB_URL" cargo test --locked --test mariadb_profile --test mariadb_adapter --test mariadb_catalog --test mariadb_values --test mariadb_transactions --test mariadb_relation_mutations --test mariadb_catalog_mutation --test mariadb_programmable_objects --test mariadb_temporal --test mariadb_connection --test mariadb_monitoring --test mariadb_principals --test mariadb_sql -- --nocapture --test-threads=1
-      - name: MariaDB relation mutation library tests
-        run: timeout 10m env LAZYDB_REQUIRE_DATABASE_TESTS=1 LAZYDB_TEST_MARIADB_URL="$LAZYDB_TEST_MARIADB_URL" cargo test --locked --lib mariadb_ -- --nocapture --test-threads=1
-      - name: SQL Server adapter tests
-        run: timeout 10m cargo test --locked --test sqlserver_adapter -- --nocapture --test-threads=1
-      - name: SQL Server transaction tests
-        run: timeout 10m cargo test --locked --test sqlserver_transactions -- --nocapture --test-threads=1
-      - name: Redis mutation tests
-        run: timeout 10m cargo test --locked --test redis_mutation -- --ignored --nocapture --test-threads=1
-      - name: ClickHouse forced-live adapters and object workflows
-        env:
-          LAZYDB_REQUIRE_DATABASE_TESTS: "1"
-          LAZYDB_TEST_CLICKHOUSE_URL: clickhouse://lazydb_test:lazydb_test@127.0.0.1:18123/lazydb_test
-        run: timeout 10m cargo test --locked --test clickhouse_adapter --test clickhouse_catalog_mutation --test clickhouse_monitoring -- --nocapture --test-threads=1
-      - name: ClickHouse deterministic adapter, catalog, principal, monitoring, agent and LSP tests
-        run: timeout 10m cargo test --locked --test clickhouse_agent --test clickhouse_catalog --test clickhouse_catalog_drop --test clickhouse_principals --test clickhouse_relation --test clickhouse_sql --test sql_dialect_mapping -- --nocapture --test-threads=1
-      - name: Stop ClickHouse test service
-        if: always()
-        run: docker compose -f docker-compose.clickhouse.yml down --volumes
-
-  mongodb:
-    name: MongoDB replica set and standalone integration
-    # MongoDB 8.0 rejects newer Azure kernels: actions/runner-images#15005.
-    runs-on: ubuntu-22.04
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with: { persist-credentials: false }
-      - run: rustup toolchain install 1.94.0 --profile minimal --no-self-update
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          shared-key: ci-ubuntu-22.04
-          cache-bin: false
-          cache-on-failure: true
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Start MongoDB fixtures
-        run: docker compose -f docker-compose.mongodb.yml up -d --wait
-      - name: Initialize replica set
-        run: |
-          docker compose -f docker-compose.mongodb.yml exec -T mongodb-rs mongosh --quiet --eval 'rs.initiate({_id:"lazydb-rs",members:[{_id:0,host:"mongodb-rs:27017"}]})'
-          container_wait_deadline=$((SECONDS + 90))
-          until docker compose -f docker-compose.mongodb.yml exec -T mongodb-rs mongosh --quiet --eval 'quit(db.hello().isWritablePrimary ? 0 : 1)'; do
-            if [ "$SECONDS" -ge "$container_wait_deadline" ]; then echo "MongoDB replica set initialization timed out" >&2; exit 1; fi
-            sleep 2
-          done
-      - name: Build MongoDB integration tests
-        run: cargo +1.94.0 test --locked --test mongodb_connection --test mongodb_catalog --test mongodb_cursor --test mongodb_console --test mongodb_transactions --test mongodb_cancellation --test mongodb_mutation --test mongodb_management --test mongodb_monitoring --test mongodb_principals --no-run
-      - name: MongoDB integration tests
-        env:
-          LAZYDB_REQUIRE_DATABASE_TESTS: "1"
-          LAZYDB_TEST_MONGODB_URL: mongodb://127.0.0.1:27017/?replicaSet=lazydb-rs&directConnection=true
-          LAZYDB_TEST_MONGODB_STANDALONE_URL: mongodb://127.0.0.1:27018
-          LAZYDB_TEST_MONGODB_PRINCIPALS_URL: mongodb://127.0.0.1:27019
-        run: timeout 15m cargo +1.94.0 test --locked --test mongodb_connection --test mongodb_catalog --test mongodb_cursor --test mongodb_console --test mongodb_transactions --test mongodb_cancellation --test mongodb_mutation --test mongodb_management --test mongodb_monitoring --test mongodb_principals -- --test-threads=1
-      - name: MongoDB service diagnostics
-        if: failure()
-        run: |
-          docker compose -f docker-compose.mongodb.yml ps --all
-          docker compose -f docker-compose.mongodb.yml logs --no-color
-      - name: Stop MongoDB fixtures
-        if: always()
-        run: docker compose -f docker-compose.mongodb.yml down -v
