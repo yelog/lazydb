@@ -70,7 +70,7 @@ jobs:
       - run: rustup toolchain install 1.94.0 --profile minimal --component rustfmt --component clippy --no-self-update
       - run: cargo +1.94.0 fmt --all -- --check
       - name: Cache Rust build
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: ci-ubuntu-24.04
           cmd-format: sh scripts/ci/rust-cache-command.sh {0}
@@ -120,7 +120,7 @@ jobs:
         run: sh scripts/release/build-linux.sh "${{ matrix.target }}" --prepare
       - name: Cache Rust build
         if: runner.os != 'Linux'
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: release-${{ matrix.os }}-${{ matrix.target }}
           cmd-format: sh scripts/ci/rust-cache-command.sh {0}
@@ -129,7 +129,7 @@ jobs:
           cache-on-failure: true
       - name: Cache pinned Linux build dependencies
         if: runner.os == 'Linux'
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: release-linux-${{ matrix.target }}-${{ matrix.image }}-${{ hashFiles('scripts/release/Dockerfile.linux', 'scripts/release/build-linux.sh') }}
           cmd-format: sh scripts/release/build-linux.sh ${{ matrix.target }} --exec {0}
