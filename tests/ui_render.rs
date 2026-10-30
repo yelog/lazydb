@@ -8708,3 +8708,170 @@ fn explorer_renders_users_and_roles_group_with_distinct_icons_and_colors() {
     assert!(find_text_cell(&unicode, "●").is_some());
     assert!(find_text_cell(&unicode, "◇").is_some());
 }
+
+#[test]
+fn mongodb_browser_grid_shows_document_fields_not_only_identifiers() {
+    use lazydb::db::mongodb::types::{MongoDocument, MongoDocumentPage, MongoNamespace};
+    use lazydb::model::mongodb_browser::{MongoBrowserTab, MongoPageState};
+
+    let mut app = App::new(Vec::new());
+    let mut tab = MongoBrowserTab::new(
+        uuid::Uuid::from_u128(7),
+        MongoNamespace::collection("speedbike_db", "categories"),
+    );
+    let first_id = mongodb::bson::oid::ObjectId::new();
+    tab.page = MongoPageState::Ready(MongoDocumentPage {
+        documents: [
+            mongodb::bson::doc! {"_id": first_id, "name": "Ruedas Pro", "price": 1200_i32},
+            mongodb::bson::doc! {"_id": mongodb::bson::oid::ObjectId::new(), "name": "Freno XT", "price": 850_i32},
+        ]
+        .into_iter()
+        .map(|bson| MongoDocument {
+            raw: mongodb::bson::raw::RawDocumentBuf::from_bytes(
+                mongodb::bson::to_vec(&bson).unwrap(),
+            )
+            .unwrap(),
+            bson,
+            editable: true,
+        })
+        .collect(),
+        next_offset: None,
+        truncated: false,
+        oversized_document: false,
+        bytes: 128,
+    });
+    app.tabs.push(WorkspaceTab::MongoBrowser(tab));
+    app.active_tab = app.tabs.len() - 1;
+
+    let output = render(&app, 200, 30);
+
+    // Panes share each terminal row, so assertions look for the pane segment
+    // that holds the grid instead of assuming a fixed pane order.
+    let header = output
+        .lines()
+        .flat_map(|line| line.split('│'))
+        .find(|pane| pane.contains('#') && pane.contains("name") && pane.contains("price"))
+        .unwrap_or_else(|| panic!("no grid header row naming the fields in:\n{output}"));
+    assert!(header.contains("_id"), "{header}");
+    let row = output
+        .lines()
+        .flat_map(|line| line.split('│'))
+        .find(|pane| pane.contains("Ruedas Pro"))
+        .unwrap_or_else(|| panic!("no grid row for the first document in:\n{output}"));
+    assert!(row.contains("1200"), "{row}");
+    assert!(row.contains(&first_id.to_hex()), "{row}");
+    assert!(!row.contains("ObjectId"), "{row}");
+    assert!(
+        output
+            .lines()
+            .flat_map(|line| line.split('│'))
+            .any(|pane| pane.contains("Freno XT") && pane.contains("850")),
+        "{output}"
+    );
+}
+
+#[test]
+fn mongodb_browser_filter_bar_does_not_overlap_pane_titles() {
+    use lazydb::db::mongodb::types::{MongoDocumentPage, MongoNamespace};
+    use lazydb::model::mongodb_browser::{MongoBrowserTab, MongoPageState};
+
+    let mut app = App::new(Vec::new());
+    let mut tab = MongoBrowserTab::new(
+        uuid::Uuid::from_u128(8),
+        MongoNamespace::collection("speedbike_db", "users"),
+    );
+    tab.page = MongoPageState::Ready(MongoDocumentPage {
+        documents: Vec::new(),
+        next_offset: None,
+        truncated: false,
+        oversized_document: false,
+        bytes: 0,
+    });
+    app.tabs.push(WorkspaceTab::MongoBrowser(tab));
+    app.active_tab = app.tabs.len() - 1;
+
+    let output = render(&app, 160, 30);
+
+    let filter_row = output
+        .lines()
+        .find(|line| line.contains("Projection:"))
+        .expect("the filter bar row");
+    assert!(
+        !filter_row.contains("Canonical EJSON"),
+        "the filter bar must not paint over the inspector title: {filter_row}"
+    );
+}
+
+fn mongodb_browser_app(documents: usize) -> App {
+    use lazydb::db::mongodb::types::{MongoDocument, MongoDocumentPage, MongoNamespace};
+    use lazydb::model::explorer::{ProfilePlacement, ProfileProvenance};
+    use lazydb::model::mongodb_browser::{MongoBrowserTab, MongoPageState};
+    use lazydb::profile::DatabaseKind;
+
+    let profile_id = uuid::Uuid::from_u128(11);
+    let mut app = App::new(Vec::new());
+    app.explorer.normalized.add_profile_with_placement(
+        profile_id,
+        "speedbike".into(),
+        DatabaseKind::MongoDb,
+        "cluster0.example.net".into(),
+        ProfileProvenance::Saved,
+        ProfilePlacement::Global,
+    );
+    let mut tab = MongoBrowserTab::new(
+        profile_id,
+        MongoNamespace::collection("speedbike_db", "rankings"),
+    );
+    tab.page = MongoPageState::Ready(MongoDocumentPage {
+        documents: (0..documents)
+            .map(|index| {
+                let bson = mongodb::bson::doc! {"_id": index as i32, "position": index as i64};
+                MongoDocument {
+                    raw: mongodb::bson::raw::RawDocumentBuf::from_bytes(
+                        mongodb::bson::to_vec(&bson).unwrap(),
+                    )
+                    .unwrap(),
+                    bson,
+                    editable: true,
+                }
+            })
+            .collect(),
+        next_offset: None,
+        truncated: false,
+        oversized_document: false,
+        bytes: 64,
+    });
+    app.tabs.push(WorkspaceTab::MongoBrowser(tab));
+    app.active_tab = app.tabs.len() - 1;
+    app
+}
+
+#[test]
+fn mongodb_browser_keeps_the_explorer_visible() {
+    let app = mongodb_browser_app(2);
+
+    let output = render(&app, 160, 30);
+
+    assert!(
+        output.contains("GLOBAL"),
+        "the explorer must keep rendering next to a mongodb browser tab:\n{output}"
+    );
+}
+
+#[test]
+fn mongodb_browser_hides_the_inspector_until_requested() {
+    let mut app = mongodb_browser_app(2);
+
+    let output = render(&app, 160, 30);
+    assert!(
+        !output.contains("Canonical EJSON"),
+        "the document inspector must stay hidden by default:\n{output}"
+    );
+
+    app.update(Action::MongoToggleInspector);
+    let output = render(&app, 160, 30);
+    assert!(
+        output.contains("Canonical EJSON"),
+        "toggling must reveal the document inspector:\n{output}"
+    );
+}

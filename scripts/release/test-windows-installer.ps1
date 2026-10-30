@@ -82,7 +82,9 @@ function Invoke-RestMethod {
         Assert-True ((Invoke-TestHost $hostExe (Join-Path $temp 'bootstrap.ps1')) -ne 0) "$failure bootstrap rejected"
     }
     Remove-Item Env:LAZYDB_BOOTSTRAP_FAILURE
-    $fallback = [regex]::Matches($readme, '(?s)```powershell\r?\n(.*?)\r?\n```')[1]
+    $installation = Get-Content -LiteralPath (Join-Path $root 'docs/installation.md') -Raw
+    $fallback = [regex]::Match($installation, '(?s)<!-- windows-installer-file-start -->\s*```powershell\r?\n(.*?)\r?\n```\s*<!-- windows-installer-file-end -->')
+    Assert-True $fallback.Success 'installation guide contains the file-based Windows installer'
     Write-Utf8 (Join-Path $temp 'fallback.ps1') ($downloadMock + "`n" + $fallback.Groups[1].Value)
 
     # Windows PowerShell emits a runnable .NET Framework EXE; pwsh 7 cannot emit

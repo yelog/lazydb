@@ -13,7 +13,9 @@ jobs also allow independent compilation on the hosted runners. These settings
 apply to CI; they do not change the published release profile.
 
 The ordinary Rust jobs run formatting, Clippy, and all tests, in that order.
-Clippy and tests retain `--all-targets --all-features`. macOS builds the same
+Clippy and tests retain `--all-targets --all-features`. The macOS Rust job first
+builds all test binaries with a separate 30-minute compilation budget, then runs
+them with the existing 10-minute execution budget. macOS also builds the same
 features for its system-library dependency check. Database jobs retain their
 live fixtures, test lists, and execution timeouts. Their existing prebuild steps
 keep compilation outside the short test execution timeouts.

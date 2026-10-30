@@ -30,6 +30,14 @@ impl MongoNamespace {
             None => self.database.clone(),
         }
     }
+
+    /// Rebuilds the namespace from a catalog native path (`[database, collection]`).
+    pub fn from_native_path(path: &[String]) -> Option<Self> {
+        match path {
+            [database, collection] => Some(Self::collection(database.clone(), collection.clone())),
+            _ => None,
+        }
+    }
 }
 
 /// Holds typed BSON as the source of truth. JSON rendering is explicitly
@@ -70,6 +78,21 @@ pub struct MongoIndexListing {
     pub error: Option<String>,
     pub permission_denied: bool,
     pub stale: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MongoCollectionStructure {
+    pub namespace: MongoNamespace,
+    pub collection_type: MongoCollectionType,
+    /// The options the server reports, without the validator it reports
+    /// separately. `None` when the collection defines no other option.
+    pub options_ejson: Option<String>,
+    /// The validator and its validation level/action, exactly as configured.
+    /// `None` when the collection defines no validator.
+    pub validator_ejson: Option<String>,
+    pub indexes: Vec<MongoIndexInfo>,
+    /// Why the index list is unavailable, when the server refused to report it.
+    pub indexes_error: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -191,5 +214,23 @@ impl MongoIndexInfo {
             .iter()
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect()
+    }
+
+    /// The server reports `sparse` only for indexes that set it.
+    pub fn sparse(&self) -> bool {
+        self.raw.get_bool("sparse").unwrap_or(false)
+    }
+
+    /// The filter a partial index applies, when it only indexes matching
+    /// documents.
+    pub fn partial_filter_ejson(&self) -> Option<String> {
+        self.raw
+            .get_document("partialFilterExpression")
+            .ok()
+            .map(|filter| {
+                Bson::Document(filter.clone())
+                    .into_relaxed_extjson()
+                    .to_string()
+            })
     }
 }

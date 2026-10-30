@@ -1233,6 +1233,13 @@ fn render_with_state_at(
         }
         footer::render(frame, layout.footer, app, theme, sequence, state);
     } else if is_mongodb_browser {
+        if let Some(area) = layout.explorer {
+            state.hit_regions.push(HitRegion {
+                area,
+                target: HitTarget::Focus(Focus::Explorer),
+            });
+            render_explorer(frame, area, app, theme, state, icons);
+        }
         if let Some(area) = layout.relation {
             mongodb_browser::render(frame, area, app, theme, state);
         }

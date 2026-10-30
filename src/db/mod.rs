@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
+use tokio::time::Instant;
 use uuid::Uuid;
 
 pub mod capabilities;
@@ -1392,7 +1393,11 @@ impl DatabaseConnection {
             Self::DuckDb(adapter) => adapter.close().await,
             Self::SqlServer(adapter) => adapter.close().await,
             Self::Redis(adapter) => adapter.close().await,
-            Self::MongoDb(adapter) => adapter.close().await,
+            Self::MongoDb(adapter) => {
+                adapter
+                    .close_until(Instant::now() + Duration::from_secs(1))
+                    .await;
+            }
             Self::ClickHouse(adapter) => adapter.close().await,
         }
     }

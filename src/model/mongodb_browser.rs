@@ -1,6 +1,78 @@
 use uuid::Uuid;
 
-use crate::db::mongodb::types::{FindSpec, MongoDocumentPage, MongoNamespace};
+use crate::db::mongodb::types::{FindSpec, MongoDocument, MongoDocumentPage, MongoNamespace};
+
+/// Longest cell text the document grid renders before truncating.
+const CELL_TEXT_LIMIT: usize = 63;
+/// Cells the row counter and its separator occupy in the grid.
+const ROW_NUMBER_CELLS: u16 = 4;
+/// Narrowest width a field column may take, so headers stay readable.
+const COLUMN_MIN_WIDTH: usize = 8;
+/// Widest width a field column may take, so one field cannot monopolize a row.
+const COLUMN_MAX_WIDTH: usize = 22;
+/// Width of the `_id` column: one full hex ObjectId.
+const IDENTIFIER_COLUMN_WIDTH: usize = 24;
+
+/// Columns of the document grid for one loaded page.
+///
+/// MongoDB has no schema, so the columns are the union of the top-level fields
+/// across the page in first-seen order, with `_id` pinned to the left when the
+/// page carries it.
+pub fn page_columns(page: &MongoDocumentPage) -> Vec<String> {
+    use std::collections::HashSet;
+
+    let mut columns = Vec::new();
+    let mut seen: HashSet<&str> = HashSet::new();
+    if page
+        .documents
+        .iter()
+        .any(|document| document.bson.contains_key("_id"))
+    {
+        columns.push("_id".to_owned());
+        seen.insert("_id");
+    }
+    for document in &page.documents {
+        for field in document.bson.keys() {
+            if seen.insert(field.as_str()) {
+                columns.push(field.clone());
+            }
+        }
+    }
+    columns
+}
+
+/// Compact single-line text for one top-level field of a document.
+///
+/// Scalars render flat, nested shapes render by shape so a row stays one line,
+/// and long values truncate so the grid keeps a stable layout.
+pub fn document_cell(document: &MongoDocument, field: &str) -> String {
+    use mongodb::bson::Bson;
+
+    let Some(value) = document.bson.get(field) else {
+        return String::new();
+    };
+    let text = match value {
+        Bson::String(value) => value.clone(),
+        Bson::Null => "null".to_owned(),
+        Bson::Document(nested) => format!("{{{} fields}}", nested.len()),
+        Bson::Array(items) => format!("[{}]", items.len()),
+        Bson::Binary(binary) => format!("Binary({} bytes)", binary.bytes.len()),
+        // The hex form identifies the document; the `ObjectId("…")` wrapper
+        // would spend most of the column on syntax.
+        Bson::ObjectId(oid) => oid.to_hex(),
+        value => value.to_string(),
+    };
+    truncate_cell(text)
+}
+
+fn truncate_cell(text: String) -> String {
+    if text.chars().count() <= CELL_TEXT_LIMIT {
+        return text;
+    }
+    let mut truncated = text.chars().take(CELL_TEXT_LIMIT).collect::<String>();
+    truncated.push('…');
+    truncated
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum MongoPageState {
@@ -50,6 +122,10 @@ pub struct MongoBrowserTab {
     pub import_draft: Option<MongoImportDraft>,
     pub mutation_message: Option<String>,
     pub mutation_generation: u64,
+    /// Whether the Canonical EJSON inspector pane is pinned open. It is hidden
+    /// by default so the document grid gets the whole pane, and it opens on its
+    /// own whenever an inspector-only interaction starts.
+    pub show_inspector: bool,
 }
 
 impl MongoBrowserTab {
@@ -78,7 +154,20 @@ impl MongoBrowserTab {
             import_draft: None,
             mutation_message: None,
             mutation_generation: 0,
+            show_inspector: false,
         }
+    }
+
+    /// Whether the inspector pane has to be on screen right now.
+    ///
+    /// Editing a document, editing a query field and reviewing an import draft
+    /// only render inside the inspector, so those interactions force it open
+    /// even when the user collapsed it.
+    pub fn inspector_visible(&self) -> bool {
+        self.show_inspector
+            || self.editing
+            || self.query_field.is_some()
+            || self.import_draft.is_some()
     }
 
     pub fn begin_load(&mut self) -> u64 {
@@ -513,5 +602,227 @@ mod tests {
         assert!(partial);
         assert!(ejson.contains("$numberLong"));
         assert!(ejson.starts_with('['));
+    }
+
+    fn document(bson: mongodb::bson::Document) -> crate::db::mongodb::types::MongoDocument {
+        crate::db::mongodb::types::MongoDocument {
+            raw: RawDocumentBuf::from_bytes(mongodb::bson::to_vec(&bson).unwrap()).unwrap(),
+            bson,
+            editable: true,
+        }
+    }
+
+    fn page(documents: Vec<crate::db::mongodb::types::MongoDocument>) -> MongoDocumentPage {
+        MongoDocumentPage {
+            documents,
+            next_offset: None,
+            truncated: false,
+            oversized_document: false,
+            bytes: 64,
+        }
+    }
+
+    #[test]
+    fn page_columns_union_top_level_fields_with_id_first() {
+        let page = page(vec![
+            document(doc! {"_id": 1_i32, "name": "a", "price": 10_i32}),
+            document(doc! {"_id": 2_i32, "extra": true, "name": "b"}),
+        ]);
+
+        assert_eq!(
+            page_columns(&page),
+            vec![
+                "_id".to_owned(),
+                "name".to_owned(),
+                "price".to_owned(),
+                "extra".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn page_columns_skip_id_when_the_page_has_no_identifier() {
+        let page = page(vec![document(doc! {"name": "a"})]);
+
+        assert_eq!(page_columns(&page), vec!["name".to_owned()]);
+    }
+
+    #[test]
+    fn document_cell_renders_scalars_flat_and_nests_by_shape() {
+        let document = document(doc! {
+            "_id": 1_i32,
+            "name": "Ruedas Pro",
+            "price": 1200.5_f64,
+            "active": true,
+            "nested": {"a": 1_i32},
+            "tags": ["x", "y"],
+            "nothing": mongodb::bson::Bson::Null,
+        });
+
+        assert_eq!(document_cell(&document, "name"), "Ruedas Pro");
+        assert_eq!(document_cell(&document, "price"), "1200.5");
+        assert_eq!(document_cell(&document, "active"), "true");
+        assert_eq!(document_cell(&document, "nested"), "{1 fields}");
+        assert_eq!(document_cell(&document, "tags"), "[2]");
+        assert_eq!(document_cell(&document, "nothing"), "null");
+        assert_eq!(document_cell(&document, "absent"), "");
+    }
+
+    #[test]
+    fn document_cell_truncates_pathological_values() {
+        let document = document(doc! {"blob": "x".repeat(400)});
+
+        let cell = document_cell(&document, "blob");
+
+        assert!(cell.chars().count() <= 64, "{cell}");
+        assert!(cell.ends_with('…'), "{cell}");
+    }
+
+    #[test]
+    fn document_cell_renders_object_ids_as_bare_hex() {
+        let oid = mongodb::bson::oid::ObjectId::new();
+        let document = document(doc! {"_id": oid});
+
+        let cell = document_cell(&document, "_id");
+
+        assert_eq!(cell, oid.to_hex());
+        assert!(!cell.contains("ObjectId"), "{cell}");
+        assert_eq!(cell.chars().count(), 24, "{cell}");
+    }
+
+    #[test]
+    fn page_column_widths_follow_content_within_bounds() {
+        let page = page(vec![document(doc! {
+            "_id": mongodb::bson::oid::ObjectId::new(),
+            "tiny": 1_i32,
+            "email": "cristianmacias305@gmail.com",
+        })]);
+        let fields = page_columns(&page);
+
+        let widths = page_column_widths(&page, &fields);
+
+        assert_eq!(
+            fields,
+            vec!["_id".to_owned(), "tiny".to_owned(), "email".to_owned()]
+        );
+        assert_eq!(widths, vec![24, 8, 22]);
+    }
+}
+
+/// Width of each field column, driven by the widest value on the page.
+///
+/// Column widths are content driven so an `email` column shows an address
+/// instead of a fragment, bounded so a single long field cannot monopolize the
+/// row. `_id` always reserves one full hex ObjectId.
+pub fn page_column_widths(page: &MongoDocumentPage, fields: &[String]) -> Vec<u16> {
+    fields
+        .iter()
+        .map(|field| {
+            if field == "_id" {
+                return IDENTIFIER_COLUMN_WIDTH as u16;
+            }
+            let widest = page
+                .documents
+                .iter()
+                .map(|document| document_cell(document, field).chars().count())
+                .max()
+                .unwrap_or(0);
+            widest.clamp(COLUMN_MIN_WIDTH, COLUMN_MAX_WIDTH) as u16
+        })
+        .collect()
+}
+
+/// Narrowest the `_id` column may shrink to when the pane is tight.
+const MIN_IDENTIFIER_WIDTH: u16 = 10;
+
+/// Fields and widths the grid can show inside a pane of `inner_width` cells.
+///
+/// Columns are dropped from the right when they cannot fit, and `_id` gives up
+/// width so at least one real field stays visible: a grid of identifiers alone
+/// is what the document browser is meant to avoid.
+pub fn page_grid_columns(page: &MongoDocumentPage, inner_width: u16) -> (Vec<String>, Vec<u16>) {
+    let fields = page_columns(page);
+    let mut widths = page_column_widths(page, &fields);
+    if widths.len() > 1 && fields.first().is_some_and(|field| field == "_id") {
+        let after_identifier =
+            inner_width.saturating_sub(ROW_NUMBER_CELLS + widths[1].saturating_add(1));
+        if widths[0]
+            .saturating_add(widths[1])
+            .saturating_add(ROW_NUMBER_CELLS)
+            > inner_width
+        {
+            widths[0] = widths[0]
+                .min(after_identifier.max(MIN_IDENTIFIER_WIDTH))
+                .max(MIN_IDENTIFIER_WIDTH);
+        }
+    }
+    let mut used = ROW_NUMBER_CELLS;
+    let mut keep = 0;
+    for width in &widths {
+        if used.saturating_add(*width) > inner_width {
+            break;
+        }
+        used += *width + 1;
+        keep += 1;
+    }
+    let mut fields = fields;
+    fields.truncate(keep);
+    widths.truncate(keep);
+    (fields, widths)
+}
+
+#[cfg(test)]
+mod grid_column_tests {
+    use super::*;
+    use mongodb::bson::{doc, raw::RawDocumentBuf};
+
+    fn document(bson: mongodb::bson::Document) -> MongoDocument {
+        MongoDocument {
+            raw: RawDocumentBuf::from_bytes(mongodb::bson::to_vec(&bson).unwrap()).unwrap(),
+            bson,
+            editable: true,
+        }
+    }
+
+    fn page(documents: Vec<MongoDocument>) -> MongoDocumentPage {
+        MongoDocumentPage {
+            documents,
+            next_offset: None,
+            truncated: false,
+            oversized_document: false,
+            bytes: 64,
+        }
+    }
+
+    #[test]
+    fn page_grid_columns_shrink_id_so_a_field_stays_visible() {
+        let page = page(vec![document(doc! {
+            "_id": mongodb::bson::oid::ObjectId::new(),
+            "name": "Ruedas Pro",
+        })]);
+
+        let (fields, widths) = page_grid_columns(&page, 34);
+
+        assert_eq!(fields, vec!["_id".to_owned(), "name".to_owned()]);
+        assert!(
+            widths[0] < 24,
+            "the identifier must give up width on a tight pane: {widths:?}"
+        );
+        assert_eq!(widths[1], 10);
+        let occupied: u16 = widths.iter().copied().sum::<u16>() + ROW_NUMBER_CELLS + 1;
+        assert!(occupied <= 34, "{occupied} must fit in 34");
+    }
+
+    #[test]
+    fn page_grid_columns_keep_full_identifier_on_a_wide_pane() {
+        let page = page(vec![document(doc! {
+            "_id": mongodb::bson::oid::ObjectId::new(),
+            "name": "Ruedas Pro",
+        })]);
+
+        let (fields, widths) = page_grid_columns(&page, 120);
+
+        assert_eq!(fields, vec!["_id".to_owned(), "name".to_owned()]);
+        assert_eq!(widths, vec![24, 10]);
     }
 }

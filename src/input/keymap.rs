@@ -270,6 +270,7 @@ impl Keymap {
                     KeyCode::Char('i') if tab.import_draft.is_some() => {
                         Some(Action::MongoImportAccept)
                     }
+                    KeyCode::Char('t') => Some(Action::MongoToggleInspector),
                     KeyCode::Char('d') => Some(Action::MongoDeleteSelected),
                     KeyCode::Char('l') => Some(Action::MongoPageNext),
                     KeyCode::Char('r')
@@ -3416,6 +3417,26 @@ fn map_configured_navigation(
         if bindings.matches("explorer-move-up", event) {
             return Some(Action::ExplorerMove(-1));
         }
+        if let Some(crate::model::explorer::ExplorerNodeId::Mongo {
+            node: crate::db::mongodb::types::MongoExplorerNodeId::Database(database),
+            ..
+        }) = app.explorer.selected_id()
+        {
+            let database = database.clone();
+            match event.code {
+                KeyCode::Char('m') => {
+                    return Some(Action::OpenMongoNode(
+                        crate::db::mongodb::types::MongoExplorerNodeId::Monitor(database),
+                    ));
+                }
+                KeyCode::Char('u') => {
+                    return Some(Action::OpenMongoNode(
+                        crate::db::mongodb::types::MongoExplorerNodeId::Users(database),
+                    ));
+                }
+                _ => {}
+            }
+        }
         if bindings.matches("explorer-expand", event) {
             return Some(Action::ExplorerExpand);
         }
@@ -4515,6 +4536,9 @@ pub fn map_paste(value: String, app: &App) -> Vec<Action> {
             Some(RelationGridMode::EditCell(_)) => {
                 return vec![Action::RelationEditPaste(value)];
             }
+            Some(RelationGridMode::EditDocument(_)) => {
+                return vec![Action::RelationEditPaste(value)];
+            }
             Some(RelationGridMode::Busy) => return Vec::new(),
             _ => {}
         }
@@ -4642,6 +4666,7 @@ fn is_relation_cell_editor(app: &App) -> bool {
             matches!(
                 edit.mode,
                 crate::model::relation_edit::RelationGridMode::EditCell(_)
+                    | crate::model::relation_edit::RelationGridMode::EditDocument(_)
             )
         })
 }
@@ -4715,6 +4740,21 @@ fn map_relation_data(event: KeyEvent, app: &App) -> Option<Action> {
     if matches!(mode, Some(RelationGridMode::Busy)) {
         return None;
     }
+    if let Some(RelationGridMode::EditDocument(state)) = mode {
+        return match state.view {
+            crate::model::relation_edit::DocumentEditorView::Ejson => {
+                match (event.modifiers, event.code) {
+                    (KeyModifiers::NONE, KeyCode::Tab) => {
+                        Some(Action::RelationEditDocumentToggleView)
+                    }
+                    _ => map_relation_json_editor(event),
+                }
+            }
+            crate::model::relation_edit::DocumentEditorView::Fields => {
+                map_document_field_list(event, state.field_edit.is_some())
+            }
+        };
+    }
     if let Some(RelationGridMode::EditCell(_)) = mode {
         if event.modifiers == KeyModifiers::ALT {
             return match event.code {
@@ -4734,29 +4774,7 @@ fn map_relation_data(event: KeyEvent, app: &App) -> Option<Action> {
             }, .. }
         ));
         if json {
-            return match (event.modifiers, event.code) {
-                (KeyModifiers::CONTROL, KeyCode::Char('s')) => Some(Action::RelationEditConfirm),
-                (KeyModifiers::CONTROL, KeyCode::Char('f')) => Some(Action::RelationEditJsonFormat),
-                (KeyModifiers::NONE, KeyCode::Enter) => Some(Action::RelationEditInsert('\n')),
-                (KeyModifiers::NONE, KeyCode::Esc) => Some(Action::RelationEditCancel),
-                (KeyModifiers::NONE, KeyCode::Up) => Some(Action::RelationEditJsonMove(-1)),
-                (KeyModifiers::NONE, KeyCode::Down) => Some(Action::RelationEditJsonMove(1)),
-                _ => map_text_input_edit(event).map(|edit| match edit {
-                    TextInputEdit::Insert(character) => Action::RelationEditInsert(character),
-                    TextInputEdit::Backspace => Action::RelationEditBackspace,
-                    TextInputEdit::DeletePreviousWord => Action::RelationEditDeletePreviousWord,
-                    TextInputEdit::DeleteToStart | TextInputEdit::Clear => {
-                        Action::RelationEditDeleteToStart
-                    }
-                    TextInputEdit::Delete => Action::RelationEditDelete,
-                    TextInputEdit::MoveLeft => Action::RelationEditMoveLeft,
-                    TextInputEdit::MoveRight => Action::RelationEditMoveRight,
-                    TextInputEdit::MoveHome => Action::RelationEditMoveHome,
-                    TextInputEdit::MoveEnd => Action::RelationEditMoveEnd,
-                    TextInputEdit::Undo => Action::RelationEditUndo,
-                    TextInputEdit::Redo => Action::RelationEditRedo,
-                }),
-            };
+            return map_relation_json_editor(event);
         }
         let boolean = matches!(mode, Some(RelationGridMode::EditCell(state))
         if matches!(
@@ -4878,6 +4896,70 @@ fn map_relation_data(event: KeyEvent, app: &App) -> Option<Action> {
             _ => None,
         },
     }
+}
+
+/// Keys of the field-by-field view inside the MongoDB document modal.
+///
+/// The list navigates like the document grid, `Enter` opens the selected
+/// field, and the field editor behaves like the single-line cell editor: only
+/// `Enter`/`Ctrl-S` apply and only `Esc` leaves it. `Ctrl-S` in the list saves
+/// the whole document through the same path the EJSON view uses.
+fn map_document_field_list(event: KeyEvent, editing: bool) -> Option<Action> {
+    if editing {
+        return match (event.modifiers, event.code) {
+            (KeyModifiers::CONTROL, KeyCode::Char('s')) | (KeyModifiers::NONE, KeyCode::Enter) => {
+                Some(Action::RelationEditDocumentFieldApply)
+            }
+            (KeyModifiers::NONE, KeyCode::Esc) => Some(Action::RelationEditDocumentFieldCancel),
+            _ => map_relation_edit_text(event),
+        };
+    }
+    match (event.modifiers, event.code) {
+        (KeyModifiers::CONTROL, KeyCode::Char('s')) => Some(Action::RelationEditConfirm),
+        (KeyModifiers::NONE, KeyCode::Tab) => Some(Action::RelationEditDocumentToggleView),
+        (KeyModifiers::NONE, KeyCode::Enter) => Some(Action::RelationEditDocumentFieldEdit),
+        (KeyModifiers::NONE, KeyCode::Esc) => Some(Action::RelationEditCancel),
+        (KeyModifiers::NONE, KeyCode::Char('j') | KeyCode::Down) => {
+            Some(Action::RelationEditDocumentFieldMove(1))
+        }
+        (KeyModifiers::NONE, KeyCode::Char('k') | KeyCode::Up) => {
+            Some(Action::RelationEditDocumentFieldMove(-1))
+        }
+        _ => None,
+    }
+}
+
+/// Keys of a multi-line JSON document editor.
+///
+/// The SQL JSON cell editor and the MongoDB document modal share it so both
+/// save, cancel and insert newlines the same way.
+fn map_relation_json_editor(event: KeyEvent) -> Option<Action> {
+    match (event.modifiers, event.code) {
+        (KeyModifiers::CONTROL, KeyCode::Char('s')) => Some(Action::RelationEditConfirm),
+        (KeyModifiers::CONTROL, KeyCode::Char('f')) => Some(Action::RelationEditJsonFormat),
+        (KeyModifiers::NONE, KeyCode::Enter) => Some(Action::RelationEditInsert('\n')),
+        (KeyModifiers::NONE, KeyCode::Esc) => Some(Action::RelationEditCancel),
+        (KeyModifiers::NONE, KeyCode::Up) => Some(Action::RelationEditJsonMove(-1)),
+        (KeyModifiers::NONE, KeyCode::Down) => Some(Action::RelationEditJsonMove(1)),
+        _ => map_relation_edit_text(event),
+    }
+}
+
+/// The text-editing keys the relation editors share.
+fn map_relation_edit_text(event: KeyEvent) -> Option<Action> {
+    map_text_input_edit(event).map(|edit| match edit {
+        TextInputEdit::Insert(character) => Action::RelationEditInsert(character),
+        TextInputEdit::Backspace => Action::RelationEditBackspace,
+        TextInputEdit::DeletePreviousWord => Action::RelationEditDeletePreviousWord,
+        TextInputEdit::DeleteToStart | TextInputEdit::Clear => Action::RelationEditDeleteToStart,
+        TextInputEdit::Delete => Action::RelationEditDelete,
+        TextInputEdit::MoveLeft => Action::RelationEditMoveLeft,
+        TextInputEdit::MoveRight => Action::RelationEditMoveRight,
+        TextInputEdit::MoveHome => Action::RelationEditMoveHome,
+        TextInputEdit::MoveEnd => Action::RelationEditMoveEnd,
+        TextInputEdit::Undo => Action::RelationEditUndo,
+        TextInputEdit::Redo => Action::RelationEditRedo,
+    })
 }
 
 fn map_text_input_edit(event: KeyEvent) -> Option<TextInputEdit> {
@@ -5723,6 +5805,104 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// A JSON cell editor buffer, the shape the SQL cell editor uses for a
+    /// whole-value edit.
+    fn json_cell_editor() -> RelationGridMode {
+        RelationGridMode::EditCell(Box::new(crate::model::relation_edit::CellEditorState {
+            row: 0,
+            column: 0,
+            input: crate::model::cell_editor::CellEditorBuffer {
+                presence: crate::model::cell_editor::CellEditorPresence::Value,
+                content: crate::model::cell_editor::CellEditorContent::Typed {
+                    kind: crate::model::cell_editor::CellEditorKind::Json,
+                    draft: crate::model::cell_editor::TypedDraft::Json(
+                        crate::model::cell_editor::JsonBuffer::new(r#"{"a":1}"#),
+                    ),
+                },
+                ..Default::default()
+            },
+            error: None,
+        }))
+    }
+
+    fn document_modal() -> RelationGridMode {
+        let namespace = crate::db::mongodb::types::MongoNamespace::collection("app", "bikes");
+        let document = crate::db::mongodb::types::MongoDocument {
+            bson: mongodb::bson::doc! { "_id": 1_i32, "name": "Ruedas Pro" },
+            raw: mongodb::bson::raw::RawDocumentBuf::from_bytes(
+                mongodb::bson::to_vec(&mongodb::bson::doc! { "_id": 1_i32, "name": "Ruedas Pro" })
+                    .expect("encodes"),
+            )
+            .expect("raw"),
+            editable: true,
+        };
+        let mut state =
+            crate::model::relation_edit::DocumentEditorState::new(0, &namespace, &document)
+                .expect("document state");
+        // This fixture pins the EJSON view keys; the modal opens on the field
+        // list, which has its own mapping.
+        state.view = crate::model::relation_edit::DocumentEditorView::Ejson;
+        RelationGridMode::EditDocument(Box::new(state))
+    }
+
+    #[test]
+    fn the_document_modal_owns_save_cancel_and_newline_keys() {
+        let app = relation_app(document_modal());
+        let mut keymap = Keymap::default();
+
+        assert_eq!(
+            keymap.map(control_key('s'), &app),
+            Some(Action::RelationEditConfirm),
+            "Ctrl-S saves the document"
+        );
+        assert_eq!(
+            keymap.map(key(KeyCode::Esc), &app),
+            Some(Action::RelationEditCancel),
+            "Esc cancels the document edit"
+        );
+        assert_eq!(
+            keymap.map(key(KeyCode::Enter), &app),
+            Some(Action::RelationEditInsert('\n')),
+            "Enter inserts a newline instead of saving"
+        );
+        assert_eq!(
+            keymap.map(key(KeyCode::Char('x')), &app),
+            Some(Action::RelationEditInsert('x')),
+            "printable keys edit the document"
+        );
+        assert_eq!(
+            keymap.map(key(KeyCode::Up), &app),
+            Some(Action::RelationEditJsonMove(-1))
+        );
+        assert_eq!(
+            keymap.map(control_key('f'), &app),
+            Some(Action::RelationEditJsonFormat)
+        );
+        assert_eq!(
+            keymap.map(key(KeyCode::Backspace), &app),
+            Some(Action::RelationEditBackspace)
+        );
+    }
+
+    #[test]
+    fn the_sql_json_cell_editor_keeps_its_own_keys() {
+        let app = relation_app(json_cell_editor());
+        let mut keymap = Keymap::default();
+
+        assert_eq!(
+            keymap.map(control_key('s'), &app),
+            Some(Action::RelationEditConfirm)
+        );
+        assert_eq!(
+            keymap.map(key(KeyCode::Enter), &app),
+            Some(Action::RelationEditInsert('\n'))
+        );
+        assert_eq!(
+            keymap.map(key(KeyCode::Esc), &app),
+            Some(Action::RelationEditCancel)
+        );
     }
 
     fn control_key(code: char) -> KeyEvent {

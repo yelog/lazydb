@@ -960,6 +960,10 @@ impl Runtime {
                 connection_generation,
                 spec,
             } => self.load_mongo_page(tab_id, profile_id, generation, connection_generation, spec),
+            Command::LoadMongoRelationPreview(request) => self.load_mongo_relation_preview(request),
+            Command::LoadMongoRelationStructure { request, documents } => {
+                self.load_mongo_relation_structure(request, documents)
+            }
             Command::RunMongoConsole {
                 tab_id,
                 profile_id,
@@ -1119,6 +1123,23 @@ impl Runtime {
                 profile_id,
                 connection_generation,
                 mutation_generation,
+                namespace,
+                id,
+                expected,
+                replacement,
+            ),
+            Command::ReplaceMongoRelationDocument {
+                tab_id,
+                tab_generation,
+                connection,
+                namespace,
+                id,
+                expected,
+                replacement,
+            } => self.replace_mongo_relation_document(
+                tab_id,
+                tab_generation,
+                connection,
                 namespace,
                 id,
                 expected,
@@ -2049,6 +2070,161 @@ impl Runtime {
                     });
                 }
             }
+        }));
+    }
+
+    /// Replaces the one document a MongoDB relation tab is editing, bounded to
+    /// its original `_id` value.
+    ///
+    /// The result carries the tab generation the save was planned under, so the
+    /// reducer can drop a result that belongs to a page or connection that has
+    /// already been replaced.
+    #[allow(clippy::too_many_arguments)]
+    fn replace_mongo_relation_document(
+        &mut self,
+        tab_id: Uuid,
+        tab_generation: u64,
+        connection: ConnectionIdentity,
+        namespace: crate::db::mongodb::types::MongoNamespace,
+        id: mongodb::bson::Bson,
+        expected: mongodb::bson::Document,
+        replacement: mongodb::bson::Document,
+    ) {
+        let active = Arc::clone(&self.connection);
+        let sender = self.event_sender.clone();
+        self.background_tasks.push(tokio::spawn(async move {
+            let database = active_database(active, connection).await;
+            let result = match database {
+                Some(DatabaseConnection::MongoDb(adapter)) => {
+                    adapter
+                        .compare_and_replace_document_detailed(
+                            &namespace,
+                            id.clone(),
+                            &expected,
+                            replacement,
+                        )
+                        .await
+                }
+                _ => Err(DatabaseError::configuration(
+                    "MongoDB connection is not active",
+                )),
+            };
+            let action = match result {
+                Ok(outcome) => match relation_replace_outcome_message(&outcome) {
+                    None => Action::MongoRelationDocumentReplaced {
+                        tab_id,
+                        tab_generation,
+                        id,
+                    },
+                    Some(message) => Action::MongoRelationDocumentReplaceFailed {
+                        tab_id,
+                        tab_generation,
+                        id,
+                        message: message.to_owned(),
+                    },
+                },
+                Err(error) => Action::MongoRelationDocumentReplaceFailed {
+                    tab_id,
+                    tab_generation,
+                    id,
+                    message: error.message,
+                },
+            };
+            let _ = sender.send(action);
+        }));
+    }
+
+    /// Loads one document page as a relation preview so a MongoDB collection
+    /// reuses the SQL relation tab, its grid and its pagination.
+    fn load_mongo_relation_preview(&mut self, request: crate::model::relation::RelationRequest) {
+        let Some(namespace) = crate::db::mongodb::types::MongoNamespace::from_native_path(
+            &request.relation.object_id.native_path,
+        ) else {
+            let _ = self.event_sender.send(Action::RelationFailed {
+                request,
+                message: "MongoDB relation is not addressable as a collection".to_owned(),
+            });
+            return;
+        };
+        let connection = Arc::clone(&self.connection);
+        let sender = self.event_sender.clone();
+        self.background_tasks.push(tokio::spawn(async move {
+            let database = active_database(connection, request.connection).await;
+            let result = match database {
+                Some(DatabaseConnection::MongoDb(adapter)) => {
+                    adapter.relation_page(&namespace, request.page).await
+                }
+                _ => Err(DatabaseError::configuration(
+                    "MongoDB connection is not active",
+                )),
+            };
+            match result {
+                Ok(page) => {
+                    // The BSON originals travel with the preview: the document
+                    // modal must write the `_id` the server returned, not the
+                    // text the grid renders.
+                    let _ = sender.send(Action::MongoRelationPreviewLoaded {
+                        request,
+                        preview: Box::new(page.preview),
+                        documents: page.documents,
+                    });
+                }
+                Err(error) => {
+                    let _ = sender.send(Action::RelationFailed {
+                        request,
+                        message: error.to_string(),
+                    });
+                }
+            }
+        }));
+    }
+
+    /// Loads the structure report of a MongoDB collection for the DDL view.
+    ///
+    /// MongoDB has no DDL, so the report combines the metadata the server
+    /// really reports with a schema inferred from the documents the DATA grid
+    /// loaded. The exact page documents travel with the command, so opening the
+    /// structure view does not issue another find or infer from a newer page.
+    fn load_mongo_relation_structure(
+        &mut self,
+        request: crate::model::relation::RelationRequest,
+        documents: Option<Vec<crate::db::mongodb::types::MongoDocument>>,
+    ) {
+        let Some(namespace) = crate::db::mongodb::types::MongoNamespace::from_native_path(
+            &request.relation.object_id.native_path,
+        ) else {
+            let _ = self
+                .event_sender
+                .send(Action::MongoRelationStructureLoaded {
+                    request,
+                    result: Err("MongoDB relation is not addressable as a collection".to_owned()),
+                });
+            return;
+        };
+        let connection = Arc::clone(&self.connection);
+        let sender = self.event_sender.clone();
+        self.background_tasks.push(tokio::spawn(async move {
+            let database = active_database(connection, request.connection).await;
+            let result = match database {
+                Some(DatabaseConnection::MongoDb(adapter)) => {
+                    match adapter.collection_structure(&namespace).await {
+                        Ok(metadata) => {
+                            let schema = documents
+                                .as_deref()
+                                .map(crate::model::mongodb_structure::infer_schema_documents);
+                            Ok(Box::new(
+                                crate::model::mongodb_structure::MongoStructureSnapshot {
+                                    metadata,
+                                    schema,
+                                },
+                            ))
+                        }
+                        Err(error) => Err(error.to_string()),
+                    }
+                }
+                _ => Err("MongoDB connection is not active".to_owned()),
+            };
+            let _ = sender.send(Action::MongoRelationStructureLoaded { request, result });
         }));
     }
 
@@ -7304,6 +7480,12 @@ impl Runtime {
             task.abort();
             let _ = task.await;
         }
+        if let Ok(mut workers) = self.mongo_transaction_workers.lock() {
+            // The user has already chosen Abandon in the quit review. Dropping
+            // these senders releases local session handles without claiming a
+            // confirmed server-side abort or sending a commit.
+            workers.clear();
+        }
         if let Some(queue) = self.workspace_save.as_mut()
             && let Some(task) = queue.active.take()
         {
@@ -7335,15 +7517,37 @@ impl Runtime {
                 .send(crate::db::transaction::TransactionRequest::Shutdown);
             let _ = entry.worker_handle.await;
         }
-        for connection in self
+        let databases = self
             .connection
             .lock()
             .await
             .drain()
-            .map(|(_, connection)| connection)
-        {
-            connection.database.close().await;
-        }
+            .map(|(_, connection)| connection.database)
+            .collect::<Vec<_>>();
+        let mongo_adapters = databases
+            .iter()
+            .filter_map(|database| match database {
+                DatabaseConnection::MongoDb(adapter) => Some(adapter.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        let close_mongo = async move {
+            futures_util::future::join_all(
+                mongo_adapters
+                    .into_iter()
+                    .map(|adapter| adapter.close_until(deadline)),
+            )
+            .await;
+        };
+        let close_other = async move {
+            for database in databases {
+                if !matches!(database, DatabaseConnection::MongoDb(_)) {
+                    database.close().await;
+                }
+            }
+        };
+        tokio::join!(close_mongo, close_other);
         for database in self.duckdb_sessions.lock().await.remove_all() {
             database.close().await;
         }
@@ -8356,6 +8560,22 @@ fn connection_attempt_is_current(
     attempts.is_current(expected)
 }
 
+fn relation_replace_outcome_message(
+    outcome: &crate::db::mongodb::mutation::MongoMutationOutcome,
+) -> Option<&'static str> {
+    use crate::db::mongodb::mutation::MongoMutationOutcome;
+
+    match outcome {
+        MongoMutationOutcome::Confirmed { affected: 1 } => None,
+        MongoMutationOutcome::Confirmed { .. } => {
+            Some("the document changed or was deleted since it was loaded; reload before saving")
+        }
+        MongoMutationOutcome::Partial { .. } | MongoMutationOutcome::Unknown { .. } => {
+            Some("MongoDB replacement outcome is unknown; reload the page before retrying")
+        }
+    }
+}
+
 async fn active_database_for_target(
     connection: Arc<Mutex<HashMap<ConnectionKey, ActiveConnection>>>,
     expected: ConnectionIdentity,
@@ -8877,12 +9097,12 @@ pub async fn run_tui(cli: Cli) -> Result<RunOutcome> {
     }
     .await;
 
-    runtime.shutdown().await;
+    drop(terminal);
     if let Some(theme_task) = theme_task.take() {
         theme_task.abort();
         let _ = theme_task.await;
     }
-    drop(terminal);
+    runtime.shutdown().await;
     result.map(|restart_path| match restart_path {
         Some(executable) => RunOutcome::Restart { executable },
         None => RunOutcome::Exit,

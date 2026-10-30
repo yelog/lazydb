@@ -61,6 +61,7 @@ For troubleshooting or environments where piping scripts to `Invoke-Expression`
 is unsuitable, use a temporary file. This still executes downloaded code;
 saving the script does not authenticate it.
 
+<!-- windows-installer-file-start -->
 ```powershell
 & {
     $ErrorActionPreference = 'Stop'
@@ -82,6 +83,8 @@ saving the script does not authenticate it.
     }
 }
 ```
+
+<!-- windows-installer-file-end -->
 
 ## Homebrew
 

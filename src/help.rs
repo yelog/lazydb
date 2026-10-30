@@ -305,7 +305,9 @@ fn shortcut_context_with_overlay(app: &App, include_help: bool) -> ShortcutConte
         }
         Some(WorkspaceTab::Relation(tab)) if app.focus == Focus::Results => {
             match tab.edit.as_ref().map(|edit| &edit.mode) {
-                Some(RelationGridMode::EditCell(_)) => ShortcutContext::RelationDataEdit,
+                Some(RelationGridMode::EditCell(_)) | Some(RelationGridMode::EditDocument(_)) => {
+                    ShortcutContext::RelationDataEdit
+                }
                 Some(RelationGridMode::VisualLine { .. }) => ShortcutContext::RelationDataVisual,
                 Some(RelationGridMode::Busy) => ShortcutContext::RelationDataBusy,
                 Some(RelationGridMode::Browse) | None => ShortcutContext::RelationDataBrowse,

@@ -1791,3 +1791,73 @@ fn profile_id(value: u128) -> Uuid {
 fn visible_ids(explorer: &ExplorerTreeState) -> Vec<ExplorerNodeId> {
     explorer.visible().into_iter().map(|row| row.id).collect()
 }
+
+#[test]
+fn mongodb_namespace_rows_expose_expand_affordances() {
+    use lazydb::db::mongodb::types::{
+        MongoCollectionInfo, MongoCollectionType, MongoExplorerNodeId, MongoNamespace,
+    };
+    use lazydb::profile::DatabaseKind;
+
+    let profile_id = profile_id(9_201);
+    let database = "speedbike_db".to_owned();
+    let collection = MongoNamespace::collection(database.clone(), "bikes");
+    let mut explorer = ExplorerTreeState::default();
+    explorer.add_profile_with_placement(
+        profile_id,
+        "speedbike".to_owned(),
+        DatabaseKind::MongoDb,
+        "cluster0.example.net".to_owned(),
+        ProfileProvenance::Saved,
+        ProfilePlacement::CurrentProject,
+    );
+    let profile = explorer.profiles.get_mut(&profile_id).unwrap();
+    profile.status = ExplorerConnectionStatus::Online;
+    profile.mongodb_databases = vec![database.clone()];
+    profile.mongodb_collections.insert(
+        database.clone(),
+        vec![MongoCollectionInfo {
+            namespace: collection.clone(),
+            collection_type: MongoCollectionType::Collection,
+            options_ejson: None,
+        }],
+    );
+    let database_node = ExplorerNodeId::Mongo {
+        profile_id,
+        node: MongoExplorerNodeId::Database(database.clone()),
+    };
+    explorer
+        .expanded
+        .insert(ExplorerNodeId::Profile(profile_id));
+    explorer.expanded.insert(database_node.clone());
+
+    let state = ExplorerState {
+        normalized: explorer,
+        ..Default::default()
+    };
+    let rows = state.viewport(20).rows;
+    let database_row = rows
+        .iter()
+        .find(|row| row.id == database_node)
+        .expect("mongodb database row");
+    assert_eq!(database_row.kind, Some(CatalogKind::Database));
+    assert!(
+        database_row.expandable,
+        "a mongodb database row must advertise its collections"
+    );
+    let collection_row = rows
+        .iter()
+        .find(|row| {
+            row.id
+                == ExplorerNodeId::Mongo {
+                    profile_id,
+                    node: MongoExplorerNodeId::Collection(collection.clone()),
+                }
+        })
+        .expect("mongodb collection row");
+    assert_eq!(collection_row.kind, Some(CatalogKind::Table));
+    assert!(
+        collection_row.expandable,
+        "a listed mongodb collection row must advertise its indexes"
+    );
+}

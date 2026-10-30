@@ -1,12 +1,18 @@
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
-    style::Style,
+    style::{Modifier, Style},
     text::{Line, Text},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{Block, Borders, Cell, HighlightSpacing, List, ListItem, Paragraph, Row, Table},
 };
 
-use crate::model::{mongodb_browser::MongoPageState, tab::WorkspaceTab};
+use crate::model::{
+    mongodb_browser::{MongoPageState, document_cell},
+    tab::WorkspaceTab,
+};
+
+/// Width of the document counter that prefixes every grid row.
+const ROW_NUMBER_WIDTH: u16 = 3;
 
 pub(crate) fn render(
     frame: &mut Frame<'_>,
@@ -18,41 +24,88 @@ pub(crate) fn render(
     let Some(WorkspaceTab::MongoBrowser(tab)) = app.tabs.get(app.active_tab) else {
         return;
     };
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(44), Constraint::Percentage(56)])
+    let region = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
         .split(area);
-    let rows: Vec<ListItem<'_>> = match &tab.page {
+    // The filter bar owns its own row, otherwise it paints over the pane titles.
+    let query_bar = region[0];
+    // Reserve the bottom row for the status line, then give the inspector a
+    // column only when it has to be on screen.
+    let body = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(region[1]);
+    let body_area = body[0];
+    let status_area = body[1];
+    let inspector_area = tab.inspector_visible().then(|| {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(body_area)[1]
+    });
+    let documents_area = inspector_area.map_or(body_area, |inspector| {
+        Rect::new(
+            body_area.x,
+            body_area.y,
+            body_area.width.saturating_sub(inspector.width),
+            body_area.height,
+        )
+    });
+    let document_rows: Vec<ListItem<'_>> = match &tab.page {
         MongoPageState::Empty => vec![ListItem::new("Choose a collection to load documents")],
         MongoPageState::Loading => vec![ListItem::new("Loading documents…")],
         MongoPageState::Failed(error) => vec![ListItem::new(format!("Load failed: {error}"))],
         MongoPageState::Ready(page) if page.documents.is_empty() => {
             vec![ListItem::new("No documents")]
         }
-        MongoPageState::Ready(page) => page
-            .documents
-            .iter()
-            .enumerate()
-            .map(|(index, document)| {
-                let id = document
-                    .bson
-                    .get("_id")
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "(missing _id)".to_owned());
-                let label = format!("{}  {}", index + 1, id);
-                let item = ListItem::new(label);
-                if index == tab.selected_document {
-                    item.style(Style::new().bg(theme.selection))
-                } else {
-                    item
-                }
-            })
-            .collect(),
+        MongoPageState::Ready(_) => Vec::new(),
     };
-    frame.render_widget(
-        List::new(rows).block(Block::default().title("Documents").borders(Borders::ALL)),
-        columns[0],
-    );
+    let block = Block::default().title("Documents").borders(Borders::ALL);
+    if let MongoPageState::Ready(page) = &tab.page
+        && !page.documents.is_empty()
+    {
+        let (fields, widths) = crate::model::mongodb_browser::page_grid_columns(
+            page,
+            documents_area.width.saturating_sub(2),
+        );
+        let header = Row::new(
+            std::iter::once("#".to_owned())
+                .chain(fields.iter().cloned())
+                .map(Cell::from)
+                .collect::<Vec<_>>(),
+        )
+        .style(Style::new().fg(theme.muted).add_modifier(Modifier::BOLD));
+        let rows =
+            page.documents
+                .iter()
+                .enumerate()
+                .map(|(index, document)| {
+                    let cells = std::iter::once((index + 1).to_string())
+                        .chain(fields.iter().zip(&widths).map(|(field, width)| {
+                            clip_cell(document_cell(document, field), *width)
+                        }))
+                        .map(Cell::from)
+                        .collect::<Vec<_>>();
+                    let row = Row::new(cells);
+                    if index == tab.selected_document {
+                        row.style(Style::new().bg(theme.selection))
+                    } else {
+                        row
+                    }
+                })
+                .collect::<Vec<_>>();
+        frame.render_widget(
+            Table::new(rows, column_widths(&widths))
+                .header(header)
+                .column_spacing(1)
+                .block(block)
+                .highlight_spacing(HighlightSpacing::Never),
+            documents_area,
+        );
+    } else {
+        frame.render_widget(List::new(document_rows).block(block), documents_area);
+    };
     let detail = if tab.query_field.is_some() {
         format!(
             "{}{}",
@@ -106,10 +159,6 @@ pub(crate) fn render(
         } else {
             Style::new().fg(theme.muted)
         };
-    let right = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
-        .split(columns[1]);
     let title = if let Some(query_field) = tab.query_field {
         format!("Edit {query_field:?} · Enter apply · Esc cancel")
     } else if tab.editing {
@@ -124,21 +173,23 @@ pub(crate) fn render(
             "Canonical EJSON · e edit · y copy".to_owned()
         }
     };
-    frame.render_widget(
-        Paragraph::new(Text::from(
-            detail.lines().map(Line::from).collect::<Vec<_>>(),
-        ))
-        .block(Block::default().title(title).borders(Borders::ALL))
-        .wrap(ratatui::widgets::Wrap { trim: false }),
-        right[0],
-    );
+    if let Some(inspector_area) = inspector_area {
+        frame.render_widget(
+            Paragraph::new(Text::from(
+                detail.lines().map(Line::from).collect::<Vec<_>>(),
+            ))
+            .block(Block::default().title(title).borders(Borders::ALL))
+            .wrap(ratatui::widgets::Wrap { trim: false }),
+            inspector_area,
+        );
+    }
     if let MongoPageState::Ready(page) = &tab.page
         && page.next_offset.is_some()
     {
         let more = Rect::new(
-            columns[0].x + 1,
-            columns[0].y + columns[0].height.saturating_sub(1),
-            columns[0].width.saturating_sub(2),
+            documents_area.x + 1,
+            documents_area.y + documents_area.height.saturating_sub(1),
+            documents_area.width.saturating_sub(2),
             1,
         );
         frame.render_widget(
@@ -151,9 +202,9 @@ pub(crate) fn render(
         });
     }
     let controls = Rect::new(
-        columns[0].x,
-        columns[0].y + columns[0].height.saturating_sub(2),
-        columns[0].width,
+        documents_area.x,
+        documents_area.y + documents_area.height.saturating_sub(2),
+        documents_area.width,
         1,
     );
     let control_text = if tab.import_draft.is_some() {
@@ -176,13 +227,13 @@ pub(crate) fn render(
             crate::model::mongodb_browser::MongoQueryField::Projection,
         ),
     ];
-    let width = (area.width / 3).max(1);
+    let width = (query_bar.width / 3).max(1);
     for (index, (label, field)) in labels.into_iter().enumerate() {
         let rect = Rect::new(
-            area.x + (index as u16 * width),
-            area.y,
+            query_bar.x + (index as u16 * width),
+            query_bar.y,
             if index == 2 {
-                area.width.saturating_sub(width * 2)
+                query_bar.width.saturating_sub(width * 2)
             } else {
                 width
             },
@@ -210,5 +261,26 @@ pub(crate) fn render(
             target: crate::ui::HitTarget::MongoQueryField(tab.id, field),
         });
     }
-    frame.render_widget(Paragraph::new(status).style(status_style), right[1]);
+    frame.render_widget(Paragraph::new(status).style(status_style), status_area);
+}
+
+/// Clip a cell to its column and say so, instead of letting it run into the
+/// next column.
+fn clip_cell(text: String, width: u16) -> String {
+    let width = width as usize;
+    if text.chars().count() <= width {
+        return text;
+    }
+    let mut clipped = text
+        .chars()
+        .take(width.saturating_sub(1))
+        .collect::<String>();
+    clipped.push('…');
+    clipped
+}
+
+fn column_widths(widths: &[u16]) -> Vec<Constraint> {
+    let mut constraints = vec![Constraint::Length(ROW_NUMBER_WIDTH)];
+    constraints.extend(widths.iter().map(|width| Constraint::Length(*width)));
+    constraints
 }

@@ -398,6 +398,151 @@ pub(crate) fn render(
             );
         }
     }
+    if let Some(crate::model::relation_edit::RelationEditSession {
+        mode: crate::model::relation_edit::RelationGridMode::EditDocument(editor),
+        ..
+    }) = &tab.edit
+    {
+        let popup_width = area.width.min(88);
+        let popup_height = area.height.min(24);
+        let popup = Rect::new(
+            area.x
+                .saturating_add(area.width.saturating_sub(popup_width) / 2),
+            area.y
+                .saturating_add(area.height.saturating_sub(popup_height) / 2),
+            popup_width,
+            popup_height,
+        );
+        frame.render_widget(ratatui::widgets::Clear, popup);
+        let block = panel_block(" EDIT DOCUMENT ", true, theme);
+        let inner = block.inner(popup);
+        frame.render_widget(block, popup);
+        state.cursor = None;
+        let sections = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Min(1),
+                Constraint::Length(1),
+            ])
+            .split(inner);
+        frame.render_widget(
+            Paragraph::new(Line::from(editor.title()).style(Style::new().fg(theme.muted))),
+            sections[0],
+        );
+        let hint = match editor.view {
+            crate::model::relation_edit::DocumentEditorView::Ejson => {
+                render_json_editor(
+                    frame,
+                    sections[1],
+                    &editor.input,
+                    editor.error.as_deref(),
+                    theme,
+                    state,
+                );
+                "Tab field view"
+            }
+            crate::model::relation_edit::DocumentEditorView::Fields => {
+                render_document_fields(frame, sections[1], editor, theme, state);
+                if editor.field_edit.is_some() {
+                    "Enter apply field  Esc back to fields"
+                } else {
+                    "j/k field  Enter edit  Ctrl-S apply document  Tab EJSON  Esc close"
+                }
+            }
+        };
+        frame.render_widget(
+            Paragraph::new(hint).style(Style::new().fg(theme.muted)),
+            sections[2],
+        );
+    }
+}
+
+/// Renders the field-by-field view of the document modal.
+///
+/// Every row is one top-level field with its observed BSON type and its
+/// compact value. The open field editor, its refusal and the document-level
+/// error all render below the list, so a refused edit is visible next to the
+/// field that produced it.
+fn render_document_fields(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    editor: &crate::model::relation_edit::DocumentEditorState,
+    theme: Theme,
+    state: &mut super::UiState,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let fields = match editor.fields() {
+        Ok(fields) => fields,
+        Err(message) => {
+            frame.render_widget(
+                Paragraph::new(message).style(Style::new().fg(theme.error)),
+                area,
+            );
+            return;
+        }
+    };
+    let error = editor.field_error.as_deref().or(editor.error.as_deref());
+    let error_height = u16::from(error.is_some() && area.height >= 3);
+    let edit_height = u16::from(editor.field_edit.is_some() && area.height >= 2);
+    let list_height = usize::from(area.height.saturating_sub(error_height + edit_height));
+    let selected = editor.selected_field_index(fields.len());
+    let top = selected.saturating_sub(list_height.saturating_sub(1));
+    let rows = fields
+        .iter()
+        .enumerate()
+        .skip(top)
+        .take(list_height)
+        .map(|(index, field)| {
+            let style = if index == selected {
+                Style::new().fg(theme.background).bg(theme.accent)
+            } else {
+                Style::new().fg(theme.text)
+            };
+            Line::from(vec![
+                ratatui::text::Span::styled(format!(" {:<16}", field.name), style),
+                ratatui::text::Span::styled(
+                    format!(" {:<10}", field.type_name),
+                    if index == selected {
+                        style
+                    } else {
+                        Style::new().fg(theme.muted)
+                    },
+                ),
+                ratatui::text::Span::styled(format!(" {}", field.value), style),
+            ])
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(rows),
+        Rect::new(area.x, area.y, area.width, list_height as u16),
+    );
+    let mut next_row = area.y.saturating_add(list_height as u16);
+    if let Some(field) = &editor.field_edit
+        && next_row < area.bottom()
+    {
+        let input_area = Rect::new(area.x, next_row, area.width, 1);
+        let prefix = format!(" {} = ", field.name);
+        render_text_input(
+            frame,
+            input_area,
+            &prefix,
+            &field.input,
+            Style::new().fg(theme.text),
+            state,
+        );
+        next_row = next_row.saturating_add(1);
+    }
+    if let Some(error) = error
+        && next_row < area.bottom()
+    {
+        frame.render_widget(
+            Paragraph::new(Line::from(error).style(Style::new().fg(theme.error))),
+            Rect::new(area.x, next_row, area.width, 1),
+        );
+    }
 }
 
 pub(crate) fn ddl_editor_viewport(area: Rect, app: &App) -> Option<(uuid::Uuid, EditorViewport)> {
@@ -863,9 +1008,31 @@ fn render_data(
             )
             .map(provenance_label)
             .unwrap_or("UNKNOWN");
+        // A MongoDB collection has no SQL: it shows the find it executed and the
+        // field under the cursor, the way a SQL snapshot shows its statement.
+        let mongo = app.profiles.iter().any(|profile| {
+            profile.id == tab.descriptor.key.profile_id
+                && profile.kind == crate::profile::DatabaseKind::MongoDb
+        });
+        let statement_label = if mongo { "Find" } else { "SQL" };
+        let active_field = mongo
+            .then(|| {
+                snapshot
+                    .value
+                    .result
+                    .result_sets
+                    .last()
+                    .and_then(|set| set.columns.get(tab.grid.selected_column))
+                    .map(|column| column.name.clone())
+            })
+            .flatten();
+        let field_status = active_field
+            .as_deref()
+            .map(|field| format!("  field: {field}"))
+            .unwrap_or_default();
         frame.render_widget(
             Paragraph::new(format!(
-                "SQL: {sql}  {row_count} rows  Snapshot: {provenance}",
+                "{statement_label}: {sql}  {row_count} rows{field_status}  Snapshot: {provenance}",
             ))
             .style(Style::new().fg(theme.muted).bg(theme.surface)),
             footer,
@@ -874,7 +1041,9 @@ fn render_data(
             area: footer,
             target: HitTarget::OpenTextDetail(super::readonly_detail_request(
                 "Relation snapshot",
-                format!("SQL: {sql}\nRows: {row_count}\nSnapshot: {provenance}",),
+                format!(
+                    "{statement_label}: {sql}\nRows: {row_count}{field_status}\nSnapshot: {provenance}",
+                ),
             )),
         });
         super::pagination::render(

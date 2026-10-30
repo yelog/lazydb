@@ -1,4 +1,5 @@
 use std::time::Duration;
+use tokio::time::Instant;
 
 pub mod catalog;
 pub mod management;
@@ -318,7 +319,17 @@ impl MongoAdapter {
     }
 
     pub async fn close(self) {
-        self.client.shutdown().await;
+        self.close_until(Instant::now() + Duration::from_secs(1))
+            .await;
+    }
+
+    pub(crate) async fn close_until(self, deadline: Instant) {
+        if tokio::time::timeout_at(deadline, self.client.shutdown())
+            .await
+            .is_err()
+        {
+            tracing::debug!("MongoDB client shutdown deadline reached; remote cleanup unconfirmed");
+        }
     }
 }
 

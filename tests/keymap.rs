@@ -5722,3 +5722,289 @@ fn profile_confirmation_and_paste_are_contextual_and_redacted() {
         [Action::EditorPaste("a\nb".into()),]
     );
 }
+
+// ---------------------------------------------------------------------------
+// T5 (S3): the field-by-field view inside the MongoDB document modal
+// ---------------------------------------------------------------------------
+
+/// An app whose active relation tab holds an open MongoDB document modal.
+fn document_modal_app() -> App {
+    use lazydb::db::mongodb::types::{MongoDocument, MongoNamespace};
+    use lazydb::model::relation_edit::{
+        DocumentEditorState, RelationEditSession, RelationGridMode,
+    };
+
+    let namespace = MongoNamespace::collection("app", "bikes");
+    let bson = mongodb::bson::doc! { "_id": 1_i32, "name": "Ruedas Pro", "price": 1200_i64 };
+    let document = MongoDocument {
+        raw: mongodb::bson::raw::RawDocumentBuf::from_bytes(
+            mongodb::bson::to_vec(&bson).expect("encodes"),
+        )
+        .expect("raw"),
+        bson,
+        editable: true,
+    };
+    let mut state = DocumentEditorState::new(0, &namespace, &document).expect("the document opens");
+    // The modal opens on the field list; these tests pin the keys of both
+    // views, so they start from the EJSON view explicitly.
+    state.view = lazydb::model::relation_edit::DocumentEditorView::Ejson;
+
+    let mut app = App::new(Vec::new());
+    let mut relation = RelationTab::new("bikes");
+    let mut edit = RelationEditSession::from_rows(vec![Vec::new(); 1]);
+    edit.mode = RelationGridMode::EditDocument(Box::new(state));
+    relation.edit = Some(edit);
+    app.tabs.push(WorkspaceTab::Relation(relation));
+    app.active_tab = app.tabs.len() - 1;
+    app.focus = Focus::Results;
+    app
+}
+
+#[test]
+fn the_document_modal_toggles_its_two_views_with_tab() {
+    let mut app = document_modal_app();
+    let mut keymap = Keymap::default();
+
+    assert_eq!(
+        keymap.map(key(KeyCode::Tab), &app),
+        Some(Action::RelationEditDocumentToggleView),
+        "Tab switches from EJSON to the field list"
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Esc), &app),
+        Some(Action::RelationEditCancel),
+        "Esc still closes the modal"
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Enter), &app),
+        Some(Action::RelationEditInsert('\n')),
+        "Enter still inserts a newline in EJSON"
+    );
+    assert_eq!(
+        keymap.map(control(KeyCode::Char('s')), &app),
+        Some(Action::RelationEditConfirm),
+        "Ctrl-S still saves the document"
+    );
+
+    app.update(Action::RelationEditDocumentToggleView);
+
+    assert_eq!(
+        keymap.map(key(KeyCode::Tab), &app),
+        Some(Action::RelationEditDocumentToggleView),
+        "Tab switches back to EJSON"
+    );
+    for (event, expected) in [
+        (
+            key(KeyCode::Char('j')),
+            Action::RelationEditDocumentFieldMove(1),
+        ),
+        (key(KeyCode::Down), Action::RelationEditDocumentFieldMove(1)),
+        (
+            key(KeyCode::Char('k')),
+            Action::RelationEditDocumentFieldMove(-1),
+        ),
+        (key(KeyCode::Up), Action::RelationEditDocumentFieldMove(-1)),
+    ] {
+        assert_eq!(keymap.map(event, &app), Some(expected));
+    }
+    assert_eq!(
+        keymap.map(key(KeyCode::Enter), &app),
+        Some(Action::RelationEditDocumentFieldEdit),
+        "Enter edits the selected field"
+    );
+    assert_eq!(
+        keymap.map(control(KeyCode::Char('s')), &app),
+        Some(Action::RelationEditConfirm),
+        "Ctrl-S in the list still saves the document"
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Esc), &app),
+        Some(Action::RelationEditCancel),
+        "Esc in the list closes the modal"
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('x')), &app),
+        None,
+        "typing in the list never edits the EJSON text"
+    );
+}
+
+#[test]
+fn a_field_editor_owns_apply_cancel_and_typing() {
+    let mut app = document_modal_app();
+    app.update(Action::RelationEditDocumentToggleView);
+    app.update(Action::RelationEditDocumentFieldMove(1));
+    app.update(Action::RelationEditDocumentFieldEdit);
+    let mut keymap = Keymap::default();
+
+    assert_eq!(
+        keymap.map(control(KeyCode::Char('s')), &app),
+        Some(Action::RelationEditDocumentFieldApply),
+        "Ctrl-S applies the field"
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Enter), &app),
+        Some(Action::RelationEditDocumentFieldApply),
+        "Enter applies the single-line field value"
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Esc), &app),
+        Some(Action::RelationEditDocumentFieldCancel),
+        "Esc leaves the field editor instead of closing the modal"
+    );
+    for (event, expected) in [
+        (key(KeyCode::Char('x')), Action::RelationEditInsert('x')),
+        (key(KeyCode::Backspace), Action::RelationEditBackspace),
+        (
+            control(KeyCode::Char('w')),
+            Action::RelationEditDeletePreviousWord,
+        ),
+        (key(KeyCode::Left), Action::RelationEditMoveLeft),
+    ] {
+        assert_eq!(keymap.map(event, &app), Some(expected));
+    }
+}
+
+#[test]
+fn the_sql_cell_editor_keys_are_unchanged_by_the_document_field_view() {
+    use lazydb::model::relation_edit::{CellEditorState, RelationEditSession, RelationGridMode};
+
+    let mut app = App::new(Vec::new());
+    let mut relation = RelationTab::new("users");
+    let mut edit = RelationEditSession::from_rows(vec![vec![lazydb::db::value::CellValue::Text(
+        "old".into(),
+    )]]);
+    edit.mode = RelationGridMode::EditCell(Box::new(CellEditorState {
+        row: 0,
+        column: 0,
+        input: lazydb::model::cell_editor::CellEditorBuffer::default(),
+        error: None,
+    }));
+    relation.edit = Some(edit);
+    app.tabs.push(WorkspaceTab::Relation(relation));
+    app.active_tab = app.tabs.len() - 1;
+    app.focus = Focus::Results;
+    let mut keymap = Keymap::default();
+
+    assert_eq!(
+        keymap.map(key(KeyCode::Enter), &app),
+        Some(Action::RelationEditConfirm)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Esc), &app),
+        Some(Action::RelationEditCancel)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('x')), &app),
+        Some(Action::RelationEditInsert('x'))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Tab), &app),
+        None,
+        "Tab stays unbound in the SQL cell editor"
+    );
+}
+
+#[test]
+fn the_sql_json_cell_editor_keys_are_unchanged_by_the_document_field_view() {
+    use lazydb::model::relation_edit::{CellEditorState, RelationEditSession, RelationGridMode};
+
+    let mut app = App::new(Vec::new());
+    let mut relation = RelationTab::new("users");
+    let mut edit =
+        RelationEditSession::from_rows(vec![vec![lazydb::db::value::CellValue::Text("{}".into())]]);
+    edit.mode = RelationGridMode::EditCell(Box::new(CellEditorState {
+        row: 0,
+        column: 0,
+        input: lazydb::model::cell_editor::CellEditorBuffer {
+            presence: lazydb::model::cell_editor::CellEditorPresence::Value,
+            content: lazydb::model::cell_editor::CellEditorContent::Typed {
+                kind: lazydb::model::cell_editor::CellEditorKind::Json,
+                draft: lazydb::model::cell_editor::TypedDraft::Json(
+                    lazydb::model::cell_editor::JsonBuffer::new("{}"),
+                ),
+            },
+            ..Default::default()
+        },
+        error: None,
+    }));
+    relation.edit = Some(edit);
+    app.tabs.push(WorkspaceTab::Relation(relation));
+    app.active_tab = app.tabs.len() - 1;
+    app.focus = Focus::Results;
+    let mut keymap = Keymap::default();
+
+    assert_eq!(
+        keymap.map(control(KeyCode::Char('s')), &app),
+        Some(Action::RelationEditConfirm)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Enter), &app),
+        Some(Action::RelationEditInsert('\n'))
+    );
+    assert_eq!(
+        keymap.map(control(KeyCode::Char('f')), &app),
+        Some(Action::RelationEditJsonFormat)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Down), &app),
+        Some(Action::RelationEditJsonMove(1))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Esc), &app),
+        Some(Action::RelationEditCancel)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Tab), &app),
+        None,
+        "Tab stays unbound in the SQL JSON cell editor"
+    );
+}
+
+#[test]
+fn m_and_u_open_monitor_and_users_from_a_mongodb_database_row() {
+    use lazydb::db::mongodb::types::MongoExplorerNodeId;
+    use lazydb::model::explorer::{ProfilePlacement, ProfileProvenance};
+    use lazydb::profile::DatabaseKind;
+
+    let profile_id = Uuid::from_u128(4242);
+    let mut app = App::new(Vec::new());
+    app.explorer.normalized.add_profile_with_placement(
+        profile_id,
+        "MongoDemo".into(),
+        DatabaseKind::MongoDb,
+        "127.0.0.1".into(),
+        ProfileProvenance::Saved,
+        ProfilePlacement::Global,
+    );
+    let profile_node = ExplorerNodeId::Profile(profile_id);
+    app.explorer
+        .normalized
+        .profiles
+        .get_mut(&profile_id)
+        .unwrap()
+        .mongodb_databases = vec!["lazydb_demo".into()];
+    app.explorer.normalized.expanded.insert(profile_node);
+    let database_node = ExplorerNodeId::Mongo {
+        profile_id,
+        node: MongoExplorerNodeId::Database("lazydb_demo".into()),
+    };
+    assert!(app.explorer.select_id(database_node));
+    app.focus = Focus::Explorer;
+    let mut keymap = Keymap::default();
+
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('m')), &app),
+        Some(Action::OpenMongoNode(MongoExplorerNodeId::Monitor(
+            "lazydb_demo".into()
+        ))),
+        "m opens the database monitor"
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('u')), &app),
+        Some(Action::OpenMongoNode(MongoExplorerNodeId::Users(
+            "lazydb_demo".into()
+        ))),
+        "u opens users and roles"
+    );
+}

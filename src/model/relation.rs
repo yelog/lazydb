@@ -11,6 +11,7 @@ use super::{data_query::DataQueryOptions, data_query::DataQueryState, tab::DataG
 use crate::db::{
     RelationPreview,
     catalog::{CatalogId, CatalogKind, QualifiedName, RelationDdl},
+    mongodb::types::MongoDocument,
 };
 use crate::identity::ConnectionIdentity;
 use crate::model::execution_target::ExecutionTarget;
@@ -181,6 +182,36 @@ pub struct RelationDescriptor {
     pub title: String,
 }
 
+impl RelationDescriptor {
+    /// Describes a MongoDB collection as a relation so it reuses the relation
+    /// tab. MongoDB has no SQL catalog entry, so the descriptor is derived from
+    /// the namespace itself: the native path is `[database, collection]` and the
+    /// collection is addressed as a table.
+    pub fn mongodb_collection(
+        profile_id: Uuid,
+        namespace: &crate::db::mongodb::types::MongoNamespace,
+    ) -> Option<Self> {
+        let collection = namespace.collection.clone()?;
+        Some(Self {
+            key: RelationKey {
+                profile_id,
+                object_id: CatalogId::new(
+                    profile_id,
+                    CatalogKind::Table,
+                    [namespace.database.clone(), collection.clone()],
+                ),
+            },
+            qualified_name: QualifiedName {
+                database: Some(namespace.database.clone()),
+                schema: None,
+                object: collection.clone(),
+            },
+            kind: CatalogKind::Table,
+            title: collection,
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct RelationTab {
     pub id: Uuid,
@@ -196,6 +227,13 @@ pub struct RelationTab {
     pub grid: DataGridState,
     pub query: RelationQueryState,
     pub edit: Option<RelationEditSession>,
+    /// The BSON documents behind the DATA grid rows of a MongoDB collection, in
+    /// grid order. The grid only keeps the mapped `CellValue`s, so the modal
+    /// edits these originals instead of reconstructing a document from cells.
+    pub mongodb_documents: Option<Vec<MongoDocument>>,
+    /// MongoDB structure inference is derived from the current DATA-page
+    /// snapshot and must be recomputed after that page changes.
+    pub ddl_refresh_needed: bool,
     pub transaction_state: TransactionState,
     pub transaction_generation: u64,
     pub transaction_snapshot: Option<RelationEditSession>,
@@ -234,6 +272,8 @@ impl RelationTab {
     pub fn invalidate_catalog_mutation(&mut self, native_identity_changed: bool) {
         self.data = mutation_stale(std::mem::replace(&mut self.data, RelationLoad::Empty));
         self.ddl = mutation_stale(std::mem::replace(&mut self.ddl, RelationLoad::Empty));
+        self.mongodb_documents = None;
+        self.ddl_refresh_needed = true;
         self.stale_native_identity |= native_identity_changed;
     }
 
@@ -243,6 +283,8 @@ impl RelationTab {
         self.preparation = RelationPreparation::Idle;
         self.data = mutation_stale(std::mem::replace(&mut self.data, RelationLoad::Empty));
         self.ddl = mutation_stale(std::mem::replace(&mut self.ddl, RelationLoad::Empty));
+        self.mongodb_documents = None;
+        self.ddl_refresh_needed = true;
         self.stale_native_identity = true;
     }
 
@@ -252,6 +294,8 @@ impl RelationTab {
         self.preparation = RelationPreparation::Idle;
         self.data = mutation_stale(std::mem::replace(&mut self.data, RelationLoad::Empty));
         self.ddl = mutation_stale(std::mem::replace(&mut self.ddl, RelationLoad::Empty));
+        self.mongodb_documents = None;
+        self.ddl_refresh_needed = true;
         self.stale_native_identity = stale_edits;
         if stale_edits {
             self.transaction_generation = self.transaction_generation.saturating_add(1);
@@ -270,26 +314,27 @@ impl RelationTab {
         let Some(profile) = profile else {
             return Some(RelationSnapshotProvenance::ProfileDeletedSnapshot);
         };
-        let in_scope = self
-            .descriptor
-            .qualified_name
-            .database
-            .as_deref()
-            .is_none_or(|database| profile.catalog_scope.allows_database(database))
-            && self
+        let in_scope = profile.kind == crate::profile::DatabaseKind::MongoDb
+            || self
                 .descriptor
                 .qualified_name
-                .schema
+                .database
                 .as_deref()
-                .is_none_or(|schema| {
-                    self.descriptor
-                        .qualified_name
-                        .database
-                        .as_deref()
-                        .is_none_or(|database| {
-                            profile.catalog_scope.allows_schema(database, schema)
-                        })
-                });
+                .is_none_or(|database| profile.catalog_scope.allows_database(database))
+                && self
+                    .descriptor
+                    .qualified_name
+                    .schema
+                    .as_deref()
+                    .is_none_or(|schema| {
+                        self.descriptor
+                            .qualified_name
+                            .database
+                            .as_deref()
+                            .is_none_or(|database| {
+                                profile.catalog_scope.allows_schema(database, schema)
+                            })
+                    });
         if !in_scope {
             Some(RelationSnapshotProvenance::OutOfScopeSnapshot)
         } else if active == Some(snapshot_connection) {
@@ -365,6 +410,8 @@ impl RelationTab {
                 ..RelationQueryState::default()
             },
             edit: None,
+            mongodb_documents: None,
+            ddl_refresh_needed: true,
             transaction_state: TransactionState::Idle,
             transaction_generation: 0,
             transaction_snapshot: None,

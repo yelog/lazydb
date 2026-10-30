@@ -53,8 +53,8 @@ use crate::{
             RelationSnapshot, RelationTab, RelationView, automatic_relation_column_widths,
         },
         relation_edit::{
-            CellEditorState, PendingMutationHistory, RelationEditSession, RelationGridMode,
-            RelationMutationHistory,
+            CellEditorState, DocumentEditorState, DocumentEditorView, MONGODB_READ_ONLY_MESSAGE,
+            PendingMutationHistory, RelationEditSession, RelationGridMode, RelationMutationHistory,
         },
         session::SessionRegistry,
         tab::{
@@ -4479,6 +4479,11 @@ impl App {
                         | Action::RelationEditMoveEnd
                         | Action::RelationEditUndo
                         | Action::RelationEditRedo
+                        | Action::RelationEditDocumentToggleView
+                        | Action::RelationEditDocumentFieldMove(_)
+                        | Action::RelationEditDocumentFieldEdit
+                        | Action::RelationEditDocumentFieldApply
+                        | Action::RelationEditDocumentFieldCancel
                         | Action::RelationEditConfirm
                         | Action::RelationEditCancel
                         | Action::RelationVisualLine
@@ -13483,6 +13488,18 @@ impl App {
                 }
                 commands
             }
+            Action::MongoRelationStructureLoaded { request, result } => {
+                self.mongo_relation_structure_loaded(request, result)
+            }
+            Action::MongoRelationPreviewLoaded {
+                request,
+                preview,
+                documents,
+            } => self.mongo_relation_preview_loaded(request, *preview, documents),
+            Action::MongoRelationDocumentReplaced { .. }
+            | Action::MongoRelationDocumentReplaceFailed { .. } => {
+                self.mongo_relation_document_result(action)
+            }
             Action::RequestProfileConnect { profile_id } => self.request_connection(profile_id),
             Action::RequestConnect(profile_id) => self.request_connection(profile_id),
             Action::RetryActiveConsoleConnection => {
@@ -15653,6 +15670,12 @@ impl App {
                 Vec::new()
             }
             Action::MongoPageRetry => self.load_mongodb_page(self.active_tab),
+            Action::MongoToggleInspector => {
+                if let Some(WorkspaceTab::MongoBrowser(tab)) = self.tabs.get_mut(self.active_tab) {
+                    tab.show_inspector = !tab.show_inspector;
+                }
+                Vec::new()
+            }
             Action::OpenMongoConsole {
                 profile_id,
                 database,
@@ -17900,7 +17923,7 @@ impl App {
                 };
                 match node {
                     crate::db::mongodb::types::MongoExplorerNodeId::Collection(namespace) => {
-                        self.open_mongodb_browser(profile_id, namespace)
+                        self.open_mongodb_relation(profile_id, namespace)
                     }
                     crate::db::mongodb::types::MongoExplorerNodeId::Monitor(database) => {
                         let mut tab =
@@ -18515,10 +18538,7 @@ impl App {
                 self.active_console_mut().result_view = view;
                 Vec::new()
             }
-            Action::RelationEditCell => {
-                self.relation_edit_cell();
-                Vec::new()
-            }
+            Action::RelationEditCell => self.relation_edit_cell(),
             Action::RelationEditBooleanMove(direction) => {
                 self.relation_edit_boolean(|input| input.move_boolean(direction));
                 Vec::new()
@@ -18560,12 +18580,24 @@ impl App {
                 Vec::new()
             }
             Action::RelationEditPaste(text) => {
-                if let Some(edit) = self.relation_session_mut()
-                    && let RelationGridMode::EditCell(state) = &mut edit.mode
-                {
-                    state.input.finish_edit_group();
-                    if state.input.paste(&text) {
-                        state.error = None;
+                if let Some(edit) = self.relation_session_mut() {
+                    match &mut edit.mode {
+                        RelationGridMode::EditCell(state) => {
+                            state.input.finish_edit_group();
+                            if state.input.paste(&text) {
+                                state.error = None;
+                            }
+                        }
+                        RelationGridMode::EditDocument(state) => match state.view {
+                            DocumentEditorView::Ejson => {
+                                state.input.paste(&text);
+                                state.error = None;
+                            }
+                            DocumentEditorView::Fields => {
+                                state.paste_field_text(&text);
+                            }
+                        },
+                        _ => {}
                     }
                 }
                 Vec::new()
@@ -18576,6 +18608,26 @@ impl App {
             }
             Action::RelationEditJsonMove(direction) => {
                 self.relation_edit_json_move(direction);
+                Vec::new()
+            }
+            Action::RelationEditDocumentToggleView => {
+                self.relation_document_toggle_view();
+                Vec::new()
+            }
+            Action::RelationEditDocumentFieldMove(delta) => {
+                self.relation_document_field_move(delta);
+                Vec::new()
+            }
+            Action::RelationEditDocumentFieldEdit => {
+                self.relation_document_field_begin_edit();
+                Vec::new()
+            }
+            Action::RelationEditDocumentFieldApply => {
+                self.relation_document_field_apply();
+                Vec::new()
+            }
+            Action::RelationEditDocumentFieldCancel => {
+                self.relation_document_field_cancel();
                 Vec::new()
             }
             Action::RelationEditBackspace => {
@@ -25787,7 +25839,7 @@ impl App {
                     let expanded = self.explorer.normalized.expanded.contains(&selected);
                     self.explorer.toggle_selected();
                     if expanded {
-                        self.open_mongodb_browser(*profile_id, namespace.clone())
+                        self.open_mongodb_relation(*profile_id, namespace.clone())
                     } else {
                         let generation = self
                             .sessions
@@ -25893,17 +25945,39 @@ impl App {
         self.ensure_redis_browser_loaded(index, true)
     }
 
-    fn open_mongodb_browser(
+    /// Opens a MongoDB collection in the same relation tab a SQL table uses, on
+    /// the DATA grid fed by its documents.
+    fn open_mongodb_relation(
         &mut self,
         profile_id: Uuid,
         namespace: crate::db::mongodb::types::MongoNamespace,
     ) -> Vec<Command> {
-        let index = self.tabs.iter().position(|tab| matches!(tab, WorkspaceTab::MongoBrowser(tab) if tab.profile_id == profile_id && tab.namespace == namespace)).unwrap_or_else(|| {
-            self.tabs.push(WorkspaceTab::MongoBrowser(crate::model::mongodb_browser::MongoBrowserTab::new(profile_id, namespace)));
-            self.tabs.len() - 1
-        });
-        self.active_tab = index;
-        self.load_mongodb_page(index)
+        let Some(descriptor) = RelationDescriptor::mongodb_collection(profile_id, &namespace)
+        else {
+            return Vec::new();
+        };
+        let key = descriptor.key.clone();
+        if let Some(index) = self.tabs.iter().position(
+            |tab| matches!(tab, WorkspaceTab::Relation(existing) if existing.descriptor.key == key),
+        ) {
+            if let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(index) {
+                tab.view = RelationView::Data;
+            }
+            self.active_tab = index;
+            self.focus = Focus::Results;
+            return self.load_active_relation(false);
+        }
+        self.tabs
+            .push(WorkspaceTab::Relation(RelationTab::with_descriptor(
+                descriptor,
+                RelationView::Data,
+            )));
+        if let Some(WorkspaceTab::Relation(tab)) = self.tabs.last() {
+            self.editor.open_read_only(tab.ddl_editor_id, "");
+        }
+        self.active_tab = self.tabs.len() - 1;
+        self.focus = Focus::Results;
+        self.load_active_relation(true)
     }
 
     fn load_mongodb_page(&mut self, index: usize) -> Vec<Command> {
@@ -26965,6 +27039,13 @@ impl App {
                 generation,
             }];
         }
+        if let ExplorerNodeId::Mongo { profile_id, node } = &selected {
+            let was_expanded = self.explorer.normalized.expanded.contains(&selected);
+            if was_expanded || !self.explorer.normalized.expand() {
+                return Vec::new();
+            }
+            return self.mongo_discovery_commands(*profile_id, node);
+        }
         let expanded = self.explorer.normalized.expanded.contains(&selected);
         if expanded || !self.explorer.normalized.expand() {
             return Vec::new();
@@ -26977,6 +27058,37 @@ impl App {
                     Vec::new()
                 }
             })
+    }
+
+    /// Children of a MongoDB node are document namespaces, not SQL catalog
+    /// pages, so expanding one starts a MongoDB discovery command.
+    fn mongo_discovery_commands(
+        &self,
+        profile_id: Uuid,
+        node: &crate::db::mongodb::types::MongoExplorerNodeId,
+    ) -> Vec<Command> {
+        use crate::db::mongodb::types::MongoExplorerNodeId;
+        let Some(generation) = self
+            .sessions
+            .identities_for_profile(profile_id)
+            .first()
+            .map(|identity| identity.generation)
+        else {
+            return Vec::new();
+        };
+        match node {
+            MongoExplorerNodeId::Database(database) => vec![Command::DiscoverMongoCollections {
+                profile_id,
+                generation,
+                database: database.clone(),
+            }],
+            MongoExplorerNodeId::Collection(namespace) => vec![Command::DiscoverMongoIndexes {
+                profile_id,
+                generation,
+                namespace: namespace.clone(),
+            }],
+            _ => Vec::new(),
+        }
     }
 
     fn collapse_explorer_selected(&mut self) -> Vec<Command> {
@@ -28128,7 +28240,10 @@ impl App {
         )
     }
 
-    fn relation_edit_cell(&mut self) {
+    fn relation_edit_cell(&mut self) -> Vec<Command> {
+        if self.active_relation_is_mongodb() {
+            return self.relation_edit_document();
+        }
         let database_kind = self.active_profile().map(|profile| profile.kind);
         let result = self.relation_result();
         let row = self.active_grid_row();
@@ -28169,13 +28284,13 @@ impl App {
                 "Relation edit",
                 "Existing rows require a primary key for grid updates",
             );
-            return;
+            return Vec::new();
         }
         let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab) else {
-            return;
+            return Vec::new();
         };
         if tab.view != RelationView::Data {
-            return;
+            return Vec::new();
         }
         let Some(value) = tab
             .edit
@@ -28183,7 +28298,7 @@ impl App {
             .and_then(|edit| edit.rows.get(row))
             .and_then(|r| r.current.get(column))
         else {
-            return;
+            return Vec::new();
         };
         let is_geometry_column = result
             .as_ref()
@@ -28195,7 +28310,7 @@ impl App {
                 "Relation edit",
                 "MariaDB geometry values are preview-only and cannot be edited yet",
             );
-            return;
+            return Vec::new();
         }
         let is_unprovided = tab
             .edit
@@ -28238,15 +28353,355 @@ impl App {
                 error: None,
             }));
         }
+        Vec::new()
+    }
+
+    /// Opens the document modal on the row under the cursor of a MongoDB
+    /// collection.
+    ///
+    /// Nothing is written here: the modal only plans a replacement. Every
+    /// refusal below leaves the page and the command stream untouched.
+    fn relation_edit_document(&mut self) -> Vec<Command> {
+        let row = self.active_grid_row();
+        let Some(WorkspaceTab::Relation(tab)) = self.tabs.get(self.active_tab) else {
+            return Vec::new();
+        };
+        if tab.view != RelationView::Data {
+            return Vec::new();
+        }
+        // The tab's own profile decides whether this connection may write, not
+        // whichever connection happens to be selected right now.
+        let Some(profile) = self
+            .profiles
+            .iter()
+            .find(|profile| profile.id == tab.descriptor.key.profile_id)
+        else {
+            self.notify_warning(
+                "Relation edit",
+                "The connection profile is no longer available",
+            );
+            return Vec::new();
+        };
+        let read_only = profile.read_only;
+        let Some(document) = tab
+            .mongodb_documents
+            .as_ref()
+            .and_then(|documents| documents.get(row))
+        else {
+            self.notify_warning(
+                "Relation edit",
+                "There is no document at the cursor to edit",
+            );
+            return Vec::new();
+        };
+        let Some(namespace) = crate::db::mongodb::types::MongoNamespace::from_native_path(
+            &tab.descriptor.key.object_id.native_path,
+        ) else {
+            self.notify_warning("Relation edit", "This relation is not a MongoDB collection");
+            return Vec::new();
+        };
+        let mut state = match DocumentEditorState::new(row, &namespace, document) {
+            Ok(state) => state,
+            Err(message) => {
+                self.notify_warning("Relation edit", message);
+                return Vec::new();
+            }
+        };
+        if read_only {
+            state.error = Some(MONGODB_READ_ONLY_MESSAGE.to_owned());
+        }
+        if let Some(edit) = self
+            .tabs
+            .get_mut(self.active_tab)
+            .and_then(|tab| match tab {
+                WorkspaceTab::Relation(tab) => tab.edit.as_mut(),
+                _ => None,
+            })
+        {
+            edit.mode = RelationGridMode::EditDocument(Box::new(state));
+        }
+        Vec::new()
+    }
+
+    /// Writes the error into the open document modal, if it is still open.
+    fn mongo_document_error(&mut self, message: &str) {
+        if let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab)
+            && let Some(edit) = tab.edit.as_mut()
+            && let RelationGridMode::EditDocument(state) = &mut edit.mode
+        {
+            state.saving = false;
+            state.error = Some(message.to_owned());
+        }
+    }
+
+    /// Validates the document modal and plans exactly one bounded replacement.
+    ///
+    /// Nothing is mutated here, so every refusal leaves the open modal and the
+    /// command stream untouched. The write is addressed by the `_id` the
+    /// document was loaded with: the editor text can change every other field,
+    /// but a text that drops or changes `_id`, an invalid Canonical EJSON text
+    /// and a row that is no longer on the page are all rejected.
+    fn plan_mongo_document_replacement(&self) -> Result<MongoDocumentReplacement, String> {
+        let Some(WorkspaceTab::Relation(tab)) = self.tabs.get(self.active_tab) else {
+            return Err("the document modal is no longer open".to_owned());
+        };
+        // The tab's own profile decides whether this connection may write.
+        let profile = self
+            .profiles
+            .iter()
+            .find(|profile| profile.id == tab.descriptor.key.profile_id)
+            .ok_or_else(|| "the connection profile is no longer available".to_owned())?;
+        if profile.kind != DatabaseKind::MongoDb {
+            return Err("This relation is not a MongoDB collection".to_owned());
+        }
+        if profile.read_only {
+            return Err(MONGODB_READ_ONLY_MESSAGE.to_owned());
+        }
+        let Some(RelationGridMode::EditDocument(state)) = tab.edit.as_ref().map(|edit| &edit.mode)
+        else {
+            return Err("the document modal is no longer open".to_owned());
+        };
+        if state.saving {
+            return Err("the document is already being replaced".to_owned());
+        }
+        let document = tab
+            .mongodb_documents
+            .as_ref()
+            .and_then(|documents| documents.get(state.row))
+            .ok_or_else(|| {
+                "There is no document at the cursor to replace; reload the page".to_owned()
+            })?;
+        if document.bson.get("_id") != Some(&state.id) {
+            return Err("the document changed since the modal opened; reload the page".to_owned());
+        }
+        let replacement = state.replacement_document()?;
+        if replacement.get("_id") != Some(&state.id) {
+            return Err("the replacement document must keep the original _id".to_owned());
+        }
+        let connection = match &tab.data {
+            RelationLoad::Ready(snapshot) => Some(snapshot.attribution.connection),
+            _ => None,
+        }
+        .filter(|connection| self.connection_identity_is_live(*connection))
+        .ok_or_else(|| "the document page is no longer live; reload the collection".to_owned())?;
+        let namespace = crate::db::mongodb::types::MongoNamespace::from_native_path(
+            &tab.descriptor.key.object_id.native_path,
+        )
+        .ok_or_else(|| "This relation is not a MongoDB collection".to_owned())?;
+        Ok(MongoDocumentReplacement {
+            tab_id: tab.id,
+            tab_generation: tab.generation,
+            connection,
+            namespace,
+            id: state.id.clone(),
+            expected: state.expected.clone(),
+            replacement,
+        })
+    }
+
+    /// Saves the document modal as one replacement bounded to its `_id`.
+    fn mongo_relation_document_save(&mut self) -> Vec<Command> {
+        let replacement = match self.plan_mongo_document_replacement() {
+            Ok(replacement) => replacement,
+            Err(message) => {
+                self.mongo_document_error(&message);
+                return Vec::new();
+            }
+        };
+        let unchanged_ejson = self
+            .tabs
+            .get(self.active_tab)
+            .and_then(|tab| match tab {
+                WorkspaceTab::Relation(tab) => tab.edit.as_ref(),
+                _ => None,
+            })
+            .is_some_and(|edit| {
+                matches!(
+                    &edit.mode,
+                    RelationGridMode::EditDocument(state)
+                        if state.view == DocumentEditorView::Ejson
+                )
+            });
+        if unchanged_ejson && replacement.expected == replacement.replacement {
+            if let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab)
+                && let Some(edit) = tab.edit.as_mut()
+            {
+                edit.mode = RelationGridMode::Browse;
+            }
+            self.notify_info("Relation", "No document changes to save");
+            return Vec::new();
+        }
+        if let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab)
+            && let Some(edit) = tab.edit.as_mut()
+            && let RelationGridMode::EditDocument(state) = &mut edit.mode
+        {
+            state.error = None;
+            state.saving = true;
+        }
+        vec![Command::ReplaceMongoRelationDocument {
+            tab_id: replacement.tab_id,
+            tab_generation: replacement.tab_generation,
+            connection: replacement.connection,
+            namespace: replacement.namespace,
+            id: replacement.id,
+            expected: replacement.expected,
+            replacement: replacement.replacement,
+        }]
+    }
+
+    /// Applies the answer to a planned document replacement.
+    ///
+    /// A result whose tab generation no longer matches, or whose `_id` is not
+    /// the document the open modal edits, belongs to a page that was already
+    /// replaced: it is dropped instead of closing or reloading anything.
+    fn mongo_relation_document_result(&mut self, action: Action) -> Vec<Command> {
+        let (tab_id, tab_generation, id, failure) = match action {
+            Action::MongoRelationDocumentReplaced {
+                tab_id,
+                tab_generation,
+                id,
+            } => (tab_id, tab_generation, id, None),
+            Action::MongoRelationDocumentReplaceFailed {
+                tab_id,
+                tab_generation,
+                id,
+                message,
+            } => (tab_id, tab_generation, id, Some(message)),
+            _ => return Vec::new(),
+        };
+        let Some(index) = self.tabs.iter().position(|tab| tab.id() == tab_id) else {
+            return Vec::new();
+        };
+        let current = match self.tabs.get(index) {
+            Some(WorkspaceTab::Relation(tab)) => {
+                tab.generation == tab_generation
+                    && matches!(
+                        tab.edit.as_ref().map(|edit| &edit.mode),
+                        Some(RelationGridMode::EditDocument(state)) if state.id == id
+                    )
+            }
+            _ => false,
+        };
+        if !current {
+            return Vec::new();
+        }
+        let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(index) else {
+            return Vec::new();
+        };
+        if let Some(message) = failure {
+            if let Some(edit) = tab.edit.as_mut()
+                && let RelationGridMode::EditDocument(state) = &mut edit.mode
+            {
+                state.saving = false;
+                state.error = Some(message);
+            }
+            return Vec::new();
+        }
+        let collection = tab.descriptor.title.clone();
+        if let Some(edit) = tab.edit.as_mut() {
+            edit.mode = RelationGridMode::Browse;
+        }
+        let page = crate::model::pagination::PageRequest::at(
+            tab.pagination.page_size,
+            tab.pagination.offset,
+        );
+        self.notify_success("Relation", format!("Document replaced in {collection}"));
+        if index != self.active_tab {
+            return Vec::new();
+        }
+        self.load_active_relation_with_page(true, Some(page))
     }
 
     fn relation_edit_insert(&mut self, character: char) {
+        if let Some(edit) = self.relation_session_mut() {
+            match &mut edit.mode {
+                RelationGridMode::EditCell(state) => {
+                    state
+                        .input
+                        .apply_text_edit(crate::model::text_input::TextInputEdit::Insert(
+                            character,
+                        ));
+                }
+                RelationGridMode::EditDocument(state) => match state.view {
+                    // One keystroke belongs to one surface: the EJSON text or
+                    // the one focused field.
+                    DocumentEditorView::Ejson => {
+                        state
+                            .input
+                            .apply(crate::model::text_input::TextInputEdit::Insert(character));
+                    }
+                    DocumentEditorView::Fields => {
+                        state.edit_field_text(crate::model::text_input::TextInputEdit::Insert(
+                            character,
+                        ));
+                    }
+                },
+                _ => {}
+            }
+        }
+    }
+
+    /// Switches the document modal between the EJSON text and the field list.
+    fn relation_document_toggle_view(&mut self) {
         if let Some(edit) = self.relation_session_mut()
-            && let RelationGridMode::EditCell(state) = &mut edit.mode
+            && let RelationGridMode::EditDocument(state) = &mut edit.mode
         {
-            state
-                .input
-                .apply_text_edit(crate::model::text_input::TextInputEdit::Insert(character));
+            state.view = match state.view {
+                DocumentEditorView::Ejson => DocumentEditorView::Fields,
+                DocumentEditorView::Fields => DocumentEditorView::Ejson,
+            };
+            state.field_edit = None;
+            state.field_error = None;
+        }
+    }
+
+    /// Moves the field-list cursor, clamped to the fields the document has.
+    fn relation_document_field_move(&mut self, delta: isize) {
+        if let Some(edit) = self.relation_session_mut()
+            && let RelationGridMode::EditDocument(state) = &mut edit.mode
+            && state.field_edit.is_none()
+        {
+            state.move_field(delta);
+        }
+    }
+
+    /// Opens the single-line editor on the selected field, or reports why that
+    /// field cannot be edited (`_id` is immutable).
+    fn relation_document_field_begin_edit(&mut self) {
+        if let Some(edit) = self.relation_session_mut()
+            && let RelationGridMode::EditDocument(state) = &mut edit.mode
+            && state.view == DocumentEditorView::Fields
+        {
+            state.begin_field_edit();
+        }
+    }
+
+    /// Applies the open field editor back into the document text.
+    ///
+    /// Only the EJSON text changes; the write still happens through the same
+    /// bounded replacement the whole-document save uses.
+    fn relation_document_field_apply(&mut self) {
+        if let Some(edit) = self.relation_session_mut()
+            && let RelationGridMode::EditDocument(state) = &mut edit.mode
+            && let Some(field) = state.field_edit.clone()
+        {
+            match state.apply_field(&field.name, field.input.value()) {
+                Ok(()) => {
+                    state.field_edit = None;
+                    state.field_error = None;
+                }
+                Err(message) => state.field_error = Some(message),
+            }
+        }
+    }
+
+    /// Leaves the field editor without changing the document text.
+    fn relation_document_field_cancel(&mut self) {
+        if let Some(edit) = self.relation_session_mut()
+            && let RelationGridMode::EditDocument(state) = &mut edit.mode
+        {
+            state.field_edit = None;
+            state.field_error = None;
         }
     }
 
@@ -28302,39 +28757,76 @@ impl App {
     }
 
     fn relation_edit_apply_text_edit(&mut self, edit: crate::model::text_input::TextInputEdit) {
-        if let Some(edit_session) = self.relation_session_mut()
-            && let RelationGridMode::EditCell(state) = &mut edit_session.mode
-        {
-            state.input.apply_text_edit(edit);
+        if let Some(edit_session) = self.relation_session_mut() {
+            match &mut edit_session.mode {
+                RelationGridMode::EditCell(state) => {
+                    state.input.apply_text_edit(edit);
+                }
+                RelationGridMode::EditDocument(state) => match state.view {
+                    DocumentEditorView::Ejson => {
+                        if state.input.apply(edit) {
+                            state.error = None;
+                        }
+                    }
+                    DocumentEditorView::Fields => {
+                        state.edit_field_text(edit);
+                    }
+                },
+                _ => {}
+            }
         }
     }
 
     fn relation_edit_json_move(&mut self, direction: isize) {
-        if let Some(edit_session) = self.relation_session_mut()
-            && let RelationGridMode::EditCell(state) = &mut edit_session.mode
-            && let Some(json) = state.input.json_buffer_mut()
-        {
-            if direction < 0 {
-                json.move_up();
-            } else {
-                json.move_down();
+        if let Some(edit_session) = self.relation_session_mut() {
+            match &mut edit_session.mode {
+                RelationGridMode::EditCell(state) => {
+                    if let Some(json) = state.input.json_buffer_mut() {
+                        if direction < 0 {
+                            json.move_up();
+                        } else {
+                            json.move_down();
+                        }
+                    }
+                }
+                RelationGridMode::EditDocument(state) => {
+                    if direction < 0 {
+                        state.input.move_up();
+                    } else {
+                        state.input.move_down();
+                    }
+                }
+                _ => {}
             }
         }
     }
 
     fn relation_edit_json_format(&mut self) {
-        if let Some(edit) = self.relation_session_mut()
-            && let RelationGridMode::EditCell(state) = &mut edit.mode
-            && let Some(json) = state.input.json_buffer_mut()
-        {
-            if let Ok(formatted) = json.format() {
-                state.input.replace_json_value(formatted);
-                state.error = None;
-            } else {
-                state.error = json
-                    .validate()
-                    .err()
-                    .map(|error| format!("{} at {}:{}", error.message, error.line, error.column));
+        if let Some(edit) = self.relation_session_mut() {
+            match &mut edit.mode {
+                RelationGridMode::EditCell(state) => {
+                    if let Some(json) = state.input.json_buffer_mut() {
+                        if let Ok(formatted) = json.format() {
+                            state.input.replace_json_value(formatted);
+                            state.error = None;
+                        } else {
+                            state.error = json.validate().err().map(|error| {
+                                format!("{} at {}:{}", error.message, error.line, error.column)
+                            });
+                        }
+                    }
+                }
+                RelationGridMode::EditDocument(state) => {
+                    if let Ok(formatted) = state.input.format() {
+                        state.input.replace_value(formatted);
+                        state.error = None;
+                    } else {
+                        state.error = state.input.validate().err().map(|error| {
+                            format!("{} at {}:{}", error.message, error.line, error.column)
+                        });
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -28383,6 +28875,18 @@ impl App {
     }
 
     fn relation_edit_confirm(&mut self) -> Vec<Command> {
+        if self.tabs.get(self.active_tab).is_some_and(|tab| {
+            matches!(
+                tab,
+                WorkspaceTab::Relation(tab)
+                    if tab
+                        .edit
+                        .as_ref()
+                        .is_some_and(|edit| edit.has_unfinished_document_edit())
+            )
+        }) {
+            return self.mongo_relation_document_save();
+        }
         let Some((state, old, type_name)) =
             self.tabs.get(self.active_tab).and_then(|tab| match tab {
                 WorkspaceTab::Relation(tab) => {
@@ -29319,8 +29823,7 @@ impl App {
         tab.grid.selected_column = 0;
         // Drop the tab/edit borrow before reopening through the canonical cell path.
         let _ = tab;
-        self.relation_edit_cell();
-        Vec::new()
+        self.relation_edit_cell()
     }
     fn relation_undo(&mut self) -> Vec<Command> {
         if let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab)
@@ -29580,6 +30083,9 @@ impl App {
         refresh: bool,
         requested_page: Option<crate::model::pagination::PageRequest>,
     ) -> Vec<Command> {
+        if self.active_relation_is_mongodb() {
+            return self.load_active_mongo_relation(refresh, requested_page);
+        }
         let console_id = self
             .tabs
             .get(self.active_tab)
@@ -29750,6 +30256,312 @@ impl App {
         }
     }
 
+    fn active_relation_is_mongodb(&self) -> bool {
+        match self.tabs.get(self.active_tab) {
+            Some(WorkspaceTab::Relation(tab)) => self
+                .profiles
+                .iter()
+                .find(|profile| profile.id == tab.descriptor.key.profile_id)
+                .is_some_and(|profile| profile.kind == DatabaseKind::MongoDb),
+            _ => false,
+        }
+    }
+
+    /// Loads the active MongoDB relation tab through the document preview path.
+    ///
+    /// A MongoDB relation is addressed directly by its namespace, so it skips the
+    /// SQL catalog scope, descriptor resolution and SQL preview options; the page
+    /// request carries the offset and size the grid asks for.
+    fn load_active_mongo_relation(
+        &mut self,
+        refresh: bool,
+        requested_page: Option<crate::model::pagination::PageRequest>,
+    ) -> Vec<Command> {
+        match self.tabs.get(self.active_tab) {
+            Some(WorkspaceTab::Relation(tab)) if tab.view == RelationView::Ddl => {
+                return self.load_active_mongo_structure(refresh);
+            }
+            Some(WorkspaceTab::Relation(_)) => {}
+            _ => return Vec::new(),
+        }
+        let console_id = self
+            .tabs
+            .get(self.active_tab)
+            .map_or(Uuid::nil(), WorkspaceTab::id);
+        let Some(WorkspaceTab::Relation(tab)) = self.tabs.get(self.active_tab) else {
+            return Vec::new();
+        };
+        if tab.transaction_state != TransactionState::Idle || relation_has_pending_edits(tab) {
+            self.notify_warning(
+                "Relation",
+                "Commit or discard relation edits before refreshing",
+            );
+            return Vec::new();
+        }
+        let profile_id = tab.descriptor.key.profile_id;
+        let Some(profile) = self
+            .profiles
+            .iter()
+            .find(|profile| profile.id == profile_id)
+            .cloned()
+        else {
+            return Vec::new();
+        };
+        let Some(connection) = self
+            .sessions
+            .identities_for_profile(profile_id)
+            .into_iter()
+            .next()
+        else {
+            return Vec::new();
+        };
+        let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab) else {
+            return Vec::new();
+        };
+        if refresh && requested_page.is_none() {
+            tab.pagination = crate::model::pagination::ResultPagination::from_page(
+                crate::model::pagination::PageRequest::first(tab.pagination.page_size),
+                0,
+            );
+            tab.pagination.total = crate::model::pagination::TotalRows::LowerBound(0);
+            tab.grid.selected_row = 0;
+            tab.grid.row_offset = 0;
+        }
+        let should_load = refresh
+            || matches!(
+                tab.data,
+                RelationLoad::Empty | RelationLoad::Failed { .. } | RelationLoad::Cancelled { .. }
+            );
+        if !should_load {
+            return Vec::new();
+        }
+        let previous_request = pending_relation_request(&tab.data);
+        let previous = match std::mem::replace(&mut tab.data, RelationLoad::Empty) {
+            RelationLoad::Ready(snapshot) => Some(snapshot),
+            RelationLoad::Loading { previous, .. }
+            | RelationLoad::Failed { previous, .. }
+            | RelationLoad::Cancelled { previous } => previous,
+            RelationLoad::Empty => None,
+        };
+        let request = RelationRequest {
+            tab_id: tab.id,
+            console_id,
+            tab_generation: tab.generation,
+            request_id: tab.next_request_id,
+            connection,
+            relation: tab.descriptor.key.clone(),
+            kind: RelationRequestKind::Preview,
+            scope: profile.catalog_scope.clone(),
+            options: tab.query.submitted.clone(),
+            page: requested_page.unwrap_or(crate::model::pagination::PageRequest::at(
+                tab.pagination.page_size,
+                tab.pagination.offset,
+            )),
+        };
+        tab.next_request_id = tab.next_request_id.saturating_add(1);
+        tab.data = RelationLoad::Loading {
+            request: request.clone(),
+            previous,
+        };
+        previous_request
+            .map(Command::CancelRelationRequest)
+            .into_iter()
+            .chain([Command::LoadMongoRelationPreview(request)])
+            .collect()
+    }
+
+    /// Loads the structure report for a MongoDB relation tab shown on DDL.
+    ///
+    /// A collection reuses the relation DDL view, whose text is the structure
+    /// report: the real metadata plus, when the DATA grid has loaded a page, the
+    /// schema inferred from that page.
+    fn load_active_mongo_structure(&mut self, refresh: bool) -> Vec<Command> {
+        let console_id = self
+            .tabs
+            .get(self.active_tab)
+            .map_or(Uuid::nil(), WorkspaceTab::id);
+        let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab) else {
+            return Vec::new();
+        };
+        if tab.view != RelationView::Ddl {
+            return Vec::new();
+        }
+        let profile_id = tab.descriptor.key.profile_id;
+        let Some(profile) = self
+            .profiles
+            .iter()
+            .find(|profile| profile.id == profile_id)
+            .cloned()
+        else {
+            return Vec::new();
+        };
+        let Some(connection) = self
+            .sessions
+            .identities_for_profile(profile_id)
+            .into_iter()
+            .next()
+        else {
+            return Vec::new();
+        };
+        let should_load = refresh
+            || tab.ddl_refresh_needed
+            || matches!(
+                tab.ddl,
+                RelationLoad::Empty | RelationLoad::Cancelled { .. }
+            );
+        if !should_load {
+            return Vec::new();
+        }
+        let page = crate::model::pagination::PageRequest::at(
+            tab.pagination.page_size,
+            tab.pagination.offset,
+        );
+        // Keep the exact BSON source for the DATA grid's schema report. The
+        // metadata request must not fetch a newer page in the background.
+        let documents = matches!(tab.data, RelationLoad::Ready(_))
+            .then(|| tab.mongodb_documents.clone())
+            .flatten();
+        let previous_request = pending_relation_request(&tab.ddl);
+        let previous = match std::mem::replace(&mut tab.ddl, RelationLoad::Empty) {
+            RelationLoad::Ready(snapshot) => Some(snapshot),
+            RelationLoad::Loading { previous, .. }
+            | RelationLoad::Failed { previous, .. }
+            | RelationLoad::Cancelled { previous } => previous,
+            RelationLoad::Empty => None,
+        };
+        let request = RelationRequest {
+            tab_id: tab.id,
+            console_id,
+            tab_generation: tab.generation,
+            request_id: tab.next_request_id,
+            connection,
+            relation: tab.descriptor.key.clone(),
+            kind: RelationRequestKind::Ddl,
+            scope: profile.catalog_scope.clone(),
+            options: tab.query.submitted.clone(),
+            page,
+        };
+        tab.next_request_id = tab.next_request_id.saturating_add(1);
+        tab.ddl = RelationLoad::Loading {
+            request: request.clone(),
+            previous,
+        };
+        previous_request
+            .map(Command::CancelRelationRequest)
+            .into_iter()
+            .chain([Command::LoadMongoRelationStructure { request, documents }])
+            .collect()
+    }
+
+    /// Fills the DATA grid of a MongoDB relation with one page and keeps the
+    /// BSON documents the rows were mapped from.
+    ///
+    /// Staleness is decided by the same guard the SQL preview uses, so a late
+    /// page can never replace a newer one or install its documents next to rows
+    /// that came from another request.
+    fn mongo_relation_preview_loaded(
+        &mut self,
+        request: RelationRequest,
+        preview: crate::db::RelationPreview,
+        documents: Vec<crate::db::mongodb::types::MongoDocument>,
+    ) -> Vec<Command> {
+        let tab_id = request.tab_id;
+        let is_current = self.tabs.iter().any(|tab| match tab {
+            WorkspaceTab::Relation(tab) => {
+                tab.id == tab_id && self.relation_result_is_current(&request, tab)
+            }
+            _ => false,
+        });
+        let commands = self.accept_relation(request, Ok(RelationSnapshot::Preview(preview)));
+        if !is_current {
+            return commands;
+        }
+        if let Some(index) = self.tabs.iter().position(|tab| tab.id() == tab_id) {
+            if let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(index)
+                && matches!(tab.data, RelationLoad::Ready(_))
+            {
+                tab.mongodb_documents = Some(documents);
+                tab.ddl_refresh_needed = true;
+            }
+        }
+        if self.active_tab_id() == Some(tab_id) {
+            self.refresh_active_data_query_completion();
+        }
+        commands
+    }
+
+    /// Fills the DDL view of a MongoDB relation with its structure report.
+    ///
+    /// The report text and the `RelationDdl` wrapper go through exactly the same
+    /// `tab.ddl` slot and read-only editor the SQL DDL path uses.
+    fn mongo_relation_structure_loaded(
+        &mut self,
+        request: RelationRequest,
+        result: Result<Box<crate::model::mongodb_structure::MongoStructureSnapshot>, String>,
+    ) -> Vec<Command> {
+        let Some(tab_index) = self.tabs.iter().position(|tab| match tab {
+            WorkspaceTab::Relation(tab) => tab.id == request.tab_id,
+            _ => false,
+        }) else {
+            return Vec::new();
+        };
+        let is_current = self.tabs.get(tab_index).is_some_and(|tab| match tab {
+            WorkspaceTab::Relation(tab) => self.relation_result_is_current(&request, tab),
+            _ => false,
+        });
+        if !is_current {
+            return Vec::new();
+        }
+        let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(tab_index) else {
+            return Vec::new();
+        };
+        let failure = match result {
+            Ok(snapshot) => {
+                let text = crate::model::mongodb_structure::render_report(&snapshot);
+                match crate::model::mongodb_structure::relation_ddl(
+                    &request,
+                    &tab.descriptor,
+                    text.clone(),
+                ) {
+                    Ok(ddl) => {
+                        tab.ddl = RelationLoad::Ready(crate::model::relation::OwnedSnapshot {
+                            value: ddl,
+                            attribution: crate::model::relation::SnapshotAttribution {
+                                connection: request.connection,
+                                profile_id: request.connection.profile_id,
+                                scope: request.scope.clone(),
+                            },
+                        });
+                        tab.ddl_refresh_needed = false;
+                        let _ = self
+                            .editor
+                            .set_read_only_text(tab.ddl_editor_id, &text, false);
+                        None
+                    }
+                    Err(error) => Some(error),
+                }
+            }
+            Err(message) => Some(message),
+        };
+        let Some(failure) = failure else {
+            return Vec::new();
+        };
+        let message = format!("Could not load collection structure: {failure}");
+        let previous = match std::mem::replace(&mut tab.ddl, RelationLoad::Empty) {
+            RelationLoad::Ready(snapshot) => Some(snapshot),
+            RelationLoad::Loading { previous, .. }
+            | RelationLoad::Failed { previous, .. }
+            | RelationLoad::Cancelled { previous } => previous,
+            RelationLoad::Empty => None,
+        };
+        tab.ddl = RelationLoad::Failed {
+            message: message.clone(),
+            previous,
+        };
+        self.notify_error("Relation", &message);
+        Vec::new()
+    }
+
     fn relation_page(&mut self, action: Action) -> Vec<Command> {
         let page = {
             let Some(WorkspaceTab::Relation(tab)) = self.tabs.get(self.active_tab) else {
@@ -29854,6 +30666,7 @@ impl App {
                             scope: request.scope.clone(),
                         },
                     });
+                    tab.ddl_refresh_needed = false;
                     let _ = self
                         .editor
                         .set_read_only_text(tab.ddl_editor_id, &ddl_text, false);
@@ -29934,7 +30747,12 @@ impl App {
                 .profiles
                 .iter()
                 .find(|profile| profile.id == request.connection.profile_id)
-                .is_some_and(|profile| relation_is_in_scope(tab, &profile.catalog_scope))
+                .is_some_and(|profile| {
+                    // A MongoDB relation is addressed by its namespace, not by the
+                    // SQL catalog, so the catalog scope never hides its snapshot.
+                    profile.kind == DatabaseKind::MongoDb
+                        || relation_is_in_scope(tab, &profile.catalog_scope)
+                })
     }
 
     fn manual_matches(
@@ -30050,6 +30868,18 @@ fn relation_execution_target(
         target.schema = tab.descriptor.qualified_name.schema.clone();
     }
     target.is_valid(profile).then_some(target)
+}
+
+/// Everything one planned document replacement needs, validated without
+/// mutating the tab so a refusal emits no command.
+struct MongoDocumentReplacement {
+    tab_id: Uuid,
+    tab_generation: u64,
+    connection: ConnectionIdentity,
+    namespace: crate::db::mongodb::types::MongoNamespace,
+    id: mongodb::bson::Bson,
+    expected: mongodb::bson::Document,
+    replacement: mongodb::bson::Document,
 }
 
 fn relation_is_in_scope(tab: &RelationTab, scope: &crate::profile::CatalogScope) -> bool {

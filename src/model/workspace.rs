@@ -1341,7 +1341,22 @@ impl ExplorerState {
                             crate::db::mongodb::types::MongoExplorerNodeId::Monitor(database) => format!("Monitor · {database}"),
                             crate::db::mongodb::types::MongoExplorerNodeId::Users(database) => format!("Users & Roles · {database}"),
                         };
-                        (label, None, None, None, None, None, None, None, None, false, None)
+                        let kind = match node {
+                            crate::db::mongodb::types::MongoExplorerNodeId::Database(_) => {
+                                Some(CatalogKind::Database)
+                            }
+                            crate::db::mongodb::types::MongoExplorerNodeId::Collection(_) => {
+                                Some(CatalogKind::Table)
+                            }
+                            crate::db::mongodb::types::MongoExplorerNodeId::Index { .. } => {
+                                Some(CatalogKind::Index)
+                            }
+                            _ => None,
+                        };
+                        let expandable = row.id.profile_id().is_some_and(|profile_id| {
+                            self.normalized.mongo_node_is_expandable(profile_id, node)
+                        });
+                        (label, None, None, kind, None, None, None, None, None, expandable, None)
                     }
                     ExplorerNodeId::EmptyProfiles => (
                         "No profiles".to_owned(),
@@ -1585,16 +1600,20 @@ impl ExplorerState {
         let Some(id) = self.selected_id().cloned() else {
             return false;
         };
-        if !matches!(
-            id,
+        let expandable = match &id {
             ExplorerNodeId::ConnectionGroup { .. }
-                | ExplorerNodeId::Others
-                | ExplorerNodeId::Profile(_)
-                | ExplorerNodeId::Catalog(_)
-                | ExplorerNodeId::ProjectionGroup(_)
-                | ExplorerNodeId::Group { .. }
-                | ExplorerNodeId::PrincipalGroup { .. }
-        ) {
+            | ExplorerNodeId::Others
+            | ExplorerNodeId::Profile(_)
+            | ExplorerNodeId::Catalog(_)
+            | ExplorerNodeId::ProjectionGroup(_)
+            | ExplorerNodeId::Group { .. }
+            | ExplorerNodeId::PrincipalGroup { .. } => true,
+            ExplorerNodeId::Mongo { profile_id, node } => {
+                self.normalized.mongo_node_is_expandable(*profile_id, node)
+            }
+            _ => false,
+        };
+        if !expandable {
             return false;
         }
         if let ExplorerNodeId::Profile(profile_id) = id

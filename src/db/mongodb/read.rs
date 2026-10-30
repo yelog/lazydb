@@ -1,15 +1,71 @@
 use futures_util::StreamExt;
 use mongodb::bson::{Document, raw::RawDocumentBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use crate::db::{DatabaseError, ErrorCategory};
+use crate::db::{
+    DatabaseError, ErrorCategory, RelationPreview,
+    query::{ColumnMeta, QueryOutcome, ResultSet},
+    value::CellValue,
+};
+use crate::model::pagination::{PageRequest, PageSize, ResultPagination, TotalRows};
 
 use super::{
     MongoAdapter,
-    types::{FindSpec, MongoDocument, MongoDocumentPage},
+    types::{FindSpec, MongoDocument, MongoDocumentPage, MongoNamespace},
 };
 
+/// The field the document grid sorts on so one page request is stable.
+const PAGINATION_SORT_FIELD: &str = "_id";
+
+/// One relation page plus the BSON documents its grid rows were mapped from.
+///
+/// The modal needs the originals: the grid keeps only `CellValue`s, and an
+/// `_id` rendered as text is not the value a write must be bounded to.
+#[derive(Clone, Debug)]
+pub struct MongoRelationPage {
+    pub preview: RelationPreview,
+    pub documents: Vec<MongoDocument>,
+}
+
 impl MongoAdapter {
+    /// Loads one page of documents for the relation DATA grid.
+    ///
+    /// The page budget is the `FindSpec` skip/limit budget, so the grid reads a
+    /// bounded page of the collection instead of draining it.
+    pub async fn relation_page(
+        &self,
+        namespace: &MongoNamespace,
+        request: PageRequest,
+    ) -> Result<MongoRelationPage, DatabaseError> {
+        let spec = relation_find_spec(namespace, request);
+        let started = Instant::now();
+        let page = self.find_page(&spec).await?;
+        let execution = started.elapsed();
+        let started = Instant::now();
+        let pagination = relation_pagination(&spec, &page);
+        let result = page_result_set(&page);
+        let fetch = started.elapsed();
+        Ok(MongoRelationPage {
+            preview: RelationPreview {
+                sql: find_description(&spec),
+                result: QueryOutcome::from_result_set(result, execution, fetch),
+                pagination,
+                row_versions: None,
+            },
+            documents: page.documents,
+        })
+    }
+
+    /// Loads one page of documents for the relation DATA grid, discarding the
+    /// BSON originals.
+    pub async fn relation_preview(
+        &self,
+        namespace: &MongoNamespace,
+        request: PageRequest,
+    ) -> Result<RelationPreview, DatabaseError> {
+        Ok(self.relation_page(namespace, request).await?.preview)
+    }
+
     pub async fn distinct_values(
         &self,
         spec: &FindSpec,
@@ -263,4 +319,126 @@ impl MongoAdapter {
             .await
             .map_err(super::map_error)
     }
+}
+
+/// Builds the `FindSpec` for one relation grid page.
+///
+/// The grid page sizes are larger than one bounded page the driver budget
+/// allows, so the size is clamped to [`FindSpec::MAX_PAGE_SIZE`]. The limit
+/// asks for one lookahead document so a full page still advertises a next page.
+pub fn relation_find_spec(namespace: &MongoNamespace, request: PageRequest) -> FindSpec {
+    let page_size = request.size.get().min(FindSpec::MAX_PAGE_SIZE as usize) as u32;
+    let mut spec = FindSpec::new(namespace.clone());
+    // An explicit stable sort keeps offsets comparable between page requests.
+    spec.sort = Some(mongodb::bson::doc! { PAGINATION_SORT_FIELD: 1 });
+    spec.page_size = page_size;
+    spec.batch_size = page_size;
+    spec.skip = request.offset;
+    spec.limit = Some(
+        request
+            .offset
+            .saturating_add(u64::from(page_size))
+            .saturating_add(1),
+    );
+    spec
+}
+
+/// Human-readable description of the `find` command the preview executes.
+///
+/// The relation DATA view always shows the statement behind a snapshot, so the
+/// MongoDB preview describes its own read instead of claiming to be SQL.
+pub fn find_description(spec: &FindSpec) -> String {
+    let collection = spec.namespace.collection.as_deref().unwrap_or_default();
+    let mut description = format!("db.{collection}.find({})", spec.filter);
+    if let Some(sort) = &spec.sort {
+        description.push_str(&format!(".sort({sort})"));
+    }
+    if let Some(projection) = &spec.projection {
+        description.push_str(&format!(".projection({projection})"));
+    }
+    description.push_str(&format!(".skip({})", spec.skip));
+    if let Some(limit) = spec.limit {
+        description.push_str(&format!(".limit({limit})"));
+    }
+    description
+}
+
+/// Maps one document page onto the relation grid result set.
+pub fn page_result_set(page: &MongoDocumentPage) -> ResultSet {
+    let columns = crate::model::mongodb_browser::page_columns(page);
+    ResultSet {
+        rows: page
+            .documents
+            .iter()
+            .map(|document| {
+                columns
+                    .iter()
+                    .map(|column| document_cell_value(document, column))
+                    .collect()
+            })
+            .collect(),
+        columns: columns
+            .iter()
+            .map(|name| ColumnMeta {
+                name: name.clone(),
+                type_name: column_type_name(page, name),
+            })
+            .collect(),
+        affected_rows: 0,
+    }
+}
+
+/// One grid cell for a top-level field.
+///
+/// BSON maps onto the existing [`CellValue`] variants: scalars keep their type
+/// and every other value reuses the document grid text, so an `ObjectId` is its
+/// hex form and nested shapes are their `{n fields}` / `[n]` markers.
+fn document_cell_value(document: &MongoDocument, field: &str) -> CellValue {
+    use mongodb::bson::Bson;
+
+    let Some(value) = document.bson.get(field) else {
+        return CellValue::Null;
+    };
+    match value {
+        Bson::String(text) => CellValue::Text(text.clone()),
+        Bson::Int32(number) => CellValue::Integer(i64::from(*number)),
+        Bson::Int64(number) => CellValue::Integer(*number),
+        Bson::Double(number) => CellValue::Float(*number),
+        Bson::Boolean(flag) => CellValue::Boolean(*flag),
+        Bson::Null | Bson::Undefined => CellValue::Null,
+        _ => CellValue::Text(crate::model::mongodb_browser::document_cell(
+            document, field,
+        )),
+    }
+}
+
+/// The observed BSON type of a column, taken from the first document carrying it.
+fn column_type_name(page: &MongoDocumentPage, field: &str) -> String {
+    page.documents
+        .iter()
+        .find_map(|document| document.bson.get(field))
+        .map(|value| format!("{:?}", value.element_type()))
+        .unwrap_or_default()
+}
+
+/// Paginates the page that was actually fetched, never the requested size.
+fn relation_pagination(spec: &FindSpec, page: &MongoDocumentPage) -> ResultPagination {
+    let size = PageSize::try_from(spec.page_size as usize).unwrap_or(PageSize::FiveHundred);
+    let mut pagination = ResultPagination::from_page(
+        PageRequest {
+            size,
+            offset: spec.skip,
+            resolve_total: false,
+        },
+        page.documents.len(),
+    );
+    if page.next_offset.is_some() {
+        pagination.has_next = true;
+        pagination.total = TotalRows::LowerBound(
+            spec.skip
+                .saturating_add(pagination.visible_rows as u64)
+                .saturating_add(1),
+        );
+    }
+    pagination
 }

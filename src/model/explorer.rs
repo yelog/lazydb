@@ -2056,26 +2056,8 @@ impl ExplorerTreeState {
                     ),
                 };
                 projection.push(database_node.clone(), child_depth);
-                if self.expanded.contains(&database_node) {
-                    projection.push(
-                        ExplorerNodeId::Mongo {
-                            profile_id,
-                            node: crate::db::mongodb::types::MongoExplorerNodeId::Monitor(
-                                database.clone(),
-                            ),
-                        },
-                        child_depth + 1,
-                    );
-                    projection.push(
-                        ExplorerNodeId::Mongo {
-                            profile_id,
-                            node: crate::db::mongodb::types::MongoExplorerNodeId::Users(
-                                database.clone(),
-                            ),
-                        },
-                        child_depth + 1,
-                    );
-                }
+                // Monitor and Users & Roles are reached from the database row
+                // with `m` and `u`; listing them here buried the collections.
                 if self.expanded.contains(&database_node) {
                     if let Some(collections) = profile.mongodb_collections.get(database) {
                         for collection in collections {
@@ -2215,39 +2197,9 @@ impl ExplorerTreeState {
             }
             ExplorerNodeId::Others => true,
             ExplorerNodeId::PrincipalGroup { profile_id } => self.profiles.contains_key(profile_id),
-            ExplorerNodeId::Mongo { profile_id, node } => match node {
-                crate::db::mongodb::types::MongoExplorerNodeId::Database(_) => self
-                    .profiles
-                    .get(profile_id)
-                    .is_some_and(|profile| profile.kind == DatabaseKind::MongoDb),
-                crate::db::mongodb::types::MongoExplorerNodeId::Collection(namespace) => {
-                    self.profiles.get(profile_id).is_some_and(|profile| {
-                        profile
-                            .mongodb_collections
-                            .get(&namespace.database)
-                            .is_some_and(|collections| {
-                                collections
-                                    .iter()
-                                    .any(|collection| collection.namespace == *namespace)
-                            })
-                    })
-                }
-                crate::db::mongodb::types::MongoExplorerNodeId::Index { namespace, name } => {
-                    self.profiles.get(profile_id).is_some_and(|profile| {
-                        profile
-                            .mongodb_indexes
-                            .get(namespace)
-                            .is_some_and(|indexes| indexes.iter().any(|index| index.name == *name))
-                    })
-                }
-                crate::db::mongodb::types::MongoExplorerNodeId::Monitor(database)
-                | crate::db::mongodb::types::MongoExplorerNodeId::Users(database) => self
-                    .profiles
-                    .get(profile_id)
-                    .is_some_and(|profile| profile.mongodb_databases.contains(database)),
-                crate::db::mongodb::types::MongoExplorerNodeId::RetryCollections(_)
-                | crate::db::mongodb::types::MongoExplorerNodeId::RetryIndexes(_) => false,
-            },
+            ExplorerNodeId::Mongo { profile_id, node } => {
+                self.mongo_node_is_expandable(*profile_id, node)
+            }
             ExplorerNodeId::EmptyProfiles
             | ExplorerNodeId::Status { .. }
             | ExplorerNodeId::LoadMore { .. }
@@ -2257,6 +2209,43 @@ impl ExplorerTreeState {
             | ExplorerNodeId::RedisDatabase { .. } => false,
         };
         expandable && self.expanded.insert(selected)
+    }
+
+    /// Whether a MongoDB node can be expanded into children.
+    ///
+    /// Only databases and loaded collections have children: databases hold
+    /// collections and collections hold indexes. Action rows (monitor, users,
+    /// retry) and index rows are leaves. The Explorer projection uses this to
+    /// decide whether a row advertises an expand affordance, so it has to agree
+    /// with [`Self::expand`].
+    pub fn mongo_node_is_expandable(
+        &self,
+        profile_id: Uuid,
+        node: &crate::db::mongodb::types::MongoExplorerNodeId,
+    ) -> bool {
+        use crate::db::mongodb::types::MongoExplorerNodeId;
+        let Some(profile) = self.profiles.get(&profile_id) else {
+            return false;
+        };
+        if profile.kind != DatabaseKind::MongoDb {
+            return false;
+        }
+        match node {
+            MongoExplorerNodeId::Database(_) => true,
+            MongoExplorerNodeId::Collection(namespace) => profile
+                .mongodb_collections
+                .get(&namespace.database)
+                .is_some_and(|collections| {
+                    collections
+                        .iter()
+                        .any(|collection| collection.namespace == *namespace)
+                }),
+            MongoExplorerNodeId::Index { .. }
+            | MongoExplorerNodeId::Monitor(_)
+            | MongoExplorerNodeId::Users(_)
+            | MongoExplorerNodeId::RetryCollections(_)
+            | MongoExplorerNodeId::RetryIndexes(_) => false,
+        }
     }
 
     fn group_exists_in_region(&self, group_id: Uuid, region: ProfileRegion) -> bool {

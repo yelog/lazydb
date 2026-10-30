@@ -17,6 +17,7 @@ pub mod mongodb_browser;
 pub mod mongodb_console;
 pub mod mongodb_management;
 pub mod mongodb_principal;
+pub mod mongodb_structure;
 pub mod navigation;
 pub mod notification;
 pub mod omni;

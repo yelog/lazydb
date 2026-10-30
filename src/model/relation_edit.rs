@@ -1,9 +1,28 @@
 use std::collections::{BTreeSet, VecDeque};
 
+use mongodb::bson::spec::ElementType;
+use mongodb::bson::{Bson, Document};
+
+use crate::db::mongodb::types::{MongoDocument, MongoNamespace};
 use crate::db::mutation::RelationMutationRequest;
 use crate::db::mutation::RowVersion;
 use crate::db::value::CellValue;
-use crate::model::cell_editor::CellEditorBuffer;
+use crate::model::cell_editor::{CellEditorBuffer, JsonBuffer};
+use crate::model::text_input::{TextInput, TextInputEdit};
+
+/// Shown in the modal when the connection profile forbids every write. The
+/// profile is checked again on save, so a read-only profile can never emit a
+/// write even if the modal was opened before the profile changed.
+pub const MONGODB_READ_ONLY_MESSAGE: &str = "This profile is read-only; documents cannot be edited";
+
+/// The field that identifies a document. It is shown in the field list but it
+/// is never editable: the replacement this modal plans stays bounded to the
+/// `_id` value the document was loaded with.
+pub const DOCUMENT_ID_FIELD: &str = "_id";
+
+/// Shown when a field edit targets `_id`, which the write path can never move.
+pub const DOCUMENT_ID_IMMUTABLE_MESSAGE: &str =
+    "the _id field is immutable: it identifies this document";
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct EditableRowId(pub u64);
@@ -13,6 +32,8 @@ pub enum RelationGridMode {
     #[default]
     Browse,
     EditCell(Box<CellEditorState>),
+    /// A MongoDB collection's whole document, edited as Canonical EJSON.
+    EditDocument(Box<DocumentEditorState>),
     VisualLine {
         anchor: usize,
     },
@@ -25,6 +46,381 @@ pub struct CellEditorState {
     pub column: usize,
     pub input: CellEditorBuffer,
     pub error: Option<String>,
+}
+
+/// The two views the document modal offers.
+///
+/// `Ejson` is the default: the whole document as one Canonical Extended JSON
+/// text. `Fields` lists one row per top-level field and edits them one by one.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum DocumentEditorView {
+    #[default]
+    Ejson,
+    Fields,
+}
+
+/// How one field's text is parsed back into BSON.
+///
+/// The kind comes from the value the field currently holds, so the same text
+/// means different things in different fields: `true` is a bool for a boolean
+/// field and the four-character string for a string field.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DocumentFieldKind {
+    Boolean,
+    Integer32,
+    Integer64,
+    Double,
+    Null,
+    String,
+    ObjectId,
+    /// Documents, arrays and every other BSON type are edited as Canonical
+    /// Extended JSON, so a nested document keeps its types when it round-trips.
+    Ejson,
+}
+
+impl DocumentFieldKind {
+    pub fn of(value: &Bson) -> Self {
+        match value {
+            Bson::Boolean(_) => Self::Boolean,
+            Bson::Int32(_) => Self::Integer32,
+            Bson::Int64(_) => Self::Integer64,
+            Bson::Double(_) => Self::Double,
+            Bson::Null => Self::Null,
+            Bson::String(_) => Self::String,
+            Bson::ObjectId(_) => Self::ObjectId,
+            _ => Self::Ejson,
+        }
+    }
+
+    /// Parses one field's text into the BSON value of this field's kind.
+    pub fn parse(self, text: &str) -> Result<Bson, String> {
+        let trimmed = text.trim();
+        match self {
+            Self::String => Ok(Bson::String(text.to_owned())),
+            Self::Boolean => match trimmed {
+                "true" => Ok(Bson::Boolean(true)),
+                "false" => Ok(Bson::Boolean(false)),
+                _ => Err(format!("expected true or false, got {trimmed:?}")),
+            },
+            Self::Integer32 => trimmed
+                .parse::<i32>()
+                .map(Bson::Int32)
+                .map_err(|_| format!("expected a 32-bit integer, got {trimmed:?}")),
+            Self::Integer64 => trimmed
+                .parse::<i64>()
+                .map(Bson::Int64)
+                .map_err(|_| format!("expected a 64-bit integer, got {trimmed:?}")),
+            Self::Double => trimmed
+                .parse::<f64>()
+                .map(Bson::Double)
+                .map_err(|_| format!("expected a double, got {trimmed:?}")),
+            Self::Null => {
+                if trimmed.eq_ignore_ascii_case("null") {
+                    Ok(Bson::Null)
+                } else {
+                    Err(format!("expected null, got {trimmed:?}"))
+                }
+            }
+            Self::ObjectId => mongodb::bson::oid::ObjectId::parse_str(trimmed)
+                .map(Bson::ObjectId)
+                .map_err(|_| format!("expected a 24-character objectId, got {trimmed:?}")),
+            Self::Ejson => {
+                let value: serde_json::Value = serde_json::from_str(trimmed)
+                    .map_err(|error| format!("invalid Canonical EJSON: {error}"))?;
+                Bson::try_from(value).map_err(|error| format!("invalid Canonical EJSON: {error}"))
+            }
+        }
+    }
+}
+
+/// One top-level field of the document, as the field list shows it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DocumentField {
+    pub name: String,
+    pub kind: DocumentFieldKind,
+    /// The observed BSON type of the value the field holds right now.
+    pub type_name: &'static str,
+    /// The compact value the row shows and the field editor starts from.
+    pub value: String,
+}
+
+impl DocumentField {
+    fn new(name: &str, value: &Bson) -> Self {
+        Self {
+            name: name.to_owned(),
+            kind: DocumentFieldKind::of(value),
+            type_name: bson_type_name(value),
+            value: compact_bson_value(value),
+        }
+    }
+}
+
+/// The single field being edited, with the single-line input it edits.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DocumentFieldEdit {
+    pub name: String,
+    pub input: TextInput,
+}
+
+fn bson_type_name(value: &Bson) -> &'static str {
+    match value.element_type() {
+        ElementType::Double => "double",
+        ElementType::String => "string",
+        ElementType::EmbeddedDocument => "document",
+        ElementType::Array => "array",
+        ElementType::Binary => "binary",
+        ElementType::Undefined => "undefined",
+        ElementType::ObjectId => "objectId",
+        ElementType::Boolean => "bool",
+        ElementType::DateTime => "date",
+        ElementType::Null => "null",
+        ElementType::RegularExpression => "regex",
+        ElementType::DbPointer => "dbPointer",
+        ElementType::JavaScriptCode => "javascript",
+        ElementType::Symbol => "symbol",
+        ElementType::JavaScriptCodeWithScope => "javascriptWithScope",
+        ElementType::Int32 => "int32",
+        ElementType::Timestamp => "timestamp",
+        ElementType::Int64 => "int64",
+        ElementType::Decimal128 => "decimal128",
+        ElementType::MaxKey => "maxKey",
+        ElementType::MinKey => "minKey",
+    }
+}
+
+/// The compact one-line rendering a field row shows.
+///
+/// Scalars lose the Extended JSON wrapper the modal uses for the whole
+/// document, so an integral field reads `1200` instead of `{"$numberLong":
+/// "1200"}`. Documents, arrays and the remaining BSON types keep Canonical
+/// Extended JSON, which is exactly the text their field editor parses.
+fn compact_bson_value(value: &Bson) -> String {
+    match value {
+        Bson::String(text) => text.clone(),
+        Bson::ObjectId(id) => id.to_hex(),
+        Bson::Boolean(flag) => flag.to_string(),
+        Bson::Int32(number) => number.to_string(),
+        Bson::Int64(number) => number.to_string(),
+        Bson::Double(number) => number.to_string(),
+        Bson::Null => "null".to_owned(),
+        other => other.clone().into_canonical_extjson().to_string(),
+    }
+}
+
+/// The state of the modal that edits one MongoDB document as a whole.
+///
+/// The write this editor plans is bounded to `id`, which is the `_id` value the
+/// document was loaded with. The editor text can change every other field, but
+/// it can never move the write to another document: only a replacement whose
+/// `_id` still equals `id` is accepted.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DocumentEditorState {
+    /// Grid row the modal was opened from.
+    pub row: usize,
+    /// `database.collection` the document belongs to.
+    pub collection: String,
+    /// The original BSON `_id` value, kept typed and never re-serialized.
+    pub id: Bson,
+    /// The exact BSON document loaded when the modal opened, used for
+    /// compare-and-replace so edits from another client cannot be overwritten.
+    pub expected: Document,
+    /// The whole document as Canonical Extended JSON.
+    ///
+    /// This text is the single source of truth of the modal: the field list is
+    /// derived from it and applying a field writes back into it.
+    pub input: JsonBuffer,
+    pub error: Option<String>,
+    /// True while one replacement is in flight, so one save emits one write.
+    pub saving: bool,
+    /// Which of the two views the modal shows.
+    pub view: DocumentEditorView,
+    /// Index of the field the list highlights.
+    pub selected_field: usize,
+    /// The field being edited, if any.
+    pub field_edit: Option<DocumentFieldEdit>,
+    /// The refusal of the last field edit, shown next to that field.
+    pub field_error: Option<String>,
+}
+
+impl DocumentEditorState {
+    pub fn new(
+        row: usize,
+        namespace: &MongoNamespace,
+        document: &MongoDocument,
+    ) -> Result<Self, String> {
+        let id = document.bson.get("_id").cloned().ok_or_else(|| {
+            "this document has no _id, so it cannot be replaced unambiguously".to_owned()
+        })?;
+        let ejson = canonical_document_ejson(&document.bson);
+        Ok(Self {
+            row,
+            collection: namespace.full_name(),
+            id,
+            expected: document.bson.clone(),
+            input: JsonBuffer::new(ejson),
+            error: None,
+            saving: false,
+            view: DocumentEditorView::Fields,
+            selected_field: 0,
+            field_edit: None,
+            field_error: None,
+        })
+    }
+
+    /// The header the modal shows: the collection and the `_id` it will write.
+    pub fn title(&self) -> String {
+        format!(
+            "{} · _id {}",
+            self.collection,
+            self.id.clone().into_canonical_extjson()
+        )
+    }
+
+    /// The top-level fields of the document as the editor text holds it now.
+    ///
+    /// The list is derived from the text instead of being stored beside it, so
+    /// the field view can never drift from the document that saving writes.
+    pub fn fields(&self) -> Result<Vec<DocumentField>, String> {
+        let document = parse_document_ejson(self.input.value())?;
+        Ok(document
+            .iter()
+            .map(|(name, value)| DocumentField::new(name, value))
+            .collect())
+    }
+
+    /// The row the field list highlights, clamped to the fields that exist.
+    pub fn selected_field_index(&self, field_count: usize) -> usize {
+        self.selected_field.min(field_count.saturating_sub(1))
+    }
+
+    /// Moves the field selection by `delta` rows, stopping at both ends.
+    pub fn move_field(&mut self, delta: isize) {
+        let Ok(fields) = self.fields() else {
+            return;
+        };
+        let Some(last) = fields.len().checked_sub(1) else {
+            self.selected_field = 0;
+            return;
+        };
+        let current = self.selected_field_index(fields.len());
+        let next = if delta < 0 {
+            current.saturating_sub(delta.unsigned_abs())
+        } else {
+            current.saturating_add(delta as usize).min(last)
+        };
+        if next != self.selected_field {
+            self.selected_field = next;
+            self.field_error = None;
+        }
+    }
+
+    /// Opens the single-line editor on the selected field.
+    ///
+    /// `_id` reports why it never opens: the identifier is immutable and the
+    /// list must not offer an edit the write path would refuse.
+    pub fn begin_field_edit(&mut self) {
+        let fields = match self.fields() {
+            Ok(fields) => fields,
+            Err(message) => {
+                self.field_edit = None;
+                self.field_error = Some(message);
+                return;
+            }
+        };
+        let Some(field) = fields.get(self.selected_field_index(fields.len())) else {
+            self.field_edit = None;
+            self.field_error = Some("this document has no fields to edit".to_owned());
+            return;
+        };
+        if field.name == DOCUMENT_ID_FIELD {
+            self.field_edit = None;
+            self.field_error = Some(DOCUMENT_ID_IMMUTABLE_MESSAGE.to_owned());
+            return;
+        }
+        self.field_error = None;
+        self.field_edit = Some(DocumentFieldEdit {
+            name: field.name.clone(),
+            input: TextInput::from(field.value.clone()),
+        });
+    }
+
+    /// Writes one field's text back into the document text.
+    ///
+    /// The value is parsed with the field's own BSON type, written into the
+    /// document the text holds, and the text is rendered again as Canonical
+    /// EJSON. A refusal returns the reason and leaves the text untouched, so an
+    /// invalid field edit can never reach the save path.
+    pub fn apply_field(&mut self, name: &str, text: &str) -> Result<(), String> {
+        if name == DOCUMENT_ID_FIELD {
+            return Err(DOCUMENT_ID_IMMUTABLE_MESSAGE.to_owned());
+        }
+        let mut document = parse_document_ejson(self.input.value())?;
+        let current = document
+            .get(name)
+            .ok_or_else(|| format!("the document has no field {name:?}"))?;
+        let value = DocumentFieldKind::of(current).parse(text)?;
+        document.insert(name, value);
+        self.input = JsonBuffer::new(canonical_document_ejson(&document));
+        Ok(())
+    }
+
+    /// Feeds one text edit to the field editor, if one is open.
+    pub fn edit_field_text(&mut self, edit: TextInputEdit) -> bool {
+        let Some(field) = self.field_edit.as_mut() else {
+            return false;
+        };
+        field.input.apply(edit);
+        self.field_error = None;
+        true
+    }
+
+    /// Feeds pasted text to the field editor, if one is open.
+    pub fn paste_field_text(&mut self, text: &str) -> bool {
+        let Some(field) = self.field_edit.as_mut() else {
+            return false;
+        };
+        field.input.paste(text);
+        self.field_error = None;
+        true
+    }
+
+    /// The document to write, or the reason it cannot be written.
+    ///
+    /// The editor text is parsed back into BSON and must still carry the
+    /// original `_id`, so a replacement can never retarget the write.
+    pub fn replacement_document(&self) -> Result<Document, String> {
+        let replacement = parse_document_ejson(self.input.value())?;
+        if replacement.get("_id") != Some(&self.id) {
+            return Err("the replacement document must keep the original _id".to_owned());
+        }
+        Ok(replacement)
+    }
+}
+
+/// Renders one document as Canonical Extended JSON.
+pub fn canonical_document_ejson(document: &Document) -> String {
+    let value = Bson::Document(document.clone()).into_canonical_extjson();
+    // The modal is a text editor: one compact line is unreadable and gets
+    // clipped at the pane edge, so the document is rendered with indentation.
+    serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())
+}
+
+/// Parses one document from Canonical Extended JSON.
+///
+/// The value is parsed as JSON first and then converted to BSON, which keeps
+/// Extended JSON types (`$oid`, `$numberLong`, `$date`, ...) intact.
+pub fn parse_document_ejson(text: &str) -> Result<Document, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(text).map_err(|error| format!("invalid Canonical EJSON: {error}"))?;
+    let bson =
+        Bson::try_from(value).map_err(|error| format!("invalid Canonical EJSON: {error}"))?;
+    match bson {
+        Bson::Document(document) => Ok(document),
+        other => Err(format!(
+            "the document editor requires a BSON document, got {:?}",
+            other.element_type()
+        )),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -334,6 +730,11 @@ impl RelationEditSession {
 
     pub fn has_unfinished_cell_edit(&self) -> bool {
         matches!(self.mode, RelationGridMode::EditCell(_))
+    }
+
+    /// True while the document modal is open on this collection.
+    pub fn has_unfinished_document_edit(&self) -> bool {
+        matches!(self.mode, RelationGridMode::EditDocument(_))
     }
 
     pub fn record_mutation(&mut self, history: RelationMutationHistory) {
