@@ -343,7 +343,7 @@ not expose every session. Filtering applies to the bounded visible snapshot.
 | `zz/zt/zb` | Align selection |
 | `h/l`, Left/Right | Collapse/expand |
 | `o` | Toggle expansion |
-| `Enter` | Open/activate selected node |
+| `Enter` | Open/activate selected node; a MongoDB collection opens its documents without revealing its indexes |
 | `/` | Open visible-node find |
 | `f` | Open catalog search |
 | `n/N` | Next/previous confirmed find/search match |

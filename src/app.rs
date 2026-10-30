@@ -25835,26 +25835,13 @@ impl App {
                         generation: 1,
                     }]
                 }
-                crate::db::mongodb::types::MongoExplorerNodeId::Collection(namespace) => {
+                crate::db::mongodb::types::MongoExplorerNodeId::Collection(_) => {
                     let expanded = self.explorer.normalized.expanded.contains(&selected);
                     self.explorer.toggle_selected();
                     if expanded {
-                        self.open_mongodb_relation(*profile_id, namespace.clone())
+                        Vec::new()
                     } else {
-                        let generation = self
-                            .sessions
-                            .identities_for_profile(*profile_id)
-                            .first()
-                            .map(|identity| identity.generation);
-                        generation
-                            .map(|generation| {
-                                vec![Command::DiscoverMongoIndexes {
-                                    profile_id: *profile_id,
-                                    generation,
-                                    namespace: namespace.clone(),
-                                }]
-                            })
-                            .unwrap_or_default()
+                        self.mongo_discovery_commands(*profile_id, node)
                     }
                 }
                 crate::db::mongodb::types::MongoExplorerNodeId::Index { .. } => Vec::new(),
@@ -27153,6 +27140,16 @@ impl App {
             && (entry.kind.is_relation() || entry.owning_relation_id().is_some())
         {
             return self.open_selected_relation(RelationView::Data);
+        }
+        // A MongoDB collection is the document-namespace counterpart of a SQL
+        // relation: its primary action opens the rows, and the indexes stay
+        // behind the expand keys.
+        if let ExplorerNodeId::Mongo {
+            profile_id,
+            node: crate::db::mongodb::types::MongoExplorerNodeId::Collection(namespace),
+        } = &selected
+        {
+            return self.open_mongodb_relation(*profile_id, namespace.clone());
         }
         self.toggle_explorer_selected()
     }

@@ -264,8 +264,6 @@ fn collection_node(profile_id: Uuid) -> ExplorerNodeId {
 fn activating_a_mongodb_collection_opens_the_relation_tab_on_data() {
     let (mut app, profile_id, _generation) = mongo_app();
     assert!(app.explorer.select_id(collection_node(profile_id)));
-    // The first activation expands the collection and loads its indexes.
-    app.update(Action::ExplorerOpenSelected);
 
     let commands = app.update(Action::ExplorerOpenSelected);
 
@@ -483,8 +481,6 @@ fn loaded_mongo_relation(app: &mut App, profile_id: Uuid) {
     use lazydb::profile::CatalogScope;
 
     assert!(app.explorer.select_id(collection_node(profile_id)));
-    // First activation expands the collection, the second opens the tab.
-    app.update(Action::ExplorerOpenSelected);
     app.update(Action::ExplorerOpenSelected);
     let Some(WorkspaceTab::Relation(tab)) = app.tabs.last_mut() else {
         panic!("activating a collection must open a relation tab");
@@ -659,7 +655,6 @@ fn opening_the_ddl_view_on_a_mongodb_relation_requests_the_structure() {
 fn opening_the_ddl_view_without_a_loaded_page_asks_for_metadata_only() {
     let (mut app, profile_id, _generation) = mongo_app();
     assert!(app.explorer.select_id(collection_node(profile_id)));
-    app.update(Action::ExplorerOpenSelected);
     app.update(Action::ExplorerOpenSelected);
 
     let commands = app.update(Action::SetRelationView(RelationView::Ddl));
@@ -836,8 +831,6 @@ fn active_relation_tab_mut(app: &mut App) -> &mut RelationTab {
 fn mongo_app_with_page(documents: Vec<MongoDocument>) -> (App, RelationRequest) {
     let (mut app, profile_id, _generation) = mongo_app();
     assert!(app.explorer.select_id(collection_node(profile_id)));
-    // The first activation expands the collection, the second opens the tab.
-    app.update(Action::ExplorerOpenSelected);
     let commands = app.update(Action::ExplorerOpenSelected);
     let request = mongo_preview_request(&commands);
     let loaded = page(documents.clone(), None);
