@@ -63,6 +63,46 @@
 - [`cfce89a`](https://github.com/yelog/lazydb/commit/cfce89a) fix(release): quote workflow glob patterns
 - [`7afadf5`](https://github.com/yelog/lazydb/commit/7afadf5) fix(ci): repair Linux distribution and database gates
 
+## [0.2.3] - 2026-10-30
+
+### Added
+
+- Browse MongoDB databases and collections from Explorer, open collections in relation tabs, and inspect collection structure and indexes ([`34575f7`](https://github.com/yelog/lazydb/commit/34575f7), [`5989a05`](https://github.com/yelog/lazydb/commit/5989a05), [`6359816`](https://github.com/yelog/lazydb/commit/6359816), [`75fe966`](https://github.com/yelog/lazydb/commit/75fe966)).
+- Edit MongoDB documents in a modal that preserves BSON field types ([`259c6de`](https://github.com/yelog/lazydb/commit/259c6de)).
+
+### Fixed
+
+- Guard MongoDB document edits against concurrent changes and preserve conflict details ([`b5d9a93`](https://github.com/yelog/lazydb/commit/b5d9a93)).
+- Bound MongoDB client cleanup during shutdown and restore the terminal before cleanup ([`5606656`](https://github.com/yelog/lazydb/commit/5606656)).
+
+### Internal
+
+- Repair and extend CI coverage for MongoDB shutdown, relation writes, Windows installer checks, and macOS builds ([`02c4716`](https://github.com/yelog/lazydb/commit/02c4716), [`5acbaa6`](https://github.com/yelog/lazydb/commit/5acbaa6), [`d66b516`](https://github.com/yelog/lazydb/commit/d66b516)).
+- Refresh onboarding and installation documentation and adjust release build checks ([`25e23cf`](https://github.com/yelog/lazydb/commit/25e23cf), [`045c0f9`](https://github.com/yelog/lazydb/commit/045c0f9), [`27f4a9c`](https://github.com/yelog/lazydb/commit/27f4a9c)).
+
+### Commits
+
+- [`5becaa1`](https://github.com/yelog/lazydb/commit/5becaa1) Merge branch 'main' of github.com:yelog/lazydb
+- [`37f42ce`](https://github.com/yelog/lazydb/commit/37f42ce) Merge pull request #24 from yelog/fix/mongodb-relation-hardening
+- [`b5d9a93`](https://github.com/yelog/lazydb/commit/b5d9a93) fix(mongodb): preserve relation document conflicts
+- [`2ca8916`](https://github.com/yelog/lazydb/commit/2ca8916) Merge pull request #20 from lansisDev/feat/mongodb-relation-tabs
+- [`8bd45c4`](https://github.com/yelog/lazydb/commit/8bd45c4) Merge pull request #23 from yelog/fix/mongodb-exit-timeout
+- [`02c4716`](https://github.com/yelog/lazydb/commit/02c4716) fix(ci): give MongoDB shutdown probe a database target
+- [`c754a43`](https://github.com/yelog/lazydb/commit/c754a43) Merge remote-tracking branch 'origin/main' into fix/mongodb-exit-timeout
+- [`fecd7d8`](https://github.com/yelog/lazydb/commit/fecd7d8) Merge pull request #22 from yelog/fix/ci-installer-and-macos-timeout
+- [`5acbaa6`](https://github.com/yelog/lazydb/commit/5acbaa6) test(mongodb): connect the PTY exit probe before timing
+- [`5606656`](https://github.com/yelog/lazydb/commit/5606656) fix(mongodb): bound client cleanup before exit
+- [`d66b516`](https://github.com/yelog/lazydb/commit/d66b516) fix(ci): repair Windows installer test and split macOS test build
+- [`259c6de`](https://github.com/yelog/lazydb/commit/259c6de) feat(mongodb): edit a document in a modal
+- [`75fe966`](https://github.com/yelog/lazydb/commit/75fe966) feat(mongodb): show the collection structure
+- [`6359816`](https://github.com/yelog/lazydb/commit/6359816) feat(mongodb): open collections as relation tabs
+- [`5989a05`](https://github.com/yelog/lazydb/commit/5989a05) feat(mongodb): show collection documents as a field grid
+- [`34575f7`](https://github.com/yelog/lazydb/commit/34575f7) fix(mongodb): expand databases and collections in the explorer
+- [`25e23cf`](https://github.com/yelog/lazydb/commit/25e23cf) docs(readme): simplify onboarding and lead with app preview
+- [`9c54a65`](https://github.com/yelog/lazydb/commit/9c54a65) Merge branch 'main' of github.com:yelog/lazydb
+- [`045c0f9`](https://github.com/yelog/lazydb/commit/045c0f9) fix(release): allow cold macOS builds to finish
+- [`27f4a9c`](https://github.com/yelog/lazydb/commit/27f4a9c) fix(release): prepare Linux image before verification
+
 ## Unreleased
 
 ### Fixed
