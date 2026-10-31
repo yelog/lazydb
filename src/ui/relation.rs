@@ -288,6 +288,7 @@ pub(crate) fn render(
                 content_area,
                 json,
                 editor.error.as_deref(),
+                Some(JSON_EDITOR_FOOTER),
                 theme,
                 state,
             );
@@ -437,17 +438,20 @@ pub(crate) fn render(
                     sections[1],
                     &editor.input,
                     editor.error.as_deref(),
+                    Some(JSON_EDITOR_FOOTER),
                     theme,
                     state,
                 );
                 "Tab field view"
             }
             crate::model::relation_edit::DocumentEditorView::Fields => {
-                render_document_fields(frame, sections[1], editor, theme, state);
-                if editor.field_edit.is_some() {
-                    "Enter apply field  Esc back to fields"
-                } else {
+                render_document_fields(frame, sections[1], editor, theme);
+                if editor.field_edit.is_none() {
                     "j/k field  Enter edit  Ctrl-S apply document  Tab EJSON  Esc close"
+                } else if editor.field_edit_is_multiline() {
+                    "Ctrl-S apply field  Esc back to fields"
+                } else {
+                    "Enter apply field  Esc back to fields"
                 }
             }
         };
@@ -455,21 +459,182 @@ pub(crate) fn render(
             Paragraph::new(hint).style(Style::new().fg(theme.muted)),
             sections[2],
         );
+        // Every field is edited in its own surface over this modal: a scalar on
+        // one line, and a container as indented EJSON, which never fits here.
+        if let Some(field) = &editor.field_edit {
+            render_document_field_editor(frame, popup, editor, field, theme, state);
+        }
     }
+}
+
+/// The footer of a field modal that edits a scalar on one line.
+const FIELD_ONE_LINE_FOOTER: &str = "Enter apply field  Esc back to fields";
+
+/// The footer of a field modal that edits an array or an embedded document.
+const FIELD_MODAL_FOOTER: &str =
+    "Enter newline  Ctrl-S apply field  Ctrl-F format  Esc back to fields";
+
+/// Renders the editor of the open field.
+///
+/// The popup is sized by the value it edits — its widest line and how many
+/// lines it spans — so it stays smaller than the document modal it opens over.
+/// A scalar edits on one line; a container edits indented Canonical Extended
+/// JSON, scrolled with the cursor by the shared JSON editor. The refusal of the
+/// last apply renders beside the value, so a broken field is corrected in place.
+fn render_document_field_editor(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    editor: &crate::model::relation_edit::DocumentEditorState,
+    field: &crate::model::relation_edit::DocumentFieldEdit,
+    theme: Theme,
+    state: &mut super::UiState,
+) {
+    let error = editor.field_error.as_deref();
+    let footer = if field.input.is_multiline() {
+        FIELD_MODAL_FOOTER
+    } else {
+        FIELD_ONE_LINE_FOOTER
+    };
+    let popup = field_popup_area(area, field, error.is_some());
+    state.cursor = None;
+    if popup.width < 3 || popup.height < 3 {
+        return;
+    }
+    frame.render_widget(ratatui::widgets::Clear, popup);
+    let title = format!(
+        " EDIT FIELD {} · {} ",
+        sanitize_terminal_text(&field.name),
+        field.type_name
+    );
+    let block = panel_block(&title, true, theme);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    // Reserve context and margins when they fit; editing takes priority in a
+    // short terminal. Every section stays inside the popup's actual viewport.
+    let show_context = inner.height >= 4;
+    let show_margins = inner.height >= 5 + u16::from(error.is_some());
+    let show_error = error.is_some() && inner.height >= 2;
+    let show_footer = inner.height >= 3;
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(u16::from(show_context)),
+            Constraint::Length(u16::from(show_margins)),
+            Constraint::Min(1),
+            Constraint::Length(u16::from(show_error)),
+            Constraint::Length(u16::from(show_margins)),
+            Constraint::Length(u16::from(show_footer)),
+        ])
+        .split(inner);
+    // The document this field belongs to stays named, so the modal keeps the
+    // same bounded target the save uses.
+    frame.render_widget(
+        Paragraph::new(Line::from(editor.title()).style(Style::new().fg(theme.muted))),
+        sections[0],
+    );
+    let value_area = sections[2];
+    match &field.input {
+        crate::model::relation_edit::DocumentFieldInput::Line(input) => {
+            render_text_input(
+                frame,
+                Rect::new(value_area.x, value_area.y, value_area.width, 1),
+                "",
+                input,
+                Style::new().fg(theme.text),
+                state,
+            );
+        }
+        crate::model::relation_edit::DocumentFieldInput::Block(buffer) => {
+            render_json_editor(frame, value_area, buffer, None, None, theme, state);
+        }
+    }
+    if let Some(error) = error.filter(|_| show_error) {
+        frame.render_widget(
+            Paragraph::new(Line::from(error).style(Style::new().fg(theme.error))),
+            sections[3],
+        );
+    }
+    if sections[5].height > 0 {
+        frame.render_widget(
+            Paragraph::new(Line::from(footer).style(Style::new().fg(theme.muted))),
+            Rect::new(sections[5].x, sections[5].y, sections[5].width, 1),
+        );
+    }
+}
+
+/// The rows the field modal spends around the value: two borders, the document
+/// header, the two margins and the footer.
+const FIELD_MODAL_CHROME_ROWS: u16 = 6;
+
+/// Where the field modal draws: centered over the document modal and sized to
+/// the value, preserving a surrounding margin when there is room for an
+/// editable row, and never wider than 72 columns or taller than 20 rows.
+fn field_popup_area(
+    area: Rect,
+    field: &crate::model::relation_edit::DocumentFieldEdit,
+    error: bool,
+) -> Rect {
+    const MIN_WIDTH: u16 = 36;
+    const MAX_WIDTH: u16 = 72;
+    const MAX_HEIGHT: u16 = 20;
+    // The popup is wide enough for the widest of its own parts: the value with
+    // the padding on both sides, the title on the border, and the footer, whose
+    // keys are useless clipped.
+    let footer = if field.input.is_multiline() {
+        FIELD_MODAL_FOOTER
+    } else {
+        FIELD_ONE_LINE_FOOTER
+    };
+    let title = format!(
+        " EDIT FIELD {} · {} ",
+        sanitize_terminal_text(&field.name),
+        field.type_name
+    );
+    let value_width = field.input.longest_line_columns().saturating_add(6);
+    let wanted_width = value_width
+        .max(title.width().saturating_add(2))
+        .max(footer.width().saturating_add(2));
+    let wanted_height = field
+        .input
+        .modal_value_rows(error)
+        .saturating_add(usize::from(FIELD_MODAL_CHROME_ROWS));
+    // The design range first, then the room the terminal actually leaves, so a
+    // narrow area shrinks the popup instead of overflowing it.
+    let available_width = if area.width >= 5 {
+        area.width - 2
+    } else {
+        area.width
+    };
+    let available_height = if area.height >= 5 {
+        area.height - 2
+    } else {
+        area.height
+    };
+    let width = wanted_width
+        .clamp(usize::from(MIN_WIDTH), usize::from(MAX_WIDTH))
+        .min(usize::from(available_width)) as u16;
+    let height = wanted_height
+        .clamp(7, usize::from(MAX_HEIGHT))
+        .min(usize::from(available_height)) as u16;
+    Rect::new(
+        area.x.saturating_add(area.width.saturating_sub(width) / 2),
+        area.y
+            .saturating_add(area.height.saturating_sub(height) / 2),
+        width,
+        height,
+    )
 }
 
 /// Renders the field-by-field view of the document modal.
 ///
 /// Every row is one top-level field with its observed BSON type and its
-/// compact value. The open field editor, its refusal and the document-level
-/// error all render below the list, so a refused edit is visible next to the
-/// field that produced it.
+/// compact value. Every field is edited in its own modal, so the list is only
+/// navigation; a refusal or the document-level error renders below it.
 fn render_document_fields(
     frame: &mut Frame<'_>,
     area: Rect,
     editor: &crate::model::relation_edit::DocumentEditorState,
     theme: Theme,
-    state: &mut super::UiState,
 ) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -486,8 +651,7 @@ fn render_document_fields(
     };
     let error = editor.field_error.as_deref().or(editor.error.as_deref());
     let error_height = u16::from(error.is_some() && area.height >= 3);
-    let edit_height = u16::from(editor.field_edit.is_some() && area.height >= 2);
-    let list_height = usize::from(area.height.saturating_sub(error_height + edit_height));
+    let list_height = usize::from(area.height.saturating_sub(error_height));
     let selected = editor.selected_field_index(fields.len());
     let top = selected.saturating_sub(list_height.saturating_sub(1));
     let rows = fields
@@ -511,7 +675,7 @@ fn render_document_fields(
                         Style::new().fg(theme.muted)
                     },
                 ),
-                ratatui::text::Span::styled(format!(" {}", field.value), style),
+                ratatui::text::Span::styled(format!(" {}", field.list_value()), style),
             ])
         })
         .collect::<Vec<_>>();
@@ -519,22 +683,7 @@ fn render_document_fields(
         Paragraph::new(rows),
         Rect::new(area.x, area.y, area.width, list_height as u16),
     );
-    let mut next_row = area.y.saturating_add(list_height as u16);
-    if let Some(field) = &editor.field_edit
-        && next_row < area.bottom()
-    {
-        let input_area = Rect::new(area.x, next_row, area.width, 1);
-        let prefix = format!(" {} = ", field.name);
-        render_text_input(
-            frame,
-            input_area,
-            &prefix,
-            &field.input,
-            Style::new().fg(theme.text),
-            state,
-        );
-        next_row = next_row.saturating_add(1);
-    }
+    let next_row = area.y.saturating_add(list_height as u16);
     if let Some(error) = error
         && next_row < area.bottom()
     {
@@ -729,11 +878,15 @@ fn json_token_color(kind: crate::model::cell_editor::JsonTokenKind) -> ratatui::
     }
 }
 
+/// The footer of a JSON editor that saves and cancels the whole value it shows.
+const JSON_EDITOR_FOOTER: &str = "Enter newline  Ctrl-S apply  Ctrl-F format  Esc cancel";
+
 fn render_json_editor(
     frame: &mut Frame<'_>,
     area: Rect,
     json: &crate::model::cell_editor::JsonBuffer,
     error: Option<&str>,
+    footer: Option<&str>,
     theme: Theme,
     state: &mut super::UiState,
 ) {
@@ -741,8 +894,7 @@ fn render_json_editor(
         return;
     }
 
-    let footer = "Enter newline  Ctrl-S apply  Ctrl-F format  Esc cancel";
-    let show_footer = error.is_none() || area.height >= 3;
+    let show_footer = footer.is_some() && (error.is_none() || area.height >= 3);
     let error_height = usize::from(error.is_some() && area.height >= 3);
     let footer_height = usize::from(show_footer && area.height >= 2);
     let body_height = usize::from(area.height)
@@ -750,16 +902,13 @@ fn render_json_editor(
         .saturating_sub(footer_height);
     if body_height == 0 {
         frame.render_widget(
-            Paragraph::new(if let Some(error) = error {
-                error
-            } else {
-                footer
-            })
-            .style(Style::new().fg(if error.is_some() {
-                theme.error
-            } else {
-                theme.muted
-            })),
+            Paragraph::new(error.or(footer).unwrap_or_default()).style(Style::new().fg(
+                if error.is_some() {
+                    theme.error
+                } else {
+                    theme.muted
+                },
+            )),
             area,
         );
         return;
@@ -830,7 +979,10 @@ fn render_json_editor(
         );
         next_row = next_row.saturating_add(1);
     }
-    if show_footer && next_row < area.bottom() {
+    if let Some(footer) = footer
+        && show_footer
+        && next_row < area.bottom()
+    {
         frame.render_widget(
             Paragraph::new(footer).style(Style::new().fg(theme.muted)),
             Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
@@ -1603,6 +1755,145 @@ mod tests {
     use chrono::NaiveDate;
     use ratatui::{Terminal, backend::TestBackend};
     use unicode_width::UnicodeWidthStr;
+
+    #[test]
+    fn field_modal_keeps_long_content_and_cursor_inside_its_viewport() {
+        use crate::db::mongodb::types::{MongoDocument, MongoNamespace};
+        use crate::model::relation_edit::{
+            DocumentEditorState, DocumentFieldEdit, DocumentFieldInput,
+        };
+        use ratatui::{layout::Rect, style::Style, widgets::Paragraph};
+        let bson = mongodb::bson::doc! { "_id": 1, "tags": [] };
+        let document = MongoDocument {
+            raw: mongodb::bson::raw::RawDocumentBuf::from_bytes(
+                mongodb::bson::to_vec(&bson).unwrap(),
+            )
+            .unwrap(),
+            bson,
+            editable: true,
+        };
+        let mut editor =
+            DocumentEditorState::new(0, &MongoNamespace::collection("db", "items"), &document)
+                .unwrap();
+        let text = (0..80)
+            .map(|i| format!("\"item-{i:02}\"\n"))
+            .collect::<String>();
+        let mut field = DocumentFieldEdit {
+            name: "tags".into(),
+            type_name: "array",
+            input: DocumentFieldInput::Block(JsonBuffer::new(text)),
+        };
+        for (width, height) in [
+            (90, 30),
+            (60, 18),
+            (32, 10),
+            (20, 7),
+            (20, 4),
+            (3, 3),
+            (90, 30),
+        ] {
+            let area = Rect::new(0, 0, width, height);
+            let popup = super::field_popup_area(area, &field, false);
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            let mut state = super::super::UiState::new();
+            terminal
+                .draw(|frame| {
+                    frame.render_widget(
+                        Paragraph::new(
+                            vec![".".repeat(width as usize); height as usize].join("\n"),
+                        )
+                        .style(Style::default()),
+                        area,
+                    );
+                    super::render_document_field_editor(
+                        frame,
+                        area,
+                        &editor,
+                        &field,
+                        super::Theme::default(),
+                        &mut state,
+                    );
+                })
+                .unwrap();
+            let cursor = state
+                .cursor
+                .expect("the field remains editable after resize")
+                .position;
+            assert!(
+                popup.contains(cursor),
+                "cursor {cursor:?} outside {popup:?}"
+            );
+            assert!(cursor.y > popup.y && cursor.y < popup.bottom() - 1);
+            let buffer = terminal.backend().buffer();
+            for y in 0..height {
+                for x in 0..width {
+                    if !popup.contains(ratatui::layout::Position::new(x, y)) {
+                        assert_eq!(
+                            buffer[(x, y)].symbol(),
+                            ".",
+                            "content escaped popup at {x},{y}"
+                        );
+                    }
+                }
+            }
+            if width >= 60 {
+                let output = (popup.y..popup.bottom())
+                    .map(|y| {
+                        (popup.x..popup.right())
+                            .map(|x| buffer[(x, y)].symbol())
+                            .collect::<String>()
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(
+                    output.contains("item-79"),
+                    "the editor scrolls to the final value"
+                );
+            }
+        }
+        editor.field_error = Some("invalid value".into());
+        if let DocumentFieldInput::Block(buffer) = &mut field.input {
+            buffer.move_up();
+        }
+        let mut terminal = Terminal::new(TestBackend::new(60, 18)).unwrap();
+        let mut state = super::super::UiState::new();
+        terminal
+            .draw(|frame| {
+                super::render_document_field_editor(
+                    frame,
+                    frame.area(),
+                    &editor,
+                    &field,
+                    super::Theme::default(),
+                    &mut state,
+                )
+            })
+            .unwrap();
+        assert!(
+            super::field_popup_area(Rect::new(0, 0, 60, 18), &field, true)
+                .contains(state.cursor.unwrap().position)
+        );
+    }
+
+    #[test]
+    fn field_modal_sizes_use_display_width_and_saturate_large_values() {
+        use crate::model::relation_edit::{DocumentFieldEdit, DocumentFieldInput};
+        use ratatui::layout::Rect;
+        let mut field = DocumentFieldEdit {
+            name: "text".into(),
+            type_name: "string",
+            input: DocumentFieldInput::Line(TextInput::from("界".repeat(25))),
+        };
+        assert_eq!(
+            super::field_popup_area(Rect::new(0, 0, 100, 30), &field, false).width,
+            56
+        );
+        field.input = DocumentFieldInput::Block(JsonBuffer::new("\n".repeat(65_536)));
+        assert_eq!(
+            super::field_popup_area(Rect::new(0, 0, 100, 30), &field, false).height,
+            20
+        );
+    }
 
     fn json_editor_app(value: &str) -> crate::app::App {
         let mut app = crate::app::App::new(Vec::new());

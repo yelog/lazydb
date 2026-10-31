@@ -5863,6 +5863,96 @@ fn a_field_editor_owns_apply_cancel_and_typing() {
     ] {
         assert_eq!(keymap.map(event, &app), Some(expected));
     }
+    // The one-line field modal hands the list keys back, so browsing fields
+    // from the modal stays one key per field.
+    assert_eq!(
+        keymap.map(key(KeyCode::Down), &app),
+        Some(Action::RelationEditDocumentFieldMove(1)),
+        "Down leaves the one-line field modal for the next field"
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Up), &app),
+        Some(Action::RelationEditDocumentFieldMove(-1)),
+        "Up leaves the one-line field modal for the previous field"
+    );
+}
+
+/// An app whose active relation tab holds the document modal open on a
+/// document with an array and an embedded document.
+fn container_modal_app() -> App {
+    use lazydb::db::mongodb::types::{MongoDocument, MongoNamespace};
+    use lazydb::model::relation_edit::{
+        DocumentEditorState, RelationEditSession, RelationGridMode,
+    };
+
+    let namespace = MongoNamespace::collection("app", "races");
+    let bson = mongodb::bson::doc! {
+        "_id": 1_i32,
+        "name": "Candonga",
+        "schedule": [mongodb::bson::doc! { "time": "Sabado 7", "activity": "Acreditacion" }],
+        "prizes": ["General Damas"],
+    };
+    let document = MongoDocument {
+        raw: mongodb::bson::raw::RawDocumentBuf::from_bytes(
+            mongodb::bson::to_vec(&bson).expect("encodes"),
+        )
+        .expect("raw"),
+        bson,
+        editable: true,
+    };
+    let state = DocumentEditorState::new(0, &namespace, &document).expect("the document opens");
+
+    let mut app = App::new(Vec::new());
+    let mut relation = RelationTab::new("races");
+    let mut edit = RelationEditSession::from_rows(vec![Vec::new(); 1]);
+    edit.mode = RelationGridMode::EditDocument(Box::new(state));
+    relation.edit = Some(edit);
+    app.tabs.push(WorkspaceTab::Relation(relation));
+    app.active_tab = app.tabs.len() - 1;
+    app.focus = Focus::Results;
+    // The list is already on `schedule`, the first container field.
+    app.update(Action::RelationEditDocumentFieldMove(2));
+    app.update(Action::RelationEditDocumentFieldEdit);
+    app
+}
+
+#[test]
+fn a_container_field_editor_owns_newlines_format_and_its_own_apply() {
+    let app = container_modal_app();
+    let mut keymap = Keymap::default();
+
+    assert_eq!(
+        keymap.map(key(KeyCode::Enter), &app),
+        Some(Action::RelationEditInsert('\n')),
+        "Enter inserts a newline instead of applying the value"
+    );
+    assert_eq!(
+        keymap.map(control(KeyCode::Char('s')), &app),
+        Some(Action::RelationEditDocumentFieldApply),
+        "Ctrl-S applies the field, not the whole document"
+    );
+    assert_eq!(
+        keymap.map(control(KeyCode::Char('f')), &app),
+        Some(Action::RelationEditDocumentFieldFormat),
+        "Ctrl-F reformats the field text"
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Down), &app),
+        Some(Action::RelationEditDocumentFieldMoveLine(1))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Up), &app),
+        Some(Action::RelationEditDocumentFieldMoveLine(-1))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Esc), &app),
+        Some(Action::RelationEditDocumentFieldCancel),
+        "Esc leaves the field modal instead of closing the document modal"
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('x')), &app),
+        Some(Action::RelationEditInsert('x'))
+    );
 }
 
 #[test]
