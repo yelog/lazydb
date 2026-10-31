@@ -923,12 +923,17 @@ pub enum Action {
     RelationEditDocumentToggleView,
     /// Moves the field-list cursor by `delta` rows.
     RelationEditDocumentFieldMove(isize),
-    /// Opens the single-line editor on the selected field.
+    /// Opens the editor on the selected field: the single-line input for a
+    /// scalar, the multi-line modal for an array or embedded document.
     RelationEditDocumentFieldEdit,
     /// Applies the open field editor back into the document text.
     RelationEditDocumentFieldApply,
     /// Leaves the field editor without touching the document text.
     RelationEditDocumentFieldCancel,
+    /// Re-indents the open multi-line field value.
+    RelationEditDocumentFieldFormat,
+    /// Moves the multi-line field editor cursor by `delta` lines.
+    RelationEditDocumentFieldMoveLine(isize),
     RelationEditBackspace,
     RelationEditDeletePreviousWord,
     RelationEditDeleteToStart,

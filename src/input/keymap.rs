@@ -4751,7 +4751,7 @@ fn map_relation_data(event: KeyEvent, app: &App) -> Option<Action> {
                 }
             }
             crate::model::relation_edit::DocumentEditorView::Fields => {
-                map_document_field_list(event, state.field_edit.is_some())
+                map_document_field_list(event, state)
             }
         };
     }
@@ -4900,32 +4900,62 @@ fn map_relation_data(event: KeyEvent, app: &App) -> Option<Action> {
 
 /// Keys of the field-by-field view inside the MongoDB document modal.
 ///
-/// The list navigates like the document grid, `Enter` opens the selected
-/// field, and the field editor behaves like the single-line cell editor: only
-/// `Enter`/`Ctrl-S` apply and only `Esc` leaves it. `Ctrl-S` in the list saves
-/// the whole document through the same path the EJSON view uses.
-fn map_document_field_list(event: KeyEvent, editing: bool) -> Option<Action> {
-    if editing {
+/// The list navigates like the document grid and `Enter` opens the selected
+/// field. A scalar opens the single-line input, where `Enter`/`Ctrl-S` apply and
+/// `Esc` leaves it. An array or embedded document opens the multi-line field
+/// modal instead, so `Enter` inserts a newline there and only `Ctrl-S` applies.
+/// `Ctrl-S` in the list saves the whole document through the same path the EJSON
+/// view uses.
+fn map_document_field_list(
+    event: KeyEvent,
+    state: &crate::model::relation_edit::DocumentEditorState,
+) -> Option<Action> {
+    let Some(field) = state.field_edit.as_ref() else {
         return match (event.modifiers, event.code) {
-            (KeyModifiers::CONTROL, KeyCode::Char('s')) | (KeyModifiers::NONE, KeyCode::Enter) => {
+            (KeyModifiers::CONTROL, KeyCode::Char('s')) => Some(Action::RelationEditConfirm),
+            (KeyModifiers::NONE, KeyCode::Tab) => Some(Action::RelationEditDocumentToggleView),
+            (KeyModifiers::NONE, KeyCode::Enter) => Some(Action::RelationEditDocumentFieldEdit),
+            (KeyModifiers::NONE, KeyCode::Esc) => Some(Action::RelationEditCancel),
+            (KeyModifiers::NONE, KeyCode::Char('j') | KeyCode::Down) => {
+                Some(Action::RelationEditDocumentFieldMove(1))
+            }
+            (KeyModifiers::NONE, KeyCode::Char('k') | KeyCode::Up) => {
+                Some(Action::RelationEditDocumentFieldMove(-1))
+            }
+            _ => None,
+        };
+    };
+    // The multi-line field modal owns `Enter`, because its value spans lines,
+    // and its own cursor keys. Both kinds keep Ctrl-S and Esc.
+    if field.input.is_multiline() {
+        return match (event.modifiers, event.code) {
+            (KeyModifiers::CONTROL, KeyCode::Char('s')) => {
                 Some(Action::RelationEditDocumentFieldApply)
             }
+            (KeyModifiers::CONTROL, KeyCode::Char('f')) => {
+                Some(Action::RelationEditDocumentFieldFormat)
+            }
+            (KeyModifiers::NONE, KeyCode::Enter) => Some(Action::RelationEditInsert('\n')),
             (KeyModifiers::NONE, KeyCode::Esc) => Some(Action::RelationEditDocumentFieldCancel),
+            (KeyModifiers::NONE, KeyCode::Up) => {
+                Some(Action::RelationEditDocumentFieldMoveLine(-1))
+            }
+            (KeyModifiers::NONE, KeyCode::Down) => {
+                Some(Action::RelationEditDocumentFieldMoveLine(1))
+            }
             _ => map_relation_edit_text(event),
         };
     }
+    // A one-line field applies on Enter; Up/Down validates the draft before
+    // opening the adjacent editable field.
     match (event.modifiers, event.code) {
-        (KeyModifiers::CONTROL, KeyCode::Char('s')) => Some(Action::RelationEditConfirm),
-        (KeyModifiers::NONE, KeyCode::Tab) => Some(Action::RelationEditDocumentToggleView),
-        (KeyModifiers::NONE, KeyCode::Enter) => Some(Action::RelationEditDocumentFieldEdit),
-        (KeyModifiers::NONE, KeyCode::Esc) => Some(Action::RelationEditCancel),
-        (KeyModifiers::NONE, KeyCode::Char('j') | KeyCode::Down) => {
-            Some(Action::RelationEditDocumentFieldMove(1))
+        (KeyModifiers::CONTROL, KeyCode::Char('s')) | (KeyModifiers::NONE, KeyCode::Enter) => {
+            Some(Action::RelationEditDocumentFieldApply)
         }
-        (KeyModifiers::NONE, KeyCode::Char('k') | KeyCode::Up) => {
-            Some(Action::RelationEditDocumentFieldMove(-1))
-        }
-        _ => None,
+        (KeyModifiers::NONE, KeyCode::Esc) => Some(Action::RelationEditDocumentFieldCancel),
+        (KeyModifiers::NONE, KeyCode::Down) => Some(Action::RelationEditDocumentFieldMove(1)),
+        (KeyModifiers::NONE, KeyCode::Up) => Some(Action::RelationEditDocumentFieldMove(-1)),
+        _ => map_relation_edit_text(event),
     }
 }
 
