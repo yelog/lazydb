@@ -34,6 +34,10 @@ pub enum ShortcutContext {
     MongoDashboard,
     RelationDataBrowse,
     RelationDataEdit,
+    MongoDocumentFields,
+    MongoDocumentField,
+    MongoDocumentFieldMultiline,
+    MongoDocumentEjson,
     RelationDataVisual,
     RelationDataBusy,
     RelationDdl,
@@ -96,6 +100,10 @@ const ALL_SHORTCUT_CONTEXTS: &[ShortcutContext] = &[
     ShortcutContext::MongoDashboard,
     ShortcutContext::RelationDataBrowse,
     ShortcutContext::RelationDataEdit,
+    ShortcutContext::MongoDocumentFields,
+    ShortcutContext::MongoDocumentField,
+    ShortcutContext::MongoDocumentFieldMultiline,
+    ShortcutContext::MongoDocumentEjson,
     ShortcutContext::RelationDataVisual,
     ShortcutContext::RelationDataBusy,
     ShortcutContext::RelationDdl,
@@ -305,9 +313,21 @@ fn shortcut_context_with_overlay(app: &App, include_help: bool) -> ShortcutConte
         }
         Some(WorkspaceTab::Relation(tab)) if app.focus == Focus::Results => {
             match tab.edit.as_ref().map(|edit| &edit.mode) {
-                Some(RelationGridMode::EditCell(_)) | Some(RelationGridMode::EditDocument(_)) => {
-                    ShortcutContext::RelationDataEdit
-                }
+                Some(RelationGridMode::EditCell(_)) => ShortcutContext::RelationDataEdit,
+                Some(RelationGridMode::EditDocument(state)) => match state.view {
+                    crate::model::relation_edit::DocumentEditorView::Ejson => {
+                        ShortcutContext::MongoDocumentEjson
+                    }
+                    crate::model::relation_edit::DocumentEditorView::Fields => {
+                        match state.field_edit.as_ref() {
+                            Some(field) if field.input.is_multiline() => {
+                                ShortcutContext::MongoDocumentFieldMultiline
+                            }
+                            Some(_) => ShortcutContext::MongoDocumentField,
+                            None => ShortcutContext::MongoDocumentFields,
+                        }
+                    }
+                },
                 Some(RelationGridMode::VisualLine { .. }) => ShortcutContext::RelationDataVisual,
                 Some(RelationGridMode::Busy) => ShortcutContext::RelationDataBusy,
                 Some(RelationGridMode::Browse) | None => ShortcutContext::RelationDataBrowse,
@@ -481,6 +501,19 @@ pub enum HelpShortcutId {
     OutputCopy,
     RelationEditApply,
     RelationEditCancel,
+    MongoDocumentMove,
+    MongoDocumentEditField,
+    MongoDocumentSave,
+    MongoDocumentToggleView,
+    MongoDocumentCancel,
+    MongoDocumentFieldApply,
+    MongoDocumentFieldApplyMultiline,
+    MongoDocumentFieldMove,
+    MongoDocumentFieldCancel,
+    MongoDocumentNewline,
+    MongoDocumentFormat,
+    MongoDocumentCursor,
+    MongoDocumentText,
     RelationVisualMove,
     RelationVisualYank,
     RelationVisualDelete,
@@ -691,7 +724,11 @@ const fn footer_priority(id: HelpShortcutId) -> Option<u8> {
         | RedisPreviewMove
         | RedisPreviewTableMove
         | RedisFindConfirm
-        | RedisFindNext => 1,
+        | RedisFindNext
+        | MongoDocumentMove
+        | MongoDocumentSave
+        | MongoDocumentFieldApply
+        | MongoDocumentFieldApplyMultiline => 1,
         ExplorerMoveUp
         | EditorRun
         | ResultsMoveDown
@@ -750,7 +787,10 @@ const fn footer_priority(id: HelpShortcutId) -> Option<u8> {
         | RedisPreviewPage
         | RedisPreviewTableCopy
         | RedisFindCancel
-        | RedisFindPrevious => 2,
+        | RedisFindPrevious
+        | MongoDocumentEditField
+        | MongoDocumentFieldMove
+        | MongoDocumentNewline => 2,
         ExplorerCollapse
         | EditorFormat
         | ResultsMoveUp
@@ -783,7 +823,11 @@ const fn footer_priority(id: HelpShortcutId) -> Option<u8> {
         | RedisKeysRefresh
         | RedisKeysPage
         | RedisPreviewTableDetails => 3,
-        RelationEditSetNull | RelationEditRestoreDefault | RelationEditUseValue => 3,
+        RelationEditSetNull
+        | RelationEditRestoreDefault
+        | RelationEditUseValue
+        | MongoDocumentToggleView
+        | MongoDocumentFormat => 3,
         ExplorerExpand
         | EditorCopyStatement
         | ResultsMoveRight
@@ -796,7 +840,10 @@ const fn footer_priority(id: HelpShortcutId) -> Option<u8> {
         | ConsoleManagerClose
         | HelpClose
         | RelationEditDeleteWord
-        | RelationVisualCancel => 4,
+        | RelationVisualCancel
+        | MongoDocumentCancel
+        | MongoDocumentFieldCancel
+        | MongoDocumentCursor => 4,
         ExplorerActivate
         | EditorNormal
         | ResultsOpenRecordView
@@ -2485,6 +2532,101 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
         display
     ),
     row!(
+        MongoDocumentMove,
+        [MongoDocumentFields],
+        "j/k / Up/Down",
+        "select a top-level field (_id is read-only)",
+        display
+    ),
+    row!(
+        MongoDocumentEditField,
+        [MongoDocumentFields],
+        "Enter",
+        "open the selected editable field",
+        display
+    ),
+    row!(
+        MongoDocumentSave,
+        [MongoDocumentFields, MongoDocumentEjson],
+        "Ctrl-s",
+        "save the document with one replacement bounded to _id",
+        display
+    ),
+    row!(
+        MongoDocumentToggleView,
+        [MongoDocumentFields, MongoDocumentEjson],
+        "Tab",
+        "switch between the field list and whole-document EJSON",
+        display
+    ),
+    row!(
+        MongoDocumentCancel,
+        [MongoDocumentFields, MongoDocumentEjson],
+        "Esc",
+        "cancel document editing",
+        display
+    ),
+    row!(
+        MongoDocumentFieldApply,
+        [MongoDocumentField],
+        "Enter / Ctrl-s",
+        "validate and apply the field to the document draft",
+        display
+    ),
+    row!(
+        MongoDocumentFieldApplyMultiline,
+        [MongoDocumentFieldMultiline],
+        "Ctrl-s",
+        "validate and apply the field to the document draft",
+        display
+    ),
+    row!(
+        MongoDocumentFieldMove,
+        [MongoDocumentField],
+        "Up/Down",
+        "validate and apply to draft, then open adjacent editable field; skip _id, stop at ends; errors keep this field open",
+        display
+    ),
+    row!(
+        MongoDocumentFieldCancel,
+        [MongoDocumentField, MongoDocumentFieldMultiline],
+        "Esc",
+        "discard this field edit and return to the field list",
+        display
+    ),
+    row!(
+        MongoDocumentNewline,
+        [MongoDocumentFieldMultiline, MongoDocumentEjson],
+        "Enter",
+        "insert a newline",
+        display
+    ),
+    row!(
+        MongoDocumentFormat,
+        [MongoDocumentFieldMultiline, MongoDocumentEjson],
+        "Ctrl-f",
+        "format Canonical Extended JSON",
+        display
+    ),
+    row!(
+        MongoDocumentCursor,
+        [MongoDocumentFieldMultiline, MongoDocumentEjson],
+        "Up/Down",
+        "move the text cursor between lines",
+        display
+    ),
+    row!(
+        MongoDocumentText,
+        [
+            MongoDocumentField,
+            MongoDocumentFieldMultiline,
+            MongoDocumentEjson
+        ],
+        "type / Backspace / Delete / Ctrl-w / Ctrl-u",
+        "edit text; Ctrl-w deletes the previous word, Ctrl-u deletes to the start",
+        display
+    ),
+    row!(
         RelationVisualMove,
         [RelationDataVisual],
         "j/k",
@@ -3832,6 +3974,14 @@ fn footer_rank(
             Id::RelationRefresh => Some(11),
             _ => None,
         },
+        ShortcutContext::MongoDocumentFields => match id {
+            Id::MongoDocumentMove => Some(1),
+            Id::MongoDocumentEditField => Some(2),
+            Id::MongoDocumentSave => Some(3),
+            Id::MongoDocumentToggleView => Some(4),
+            Id::MongoDocumentCancel => Some(5),
+            _ => None,
+        },
         ShortcutContext::RelationDataEdit => match id {
             Id::RelationEditApply => Some(1),
             Id::RelationEditCancel => Some(2),
@@ -3933,6 +4083,10 @@ pub(crate) fn context_name(context: ShortcutContext) -> &'static str {
         | ShortcutContext::RelationDataBusy
         | ShortcutContext::RelationDdl
         | ShortcutContext::PrincipalDdl => "RESULTS",
+        ShortcutContext::MongoDocumentFields => "MONGODB DOCUMENT · FIELDS",
+        ShortcutContext::MongoDocumentField => "MONGODB FIELD · SINGLE LINE",
+        ShortcutContext::MongoDocumentFieldMultiline => "MONGODB FIELD · MULTILINE",
+        ShortcutContext::MongoDocumentEjson => "MONGODB DOCUMENT · EJSON",
         ShortcutContext::RedisKeys => "REDIS KEYS",
         ShortcutContext::RedisKeysFindEditing | ShortcutContext::RedisKeysFindConfirmed => {
             "REDIS KEYS · FIND"
@@ -4549,6 +4703,107 @@ mod tests {
         };
         tab.view = RelationView::Ddl;
         assert_eq!(shortcut_context(&app), ShortcutContext::RelationDdl);
+    }
+
+    #[test]
+    fn mongodb_document_help_matches_each_editor_state() {
+        use crate::{
+            db::mongodb::types::{MongoDocument, MongoNamespace},
+            model::relation_edit::{DocumentEditorState, DocumentEditorView},
+        };
+        use mongodb::bson::{doc, raw::RawDocumentBuf};
+
+        let bson = doc! { "_id": 1, "name": "bike", "tags": ["road"] };
+        let document = MongoDocument {
+            raw: RawDocumentBuf::from_bytes(mongodb::bson::to_vec(&bson).unwrap()).unwrap(),
+            bson,
+            editable: true,
+        };
+        let state =
+            DocumentEditorState::new(0, &MongoNamespace::collection("app", "items"), &document)
+                .unwrap();
+        for (context, selected_field, ejson, expected) in [
+            (
+                ShortcutContext::MongoDocumentFields,
+                None,
+                false,
+                vec!["j/k / Up/Down", "Enter", "Ctrl-s", "Tab", "Esc"],
+            ),
+            (
+                ShortcutContext::MongoDocumentField,
+                Some(1),
+                false,
+                vec!["Enter / Ctrl-s", "Up/Down", "Esc"],
+            ),
+            (
+                ShortcutContext::MongoDocumentFieldMultiline,
+                Some(2),
+                false,
+                vec!["Ctrl-s", "Enter", "Ctrl-f", "Esc", "Up/Down"],
+            ),
+            (
+                ShortcutContext::MongoDocumentEjson,
+                None,
+                true,
+                vec!["Ctrl-s", "Enter", "Tab", "Ctrl-f", "Esc", "Up/Down"],
+            ),
+        ] {
+            let mut state = state.clone();
+            if let Some(index) = selected_field {
+                state.selected_field = index;
+                state.begin_field_edit();
+                assert!(state.field_edit.is_some());
+            }
+            if ejson {
+                state.view = DocumentEditorView::Ejson;
+            }
+            let mut relation = RelationTab::new("items");
+            let mut edit = RelationEditSession::default();
+            edit.mode = RelationGridMode::EditDocument(Box::new(state));
+            relation.edit = Some(edit);
+            let mut app = App::new(Vec::new());
+            app.tabs = vec![WorkspaceTab::Relation(relation)];
+            app.active_tab = 0;
+            app.focus = Focus::Results;
+
+            assert_eq!(shortcut_context(&app), context);
+            // An active document editor has its own controls even without SQL
+            // cell-edit capabilities.
+            let capabilities = ShortcutCapabilities::default();
+            assert_eq!(footer_sequences(context, capabilities), expected);
+            let rows = HelpState::new(context, capabilities).entries();
+            assert_eq!(
+                rows,
+                shortcuts(
+                    context,
+                    ShortcutCapabilities {
+                        relation_edit_available: true,
+                        ..capabilities
+                    }
+                )
+            );
+            assert_eq!(
+                rows.len(),
+                expected.len() + usize::from(selected_field.is_some() || ejson)
+            );
+            assert!(rows.iter().all(|row| !shortcut_is_executable(row.id)));
+            assert!(rows.iter().all(|row| {
+                !row.description.contains("SQL")
+                    && !row.description.contains("DEFAULT")
+                    && !row.sequence.starts_with("Alt-")
+            }));
+            if context == ShortcutContext::MongoDocumentField {
+                let movement = rows.iter().find(|row| row.sequence == "Up/Down").unwrap();
+                for phrase in [
+                    "validate and apply to draft",
+                    "skip _id",
+                    "stop at ends",
+                    "errors keep this field open",
+                ] {
+                    assert!(movement.description.contains(phrase));
+                }
+            }
+        }
     }
 
     #[test]

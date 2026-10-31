@@ -16,7 +16,10 @@ use lazydb::{
         },
     },
     identity::ConnectionIdentity,
-    model::{execution_target::ExecutionTarget, explorer::ExplorerNodeId, workspace::Focus},
+    model::{
+        execution_target::ExecutionTarget, explorer::ExplorerNodeId, relation::RelationView,
+        tab::WorkspaceTab, workspace::Focus,
+    },
     profile::{DatabaseKind, import_connection_url},
 };
 use uuid::Uuid;
@@ -241,6 +244,115 @@ fn expanding_a_mongodb_database_reveals_its_children() {
 
     assert!(app.explorer.normalized.expanded.contains(&node));
     assert_database_children_projected(&app, "after expand");
+}
+
+#[test]
+fn activating_a_mongodb_collection_opens_its_rows_on_the_first_press() {
+    let (mut app, profile_id, generation) = mongo_app();
+    load_collections(&mut app, profile_id, generation);
+    let node = collection_node(profile_id);
+    assert!(app.explorer.select_id(node.clone()));
+
+    let commands = app.update(Action::ExplorerOpenSelected);
+
+    let Some(WorkspaceTab::Relation(tab)) = app.tabs.last() else {
+        panic!(
+            "one enter on a collection must open its rows, got {} tabs",
+            app.tabs.len()
+        );
+    };
+    assert_eq!(tab.view, RelationView::Data);
+    assert_eq!(app.active_tab, app.tabs.len() - 1);
+    assert_eq!(app.focus, Focus::Results);
+    assert!(
+        commands
+            .iter()
+            .any(|command| matches!(command, Command::LoadMongoRelationPreview(_))),
+        "opening the rows must request the first document page, got {commands:?}"
+    );
+    assert!(
+        !app.explorer.normalized.expanded.contains(&node),
+        "enter must not reveal the collection branch"
+    );
+    assert!(
+        !projected_ids(&app).iter().any(|id| matches!(
+            id,
+            ExplorerNodeId::Mongo {
+                node: MongoExplorerNodeId::Index { .. },
+                ..
+            }
+        )),
+        "enter must not reveal the collection's indexes, got {:?}",
+        projected_ids(&app)
+    );
+    assert!(
+        !commands
+            .iter()
+            .any(|command| matches!(command, Command::DiscoverMongoIndexes { .. })),
+        "enter must not load the collection's indexes, got {commands:?}"
+    );
+}
+
+#[test]
+fn toggling_a_mongodb_collection_only_toggles_expansion() {
+    let (mut app, profile_id, generation) = mongo_app();
+    load_collections(&mut app, profile_id, generation);
+    let node = collection_node(profile_id);
+    assert!(app.explorer.select_id(node.clone()));
+    app.update(Action::ExplorerExpand);
+
+    let commands = app.update(Action::ExplorerToggle);
+
+    assert!(
+        !app.explorer.normalized.expanded.contains(&node),
+        "toggling an expanded collection must collapse it"
+    );
+    assert!(
+        !app.tabs
+            .iter()
+            .any(|tab| matches!(tab, WorkspaceTab::Relation(_))),
+        "collapsing a collection must not open its rows"
+    );
+    assert!(
+        commands.is_empty(),
+        "collapsing a collection must emit nothing, got {commands:?}"
+    );
+}
+
+#[test]
+fn activating_an_expanded_collection_preserves_the_tree_and_reuses_the_tab() {
+    let (mut app, profile_id, generation) = mongo_app();
+    load_collections(&mut app, profile_id, generation);
+    let node = collection_node(profile_id);
+    assert!(app.explorer.select_id(node.clone()));
+    app.update(Action::ExplorerExpand);
+    let expanded = app.explorer.normalized.expanded.clone();
+    app.update(Action::ExplorerPrimary);
+    let Some(WorkspaceTab::Relation(tab)) = app.tabs.get(app.active_tab) else {
+        panic!("primary activation must open a relation");
+    };
+    let tab_id = tab.id;
+    let count = app.tabs.len();
+    assert_eq!(app.explorer.normalized.expanded, expanded);
+    app.focus = Focus::Explorer;
+    let commands = app.update(Action::ExplorerOpenSelected);
+    assert_eq!(app.tabs.len(), count);
+    assert!(
+        matches!(app.tabs.get(app.active_tab), Some(WorkspaceTab::Relation(tab)) if tab.id == tab_id)
+    );
+    assert_eq!(app.explorer.normalized.expanded, expanded);
+    assert!(
+        !commands
+            .iter()
+            .any(|command| matches!(command, Command::DiscoverMongoIndexes { .. }))
+    );
+
+    // The mouse chevron uses ToggleNode, and must only collapse the branch.
+    let commands = app.update(Action::ExplorerToggleNode(node.clone()));
+    assert!(commands.is_empty());
+    assert_eq!(app.tabs.len(), count);
+    assert_eq!(app.focus, Focus::Explorer);
+    assert!(!app.explorer.normalized.expanded.contains(&node));
 }
 
 #[test]

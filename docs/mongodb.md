@@ -1,6 +1,6 @@
 # MongoDB
 
-LazyDB connects with a MongoDB profile and keeps document data in BSON/EJSON form. MongoDB consoles accept one ordered JSON command object per run; the current TUI console supports bounded `find` and `count` reads. Use the Explorer to open a database, then its Monitor or Users & Roles entry.
+LazyDB connects with a MongoDB profile and keeps document data in BSON/EJSON form. MongoDB consoles accept one ordered JSON command object per run; the current TUI console supports bounded `find` and `count` reads. Use the Explorer to open a database, then its Monitor or Users & Roles entry. `Enter` on a collection opens its documents in the relation tab; the collection's indexes stay behind the expand keys (`Right`, `o`).
 
 ## Monitoring and principals
 

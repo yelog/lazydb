@@ -73,8 +73,12 @@ pub enum DocumentFieldKind {
     Null,
     String,
     ObjectId,
-    /// Documents, arrays and every other BSON type are edited as Canonical
-    /// Extended JSON, so a nested document keeps its types when it round-trips.
+    /// A BSON date reads and edits as ISO-8601 UTC: the canonical EJSON form is
+    /// unreadable and easy to get wrong by hand.
+    DateTime,
+    /// Documents, arrays and every other BSON type (timestamps, regexes,
+    /// decimals) are edited as Canonical Extended JSON, so they keep their
+    /// types when they round-trip.
     Ejson,
 }
 
@@ -88,6 +92,7 @@ impl DocumentFieldKind {
             Bson::Null => Self::Null,
             Bson::String(_) => Self::String,
             Bson::ObjectId(_) => Self::ObjectId,
+            Bson::DateTime(_) => Self::DateTime,
             _ => Self::Ejson,
         }
     }
@@ -124,6 +129,7 @@ impl DocumentFieldKind {
             Self::ObjectId => mongodb::bson::oid::ObjectId::parse_str(trimmed)
                 .map(Bson::ObjectId)
                 .map_err(|_| format!("expected a 24-character objectId, got {trimmed:?}")),
+            Self::DateTime => parse_bson_date(trimmed),
             Self::Ejson => {
                 let value: serde_json::Value = serde_json::from_str(trimmed)
                     .map_err(|error| format!("invalid Canonical EJSON: {error}"))?;
@@ -133,6 +139,16 @@ impl DocumentFieldKind {
     }
 }
 
+/// How a container field is summarized in the field list.
+///
+/// A container is edited in its own multi-line modal, so the row shows how much
+/// the field holds instead of a canonical EJSON line clipped at the pane edge.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DocumentFieldShape {
+    Array(usize),
+    Document(usize),
+}
+
 /// One top-level field of the document, as the field list shows it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DocumentField {
@@ -140,26 +156,143 @@ pub struct DocumentField {
     pub kind: DocumentFieldKind,
     /// The observed BSON type of the value the field holds right now.
     pub type_name: &'static str,
-    /// The compact value the row shows and the field editor starts from.
+    /// The compact value the field editor starts from.
     pub value: String,
+    /// `Some` for the BSON containers, which are edited in the multi-line modal.
+    pub shape: Option<DocumentFieldShape>,
 }
 
 impl DocumentField {
     fn new(name: &str, value: &Bson) -> Self {
+        let shape = match value {
+            Bson::Array(items) => Some(DocumentFieldShape::Array(items.len())),
+            Bson::Document(fields) => Some(DocumentFieldShape::Document(fields.len())),
+            _ => None,
+        };
         Self {
             name: name.to_owned(),
             kind: DocumentFieldKind::of(value),
             type_name: bson_type_name(value),
             value: compact_bson_value(value),
+            shape,
+        }
+    }
+
+    /// True for an array or an embedded document.
+    pub fn is_container(&self) -> bool {
+        self.shape.is_some()
+    }
+
+    /// What the field row shows: the compact value of a scalar, or a shape
+    /// marker for a container (the same shape the data grid shows for them).
+    pub fn list_value(&self) -> String {
+        match self.shape {
+            Some(DocumentFieldShape::Array(entries)) => format!("[{entries} items]"),
+            Some(DocumentFieldShape::Document(entries)) => format!("{{{entries} fields}}"),
+            None => self.value.clone(),
         }
     }
 }
 
-/// The single field being edited, with the single-line input it edits.
+/// The text one field is being edited as.
+///
+/// Every field opens in the modal, so both kinds are modal values: a scalar is
+/// edited on one line, and a container gets a multi-line JSON buffer, because a
+/// canonical EJSON array on one line is unreadable and wider than the pane.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DocumentFieldInput {
+    Line(TextInput),
+    Block(JsonBuffer),
+}
+
+impl DocumentFieldInput {
+    pub fn value(&self) -> &str {
+        match self {
+            Self::Line(input) => input.value(),
+            Self::Block(buffer) => buffer.value(),
+        }
+    }
+
+    /// True for the multi-line editor, which owns `Enter` and the cursor keys.
+    pub fn is_multiline(&self) -> bool {
+        matches!(self, Self::Block(_))
+    }
+
+    /// How many lines the value spans, which is one half of the modal size.
+    pub fn line_count(&self) -> usize {
+        self.value().split('\n').count()
+    }
+
+    /// The terminal cells of the widest projected line.
+    pub fn longest_line_columns(&self) -> usize {
+        self.value()
+            .split('\n')
+            .map(|line| {
+                unicode_width::UnicodeWidthStr::width(
+                    crate::security::project_editor_line(line).text.as_str(),
+                )
+            })
+            .max()
+            .unwrap_or_default()
+    }
+
+    /// The lines the value itself takes in the field modal: its own lines, plus
+    /// one for the refusal when the last apply was rejected. The modal adds the
+    /// chrome around it, including the margins above and below.
+    pub fn modal_value_rows(&self, error: bool) -> usize {
+        self.line_count() + usize::from(error)
+    }
+
+    fn apply(&mut self, edit: TextInputEdit) -> bool {
+        match self {
+            Self::Line(input) => input.apply(edit),
+            Self::Block(buffer) => buffer.apply(edit),
+        }
+    }
+
+    fn paste(&mut self, text: &str) {
+        match self {
+            Self::Line(input) => input.paste(text),
+            Self::Block(buffer) => buffer.paste(text),
+        }
+    }
+
+    fn move_line(&mut self, delta: isize) -> bool {
+        match self {
+            Self::Line(_) => false,
+            Self::Block(buffer) => {
+                if delta < 0 {
+                    buffer.move_up();
+                } else {
+                    buffer.move_down();
+                }
+                true
+            }
+        }
+    }
+
+    /// Re-indents a multi-line field, and reports why a single-line field has
+    /// nothing to format.
+    fn format(&mut self) -> Result<(), String> {
+        match self {
+            Self::Line(_) => Err("this field is edited on one line".to_owned()),
+            Self::Block(buffer) => {
+                let formatted = buffer.format().map_err(|error| {
+                    format!("{} at {}:{}", error.message, error.line, error.column)
+                })?;
+                buffer.replace_value(formatted);
+                Ok(())
+            }
+        }
+    }
+}
+
+/// The single field being edited, with the input it edits.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DocumentFieldEdit {
     pub name: String,
-    pub input: TextInput,
+    pub type_name: &'static str,
+    pub input: DocumentFieldInput,
 }
 
 fn bson_type_name(value: &Bson) -> &'static str {
@@ -203,8 +336,92 @@ fn compact_bson_value(value: &Bson) -> String {
         Bson::Int64(number) => number.to_string(),
         Bson::Double(number) => number.to_string(),
         Bson::Null => "null".to_owned(),
+        Bson::DateTime(date) => iso_utc_date(date),
         other => other.clone().into_canonical_extjson().to_string(),
     }
+}
+
+/// One BSON date as ISO-8601 UTC, with milliseconds only when it has them.
+///
+/// The canonical EJSON form (`{"$date":{"$numberLong":"…"}}`) is what the write
+/// path stores, but it is not what a person can read or safely edit, so the
+/// document editor shows and accepts this instead.
+fn iso_utc_date(value: &mongodb::bson::DateTime) -> String {
+    let Some(timestamp) = chrono::DateTime::from_timestamp_millis(value.timestamp_millis()) else {
+        // Outside chrono's range: keep the canonical form instead of inventing
+        // a date the value does not hold.
+        return Bson::DateTime(*value).into_canonical_extjson().to_string();
+    };
+    if !(0..=9999).contains(&chrono::Datelike::year(&timestamp)) {
+        return Bson::DateTime(*value).into_canonical_extjson().to_string();
+    }
+    if timestamp.timestamp_subsec_millis() == 0 {
+        timestamp.format("%Y-%m-%dT%H:%M:%SZ").to_string()
+    } else {
+        timestamp.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
+    }
+}
+
+/// Reads a date the way a person writes one.
+///
+/// `2026-11-08T00:00:00Z`, `2026-11-08 15:30`, `2026-11-08 15:30:15.250` and
+/// `2026-11-08` are all accepted, the forms without an offset as UTC, and so is
+/// canonical or relaxed EJSON, so a value copied from the EJSON view still
+/// round-trips.
+fn parse_bson_date(text: &str) -> Result<Bson, String> {
+    let invalid =
+        || format!("expected an ISO-8601 timestamp like 2026-11-08T00:00:00Z, got {text:?}");
+    if let Ok(timestamp) = chrono::DateTime::parse_from_rfc3339(text) {
+        return bson_date_from_timestamp(timestamp.with_timezone(&chrono::Utc));
+    }
+    for format in [
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d %H:%M:%S",
+    ] {
+        if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(text, format) {
+            return bson_date_from_timestamp(naive.and_utc());
+        }
+    }
+    if let Ok(date) = chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d")
+        && let Some(naive) = date.and_hms_opt(0, 0, 0)
+    {
+        return Ok(Bson::DateTime(mongodb::bson::DateTime::from_millis(
+            naive.and_utc().timestamp_millis(),
+        )));
+    }
+    if text.starts_with('{') {
+        let value: serde_json::Value = serde_json::from_str(text)
+            .map_err(|error| format!("invalid Canonical EJSON: {error}"))?;
+        if let Some(object) = value.as_object()
+            && object.len() == 1
+            && let Some(date) = object.get("$date").and_then(serde_json::Value::as_str)
+        {
+            let timestamp = chrono::DateTime::parse_from_rfc3339(date)
+                .map_err(|error| format!("invalid date: {error}"))?;
+            return bson_date_from_timestamp(timestamp.with_timezone(&chrono::Utc));
+        }
+        return match Bson::try_from(value) {
+            Ok(Bson::DateTime(date)) => Ok(Bson::DateTime(date)),
+            Ok(other) => Err(format!("expected a date, got {}", bson_type_name(&other))),
+            Err(error) => Err(format!("invalid Canonical EJSON: {error}")),
+        };
+    }
+    Err(invalid())
+}
+
+fn bson_date_from_timestamp(timestamp: chrono::DateTime<chrono::Utc>) -> Result<Bson, String> {
+    // BSON stores whole milliseconds. Refuse submillisecond precision and leap
+    // seconds instead of silently changing the supplied instant.
+    let nanos = timestamp.timestamp_subsec_nanos();
+    if nanos >= 1_000_000_000 || !nanos.is_multiple_of(1_000_000) {
+        return Err(
+            "BSON dates require millisecond precision and do not support leap seconds".to_owned(),
+        );
+    }
+    Ok(Bson::DateTime(mongodb::bson::DateTime::from_millis(
+        timestamp.timestamp_millis(),
+    )))
 }
 
 /// The state of the modal that edits one MongoDB document as a whole.
@@ -281,16 +498,51 @@ impl DocumentEditorState {
     /// The list is derived from the text instead of being stored beside it, so
     /// the field view can never drift from the document that saving writes.
     pub fn fields(&self) -> Result<Vec<DocumentField>, String> {
+        self.document_and_fields().map(|(_, fields)| fields)
+    }
+
+    /// The parsed document and its field rows, from one parse of the text.
+    fn document_and_fields(&self) -> Result<(Document, Vec<DocumentField>), String> {
         let document = parse_document_ejson(self.input.value())?;
-        Ok(document
+        let fields = document
             .iter()
             .map(|(name, value)| DocumentField::new(name, value))
-            .collect())
+            .collect();
+        Ok((document, fields))
     }
 
     /// The row the field list highlights, clamped to the fields that exist.
     pub fn selected_field_index(&self, field_count: usize) -> usize {
         self.selected_field.min(field_count.saturating_sub(1))
+    }
+
+    /// Applies a scalar draft locally before opening an adjacent editable field.
+    pub fn navigate_field_edit(&mut self, delta: isize) -> Result<(), String> {
+        let Some(field) = self.field_edit.as_ref() else {
+            self.move_field(delta);
+            return Ok(());
+        };
+        if field.input.is_multiline() || delta == 0 {
+            return Ok(());
+        }
+        let name = field.name.clone();
+        let text = field.input.value().to_owned();
+        self.apply_field(&name, &text)?;
+        self.field_error = None;
+        let fields = self.fields()?;
+        let current = self.selected_field_index(fields.len());
+        let next = if delta < 0 {
+            (0..current)
+                .rev()
+                .find(|&index| fields[index].name != DOCUMENT_ID_FIELD)
+        } else {
+            (current + 1..fields.len()).find(|&index| fields[index].name != DOCUMENT_ID_FIELD)
+        };
+        if let Some(next) = next {
+            self.selected_field = next;
+            self.begin_field_edit();
+        }
+        Ok(())
     }
 
     /// Moves the field selection by `delta` rows, stopping at both ends.
@@ -314,13 +566,15 @@ impl DocumentEditorState {
         }
     }
 
-    /// Opens the single-line editor on the selected field.
+    /// Opens the modal on the selected field.
     ///
-    /// `_id` reports why it never opens: the identifier is immutable and the
-    /// list must not offer an edit the write path would refuse.
+    /// A container opens it multi-line, so its value is shown indented instead
+    /// of as one canonical EJSON line. `_id` reports why it never opens: the
+    /// identifier is immutable and the list must not offer an edit the write
+    /// path would refuse.
     pub fn begin_field_edit(&mut self) {
-        let fields = match self.fields() {
-            Ok(fields) => fields,
+        let (document, fields) = match self.document_and_fields() {
+            Ok(parsed) => parsed,
             Err(message) => {
                 self.field_edit = None;
                 self.field_error = Some(message);
@@ -337,10 +591,17 @@ impl DocumentEditorState {
             self.field_error = Some(DOCUMENT_ID_IMMUTABLE_MESSAGE.to_owned());
             return;
         }
+        let input = match (field.is_container(), document.get(&field.name)) {
+            (true, Some(value)) => {
+                DocumentFieldInput::Block(JsonBuffer::new(indented_bson_value(value)))
+            }
+            _ => DocumentFieldInput::Line(TextInput::from(field.value.clone())),
+        };
         self.field_error = None;
         self.field_edit = Some(DocumentFieldEdit {
             name: field.name.clone(),
-            input: TextInput::from(field.value.clone()),
+            type_name: field.type_name,
+            input,
         });
     }
 
@@ -384,6 +645,30 @@ impl DocumentEditorState {
         true
     }
 
+    /// Moves the multi-line field cursor by `delta` lines.
+    pub fn move_field_edit_line(&mut self, delta: isize) -> bool {
+        let Some(field) = self.field_edit.as_mut() else {
+            return false;
+        };
+        field.input.move_line(delta)
+    }
+
+    /// Re-indents the open multi-line field value.
+    pub fn format_field_edit(&mut self) -> Result<(), String> {
+        let Some(field) = self.field_edit.as_mut() else {
+            return Err("no field editor is open".to_owned());
+        };
+        field.input.format()
+    }
+
+    /// True while the open field editor is the multi-line one, which owns
+    /// `Enter` and the cursor keys instead of applying on `Enter`.
+    pub fn field_edit_is_multiline(&self) -> bool {
+        self.field_edit
+            .as_ref()
+            .is_some_and(|field| field.input.is_multiline())
+    }
+
     /// The document to write, or the reason it cannot be written.
     ///
     /// The editor text is parsed back into BSON and must still carry the
@@ -399,9 +684,16 @@ impl DocumentEditorState {
 
 /// Renders one document as Canonical Extended JSON.
 pub fn canonical_document_ejson(document: &Document) -> String {
-    let value = Bson::Document(document.clone()).into_canonical_extjson();
-    // The modal is a text editor: one compact line is unreadable and gets
-    // clipped at the pane edge, so the document is rendered with indentation.
+    indented_bson_value(&Bson::Document(document.clone()))
+}
+
+/// Renders one BSON value as Canonical Extended JSON across lines.
+///
+/// An array or a nested document on one compact line is unreadable and gets
+/// clipped at the pane edge, so every value the editors show is indented.
+/// Scalars render as the same single token canonical EJSON would produce.
+pub fn indented_bson_value(value: &Bson) -> String {
+    let value = value.clone().into_canonical_extjson();
     serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())
 }
 

@@ -264,8 +264,6 @@ fn collection_node(profile_id: Uuid) -> ExplorerNodeId {
 fn activating_a_mongodb_collection_opens_the_relation_tab_on_data() {
     let (mut app, profile_id, _generation) = mongo_app();
     assert!(app.explorer.select_id(collection_node(profile_id)));
-    // The first activation expands the collection and loads its indexes.
-    app.update(Action::ExplorerOpenSelected);
 
     let commands = app.update(Action::ExplorerOpenSelected);
 
@@ -483,8 +481,6 @@ fn loaded_mongo_relation(app: &mut App, profile_id: Uuid) {
     use lazydb::profile::CatalogScope;
 
     assert!(app.explorer.select_id(collection_node(profile_id)));
-    // First activation expands the collection, the second opens the tab.
-    app.update(Action::ExplorerOpenSelected);
     app.update(Action::ExplorerOpenSelected);
     let Some(WorkspaceTab::Relation(tab)) = app.tabs.last_mut() else {
         panic!("activating a collection must open a relation tab");
@@ -659,7 +655,6 @@ fn opening_the_ddl_view_on_a_mongodb_relation_requests_the_structure() {
 fn opening_the_ddl_view_without_a_loaded_page_asks_for_metadata_only() {
     let (mut app, profile_id, _generation) = mongo_app();
     assert!(app.explorer.select_id(collection_node(profile_id)));
-    app.update(Action::ExplorerOpenSelected);
     app.update(Action::ExplorerOpenSelected);
 
     let commands = app.update(Action::SetRelationView(RelationView::Ddl));
@@ -836,8 +831,6 @@ fn active_relation_tab_mut(app: &mut App) -> &mut RelationTab {
 fn mongo_app_with_page(documents: Vec<MongoDocument>) -> (App, RelationRequest) {
     let (mut app, profile_id, _generation) = mongo_app();
     assert!(app.explorer.select_id(collection_node(profile_id)));
-    // The first activation expands the collection, the second opens the tab.
-    app.update(Action::ExplorerOpenSelected);
     let commands = app.update(Action::ExplorerOpenSelected);
     let request = mongo_preview_request(&commands);
     let loaded = page(documents.clone(), None);
@@ -1600,7 +1593,7 @@ fn the_document_modal_renders_the_collection_id_and_save_hints() {
         "the modal names the _id it will write, got:\n{output}"
     );
     assert!(
-        output.contains("Ctrl-S apply") && output.contains("Esc cancel"),
+        output.contains("Ctrl-S apply document") && output.contains("Esc close"),
         "the modal shows how to save and cancel, got:\n{output}"
     );
 }
@@ -2053,6 +2046,652 @@ fn the_id_field_cannot_be_edited_from_the_field_list() {
     assert!(
         document_state(&app).field_edit.is_some(),
         "a field other than _id still opens its editor"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T6 (issue #6): a container field is edited in its own multi-line modal
+// ---------------------------------------------------------------------------
+
+/// Opens the field editor on `name` and returns the text it starts with.
+fn open_field_editor(app: &mut App, name: &str) -> String {
+    select_field(app, name);
+    app.update(Action::RelationEditDocumentFieldEdit);
+    let state = document_state(app);
+    let field = state
+        .field_edit
+        .clone()
+        .unwrap_or_else(|| panic!("the {name} field editor must open"));
+    assert_eq!(field.name, name);
+    field.input.value().to_owned()
+}
+
+/// Replaces the open field editor's text the way typing does.
+fn retype_field_editor(app: &mut App, text: &str) {
+    app.update(Action::RelationEditDeleteToStart);
+    for character in text.chars() {
+        app.update(Action::RelationEditInsert(character));
+    }
+}
+
+fn document_field_text(app: &App) -> String {
+    document_state(app)
+        .field_edit
+        .as_ref()
+        .map(|field| field.input.value().to_owned())
+        .unwrap_or_default()
+}
+
+#[test]
+fn a_container_field_opens_on_indented_ejson_in_its_own_modal() {
+    let (mut app, _request) = mongo_app_with_page(typed_documents());
+    open_fields_view(&mut app);
+
+    let text = open_field_editor(&mut app, "geometry");
+
+    assert_eq!(
+        document_state(&app).view,
+        DocumentEditorView::Fields,
+        "the field list stays the surface underneath"
+    );
+    assert!(
+        document_state(&app)
+            .field_edit
+            .as_ref()
+            .is_some_and(|field| field.input.is_multiline()),
+        "a document field opens the multi-line editor"
+    );
+    assert!(
+        text.lines().count() > 1,
+        "the value must be indented across lines, got {text:?}"
+    );
+    for expected in [
+        "\n",
+        "  \"wheels\": {",
+        "    \"$numberInt\": \"2\"",
+        "  \"frame\": \"carbon\"",
+        "\n}",
+    ] {
+        assert!(
+            text.contains(expected),
+            "the indented EJSON must contain {expected:?}, got {text:?}"
+        );
+    }
+
+    let output = render_app(&app, 200, 40);
+    assert!(
+        output.contains("EDIT FIELD geometry") && output.contains("document"),
+        "the field modal names the field and its BSON type, got:\n{output}"
+    );
+    assert!(
+        output.contains(RUEDAS_ID),
+        "the document header naming the _id stays visible, got:\n{output}"
+    );
+    assert!(
+        output.contains("Ctrl-F format") && output.contains("Ctrl-S apply"),
+        "the field modal shows its own keys, got:\n{output}"
+    );
+    assert!(
+        output
+            .lines()
+            .any(|line| line.contains("\"frame\": \"carbon\"")),
+        "a nested document renders one property per line, got:\n{output}"
+    );
+
+    // The same modal renders an array with one element per line.
+    app.update(Action::RelationEditDocumentFieldCancel);
+    open_field_editor(&mut app, "tags");
+    let output = render_app(&app, 200, 40);
+    assert!(
+        output.contains("EDIT FIELD tags · array"),
+        "the field modal names the array type, got:\n{output}"
+    );
+    for element in ["\"road\",", "\"fast\""] {
+        assert!(
+            output.lines().any(|line| line.contains(element)),
+            "every array element must render on its own line, missing {element}, got:\n{output}"
+        );
+    }
+}
+
+/// A document whose `tags` array is long enough that the field modal has to cap
+/// its own height instead of growing over the document modal.
+fn document_with_long_array() -> String {
+    let items = (0..40)
+        .map(|index| format!("\"item-{index:02}\""))
+        .collect::<Vec<_>>()
+        .join(",\n    ");
+    format!("{{\n  \"_id\": {{\"$oid\": \"{RUEDAS_ID}\"}},\n  \"tags\": [\n    {items}\n  ]\n}}")
+}
+
+#[test]
+fn every_field_opens_in_its_own_modal() {
+    let (mut app, _request) = mongo_app_with_page(typed_documents());
+    open_fields_view(&mut app);
+
+    let text = open_field_editor(&mut app, "name");
+    assert_eq!(
+        text, "Ruedas Pro",
+        "a scalar opens on the value the field list already shows"
+    );
+    assert!(
+        !document_state(&app)
+            .field_edit
+            .as_ref()
+            .is_some_and(|field| field.input.is_multiline()),
+        "a scalar stays a one-line value inside the modal"
+    );
+    let output = render_app(&app, 200, 40);
+    assert!(
+        output.contains("EDIT FIELD name · string"),
+        "the scalar field opens its own modal, got:\n{output}"
+    );
+    assert!(
+        output
+            .lines()
+            .any(|line| line.contains("Enter apply field  Esc back to fields")),
+        "the one-line field modal shows its own keys uncut, got:\n{output}"
+    );
+
+    // A scalar navigation key applies locally and opens the adjacent field.
+    let index = field_names(&app)
+        .iter()
+        .position(|field| field == "name")
+        .expect("name is a field");
+    app.update(Action::RelationEditDocumentFieldMove(1));
+    let state = document_state(&app);
+    assert_eq!(
+        state.field_edit.as_ref().map(|field| field.name.as_str()),
+        Some("stock"),
+        "moving opens the adjacent editable field"
+    );
+    assert_eq!(
+        state.selected_field_index(field_names(&app).len()),
+        index + 1,
+        "the same key press moves the list cursor"
+    );
+}
+
+#[test]
+fn scalar_navigation_applies_locally_and_preserves_invalid_drafts() {
+    let (mut app, _request) = mongo_app_with_page(typed_documents());
+    open_fields_view(&mut app);
+    let expected = document_state(&app).expected;
+    type_field_value(&mut app, "name", "Updated name");
+    assert!(
+        app.update(Action::RelationEditDocumentFieldMove(1))
+            .is_empty()
+    );
+    let state = document_state(&app);
+    assert_eq!(
+        state.replacement_document().unwrap().get_str("name"),
+        Ok("Updated name")
+    );
+    assert_eq!(state.expected, expected);
+    assert_eq!(state.field_edit.as_ref().unwrap().name, "stock");
+
+    retype_field_editor(&mut app, "invalid integer");
+    let before = document_state(&app).input.value().to_owned();
+    assert!(
+        app.update(Action::RelationEditDocumentFieldMove(1))
+            .is_empty()
+    );
+    let state = document_state(&app);
+    assert_eq!(state.field_edit.as_ref().unwrap().name, "stock");
+    assert_eq!(
+        state.field_edit.as_ref().unwrap().input.value(),
+        "invalid integer"
+    );
+    assert!(
+        state
+            .field_error
+            .as_deref()
+            .unwrap()
+            .contains("32-bit integer")
+    );
+    assert_eq!(state.input.value(), before);
+}
+
+#[test]
+fn scalar_navigation_skips_id_and_stops_at_the_ends() {
+    let (mut app, _request) = mongo_app_with_page(bike_documents());
+    open_fields_view(&mut app);
+    type_field_value(&mut app, "name", "Kept at start");
+    app.update(Action::RelationEditDocumentFieldMove(-1));
+    let state = document_state(&app);
+    assert_eq!(state.field_edit.as_ref().unwrap().name, "name");
+    assert_eq!(
+        state.field_edit.as_ref().unwrap().input.value(),
+        "Kept at start"
+    );
+    assert_eq!(
+        state.replacement_document().unwrap().get_str("name"),
+        Ok("Kept at start")
+    );
+    app.update(Action::RelationEditDocumentFieldCancel);
+    type_field_value(&mut app, "active", "false");
+    app.update(Action::RelationEditDocumentFieldMove(1));
+    let state = document_state(&app);
+    assert_eq!(state.field_edit.as_ref().unwrap().name, "active");
+    assert_eq!(
+        state.replacement_document().unwrap().get_bool("active"),
+        Ok(false)
+    );
+}
+
+/// The rows the field modal keeps blank around its value: the margin under the
+/// document header and the margin over the footer. It also reports the value
+/// rows, which must sit between the two margins.
+#[derive(Debug)]
+struct FieldModalLayout {
+    above: String,
+    below: String,
+    value_rows: usize,
+}
+
+fn field_modal_layout(output: &str) -> FieldModalLayout {
+    let lines = output.lines().collect::<Vec<_>>();
+    let title_row = lines
+        .iter()
+        .position(|line| line.contains("EDIT FIELD "))
+        .expect("the field modal is rendered");
+    let title = lines[title_row].chars().collect::<Vec<_>>();
+    let left = title
+        .iter()
+        .position(|cell| *cell == '╭')
+        .expect("the field modal has a left border");
+    let right = title
+        .iter()
+        .rposition(|cell| *cell == '╮')
+        .expect("the field modal has a right border");
+    let inside = |row: usize| {
+        lines[row]
+            .chars()
+            .skip(left + 1)
+            .take(right - left - 1)
+            .collect::<String>()
+    };
+    let bottom_row = (title_row + 1..lines.len())
+        .find(|row| lines[*row].chars().nth(left) == Some('╰'))
+        .expect("the field modal has a bottom border");
+    let rows = (title_row + 1..bottom_row)
+        .filter(|row| !inside(*row).trim().is_empty())
+        .collect::<Vec<_>>();
+    assert!(
+        rows.len() >= 3,
+        "the modal holds a header, the value and a footer, got {rows:?}"
+    );
+    FieldModalLayout {
+        above: inside(rows[0] + 1),
+        below: inside(rows[rows.len() - 1] - 1),
+        value_rows: rows.len() - 2,
+    }
+}
+
+/// The BSON date of the issue screenshot: 2026-11-08T00:00:00Z.
+const DATE_MILLIS: i64 = 1_794_096_000_000;
+const DATE_ISO: &str = "2026-11-08T00:00:00Z";
+
+/// A document with one BSON date field.
+fn dated_documents() -> Vec<MongoDocument> {
+    vec![document(mongodb::bson::doc! {
+        "_id": object_id(RUEDAS_ID),
+        "name": "Carrera 42",
+        "date": mongodb::bson::DateTime::from_millis(DATE_MILLIS),
+    })]
+}
+
+#[test]
+fn a_date_field_shows_an_iso_timestamp_in_the_list_and_the_modal() {
+    let (mut app, _request) = mongo_app_with_page(dated_documents());
+    open_fields_view(&mut app);
+
+    assert_eq!(
+        field_value(&app, "date").as_deref(),
+        Some(DATE_ISO),
+        "the field list row shows the readable date instead of canonical EJSON"
+    );
+    let text = open_field_editor(&mut app, "date");
+    assert_eq!(
+        text, DATE_ISO,
+        "the field modal opens on the ISO-8601 UTC form"
+    );
+    let output = render_app(&app, 200, 40);
+    assert!(
+        output.lines().any(|line| line.contains(DATE_ISO)),
+        "the modal renders the readable date, got:\n{output}"
+    );
+    assert!(
+        !output.contains("$date"),
+        "neither the list nor the modal shows the raw canonical EJSON, got:\n{output}"
+    );
+}
+
+#[test]
+fn date_fields_preserve_precision_offsets_and_out_of_range_values() {
+    use lazydb::model::relation_edit::{DocumentEditorState, DocumentFieldKind};
+    use mongodb::bson::{Bson, DateTime, doc};
+    let kind = DocumentFieldKind::of(&Bson::DateTime(DateTime::from_millis(0)));
+    for text in [
+        "2026-11-08T02:30:00.123+02:30",
+        "2026-11-08 00:00:00.123",
+        r#"{"$date":"2026-11-08T00:00:00.123Z"}"#,
+    ] {
+        assert_eq!(
+            kind.parse(text).unwrap(),
+            Bson::DateTime(DateTime::from_millis(DATE_MILLIS + 123))
+        );
+    }
+    for millis in [i64::MIN, -1, 0, 123, i64::MAX, 253_402_300_800_000] {
+        let original = doc! { "_id": 1, "date": DateTime::from_millis(millis) };
+        let mut state =
+            DocumentEditorState::new(0, &mongo_namespace(), &document(original.clone())).unwrap();
+        state.selected_field = 1;
+        state.begin_field_edit();
+        let text = state.field_edit.as_ref().unwrap().input.value().to_owned();
+        state.apply_field("date", &text).unwrap();
+        assert_eq!(
+            state.replacement_document().unwrap(),
+            original,
+            "round trip at {millis}"
+        );
+    }
+    for text in [
+        "2026-11-08T00:00:00.123456Z",
+        "2026-11-08 00:00:00.000001",
+        "2016-12-31T23:59:60Z",
+        r#"{"$date":"2026-11-08T00:00:00.123456Z"}"#,
+        r#"{"$date":"2016-12-31T23:59:60Z"}"#,
+        r#"{"$numberLong":"1"}"#,
+    ] {
+        assert!(kind.parse(text).is_err(), "must refuse {text}");
+    }
+}
+
+#[test]
+fn a_date_field_applies_every_accepted_form_and_refuses_text_that_is_not_a_date() {
+    let (mut app, _request) = mongo_app_with_page(dated_documents());
+    open_fields_view(&mut app);
+
+    for (typed, expected) in [
+        (DATE_ISO, DATE_ISO),
+        ("2026-11-08 15:30", "2026-11-08T15:30:00Z"),
+        ("2026-11-08", "2026-11-08T00:00:00Z"),
+        ("2026-11-08T00:00:00.250Z", "2026-11-08T00:00:00.250Z"),
+        (
+            r#"{"$date":{"$numberLong":"1794096000000"}}"#,
+            "2026-11-08T00:00:00Z",
+        ),
+    ] {
+        open_field_editor(&mut app, "date");
+        retype_field_editor(&mut app, typed);
+        app.update(Action::RelationEditDocumentFieldApply);
+        assert_eq!(
+            document_state(&app).field_error,
+            None,
+            "applying {typed:?} must be accepted"
+        );
+        assert_eq!(
+            field_value(&app, "date").as_deref(),
+            Some(expected),
+            "after applying {typed:?}"
+        );
+    }
+
+    // The document text stays canonical, so the write path and the EJSON view
+    // keep seeing the same value they always did.
+    let text = document_state(&app).input.value().to_owned();
+    assert!(
+        text.contains("\"$date\"") && text.contains("1794096000000"),
+        "the document text keeps the canonical EJSON the write path stores, got {text:?}"
+    );
+
+    open_field_editor(&mut app, "date");
+    retype_field_editor(&mut app, "not a date");
+    app.update(Action::RelationEditDocumentFieldApply);
+    assert!(
+        document_state(&app).field_error.is_some(),
+        "text that is not a date is refused"
+    );
+    assert!(
+        document_state(&app).field_edit.is_some(),
+        "the refused field keeps its modal open"
+    );
+    assert_eq!(
+        field_value(&app, "date").as_deref(),
+        Some("2026-11-08T00:00:00Z"),
+        "a refused date leaves the document untouched"
+    );
+}
+
+#[test]
+fn the_field_modal_keeps_a_blank_row_around_the_value() {
+    let (mut app, _request) = mongo_app_with_page(typed_documents());
+    open_fields_view(&mut app);
+
+    open_field_editor(&mut app, "name");
+    let output = render_app(&app, 200, 40);
+    let layout = field_modal_layout(&output);
+    assert!(
+        layout.value_rows >= 1,
+        "the one-line value sits between both margins, got {layout:?}"
+    );
+    assert_eq!(
+        layout.above.trim(),
+        "",
+        "a one-line field keeps a blank row above its value, got {:?}",
+        layout.above
+    );
+    assert_eq!(
+        layout.below.trim(),
+        "",
+        "a one-line field keeps a blank row below its value, got {:?}",
+        layout.below
+    );
+
+    app.update(Action::RelationEditDocumentFieldCancel);
+    open_field_editor(&mut app, "tags");
+    let output = render_app(&app, 200, 40);
+    let layout = field_modal_layout(&output);
+    assert_eq!(
+        layout.value_rows, 4,
+        "the whole four-line array sits between both margins"
+    );
+    assert_eq!(
+        layout.above.trim(),
+        "",
+        "a multi-line field keeps a blank row above its value, got {:?}",
+        layout.above
+    );
+    assert_eq!(
+        layout.below.trim(),
+        "",
+        "a multi-line field keeps a blank row below its value, got {:?}",
+        layout.below
+    );
+}
+
+#[test]
+fn the_field_modal_stays_smaller_than_the_document_modal() {
+    let (mut app, _request) = mongo_app_with_page(typed_documents());
+    open_fields_view(&mut app);
+    set_document_text(&mut app, &document_with_long_array());
+
+    let text = open_field_editor(&mut app, "tags");
+    assert_eq!(
+        text.lines().count(),
+        42,
+        "the whole array is in the editor, one element per line"
+    );
+    let output = render_app(&app, 200, 40);
+    assert!(
+        output.contains("EDIT FIELD tags · array"),
+        "the field modal names the field, got:\n{output}"
+    );
+    assert!(
+        output.contains("EDIT DOCUMENT"),
+        "the document modal keeps its own title, so the field modal never covers it, got:\n{output}"
+    );
+    assert!(
+        output
+            .lines()
+            .any(|line| line.contains("Ctrl-F format") && line.contains("Esc back to fields")),
+        "the field modal keeps its keys on one line, got:\n{output}"
+    );
+}
+
+#[test]
+fn applying_a_multiline_container_field_writes_the_whole_field() {
+    let (mut app, _request) = mongo_app_with_page(typed_documents());
+    open_fields_view(&mut app);
+    let ejson = document_state(&app).input.value().to_owned();
+    open_field_editor(&mut app, "tags");
+
+    retype_field_editor(&mut app, "[\n  \"road\",\n  \"gravel\"\n]");
+    let commands = app.update(Action::RelationEditDocumentFieldApply);
+
+    assert!(
+        commands.is_empty(),
+        "applying a field writes nothing by itself, got {commands:?}"
+    );
+    let state = document_state(&app);
+    assert!(
+        state.field_edit.is_none(),
+        "applying closes the field modal"
+    );
+    assert_eq!(state.field_error, None);
+    assert_ne!(
+        state.input.value(),
+        ejson,
+        "the document text was rewritten"
+    );
+    let document = state
+        .replacement_document()
+        .expect("the document is still valid");
+    assert_eq!(
+        document.get("tags"),
+        Some(&mongodb::bson::Bson::Array(vec![
+            mongodb::bson::Bson::String("road".into()),
+            mongodb::bson::Bson::String("gravel".into()),
+        ])),
+        "the newline-separated array is parsed as one array value"
+    );
+    assert_eq!(
+        document.get("_id"),
+        Some(&object_id(RUEDAS_ID)),
+        "editing a container keeps the same _id"
+    );
+    assert_eq!(
+        field_value(&app, "geometry").as_deref(),
+        Some(r#"{"wheels":{"$numberInt":"2"},"frame":"carbon"}"#),
+        "the other container is untouched by this edit"
+    );
+}
+
+#[test]
+fn an_invalid_multiline_field_value_is_refused_and_keeps_the_modal_open() {
+    let (mut app, _request) = mongo_app_with_page(typed_documents());
+    open_fields_view(&mut app);
+    let ejson = document_state(&app).input.value().to_owned();
+    open_field_editor(&mut app, "tags");
+
+    retype_field_editor(&mut app, "[\n  \"road\",\n");
+    let commands = app.update(Action::RelationEditDocumentFieldApply);
+
+    assert!(
+        commands.is_empty(),
+        "an invalid field value must never reach the database, got {commands:?}"
+    );
+    let state = document_state(&app);
+    let error = state.field_error.clone().unwrap_or_default();
+    assert!(
+        error.contains("invalid Canonical EJSON"),
+        "the refusal names the problem, got {error:?}"
+    );
+    assert!(
+        state
+            .field_edit
+            .as_ref()
+            .is_some_and(|field| field.input.is_multiline()),
+        "a refused value keeps the multi-line editor open so it can be corrected"
+    );
+    assert_eq!(
+        state.input.value(),
+        ejson,
+        "a refused value leaves the document text unchanged"
+    );
+}
+
+#[test]
+fn the_multiline_field_editor_formats_its_text_on_demand() {
+    let (mut app, _request) = mongo_app_with_page(typed_documents());
+    open_fields_view(&mut app);
+    open_field_editor(&mut app, "tags");
+    retype_field_editor(&mut app, r#"["road","gravel"]"#);
+
+    let commands = app.update(Action::RelationEditDocumentFieldFormat);
+
+    assert!(
+        commands.is_empty(),
+        "formatting writes nothing, got {commands:?}"
+    );
+    let state = document_state(&app);
+    assert_eq!(state.field_error, None);
+    assert_eq!(
+        document_field_text(&app),
+        "[\n  \"road\",\n  \"gravel\"\n]",
+        "Ctrl-F re-indents the value in the field modal"
+    );
+}
+
+#[test]
+fn leaving_the_multiline_field_editor_with_escape_keeps_the_document_text() {
+    let (mut app, _request) = mongo_app_with_page(typed_documents());
+    open_fields_view(&mut app);
+    let ejson = document_state(&app).input.value().to_owned();
+    open_field_editor(&mut app, "tags");
+    retype_field_editor(&mut app, "[\n  \"discarded\"\n]");
+
+    let commands = app.update(Action::RelationEditDocumentFieldCancel);
+
+    assert!(
+        commands.is_empty(),
+        "leaving the field modal writes nothing, got {commands:?}"
+    );
+    let state = document_state(&app);
+    assert!(state.field_edit.is_none());
+    assert_eq!(state.field_error, None);
+    assert_eq!(
+        state.view,
+        DocumentEditorView::Fields,
+        "the field list is the surface left behind"
+    );
+    assert_eq!(
+        state.input.value(),
+        ejson,
+        "an abandoned field edit never touches the document text"
+    );
+}
+
+#[test]
+fn the_field_list_shows_a_shape_marker_for_container_fields() {
+    let (mut app, _request) = mongo_app_with_page(typed_documents());
+    open_fields_view(&mut app);
+
+    let output = render_app(&app, 200, 40);
+
+    assert!(
+        output.contains("[2 items]") && output.contains("{2 fields}"),
+        "containers collapse to a shape marker instead of clipped JSON, got:\n{output}"
+    );
+    assert!(
+        !output.contains(r#"["road","fast"]"#),
+        "the raw compact array is not shown in the list, got:\n{output}"
+    );
+    assert_eq!(
+        field_value(&app, "tags").as_deref(),
+        Some(r#"["road","fast"]"#),
+        "the value the editors start from is still the compact EJSON"
     );
 }
 
