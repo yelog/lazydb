@@ -71,6 +71,7 @@ mod tests {
             default_schema: Some("public".into()),
             sqlite_path: None,
             mongodb_options: None,
+            pg_options: None,
             snowflake_options: None,
             duckdb_path: None,
             ssl_mode: Default::default(),
@@ -222,9 +223,10 @@ impl ExecutionTarget {
                     .clone()
                     .unwrap_or_else(|| "PUBLIC".into()),
             ),
-            DatabaseKind::Postgres | DatabaseKind::SqlServer | DatabaseKind::Oracle => {
-                profile.default_schema.clone()
-            }
+            DatabaseKind::Postgres
+            | DatabaseKind::CockroachDb
+            | DatabaseKind::SqlServer
+            | DatabaseKind::Oracle => profile.default_schema.clone(),
             DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb => None,
         };
         Self {
@@ -263,7 +265,10 @@ impl ExecutionTarget {
             DatabaseKind::Snowflake => profile
                 .catalog_scope
                 .allows_schema(&self.database, self.schema.as_deref().unwrap_or("PUBLIC")),
-            DatabaseKind::Postgres | DatabaseKind::SqlServer | DatabaseKind::Oracle => self
+            DatabaseKind::Postgres
+            | DatabaseKind::CockroachDb
+            | DatabaseKind::SqlServer
+            | DatabaseKind::Oracle => self
                 .schema
                 .as_deref()
                 .is_none_or(|schema| profile.catalog_scope.allows_schema(&self.database, schema)),
@@ -290,7 +295,10 @@ impl ExecutionTarget {
                 configured.default_schema =
                     Some(self.schema.clone().unwrap_or_else(|| "PUBLIC".into()));
             }
-            DatabaseKind::Postgres | DatabaseKind::SqlServer | DatabaseKind::Oracle => {
+            DatabaseKind::Postgres
+            | DatabaseKind::CockroachDb
+            | DatabaseKind::SqlServer
+            | DatabaseKind::Oracle => {
                 configured.database = Some(self.database.clone());
                 configured.default_schema = self.schema.clone();
             }

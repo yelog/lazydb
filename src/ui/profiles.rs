@@ -1432,6 +1432,9 @@ fn field_value(draft: &ProfileDraft, field: ProfileField) -> String {
 fn url_help(kind: DatabaseKind) -> &'static str {
     match kind {
         DatabaseKind::Postgres => "Accepts postgres://, postgresql://, and jdbc:postgresql://",
+        DatabaseKind::CockroachDb => {
+            "Accepts cockroachdb://, postgres://, postgresql://, and jdbc:postgresql://"
+        }
         DatabaseKind::MySql => "Accepts mysql:// and jdbc:mysql://",
         DatabaseKind::MariaDb => "Accepts mariadb://",
         DatabaseKind::TiDb => "Accepts tidb:// (default port 4000)",

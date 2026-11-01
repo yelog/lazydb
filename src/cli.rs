@@ -142,6 +142,9 @@ pub enum ConnectionsCommand {
     Add {
         #[arg(long)]
         name: String,
+        /// Select a driver explicitly when importing a compatible connection URL.
+        #[arg(long)]
+        driver: Option<String>,
         #[arg(long, value_enum)]
         scope: Option<ConnectionScope>,
         #[arg(long)]
@@ -766,6 +769,7 @@ mod tests {
                 "mongodb",
                 "clickhouse",
                 "tidb",
+                "cockroachdb",
                 "snowflake"
             ])
         );

@@ -242,6 +242,7 @@ impl IconSet {
         match self.mode {
             IconMode::NerdFont => match kind {
                 DatabaseKind::Postgres => dev::DEV_POSTGRESQL,
+                DatabaseKind::CockroachDb => md::MD_DATABASE,
                 DatabaseKind::MySql => dev::DEV_MYSQL,
                 DatabaseKind::MariaDb => dev::DEV_MARIADB,
                 DatabaseKind::TiDb => "T",
@@ -257,6 +258,7 @@ impl IconSet {
             },
             IconMode::Unicode => match kind {
                 DatabaseKind::Postgres => "PG",
+                DatabaseKind::CockroachDb => "CR",
                 DatabaseKind::MySql => "MY",
                 DatabaseKind::MariaDb => "MA",
                 DatabaseKind::TiDb => "TI",
@@ -272,6 +274,7 @@ impl IconSet {
             },
             IconMode::Ascii => match kind {
                 DatabaseKind::Postgres => "PG",
+                DatabaseKind::CockroachDb => "CR",
                 DatabaseKind::MySql => "MY",
                 DatabaseKind::MariaDb => "MA",
                 DatabaseKind::TiDb => "TI",
@@ -291,6 +294,7 @@ impl IconSet {
     pub const fn database_color(self, kind: DatabaseKind) -> ratatui::style::Color {
         match kind {
             DatabaseKind::Postgres => ratatui::style::Color::Rgb(87, 169, 220),
+            DatabaseKind::CockroachDb => ratatui::style::Color::Rgb(105, 181, 91),
             DatabaseKind::MySql | DatabaseKind::MariaDb => ratatui::style::Color::Rgb(242, 145, 17),
             DatabaseKind::TiDb => ratatui::style::Color::Rgb(230, 45, 65),
             DatabaseKind::Oracle => ratatui::style::Color::Rgb(220, 70, 70),

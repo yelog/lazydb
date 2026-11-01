@@ -30,7 +30,7 @@ impl ColumnTypePolicy {
     pub const fn default_native_type(self) -> &'static str {
         match self.kind {
             DatabaseKind::Oracle => "VARCHAR2(255 CHAR)",
-            DatabaseKind::Postgres | DatabaseKind::Sqlite => "text",
+            DatabaseKind::Postgres | DatabaseKind::CockroachDb | DatabaseKind::Sqlite => "text",
             DatabaseKind::DuckDb | DatabaseKind::Snowflake => "VARCHAR",
             DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::TiDb => "text",
             DatabaseKind::SqlServer => "nvarchar(255)",

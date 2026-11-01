@@ -1,0 +1,19 @@
+services:
+  cockroachdb:
+    image: cockroachdb/cockroach:v25.4.6
+    command:
+      - start-single-node
+      - --insecure
+      - --store=type=mem,size=1GiB
+      - --cache=128MiB
+      - --max-sql-memory=128MiB
+      - --listen-addr=127.0.0.1:26257
+      - --sql-addr=0.0.0.0:26258
+      - --http-addr=0.0.0.0:8080
+    ports:
+      - "127.0.0.1:${COCKROACHDB_HOST_PORT:-26257}:26258"
+    healthcheck:
+      test: ["CMD", "cockroach", "sql", "--insecure", "--host=localhost:26258", "--execute=SELECT 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
