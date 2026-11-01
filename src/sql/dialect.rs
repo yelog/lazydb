@@ -27,7 +27,7 @@ impl SqlDialect {
             crate::profile::DatabaseKind::Postgres | crate::profile::DatabaseKind::CockroachDb => {
                 Self::Postgres
             }
-            crate::profile::DatabaseKind::MySql => Self::MySql,
+            crate::profile::DatabaseKind::MySql | crate::profile::DatabaseKind::TiDb => Self::MySql,
             crate::profile::DatabaseKind::MariaDb => Self::MariaDb,
             crate::profile::DatabaseKind::SqlServer => Self::SqlServer,
             crate::profile::DatabaseKind::Sqlite => Self::Sqlite,

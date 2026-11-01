@@ -2701,6 +2701,7 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
         [RelationDataBrowse],
         "dd",
         "delete row",
+        RelationEditAvailable,
         RelationDelete,
         "d"
     ),
@@ -3436,6 +3437,8 @@ pub(crate) fn shortcut_capabilities(app: &App) -> ShortcutCapabilities {
         app.tabs.get(app.active_tab),
         Some(WorkspaceTab::Relation(tab))
             if tab.view == RelationView::Data
+                && !app.profiles.iter().any(|profile| profile.id == tab.descriptor.key.profile_id
+                    && profile.kind == crate::profile::DatabaseKind::TiDb)
                 && tab.edit.as_ref().is_some_and(|edit| !matches!(edit.mode, RelationGridMode::Busy))
     );
     let (rows, columns) = app.active_grid_dimensions_for_input();

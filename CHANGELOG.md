@@ -1,5 +1,39 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Add CockroachDB as an independent driver with PostgreSQL wire transport, TLS profile options, scoped database/schema/table/view catalogs, native DDL, paged previews, SQL execution, manual transactions, and existing MCP query/catalog access. Structured editing and monitoring remain unavailable; see [CockroachDB support](docs/cockroachdb.md).
+
+### Fixed
+
+- Preserve unknown CockroachDB commit outcomes, including SQLSTATE `40003`, without replaying SQL; require rollback after definitive commit rejection.
+- Cancel running SQL before global quit on `Ctrl-c`, propagate manual pagination cancellation, and discard interrupted PostgreSQL/CockroachDB AUTO sessions after a bounded server cancellation request.
+- Reconnect PostgreSQL-compatible profiles when TLS paths or startup routing options change, and include all permitted CockroachDB databases in workspace selection.
+
+## [0.3.0] - 2026-11-01
+
+### Added
+
+- Add TiDB as a separate relational driver with native `tidb://` connection URLs, verified TLS, scoped table/view browsing and search, relation previews, native DDL, and SQL execution. The adapter targets stable TiDB 8.5.0 or newer; TiDB 8.5.3 has been verified locally and on TiDB Cloud Starter (MySQL Compatible).
+- Enforce TiDB client read-only checks across complete SQL batches and relation previews, including sequence-changing `NEXTVAL` and `SETVAL` expressions. Use database grants for server-side authorization. Structured catalog changes, relation-grid writes, manual transaction UI, monitoring, principal management, and native cancellation remain unavailable in this initial release. See [TiDB support](docs/tidb.md) for details.
+
+### Fixed
+
+- Open MongoDB collection data on first activation and improve bounded document field editors, navigation, and date precision ([#29](https://github.com/yelog/lazydb/pull/29)).
+- Reconnect saved profiles when connection settings or credentials change, so enabling read-only mode takes effect in existing sessions; resolve pending manual transactions before retiring those sessions.
+- Reject sequence-changing functions and nested locking reads in the shared read-only SQL policy, including agent queries against writable TiDB profiles.
+- Refresh TiDB result metadata after schema changes and record execution timing from actual query responses.
+- Preserve MySQL/MariaDB executable comments and escaped double quotes when splitting SQL batches; TiDB execution follows the connection's current SQL quote modes, and ambiguous automatic statement selection requires an explicit selection.
+
+### Commits
+
+- [`986c760`](https://github.com/yelog/lazydb/commit/986c760) feat(tidb): add native TiDB support (#31)
+- [`cf1af6f`](https://github.com/yelog/lazydb/commit/cf1af6f) Merge branch 'main' of github.com:yelog/lazydb
+- [`4904184`](https://github.com/yelog/lazydb/commit/4904184) Merge pull request #29 from yelog/fix/mongodb-explorer-field-editors
+- [`6fe5700`](https://github.com/yelog/lazydb/commit/6fe5700) fix(mongodb): improve collection activation and document field editors
+
 ## [0.2.2] - 2026-10-26
 
 ### Added

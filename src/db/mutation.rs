@@ -124,6 +124,7 @@ pub enum EditDisabledReason {
     UnsupportedRowValue,
     UnsupportedInsertResultStrategy,
     UnsupportedDriver,
+    UnsupportedDatabase,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -175,6 +176,13 @@ pub fn relation_mutation_capabilities(
             insert: MutationCapability::Unavailable(EditDisabledReason::UnsupportedDriver),
             update: MutationCapability::Unavailable(EditDisabledReason::UnsupportedDriver),
             delete: MutationCapability::Unavailable(EditDisabledReason::UnsupportedDriver),
+        };
+    }
+    if kind == DatabaseKind::TiDb {
+        return RelationMutationCapabilities {
+            insert: MutationCapability::Unavailable(EditDisabledReason::UnsupportedDatabase),
+            update: MutationCapability::Unavailable(EditDisabledReason::UnsupportedDatabase),
+            delete: MutationCapability::Unavailable(EditDisabledReason::UnsupportedDatabase),
         };
     }
     let primary_key_columns = metadata

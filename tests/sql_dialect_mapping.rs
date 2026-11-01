@@ -11,6 +11,10 @@ fn database_kind_mapping_has_one_canonical_sql_dialect() {
         SqlDialect::Postgres
     );
     assert_eq!(
+        SqlDialect::for_database_kind(DatabaseKind::TiDb),
+        SqlDialect::MySql
+    );
+    assert_eq!(
         SqlDialect::for_database_kind(DatabaseKind::MySql),
         SqlDialect::MySql
     );

@@ -766,6 +766,7 @@ mod tests {
                 "valkey",
                 "mongodb",
                 "clickhouse",
+                "tidb",
                 "cockroachdb"
             ])
         );

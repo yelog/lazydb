@@ -135,6 +135,7 @@ impl DatabaseKindLabel for DatabaseKind {
             DatabaseKind::CockroachDb => "CockroachDB",
             DatabaseKind::MySql => "MySQL",
             DatabaseKind::MariaDb => "MariaDB",
+            DatabaseKind::TiDb => "TiDB",
             DatabaseKind::Oracle => "Oracle",
             DatabaseKind::Sqlite => "SQLite",
             DatabaseKind::DuckDb => "DuckDB",

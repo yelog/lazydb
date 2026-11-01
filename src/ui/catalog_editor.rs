@@ -3211,9 +3211,9 @@ fn preview(
             crate::profile::DatabaseKind::Postgres | crate::profile::DatabaseKind::CockroachDb => {
                 SqlDialect::Postgres
             }
-            crate::profile::DatabaseKind::MySql | crate::profile::DatabaseKind::MariaDb => {
-                SqlDialect::MySql
-            }
+            crate::profile::DatabaseKind::MySql
+            | crate::profile::DatabaseKind::MariaDb
+            | crate::profile::DatabaseKind::TiDb => SqlDialect::MySql,
             crate::profile::DatabaseKind::Oracle => SqlDialect::Generic,
             crate::profile::DatabaseKind::Sqlite => SqlDialect::Sqlite,
             crate::profile::DatabaseKind::DuckDb => SqlDialect::DuckDb,

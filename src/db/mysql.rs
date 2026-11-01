@@ -58,6 +58,7 @@ use super::{
 use crate::model::dashboard::MetricKey;
 
 mod geometry;
+mod tidb;
 
 fn mysql_column_definition(
     column: &crate::model::catalog_editor::ColumnDraft,
@@ -230,6 +231,7 @@ pub struct MySqlAdapter {
     kind: DatabaseKind,
     connection_id: Uuid,
     catalog_scope: CatalogScope,
+    read_only: bool,
 }
 
 pub(crate) fn mysql_membership_coverage() -> crate::db::principal::PrincipalCoverage {
@@ -342,6 +344,7 @@ impl MySqlAdapter {
     pub async fn load_monitor_snapshot(
         &self,
     ) -> Result<crate::db::monitor::MonitorSnapshot, DatabaseError> {
+        self.reject_tidb_operation("monitoring")?;
         let rows = sqlx::query(Self::MONITOR_STATUS_SQL)
             .fetch_all(&self.pool)
             .await
@@ -395,6 +398,7 @@ impl MySqlAdapter {
     pub async fn load_monitor_metadata(
         &self,
     ) -> Result<crate::db::monitor::MonitorMetadata, DatabaseError> {
+        self.reject_tidb_operation("monitoring")?;
         let rows = sqlx::query(Self::MONITOR_METADATA_SQL)
             .fetch_all(&self.pool)
             .await
@@ -415,6 +419,7 @@ impl MySqlAdapter {
     pub async fn load_process_snapshot(
         &self,
     ) -> Result<crate::db::monitor::ProcessSnapshot, DatabaseError> {
+        self.reject_tidb_operation("process monitoring")?;
         let rows = sqlx::query(Self::PROCESS_LIST_SQL)
             .fetch_all(&self.pool)
             .await
@@ -1011,6 +1016,7 @@ impl MySqlAdapter {
         &self,
         plan: &CatalogMutationPlan,
     ) -> Result<QueryOutcome, DatabaseError> {
+        self.reject_tidb_operation("structured catalog mutation")?;
         plan.validate()
             .map_err(|error| DatabaseError::configuration(error.to_string()))?;
         let mut outcome = None;
@@ -1024,6 +1030,7 @@ impl MySqlAdapter {
         &self,
         request: &CatalogObjectDefinitionRequest,
     ) -> Result<CatalogObjectDefinition, DatabaseError> {
+        self.reject_tidb_operation("structured catalog editing")?;
         request
             .validate()
             .map_err(|error| DatabaseError::configuration(error.to_string()))?;
@@ -1150,6 +1157,7 @@ impl MySqlAdapter {
     pub(crate) async fn transaction_backend(
         &self,
     ) -> Result<MySqlTransactionBackend, DatabaseError> {
+        self.reject_tidb_operation("manual transactions and structured relation mutations")?;
         let mut connection = self
             .pool
             .acquire()
@@ -1171,9 +1179,12 @@ impl MySqlAdapter {
         profile: &ConnectionProfile,
         password: Option<&SecretString>,
     ) -> Result<Self, DatabaseError> {
-        if !matches!(profile.kind, DatabaseKind::MySql | DatabaseKind::MariaDb) {
+        if !matches!(
+            profile.kind,
+            DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::TiDb
+        ) {
             return Err(DatabaseError::configuration(
-                "profile is not MySQL or MariaDB",
+                "profile is not MySQL, MariaDB or TiDB",
             ));
         }
         let host = profile
@@ -1182,8 +1193,21 @@ impl MySqlAdapter {
             .ok_or_else(|| DatabaseError::configuration("MySQL profile has no host"))?;
         let mut options = MySqlConnectOptions::new()
             .host(host)
-            .port(profile.port.unwrap_or(3306))
+            .port(
+                profile
+                    .port
+                    .unwrap_or(if profile.kind == DatabaseKind::TiDb {
+                        4000
+                    } else {
+                        3306
+                    }),
+            )
             .ssl_mode(mysql_ssl_mode(profile.ssl_mode));
+        if profile.kind == DatabaseKind::TiDb {
+            // Each DQL statement is prepared for empty-result metadata, then
+            // executed as text. DDL and USE can change identical SQL's columns.
+            options = options.statement_cache_capacity(0);
+        }
         if let Some(user) = &profile.user {
             options = options.username(user);
         }
@@ -1197,7 +1221,7 @@ impl MySqlAdapter {
         let mut pool_options = MySqlPoolOptions::new()
             .max_connections(6)
             .acquire_timeout(Duration::from_secs(10));
-        if profile.read_only {
+        if profile.read_only && profile.kind != DatabaseKind::TiDb {
             pool_options = pool_options.after_connect(|connection, _| {
                 Box::pin(async move {
                     connection
@@ -1211,12 +1235,20 @@ impl MySqlAdapter {
             .connect_with(options)
             .await
             .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Network))?;
-        Ok(Self {
+        let adapter = Self {
             pool,
             kind: profile.kind,
             connection_id: profile.id,
             catalog_scope: profile.catalog_scope.clone(),
-        })
+            read_only: profile.read_only,
+        };
+        // Driver options use the MySQL wire protocol while the native product
+        // identity remains TiDB. Reject mislabelled TiDB profiles immediately.
+        if let Err(error) = adapter.probe().await {
+            adapter.pool.close().await;
+            return Err(error);
+        }
+        Ok(adapter)
     }
 
     pub async fn probe(&self) -> Result<ServerInfo, DatabaseError> {
@@ -1224,9 +1256,23 @@ impl MySqlAdapter {
             .fetch_one(&self.pool)
             .await
             .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Network))?;
+        let version: String = row.try_get("version").map_err(decode_error)?;
+        let is_tidb = version.to_ascii_lowercase().contains("tidb");
+        if (self.kind == DatabaseKind::TiDb) != is_tidb {
+            return Err(DatabaseError::configuration(format!(
+                "server product does not match {:?} profile (server reported {})",
+                self.kind,
+                sanitize_terminal_text(&version)
+            )));
+        }
+        if self.kind == DatabaseKind::TiDb
+            && !supports_catalog_version_for_kind(self.kind, &version)
+        {
+            return Err(unsupported_catalog_version(self.kind, &version));
+        }
         Ok(ServerInfo {
             kind: self.kind,
-            version: row.try_get("version").map_err(decode_error)?,
+            version,
             database: row
                 .try_get::<Option<String>, _>("current_database")
                 .map_err(decode_error)?
@@ -1267,6 +1313,9 @@ impl MySqlAdapter {
         sql: &str,
         budget: QueryBudget,
     ) -> Result<QueryOutcome, DatabaseError> {
+        if self.kind == DatabaseKind::TiDb {
+            return self.execute_tidb_with_budget(sql, budget).await;
+        }
         let mut stream = sqlx::raw_sql(AssertSqlSafe(sql)).fetch_many(&self.pool);
         self.collect_stream(&mut stream, budget).await
     }
@@ -1318,6 +1367,15 @@ impl MySqlAdapter {
             .validate_for_profile(self.connection_id)
             .map_err(DatabaseError::invalid_catalog_request)?;
         validate_catalog_scope(&request.scope)?;
+        if self.kind == DatabaseKind::TiDb
+            && matches!(&request.key.target, CatalogTarget::Objects { group, .. }
+                if !matches!(group, ObjectGroup::Tables | ObjectGroup::Views))
+        {
+            return Err(DatabaseError::unsupported_catalog_target(
+                self.kind,
+                &request.key.target,
+            ));
+        }
         if matches!(
             request.key.target,
             CatalogTarget::Objects {
@@ -1352,7 +1410,7 @@ impl MySqlAdapter {
             return Err(unsupported_catalog_version(self.kind, &version));
         }
         let mut transaction = connection
-            .begin_with(CATALOG_PAGE_BEGIN_SQL)
+            .begin_with(self.catalog_begin_sql())
             .await
             .map_err(sql_error)?;
         let lower_case_table_names: i64 =
@@ -1440,7 +1498,7 @@ impl MySqlAdapter {
             return Err(unsupported_catalog_version(self.kind, &version));
         }
         let mut transaction = connection
-            .begin_with(CATALOG_PAGE_BEGIN_SQL)
+            .begin_with(self.catalog_begin_sql())
             .await
             .map_err(sql_error)?;
         let lower_case_table_names: i64 =
@@ -1491,7 +1549,9 @@ impl MySqlAdapter {
                 }
             })
             .unwrap_or_else(|| "TRUE".to_owned());
-        let candidates = if self.kind == DatabaseKind::MariaDb {
+        let candidates = if self.kind == DatabaseKind::TiDb {
+            tidb::search_candidates_sql()
+        } else if self.kind == DatabaseKind::MariaDb {
             CATALOG_SEARCH_CANDIDATES_SQL.replace(
                 "), normalized AS (",
                 &format!("{}), normalized AS (", MARIADB_CATALOG_SEARCH_SEQUENCE_SQL),
@@ -1847,7 +1907,9 @@ impl MySqlAdapter {
                 lower_case_table_names,
             )
             .await?;
-        let count_sql = if self.kind == DatabaseKind::MariaDb {
+        let count_sql = if self.kind == DatabaseKind::TiDb {
+            tidb::GROUP_COUNTS_SQL
+        } else if self.kind == DatabaseKind::MariaDb {
             "SELECT \
              (SELECT CAST(COUNT(*) AS CHAR) FROM information_schema.tables WHERE BINARY table_schema=BINARY ? AND table_type='BASE TABLE') AS tables, \
              (SELECT CAST(COUNT(*) AS CHAR) FROM information_schema.tables WHERE BINARY table_schema=BINARY ? AND table_type='VIEW') AS views, \
@@ -1865,10 +1927,10 @@ impl MySqlAdapter {
         };
         let mut query = sqlx::query(AssertSqlSafe(count_sql))
             .bind(&database)
-            .bind(&database)
-            .bind(&database)
-            .bind(&database)
             .bind(&database);
+        if self.kind != DatabaseKind::TiDb {
+            query = query.bind(&database).bind(&database).bind(&database);
+        }
         if self.kind == DatabaseKind::MariaDb {
             query = query.bind(&database);
         }
@@ -1881,6 +1943,11 @@ impl MySqlAdapter {
             (ObjectGroup::Procedures, "procedures"),
             (ObjectGroup::Triggers, "triggers"),
         ] {
+            if self.kind == DatabaseKind::TiDb
+                && !matches!(group, ObjectGroup::Tables | ObjectGroup::Views)
+            {
+                continue;
+            }
             summaries.push(CatalogGroupSummary {
                 group,
                 object_count: CatalogCount::Exact(
@@ -2218,10 +2285,10 @@ impl MySqlAdapter {
         }
 
         let rows = sqlx::query(
-            "SELECT ordinal_position, column_name, column_type, data_type, is_nullable, \
+            "SELECT CAST(ordinal_position AS UNSIGNED), column_name, column_type, data_type, is_nullable, \
              column_default, extra, \
              generation_expression, \
-             numeric_precision, numeric_scale, \
+             CAST(numeric_precision AS UNSIGNED), CAST(numeric_scale AS UNSIGNED), \
               CAST(character_maximum_length AS SIGNED), collation_name, character_set_name, column_comment \
              FROM information_schema.columns WHERE BINARY table_schema=BINARY ? AND BINARY table_name=BINARY ? \
              ORDER BY ordinal_position",
@@ -2427,7 +2494,10 @@ impl MySqlAdapter {
         target: &CatalogTarget,
         lower_case_table_names: i64,
     ) -> Result<(String, String, &'static str), DatabaseError> {
-        if relation.profile_id() != self.connection_id || !relation.kind.is_relation() {
+        if relation.profile_id() != self.connection_id
+            || !relation.kind.is_relation()
+            || (self.kind == DatabaseKind::TiDb && !tidb::supported_relation(relation.kind))
+        {
             return Err(catalog_target_not_found(target));
         }
         let (database, schema, name) =
@@ -2471,7 +2541,9 @@ impl MySqlAdapter {
         options: &crate::model::relation::RelationPreviewOptions,
         mut page: crate::model::pagination::PageRequest,
     ) -> Result<crate::db::RelationPreview, DatabaseError> {
+        validate_catalog_scope(&self.catalog_scope)?;
         let mut connection = self.pool.acquire().await.map_err(sql_error)?;
+        self.check_tidb_catalog_version(&mut connection).await?;
         let target = CatalogTarget::RelationChildren {
             relation: relation.clone(),
         };
@@ -2496,6 +2568,9 @@ impl MySqlAdapter {
             quote_identifier(&name)
         );
         append_preview_options(&mut base_sql, options);
+        if self.kind == DatabaseKind::TiDb && self.read_only {
+            tidb::validate_read_only_sql(&base_sql)?;
+        }
         let total = if page.resolve_total {
             let count_sql = relation_count_sql(&base_sql);
             let count = sqlx::query_scalar::<_, i64>(AssertSqlSafe(count_sql))
@@ -2550,8 +2625,9 @@ impl MySqlAdapter {
     pub async fn relation_ddl(&self, relation: &CatalogId) -> Result<RelationDdl, DatabaseError> {
         validate_catalog_scope(&self.catalog_scope)?;
         let mut connection = self.pool.acquire().await.map_err(sql_error)?;
+        self.check_tidb_catalog_version(&mut connection).await?;
         let mut transaction = connection
-            .begin_with(CATALOG_PAGE_BEGIN_SQL)
+            .begin_with(self.catalog_begin_sql())
             .await
             .map_err(sql_error)?;
         let result = self.relation_ddl_snapshot(&mut transaction, relation).await;
@@ -2587,6 +2663,11 @@ impl MySqlAdapter {
         let (database, name, native_kind) = self
             .verify_relation(connection, relation, &target, lower_case)
             .await?;
+        if self.kind == DatabaseKind::TiDb
+            && !self.catalog_scope.allows_schema(&database, &database)
+        {
+            return Err(catalog_target_not_found(&target));
+        }
         let relation_entry = CatalogEntry::relation(
             relation.clone(),
             CatalogId::new(
@@ -2650,16 +2731,20 @@ impl MySqlAdapter {
                     "MySQL {native_kind} {database}.{name} has no SHOW CREATE statement"
                 ))
             })?;
-        let trigger_names = sqlx::query_scalar::<_, String>(
-            "SELECT trigger_name FROM information_schema.triggers \
+        let trigger_names = if self.kind == DatabaseKind::TiDb {
+            Vec::new()
+        } else {
+            sqlx::query_scalar::<_, String>(
+                "SELECT trigger_name FROM information_schema.triggers \
              WHERE BINARY event_object_schema=BINARY ? AND BINARY event_object_table=BINARY ? \
              ORDER BY BINARY trigger_name",
-        )
-        .bind(&database)
-        .bind(&name)
-        .fetch_all(&mut *connection)
-        .await
-        .map_err(sql_error)?;
+            )
+            .bind(&database)
+            .bind(&name)
+            .fetch_all(&mut *connection)
+            .await
+            .map_err(sql_error)?
+        };
         let mut triggers = Vec::with_capacity(trigger_names.len());
         for trigger_name in trigger_names {
             let sql = show_create_trigger(connection, &database, &trigger_name)
@@ -2694,7 +2779,9 @@ impl MySqlAdapter {
             .fetch_one(&mut *connection)
             .await
             .map_err(sql_error)?;
-        let index_sql = if self.kind == DatabaseKind::MariaDb
+        let index_sql = if self.kind == DatabaseKind::TiDb {
+            tidb::INDEXES_SQL
+        } else if self.kind == DatabaseKind::MariaDb
             || server_version.to_ascii_lowercase().contains("mariadb")
         {
             CATALOG_PAGE_INDEXES_MARIADB_SQL
@@ -2860,6 +2947,7 @@ impl MySqlAdapter {
     ///    cannot be distinguished from users and are reported as users with a
     ///    native-kind note.
     pub async fn list_principals(&self) -> Result<PrincipalPage, DatabaseError> {
+        self.reject_tidb_operation("principal metadata")?;
         let rows = if self.kind == DatabaseKind::MariaDb {
             match sqlx::query(
                 "SELECT User AS user_name, Host AS host_name, \
@@ -2948,6 +3036,7 @@ impl MySqlAdapter {
         &self,
         principal: &PrincipalEntry,
     ) -> Result<PrincipalDdl, DatabaseError> {
+        self.reject_tidb_operation("principal DDL")?;
         if principal.id.profile_id != self.connection_id {
             return Err(DatabaseError::configuration(
                 "principal does not belong to this connection",
@@ -3008,6 +3097,7 @@ impl MySqlAdapter {
         principal: &PrincipalEntry,
         target: &crate::db::principal::PrincipalReadTarget,
     ) -> Result<crate::db::principal::PrincipalDetails, DatabaseError> {
+        self.reject_tidb_operation("principal metadata")?;
         if principal.id.profile_id != self.connection_id || target.principal != principal.id {
             return Err(DatabaseError::configuration(
                 "principal details target does not match this connection",
@@ -3048,6 +3138,7 @@ impl MySqlAdapter {
         database: Option<&str>,
         mutation: crate::db::principal::PrincipalMutation,
     ) -> Result<crate::db::principal::PrincipalMutationPlan, DatabaseError> {
+        self.reject_tidb_operation("principal mutations")?;
         if principal.id.profile_id != self.connection_id {
             return Err(DatabaseError::configuration(
                 "principal does not belong to this connection",
@@ -3199,10 +3290,21 @@ impl MySqlAdapter {
         schema: &str,
         name: &str,
     ) -> Result<Option<String>, DatabaseError> {
+        if self.kind == DatabaseKind::TiDb && !tidb::supported_relation(kind) {
+            return Err(DatabaseError::unsupported(
+                "TiDB native DDL supports tables and views only",
+            ));
+        }
         if !matches!(kind, CatalogKind::Table | CatalogKind::View) {
             return Ok(None);
         }
+        if self.kind == DatabaseKind::TiDb && !self.catalog_scope.allows_schema(schema, schema) {
+            return Err(DatabaseError::unsupported(
+                "TiDB native DDL target is outside the catalog scope",
+            ));
+        }
         let mut connection = self.pool.acquire().await.map_err(sql_error)?;
+        self.check_tidb_catalog_version(&mut connection).await?;
         show_create_relation(&mut connection, kind, schema, name).await
     }
 
@@ -4472,12 +4574,17 @@ pub fn supports_catalog_version_for_kind(kind: DatabaseKind, version: &str) -> b
     match kind {
         DatabaseKind::MySql => {
             !version.to_ascii_lowercase().contains("mariadb")
+                && !version.to_ascii_lowercase().contains("tidb")
                 && parse_version_triplet(version).is_some_and(|version| version >= (8, 0, 13))
         }
         DatabaseKind::MariaDb => {
             version.to_ascii_lowercase().contains("mariadb")
+                && !version.to_ascii_lowercase().contains("tidb")
                 && parse_mariadb_version_triplet(version)
                     .is_some_and(|version| version >= (10, 5, 0))
+        }
+        DatabaseKind::TiDb => {
+            tidb::product_version(version).is_some_and(|version| version >= (8, 5, 0))
         }
         _ => false,
     }
@@ -4486,6 +4593,7 @@ pub fn supports_catalog_version_for_kind(kind: DatabaseKind, version: &str) -> b
 fn unsupported_catalog_version(kind: DatabaseKind, version: &str) -> DatabaseError {
     let product = match kind {
         DatabaseKind::MariaDb => "MariaDB 10.5 or newer",
+        DatabaseKind::TiDb => "stable TiDB 8.5.0 or newer (8.5 LTS baseline)",
         _ => "Oracle MySQL 8.0.13 or newer",
     };
     DatabaseError {

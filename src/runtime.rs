@@ -7353,6 +7353,7 @@ impl Runtime {
                 | DatabaseConnection::CockroachDb(_)
                 | DatabaseConnection::MySql(_)
                 | DatabaseConnection::MariaDb(_)
+                | DatabaseConnection::TiDb(_)
                 | DatabaseConnection::Oracle(_)
                 | DatabaseConnection::SqlServer(_)
                 | DatabaseConnection::Redis(_)

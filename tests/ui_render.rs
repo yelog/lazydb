@@ -7887,6 +7887,7 @@ fn driver_options_use_database_icons_in_each_icon_mode() {
         DatabaseKind::Redis,
         DatabaseKind::Oracle,
         DatabaseKind::ClickHouse,
+        DatabaseKind::TiDb,
     ];
 
     for mode in [IconMode::NerdFont, IconMode::Unicode, IconMode::Ascii] {
@@ -7920,6 +7921,7 @@ fn driver_options_use_database_icons_in_each_icon_mode() {
                 DatabaseKind::Valkey => "Valkey",
                 DatabaseKind::MongoDb => "MongoDB",
                 DatabaseKind::ClickHouse => "ClickHouse",
+                DatabaseKind::TiDb => "TiDB",
             };
             let label = format!("{} {display_name}", IconSet::new(mode).database(kind));
             assert!(
@@ -8026,6 +8028,7 @@ fn profile_category_controls_filter_drivers_and_keep_full_names_visible() {
             DatabaseKind::Postgres,
             DatabaseKind::SqlServer,
             DatabaseKind::Sqlite,
+            DatabaseKind::TiDb,
         ] {
             app.update(Action::ProfileSelectDriver(kind));
             let (output, _) = render_with_icons(&app, width, 36, IconSet::new(IconMode::Ascii));

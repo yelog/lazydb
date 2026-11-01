@@ -1011,19 +1011,28 @@ mod tests {
                 }
             }).await.expect("manual page must start before cancellation");
             cancel.send(()).unwrap();
-            assert_eq!(
-                tokio::time::timeout(Duration::from_secs(5), result)
+            let acknowledgement = tokio::time::timeout(Duration::from_secs(5), result)
+                .await
+                .expect("page cancellation must stop promptly");
+            let disposition = worker.worker.await.unwrap();
+            match disposition {
+                WorkerDisposition::CancelledAndRolledBack => {
+                    assert_eq!(acknowledgement.unwrap().unwrap_err().0, "cancelled");
+                }
+                WorkerDisposition::Quarantine => {
+                    // SQLx may surface the cancelled SELECT while draining it for
+                    // ROLLBACK. The armed guard must destroy that pinned session.
+                    assert!(acknowledgement.is_err());
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        while !worker.forced_close.completed() {
+                            tokio::task::yield_now().await;
+                        }
+                    })
                     .await
-                    .unwrap()
-                    .unwrap()
-                    .unwrap_err()
-                    .0,
-                "cancelled"
-            );
-            assert_eq!(
-                worker.worker.await.unwrap(),
-                WorkerDisposition::CancelledAndRolledBack
-            );
+                    .expect("quarantined session must close promptly");
+                }
+                other => panic!("unsafe page cancellation disposition: {other:?}"),
+            }
             let rows = adapter
                 .execute(&format!("SELECT count(*) FROM {table}"))
                 .await

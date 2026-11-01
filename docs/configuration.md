@@ -21,8 +21,9 @@ silently accepting a setting that LazyDB does not use.
 ## Connection driver categories
 
 New and edited connection forms show **Category** above **Driver**. Choose
-**Relational** for PostgreSQL, CockroachDB, MySQL, MariaDB, Oracle, SQL Server,
-SQLite, DuckDB or ClickHouse; choose **Non-relational** for Redis, Valkey, or MongoDB. Left/Right
+**Relational** for PostgreSQL, CockroachDB, MySQL, MariaDB, TiDB, Oracle,
+SQL Server, SQLite, DuckDB or ClickHouse; choose **Non-relational** for Redis,
+Valkey, or MongoDB. Left/Right
 changes the focused category or cycles drivers within that category. Categories
 and drivers also support mouse selection. Narrow forms keep full driver names
 in a selection-following window.
@@ -341,16 +342,16 @@ The current profile file format is version `6`:
 | `id` | UUID string | Generated on creation | Stable identity used by workspace state and system credential references. Must be unique within the file. |
 | `name` | String | Derived from the database, host, or SQLite filename | Name shown in the Explorer and accepted by `--profile` and agent `--connection`. |
 | `access` | Table | `{ scope = "global" }` | Controls which projects can see a saved profile. |
-| `kind` | `postgres`, `cockroachdb`, `mysql`, `mariadb`, `oracle`, `sqlserver`, `sqlite`, `duckdb`, `redis`, `valkey`, `mongodb`, `clickhouse` | Required | Database adapter to use. Oracle requires Oracle Instant Client; DuckDB requires an optional C API runtime. Redis/Valkey use key/value workflows; MongoDB uses document workflows. See [database capabilities](database-capabilities.md). |
+| `kind` | `postgres`, `cockroachdb`, `mysql`, `mariadb`, `tidb`, `oracle`, `sqlserver`, `sqlite`, `duckdb`, `redis`, `valkey`, `mongodb`, `clickhouse` | Required | Database adapter to use. Oracle requires Oracle Instant Client; DuckDB requires an optional C API runtime. Redis/Valkey use key/value workflows; MongoDB uses document workflows. See [database capabilities](database-capabilities.md). |
 | `url_format` | Kebab-case enum | Driver-specific | URL spelling used when LazyDB displays or regenerates the connection URL. |
-| `host` | String or `null` | `null` | Server hostname or address. PostgreSQL/CockroachDB, MySQL/MariaDB, Oracle, SQL Server, and Redis use this field. |
-| `port` | Integer or `null` | Driver default when imported | Server port. PostgreSQL defaults to `5432`, CockroachDB to `26257`, MySQL/MariaDB to `3306`, Oracle to `1521`, SQL Server to `1433`, and Redis to `6379`. SQL Server profiles require an explicit TCP port when connecting. |
+| `host` | String or `null` | `null` | Server hostname or address. PostgreSQL/CockroachDB, MySQL/MariaDB/TiDB, Oracle, SQL Server, and Redis use this field. |
+| `port` | Integer or `null` | Driver default when imported | Server port. PostgreSQL defaults to `5432`, CockroachDB to `26257`, MySQL/MariaDB to `3306`, TiDB to `4000`, Oracle to `1521`, SQL Server to `1433`, and Redis to `6379`. SQL Server profiles require an explicit TCP port when connecting. |
 | `user` | String or `null` | `null` | Server login name. SQL Server uses SQL username/password authentication; SQLite does not use it. |
-| `database` | String or `null` | `null` | Database name for PostgreSQL, MySQL/MariaDB, Oracle service, or SQL Server; logical SQLite path value; or non-negative Redis logical database number. |
-| `default_schema` | String or `null` | `null` | PostgreSQL/CockroachDB `currentSchema`, SQL Server schema, or SQLite `main`. MySQL has no separate default-schema field. |
+| `database` | String or `null` | `null` | Database name for PostgreSQL/CockroachDB, MySQL/MariaDB/TiDB, Oracle service, or SQL Server; logical SQLite path value; or non-negative Redis logical database number. |
+| `default_schema` | String or `null` | `null` | PostgreSQL/CockroachDB `currentSchema`, SQL Server schema, or SQLite `main`. MySQL, MariaDB, and TiDB have no separate default-schema field. |
 | `sqlite_path` | Path or `null` | `null` | SQLite file path. It is `null` for an in-memory database. |
 | `duckdb_path` | Path or `null` | `null` | DuckDB file path. It is `null` for an in-memory database. |
-| `ssl_mode` | `disable`, `prefer`, `require`, `verify-ca`, `verify-full` | `prefer` | TLS policy for PostgreSQL, MySQL/MariaDB, Oracle, SQL Server, and Redis. SQLite always uses `disable`; Redis accepts `disable` or a TLS-enabled mode, not `prefer`. |
+| `ssl_mode` | `disable`, `prefer`, `require`, `verify-ca`, `verify-full` | `prefer` | TLS policy for PostgreSQL/CockroachDB, MySQL/MariaDB/TiDB, Oracle, SQL Server, and Redis. SQLite always uses `disable`; Redis accepts `disable` or a TLS-enabled mode, not `prefer`. |
 | `pg_options` | Optional table | Absent | PostgreSQL/CockroachDB `ssl_root_cert`, `ssl_client_cert`, `ssl_client_key` paths and startup `options`. |
 | `credential_policy` | Tagged table | `{ policy = "none" }` | Where the password comes from. |
 | `read_only` | Boolean | `false` | Requests adapter-level read-only behavior. Use database grants for authorization. |
@@ -366,11 +367,15 @@ the client directory requires restarting LazyDB.
 
 `url_format` accepts `cockroachdb`, `postgres`, `postgresql`, `jdbc-postgresql`
 for CockroachDB; `postgres`, `postgresql`, `jdbc-postgresql` for PostgreSQL;
-`mysql`, `jdbc-mysql` for MySQL; `mariadb` for MariaDB; `jdbc-oracle` for Oracle;
+`mysql`, `jdbc-mysql` for MySQL; `mariadb` for MariaDB; `tidb` for TiDB; `jdbc-oracle` for Oracle;
 `sqlserver`, `mssql`, `jdbc-sqlserver` for SQL Server; `sqlite`, `file-uri`,
 `jdbc-sqlite` for SQLite; `duckdb` for DuckDB; and `redis`, `rediss` for Redis. Defaults are
-`postgresql`, `mysql`, `mariadb`, `jdbc-oracle`, `sqlserver`, `sqlite`, `duckdb`, and
+`postgresql`, `mysql`, `mariadb`, `tidb`, `jdbc-oracle`, `sqlserver`, `sqlite`, `duckdb`, and
 `redis` respectively. See the [DuckDB guide](duckdb.md) for its local file and memory URL formats.
+
+TiDB profiles retain their own product identity and use `tidb://root@host:4000/database`
+with MySQL-compatible TLS parameters. For TiDB Cloud, use `sslMode=verify-full`.
+See [TiDB setup and capability limits](tidb.md).
 
 ### Profile Access
 
@@ -651,6 +656,10 @@ back any open transaction on that session.
 - SQLite uses read-only database open flags.
 - PostgreSQL configures `default_transaction_read_only=on`.
 - MySQL configures each pooled session as transaction read-only.
+- TiDB validates the entire user SQL batch with the client read-only classifier;
+  writes and unclassified statements are rejected before execution. TiDB's
+  compatibility transaction flag is not treated as read-only enforcement. Use
+  database grants as the authorization boundary; see [TiDB](tidb.md).
 - SQL Server configures the session as read-only where supported by the driver.
 
 For PostgreSQL and MySQL, use a database role with read-only grants as the actual

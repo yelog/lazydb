@@ -1,0 +1,7 @@
+services:
+  tidb:
+    image: pingcap/tidb:v8.5.3@sha256:00f015520ce91734c3fbec720f23448e790e691655c7e181544a620872a00c61
+    command: ["--store=unistore", "--path=/tmp/lazydb-tidb", "--host=0.0.0.0", "-P=4000", "--status=10080", "--advertise-address=127.0.0.1"]
+    ports:
+      - "127.0.0.1:14000:4000"
+      - "127.0.0.1:18080:10080"

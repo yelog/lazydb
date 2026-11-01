@@ -8,7 +8,7 @@ use lazydb::{
 
 #[test]
 fn categories_partition_the_registry_without_changing_machine_names() {
-    assert_eq!(drivers_in(DatabaseCategory::Relational).count(), 9);
+    assert_eq!(drivers_in(DatabaseCategory::Relational).count(), 10);
     assert_eq!(
         drivers_in(DatabaseCategory::NonRelational)
             .map(|d| d.kind)
@@ -33,6 +33,7 @@ fn categories_partition_the_registry_without_changing_machine_names() {
             "valkey",
             "mongodb",
             "clickhouse",
+            "tidb",
             "cockroachdb"
         ]
     );
@@ -92,4 +93,27 @@ fn category_action_updates_the_real_form_and_driver_list() {
     let manager = app.profile_manager.as_ref().unwrap();
     assert_eq!(manager.draft.as_ref().unwrap().kind, DatabaseKind::Valkey);
     assert!(!manager.visible_fields().contains(&ProfileField::Schema));
+}
+
+#[test]
+fn tidb_category_round_trip_restores_driver_defaults_and_preserves_custom_ports() {
+    let mut manager = ProfileManagerState::new(false);
+    manager.start_new(DatabaseKind::TiDb);
+    assert_eq!(manager.draft.as_ref().unwrap().user.value(), "root");
+    assert_eq!(manager.draft.as_ref().unwrap().port.value(), "4000");
+    manager.selected_field = ProfileField::DatabaseCategory;
+    manager.cycle(1);
+    assert_eq!(manager.draft.as_ref().unwrap().kind, DatabaseKind::Redis);
+    assert_eq!(manager.draft.as_ref().unwrap().port.value(), "6379");
+    manager.cycle(-1);
+    assert_eq!(manager.draft.as_ref().unwrap().kind, DatabaseKind::TiDb);
+    assert_eq!(manager.draft.as_ref().unwrap().port.value(), "4000");
+    manager.select_driver(DatabaseKind::MySql);
+    assert_eq!(manager.draft.as_ref().unwrap().port.value(), "3306");
+    manager.select_driver(DatabaseKind::TiDb);
+    assert_eq!(manager.draft.as_ref().unwrap().port.value(), "4000");
+    manager.draft.as_mut().unwrap().port.set("4400");
+    manager.select_driver(DatabaseKind::MySql);
+    manager.select_driver(DatabaseKind::TiDb);
+    assert_eq!(manager.draft.as_ref().unwrap().port.value(), "4400");
 }

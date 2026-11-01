@@ -24,6 +24,7 @@ pub enum DatabaseKind {
     Valkey,
     MongoDb,
     ClickHouse,
+    TiDb,
 }
 
 impl DatabaseKind {
@@ -42,6 +43,7 @@ impl DatabaseKind {
                 | Self::CockroachDb
                 | Self::MySql
                 | Self::MariaDb
+                | Self::TiDb
                 | Self::Oracle
                 | Self::SqlServer
                 | Self::Sqlite
@@ -79,6 +81,8 @@ pub enum ConnectionUrlFormat {
     MongoDbSrv,
     ClickHouse,
     ClickHouseTls,
+    #[serde(rename = "tidb")]
+    TiDb,
 }
 
 impl ConnectionUrlFormat {
@@ -88,6 +92,7 @@ impl ConnectionUrlFormat {
             DatabaseKind::CockroachDb => Self::CockroachDb,
             DatabaseKind::MySql => Self::MySql,
             DatabaseKind::MariaDb => Self::MariaDb,
+            DatabaseKind::TiDb => Self::TiDb,
             DatabaseKind::Oracle => Self::JdbcOracle,
             DatabaseKind::SqlServer => Self::SqlServer,
             DatabaseKind::Sqlite => Self::Sqlite,
@@ -110,6 +115,7 @@ impl ConnectionUrlFormat {
                 DatabaseKind::CockroachDb
             ) | (Self::MySql | Self::JdbcMySql, DatabaseKind::MySql)
                 | (Self::MariaDb, DatabaseKind::MariaDb)
+                | (Self::TiDb, DatabaseKind::TiDb)
                 | (Self::JdbcOracle, DatabaseKind::Oracle)
                 | (
                     Self::SqlServer | Self::MsSql | Self::JdbcSqlServer,
@@ -141,6 +147,7 @@ impl ConnectionUrlFormat {
             ],
             DatabaseKind::MySql => &[Self::MySql, Self::JdbcMySql],
             DatabaseKind::MariaDb => &[Self::MariaDb],
+            DatabaseKind::TiDb => &[Self::TiDb],
             DatabaseKind::Oracle => &[Self::JdbcOracle],
             DatabaseKind::SqlServer => &[Self::SqlServer, Self::MsSql, Self::JdbcSqlServer],
             DatabaseKind::Sqlite => &[Self::Sqlite, Self::FileUri, Self::JdbcSqlite],
@@ -197,9 +204,8 @@ impl CatalogScope {
             };
         }
         let schemas = match (kind, default_schema) {
-            (DatabaseKind::MySql | DatabaseKind::ClickHouse, _) | (_, None) => {
-                CatalogSelection::All
-            }
+            (DatabaseKind::MySql | DatabaseKind::TiDb | DatabaseKind::ClickHouse, _)
+            | (_, None) => CatalogSelection::All,
             (_, Some(schema)) => CatalogSelection::Selected(vec![schema.to_owned()]),
         };
 
@@ -873,6 +879,7 @@ fn parse_connection_url_inner(
         ("mysql", false) => (DatabaseKind::MySql, ConnectionUrlFormat::MySql),
         ("mysql", true) => (DatabaseKind::MySql, ConnectionUrlFormat::JdbcMySql),
         ("mariadb", false) => (DatabaseKind::MariaDb, ConnectionUrlFormat::MariaDb),
+        ("tidb", false) => (DatabaseKind::TiDb, ConnectionUrlFormat::TiDb),
         ("sqlserver", false) => (DatabaseKind::SqlServer, ConnectionUrlFormat::SqlServer),
         ("mssql", false) => (DatabaseKind::SqlServer, ConnectionUrlFormat::MsSql),
         ("redis", false) => (DatabaseKind::Redis, ConnectionUrlFormat::Redis),
@@ -1233,9 +1240,14 @@ fn parse_server_url(
     } else {
         (!database.is_empty()).then_some(database)
     };
-    let user = if kind == DatabaseKind::ClickHouse {
+    let user = if matches!(kind, DatabaseKind::ClickHouse | DatabaseKind::TiDb) {
         Some(if url.username().is_empty() {
-            "default".to_owned()
+            if kind == DatabaseKind::TiDb {
+                "root"
+            } else {
+                "default"
+            }
+            .to_owned()
         } else {
             decode(url.username())
         })
@@ -1311,7 +1323,10 @@ fn parse_server_url(
                 _ => unreachable!("recognized PostgreSQL option"),
             }
         } else if key.eq_ignore_ascii_case("useSSL")
-            && matches!(kind, DatabaseKind::MySql | DatabaseKind::MariaDb)
+            && matches!(
+                kind,
+                DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::TiDb
+            )
         {
             reject_duplicate(&mut seen_ssl, "ssl")?;
             ssl_mode = if parse_bool(&value, "useSSL")? {
@@ -1320,7 +1335,10 @@ fn parse_server_url(
                 SslMode::Disable
             };
         } else if key.eq_ignore_ascii_case("sslMode")
-            && matches!(kind, DatabaseKind::MySql | DatabaseKind::MariaDb)
+            && matches!(
+                kind,
+                DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::TiDb
+            )
         {
             reject_duplicate(&mut seen_ssl, "ssl")?;
             ssl_mode = parse_ssl_mode(&value)
@@ -1362,6 +1380,7 @@ fn parse_server_url(
         DatabaseKind::Postgres => 5432,
         DatabaseKind::CockroachDb => 26257,
         DatabaseKind::MySql | DatabaseKind::MariaDb => 3306,
+        DatabaseKind::TiDb => 4000,
         DatabaseKind::Oracle => 1521,
         DatabaseKind::SqlServer => 1433,
         DatabaseKind::Sqlite | DatabaseKind::DuckDb => {
@@ -1695,6 +1714,7 @@ pub fn format_connection_url(
         ConnectionUrlFormat::PostgreSql | ConnectionUrlFormat::JdbcPostgreSql => "postgresql",
         ConnectionUrlFormat::MySql | ConnectionUrlFormat::JdbcMySql => "mysql",
         ConnectionUrlFormat::MariaDb => "mariadb",
+        ConnectionUrlFormat::TiDb => "tidb",
         ConnectionUrlFormat::SqlServer | ConnectionUrlFormat::JdbcSqlServer => "sqlserver",
         ConnectionUrlFormat::MsSql => "mssql",
         ConnectionUrlFormat::Redis => "redis",
@@ -1777,7 +1797,10 @@ pub fn format_connection_url(
                 ));
             }
         }
-    } else if matches!(profile.kind, DatabaseKind::MySql | DatabaseKind::MariaDb) {
+    } else if matches!(
+        profile.kind,
+        DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::TiDb
+    ) {
         query.push(format!("sslMode={}", ssl_mode_value(profile.ssl_mode)));
     } else if profile.kind.is_redis_compatible() {
         // The redis/rediss and valkey/valkeys schemes are the TLS source of truth.

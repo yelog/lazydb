@@ -652,14 +652,12 @@ async fn runtime_manual_page_cancellation_rolls_back_writes_during_count_and_sel
             console_id: session.console_id,
             query_generation: 2,
             transaction_generation: 1,
-            source_sql: "SELECT pg_sleep(30)".into(),
+            source_sql: format!("SELECT pg_sleep(30) FROM {}", fixture.table),
             dialect: lazydb::sql::SqlDialect::Postgres,
-            count_sql: if during_count {
-                "SELECT count(*) FROM (SELECT pg_sleep(30)) AS slow"
-            } else {
-                "SELECT 1"
-            }
-            .into(),
+            count_sql: format!(
+                "SELECT count(*) FROM {} WHERE pg_sleep(30) IS NULL",
+                fixture.table
+            ),
             page: if during_count {
                 PageRequest::last(PageSize::Ten, 0)
             } else {
@@ -673,7 +671,7 @@ async fn runtime_manual_page_cancellation_rolls_back_writes_during_count_and_sel
                     "SELECT query FROM [SHOW CLUSTER QUERIES] WHERE application_name = 'lazydb'"
                 ).await.unwrap();
                 if active.result_sets.iter().flat_map(|set| &set.rows).any(|row| {
-                    matches!(row.first(), Some(CellValue::Text(sql)) if sql.starts_with("SELECT") && sql.contains("pg_sleep(30)") && !sql.contains("SHOW CLUSTER QUERIES"))
+                    matches!(row.first(), Some(CellValue::Text(sql)) if sql.starts_with("SELECT") && sql.contains("pg_sleep") && sql.contains(&fixture.table) && !sql.contains("SHOW CLUSTER QUERIES"))
                 }) { break; }
                 tokio::task::yield_now().await;
             }

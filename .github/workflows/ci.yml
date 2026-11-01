@@ -289,6 +289,15 @@ jobs:
         run: docker compose -f docker-compose.cockroachdb.yml up -d --wait
       - name: CockroachDB adapter and profile tests
         run: python3 scripts/ci/run-with-timeout.py 600 -- env LAZYDB_REQUIRE_DATABASE_TESTS=1 cargo test --locked --test cockroach_adapter --test cockroach_commit_faults --test cockroach_profile -- --nocapture --test-threads=1
+      - name: Start pinned TiDB 8.5.3 fixture
+        run: |
+          docker compose -f docker-compose.tidb.yml up -d
+          curl --fail --silent --show-error --retry 60 --retry-delay 2 --retry-all-errors --retry-max-time 180 http://127.0.0.1:18080/status
+      - name: TiDB profile and forced-live adapter tests
+        env:
+          LAZYDB_REQUIRE_DATABASE_TESTS: "1"
+          LAZYDB_TEST_TIDB_URL: tidb://root@127.0.0.1:14000/test?sslMode=disable
+        run: python3 scripts/ci/run-with-timeout.py 600 -- cargo test --locked --test tidb_profile --test tidb_adapter --test tidb_contract --test tidb_ui -- --nocapture --test-threads=1
       - name: Build PostgreSQL adapter tests
         run: python3 scripts/ci/run-with-timeout.py 600 -- cargo test --locked --test postgres_adapter --no-run
       - name: PostgreSQL adapter tests
@@ -325,6 +334,12 @@ jobs:
       - name: Stop CockroachDB test service
         if: always()
         run: docker compose -f docker-compose.cockroachdb.yml down
+      - name: TiDB service diagnostics
+        if: failure()
+        run: docker compose -f docker-compose.tidb.yml logs --no-color
+      - name: Stop TiDB test service
+        if: always()
+        run: docker compose -f docker-compose.tidb.yml down
       - name: Stop ClickHouse test service
         if: always()
         run: docker compose -f docker-compose.clickhouse.yml down --volumes
