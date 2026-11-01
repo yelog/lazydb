@@ -123,6 +123,7 @@ pub enum EditDisabledReason {
     GeneratedColumn(String),
     UnsupportedRowValue,
     UnsupportedInsertResultStrategy,
+    UnsupportedDatabase,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -169,6 +170,13 @@ pub fn relation_mutation_capabilities(
     kind: DatabaseKind,
     metadata: &MetadataFingerprint,
 ) -> RelationMutationCapabilities {
+    if kind == DatabaseKind::TiDb {
+        return RelationMutationCapabilities {
+            insert: MutationCapability::Unavailable(EditDisabledReason::UnsupportedDatabase),
+            update: MutationCapability::Unavailable(EditDisabledReason::UnsupportedDatabase),
+            delete: MutationCapability::Unavailable(EditDisabledReason::UnsupportedDatabase),
+        };
+    }
     let primary_key_columns = metadata
         .primary_key
         .iter()

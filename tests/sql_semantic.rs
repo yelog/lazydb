@@ -507,7 +507,11 @@ fn snowflake_identifiers_fold_only_when_unquoted() {
     ] {
         let analysis = analyze_semantics(sql, &context, &snapshot);
         assert!(analysis.diagnostics.is_empty(), "{sql}: {analysis:?}");
-        assert_eq!(&analysis.dependencies, &[expected.clone()], "{sql}");
+        assert_eq!(
+            analysis.dependencies.as_slice(),
+            std::slice::from_ref(expected),
+            "{sql}"
+        );
         assert!(!analysis.incomplete, "{sql}");
     }
     assert_eq!(

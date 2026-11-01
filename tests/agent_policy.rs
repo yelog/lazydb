@@ -30,6 +30,47 @@ fn query_path_accepts_only_single_read_only_statements() {
 }
 
 #[test]
+fn tidb_query_policy_rejects_sequence_writes_and_nested_locks() {
+    let mut profile = import_connection_url("tidb://db.example.test/app", Some("tidb"))
+        .unwrap()
+        .profile;
+    profile.read_only = false;
+    profile.environment = Environment::Development;
+    for sql in [
+        "SELECT NEXTVAL(seq)",
+        "SELECT `nextval`(seq)",
+        "SELECT SETVAL(seq, 100)",
+        "SELECT (SELECT NEXTVAL(seq))",
+        "SELECT * FROM t WHERE id = NEXTVAL(seq)",
+        "SELECT (SELECT id FROM t FOR UPDATE)",
+        "SELECT 1 WHERE EXISTS (SELECT id FROM t FOR UPDATE)",
+    ] {
+        assert_eq!(
+            authorize_query(&profile, sql),
+            Err(PolicyError::ReadOnlyQueryRequired),
+            "{sql}"
+        );
+        assert_eq!(
+            authorize_write(&profile, WritePolicy::Deny, sql),
+            Err(PolicyError::ServerWritePolicyDenied),
+            "{sql}"
+        );
+        assert_eq!(
+            authorize_write(&profile, WritePolicy::NonProduction, sql),
+            Ok(()),
+            "{sql}"
+        );
+    }
+    for sql in [
+        "SELECT LASTVAL(seq)",
+        "SELECT 'NEXTVAL(seq)' /* SETVAL(seq, 1) FOR UPDATE */",
+        "SELECT t.nextval, t.setval FROM t",
+    ] {
+        assert_eq!(authorize_query(&profile, sql), Ok(()), "{sql}");
+    }
+}
+
+#[test]
 fn writes_obey_profile_environment_and_server_policy() {
     let read_only = profile(true, Environment::Development);
     assert_eq!(

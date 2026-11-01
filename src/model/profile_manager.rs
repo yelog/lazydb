@@ -440,6 +440,7 @@ impl ProfileDraft {
             DatabaseKind::MySql | DatabaseKind::MariaDb => {
                 ("localhost", "3306", "", SslMode::Prefer)
             }
+            DatabaseKind::TiDb => ("localhost", "4000", "", SslMode::Prefer),
             DatabaseKind::Oracle => ("localhost", "1521", "", SslMode::Prefer),
             DatabaseKind::SqlServer => ("localhost", "1433", "dbo", SslMode::Prefer),
             DatabaseKind::Sqlite | DatabaseKind::DuckDb => ("", "", "main", SslMode::Disable),
@@ -489,6 +490,9 @@ impl ProfileDraft {
             credential_revision: 0,
             system_credential_availability: SecretStoreAvailability::Unavailable,
         };
+        if kind == DatabaseKind::TiDb {
+            draft.user.set("root");
+        }
         if kind.is_redis_compatible() {
             draft.database.set("0");
         } else if kind == DatabaseKind::ClickHouse {
@@ -1051,7 +1055,7 @@ impl ProfileDraft {
             (DatabaseKind::Sqlite, false) => &SQLITE_FILE_FIELDS,
             (DatabaseKind::Sqlite, true) => &SQLITE_MEMORY_FIELDS,
             (DatabaseKind::DuckDb, _) => &DUCKDB_FIELDS,
-            (DatabaseKind::MariaDb, _) => &MYSQL_FIELDS,
+            (DatabaseKind::MariaDb | DatabaseKind::TiDb, _) => &MYSQL_FIELDS,
             (DatabaseKind::Oracle, _) => &ORACLE_FIELDS,
             (DatabaseKind::Redis | DatabaseKind::Valkey, _) => &REDIS_FIELDS,
             (DatabaseKind::MongoDb, _) => &MONGODB_FIELDS,
@@ -1113,6 +1117,7 @@ impl ProfileDraft {
             DatabaseKind::Postgres
             | DatabaseKind::MySql
             | DatabaseKind::MariaDb
+            | DatabaseKind::TiDb
             | DatabaseKind::Oracle
             | DatabaseKind::SqlServer
             | DatabaseKind::Snowflake => {
@@ -1440,7 +1445,9 @@ impl ProfileDraft {
                     (self.kind == DatabaseKind::Snowflake).then(|| "PUBLIC".to_owned())
                 }),
             ),
-            DatabaseKind::MySql | DatabaseKind::MariaDb => (self.database.value(), None),
+            DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::TiDb => {
+                (self.database.value(), None)
+            }
             DatabaseKind::Oracle => (self.database.value(), None),
             DatabaseKind::Sqlite => (
                 if self.sqlite_memory {
@@ -1587,7 +1594,10 @@ impl ProfileDraft {
                     self.ssl_mode = SslMode::Prefer;
                 }
             }
-            DatabaseKind::MySql | DatabaseKind::MariaDb => {
+            DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::TiDb => {
+                if kind == DatabaseKind::TiDb && self.user.value().trim().is_empty() {
+                    self.user.set("root");
+                }
                 if self.host.value().trim().is_empty() {
                     self.host.set("localhost");
                 }
@@ -1763,6 +1773,7 @@ impl ProfileDraft {
             DatabaseKind::Postgres
             | DatabaseKind::MySql
             | DatabaseKind::MariaDb
+            | DatabaseKind::TiDb
             | DatabaseKind::SqlServer
             | DatabaseKind::Snowflake => {
                 let host = optional(&self.host).ok_or_else(|| {
@@ -2345,7 +2356,10 @@ impl ProfileManagerState {
                 || self.scope_selected_row.as_deref() == Some(&format!("database:{database}"))
             {
                 let selected_schemas = selected_schema(&draft.catalog_scope, database);
-                if matches!(draft.kind, DatabaseKind::MySql | DatabaseKind::MariaDb) {
+                if matches!(
+                    draft.kind,
+                    DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::TiDb
+                ) {
                     rows.push(ScopeRow {
                         id: format!("database:{database}:schema:{database}"),
                         name: database.to_owned(),
@@ -2383,7 +2397,7 @@ impl ProfileManagerState {
                         },
                         read_only: matches!(
                             draft.kind,
-                            DatabaseKind::MySql | DatabaseKind::MariaDb
+                            DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::TiDb
                         ),
                         unavailable: discovery.is_none_or(|result| {
                             result.as_ref().map_or(true, |items| {
@@ -2744,6 +2758,7 @@ fn default_port(kind: DatabaseKind) -> Option<u16> {
     match kind {
         DatabaseKind::Postgres => Some(5432),
         DatabaseKind::MySql | DatabaseKind::MariaDb => Some(3306),
+        DatabaseKind::TiDb => Some(4000),
         DatabaseKind::Oracle => Some(1521),
         DatabaseKind::SqlServer => Some(1433),
         DatabaseKind::Sqlite | DatabaseKind::DuckDb => None,
@@ -2886,7 +2901,10 @@ fn toggle_scope(
         }
         return true;
     };
-    if matches!(kind, DatabaseKind::MySql | DatabaseKind::MariaDb) {
+    if matches!(
+        kind,
+        DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::TiDb
+    ) {
         return false;
     }
     let discovered_schemas = discovered

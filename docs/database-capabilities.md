@@ -22,6 +22,7 @@ disable it at runtime.
 | PostgreSQL | Relational | Available; broad catalog editor | Available when metadata and permissions allow | AUTO/MANUAL | Native cancellation | Metrics and bounded process list |
 | MySQL | Relational | Available; table/view catalog mutation | Insert requires reliable primary-key lookup; update/delete require primary key | AUTO/MANUAL | Supported | Metrics and bounded process list |
 | MariaDB | Relational | Available; table/view mutation plus version-gated sequences | Insert supports `RETURNING`, including keyless insert; update/delete require primary key | AUTO/MANUAL | Supported | Metrics and bounded process list |
+| TiDB | Relational, MySQL-compatible | Table/view discovery, relation metadata and native DDL display; structured catalog mutations unavailable | Not advertised | Automatic SQL execution only; no manual transaction UI | Not advertised | Not implemented |
 | Oracle | Relational | Available; table/view/sequence DDL and catalog mutation slices | Not advertised | AUTO/MANUAL | Not advertised | Not implemented |
 | SQL Server | Relational | Available; table/view mutation; complex children gated | Insert supports `OUTPUT`; update/delete require primary key | AUTO/MANUAL | Session close; open transaction rolls back | Not supported |
 | SQLite | Relational | Available; table/view DDL and catalog mutation | Rowid-table insert lookup; update/delete require primary key; table shape is gated | AUTO/MANUAL | Progress handler / close | Not applicable |
@@ -63,6 +64,18 @@ authentication and monitoring limits are described in the catalog section below.
 See the [issue tracker](https://github.com/yelog/lazydb/issues) and
 [release notes](https://github.com/yelog/lazydb/releases) for current priorities
 and version-specific changes.
+
+## TiDB
+
+TiDB is an independent profile using the MySQL transport and SQL dialect. The
+initial native adapter targets stable TiDB 8.5.0 or newer, with the pinned 8.5.3
+fixture as its baseline. Product/version validation reads the TiDB version suffix
+rather than the leading MySQL compatibility number. Discovery, paged catalog and
+search, table/view previews, relation metadata, and native `SHOW CREATE` are
+supported. Stored procedures, triggers, events, monitoring, principal management,
+manual transactions, native cancellation, relation-grid writes and structured
+catalog mutations are not advertised. Native SQL still follows normal client
+read/write policy. See [TiDB](tidb.md) for setup and verification limits.
 
 ## MariaDB
 
@@ -197,6 +210,7 @@ other secrets are never read or reproduced.
 | PostgreSQL | `pg_roles` cluster-wide; users are `rolcanlogin` roles | DDL is adapter-generated from role attributes and direct memberships; passwords cannot be recovered and are documented as omitted |
 | MySQL | `mysql.user` accounts plus `mysql.role_edges` for role classification | Accounts keep `user` and `host` as separate identity fields; MySQL has no independent role flag, so roles that were never granted are reported as accounts with a native-kind note; MySQL before 8 has no role metadata |
 | MariaDB | `mysql.user` with the native `is_role` flag | The flag is authoritative; account-lock state is not shown because the `mysql.user` view does not expose it |
+| TiDB | Not implemented | The group reports unsupported; no account metadata query is issued |
 | SQL Server | Bound database's `sys.database_principals`; `sys.database_role_members` and `sys.database_permissions` | Server logins are excluded; built-in fixed roles and users are described rather than emitted as replayable statements; identifiers use bracket quoting |
 | Oracle | `all_users` plus `dba_roles` (falling back to `user_role_privs`, marked incomplete) | User and role names are namespaced in the native identity because they can collide; `DBMS_METADATA.GET_DDL` is not used for users because it embeds `IDENTIFIED BY VALUES` |
 | SQLite | Not applicable | The group expands to an explicit "SQLite does not support users or roles" notice and issues no account query |
@@ -213,6 +227,7 @@ Relation Data 的行操作能力与 Catalog DDL 能力分开判断。新增一�
 | PostgreSQL | `INSERT ... RETURNING` | Available | Primary key plus PostgreSQL row-version rules |
 | MariaDB 10.5+ | `INSERT ... RETURNING` | Available | Primary key |
 | MySQL | Primary-key lookup / auto-increment result | Requires reliable key metadata | Primary key |
+| TiDB | Not implemented | Not advertised | Not advertised |
 | SQL Server | `OUTPUT inserted.*` | Available where OUTPUT semantics are supported | Primary key |
 | SQLite rowid table | Same-connection `last_insert_rowid()` lookup | Available for ordinary rowid tables | Primary key |
 | SQLite `WITHOUT ROWID` / unsupported virtual table shape | Shape-specific strategy required | Capability-gated | Primary key |
@@ -307,6 +322,7 @@ for permission handling and result limits.
 | PostgreSQL | PostgreSQL 12 or newer | Database + schema | Tables, views, materialized views, sequences, functions, procedures, types | Type family, defaults, identity, generated expressions, character length, collation, comments; numeric precision/scale is not advertised |
 | MySQL | Oracle MySQL 8.0.13 or newer | Database is schema | Tables, views, functions, procedures, triggers | Type family, defaults, auto-increment, generated expressions, numeric precision/scale, character length, collation, character set, comments |
 | MariaDB | MariaDB 10.5 or newer; product-specific version gate and MySQL-compatible transport | Database is schema | Tables, views, functions, procedures, triggers, sequences | Type family, defaults, auto-increment, generated expressions, numeric precision/scale, character length, collation, character set, comments; CHECK expressions are structured relation children; extended TIME values currently fall back to text |
+| TiDB | Stable TiDB 8.5.0+; TiDB product version suffix, 8.5.3 fixture baseline | Database is schema | Tables, views, columns, indexes and constraints | MySQL-compatible relation metadata with TiDB-specific index field decoding |
 | Oracle | Profile/URL recognition, native connect/probe, basic query, catalog, preview, DDL, and generated result pagination implemented for Oracle 12c+; advanced contract pending | Service + owner/schema | Tables, views, sequences, columns, indexes, primary/unique/check constraints | Type family, defaults, numeric precision/scale, character length; advanced LOB metadata pending |
 | SQL Server | SQL Server 2012 or newer | Database + schema | Tables, views, functions, procedures, sequences, triggers; relation children include columns, indexes, keys, and foreign keys | Type family, defaults, identity, computed/generated expressions, numeric precision/scale, character length, collation, comments, and rowversion metadata |
 | SQLite | SQLite metadata support through native schema tables; no server-version gate | Database + attached schema aliases | Tables, views, triggers | Default expressions and hidden-column metadata; unsupported fields are represented as unsupported |
@@ -317,7 +333,7 @@ for permission handling and result limits.
 | ClickHouse | HTTP interface; supported and tested against ClickHouse 25.8 LTS | Database is schema | Tables, views, materialized views, dictionaries, functions; projections are table children | Names, engine/native kind, comments, columns, defaults, and native definition metadata where available |
 | Snowflake | HTTPS SQL API; token and role permissions gate access | Database + schema | Databases, schemas, tables, views, and columns | Column type/nullability and native DDL where available |
 
-PostgreSQL, MySQL, MariaDB, SQLite, and ClickHouse advertise lazy children. SQLite opens a pool with
+PostgreSQL, MySQL, MariaDB, TiDB, SQLite, and ClickHouse advertise lazy children. SQLite opens a pool with
 exactly one physical connection; SQL Server loads its supported catalog groups
 without lazy child requests.
 

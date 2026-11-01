@@ -244,6 +244,7 @@ impl IconSet {
                 DatabaseKind::Postgres => dev::DEV_POSTGRESQL,
                 DatabaseKind::MySql => dev::DEV_MYSQL,
                 DatabaseKind::MariaDb => dev::DEV_MARIADB,
+                DatabaseKind::TiDb => "T",
                 DatabaseKind::Oracle => md::MD_DATABASE,
                 DatabaseKind::SqlServer => md::MD_DATABASE,
                 DatabaseKind::Sqlite => dev::DEV_SQLITE,
@@ -258,6 +259,7 @@ impl IconSet {
                 DatabaseKind::Postgres => "PG",
                 DatabaseKind::MySql => "MY",
                 DatabaseKind::MariaDb => "MA",
+                DatabaseKind::TiDb => "TI",
                 DatabaseKind::Oracle => "OR",
                 DatabaseKind::SqlServer => "MS",
                 DatabaseKind::Sqlite => "SQ",
@@ -272,6 +274,7 @@ impl IconSet {
                 DatabaseKind::Postgres => "PG",
                 DatabaseKind::MySql => "MY",
                 DatabaseKind::MariaDb => "MA",
+                DatabaseKind::TiDb => "TI",
                 DatabaseKind::Oracle => "OR",
                 DatabaseKind::SqlServer => "MS",
                 DatabaseKind::Sqlite => "SQ",
@@ -289,6 +292,7 @@ impl IconSet {
         match kind {
             DatabaseKind::Postgres => ratatui::style::Color::Rgb(87, 169, 220),
             DatabaseKind::MySql | DatabaseKind::MariaDb => ratatui::style::Color::Rgb(242, 145, 17),
+            DatabaseKind::TiDb => ratatui::style::Color::Rgb(230, 45, 65),
             DatabaseKind::Oracle => ratatui::style::Color::Rgb(220, 70, 70),
             DatabaseKind::SqlServer => ratatui::style::Color::Rgb(13, 127, 228),
             DatabaseKind::Sqlite => ratatui::style::Color::Rgb(68, 184, 214),
@@ -520,12 +524,13 @@ impl IconSet {
 mod tests {
     use super::*;
 
-    const DATABASE_KINDS: [DatabaseKind; 5] = [
+    const DATABASE_KINDS: [DatabaseKind; 6] = [
         DatabaseKind::Postgres,
         DatabaseKind::MySql,
         DatabaseKind::SqlServer,
         DatabaseKind::Sqlite,
         DatabaseKind::DuckDb,
+        DatabaseKind::TiDb,
     ];
 
     const CATALOG_KINDS: [CatalogKind; 16] = [
@@ -653,6 +658,25 @@ mod tests {
         assert_eq!(icons.group(ObjectGroup::Tables, true), md::MD_FOLDER_OPEN);
         assert_eq!(icons.query_filter(), md::MD_FILTER);
         assert_eq!(icons.query_sort(), md::MD_SORT);
+    }
+
+    #[test]
+    fn tidb_icons_preserve_its_driver_identity() {
+        for mode in [IconMode::NerdFont, IconMode::Unicode, IconMode::Ascii] {
+            let icons = IconSet::new(mode);
+            assert_ne!(
+                icons.database(DatabaseKind::TiDb),
+                icons.database(DatabaseKind::MySql)
+            );
+            assert_eq!(
+                icons.database(DatabaseKind::TiDb),
+                if mode == IconMode::NerdFont {
+                    "T"
+                } else {
+                    "TI"
+                }
+            );
+        }
     }
 
     #[test]
