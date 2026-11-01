@@ -98,3 +98,16 @@
 - 最终 Cloud 临时数据库已删除，查询 information_schema 确认计数为 0；root 临时密码已轮换失效。独立 TUI 配置、加密凭据及密钥、浏览器提取字段、PTY 工具虚拟环境均已移除，一次性 cleanup harness 已移出仓库。保留免费实例与原有两条单 IP 防火墙规则。
 - 最后浏览器收尾调用发现 TaskSpace 3 已不存在，未新建或接管空间；不声称该次 finish 成功。Cloud 数据清理通过数据库连接独立完成。
 - `CHANGELOG.md` 新增 Unreleased，列出 TiDB 首期支持、已验证环境、未开放能力，以及 session 复用与 SQL 双引号扫描修复；未变更发布版本号，未执行 commit、push 或创建 PR。
+
+## PR #31 合并前审查（2026-11-01）
+
+- 初始提交 `c3d0c1b` 的 12 项 CI 全部通过；Linux/macOS 各 193 个目标、3,493 项通过、16 项忽略。CI 检出与最新 main 合并的 `23a6677`；TiDB 强制实机专项 26 项、数据库作业共 163 项、MongoDB 作业 83 项通过。该证据仅对应初始提交，后续修复另行验收。
+- 审查确认保存连接参数或凭据时可能直接断开空闲手动事务。改为复用 `profile_exit_check` 与 deferred transaction resolution：事务全部提交/回滚成功后才退役旧连接；取消、失败或未提交关系编辑会保留旧连接。新增 settings/credentials、多个 console、失败/取消回归。
+- 将序列副作用与嵌套 locking read 检查统一到共享 SQL risk AST visitor，使 writable TiDB profile 的 agent query 入口同样拒绝 NEXTVAL/SETVAL，且覆盖 scalar/WHERE 子查询，保留字符串和注释不误报。TiDB 局部只读校验复用共享策略。
+- TiDB metadata prepare 禁用 statement cache，避免相同 SELECT 在 ALTER/USE 后复用旧列信息；prepared metadata 初始化不再记录执行响应时间。新增实机 DDL 前后、空结果列及 accumulator 时序回归。
+- TiDB 按物理连接当前 `sql_mode` 切分，非 DQL 后刷新；支持同批 SET 后的 ANSI_QUOTES/NO_BACKSLASH_ESCAPES 边界。只读配置对非默认 quote mode 保守拒绝。MySQL/MariaDB 可执行注释保留、MariaDB 扫描规则对齐；自动 current-statement 在不同模式产生不同边界时拒绝，显式 selection 保留。扫描器覆盖四种模式组合和 UTF-8。
+- TiDB 搜索使用独立 SQL 常量，不再通过另一数据库 SQL 的精确空白片段与 expect 构造。连接阶段的产品校验 probe 保留：重复一次探测是已知低优先级成本，避免为本次接入扩大连接生命周期接口。
+- 第一轮新增 ANSI_QUOTES 实机用例中的反斜杠结尾标识符被 TiDB 8.5.3 自身拒绝；对应特殊边界由扫描器单测覆盖，实机改用服务端支持的标识符并保留 NO_BACKSLASH_ESCAPES 切分和 executable comment 检查。
+- 统一针对性回归 125 项通过、0 失败、0 忽略，包含 TiDB adapter 8、contract 4、profile 7、UI 9，共 28 项强制实机配置专项。首次统一命令缺 DuckDB 动态库，配置官方脚本下载且摘要校验的 1.5.6 运行库后完整重跑通过；未计首次失败为通过。
+- 严格 `cargo clippy --locked --all-targets --all-features -- -D warnings`、格式、空白和 release metadata 检查通过。原审查候选限定复核确认前 9 项已收敛，重复 probe 保留为已知非阻塞成本；未扩大复核范围，未发表远端评论。
+- 修复后本地完整命令 `cargo test --locked --all-targets --all-features --no-fail-fast -- --test-threads=1` 退出 0：193 个测试目标，3,490 项通过、0 失败、16 项忽略。配置隔离 TiDB 8.5.3 与已校验 DuckDB 1.5.6 运行库；未配置的其他外部数据库不计为实机验证。该分支未合并 main 的后续 MongoDB 提交，计数与初始合并提交 CI 不同。日志 `/tmp/lazydb-pr31-review-full.log`。

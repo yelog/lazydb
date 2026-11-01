@@ -1203,6 +1203,11 @@ impl MySqlAdapter {
                     }),
             )
             .ssl_mode(mysql_ssl_mode(profile.ssl_mode));
+        if profile.kind == DatabaseKind::TiDb {
+            // Each DQL statement is prepared for empty-result metadata, then
+            // executed as text. DDL and USE can change identical SQL's columns.
+            options = options.statement_cache_capacity(0);
+        }
         if let Some(user) = &profile.user {
             options = options.username(user);
         }

@@ -20182,7 +20182,9 @@ impl App {
             DeferredIntent::SetMode(TransactionMode::Auto) => {
                 self.set_transaction_mode(TransactionMode::Auto)
             }
-            DeferredIntent::SwitchConnection { profile_id } => self.request_connection(profile_id),
+            DeferredIntent::SwitchConnection { profile_id } => {
+                self.reconnect_saved_profile(profile_id)
+            }
             DeferredIntent::DeleteProfile {
                 profile_id,
                 request_id,
@@ -21080,13 +21082,39 @@ impl App {
             self.overlay = None;
         }
         if change.connection_settings_changed || change.credentials_changed {
-            let retired = self.retire_profile_connections(profile_id, None);
-            for command in &retired {
-                if let Command::Disconnect { connection } = command {
-                    self.sessions.retire_identity(*connection);
-                }
+            commands.extend(self.reconnect_saved_profile(profile_id));
+        } else {
+            commands.extend(self.request_connection(profile_id));
+        }
+        commands
+    }
+
+    fn reconnect_saved_profile(&mut self, profile_id: Uuid) -> Vec<Command> {
+        match self.profile_exit_check(profile_id) {
+            WorkspaceExitCheck::Running => {
+                self.notify_warning(
+                    "Connection",
+                    "Profile saved; wait for running SQL or relation loads before reconnecting",
+                );
+                return Vec::new();
             }
-            commands.extend(retired);
+            WorkspaceExitCheck::RelationTransaction => {
+                self.notify_warning(
+                    "Connection",
+                    "Profile saved; commit or roll back relation edits before reconnecting",
+                );
+                return Vec::new();
+            }
+            WorkspaceExitCheck::ConsoleTransactions(ids) => {
+                return self.defer_intent(DeferredIntent::SwitchConnection { profile_id }, ids);
+            }
+            WorkspaceExitCheck::Ready => {}
+        }
+        let mut commands = self.retire_profile_connections(profile_id, None);
+        for command in &commands {
+            if let Command::Disconnect { connection } = command {
+                self.sessions.retire_identity(*connection);
+            }
         }
         commands.extend(self.request_connection(profile_id));
         commands

@@ -45,7 +45,17 @@ batch is rejected before execution. Sequence-changing `NEXTVAL` and `SETVAL`
 expressions are also rejected, including nested queries and preview filters or
 sorting expressions. TiDB's compatibility `READ ONLY` transaction
 flag is not treated as server-side enforcement. Use a database account with
-read-only grants for the authorization boundary.
+read-only grants for the authorization boundary. The shared policy also rejects
+sequence changes through the read-only agent query endpoint on writable profiles,
+and recognizes locking reads inside expression subqueries.
+
+Native batch execution reads the connection's current `sql_mode` and refreshes it
+after non-query statements, including `SET` and executable comments. This supports
+`ANSI_QUOTES` and `NO_BACKSLASH_ESCAPES` when splitting a writable batch. Read-only
+profiles conservatively reject these quote modes because their risk parser uses
+default MySQL quoting. Automatic current-statement selection also rejects ranges
+whose boundaries depend on those modes; use an explicit selection or full-buffer
+execution for ambiguous SQL.
 
 TiDB's distributed engine and compatibility catalog differ from MySQL. Shared
 transport does not imply identical metadata types, InnoDB metrics, transaction

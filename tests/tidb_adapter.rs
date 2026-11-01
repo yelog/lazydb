@@ -226,6 +226,90 @@ async fn tidb_query_preserves_identity_empty_metadata_result_sets_and_native_val
 }
 
 #[tokio::test]
+async fn tidb_query_refreshes_metadata_after_schema_changes() {
+    let Some(url) = tidb_test_url() else {
+        return;
+    };
+    let imported = import_connection_url(&url, Some("TiDB metadata test")).unwrap();
+    let adapter = MySqlAdapter::connect(&imported.profile, imported.transient_password.as_ref())
+        .await
+        .unwrap();
+    let table = mysql::quote_identifier(&format!("lazydb_metadata_{}", Uuid::new_v4().simple()));
+    adapter
+        .execute(&format!(
+            "CREATE TABLE {table} (id INT PRIMARY KEY); INSERT INTO {table} VALUES (1)"
+        ))
+        .await
+        .unwrap();
+    let tested = AssertUnwindSafe(async {
+        let result = adapter
+            .execute(&format!(
+                "SELECT * FROM {table}; ALTER TABLE {table} ADD COLUMN extra INT DEFAULT 7; \
+             SELECT * FROM {table}; SELECT * FROM {table} WHERE FALSE; \
+             ALTER TABLE {table} ADD COLUMN another INT; SELECT * FROM {table} WHERE FALSE"
+            ))
+            .await
+            .unwrap();
+        for (index, count) in [(0, 1), (2, 2), (3, 2), (5, 3)] {
+            let set = &result.result_sets[index];
+            assert_eq!(set.columns.len(), count);
+            assert!(set.rows.iter().all(|row| row.len() == count));
+        }
+        assert!(result.result_sets[3].rows.is_empty());
+        assert!(result.result_sets[5].rows.is_empty());
+    })
+    .catch_unwind()
+    .await;
+    adapter
+        .execute(&format!("DROP TABLE {table}"))
+        .await
+        .unwrap();
+    adapter.close().await;
+    if let Err(panic) = tested {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+#[tokio::test]
+async fn tidb_query_uses_current_sql_mode_between_statements() {
+    let Some(url) = tidb_test_url() else {
+        return;
+    };
+    let imported = import_connection_url(&url, Some("TiDB SQL mode test")).unwrap();
+    let adapter = MySqlAdapter::connect(&imported.profile, imported.transient_password.as_ref())
+        .await
+        .unwrap();
+    let result = adapter
+        .execute(
+            r#"SET @lazydb_original_mode=@@SESSION.sql_mode;
+           SET SESSION sql_mode='ANSI_QUOTES';
+           SELECT 1 AS "ansi_value"; SELECT 2 AS second_value;
+           SET SESSION sql_mode='NO_BACKSLASH_ESCAPES';
+           SELECT 'ends_with_backslash\' AS value; SELECT 3 AS third_value;
+           SET SESSION sql_mode=@lazydb_original_mode"#,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.result_sets.len(), 8);
+    let conditional = adapter
+        .execute("/*!40101 SELECT 42 AS conditional_value */")
+        .await
+        .unwrap();
+    assert_eq!(
+        conditional.result_sets[0].rows[0][0],
+        CellValue::Integer(42)
+    );
+    assert_eq!(result.result_sets[2].columns[0].name, "ansi_value");
+    assert_eq!(result.result_sets[3].rows[0][0], CellValue::Integer(2));
+    assert_eq!(
+        result.result_sets[5].rows[0][0].clipboard_text(),
+        "ends_with_backslash\\"
+    );
+    assert_eq!(result.result_sets[6].rows[0][0], CellValue::Integer(3));
+    adapter.close().await;
+}
+
+#[tokio::test]
 async fn tidb_native_catalog_pages_search_preview_ddl_and_operation_boundaries() {
     let Some(url) = tidb_test_url() else {
         return;

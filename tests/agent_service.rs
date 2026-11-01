@@ -195,6 +195,27 @@ async fn query_rejects_write_before_database_io() {
 }
 
 #[tokio::test]
+async fn tidb_query_rejects_sequence_writes_and_nested_locks_before_database_io() {
+    let temp = TempDir::new().unwrap();
+    fs::create_dir(temp.path().join(".git")).unwrap();
+    let mut profile = import_connection_url("tidb://db.example.test/app", Some("tidb"))
+        .unwrap()
+        .profile;
+    profile.read_only = false;
+    let service = service(&temp, vec![profile]);
+    for sql in [
+        "SELECT NEXTVAL(seq)",
+        "SELECT SETVAL(seq, 100)",
+        "SELECT (SELECT NEXTVAL(seq))",
+        "SELECT (SELECT id FROM t FOR UPDATE)",
+    ] {
+        let error = service.query(None, sql).await.unwrap_err();
+        assert_eq!(error.code, AgentErrorCode::PolicyDenied, "{sql}");
+        assert!(error.message.contains("query rejected"), "{sql}: {error}");
+    }
+}
+
+#[tokio::test]
 async fn execute_reports_server_policy_denial_before_database_io() {
     let temp = TempDir::new().unwrap();
     fs::create_dir(temp.path().join(".git")).unwrap();

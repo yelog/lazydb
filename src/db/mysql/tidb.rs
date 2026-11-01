@@ -5,14 +5,6 @@
 //! access. Use the supported snapshot begin syntax instead. These private
 //! metadata transactions issue only reads; user SQL retains normal rules.
 
-use std::ops::ControlFlow;
-
-use sqlparser::{
-    ast::{Expr, visit_expressions},
-    dialect::MySqlDialect,
-    parser::Parser,
-};
-
 use super::*;
 
 pub(super) const CATALOG_BEGIN_SQL: &str = "START TRANSACTION WITH CONSISTENT SNAPSHOT";
@@ -54,43 +46,69 @@ pub(super) fn product_version(version: &str) -> Option<(u32, u32, u32)> {
 }
 
 pub(super) fn search_candidates_sql() -> String {
-    // Remove unsupported sources from the SQL itself: TiDB's compatibility
-    // information_schema placeholders must never be treated as real objects.
-    let start = CATALOG_SEARCH_CANDIDATES_SQL
-        .find("    UNION ALL\n    SELECT LOWER(routine_type)")
-        .expect("routine search branch");
-    let end = CATALOG_SEARCH_CANDIDATES_SQL
-        .find("    UNION ALL\n    SELECT 'column'")
-        .expect("column search branch");
-    format!(
-        "{}{}",
-        &CATALOG_SEARCH_CANDIDATES_SQL[..start],
-        &CATALOG_SEARCH_CANDIDATES_SQL[end..]
-    )
+    CATALOG_SEARCH_SQL.to_owned()
 }
 
-fn contains_sequence_mutation(sql: &str) -> bool {
-    let Ok(statements) = Parser::parse_sql(&MySqlDialect {}, sql) else {
-        return true;
-    };
-    visit_expressions(&statements, |expression| {
-        if let Expr::Function(function) = expression
-            && function
-                .name
-                .0
-                .last()
-                .and_then(|part| part.as_ident())
-                .is_some_and(|name| {
-                    name.value.eq_ignore_ascii_case("nextval")
-                        || name.value.eq_ignore_ascii_case("setval")
-                })
-        {
-            return ControlFlow::Break(());
-        }
-        ControlFlow::Continue(())
-    })
-    .is_break()
-}
+const CATALOG_SEARCH_SQL: &str = r#"
+WITH candidates AS (
+    SELECT 'database' AS kind, schema_name AS database_name, schema_name AS object_name,
+           NULL AS relation_name, NULL AS relation_type, schema_name AS native_identity,
+           schema_name AS qualified_path, NULL AS comment
+    FROM information_schema.schemata
+    WHERE schema_name NOT IN ('information_schema','mysql','performance_schema','sys')
+    UNION ALL
+    SELECT 'schema', schema_name, schema_name, NULL, NULL, schema_name, schema_name, NULL
+    FROM information_schema.schemata
+    WHERE schema_name NOT IN ('information_schema','mysql','performance_schema','sys')
+    UNION ALL
+    SELECT IF(table_type='VIEW','view','table'), table_schema, table_name, table_name, table_type,
+           table_name, CONCAT(table_schema,'.',table_name), table_comment
+    FROM information_schema.tables WHERE table_type IN ('BASE TABLE','VIEW')
+    UNION ALL
+    SELECT 'column', c.table_schema, c.column_name, c.table_name, t.table_type,
+           CAST(c.ordinal_position AS CHAR), CONCAT(c.table_schema,'.',c.table_name,'.',c.column_name), NULL
+    FROM information_schema.columns c JOIN information_schema.tables t
+      ON BINARY t.table_schema=BINARY c.table_schema AND BINARY t.table_name=BINARY c.table_name
+     AND t.table_type IN ('BASE TABLE','VIEW')
+    UNION ALL
+    SELECT 'index', s.table_schema, s.index_name, s.table_name, t.table_type, s.index_name,
+           CONCAT(s.table_schema,'.',s.table_name,'.',s.index_name), NULL
+    FROM information_schema.statistics s JOIN information_schema.tables t
+      ON BINARY t.table_schema=BINARY s.table_schema AND BINARY t.table_name=BINARY s.table_name
+     AND t.table_type IN ('BASE TABLE','VIEW')
+    GROUP BY s.table_schema, s.table_name, s.index_name, t.table_type
+    UNION ALL
+    SELECT CASE constraint_type WHEN 'PRIMARY KEY' THEN 'primary_key'
+               WHEN 'UNIQUE' THEN 'unique_constraint' ELSE 'foreign_key' END,
+           tc.table_schema, tc.constraint_name, tc.table_name, t.table_type, tc.constraint_name,
+           CONCAT(tc.table_schema,'.',tc.table_name,'.',tc.constraint_name), NULL
+    FROM information_schema.table_constraints tc JOIN information_schema.tables t
+      ON BINARY t.table_schema=BINARY tc.table_schema AND BINARY t.table_name=BINARY tc.table_name
+     AND t.table_type IN ('BASE TABLE','VIEW')
+    WHERE tc.constraint_type IN ('PRIMARY KEY','UNIQUE','FOREIGN KEY')
+), normalized AS (
+    SELECT *, REGEXP_REPLACE(LOWER(object_name), '[^[:alnum:]]', '') AS normalized_name,
+              REGEXP_REPLACE(LOWER(qualified_path), '[^[:alnum:]]', '') AS normalized_path
+    FROM candidates
+), searchable AS (
+    SELECT *, IF(?, normalized_name, LOWER(object_name)) AS search_name,
+              IF(?, normalized_path, LOWER(qualified_path)) AS search_path
+    FROM normalized
+)
+SELECT kind, database_name, object_name, relation_name, relation_type, native_identity, comment
+FROM searchable
+WHERE {scope_predicate}
+  AND database_name NOT IN ('information_schema','mysql','performance_schema','sys')
+  AND (? OR kind IN ('table','view'))
+  AND (LOCATE(?, search_name) > 0 OR LOCATE(?, search_path) > 0)
+ORDER BY CASE
+    WHEN search_name=? THEN 0
+    WHEN LOCATE(?, search_name)=1 THEN 1
+    WHEN LOCATE(?, search_name)>0 THEN 2
+    ELSE 3 END,
+    LOWER(qualified_path), kind, BINARY native_identity
+LIMIT 101
+"#;
 
 // TiDB's compatibility READ ONLY flag does not enforce policy. Check the whole
 // batch, including sequence writes inside otherwise read-only query expressions.
@@ -101,7 +119,6 @@ pub(super) fn validate_read_only_sql(sql: &str) -> Result<(), DatabaseError> {
             .risks
             .iter()
             .any(|risk| *risk != crate::sql::SqlRisk::ReadOnly)
-        || contains_sequence_mutation(sql)
     {
         return Err(DatabaseError::unsupported(
             "TiDB profile is read-only; only SQL classified as read-only can execute",
@@ -167,17 +184,41 @@ impl MySqlAdapter {
             validate_read_only_sql(sql)?;
         }
         let mut connection = self.pool.acquire().await.map_err(sql_error)?;
+        let mut sql_mode: String = sqlx::query_scalar("SELECT @@SESSION.sql_mode")
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(sql_error)?;
         let mut accumulator = QueryOutcomeAccumulator::with_budget(budget);
-        for range in crate::sql::scan_statements(sql, crate::sql::SqlDialect::MySql) {
-            let statement = &sql[range.start..range.end];
-            if crate::sql::classify_statement_kind(statement, crate::sql::SqlDialect::MySql)
-                == crate::sql::SqlStatementKind::Dql
-            {
+        let mut remaining = sql;
+        loop {
+            let ansi_quotes = sql_mode
+                .split(',')
+                .any(|mode| mode.eq_ignore_ascii_case("ANSI_QUOTES"));
+            let no_backslash_escapes = sql_mode
+                .split(',')
+                .any(|mode| mode.eq_ignore_ascii_case("NO_BACKSLASH_ESCAPES"));
+            if self.read_only && (ansi_quotes || no_backslash_escapes) {
+                return Err(DatabaseError::unsupported(
+                    "TiDB read-only SQL validation requires the default SQL quote modes",
+                ));
+            }
+            let Some(range) =
+                crate::sql::scan_mysql_statements(remaining, ansi_quotes, no_backslash_escapes)
+                    .into_iter()
+                    .next()
+            else {
+                break;
+            };
+            let statement = &remaining[range.start..range.end];
+            let is_query =
+                crate::sql::classify_statement_kind(statement, crate::sql::SqlDialect::MySql)
+                    == crate::sql::SqlStatementKind::Dql;
+            if is_query {
                 let description = connection
                     .prepare(AssertSqlSafe(statement).into_sql_str())
                     .await
                     .map_err(sql_error)?;
-                accumulator.metadata(
+                accumulator.prepared_metadata(
                     description
                         .columns()
                         .iter()
@@ -194,6 +235,14 @@ impl MySqlAdapter {
                     Either::Right(row) => accumulator.row(columns(&row), decode_row(&row)),
                     Either::Left(done) => accumulator.done(done.rows_affected()),
                 }
+            }
+            drop(stream);
+            remaining = &remaining[range.end..];
+            if !is_query && !remaining.trim().is_empty() {
+                sql_mode = sqlx::query_scalar("SELECT @@SESSION.sql_mode")
+                    .fetch_one(&mut *connection)
+                    .await
+                    .map_err(sql_error)?;
             }
         }
         Ok(accumulator.finish())
@@ -230,6 +279,9 @@ mod tests {
             "SELECT * FROM items WHERE id = NEXTVAL(seq)",
             "WITH values_cte AS (SELECT NEXTVAL(seq)) SELECT * FROM values_cte",
             "SELECT NEXT VALUE FOR seq",
+            "SELECT (SELECT id FROM items WHERE id=1 FOR UPDATE)",
+            "SELECT * FROM items WHERE EXISTS (SELECT id FROM items FOR UPDATE)",
+            "/*!40101 SELECT NEXTVAL(seq) */",
         ] {
             assert!(validate_read_only_sql(sql).is_err(), "{sql}");
         }
