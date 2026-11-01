@@ -38,6 +38,7 @@ pub fn format_sql(sql: &str, dialect: SqlDialect) -> Result<String, FormatError>
         SqlDialect::DuckDb => &sqlparser::dialect::DuckDbDialect {},
         SqlDialect::Generic | SqlDialect::Oracle => &GenericDialect {},
         SqlDialect::ClickHouse => &ClickHouseDialect {},
+        SqlDialect::Snowflake => &sqlparser::dialect::SnowflakeDialect {},
     };
     let before = meaningful_tokens(parser_dialect, sql);
     let after = meaningful_tokens(parser_dialect, &formatted);

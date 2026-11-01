@@ -1442,7 +1442,7 @@ pub(crate) fn classify_column_type(
         | DatabaseKind::Sqlite
         | DatabaseKind::DuckDb => None,
         DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb => None,
-        DatabaseKind::ClickHouse => None,
+        DatabaseKind::ClickHouse | DatabaseKind::Snowflake => None,
     }?;
 
     Some(ColumnEditorDescription { kind })

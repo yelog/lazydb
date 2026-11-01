@@ -667,3 +667,12 @@ fn unrecoverable_sql_still_returns_safe_lexical_highlighting() {
     );
     assert!(spans.iter().all(|span| span.range.end <= text.len()));
 }
+
+#[test]
+fn snowflake_highlights_variant_paths_and_dollar_strings() {
+    let text = "SELECT payload:key::VARCHAR, $$a;b$$ FROM DB.PUBLIC.EVENTS QUALIFY rank = 1";
+    let spans = highlight_sql(text, SqlDialect::Snowflake);
+    assert!(spans.iter().any(|span| span.kind == HighlightKind::Keyword));
+    assert!(spans.iter().any(|span| span.kind == HighlightKind::String
+        && text[span.range.start..span.range.end].contains("a;b")));
+}

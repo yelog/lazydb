@@ -948,6 +948,8 @@ fn driver_cycle_includes_duckdb_after_sqlite() {
     state.cycle(1);
     assert_eq!(state.draft.as_ref().unwrap().kind, DatabaseKind::TiDb);
     state.cycle(1);
+    assert_eq!(state.draft.as_ref().unwrap().kind, DatabaseKind::Snowflake);
+    state.cycle(1);
     assert_eq!(state.draft.as_ref().unwrap().kind, DatabaseKind::Postgres);
 }
 
@@ -1367,4 +1369,89 @@ fn discovered_and_saved_schema_rows_are_deduplicated() {
         .filter(|row| row.id == "database:db:schema:public")
         .count();
     assert_eq!(rows, 1);
+}
+
+#[test]
+fn snowflake_draft_preserves_schema_options_and_redacts_token_through_edits() {
+    let imported = lazydb::profile::import_connection_url(
+        "snowflake://alice:private-token@org-account.snowflakecomputing.com/DB?schema=RAW&warehouse=WH&role=ANALYST&token_type=KEYPAIR_JWT", Some("snowflake")
+    ).unwrap();
+    let mut draft = ProfileDraft::edit(&imported.profile, false);
+    draft.set_password("private-token");
+    draft.paste(ProfileField::Database, "_TWO");
+    let submission = draft.validate(&[]).unwrap();
+    assert_eq!(submission.profile.database.as_deref(), Some("DB_TWO"));
+    assert_eq!(submission.profile.default_schema.as_deref(), Some("RAW"));
+    assert_eq!(
+        submission.profile.snowflake_options,
+        imported.profile.snowflake_options
+    );
+    assert!(!draft.url_display().contains("private-token"));
+    assert!(!format!("{draft:?} {submission:?}").contains("private-token"));
+    replace_profile_url(
+        &mut draft,
+        "snowflake://alice:replacement-token@org-account.snowflakecomputing.com/DB?schema=PUBLIC&warehouse=NEW_WH&role=READER&token_type=OAUTH",
+    );
+    draft.commit_url().unwrap();
+    draft.paste(ProfileField::Schema, "_TWO");
+    let submission = draft.validate(&[]).unwrap();
+    assert_eq!(
+        submission.profile.default_schema.as_deref(),
+        Some("PUBLIC_TWO")
+    );
+    let options = submission.profile.snowflake_options.unwrap();
+    assert_eq!(options.warehouse.as_deref(), Some("NEW_WH"));
+    assert_eq!(options.role.as_deref(), Some("READER"));
+    assert_eq!(options.token_type, "OAUTH");
+    assert_eq!(draft.password().expose_secret(), "replacement-token");
+    assert!(!draft.url_display().contains("replacement-token"));
+}
+
+#[test]
+fn snowflake_discovery_fingerprint_tracks_options_and_schema() {
+    use lazydb::model::profile_manager::DiscoveryFingerprint;
+    let mut profile = lazydb::profile::import_connection_url(
+        "snowflake://alice@org-account.snowflakecomputing.com/DB",
+        None,
+    )
+    .unwrap()
+    .profile;
+    let original = DiscoveryFingerprint::for_profile(&profile, true, 0);
+    profile.snowflake_options.as_mut().unwrap().warehouse = Some("WH".into());
+    let warehouse = DiscoveryFingerprint::for_profile(&profile, true, 0);
+    assert_ne!(original, warehouse);
+    profile.snowflake_options.as_mut().unwrap().role = Some("ROLE".into());
+    let role = DiscoveryFingerprint::for_profile(&profile, true, 0);
+    assert_ne!(warehouse, role);
+    profile.snowflake_options.as_mut().unwrap().token_type = "OAUTH".into();
+    let token = DiscoveryFingerprint::for_profile(&profile, true, 0);
+    assert_ne!(role, token);
+    profile.default_schema = Some("RAW".into());
+    assert_ne!(token, DiscoveryFingerprint::for_profile(&profile, true, 0));
+}
+
+#[test]
+fn snowflake_form_only_offers_verified_tls_and_blank_schema_defaults_public() {
+    let mut state = ProfileManagerState::new(false);
+    state.start_new(DatabaseKind::Snowflake);
+    {
+        let draft = state.draft.as_mut().unwrap();
+        draft.name.set("snowflake");
+        draft.host.set("org-account.snowflakecomputing.com");
+        draft.database.set("DB");
+        draft.schema.set("");
+    }
+    state.focus_field(ProfileField::SslMode);
+    state.cycle(1);
+    let draft = state.draft.as_ref().unwrap();
+    assert_eq!(draft.ssl_mode, SslMode::VerifyFull);
+    assert_eq!(
+        draft
+            .validate(&[])
+            .unwrap()
+            .profile
+            .default_schema
+            .as_deref(),
+        Some("PUBLIC")
+    );
 }

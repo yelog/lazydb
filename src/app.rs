@@ -745,7 +745,8 @@ impl App {
             | DatabaseKind::DuckDb
             | DatabaseKind::Redis
             | DatabaseKind::Valkey
-            | DatabaseKind::MongoDb => crate::db::principal::PrincipalCapability::Unsupported,
+            | DatabaseKind::MongoDb
+            | DatabaseKind::Snowflake => crate::db::principal::PrincipalCapability::Unsupported,
             DatabaseKind::ClickHouse => {
                 crate::db::clickhouse::ClickHouseAdapter::principal_capability()
             }
@@ -2130,6 +2131,7 @@ impl App {
                 DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb => {
                     SqlDialect::Generic
                 }
+                DatabaseKind::Snowflake => SqlDialect::Snowflake,
                 DatabaseKind::ClickHouse => SqlDialect::ClickHouse,
             })
             .unwrap_or_else(|| self.sql_dialect());
@@ -19141,7 +19143,7 @@ impl App {
                     crate::db::mssql::MsSqlAdapter::catalog_mutation_capabilities()
                 }
                 DatabaseKind::Redis | DatabaseKind::Valkey => Default::default(),
-                DatabaseKind::MongoDb => Default::default(),
+                DatabaseKind::MongoDb | DatabaseKind::Snowflake => Default::default(),
                 DatabaseKind::ClickHouse => {
                     crate::db::clickhouse::ClickHouseAdapter::catalog_mutation_capabilities()
                 }
@@ -21495,7 +21497,8 @@ impl App {
                     DatabaseKind::Postgres
                     | DatabaseKind::SqlServer
                     | DatabaseKind::Sqlite
-                    | DatabaseKind::DuckDb => entry.qualified_name.schema.clone(),
+                    | DatabaseKind::DuckDb
+                    | DatabaseKind::Snowflake => entry.qualified_name.schema.clone(),
                     DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb => None,
                     DatabaseKind::ClickHouse => Some(database.clone()),
                 };
@@ -21696,7 +21699,10 @@ impl App {
                         Some(database.clone())
                     }
                     DatabaseKind::Sqlite | DatabaseKind::DuckDb => Some("main".to_owned()),
-                    DatabaseKind::Postgres | DatabaseKind::SqlServer | DatabaseKind::Oracle => None,
+                    DatabaseKind::Postgres
+                    | DatabaseKind::SqlServer
+                    | DatabaseKind::Oracle
+                    | DatabaseKind::Snowflake => None,
                     DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb => None,
                     DatabaseKind::ClickHouse => Some(database.clone()),
                 },
@@ -22656,6 +22662,7 @@ impl App {
             DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb => {
                 SqlDialect::Generic
             }
+            DatabaseKind::Snowflake => SqlDialect::Snowflake,
             DatabaseKind::ClickHouse => SqlDialect::ClickHouse,
         }
     }
@@ -22673,6 +22680,7 @@ impl App {
             Some(DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb) => {
                 SqlDialect::Generic
             }
+            Some(DatabaseKind::Snowflake) => SqlDialect::Snowflake,
             Some(DatabaseKind::ClickHouse) => SqlDialect::ClickHouse,
             None => SqlDialect::Generic,
         }
@@ -22699,6 +22707,7 @@ impl App {
             Some(DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb) | None => {
                 SqlDialect::Generic
             }
+            Some(DatabaseKind::Snowflake) => SqlDialect::Snowflake,
             Some(DatabaseKind::ClickHouse) => SqlDialect::ClickHouse,
         }
     }
@@ -31082,7 +31091,10 @@ fn relation_execution_target(
     }
     if matches!(
         profile.kind,
-        DatabaseKind::Postgres | DatabaseKind::SqlServer | DatabaseKind::Oracle
+        DatabaseKind::Postgres
+            | DatabaseKind::SqlServer
+            | DatabaseKind::Oracle
+            | DatabaseKind::Snowflake
     ) {
         target.schema = tab.descriptor.qualified_name.schema.clone();
     }
@@ -31155,7 +31167,8 @@ fn add_explorer_profile(
         | DatabaseKind::MariaDb
         | DatabaseKind::TiDb
         | DatabaseKind::Oracle
-        | DatabaseKind::SqlServer => {
+        | DatabaseKind::SqlServer
+        | DatabaseKind::Snowflake => {
             let host = profile.host.as_deref().unwrap_or_default();
             profile
                 .port

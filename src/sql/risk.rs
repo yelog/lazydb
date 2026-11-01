@@ -219,6 +219,14 @@ impl RiskVisitor {
                 SqlRisk::Dml
             });
         }
+        if self.dialect == SqlDialect::Snowflake {
+            let name = name.value.to_ascii_uppercase();
+            // SYSTEM$ includes administrative and state-changing APIs.
+            // Keep the entire family behind explicit approval.
+            if name.starts_with("SYSTEM$") || matches!(name.as_str(), "NEXTVAL" | "GETNEXTVAL") {
+                self.include(SqlRisk::Unknown);
+            }
+        }
         if self.dialect == SqlDialect::DuckDb {
             let name = name.value.to_ascii_lowercase();
             if name.starts_with("read_csv")
@@ -273,6 +281,15 @@ impl Visitor for RiskVisitor {
     fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<Self::Break> {
         match expression {
             Expr::Function(function) => self.function(&function.name),
+            // Inspect AST nodes so literals and aliases do not trigger approval.
+            Expr::CompoundIdentifier(parts)
+                if self.dialect == SqlDialect::Snowflake
+                    && parts
+                        .last()
+                        .is_some_and(|name| name.value.eq_ignore_ascii_case("nextval")) =>
+            {
+                self.include(SqlRisk::Unknown);
+            }
             // Oracle sequence pseudocolumns are identifiers, not function calls.
             Expr::CompoundIdentifier(parts)
                 if self.dialect == SqlDialect::Oracle

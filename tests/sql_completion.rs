@@ -5620,3 +5620,64 @@ fn qualified(database: &str, schema: Option<&str>, object: &str) -> QualifiedNam
         object: object.into(),
     }
 }
+
+#[test]
+fn snowflake_relation_completion_quotes_all_three_name_parts() {
+    let index = CompletionIndex::new(&fixture());
+    let text = "select * from ";
+    let candidates = complete(
+        text,
+        text.len(),
+        SqlDialect::Snowflake,
+        &index,
+        CompletionContext::default(),
+    );
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate.insert_text.starts_with("\"app\".\"public\".")),
+        "{candidates:?}"
+    );
+    let text = "select * from app.public.";
+    let candidates = complete(
+        text,
+        text.len(),
+        SqlDialect::Snowflake,
+        &index,
+        CompletionContext::default(),
+    );
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate.kind == CompletionKind::Table
+                && candidate.insert_text.starts_with('"')),
+        "{candidates:?}"
+    );
+}
+
+#[test]
+fn snowflake_completion_qualifies_case_sensitive_database_and_schema_names() {
+    let index = CompletionIndex::new(&fixture());
+    let text = "select * from ";
+    for (database, schema, expected) in [
+        ("APP", "public", "\"app\".\"public\".\"users\""),
+        ("app", "PUBLIC", "\"public\".\"users\""),
+        ("app", "public", "\"users\""),
+    ] {
+        let candidates = complete(
+            text,
+            text.len(),
+            SqlDialect::Snowflake,
+            &index,
+            CompletionContext {
+                database: Some(database),
+                schema: Some(schema),
+            },
+        );
+        let users = candidates
+            .iter()
+            .find(|candidate| candidate.kind == CompletionKind::Table && candidate.label == "users")
+            .unwrap();
+        assert_eq!(users.insert_text, expected, "{database}.{schema}");
+    }
+}

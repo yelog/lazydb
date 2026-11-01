@@ -1443,6 +1443,9 @@ fn url_help(kind: DatabaseKind) -> &'static str {
         DatabaseKind::Valkey => "Accepts valkey:// and valkeys://",
         DatabaseKind::MongoDb => "Accepts mongodb:// and mongodb+srv://",
         DatabaseKind::ClickHouse => "Accepts clickhouse:// (HTTP) and clickhouses:// (HTTPS)",
+        DatabaseKind::Snowflake => {
+            "Accepts snowflake://user:token@full-host/database?warehouse=...&role=..."
+        }
     }
 }
 
@@ -1456,6 +1459,7 @@ fn field_label(field: ProfileField, kind: DatabaseKind) -> &'static str {
         ProfileField::Host => "Host",
         ProfileField::Port => "Port",
         ProfileField::User => "User",
+        ProfileField::Password if kind == DatabaseKind::Snowflake => "Access token",
         ProfileField::Password => "Password",
         ProfileField::Database if kind == DatabaseKind::Oracle => "Service Name",
         ProfileField::Database => "Database",
@@ -1464,6 +1468,7 @@ fn field_label(field: ProfileField, kind: DatabaseKind) -> &'static str {
         ProfileField::SslMode => "SSL mode",
         ProfileField::Environment => "Environment",
         ProfileField::ReadOnly => "Read only",
+        ProfileField::PasswordStorage if kind == DatabaseKind::Snowflake => "Token storage",
         ProfileField::PasswordStorage => "Password storage",
         ProfileField::SqliteMemory => "Memory database",
         ProfileField::SqlitePath => "Path",

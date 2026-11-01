@@ -37,3 +37,13 @@ fn formatting_preserves_tsql_tokens() {
     assert!(output.contains("@value"));
     assert!(output.contains("N'你好'"));
 }
+
+#[test]
+fn snowflake_format_preserves_variant_cast_and_qualify() {
+    let output = format_sql("select payload:key::varchar from DB.PUBLIC.EVENTS qualify row_number() over (partition by id order by id) = 1", SqlDialect::Snowflake).unwrap();
+    assert!(output.to_ascii_uppercase().contains("QUALIFY"));
+    sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::SnowflakeDialect {}, &output)
+        .unwrap();
+    assert!(output.contains("payload"));
+    assert!(output.contains("::"));
+}

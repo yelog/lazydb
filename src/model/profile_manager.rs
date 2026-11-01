@@ -204,6 +204,8 @@ impl DiscoveryFingerprint {
         profile.port.hash(&mut hasher);
         profile.user.hash(&mut hasher);
         profile.database.hash(&mut hasher);
+        profile.default_schema.hash(&mut hasher);
+        profile.snowflake_options.hash(&mut hasher);
         (profile.ssl_mode as u8).hash(&mut hasher);
         profile.sqlite_path.hash(&mut hasher);
         (profile.kind == DatabaseKind::Sqlite
@@ -385,6 +387,7 @@ pub struct ProfileDraft {
     pub sqlite_memory: bool,
     pub sqlite_path: TextInput,
     pub mongodb_options: Option<crate::profile::MongoConnectionOptions>,
+    pub snowflake_options: Option<crate::profile::SnowflakeConnectionOptions>,
     pub duckdb_path: TextInput,
     pub original_credential_policy: CredentialPolicy,
     pub has_stored_credential: bool,
@@ -432,6 +435,7 @@ impl ProfileDraft {
 
     pub fn new(kind: DatabaseKind) -> Self {
         let (host, port, schema, ssl_mode) = match kind {
+            DatabaseKind::Snowflake => ("", "443", "PUBLIC", SslMode::VerifyFull),
             DatabaseKind::Postgres => ("localhost", "5432", "public", SslMode::Prefer),
             DatabaseKind::MySql | DatabaseKind::MariaDb => {
                 ("localhost", "3306", "", SslMode::Prefer)
@@ -474,6 +478,8 @@ impl ProfileDraft {
             sqlite_memory: false,
             sqlite_path: TextInput::default(),
             mongodb_options: None,
+            snowflake_options: (kind == DatabaseKind::Snowflake)
+                .then(crate::profile::SnowflakeConnectionOptions::default),
             duckdb_path: TextInput::default(),
             original_credential_policy: CredentialPolicy::None,
             has_stored_credential: false,
@@ -556,6 +562,7 @@ impl ProfileDraft {
                     .unwrap_or_default(),
             ),
             mongodb_options: profile.mongodb_options.clone(),
+            snowflake_options: profile.snowflake_options.clone(),
             user: TextInput::from(profile.user.clone().unwrap_or_default()),
             password: SecretTextInput::default(),
             database: TextInput::from(profile.database.clone().unwrap_or_default()),
@@ -758,6 +765,7 @@ impl ProfileDraft {
         };
         self.url_format = parsed.format;
         self.mongodb_options = parsed.mongodb_options.clone();
+        self.snowflake_options = parsed.snowflake_options.clone();
         self.host.set(parsed.host.unwrap_or_default());
         self.port
             .set(parsed.port.map(|port| port.to_string()).unwrap_or_default());
@@ -1043,7 +1051,7 @@ impl ProfileDraft {
         match (self.kind, self.sqlite_memory) {
             (DatabaseKind::Postgres, _) => &POSTGRES_FIELDS,
             (DatabaseKind::MySql, _) => &MYSQL_FIELDS,
-            (DatabaseKind::SqlServer, _) => &POSTGRES_FIELDS,
+            (DatabaseKind::SqlServer | DatabaseKind::Snowflake, _) => &POSTGRES_FIELDS,
             (DatabaseKind::Sqlite, false) => &SQLITE_FILE_FIELDS,
             (DatabaseKind::Sqlite, true) => &SQLITE_MEMORY_FIELDS,
             (DatabaseKind::DuckDb, _) => &DUCKDB_FIELDS,
@@ -1111,7 +1119,8 @@ impl ProfileDraft {
             | DatabaseKind::MariaDb
             | DatabaseKind::TiDb
             | DatabaseKind::Oracle
-            | DatabaseKind::SqlServer => {
+            | DatabaseKind::SqlServer
+            | DatabaseKind::Snowflake => {
                 let host = required(&self.host, ProfileField::Host, "host is required")?;
                 let port = self.port.value().trim().parse::<u16>().map_err(|_| {
                     ProfileValidationError::new(
@@ -1136,9 +1145,16 @@ impl ProfileDraft {
                     Some(port),
                     optional(&self.user),
                     Some(database),
-                    matches!(self.kind, DatabaseKind::Postgres | DatabaseKind::SqlServer)
-                        .then(|| optional(&self.schema))
-                        .flatten(),
+                    matches!(
+                        self.kind,
+                        DatabaseKind::Postgres | DatabaseKind::SqlServer | DatabaseKind::Snowflake
+                    )
+                    .then(|| {
+                        optional(&self.schema).or_else(|| {
+                            (self.kind == DatabaseKind::Snowflake).then(|| "PUBLIC".to_owned())
+                        })
+                    })
+                    .flatten(),
                     None,
                     self.ssl_mode,
                     self.mongodb_options.clone(),
@@ -1333,6 +1349,13 @@ impl ProfileDraft {
             }
         };
 
+        if self.kind == DatabaseKind::Snowflake {
+            // The URL formatter validates the fixed HTTPS endpoint and token options.
+            let profile = self.connection_profile_for_url()?;
+            format_connection_url(&profile, ConnectionUrlFormat::Snowflake).map_err(|error| {
+                ProfileValidationError::new(ProfileField::Url, error.to_string())
+            })?;
+        }
         let credential = self.credential_update();
         let credential_policy = match &credential {
             CredentialUpdate::Preserve => self.original_credential_policy.clone(),
@@ -1375,6 +1398,7 @@ impl ProfileDraft {
                 default_schema,
                 sqlite_path,
                 mongodb_options,
+                snowflake_options: self.snowflake_options.clone(),
                 duckdb_path,
                 ssl_mode,
                 credential_policy,
@@ -1415,9 +1439,12 @@ impl ProfileDraft {
             return;
         }
         let (database, default_schema) = match self.kind {
-            DatabaseKind::Postgres | DatabaseKind::SqlServer => {
-                (self.database.value(), optional(&self.schema))
-            }
+            DatabaseKind::Postgres | DatabaseKind::SqlServer | DatabaseKind::Snowflake => (
+                self.database.value(),
+                optional(&self.schema).or_else(|| {
+                    (self.kind == DatabaseKind::Snowflake).then(|| "PUBLIC".to_owned())
+                }),
+            ),
             DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::TiDb => {
                 (self.database.value(), None)
             }
@@ -1547,6 +1574,15 @@ impl ProfileDraft {
             ConnectionUrlFormat::default_for(kind)
         };
         match kind {
+            DatabaseKind::Snowflake => {
+                self.ssl_mode = SslMode::VerifyFull;
+                if self.schema.value().trim().is_empty()
+                    || matches!(self.schema.value(), "public" | "main" | "dbo")
+                {
+                    self.schema.set("PUBLIC");
+                }
+                self.snowflake_options.get_or_insert_with(Default::default);
+            }
             DatabaseKind::Postgres => {
                 if self.host.value().trim().is_empty() {
                     self.host.set("localhost");
@@ -1738,7 +1774,8 @@ impl ProfileDraft {
             | DatabaseKind::MySql
             | DatabaseKind::MariaDb
             | DatabaseKind::TiDb
-            | DatabaseKind::SqlServer => {
+            | DatabaseKind::SqlServer
+            | DatabaseKind::Snowflake => {
                 let host = optional(&self.host).ok_or_else(|| {
                     ProfileValidationError::new(ProfileField::Host, "host is required")
                 })?;
@@ -1759,9 +1796,16 @@ impl ProfileDraft {
                     Some(port),
                     optional(&self.user),
                     optional(&self.database),
-                    matches!(self.kind, DatabaseKind::Postgres | DatabaseKind::SqlServer)
-                        .then(|| optional(&self.schema))
-                        .flatten(),
+                    matches!(
+                        self.kind,
+                        DatabaseKind::Postgres | DatabaseKind::SqlServer | DatabaseKind::Snowflake
+                    )
+                    .then(|| {
+                        optional(&self.schema).or_else(|| {
+                            (self.kind == DatabaseKind::Snowflake).then(|| "PUBLIC".to_owned())
+                        })
+                    })
+                    .flatten(),
                     None,
                 )
             }
@@ -1922,6 +1966,7 @@ impl ProfileDraft {
             default_schema,
             sqlite_path,
             mongodb_options: self.mongodb_options.clone(),
+            snowflake_options: self.snowflake_options.clone(),
             duckdb_path: (self.kind == DatabaseKind::DuckDb)
                 .then(|| optional(&self.duckdb_path).map(PathBuf::from))
                 .flatten(),
@@ -2595,7 +2640,9 @@ impl ProfileManagerState {
                 draft.refresh_url();
             }
             ProfileField::SslMode => {
-                let choices: &[SslMode] = if draft.kind.is_redis_compatible() {
+                let choices: &[SslMode] = if draft.kind == DatabaseKind::Snowflake {
+                    &[SslMode::VerifyFull]
+                } else if draft.kind.is_redis_compatible() {
                     &[SslMode::Disable, SslMode::Require]
                 } else {
                     &[
@@ -2718,6 +2765,7 @@ fn default_port(kind: DatabaseKind) -> Option<u16> {
         DatabaseKind::Redis | DatabaseKind::Valkey => Some(6379),
         DatabaseKind::MongoDb => Some(27017),
         DatabaseKind::ClickHouse => Some(8123),
+        DatabaseKind::Snowflake => Some(443),
     }
 }
 

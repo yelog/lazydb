@@ -328,3 +328,44 @@ fn sql_server_scope_ignores_semicolons_in_bracketed_identifiers() {
     );
     assert_eq!(&text[ranges[1].start..ranges[1].end], "SELECT @value;");
 }
+
+#[test]
+fn snowflake_scope_keeps_identifier_quotes_independent_of_mysql_session_modes() {
+    let text = r#"SELECT "ends_with_backslash\"; SELECT 2;"#;
+    let ranges = scan_statements(text, SqlDialect::Snowflake);
+    assert_eq!(ranges.len(), 2);
+    assert_eq!(
+        resolve_scope(text, 0, None, SqlDialect::Snowflake)
+            .unwrap()
+            .sql,
+        r#"SELECT "ends_with_backslash\";"#
+    );
+    assert_eq!(
+        resolve_scope(
+            text,
+            text.find("SELECT 2").unwrap(),
+            None,
+            SqlDialect::Snowflake,
+        )
+        .unwrap()
+        .sql,
+        "SELECT 2;"
+    );
+}
+
+#[test]
+fn snowflake_scope_keeps_dollar_quoted_body_and_comments_in_one_statement() {
+    let text = "CREATE PROCEDURE p() RETURNS VARCHAR LANGUAGE SQL AS $$ BEGIN RETURN 'a;b'; END; $$; SELECT 2;";
+    let statements = scan_statements(text, SqlDialect::Snowflake);
+    assert_eq!(statements.len(), 2);
+    let scope = resolve_scope(
+        text,
+        text.find("RETURN").unwrap(),
+        None,
+        SqlDialect::Snowflake,
+    )
+    .unwrap();
+    assert!(scope.sql.ends_with("$$;"));
+    let text = "SELECT $$a; -- still a string\n b$$; -- comment\nSELECT 2;";
+    assert_eq!(scan_statements(text, SqlDialect::Snowflake).len(), 2);
+}

@@ -526,3 +526,86 @@ fn jdbc_sql_server_formatter_emits_semicolon_properties_and_round_trips() {
     assert_eq!(reparsed.read_only, imported.profile.read_only);
     assert!(reparsed.password.is_none());
 }
+
+#[test]
+fn snowflake_url_round_trip_preserves_options_and_keeps_token_secret() {
+    let imported = import_connection_url(
+        "snowflake://alice:private%40token@org-account.snowflakecomputing.com/ANALYTICS?schema=Raw%20Data&warehouse=COMPUTE_WH&role=ANALYST&token_type=OAUTH",
+        Some("snowflake"),
+    ).unwrap();
+    let profile = imported.profile;
+    assert_eq!(profile.kind, DatabaseKind::Snowflake);
+    assert_eq!(profile.port, Some(443));
+    assert_eq!(profile.ssl_mode, SslMode::VerifyFull);
+    assert_eq!(profile.database.as_deref(), Some("ANALYTICS"));
+    assert_eq!(profile.default_schema.as_deref(), Some("Raw Data"));
+    assert_eq!(
+        imported.transient_password.unwrap().expose_secret(),
+        "private@token"
+    );
+    let options = profile.snowflake_options.as_ref().unwrap();
+    assert_eq!(options.warehouse.as_deref(), Some("COMPUTE_WH"));
+    assert_eq!(options.role.as_deref(), Some("ANALYST"));
+    assert_eq!(options.token_type, "OAUTH");
+    let output = format_connection_url(&profile, ConnectionUrlFormat::Snowflake).unwrap();
+    assert!(!output.contains("private"));
+    assert!(!format!("{profile:?}").contains("private"));
+    let parsed = parse_connection_url(&output).unwrap();
+    assert_eq!(parsed.snowflake_options, profile.snowflake_options);
+    assert_eq!(parsed.default_schema, profile.default_schema);
+    assert!(parsed.password.is_none());
+}
+
+#[test]
+fn snowflake_defaults_and_profile_serialization_keep_options() {
+    let profile = import_connection_url(
+        "snowflake://alice@org-account.snowflakecomputing.com/DB",
+        None,
+    )
+    .unwrap()
+    .profile;
+    assert_eq!(profile.default_schema.as_deref(), Some("PUBLIC"));
+    assert_eq!(
+        profile.snowflake_options.as_ref().unwrap().token_type,
+        "PROGRAMMATIC_ACCESS_TOKEN"
+    );
+    let encoded = toml::to_string(&profile).unwrap();
+    let decoded: lazydb::profile::ConnectionProfile = toml::from_str(&encoded).unwrap();
+    assert_eq!(decoded, profile);
+    let options: lazydb::profile::SnowflakeConnectionOptions =
+        toml::from_str("warehouse = 'WH'").unwrap();
+    assert_eq!(options.token_type, "PROGRAMMATIC_ACCESS_TOKEN");
+    for token_type in ["PROGRAMMATIC_ACCESS_TOKEN", "OAUTH", "KEYPAIR_JWT"] {
+        let parsed = parse_connection_url(&format!(
+            "snowflake://alice@org-account.snowflakecomputing.com/DB?token_type={token_type}"
+        ))
+        .unwrap();
+        assert_eq!(parsed.snowflake_options.unwrap().token_type, token_type);
+    }
+}
+
+#[test]
+fn snowflake_rejects_unsafe_endpoints_and_invalid_options() {
+    for input in [
+        "snowflake://alice@account/DB",
+        "snowflake://alice@org-account.snowflakecomputing.com:80/DB",
+        "snowflake://alice@org-account.snowflakecomputing.com/",
+        "snowflake://alice@org-account.snowflakecomputing.com/DB/SCHEMA",
+        "snowflake://alice@org-account.snowflakecomputing.com/DB?sslmode=disable",
+        "snowflake://alice@org-account.snowflakecomputing.com/DB?token_type=PASSWORD",
+        "snowflake://alice@org-account.snowflakecomputing.com/DB?warehouse=",
+        "snowflake://alice@org-account.snowflakecomputing.com/DB?schema=A&SCHEMA=B",
+        "snowflake://alice@org-account.snowflakecomputing.com/DB?role=A&role=B",
+        "snowflake://alice@org-account.snowflakecomputing.com/DB#fragment",
+    ] {
+        assert!(parse_connection_url(input).is_err(), "accepted {input}");
+    }
+    let mut profile = import_connection_url(
+        "snowflake://alice@org-account.snowflakecomputing.com/DB",
+        None,
+    )
+    .unwrap()
+    .profile;
+    profile.ssl_mode = SslMode::Require;
+    assert!(format_connection_url(&profile, ConnectionUrlFormat::Snowflake).is_err());
+}
