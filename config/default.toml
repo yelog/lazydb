@@ -24,6 +24,8 @@ help_panel = "help"
 confirmation = "risky"
 
 [connections]
+# Driver authentication/CA options (including OpenSearch) belong to saved
+# profiles in connections.toml, not to application defaults in this file.
 default_access = "global"
 
 [dashboard]

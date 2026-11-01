@@ -771,7 +771,8 @@ mod tests {
                 "tidb",
                 "cockroachdb",
                 "snowflake",
-                "elasticsearch"
+                "elasticsearch",
+                "opensearch"
             ])
         );
         assert_eq!(

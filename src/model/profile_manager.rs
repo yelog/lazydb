@@ -107,6 +107,7 @@ pub enum ProfileField {
     VisibleObjects,
     SslMode,
     ElasticsearchAuth,
+    OpenSearchAuth,
     CaCertPath,
     Environment,
     ReadOnly,
@@ -210,6 +211,7 @@ impl DiscoveryFingerprint {
         profile.snowflake_options.hash(&mut hasher);
         (profile.ssl_mode as u8).hash(&mut hasher);
         profile.elasticsearch_options.hash(&mut hasher);
+        profile.opensearch_options.hash(&mut hasher);
         profile.pg_options.hash(&mut hasher);
         profile.sqlite_path.hash(&mut hasher);
         (profile.kind == DatabaseKind::Sqlite
@@ -386,6 +388,7 @@ pub struct ProfileDraft {
     pub schema: TextInput,
     pub ssl_mode: SslMode,
     pub elasticsearch_auth: crate::profile::ElasticsearchAuth,
+    pub opensearch_auth: crate::profile::OpenSearchAuth,
     pub ca_cert_path: TextInput,
     credential_reset: bool,
     pub environment: Environment,
@@ -458,7 +461,9 @@ impl ProfileDraft {
             }
             DatabaseKind::MongoDb => ("localhost", "27017", "", SslMode::Prefer),
             DatabaseKind::ClickHouse => ("localhost", "8123", "", SslMode::Disable),
-            DatabaseKind::Elasticsearch => ("localhost", "9200", "", SslMode::Disable),
+            DatabaseKind::Elasticsearch | DatabaseKind::OpenSearch => {
+                ("localhost", "9200", "", SslMode::Disable)
+            }
         };
 
         let mut draft = Self {
@@ -483,6 +488,7 @@ impl ProfileDraft {
             schema: TextInput::from(schema),
             ssl_mode,
             elasticsearch_auth: Default::default(),
+            opensearch_auth: Default::default(),
             ca_cert_path: TextInput::default(),
             credential_reset: false,
             environment: Environment::Development,
@@ -591,13 +597,25 @@ impl ProfileDraft {
                 .as_ref()
                 .map(|options| options.auth)
                 .unwrap_or_default(),
+            opensearch_auth: profile
+                .opensearch_options
+                .as_ref()
+                .map(|options| options.auth)
+                .unwrap_or_default(),
             ca_cert_path: TextInput::from(
-                profile
-                    .elasticsearch_options
-                    .as_ref()
-                    .and_then(|options| options.ca_cert_path.as_ref())
-                    .map(|path| path.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
+                if profile.kind == DatabaseKind::OpenSearch {
+                    profile
+                        .opensearch_options
+                        .as_ref()
+                        .and_then(|options| options.ca_cert_path.as_ref())
+                } else {
+                    profile
+                        .elasticsearch_options
+                        .as_ref()
+                        .and_then(|options| options.ca_cert_path.as_ref())
+                }
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default(),
             ),
             credential_reset: false,
             environment: profile.environment,
@@ -804,6 +822,10 @@ impl ProfileDraft {
     }
 
     fn apply_parsed_url(&mut self, parsed: ParsedConnectionUrl) {
+        let preserve_opensearch_user = self.kind == DatabaseKind::OpenSearch
+            && parsed.kind == self.kind
+            && parsed.user.is_none()
+            && parsed.password.is_none();
         self.recent_drivers[usize::from(self.category() == DatabaseCategory::NonRelational)] =
             Some(self.kind);
         // URL credentials are always Basic Auth, never an API key.
@@ -812,7 +834,21 @@ impl ProfileDraft {
         {
             self.set_elasticsearch_auth(crate::profile::ElasticsearchAuth::Basic);
         }
-        if parsed.kind != DatabaseKind::Elasticsearch {
+        if self.kind == DatabaseKind::OpenSearch
+            && (parsed.kind != self.kind || parsed.user.is_some() || parsed.password.is_some())
+        {
+            self.set_opensearch_auth(crate::profile::OpenSearchAuth::Basic);
+        }
+        if self.kind != parsed.kind
+            && (self.kind == DatabaseKind::OpenSearch || parsed.kind == DatabaseKind::OpenSearch)
+        {
+            self.password = SecretTextInput::default();
+            self.has_stored_credential = false;
+            self.credential_reset = true;
+            self.credential_changed();
+            self.ca_cert_path.set("");
+            self.opensearch_auth = Default::default();
+        } else if !parsed.kind.is_search_rest() {
             self.ca_cert_path.set("");
         }
         self.kind = parsed.kind;
@@ -830,7 +866,9 @@ impl ProfileDraft {
         self.host.set(parsed.host.unwrap_or_default());
         self.port
             .set(parsed.port.map(|port| port.to_string()).unwrap_or_default());
-        self.user.set(parsed.user.unwrap_or_default());
+        if !preserve_opensearch_user {
+            self.user.set(parsed.user.unwrap_or_default());
+        }
         self.database.set(parsed.database.unwrap_or_default());
         self.schema.set(parsed.default_schema.unwrap_or_default());
         self.ssl_mode = parsed.ssl_mode;
@@ -1128,6 +1166,12 @@ impl ProfileDraft {
                 &ELASTICSEARCH_API_KEY_FIELDS
             }
             (DatabaseKind::Elasticsearch, _) => &ELASTICSEARCH_FIELDS,
+            (DatabaseKind::OpenSearch, _)
+                if self.opensearch_auth == crate::profile::OpenSearchAuth::None =>
+            {
+                &OPENSEARCH_NO_AUTH_FIELDS
+            }
+            (DatabaseKind::OpenSearch, _) => &OPENSEARCH_FIELDS,
         }
     }
 
@@ -1376,7 +1420,7 @@ impl ProfileDraft {
                     None,
                 )
             }
-            DatabaseKind::Elasticsearch => {
+            DatabaseKind::Elasticsearch | DatabaseKind::OpenSearch => {
                 let host = required(&self.host, ProfileField::Host, "host is required")?;
                 let port = self
                     .port
@@ -1394,11 +1438,13 @@ impl ProfileDraft {
                 if !self.url_format.is_compatible(self.kind) {
                     return Err(ProfileValidationError::new(
                         ProfileField::UrlFormat,
-                        "connection URL format is incompatible with Elasticsearch",
+                        "connection URL format is incompatible with the search driver",
                     ));
                 }
-                let expected_ssl_mode = if self.url_format == ConnectionUrlFormat::ElasticsearchTls
-                {
+                let expected_ssl_mode = if matches!(
+                    self.url_format,
+                    ConnectionUrlFormat::ElasticsearchTls | ConnectionUrlFormat::OpenSearchTls
+                ) {
                     SslMode::VerifyFull
                 } else {
                     SslMode::Disable
@@ -1406,7 +1452,7 @@ impl ProfileDraft {
                 if self.ssl_mode != expected_ssl_mode {
                     return Err(ProfileValidationError::new(
                         ProfileField::SslMode,
-                        "Elasticsearch URL format requires disabled TLS or full certificate verification",
+                        "search URL format requires disabled TLS or full certificate verification",
                     ));
                 }
                 if optional(&self.ca_cert_path).is_some() && self.ssl_mode != SslMode::VerifyFull {
@@ -1415,7 +1461,8 @@ impl ProfileDraft {
                         "CA certificate requires HTTPS with full certificate verification",
                     ));
                 }
-                if self.elasticsearch_auth == crate::profile::ElasticsearchAuth::ApiKey
+                if self.kind == DatabaseKind::Elasticsearch
+                    && self.elasticsearch_auth == crate::profile::ElasticsearchAuth::ApiKey
                     && self.password_len() == 0
                     && !self.has_stored_credential
                     && (self.credential_reset
@@ -1429,7 +1476,10 @@ impl ProfileDraft {
                 (
                     Some(host),
                     Some(port),
-                    (self.elasticsearch_auth == crate::profile::ElasticsearchAuth::Basic)
+                    ((self.kind == DatabaseKind::Elasticsearch
+                        && self.elasticsearch_auth == crate::profile::ElasticsearchAuth::Basic)
+                        || (self.kind == DatabaseKind::OpenSearch
+                            && self.opensearch_auth == crate::profile::OpenSearchAuth::Basic))
                         .then(|| optional(&self.user))
                         .flatten(),
                     optional(&self.database),
@@ -1535,6 +1585,7 @@ impl ProfileDraft {
                 sqlite_path,
                 mongodb_options,
                 elasticsearch_options: self.elasticsearch_options(),
+                opensearch_options: self.opensearch_options(),
                 pg_options: self.pg_options.clone(),
                 snowflake_options: self.snowflake_options.clone(),
                 duckdb_path,
@@ -1558,6 +1609,27 @@ impl ProfileDraft {
         })
     }
 
+    fn opensearch_options(&self) -> Option<crate::profile::OpenSearchConnectionOptions> {
+        (self.kind == DatabaseKind::OpenSearch).then(|| {
+            crate::profile::OpenSearchConnectionOptions {
+                auth: self.opensearch_auth,
+                ca_cert_path: optional(&self.ca_cert_path).map(PathBuf::from),
+            }
+        })
+    }
+
+    pub fn set_opensearch_auth(&mut self, auth: crate::profile::OpenSearchAuth) {
+        if self.opensearch_auth == auth {
+            return;
+        }
+        self.opensearch_auth = auth;
+        self.password = SecretTextInput::default();
+        self.has_stored_credential = false;
+        self.credential_reset = true;
+        self.credential_changed();
+        self.refresh_url();
+    }
+
     pub fn set_elasticsearch_auth(&mut self, auth: crate::profile::ElasticsearchAuth) {
         if self.elasticsearch_auth == auth {
             return;
@@ -1572,6 +1644,11 @@ impl ProfileDraft {
     }
 
     fn credential_update(&self) -> CredentialUpdate {
+        if self.kind == DatabaseKind::OpenSearch
+            && self.opensearch_auth == crate::profile::OpenSearchAuth::None
+        {
+            return CredentialUpdate::Forget;
+        }
         if self.kind == DatabaseKind::Sqlite {
             return if !matches!(self.original_credential_policy, CredentialPolicy::None) {
                 CredentialUpdate::Forget
@@ -1629,7 +1706,9 @@ impl ProfileDraft {
                 Some(optional(&self.schema).unwrap_or_else(|| "main".into())),
             ),
             DatabaseKind::Redis | DatabaseKind::Valkey => (self.database.value(), None),
-            DatabaseKind::MongoDb | DatabaseKind::Elasticsearch => (self.database.value(), None),
+            DatabaseKind::MongoDb | DatabaseKind::Elasticsearch | DatabaseKind::OpenSearch => {
+                (self.database.value(), None)
+            }
             DatabaseKind::ClickHouse => (
                 self.database.value(),
                 Some(self.database.value().to_owned()),
@@ -1724,6 +1803,14 @@ impl ProfileDraft {
         self.invalidate_catalog_discovery();
         if self.kind == DatabaseKind::Elasticsearch {
             self.set_elasticsearch_auth(crate::profile::ElasticsearchAuth::Basic);
+            self.ca_cert_path.set("");
+        }
+        if self.kind == DatabaseKind::OpenSearch || kind == DatabaseKind::OpenSearch {
+            self.set_opensearch_auth(crate::profile::OpenSearchAuth::Basic);
+            self.password = SecretTextInput::default();
+            self.has_stored_credential = false;
+            self.credential_reset = true;
+            self.credential_changed();
             self.ca_cert_path.set("");
         }
         let previous = self.kind;
@@ -1859,7 +1946,7 @@ impl ProfileDraft {
                     self.ssl_mode = SslMode::Disable;
                 }
             }
-            DatabaseKind::Elasticsearch => {
+            DatabaseKind::Elasticsearch | DatabaseKind::OpenSearch => {
                 if self.host.value().trim().is_empty() {
                     self.host.set("localhost");
                 }
@@ -2107,7 +2194,7 @@ impl ProfileDraft {
                     path,
                 )
             }
-            DatabaseKind::Elasticsearch => {
+            DatabaseKind::Elasticsearch | DatabaseKind::OpenSearch => {
                 let host = required(&self.host, ProfileField::Host, "host is required")?;
                 let port = self
                     .port
@@ -2178,6 +2265,7 @@ impl ProfileDraft {
             sqlite_path,
             mongodb_options: self.mongodb_options.clone(),
             elasticsearch_options: self.elasticsearch_options(),
+            opensearch_options: self.opensearch_options(),
             pg_options: self.pg_options.clone(),
             snowflake_options: self.snowflake_options.clone(),
             duckdb_path: (self.kind == DatabaseKind::DuckDb)
@@ -2850,8 +2938,11 @@ impl ProfileManagerState {
                     ConnectionUrlFormat::compatible_formats(draft.kind),
                     delta,
                 );
-                if draft.kind == DatabaseKind::Elasticsearch {
-                    draft.ssl_mode = if draft.url_format == ConnectionUrlFormat::ElasticsearchTls {
+                if draft.kind.is_search_rest() {
+                    draft.ssl_mode = if matches!(
+                        draft.url_format,
+                        ConnectionUrlFormat::ElasticsearchTls | ConnectionUrlFormat::OpenSearchTls
+                    ) {
                         SslMode::VerifyFull
                     } else {
                         SslMode::Disable
@@ -2869,8 +2960,18 @@ impl ProfileManagerState {
                     delta,
                 ));
             }
+            ProfileField::OpenSearchAuth => {
+                draft.set_opensearch_auth(cycle_value(
+                    draft.opensearch_auth,
+                    &[
+                        crate::profile::OpenSearchAuth::Basic,
+                        crate::profile::OpenSearchAuth::None,
+                    ],
+                    delta,
+                ));
+            }
             ProfileField::SslMode => {
-                let choices: &[SslMode] = if draft.kind == DatabaseKind::Elasticsearch {
+                let choices: &[SslMode] = if draft.kind.is_search_rest() {
                     &[SslMode::Disable, SslMode::VerifyFull]
                 } else if draft.kind == DatabaseKind::Snowflake {
                     &[SslMode::VerifyFull]
@@ -2889,11 +2990,14 @@ impl ProfileManagerState {
                 if draft.kind.is_redis_compatible() {
                     draft.url_format = redis_compatible_url_format(draft.kind, draft.ssl_mode);
                 }
-                if draft.kind == DatabaseKind::Elasticsearch {
-                    draft.url_format = if draft.ssl_mode == SslMode::Disable {
-                        ConnectionUrlFormat::Elasticsearch
-                    } else {
-                        ConnectionUrlFormat::ElasticsearchTls
+                if draft.kind.is_search_rest() {
+                    draft.url_format = match (draft.kind, draft.ssl_mode) {
+                        (DatabaseKind::OpenSearch, SslMode::Disable) => {
+                            ConnectionUrlFormat::OpenSearch
+                        }
+                        (DatabaseKind::OpenSearch, _) => ConnectionUrlFormat::OpenSearchTls,
+                        (_, SslMode::Disable) => ConnectionUrlFormat::Elasticsearch,
+                        _ => ConnectionUrlFormat::ElasticsearchTls,
                     };
                 }
                 draft.invalidate_catalog_discovery();
@@ -3005,7 +3109,7 @@ fn default_port(kind: DatabaseKind) -> Option<u16> {
         DatabaseKind::Redis | DatabaseKind::Valkey => Some(6379),
         DatabaseKind::MongoDb => Some(27017),
         DatabaseKind::ClickHouse => Some(8123),
-        DatabaseKind::Elasticsearch => Some(9200),
+        DatabaseKind::Elasticsearch | DatabaseKind::OpenSearch => Some(9200),
         DatabaseKind::Snowflake => Some(443),
     }
 }
@@ -3395,6 +3499,47 @@ const ELASTICSEARCH_FIELDS: [ProfileField; 19] = [
     ProfileField::User,
     ProfileField::Password,
     ProfileField::PasswordStorage,
+    ProfileField::SslMode,
+    ProfileField::CaCertPath,
+    ProfileField::Environment,
+    ProfileField::ReadOnly,
+    ProfileField::Url,
+    ProfileField::Test,
+    ProfileField::Save,
+    ProfileField::Cancel,
+];
+
+const OPENSEARCH_FIELDS: [ProfileField; 19] = [
+    ProfileField::DatabaseCategory,
+    ProfileField::Kind,
+    ProfileField::Name,
+    ProfileField::Host,
+    ProfileField::Port,
+    ProfileField::Database,
+    ProfileField::VisibleObjects,
+    ProfileField::OpenSearchAuth,
+    ProfileField::User,
+    ProfileField::Password,
+    ProfileField::PasswordStorage,
+    ProfileField::SslMode,
+    ProfileField::CaCertPath,
+    ProfileField::Environment,
+    ProfileField::ReadOnly,
+    ProfileField::Url,
+    ProfileField::Test,
+    ProfileField::Save,
+    ProfileField::Cancel,
+];
+
+const OPENSEARCH_NO_AUTH_FIELDS: [ProfileField; 16] = [
+    ProfileField::DatabaseCategory,
+    ProfileField::Kind,
+    ProfileField::Name,
+    ProfileField::Host,
+    ProfileField::Port,
+    ProfileField::Database,
+    ProfileField::VisibleObjects,
+    ProfileField::OpenSearchAuth,
     ProfileField::SslMode,
     ProfileField::CaCertPath,
     ProfileField::Environment,

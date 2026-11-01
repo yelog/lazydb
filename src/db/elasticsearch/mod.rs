@@ -14,7 +14,7 @@ use crate::{
         query::{ColumnMeta, QueryBudget, QueryOutcome, QueryOutcomeAccumulator},
         value::CellValue,
     },
-    profile::{ConnectionProfile, DatabaseKind, ElasticsearchAuth, SslMode},
+    profile::{ConnectionProfile, DatabaseKind, ElasticsearchAuth, OpenSearchAuth, SslMode},
     security::sanitize_terminal_text,
 };
 
@@ -24,6 +24,7 @@ const MAX_ERROR_BYTES: usize = 16 * 1024;
 #[derive(Clone, Debug)]
 pub struct ElasticsearchAdapter {
     client: Client,
+    kind: DatabaseKind,
     endpoint: Url,
     user: Option<String>,
     password: Option<SecretString>,
@@ -94,8 +95,14 @@ impl ElasticsearchRequest {
     /// Only known read APIs bypass write confirmation. GET alone is not proof
     /// of a read: Elasticsearch also supports stateful APIs such as scroll.
     pub fn is_read_only(&self) -> bool {
-        let (path, query) = self.path.split_once('?').unwrap_or((&self.path, ""));
-        if url::form_urlencoded::parse(query.as_bytes()).any(|(name, _)| name == "scroll") {
+        Self::read_only_parts(&self.method, &self.path, self.body.is_some())
+    }
+
+    fn read_only_parts(method: &Method, path: &str, has_body: bool) -> bool {
+        let (path, query) = path.split_once('?').unwrap_or((path, ""));
+        if url::form_urlencoded::parse(query.as_bytes())
+            .any(|(name, _)| matches!(name.as_ref(), "scroll" | "refresh"))
+        {
             return false;
         }
         let segments: Vec<_> = path.trim_matches('/').split('/').collect();
@@ -103,14 +110,14 @@ impl ElasticsearchRequest {
         if path.contains('%') || segments.iter().any(|part| matches!(*part, "." | "..")) {
             return false;
         }
-        if self.method == Method::HEAD {
-            return self.body.is_none()
+        if method == Method::HEAD {
+            return !has_body
                 && (path == "/"
                     || (segments.len() == 1 && !segments[0].starts_with('_'))
                     || (segments.len() == 3 && segments[1] == "_doc")
                     || (segments.len() <= 3 && segments.contains(&"_alias")));
         }
-        if self.method != Method::GET && self.method != Method::POST {
+        if method != Method::GET && method != Method::POST {
             return false;
         }
         let last = segments.last().copied().unwrap_or_default();
@@ -125,7 +132,7 @@ impl ElasticsearchRequest {
         if segments.len() == 3 && segments[1] == "_validate" && last == "query" {
             return true;
         }
-        if self.method != Method::GET {
+        if method != Method::GET {
             return false;
         }
         path == "/"
@@ -155,38 +162,65 @@ impl ElasticsearchAdapter {
         profile: &ConnectionProfile,
         password: Option<&SecretString>,
     ) -> Result<Self, DatabaseError> {
-        if profile.kind != DatabaseKind::Elasticsearch {
+        Self::connect_inner(profile, password).await
+    }
+
+    async fn connect_inner(
+        profile: &ConnectionProfile,
+        password: Option<&SecretString>,
+    ) -> Result<Self, DatabaseError> {
+        if !profile.kind.is_search_rest() {
             return Err(DatabaseError::configuration(
-                "Elasticsearch adapter requires an Elasticsearch profile",
+                "Search REST adapter requires an Elasticsearch or OpenSearch profile",
             ));
         }
+        let product = crate::db::descriptor::descriptor(profile.kind).display_name;
         let host = profile
             .host
             .as_deref()
             .filter(|host| !host.trim().is_empty())
-            .ok_or_else(|| DatabaseError::configuration("Elasticsearch host is required"))?;
+            .ok_or_else(|| DatabaseError::configuration(format!("{product} host is required")))?;
         let port = profile.port.unwrap_or(9200);
         if port == 0 {
-            return Err(DatabaseError::configuration(
-                "Elasticsearch port must be non-zero",
-            ));
+            return Err(DatabaseError::configuration(format!(
+                "{product} port must be non-zero"
+            )));
         }
         let scheme = match profile.ssl_mode {
             SslMode::Disable => "http",
             SslMode::VerifyFull => "https",
             _ => {
-                return Err(DatabaseError::configuration(
-                    "Elasticsearch TLS mode must be Disable (HTTP) or VerifyFull (HTTPS with certificate and hostname verification)",
-                ));
+                return Err(DatabaseError::configuration(format!(
+                    "{product} TLS mode must be Disable (HTTP) or VerifyFull (HTTPS with certificate and hostname verification)"
+                )));
             }
         };
-        let options = profile.elasticsearch_options.clone().unwrap_or_default();
-        if options.ca_cert_path.is_some() && profile.ssl_mode != SslMode::VerifyFull {
-            return Err(DatabaseError::configuration(
-                "A custom Elasticsearch CA certificate requires VerifyFull HTTPS; enable HTTPS or remove the CA path",
-            ));
+        // Authentication belongs to the selected product. Never interpret an
+        // Elasticsearch API key as an OpenSearch credential.
+        let (basic_auth, api_key_auth, ca_cert_path) = match profile.kind {
+            DatabaseKind::OpenSearch => {
+                let options = profile.opensearch_options.clone().unwrap_or_default();
+                (
+                    options.auth == OpenSearchAuth::Basic,
+                    false,
+                    options.ca_cert_path,
+                )
+            }
+            _ => {
+                let options = profile.elasticsearch_options.clone().unwrap_or_default();
+                (
+                    options.auth == ElasticsearchAuth::Basic,
+                    options.auth == ElasticsearchAuth::ApiKey,
+                    options.ca_cert_path,
+                )
+            }
+        };
+        if ca_cert_path.is_some() && profile.ssl_mode != SslMode::VerifyFull {
+            return Err(DatabaseError::configuration(format!(
+                "A custom {product} CA certificate requires VerifyFull HTTPS; enable HTTPS or remove the CA path"
+            )));
         }
-        let api_key = if options.auth == ElasticsearchAuth::ApiKey {
+        let api_key = if api_key_auth {
             let secret = password
                 .map(ExposeSecret::expose_secret)
                 .filter(|secret| !secret.trim().is_empty())
@@ -212,15 +246,27 @@ impl ElasticsearchAdapter {
             host.to_owned()
         };
         let endpoint = Url::parse(&format!("{scheme}://{host}:{port}/"))
-            .map_err(|_| DatabaseError::configuration("Invalid Elasticsearch endpoint"))?;
+            .map_err(|_| DatabaseError::configuration(format!("Invalid {product} endpoint")))?;
+        if !endpoint.username().is_empty()
+            || endpoint.password().is_some()
+            || endpoint.path() != "/"
+            || endpoint.query().is_some()
+            || endpoint.fragment().is_some()
+            || endpoint.port_or_known_default() != Some(port)
+        {
+            return Err(DatabaseError::configuration(
+                "Invalid search REST host; enter a hostname or IP address without credentials, path or query",
+            ));
+        }
         let mut builder = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(30));
-        if let Some(path) = options.ca_cert_path {
+        if let Some(path) = ca_cert_path {
             let pem = std::fs::read(&path).map_err(|error| {
                 DatabaseError::configuration(format!(
-                    "Could not read Elasticsearch CA certificate at {} ({:?}); check that the PEM file exists and is readable",
+                    "Could not read {product} CA certificate at {} ({:?}); check that the PEM file exists and is readable",
                     sanitize_terminal_text(&path.display().to_string()), error.kind()
                 ))
             })?;
@@ -229,7 +275,7 @@ impl ElasticsearchAdapter {
                 .filter(|certificates| !certificates.is_empty())
                 .ok_or_else(|| {
                     DatabaseError::configuration(format!(
-                        "Invalid Elasticsearch CA certificate at {}; provide a PEM certificate or PEM certificate bundle",
+                        "Invalid {product} CA certificate at {}; provide a PEM certificate or PEM certificate bundle",
                         sanitize_terminal_text(&path.display().to_string())
                     ))
                 })?;
@@ -239,19 +285,18 @@ impl ElasticsearchAdapter {
             }
         }
         let client = builder.build().map_err(|_| {
-            DatabaseError::configuration(
-                "Could not create Elasticsearch HTTP client; check the configured CA certificate contains valid X.509 certificates",
-            )
+            DatabaseError::configuration(format!(
+                "Could not create {product} HTTP client; check the configured CA certificate contains valid X.509 certificates"
+            ))
         })?;
         let adapter = Self {
             client,
+            kind: profile.kind,
             endpoint,
-            user: (options.auth == ElasticsearchAuth::Basic)
+            user: basic_auth
                 .then(|| profile.user.clone().filter(|user| !user.is_empty()))
                 .flatten(),
-            password: (options.auth == ElasticsearchAuth::Basic)
-                .then(|| password.cloned())
-                .flatten(),
+            password: basic_auth.then(|| password.cloned()).flatten(),
             api_key,
             read_only: profile.read_only,
             profile_id: profile.id,
@@ -267,21 +312,43 @@ impl ElasticsearchAdapter {
 
     pub async fn probe(&self) -> Result<ServerInfo, DatabaseError> {
         let value = self.request_json(Method::GET, "/", None).await?;
+        let distribution = value
+            .pointer("/version/distribution")
+            .and_then(Value::as_str);
+        let opensearch = distribution == Some("opensearch");
+        if (self.kind == DatabaseKind::OpenSearch && !opensearch)
+            || (self.kind == DatabaseKind::Elasticsearch && opensearch)
+        {
+            return Err(DatabaseError::configuration(format!(
+                "{} product identity mismatch: expected {} in GET / version.distribution",
+                self.product_name(),
+                if self.kind == DatabaseKind::OpenSearch {
+                    "opensearch"
+                } else {
+                    "Elasticsearch, received OpenSearch"
+                }
+            )));
+        }
         let version = value
             .pointer("/version/number")
             .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
+            .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| {
-                DatabaseError::configuration(
-                    "Elasticsearch identity response is missing version.number",
-                )
+                DatabaseError::configuration(format!(
+                    "{} identity response is missing version.number",
+                    self.product_name()
+                ))
             })?;
         Ok(ServerInfo {
-            kind: DatabaseKind::Elasticsearch,
+            kind: self.kind,
             version: sanitize_terminal_text(version),
             database: self.database.clone(),
             current_user: self.user.clone(),
         })
+    }
+
+    pub(super) fn product_name(&self) -> &'static str {
+        crate::db::descriptor::descriptor(self.kind).display_name
     }
 
     pub async fn execute_with_budget(
@@ -294,9 +361,10 @@ impl ElasticsearchAdapter {
             return Err(DatabaseError {
                 category: ErrorCategory::Permission,
                 code: Some("profile_read_only".into()),
-                message:
-                    "This Elasticsearch connection is read-only; the REST request was not sent"
-                        .into(),
+                message: format!(
+                    "This {} connection is read-only; the REST request was not sent",
+                    self.product_name()
+                ),
                 diagnostic: None,
             });
         }
@@ -306,6 +374,12 @@ impl ElasticsearchAdapter {
             .await?;
         let execution = started.elapsed();
         let mut result = outcome(value, budget)?;
+        if self.kind == DatabaseKind::OpenSearch {
+            result.stats.response_error = result
+                .stats
+                .response_error
+                .map(|error| error.replacen("Elasticsearch", "OpenSearch", 1));
+        }
         result.stats.execution = execution;
         Ok(result)
     }
@@ -316,7 +390,26 @@ impl ElasticsearchAdapter {
         path: &str,
         body: Option<&str>,
     ) -> Result<Value, DatabaseError> {
+        self.request_json_inner(method, path, body).await
+    }
+
+    async fn request_json_inner(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&str>,
+    ) -> Result<Value, DatabaseError> {
         validate_path(path)?;
+        let potentially_writing =
+            !ElasticsearchRequest::read_only_parts(&method, path, body.is_some());
+        let uncertain_response = |mut error: DatabaseError| {
+            if potentially_writing {
+                error.code = Some("search_rest_write_outcome_unknown".into());
+                error.message.push_str("; remote write outcome may be unknown. This request was not replayed; inspect remote state before retrying.");
+            }
+            error
+        };
+        let network_error = |error| uncertain_response(network_error(error));
         let url = self
             .endpoint
             .join(path)
@@ -364,9 +457,10 @@ impl ElasticsearchAdapter {
             let chunk = chunk.map_err(network_error)?;
             if bytes.len().saturating_add(chunk.len()) > limit {
                 if status.is_success() {
-                    return Err(DatabaseError::configuration(
-                        "Elasticsearch response exceeds 32 MiB; narrow the query or reduce size",
-                    ));
+                    return Err(uncertain_response(DatabaseError::configuration(format!(
+                        "{} response exceeds 32 MiB; narrow the query or reduce size",
+                        self.product_name()
+                    ))));
                 }
                 bytes.extend_from_slice(&chunk[..limit.saturating_sub(bytes.len())]);
                 break;
@@ -374,15 +468,16 @@ impl ElasticsearchAdapter {
             bytes.extend_from_slice(&chunk);
         }
         if !status.is_success() {
-            return Err(http_error(status, &bytes));
+            return Err(http_error(self.product_name(), status, &bytes));
         }
         if head || bytes.is_empty() {
             return Ok(json!({"status": status.as_u16()}));
         }
         serde_json::from_slice(&bytes).map_err(|_| {
-            DatabaseError::configuration(
-                "Elasticsearch returned a non-JSON response; use format=json for cat APIs",
-            )
+            uncertain_response(DatabaseError::configuration(format!(
+                "{} returned a non-JSON response; use format=json for cat APIs",
+                self.product_name()
+            )))
         })
     }
 
@@ -400,6 +495,21 @@ fn validate_path(path: &str) -> Result<(), DatabaseError> {
         return Err(DatabaseError::configuration(
             "Elasticsearch requests require an absolute /path on the configured server",
         ));
+    }
+    // Reject traversal before Url::join normalizes dot segments. Decode each
+    // path segment separately so encoded separators cannot change its meaning.
+    for segment in path.split('?').next().unwrap_or(path).split('/') {
+        let decoded = percent_encoding::percent_decode_str(segment)
+            .decode_utf8()
+            .map_err(|_| DatabaseError::configuration("Invalid UTF-8 in REST request path"))?;
+        if matches!(decoded.as_ref(), "." | "..")
+            || decoded.contains(['/', '\\', '%'])
+            || decoded.chars().any(char::is_control)
+        {
+            return Err(DatabaseError::configuration(
+                "REST request paths must not contain traversal or encoded separators",
+            ));
+        }
     }
     Ok(())
 }
@@ -425,7 +535,7 @@ fn network_error(error: reqwest::Error) -> DatabaseError {
     }
 }
 
-fn http_error(status: StatusCode, bytes: &[u8]) -> DatabaseError {
+fn http_error(product: &str, status: StatusCode, bytes: &[u8]) -> DatabaseError {
     let value: Value = serde_json::from_slice(bytes).unwrap_or(Value::Null);
     let error = &value["error"];
     let reason = error
@@ -446,7 +556,7 @@ fn http_error(status: StatusCode, bytes: &[u8]) -> DatabaseError {
             .and_then(Value::as_str)
             .map(sanitize_terminal_text)
             .or_else(|| Some(status.as_u16().to_string())),
-        message: sanitize_terminal_text(&format!("Elasticsearch HTTP {status}: {reason}")),
+        message: sanitize_terminal_text(&format!("{product} HTTP {status}: {reason}")),
         diagnostic: None,
     }
 }
@@ -630,11 +740,7 @@ mod tests {
                 .unwrap()
                 .is_read_only()
         );
-        assert!(
-            !ElasticsearchRequest::parse("GET /_search/../_refresh")
-                .unwrap()
-                .is_read_only()
-        );
+        assert!(ElasticsearchRequest::parse("GET /_search/../_refresh").is_err());
         assert!(
             !ElasticsearchRequest::parse("POST /books/_delete_by_query\n{}")
                 .unwrap()
@@ -649,6 +755,8 @@ mod tests {
         ] {
             assert!(ElasticsearchRequest::parse(input).is_err(), "{input}");
         }
+        assert!(ElasticsearchRequest::parse("GET /books/_doc/why%3F").is_ok());
+        assert!(ElasticsearchRequest::parse("GET /books/_doc/hash%23").is_ok());
         let bulk = ElasticsearchRequest::parse(
             "POST /_bulk\n{\"index\":{\"_index\":\"books\"}}\n{\"x\":1}",
         )

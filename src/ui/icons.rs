@@ -256,6 +256,7 @@ impl IconSet {
                 DatabaseKind::Snowflake => md::MD_DATABASE,
                 DatabaseKind::ClickHouse => md::MD_DATABASE,
                 DatabaseKind::Elasticsearch => "ES",
+                DatabaseKind::OpenSearch => "OS",
             },
             IconMode::Unicode => match kind {
                 DatabaseKind::Postgres => "PG",
@@ -273,6 +274,7 @@ impl IconSet {
                 DatabaseKind::Snowflake => "SF",
                 DatabaseKind::ClickHouse => "CH",
                 DatabaseKind::Elasticsearch => "ES",
+                DatabaseKind::OpenSearch => "OS",
             },
             IconMode::Ascii => match kind {
                 DatabaseKind::Postgres => "PG",
@@ -290,6 +292,7 @@ impl IconSet {
                 DatabaseKind::Snowflake => "SF",
                 DatabaseKind::ClickHouse => "CH",
                 DatabaseKind::Elasticsearch => "ES",
+                DatabaseKind::OpenSearch => "OS",
             },
         }
     }
@@ -310,6 +313,7 @@ impl IconSet {
             DatabaseKind::Snowflake => ratatui::style::Color::Rgb(41, 181, 232),
             DatabaseKind::ClickHouse => ratatui::style::Color::Rgb(252, 199, 0),
             DatabaseKind::Elasticsearch => ratatui::style::Color::Rgb(0, 191, 179),
+            DatabaseKind::OpenSearch => ratatui::style::Color::Rgb(0, 100, 181),
         }
     }
 

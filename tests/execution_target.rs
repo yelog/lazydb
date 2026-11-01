@@ -27,6 +27,7 @@ fn profile(kind: DatabaseKind) -> ConnectionProfile {
         pg_options: None,
         snowflake_options: None,
         elasticsearch_options: None,
+        opensearch_options: None,
         duckdb_path: None,
         ssl_mode: SslMode::Prefer,
         credential_policy: CredentialPolicy::None,
@@ -355,4 +356,26 @@ fn snowflake_execution_target_keeps_database_schema_and_session_options() {
     assert_eq!(configured.database.as_deref(), Some("OTHER_DB"));
     assert_eq!(configured.default_schema.as_deref(), Some("OTHER_SCHEMA"));
     assert_eq!(configured.snowflake_options, profile.snowflake_options);
+}
+
+#[test]
+fn opensearch_virtual_namespace_round_trips_and_respects_scope() {
+    use lazydb::profile::{CatalogScope, import_connection_url};
+    let mut profile = import_connection_url("opensearch://localhost", None)
+        .unwrap()
+        .profile;
+    let target = ExecutionTarget::from_profile(&profile);
+    assert_eq!(target.database, "default");
+    assert_eq!(target.schema.as_deref(), Some("default"));
+    assert!(target.is_valid(&profile));
+    let configured = target.apply_to_profile(&profile).unwrap();
+    assert_eq!(configured.kind, DatabaseKind::OpenSearch);
+    assert_eq!(ExecutionTarget::from_profile(&configured), target);
+    assert_eq!(configured.opensearch_options, profile.opensearch_options);
+    let mut wrong_namespace = target.clone();
+    wrong_namespace.schema = Some("other".into());
+    assert!(!wrong_namespace.is_valid(&profile));
+    profile.catalog_scope = CatalogScope::for_profile(DatabaseKind::OpenSearch, "other", None);
+    assert!(!target.is_valid(&profile));
+    assert!(target.apply_to_profile(&profile).is_none());
 }

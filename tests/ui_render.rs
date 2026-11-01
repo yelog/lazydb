@@ -2757,7 +2757,7 @@ fn record_view_copy_uses_selected_field_instead_of_grid_column() {
 }
 
 #[test]
-fn record_view_value_detail_keeps_preview_and_complete_value_without_query_io() {
+fn record_view_value_detail_displays_complete_value_without_query_io() {
     let mut app = fixture();
     let long_value = "0123456789".repeat(20);
     app.active_console_mut().outcome = Some(QueryOutcome {
@@ -2779,7 +2779,7 @@ fn record_view_value_detail_keeps_preview_and_complete_value_without_query_io() 
     let Some(Overlay::TextDetail(detail)) = app.overlay.as_ref() else {
         panic!("value detail did not open");
     };
-    assert!(app.editor_text(detail.session_id).unwrap().len() < long_value.len());
+    assert_eq!(app.editor_text(detail.session_id).unwrap(), long_value);
     assert_eq!(detail.copy_text, long_value);
     assert_eq!(app.active_console().generation, generation);
 }
@@ -2806,7 +2806,7 @@ fn grid_value_detail_uses_complete_value_without_query_io() {
     let Some(Overlay::TextDetail(detail)) = app.overlay.as_ref() else {
         panic!("grid value detail did not open");
     };
-    assert!(app.editor_text(detail.session_id).unwrap().len() < long_value.len());
+    assert_eq!(app.editor_text(detail.session_id).unwrap(), long_value);
     assert_eq!(detail.copy_text, long_value);
     assert_eq!(app.active_console().generation, generation);
 }
@@ -7925,6 +7925,7 @@ fn driver_options_use_database_icons_in_each_icon_mode() {
                 DatabaseKind::TiDb => "TiDB",
                 DatabaseKind::Snowflake => "Snowflake",
                 DatabaseKind::Elasticsearch => "Elasticsearch",
+                DatabaseKind::OpenSearch => "OpenSearch",
             };
             let label = format!("{} {display_name}", IconSet::new(mode).database(kind));
             assert!(
@@ -8881,4 +8882,97 @@ fn mongodb_browser_hides_the_inspector_until_requested() {
         output.contains("Canonical EJSON"),
         "toggling must reveal the document inspector:\n{output}"
     );
+}
+
+#[test]
+fn search_rest_consoles_and_index_previews_hide_sql_controls() {
+    use lazydb::model::{
+        execution_target::ExecutionTarget, relation::RelationView, tab::ResultView,
+    };
+    for url in ["elasticsearch://localhost", "opensearch://localhost"] {
+        let profile = import_connection_url(url, Some("search")).unwrap().profile;
+        let profile_id = profile.id;
+        let target = ExecutionTarget::from_profile(&profile);
+        let mut app = App::new(vec![profile]);
+        app.update(Action::NewUnboundConsoleNamed("REST".into()));
+        app.active_console_mut().execution_target = Some(target);
+        app.active_console_mut().result_view = ResultView::Data;
+        let (output, _) = render_with_state(&app, 140, 40);
+        assert!(output.contains("REST CONSOLE"), "{output}");
+        assert!(!output.contains("WHERE"), "{output}");
+        assert!(!output.contains("ORDER BY"), "{output}");
+        assert!(!output.contains("TX AUTO"), "{output}");
+        let mut relation = RelationTab::new("books");
+        relation.descriptor.key.profile_id = profile_id;
+        relation.data = lazydb::model::relation::RelationLoad::Ready(
+            lazydb::model::relation::OwnedSnapshot::new(
+                lazydb::db::RelationPreview {
+                    sql: "POST /books/_search\n{}".into(),
+                    result: lazydb::db::query::QueryOutcome {
+                        result_sets: vec![lazydb::db::query::ResultSet {
+                            columns: vec![lazydb::db::query::ColumnMeta {
+                                name: "_source".into(),
+                                type_name: "JSON".into(),
+                            }],
+                            rows: vec![vec![lazydb::db::value::CellValue::Text("{}".into())]],
+                            affected_rows: 0,
+                        }],
+                        stats: lazydb::db::query::QueryStats::new(
+                            Duration::ZERO,
+                            Duration::ZERO,
+                            1,
+                        ),
+                    },
+                    pagination: lazydb::model::pagination::ResultPagination::from_page(
+                        lazydb::model::pagination::PageRequest::first(
+                            lazydb::model::pagination::PageSize::Ten,
+                        ),
+                        1,
+                    ),
+                    row_versions: None,
+                },
+                lazydb::identity::ConnectionIdentity {
+                    profile_id,
+                    generation: 1,
+                },
+                app.profiles[0].catalog_scope.clone(),
+            ),
+        );
+        app.tabs.push(WorkspaceTab::Relation(relation));
+        app.active_tab = app.tabs.len() - 1;
+        let (output, state) = render_with_state(&app, 140, 40);
+        assert!(!output.contains("WHERE"), "{output}");
+        assert!(!output.contains("ORDER BY"), "{output}");
+        assert!(
+            !state
+                .hit_regions
+                .iter()
+                .any(|region| matches!(region.target, HitTarget::RelationView(RelationView::Ddl)))
+        );
+        assert!(
+            !state
+                .hit_regions
+                .iter()
+                .any(|region| matches!(region.target, HitTarget::GridColumnSort(_)))
+        );
+        assert!(
+            app.update(Action::SetRelationView(RelationView::Ddl))
+                .is_empty()
+        );
+        assert!(
+            matches!(app.tabs.get(app.active_tab), Some(WorkspaceTab::Relation(tab)) if tab.view == RelationView::Data)
+        );
+    }
+}
+
+#[test]
+fn opensearch_driver_icon_is_distinct_in_every_mode() {
+    for mode in [IconMode::Ascii, IconMode::Unicode, IconMode::NerdFont] {
+        let icons = IconSet::new(mode);
+        assert_eq!(icons.database(DatabaseKind::OpenSearch), "OS");
+        assert_ne!(
+            icons.database(DatabaseKind::OpenSearch),
+            icons.database(DatabaseKind::Elasticsearch)
+        );
+    }
 }

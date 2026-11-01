@@ -1171,7 +1171,7 @@ impl ExplorerState {
                             .and_then(|profile| profile.catalog.group_state(parent, *group))
                             .and_then(|state| catalog_count_label(state.count));
                         (
-                            if *group == crate::db::catalog::ObjectGroup::Tables && profile.is_some_and(|profile| profile.kind == DatabaseKind::Elasticsearch) {
+                            if *group == crate::db::catalog::ObjectGroup::Tables && profile.is_some_and(|profile| profile.kind.is_search_rest()) {
                                 "Indices".to_owned()
                             } else { group_label(*group).to_owned() },
                             metadata,

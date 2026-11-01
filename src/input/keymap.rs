@@ -5303,6 +5303,7 @@ fn is_cycle_field(field: ProfileField) -> bool {
         field,
         ProfileField::UrlFormat
             | ProfileField::ElasticsearchAuth
+            | ProfileField::OpenSearchAuth
             | ProfileField::SslMode
             | ProfileField::Environment
             | ProfileField::PasswordStorage

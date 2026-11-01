@@ -34,6 +34,7 @@ disable it at runtime.
 | ClickHouse | Relational | Available; database/table/view/MV and bounded native object catalog | Not advertised; supported catalog table-shape edits are separate | No manual transactions | Local request cancellation only; server query may continue | `system.events` counters and bounded `system.processes` |
 | Snowflake | Relational | Database/schema/table/view discovery, column metadata, relation previews and DDL reads; no structured catalog mutation | Not advertised | Independent SQL API statements; no manual transactions | Not advertised | Not supported |
 | Elasticsearch | Search / REST | Index and mapping discovery; native REST commands, no SQL DDL | Confirmed REST writes; no grid-cell editing | No manual transactions | Local HTTP cancellation; server work may continue | REST APIs only; no dedicated dashboard |
+| OpenSearch | Search / REST; independent driver | Index and mapping discovery; shared REST/NDJSON console, no SQL DDL | Confirmed REST writes; no grid-cell editing | No manual transactions | Local HTTP cancellation; server work may continue | REST APIs only; no dedicated dashboard |
 
 Native key/value and document workflows have their own operation checks. The
 relational grid and SQL transaction flags do not describe those workflows;
@@ -164,6 +165,22 @@ transactions, structured row/catalog editing, principals, monitoring, and
 server cancellation are not advertised. Closing a local request does not
 confirm that server execution stopped. The server's grants remain authoritative.
 See the [Snowflake guide](snowflake.md) for setup and verification limits.
+
+## OpenSearch
+
+OpenSearch retains its own driver identity and `opensearch://` / `opensearchs://`
+URLs while sharing the Elasticsearch REST console, index/mapping catalog and
+bounded document previews. Basic/None authentication and verified HTTPS with
+optional PEM CA bundles are supported; API keys and AWS SigV4 are unavailable.
+OpenSearch Security uses different role/action APIs and permissions. Discovery
+may require more grants than document reads. Previews use `from`/`size` within
+10,000 results with a 16 MiB preview-page result budget; exceeding it reports an
+error rather than a completed truncated page. Cancellation is local and write
+results can remain unknown after
+a network failure. The official 2.19.4 fixture is the compatibility baseline;
+other versions and managed-service deployments require separate verification.
+See [OpenSearch](opensearch.md) for permissions, live/PTY commands and the exact
+validation status.
 
 ## ClickHouse
 
@@ -350,6 +367,7 @@ for permission handling and result limits.
 | MongoDB | Server permissions gate discovery and monitoring; transactions require a replica set or sharded cluster | Database + collection | Databases, collections, and indexes | Native BSON/EJSON document values and dedicated metadata; see [verification limits](mongodb.md#verification-limits) |
 | ClickHouse | HTTP interface; supported and tested against ClickHouse 25.8 LTS | Database is schema | Tables, views, materialized views, dictionaries, functions; projections are table children | Names, engine/native kind, comments, columns, defaults, and native definition metadata where available |
 | Snowflake | HTTPS SQL API; token and role permissions gate access | Database + schema | Databases, schemas, tables, views, and columns | Column type/nullability and native DDL where available |
+| OpenSearch | Official 2.19.4 fixture verified; other releases/deployments require testing | Virtual database/schema namespace | Indices and mapping fields | Nested properties/multifields, JSON documents and original search hits; Basic/None with verified HTTPS |
 
 PostgreSQL, MySQL, MariaDB, TiDB, SQLite, and ClickHouse advertise lazy children. SQLite opens a pool with
 exactly one physical connection; SQL Server loads its supported catalog groups

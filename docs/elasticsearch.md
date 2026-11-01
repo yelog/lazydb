@@ -27,7 +27,7 @@ Expand the connection and virtual namespace to find the index group. The group i
 
 Expand an index to inspect its mapping fields, including nested properties and text multifields such as `title.keyword`. Open an index to preview documents. The grid retains `_index`, `_id`, `_score`, the full `_source` JSON, the original hit in `_hit` (including highlights, sort values, and inner hits), and separate top-level source fields. Nested objects and arrays remain JSON values; source fields cannot overwrite document metadata.
 
-Previews use `from`/`size` pagination within Elasticsearch's default 10,000-result window. Results can change between pages because the preview is not a point-in-time snapshot. Last-page navigation beyond the window returns an explicit unsupported error. Use PIT and `search_after` manually in the REST console for larger or consistent searches. Preview filtering and sorting use the console's Query DSL; SQL WHERE/ORDER BY filters are disabled.
+Previews use `from`/`size` pagination within Elasticsearch's default 10,000-result window. Results can change between pages because the preview is not a point-in-time snapshot. Last-page navigation beyond the window returns an explicit unsupported error. Use PIT and `search_after` manually in the REST console for larger or consistent searches. Preview filtering and sorting use the console's Query DSL; SQL WHERE/ORDER BY filters are disabled. Inexact server totals remain lower bounds at the result-window boundary. Preview pages obey the shared 16 MiB result budget; exceeding it returns an explicit error, so reduce the page size or use `_source` filtering in the console.
 
 ## REST console
 

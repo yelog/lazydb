@@ -80,7 +80,7 @@ pub fn authorize_query(profile: &ConnectionProfile, sql: &str) -> Result<(), Pol
     if sql.trim().is_empty() {
         return Err(PolicyError::EmptySql);
     }
-    if profile.kind == crate::profile::DatabaseKind::Elasticsearch {
+    if profile.kind.is_search_rest() {
         return crate::db::elasticsearch::ElasticsearchRequest::parse(sql)
             .ok()
             .filter(|request| request.is_read_only())
@@ -103,7 +103,7 @@ pub fn authorize_write(
     if sql.trim().is_empty() {
         return Err(PolicyError::EmptySql);
     }
-    if profile.kind == crate::profile::DatabaseKind::Elasticsearch {
+    if profile.kind.is_search_rest() {
         let request = crate::db::elasticsearch::ElasticsearchRequest::parse(sql)
             .map_err(|_| PolicyError::UnknownSql)?;
         if let WriteCapability::Denied(error) = write_capability(profile, policy) {

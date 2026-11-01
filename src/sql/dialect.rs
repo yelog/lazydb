@@ -19,7 +19,8 @@ impl SqlDialect {
             crate::profile::DatabaseKind::Redis
             | crate::profile::DatabaseKind::Valkey
             | crate::profile::DatabaseKind::MongoDb
-            | crate::profile::DatabaseKind::Elasticsearch => None,
+            | crate::profile::DatabaseKind::Elasticsearch
+            | crate::profile::DatabaseKind::OpenSearch => None,
             _ => Some(Self::for_database_kind(kind)),
         }
     }
@@ -37,9 +38,9 @@ impl SqlDialect {
             crate::profile::DatabaseKind::Oracle => Self::Oracle,
             crate::profile::DatabaseKind::Redis => Self::Generic,
             crate::profile::DatabaseKind::Valkey => Self::Generic,
-            crate::profile::DatabaseKind::MongoDb | crate::profile::DatabaseKind::Elasticsearch => {
-                Self::Generic
-            }
+            crate::profile::DatabaseKind::MongoDb
+            | crate::profile::DatabaseKind::Elasticsearch
+            | crate::profile::DatabaseKind::OpenSearch => Self::Generic,
             crate::profile::DatabaseKind::ClickHouse => Self::ClickHouse,
             crate::profile::DatabaseKind::Snowflake => Self::Snowflake,
         }
