@@ -173,6 +173,15 @@ jobs:
         run: python3 scripts/ci/run-with-timeout.py 1800 -- cargo +1.94.0 test --locked --all-targets --all-features --timings --no-run
       # Includes deterministic Elasticsearch transport, profile, REST policy and console tests.
       - run: python3 scripts/ci/run-with-timeout.py 600 -- cargo +1.94.0 test --locked --all-targets --all-features --timings
+      - name: Repeat parallel native updater tests (Linux)
+        if: runner.os == 'Linux'
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          for iteration in {1..20}; do
+            printf 'Native updater parallel run %s/20\n' "$iteration"
+            python3 scripts/ci/run-with-timeout.py 30 -- cargo +1.94.0 test --locked --all-features --test update_native -- --test-threads=5
+          done
       - name: Check macOS binary dependencies
         if: runner.os == 'macOS'
         shell: bash
