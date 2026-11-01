@@ -1413,6 +1413,64 @@ fn snowflake_draft_preserves_schema_options_and_redacts_token_through_edits() {
 }
 
 #[test]
+fn replacing_snowflake_token_invalidates_discovery_and_preserves_scope() {
+    use lazydb::model::profile_manager::{CatalogDiscoveryState, ProfileCatalogDiscovery};
+    for token_type in ["OAUTH", "PROGRAMMATIC_ACCESS_TOKEN"] {
+        let profile = lazydb::profile::import_connection_url(
+            &format!(
+                "snowflake://alice@org-account.snowflakecomputing.com/DB?token_type={token_type}"
+            ),
+            None,
+        )
+        .unwrap()
+        .profile;
+        let mut draft = ProfileDraft::edit(&profile, true);
+        let original_scope = draft.catalog_scope.clone();
+        let fingerprint = draft.validate(&[]).unwrap().discovery_fingerprint;
+        let snapshot = ProfileCatalogDiscovery {
+            fingerprint,
+            server: lazydb::db::ServerInfo {
+                kind: DatabaseKind::Snowflake,
+                version: "test".into(),
+                database: "DB".into(),
+                current_user: Some("alice".into()),
+            },
+            capabilities: lazydb::db::catalog::CatalogCapabilities {
+                namespace_model: lazydb::db::catalog::NamespaceModel::DatabaseAndSchema,
+                top_level_groups: vec![],
+                column_metadata: Default::default(),
+                supports_lazy_children: true,
+            },
+            discovery: Some(Ok(lazydb::db::catalog::CatalogDiscovery {
+                databases: vec![],
+                warnings: vec![],
+            })),
+        };
+        draft.begin_catalog_discovery(fingerprint);
+        draft.apply_catalog_discovery(snapshot.clone());
+        assert!(matches!(
+            draft.catalog_discovery,
+            CatalogDiscoveryState::Fresh(_)
+        ));
+        draft.set_password("replacement-token");
+        assert!(matches!(
+            draft.catalog_discovery,
+            CatalogDiscoveryState::Stale(_)
+        ));
+        assert!(draft.discovery_fingerprint.is_none());
+        assert_eq!(draft.catalog_scope, original_scope);
+        let next = draft.validate(&[]).unwrap().discovery_fingerprint;
+        assert_ne!(next, fingerprint);
+        draft.apply_catalog_discovery(snapshot);
+        assert!(!matches!(
+            draft.catalog_discovery,
+            CatalogDiscoveryState::Fresh(_)
+        ));
+        assert!(!format!("{draft:?}").contains("replacement-token"));
+    }
+}
+
+#[test]
 fn snowflake_discovery_fingerprint_tracks_options_and_schema() {
     use lazydb::model::profile_manager::DiscoveryFingerprint;
     let mut profile = lazydb::profile::import_connection_url(

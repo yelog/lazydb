@@ -17,6 +17,51 @@ use lazydb::{
 };
 use secrecy::SecretString;
 
+/// Reuse after a real token expires; the replacement must have the same intended role.
+#[tokio::test]
+#[ignore = "requires a naturally expired token and a valid replacement in protected files"]
+async fn snowflake_live_expired_token_and_replacement() -> anyhow::Result<()> {
+    let url = std::env::var("LAZYDB_SNOWFLAKE_TEST_URL")?;
+    let imported = import_connection_url(&url, Some("Snowflake token lifecycle"))?;
+    anyhow::ensure!(
+        imported.transient_password.is_none(),
+        "test URL must not contain credentials"
+    );
+    let profile = imported.profile;
+    let read_token = |variable| -> anyhow::Result<SecretString> {
+        let path = std::env::var(variable)?;
+        Ok(SecretString::from(
+            std::fs::read_to_string(path)?.trim().to_owned(),
+        ))
+    };
+    let expired = read_token("LAZYDB_SNOWFLAKE_EXPIRED_TOKEN_FILE")?;
+    let error = match DatabaseConnection::connect(&profile, Some(&expired)).await {
+        Ok(connection) => {
+            connection.close().await;
+            anyhow::bail!("the expired token was unexpectedly accepted");
+        }
+        Err(error) => error,
+    };
+    assert_eq!(error.category, lazydb::db::ErrorCategory::Authentication);
+
+    let replacement = read_token("LAZYDB_SNOWFLAKE_TOKEN_FILE")?;
+    let connection = DatabaseConnection::connect(&profile, Some(&replacement)).await?;
+    let info = connection.probe().await?;
+    assert_eq!(info.database, profile.database.as_deref().unwrap());
+    let result = connection.execute("SELECT 42 AS ANSWER").await?;
+    assert_eq!(result.result_sets[0].rows[0][0], CellValue::Integer(42));
+    let discovery = connection.discover_catalog_scope().await?;
+    assert!(discovery.databases.iter().any(|database| {
+        Some(database.name.as_str()) == profile.database.as_deref()
+            && database
+                .schemas
+                .iter()
+                .any(|schema| Some(schema.as_str()) == profile.default_schema.as_deref())
+    }));
+    connection.close().await;
+    Ok(())
+}
+
 /// Opt-in only: reads synthetic fixtures and credentials from a protected local file.
 #[tokio::test]
 #[ignore = "requires LAZYDB_SNOWFLAKE_TEST_URL and LAZYDB_SNOWFLAKE_TOKEN_FILE"]

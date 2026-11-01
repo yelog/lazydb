@@ -378,7 +378,9 @@ fn api_error(status: StatusCode, body: &Value) -> DatabaseError {
         .get("sqlState")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    let code = body.get("code").and_then(Value::as_str);
     let category = match status {
+        _ if matches!(code, Some("390111" | "390303" | "390318")) => ErrorCategory::Authentication,
         StatusCode::UNAUTHORIZED => ErrorCategory::Authentication,
         StatusCode::FORBIDDEN => ErrorCategory::Permission,
         StatusCode::TOO_MANY_REQUESTS => ErrorCategory::Network,
