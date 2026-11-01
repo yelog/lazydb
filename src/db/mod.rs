@@ -8,6 +8,7 @@ pub mod catalog_change_set;
 pub mod catalog_drop;
 pub mod catalog_mutation;
 pub mod clickhouse;
+pub mod cockroach;
 pub mod column_type;
 pub(crate) mod ddl;
 pub mod descriptor;
@@ -21,6 +22,7 @@ pub mod mutation;
 pub mod mysql;
 pub mod oracle;
 pub mod oracle_client;
+pub(crate) mod pgwire;
 pub mod postgres;
 pub mod principal;
 pub mod principal_drop;
@@ -52,6 +54,7 @@ use self::{
     catalog_mutation::CatalogMutationCapabilities,
     catalog_mutation::{CatalogObjectDefinition, CatalogObjectDefinitionRequest},
     clickhouse::ClickHouseAdapter,
+    cockroach::CockroachAdapter,
     elasticsearch::ElasticsearchAdapter,
     mssql::MsSqlAdapter,
     mysql::MySqlAdapter,
@@ -303,6 +306,7 @@ fn format_postgres_severity(severity: sqlx::postgres::PgSeverity) -> String {
 #[derive(Clone, Debug)]
 pub enum DatabaseConnection {
     Postgres(PostgresAdapter),
+    CockroachDb(CockroachAdapter),
     MySql(MySqlAdapter),
     MariaDb(MySqlAdapter),
     TiDb(MySqlAdapter),
@@ -325,9 +329,11 @@ impl DatabaseConnection {
             Self::MySql(_) | Self::MariaDb(_) | Self::SqlServer(_) | Self::Oracle(_) => {
                 principal::PrincipalCapability::DdlOnly
             }
-            Self::TiDb(_) | Self::Sqlite(_) | Self::DuckDb(_) | Self::Redis(_) => {
-                principal::PrincipalCapability::Unsupported
-            }
+            Self::CockroachDb(_)
+            | Self::TiDb(_)
+            | Self::Sqlite(_)
+            | Self::DuckDb(_)
+            | Self::Redis(_) => principal::PrincipalCapability::Unsupported,
             Self::MongoDb(_) | Self::Elasticsearch(_) => {
                 principal::PrincipalCapability::Unsupported
             }
@@ -366,7 +372,8 @@ impl DatabaseConnection {
                 privileges: Vec::new(),
                 memberships: false,
             },
-            Self::TiDb(_)
+            Self::CockroachDb(_)
+            | Self::TiDb(_)
             | Self::Sqlite(_)
             | Self::DuckDb(_)
             | Self::Redis(_)
@@ -386,6 +393,9 @@ impl DatabaseConnection {
                 "Snowflake principal management is not implemented",
             )),
             Self::Postgres(adapter) => adapter.list_principals().await,
+            Self::CockroachDb(_) => Err(DatabaseError::unsupported(
+                "CockroachDB principal management is not implemented",
+            )),
             Self::MySql(adapter) | Self::MariaDb(adapter) => adapter.list_principals().await,
             Self::SqlServer(adapter) => adapter.list_principals().await,
             Self::Oracle(adapter) => adapter.list_principals().await,
@@ -420,9 +430,9 @@ impl DatabaseConnection {
             Self::TiDb(_) => Err(DatabaseError::unsupported(
                 "TiDB principal management is not implemented",
             )),
-            Self::Sqlite(_) | Self::DuckDb(_) => Err(DatabaseError::unsupported(
-                "This database has no SQL principals",
-            )),
+            Self::CockroachDb(_) | Self::Sqlite(_) | Self::DuckDb(_) => Err(
+                DatabaseError::unsupported("This database has no SQL principals"),
+            ),
             Self::Redis(_) => Err(DatabaseError::unsupported("Redis has no SQL principals")),
             Self::MongoDb(_) => Err(DatabaseError::unsupported(
                 "MongoDB uses document principals",
@@ -449,7 +459,8 @@ impl DatabaseConnection {
             }
             Self::SqlServer(adapter) => adapter.principal_details(principal, target).await,
             Self::Oracle(adapter) => adapter.principal_details(principal, target).await,
-            Self::TiDb(_)
+            Self::CockroachDb(_)
+            | Self::TiDb(_)
             | Self::Sqlite(_)
             | Self::DuckDb(_)
             | Self::Redis(_)
@@ -495,6 +506,9 @@ impl DatabaseConnection {
                 "Snowflake monitoring is not implemented",
             )),
             Self::Postgres(adapter) => adapter.load_monitor_snapshot().await,
+            Self::CockroachDb(_) => Err(DatabaseError::unsupported(
+                "CockroachDB monitoring is not implemented",
+            )),
             Self::MySql(adapter) => adapter.load_monitor_snapshot().await,
             Self::MariaDb(adapter) => adapter.load_monitor_snapshot().await,
             Self::TiDb(_) => Err(DatabaseError::unsupported(
@@ -531,6 +545,7 @@ impl DatabaseConnection {
         match self {
             Self::Snowflake(_) => Ok(monitor::MonitorMetadata::default()),
             Self::Postgres(adapter) => adapter.load_monitor_metadata().await,
+            Self::CockroachDb(_) => Ok(monitor::MonitorMetadata::default()),
             Self::MySql(adapter) => adapter.load_monitor_metadata().await,
             Self::MariaDb(adapter) => adapter.load_monitor_metadata().await,
             Self::TiDb(_) => Err(DatabaseError::unsupported(
@@ -551,6 +566,9 @@ impl DatabaseConnection {
                 "Snowflake process monitoring is not implemented",
             )),
             Self::Postgres(adapter) => adapter.load_process_snapshot().await,
+            Self::CockroachDb(_) => Err(DatabaseError::unsupported(
+                "CockroachDB process monitoring is not implemented",
+            )),
             Self::MySql(adapter) => adapter.load_process_snapshot().await,
             Self::MariaDb(adapter) => adapter.load_process_snapshot().await,
             Self::TiDb(_) => Err(DatabaseError::unsupported(
@@ -593,6 +611,12 @@ impl DatabaseConnection {
         forced_close: crate::runtime::transaction::ForcedCloseHandle,
     ) -> Result<crate::runtime::transaction::TransactionWorkerHandle, DatabaseError> {
         match self {
+            Self::CockroachDb(adapter) => Ok(
+                crate::runtime::transaction::spawn_transaction_worker_with_forced_close(
+                    adapter.transaction_backend().await?,
+                    forced_close,
+                ),
+            ),
             Self::Snowflake(_) => Err(DatabaseError::unsupported(
                 "Snowflake SQL API does not retain transactions across requests",
             )),
@@ -668,6 +692,9 @@ impl DatabaseConnection {
             DatabaseKind::DuckDb => duckdb::DuckDbAdapter::connect(profile)
                 .await
                 .map(Self::DuckDb),
+            DatabaseKind::CockroachDb => CockroachAdapter::connect(profile, password)
+                .await
+                .map(Self::CockroachDb),
             DatabaseKind::Postgres => PostgresAdapter::connect(profile, password)
                 .await
                 .map(Self::Postgres),
@@ -716,6 +743,7 @@ impl DatabaseConnection {
         match self {
             Self::Snowflake(_) => DatabaseKind::Snowflake,
             Self::Postgres(_) => DatabaseKind::Postgres,
+            Self::CockroachDb(_) => DatabaseKind::CockroachDb,
             Self::MySql(_) => DatabaseKind::MySql,
             Self::MariaDb(_) => DatabaseKind::MariaDb,
             Self::TiDb(_) => DatabaseKind::TiDb,
@@ -745,6 +773,7 @@ impl DatabaseConnection {
         match self {
             Self::Snowflake(_) => snowflake::SnowflakeAdapter::catalog_capabilities(),
             Self::Postgres(_) => PostgresAdapter::catalog_capabilities(),
+            Self::CockroachDb(_) => CockroachAdapter::catalog_capabilities(),
             Self::MySql(_) => MySqlAdapter::catalog_capabilities(),
             Self::MariaDb(_) => MySqlAdapter::mariadb_catalog_capabilities(),
             Self::TiDb(_) => MySqlAdapter::tidb_catalog_capabilities(),
@@ -801,6 +830,7 @@ impl DatabaseConnection {
         match self {
             Self::Snowflake(_) => CatalogMutationCapabilities::default(),
             Self::Postgres(adapter) => adapter.mutation_capabilities(),
+            Self::CockroachDb(_) => CatalogMutationCapabilities::default(),
             Self::MySql(_) => MySqlAdapter::catalog_mutation_capabilities(),
             Self::MariaDb(_) => MySqlAdapter::catalog_mutation_capabilities(),
             Self::TiDb(_) => CatalogMutationCapabilities::default(),
@@ -820,6 +850,9 @@ impl DatabaseConnection {
         kind: CatalogKind,
     ) -> catalog_mutation::CatalogMutationAvailability {
         match self {
+            Self::CockroachDb(_) => catalog_mutation::CatalogMutationAvailability::Unavailable {
+                reason: "CockroachDB structured schema editing is not implemented",
+            },
             Self::TiDb(_) => catalog_mutation::CatalogMutationAvailability::Unavailable {
                 reason: "TiDB structured catalog mutations are not implemented",
             },
@@ -861,6 +894,10 @@ impl DatabaseConnection {
                 reason: "Snowflake structured catalog changes are not implemented; use SQL".into(),
             }),
             Self::Postgres(_) => PostgresAdapter::plan_catalog_drop(request, entry),
+            Self::CockroachDb(_) => Err(catalog_drop::CatalogDropError::Unsupported {
+                kind: entry.kind,
+                reason: "CockroachDB structured schema editing is not implemented".into(),
+            }),
             Self::MySql(_) => MySqlAdapter::plan_catalog_drop(request, entry),
             Self::MariaDb(_) => MySqlAdapter::plan_catalog_drop(request, entry),
             Self::TiDb(_) => Err(catalog_drop::CatalogDropError::Unsupported {
@@ -926,7 +963,7 @@ impl DatabaseConnection {
             }
             Self::SqlServer(_) => MsSqlAdapter::plan_catalog_mutation(request, draft, baseline),
             Self::Oracle(_) => OracleAdapter::plan_catalog_mutation(request, draft, baseline),
-            Self::Redis(_) => Err(
+            Self::CockroachDb(_) | Self::Redis(_) => Err(
                 catalog_mutation::CatalogMutationError::UnsupportedOperation {
                     object_type: request.object_type,
                 },
@@ -954,6 +991,9 @@ impl DatabaseConnection {
                 "Snowflake structured catalog changes are not implemented; use SQL",
             )),
             Self::Postgres(adapter) => adapter.execute_catalog_mutation(plan).await,
+            Self::CockroachDb(_) => Err(DatabaseError::unsupported(
+                "CockroachDB structured schema editing is not implemented",
+            )),
             Self::TiDb(_) => Err(DatabaseError::unsupported(
                 "TiDB structured catalog mutations are not implemented",
             )),
@@ -1058,6 +1098,7 @@ impl DatabaseConnection {
         match self {
             Self::Snowflake(adapter) => adapter.probe().await,
             Self::Postgres(adapter) => adapter.probe().await,
+            Self::CockroachDb(adapter) => adapter.probe().await,
             Self::MySql(adapter) => adapter.probe().await,
             Self::MariaDb(adapter) => adapter.probe().await,
             Self::TiDb(adapter) => adapter.probe().await,
@@ -1093,6 +1134,7 @@ impl DatabaseConnection {
         match self {
             Self::Snowflake(adapter) => adapter.discover_catalog_scope().await,
             Self::Postgres(adapter) => adapter.discover_catalog_scope().await,
+            Self::CockroachDb(adapter) => adapter.discover_catalog_scope().await,
             Self::MySql(adapter) => adapter.discover_catalog_scope().await,
             Self::MariaDb(adapter) => adapter.discover_catalog_scope().await,
             Self::TiDb(adapter) => adapter.discover_catalog_scope().await,
@@ -1121,6 +1163,17 @@ impl DatabaseConnection {
         match self {
             Self::Snowflake(_) => Ok(None),
             Self::Postgres(adapter) => adapter.discoverable_databases().await.map(Some),
+            _ => Ok(None),
+        }
+    }
+
+    pub async fn discoverable_pgwire_databases(
+        &self,
+    ) -> Result<Option<Vec<String>>, DatabaseError> {
+        match self {
+            Self::Snowflake(_) => Ok(None),
+            Self::Postgres(adapter) => adapter.discoverable_databases().await.map(Some),
+            Self::CockroachDb(adapter) => adapter.discoverable_databases().await.map(Some),
             Self::MySql(_)
             | Self::MariaDb(_)
             | Self::TiDb(_)
@@ -1141,6 +1194,7 @@ impl DatabaseConnection {
         match self {
             Self::Snowflake(adapter) => adapter.load_catalog_page(request).await,
             Self::Postgres(adapter) => adapter.load_catalog_page(request).await,
+            Self::CockroachDb(adapter) => adapter.load_catalog_page(request).await,
             Self::MySql(adapter) => adapter.load_catalog_page(request).await,
             Self::MariaDb(adapter) => adapter.load_catalog_page(request).await,
             Self::TiDb(adapter) => adapter.load_catalog_page(request).await,
@@ -1178,6 +1232,7 @@ impl DatabaseConnection {
         match self {
             Self::Snowflake(adapter) => adapter.resolve_relation_identity(relation).await,
             Self::Postgres(adapter) => adapter.resolve_relation_identity(relation).await,
+            Self::CockroachDb(adapter) => adapter.resolve_relation_identity(relation).await,
             Self::MySql(_)
             | Self::MariaDb(_)
             | Self::TiDb(_)
@@ -1204,6 +1259,11 @@ impl DatabaseConnection {
                     .await
             }
             Self::Postgres(adapter) => {
+                adapter
+                    .resolve_relation_identity_with_scope(relation, scope)
+                    .await
+            }
+            Self::CockroachDb(adapter) => {
                 adapter
                     .resolve_relation_identity_with_scope(relation, scope)
                     .await
@@ -1243,6 +1303,9 @@ impl DatabaseConnection {
                 "Snowflake structured object definitions are not implemented; use DDL",
             )),
             Self::Postgres(adapter) => adapter.load_catalog_object_definition(request).await,
+            Self::CockroachDb(_) => Err(DatabaseError::unsupported(
+                "CockroachDB structured schema editing is not implemented",
+            )),
             Self::MySql(adapter) | Self::MariaDb(adapter) | Self::TiDb(adapter) => {
                 adapter.load_catalog_object_definition(request).await
             }
@@ -1270,7 +1333,8 @@ impl DatabaseConnection {
         match self {
             Self::Snowflake(_) => Ok(None),
             Self::Postgres(adapter) => adapter.load_catalog_owner_context(request).await.map(Some),
-            Self::MySql(_)
+            Self::CockroachDb(_)
+            | Self::MySql(_)
             | Self::MariaDb(_)
             | Self::TiDb(_)
             | Self::Oracle(_)
@@ -1290,6 +1354,7 @@ impl DatabaseConnection {
         match self {
             Self::Snowflake(adapter) => adapter.search_catalog(request).await,
             Self::Postgres(adapter) => adapter.search_catalog(request).await,
+            Self::CockroachDb(adapter) => adapter.search_catalog(request).await,
             Self::MySql(adapter) => adapter.search_catalog(request).await,
             Self::MariaDb(adapter) => adapter.search_catalog(request).await,
             Self::TiDb(adapter) => adapter.search_catalog(request).await,
@@ -1334,6 +1399,7 @@ impl DatabaseConnection {
         match self {
             Self::Snowflake(adapter) => adapter.execute_with_budget(sql, budget).await,
             Self::Postgres(adapter) => adapter.execute_pool_with_budget(sql, budget).await,
+            Self::CockroachDb(adapter) => adapter.execute_pool_with_budget(sql, budget).await,
             Self::MySql(adapter) => adapter.execute_pool_with_budget(sql, budget).await,
             Self::MariaDb(adapter) => adapter.execute_pool_with_budget(sql, budget).await,
             Self::TiDb(adapter) => adapter.execute_pool_with_budget(sql, budget).await,
@@ -1384,6 +1450,7 @@ impl DatabaseConnection {
             }
             Self::Elasticsearch(adapter) => adapter.preview_relation(relation, options, page).await,
             Self::Postgres(adapter) => adapter.preview_relation(relation, options, page).await,
+            Self::CockroachDb(adapter) => adapter.preview_relation(relation, options, page).await,
             Self::MySql(adapter) => adapter.preview_relation(relation, options, page).await,
             Self::MariaDb(adapter) => adapter.preview_relation(relation, options, page).await,
             Self::TiDb(adapter) => adapter.preview_relation(relation, options, page).await,
@@ -1437,6 +1504,11 @@ impl DatabaseConnection {
                     .await
             }
             Self::Postgres(adapter) => {
+                adapter
+                    .preview_relation_with_scope(relation, scope, options, page)
+                    .await
+            }
+            Self::CockroachDb(adapter) => {
                 adapter
                     .preview_relation_with_scope(relation, scope, options, page)
                     .await
@@ -1500,6 +1572,7 @@ impl DatabaseConnection {
                 "Elasticsearch has mappings rather than SQL DDL",
             )),
             Self::Postgres(adapter) => adapter.relation_ddl(relation).await,
+            Self::CockroachDb(adapter) => adapter.relation_ddl(relation).await,
             Self::MySql(adapter) => adapter.relation_ddl(relation).await,
             Self::MariaDb(adapter) => adapter.relation_ddl(relation).await,
             Self::TiDb(adapter) => adapter.relation_ddl(relation).await,
@@ -1540,6 +1613,7 @@ impl DatabaseConnection {
         match self {
             Self::Snowflake(adapter) => adapter.relation_ddl_with_scope(relation, scope).await,
             Self::Postgres(adapter) => adapter.relation_ddl_with_scope(relation, scope).await,
+            Self::CockroachDb(adapter) => adapter.relation_ddl_with_scope(relation, scope).await,
             Self::MySql(adapter) => adapter.relation_ddl_with_scope(relation, scope).await,
             Self::MariaDb(adapter) => adapter.relation_ddl_with_scope(relation, scope).await,
             Self::TiDb(adapter) => adapter.relation_ddl_with_scope(relation, scope).await,
@@ -1569,6 +1643,7 @@ impl DatabaseConnection {
         match self {
             Self::Snowflake(_) => Ok(None),
             Self::Postgres(adapter) => adapter.object_ddl(kind, schema, name).await,
+            Self::CockroachDb(adapter) => adapter.object_ddl(kind, schema, name).await,
             Self::MySql(adapter) => adapter.object_ddl(kind, schema, name).await,
             Self::MariaDb(adapter) => adapter.object_ddl(kind, schema, name).await,
             Self::TiDb(adapter) => adapter.object_ddl(kind, schema, name).await,
@@ -1585,7 +1660,7 @@ impl DatabaseConnection {
     pub fn quote_identifier(&self, value: &str) -> String {
         match self {
             Self::Snowflake(_) => snowflake::quote_identifier(value),
-            Self::Postgres(_) => postgres::quote_identifier(value),
+            Self::Postgres(_) | Self::CockroachDb(_) => postgres::quote_identifier(value),
             Self::MySql(_) => mysql::quote_identifier(value),
             Self::MariaDb(_) => mysql::quote_identifier(value),
             Self::TiDb(_) => mysql::quote_identifier(value),
@@ -1603,6 +1678,7 @@ impl DatabaseConnection {
         match self {
             Self::Snowflake(adapter) => adapter.close().await,
             Self::Postgres(adapter) => adapter.close().await,
+            Self::CockroachDb(adapter) => adapter.close().await,
             Self::MySql(adapter) => adapter.close().await,
             Self::MariaDb(adapter) => adapter.close().await,
             Self::TiDb(adapter) => adapter.close().await,

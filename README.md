@@ -94,7 +94,7 @@ updates, and removal, see the [installation guide](docs/installation.md).
 
 | Type | Databases |
 | --- | --- |
-| Server SQL | PostgreSQL, MySQL, MariaDB, TiDB, Oracle, SQL Server, ClickHouse, Snowflake |
+| Server SQL | PostgreSQL, CockroachDB, MySQL, MariaDB, TiDB, Oracle, SQL Server, ClickHouse, Snowflake |
 | Embedded SQL | SQLite, DuckDB |
 | Key-value and document | Redis, Valkey, MongoDB |
 | Search | Elasticsearch |

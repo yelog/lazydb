@@ -3208,7 +3208,9 @@ fn preview(
                 .find(|profile| profile.id == plan.request.connection.profile_id)
         })
         .map(|profile| match profile.kind {
-            crate::profile::DatabaseKind::Postgres => SqlDialect::Postgres,
+            crate::profile::DatabaseKind::Postgres | crate::profile::DatabaseKind::CockroachDb => {
+                SqlDialect::Postgres
+            }
             crate::profile::DatabaseKind::MySql
             | crate::profile::DatabaseKind::MariaDb
             | crate::profile::DatabaseKind::TiDb => SqlDialect::MySql,

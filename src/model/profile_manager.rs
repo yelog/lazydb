@@ -31,7 +31,7 @@ use crate::{
         CatalogScope, CatalogScopeValidationError, CatalogSelection, ConnectionProfile,
         ConnectionUrlFormat, CredentialPolicy, DatabaseKind, DatabaseScope, Environment,
         ParsedConnectionUrl, PasswordStorageChoice, ProfileAccess, SslMode, format_connection_url,
-        parse_connection_url,
+        parse_connection_url, parse_connection_url_with_driver,
     },
 };
 
@@ -210,6 +210,7 @@ impl DiscoveryFingerprint {
         profile.snowflake_options.hash(&mut hasher);
         (profile.ssl_mode as u8).hash(&mut hasher);
         profile.elasticsearch_options.hash(&mut hasher);
+        profile.pg_options.hash(&mut hasher);
         profile.sqlite_path.hash(&mut hasher);
         (profile.kind == DatabaseKind::Sqlite
             && profile.sqlite_path.is_none()
@@ -393,6 +394,7 @@ pub struct ProfileDraft {
     pub sqlite_memory: bool,
     pub sqlite_path: TextInput,
     pub mongodb_options: Option<crate::profile::MongoConnectionOptions>,
+    pub pg_options: Option<crate::profile::PgConnectionOptions>,
     pub snowflake_options: Option<crate::profile::SnowflakeConnectionOptions>,
     pub duckdb_path: TextInput,
     pub original_credential_policy: CredentialPolicy,
@@ -443,6 +445,7 @@ impl ProfileDraft {
         let (host, port, schema, ssl_mode) = match kind {
             DatabaseKind::Snowflake => ("", "443", "PUBLIC", SslMode::VerifyFull),
             DatabaseKind::Postgres => ("localhost", "5432", "public", SslMode::Prefer),
+            DatabaseKind::CockroachDb => ("localhost", "26257", "public", SslMode::Prefer),
             DatabaseKind::MySql | DatabaseKind::MariaDb => {
                 ("localhost", "3306", "", SslMode::Prefer)
             }
@@ -488,6 +491,7 @@ impl ProfileDraft {
             sqlite_memory: false,
             sqlite_path: TextInput::default(),
             mongodb_options: None,
+            pg_options: None,
             snowflake_options: (kind == DatabaseKind::Snowflake)
                 .then(crate::profile::SnowflakeConnectionOptions::default),
             duckdb_path: TextInput::default(),
@@ -503,7 +507,10 @@ impl ProfileDraft {
         if kind == DatabaseKind::TiDb {
             draft.user.set("root");
         }
-        if kind.is_redis_compatible() {
+        if kind == DatabaseKind::CockroachDb {
+            draft.database.set("defaultdb");
+            draft.sync_derived_catalog_scope();
+        } else if kind.is_redis_compatible() {
             draft.database.set("0");
         } else if kind == DatabaseKind::ClickHouse {
             draft.database.set("default");
@@ -572,6 +579,7 @@ impl ProfileDraft {
                     .unwrap_or_default(),
             ),
             mongodb_options: profile.mongodb_options.clone(),
+            pg_options: profile.pg_options.clone(),
             snowflake_options: profile.snowflake_options.clone(),
             user: TextInput::from(profile.user.clone().unwrap_or_default()),
             password: SecretTextInput::default(),
@@ -738,7 +746,7 @@ impl ProfileDraft {
             return false;
         }
 
-        let result = parse_connection_url(self.url.value());
+        let result = self.parse_url();
         match result {
             Ok(parsed) => {
                 self.apply_parsed_url(parsed);
@@ -767,7 +775,7 @@ impl ProfileDraft {
                 Err(ProfileValidationError::new(ProfileField::Url, error))
             });
         }
-        let parsed = parse_connection_url(self.url.value()).map_err(|error| {
+        let parsed = self.parse_url().map_err(|error| {
             let message = error.to_string();
             self.url_error = Some(message.clone());
             ProfileValidationError::new(ProfileField::Url, message)
@@ -776,6 +784,23 @@ impl ProfileDraft {
         self.apply_parsed_url(parsed);
         self.refresh_url();
         Ok(())
+    }
+
+    fn parse_url(&self) -> Result<ParsedConnectionUrl, crate::profile::ProfileError> {
+        // Generic PostgreSQL URLs do not identify the server product. Preserve
+        // an explicitly selected CockroachDB driver while allowing other URLs
+        // to continue selecting their own driver.
+        if self.kind == DatabaseKind::CockroachDb {
+            let parsed = parse_connection_url(self.url.value())?;
+            if parsed.kind.is_postgres_compatible() {
+                return parse_connection_url_with_driver(
+                    self.url.value(),
+                    Some(DatabaseKind::CockroachDb),
+                );
+            }
+            return Ok(parsed);
+        }
+        parse_connection_url(self.url.value())
     }
 
     fn apply_parsed_url(&mut self, parsed: ParsedConnectionUrl) {
@@ -798,6 +823,9 @@ impl ProfileDraft {
         };
         self.url_format = parsed.format;
         self.mongodb_options = parsed.mongodb_options.clone();
+        if parsed.kind.is_postgres_compatible() {
+            self.pg_options = parsed.pg_options;
+        }
         self.snowflake_options = parsed.snowflake_options.clone();
         self.host.set(parsed.host.unwrap_or_default());
         self.port
@@ -1083,7 +1111,7 @@ impl ProfileDraft {
 
     pub fn visible_fields(&self) -> &'static [ProfileField] {
         match (self.kind, self.sqlite_memory) {
-            (DatabaseKind::Postgres, _) => &POSTGRES_FIELDS,
+            (DatabaseKind::Postgres | DatabaseKind::CockroachDb, _) => &POSTGRES_FIELDS,
             (DatabaseKind::MySql, _) => &MYSQL_FIELDS,
             (DatabaseKind::SqlServer | DatabaseKind::Snowflake, _) => &POSTGRES_FIELDS,
             (DatabaseKind::Sqlite, false) => &SQLITE_FILE_FIELDS,
@@ -1155,6 +1183,7 @@ impl ProfileDraft {
             duckdb_path,
         ) = match self.kind {
             DatabaseKind::Postgres
+            | DatabaseKind::CockroachDb
             | DatabaseKind::MySql
             | DatabaseKind::MariaDb
             | DatabaseKind::TiDb
@@ -1187,7 +1216,10 @@ impl ProfileDraft {
                     Some(database),
                     matches!(
                         self.kind,
-                        DatabaseKind::Postgres | DatabaseKind::SqlServer | DatabaseKind::Snowflake
+                        DatabaseKind::Postgres
+                            | DatabaseKind::CockroachDb
+                            | DatabaseKind::SqlServer
+                            | DatabaseKind::Snowflake
                     )
                     .then(|| {
                         optional(&self.schema).or_else(|| {
@@ -1503,6 +1535,7 @@ impl ProfileDraft {
                 sqlite_path,
                 mongodb_options,
                 elasticsearch_options: self.elasticsearch_options(),
+                pg_options: self.pg_options.clone(),
                 snowflake_options: self.snowflake_options.clone(),
                 duckdb_path,
                 ssl_mode,
@@ -1570,7 +1603,10 @@ impl ProfileDraft {
             return;
         }
         let (database, default_schema) = match self.kind {
-            DatabaseKind::Postgres | DatabaseKind::SqlServer | DatabaseKind::Snowflake => (
+            DatabaseKind::Postgres
+            | DatabaseKind::CockroachDb
+            | DatabaseKind::SqlServer
+            | DatabaseKind::Snowflake => (
                 self.database.value(),
                 optional(&self.schema).or_else(|| {
                     (self.kind == DatabaseKind::Snowflake).then(|| "PUBLIC".to_owned())
@@ -1720,7 +1756,10 @@ impl ProfileDraft {
                 }
                 self.snowflake_options.get_or_insert_with(Default::default);
             }
-            DatabaseKind::Postgres => {
+            DatabaseKind::Postgres | DatabaseKind::CockroachDb => {
+                if kind == DatabaseKind::CockroachDb && self.database.value().trim().is_empty() {
+                    self.database.set("defaultdb");
+                }
                 if self.host.value().trim().is_empty() {
                     self.host.set("localhost");
                 }
@@ -1915,6 +1954,7 @@ impl ProfileDraft {
                 )
             }
             DatabaseKind::Postgres
+            | DatabaseKind::CockroachDb
             | DatabaseKind::MySql
             | DatabaseKind::MariaDb
             | DatabaseKind::TiDb
@@ -1942,7 +1982,10 @@ impl ProfileDraft {
                     optional(&self.database),
                     matches!(
                         self.kind,
-                        DatabaseKind::Postgres | DatabaseKind::SqlServer | DatabaseKind::Snowflake
+                        DatabaseKind::Postgres
+                            | DatabaseKind::CockroachDb
+                            | DatabaseKind::SqlServer
+                            | DatabaseKind::Snowflake
                     )
                     .then(|| {
                         optional(&self.schema).or_else(|| {
@@ -2135,6 +2178,7 @@ impl ProfileDraft {
             sqlite_path,
             mongodb_options: self.mongodb_options.clone(),
             elasticsearch_options: self.elasticsearch_options(),
+            pg_options: self.pg_options.clone(),
             snowflake_options: self.snowflake_options.clone(),
             duckdb_path: (self.kind == DatabaseKind::DuckDb)
                 .then(|| optional(&self.duckdb_path).map(PathBuf::from))
@@ -2952,6 +2996,7 @@ fn non_empty(input: &TextInput) -> Option<&str> {
 fn default_port(kind: DatabaseKind) -> Option<u16> {
     match kind {
         DatabaseKind::Postgres => Some(5432),
+        DatabaseKind::CockroachDb => Some(26257),
         DatabaseKind::MySql | DatabaseKind::MariaDb => Some(3306),
         DatabaseKind::TiDb => Some(4000),
         DatabaseKind::Oracle => Some(1521),

@@ -1819,6 +1819,14 @@ impl DuckDbAdapter {
         worker
             .await
             .map_err(|error| DatabaseError::internal(format!("DuckDB worker failed: {error}")))?
+            .map_err(|error| {
+                duck_operation_error(
+                    error,
+                    operation.as_ref().is_some_and(|(_, cancelled)| {
+                        cancelled.load(std::sync::atomic::Ordering::SeqCst)
+                    }),
+                )
+            })
     }
 
     pub async fn close(self) {
@@ -3093,10 +3101,35 @@ fn intersect_catalog_scopes(
     CatalogScope { databases }
 }
 
-fn duck_error(error: impl std::fmt::Display) -> DatabaseError {
+fn duck_operation_error(mut error: DatabaseError, cancelled: bool) -> DatabaseError {
+    // Some DuckDB C API paths expose only a generic failure code on interrupt.
+    if cancelled && error.category == ErrorCategory::Sql {
+        error.category = ErrorCategory::Cancelled;
+        error.code = Some("cancelled".into());
+    }
+    error
+}
+
+fn duck_error(error: duckdb::Error) -> DatabaseError {
+    let interrupted = matches!(
+        &error,
+        duckdb::Error::DuckDBFailure(native, _)
+            if native.extended_code == duckdb::ffi::duckdb_error_type_DUCKDB_ERROR_INTERRUPT
+    );
     DatabaseError {
-        category: ErrorCategory::Sql,
-        code: Some("duckdb_error".into()),
+        category: if interrupted {
+            ErrorCategory::Cancelled
+        } else {
+            ErrorCategory::Sql
+        },
+        code: Some(
+            if interrupted {
+                "cancelled"
+            } else {
+                "duckdb_error"
+            }
+            .into(),
+        ),
         message: crate::security::sanitize_terminal_text(&error.to_string()),
         diagnostic: None,
     }
@@ -3156,6 +3189,48 @@ mod transaction_tests {
             .unwrap();
         assert_eq!(deleted.result_sets[0].affected_rows, 1);
         adapter.close().await;
+    }
+
+    #[test]
+    fn native_interrupt_errors_are_cancelled_while_sql_errors_remain_sql() {
+        for (native_code, category, code) in [
+            (
+                duckdb::ffi::duckdb_error_type_DUCKDB_ERROR_INTERRUPT,
+                ErrorCategory::Cancelled,
+                "cancelled",
+            ),
+            (
+                duckdb::ffi::duckdb_error_type_DUCKDB_ERROR_PARSER,
+                ErrorCategory::Sql,
+                "duckdb_error",
+            ),
+        ] {
+            let error = duck_error(duckdb::Error::DuckDBFailure(
+                duckdb::ffi::Error::new(native_code),
+                Some("native diagnostic".into()),
+            ));
+            assert_eq!(error.category, category);
+            assert_eq!(error.code.as_deref(), Some(code));
+            assert_eq!(error.message, "native diagnostic");
+        }
+    }
+
+    #[test]
+    fn operation_cancellation_classifies_generic_native_failures() {
+        for (cancelled, expected) in [
+            (true, ErrorCategory::Cancelled),
+            (false, ErrorCategory::Sql),
+        ] {
+            let native = duckdb::Error::DuckDBFailure(
+                duckdb::ffi::Error::new(duckdb::ffi::DuckDBError),
+                Some("INTERRUPT Error: Interrupted!".into()),
+            );
+            let error = duck_operation_error(duck_error(native), cancelled);
+            assert_eq!(error.category, expected);
+            assert_eq!(error.message, "INTERRUPT Error: Interrupted!");
+        }
+        let error = duck_operation_error(DatabaseError::internal("worker failed"), true);
+        assert_eq!(error.category, ErrorCategory::Internal);
     }
 
     #[tokio::test]

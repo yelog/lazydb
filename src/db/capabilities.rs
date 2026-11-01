@@ -40,6 +40,14 @@ impl DatabaseCapabilities {
                 manual_transactions: true,
                 cancellation: true,
             },
+            DatabaseKind::CockroachDb => Self {
+                catalog: true,
+                relation_ddl: true,
+                relation_edit: false,
+                monitoring: false,
+                manual_transactions: true,
+                cancellation: true,
+            },
             DatabaseKind::MySql => Self {
                 catalog: true,
                 relation_ddl: true,

@@ -26,7 +26,9 @@ impl SqlDialect {
 
     pub const fn for_database_kind(kind: crate::profile::DatabaseKind) -> Self {
         match kind {
-            crate::profile::DatabaseKind::Postgres => Self::Postgres,
+            crate::profile::DatabaseKind::Postgres | crate::profile::DatabaseKind::CockroachDb => {
+                Self::Postgres
+            }
             crate::profile::DatabaseKind::MySql | crate::profile::DatabaseKind::TiDb => Self::MySql,
             crate::profile::DatabaseKind::MariaDb => Self::MariaDb,
             crate::profile::DatabaseKind::SqlServer => Self::SqlServer,

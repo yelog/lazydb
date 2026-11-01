@@ -24,8 +24,8 @@ use crate::{
         settings::AppSettings,
     },
     profile::{
-        ConnectionProfile, CredentialPolicy, ProfileAccess, ProfileCollection,
-        import_connection_url,
+        ConnectionProfile, CredentialPolicy, DatabaseKind, ProfileAccess, ProfileCollection,
+        import_connection_url_with_driver,
     },
     project::ProjectContext,
 };
@@ -145,6 +145,7 @@ pub async fn run(
     match command {
         ConnectionsCommand::Add {
             name,
+            driver,
             scope,
             project,
             password_env,
@@ -173,6 +174,21 @@ pub async fn run(
                     2,
                 ));
             }
+            let driver = driver
+                .as_deref()
+                .map(|name| {
+                    serde_json::from_value::<DatabaseKind>(serde_json::Value::String(
+                        name.to_ascii_lowercase(),
+                    ))
+                    .map_err(|_| {
+                        error(
+                            "invalid_arguments",
+                            "The requested driver is unsupported.",
+                            2,
+                        )
+                    })
+                })
+                .transpose()?;
             let paths = app_paths()?;
             let scope = match scope {
                 Some(scope) => scope,
@@ -197,13 +213,14 @@ pub async fn run(
                     .map_err(|_| {
                         error("invalid_project", "Unable to resolve the project path.", 2)
                     })?;
-            let mut imported = import_connection_url(url, Some(&name)).map_err(|_| {
-                error(
-                    "invalid_profile",
-                    "The connection URL is invalid or unsupported.",
-                    2,
-                )
-            })?;
+            let mut imported = import_connection_url_with_driver(url, Some(&name), driver)
+                .map_err(|_| {
+                    error(
+                        "invalid_profile",
+                        "The connection URL is invalid or unsupported.",
+                        2,
+                    )
+                })?;
             let normalized_name = name.trim();
             if normalized_name.is_empty() {
                 return Err(error(

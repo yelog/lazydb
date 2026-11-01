@@ -48,6 +48,82 @@ fn commit_and_outer_rollback_return_to_idle_with_new_generation() {
 }
 
 #[test]
+fn cockroach_and_postgres_statement_errors_abort_manual_transactions() {
+    for url in [
+        "cockroachdb://root@localhost/defaultdb",
+        "postgresql://postgres@localhost/defaultdb",
+    ] {
+        let profile = lazydb::profile::import_connection_url(url, Some("transaction-test"))
+            .unwrap()
+            .profile;
+        let profile_id = profile.id;
+        let mut app = lazydb::app::App::new(Vec::new());
+        app.profiles.push(profile);
+        app.connection.profile_id = Some(profile_id);
+        app.connection.generation = 1;
+        app.connection.status = lazydb::model::workspace::ConnectionStatus::Connected;
+        let tab = app.active_console_mut();
+        tab.transaction_mode = TransactionMode::Manual;
+        tab.transaction_state = TransactionState::Active;
+        tab.transaction_generation = 4;
+        tab.generation = 2;
+        let tab_id = tab.id;
+        app.update(lazydb::action::Action::ManualQueryFailed {
+            tab_id,
+            query_generation: 2,
+            transaction_generation: 4,
+            connection: lazydb::identity::ConnectionIdentity {
+                profile_id,
+                generation: 1,
+            },
+            message: "transaction statement failed (SQLSTATE 40001)".into(),
+        });
+        assert_eq!(
+            app.active_console().transaction_state,
+            TransactionState::Aborted,
+            "{url}"
+        );
+    }
+}
+
+#[test]
+fn cockroach_rejected_commit_requires_rollback_and_unknown_commit_is_blocked() {
+    for (unknown, expected) in [
+        (false, TransactionState::Aborted),
+        (true, TransactionState::OutcomeUnknown),
+    ] {
+        let profile =
+            lazydb::profile::import_connection_url("cockroachdb://root@localhost/defaultdb", None)
+                .unwrap()
+                .profile;
+        let profile_id = profile.id;
+        let mut app = lazydb::app::App::new(Vec::new());
+        app.profiles.push(profile);
+        app.connection.profile_id = Some(profile_id);
+        app.connection.generation = 1;
+        app.connection.status = lazydb::model::workspace::ConnectionStatus::Connected;
+        let tab = app.active_console_mut();
+        tab.transaction_mode = TransactionMode::Manual;
+        tab.transaction_state = TransactionState::Committing;
+        tab.transaction_generation = 4;
+        tab.generation = 2;
+        let tab_id = tab.id;
+        app.update(lazydb::action::Action::ManualCommitFailed {
+            tab_id,
+            query_generation: 2,
+            transaction_generation: 4,
+            connection: lazydb::identity::ConnectionIdentity {
+                profile_id,
+                generation: 1,
+            },
+            message: "commit failed".into(),
+            unknown,
+        });
+        assert_eq!(app.active_console().transaction_state, expected);
+    }
+}
+
+#[test]
 fn aborted_allows_only_rollback_and_unknown_outcome_is_blocked() {
     let active = TransactionSnapshot {
         mode: TransactionMode::Manual,

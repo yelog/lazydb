@@ -21,6 +21,7 @@ pub enum TransactionRequest {
         dialect: crate::sql::SqlDialect,
         count_sql: String,
         page: crate::model::pagination::PageRequest,
+        cancel: tokio::sync::oneshot::Receiver<()>,
         reply: tokio::sync::oneshot::Sender<
             Result<(QueryOutcome, crate::model::pagination::ResultPagination), TransactionError>,
         >,
@@ -150,6 +151,10 @@ pub trait TransactionBackend: Send + 'static {
         ))
     }
     async fn commit(&mut self) -> Result<(), TransactionError>;
+    /// Whether a rejected commit retains a session that can only be rolled back.
+    fn commit_failure_requires_rollback(&self, _error: &TransactionError) -> bool {
+        false
+    }
     async fn rollback(&mut self) -> Result<(), TransactionError>;
     async fn cancel(&mut self) -> Result<(), TransactionError>;
     fn depth(&self) -> usize;

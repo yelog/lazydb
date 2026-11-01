@@ -132,6 +132,7 @@ impl DatabaseKindLabel for DatabaseKind {
     fn label(self) -> &'static str {
         match self {
             DatabaseKind::Postgres => "PostgreSQL",
+            DatabaseKind::CockroachDb => "CockroachDB",
             DatabaseKind::MySql => "MySQL",
             DatabaseKind::MariaDb => "MariaDB",
             DatabaseKind::TiDb => "TiDB",

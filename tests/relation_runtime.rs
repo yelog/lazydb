@@ -175,6 +175,64 @@ fn unchanged_relation_response_is_the_only_accepted_identity() {
 }
 
 #[test]
+fn readonly_grid_drivers_have_no_edit_session_while_postgres_keeps_one() {
+    for (url, editable) in [
+        (
+            "cockroachdb://root@localhost/defaultdb?sslmode=disable",
+            false,
+        ),
+        (
+            "snowflake://alice@org-account.snowflakecomputing.com/defaultdb",
+            false,
+        ),
+        ("tidb://root@localhost/defaultdb", false),
+        (
+            "postgresql://postgres@localhost/defaultdb?sslmode=disable",
+            true,
+        ),
+    ] {
+        let mut profile = lazydb::profile::import_connection_url(url, Some("grid-test"))
+            .unwrap()
+            .profile;
+        let mut request = request();
+        profile.id = request.connection.profile_id;
+        request.scope = profile.catalog_scope.clone();
+        let mut app = relation_app(&request);
+        app.profiles.push(profile);
+        request.tab_id = app.tabs[1].id();
+        if let WorkspaceTab::Relation(tab) = &mut app.tabs[1] {
+            tab.data = RelationLoad::Loading {
+                request: request.clone(),
+                previous: None,
+            };
+        }
+        let mut result = empty_outcome();
+        result.result_sets.push(lazydb::db::query::ResultSet {
+            columns: vec![lazydb::db::query::ColumnMeta {
+                name: "id".into(),
+                type_name: "INT8".into(),
+            }],
+            rows: vec![vec![lazydb::db::value::CellValue::Integer(1)]],
+            affected_rows: 0,
+        });
+        app.update(Action::RelationSucceeded {
+            request,
+            snapshot: Box::new(RelationSnapshot::Preview(lazydb::db::RelationPreview {
+                sql: "SELECT id FROM users".into(),
+                result,
+                pagination: default_pagination(),
+                row_versions: None,
+            })),
+        });
+        let WorkspaceTab::Relation(tab) = &app.tabs[1] else {
+            panic!("expected relation tab");
+        };
+        assert!(matches!(tab.data, RelationLoad::Ready(_)));
+        assert_eq!(tab.edit.is_some(), editable, "{url}");
+    }
+}
+
+#[test]
 fn every_stale_field_preserves_pending_and_previous_snapshot() {
     let valid = request();
     for stale in stale_requests(&valid) {

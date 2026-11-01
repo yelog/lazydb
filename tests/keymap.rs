@@ -5341,6 +5341,19 @@ fn clearing_notification_history_keeps_empty_history_reopenable() {
 }
 
 #[test]
+fn ctrl_c_cancels_running_sql_before_global_quit() {
+    let mut keymap = Keymap::default();
+    let mut app = App::new(Vec::new());
+    app.active_console_mut().query_status = lazydb::model::workspace::QueryStatus::Running;
+    for focus in [Focus::Editor, Focus::Results, Focus::Explorer] {
+        app.focus = focus;
+        assert_eq!(keymap.map(ctrl('c'), &app), Some(Action::CancelActiveQuery));
+    }
+    app.active_console_mut().query_status = lazydb::model::workspace::QueryStatus::Idle;
+    assert_eq!(keymap.map(ctrl('c'), &app), Some(Action::Quit));
+}
+
+#[test]
 fn ctrl_c_is_the_global_exit_and_q_is_not() {
     let mut keymap = Keymap::default();
     let mut app = App::new(Vec::new());

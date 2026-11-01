@@ -13,6 +13,7 @@ use crate::persistence::local_credentials::EncryptedCredential;
 #[serde(rename_all = "lowercase")]
 pub enum DatabaseKind {
     Postgres,
+    CockroachDb,
     MySql,
     MariaDb,
     Oracle,
@@ -33,10 +34,15 @@ impl DatabaseKind {
         matches!(self, Self::Redis | Self::Valkey)
     }
 
+    pub const fn is_postgres_compatible(self) -> bool {
+        matches!(self, Self::Postgres | Self::CockroachDb)
+    }
+
     pub fn is_relational(self) -> bool {
         matches!(
             self,
             Self::Postgres
+                | Self::CockroachDb
                 | Self::MySql
                 | Self::MariaDb
                 | Self::TiDb
@@ -53,6 +59,8 @@ impl DatabaseKind {
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ConnectionUrlFormat {
+    #[serde(rename = "cockroachdb")]
+    CockroachDb,
     Postgres,
     #[default]
     PostgreSql,
@@ -87,6 +95,7 @@ impl ConnectionUrlFormat {
     pub const fn default_for(kind: DatabaseKind) -> Self {
         match kind {
             DatabaseKind::Postgres => Self::PostgreSql,
+            DatabaseKind::CockroachDb => Self::CockroachDb,
             DatabaseKind::MySql => Self::MySql,
             DatabaseKind::MariaDb => Self::MariaDb,
             DatabaseKind::TiDb => Self::TiDb,
@@ -109,6 +118,9 @@ impl ConnectionUrlFormat {
             (
                 Self::Postgres | Self::PostgreSql | Self::JdbcPostgreSql,
                 DatabaseKind::Postgres
+            ) | (
+                Self::CockroachDb | Self::Postgres | Self::PostgreSql | Self::JdbcPostgreSql,
+                DatabaseKind::CockroachDb
             ) | (Self::MySql | Self::JdbcMySql, DatabaseKind::MySql)
                 | (Self::MariaDb, DatabaseKind::MariaDb)
                 | (Self::TiDb, DatabaseKind::TiDb)
@@ -140,6 +152,12 @@ impl ConnectionUrlFormat {
     pub const fn compatible_formats(kind: DatabaseKind) -> &'static [Self] {
         match kind {
             DatabaseKind::Postgres => &[Self::Postgres, Self::PostgreSql, Self::JdbcPostgreSql],
+            DatabaseKind::CockroachDb => &[
+                Self::CockroachDb,
+                Self::Postgres,
+                Self::PostgreSql,
+                Self::JdbcPostgreSql,
+            ],
             DatabaseKind::MySql => &[Self::MySql, Self::JdbcMySql],
             DatabaseKind::MariaDb => &[Self::MariaDb],
             DatabaseKind::TiDb => &[Self::TiDb],
@@ -582,6 +600,8 @@ pub struct ConnectionProfile {
     pub catalog_scope: CatalogScope,
     #[serde(default)]
     pub mongodb_options: Option<MongoConnectionOptions>,
+    #[serde(default)]
+    pub pg_options: Option<PgConnectionOptions>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elasticsearch_options: Option<ElasticsearchConnectionOptions>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -742,6 +762,7 @@ fn parse_duckdb_url(input: &str) -> Result<Option<ParsedConnectionUrl>, ProfileE
         read_only,
         read_only_explicit: read_only_seen,
         mongodb_options: None,
+        pg_options: None,
         snowflake_options: None,
     }))
 }
@@ -775,7 +796,23 @@ pub struct ParsedConnectionUrl {
     pub read_only: bool,
     pub read_only_explicit: bool,
     pub mongodb_options: Option<MongoConnectionOptions>,
+    pub pg_options: Option<PgConnectionOptions>,
     pub snowflake_options: Option<SnowflakeConnectionOptions>,
+}
+
+/// PostgreSQL protocol options. Certificate material remains in the referenced
+/// files; profiles and URL conversion only retain their paths.
+#[derive(Clone, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PgConnectionOptions {
+    #[serde(default)]
+    pub ssl_root_cert: Option<PathBuf>,
+    #[serde(default)]
+    pub ssl_client_cert: Option<PathBuf>,
+    #[serde(default)]
+    pub ssl_client_key: Option<PathBuf>,
+    #[serde(default)]
+    pub options: Option<String>,
 }
 
 /// SQL API session options. The access token is kept in the shared credential store.
@@ -831,6 +868,26 @@ pub struct MongoSeed {
 }
 
 pub fn parse_connection_url(input: &str) -> Result<ParsedConnectionUrl, ProfileError> {
+    parse_connection_url_with_driver(input, None)
+}
+
+/// Parse a URL using an explicit driver identity, including PostgreSQL URLs
+/// supplied for CockroachDB. Defaults are chosen after resolving that identity.
+pub fn parse_connection_url_with_driver(
+    input: &str,
+    driver: Option<DatabaseKind>,
+) -> Result<ParsedConnectionUrl, ProfileError> {
+    let parsed = parse_connection_url_inner(input, driver)?;
+    if driver.is_some_and(|driver| driver != parsed.kind) {
+        return Err(ProfileError::IncompatibleFormat);
+    }
+    Ok(parsed)
+}
+
+fn parse_connection_url_inner(
+    input: &str,
+    driver: Option<DatabaseKind>,
+) -> Result<ParsedConnectionUrl, ProfileError> {
     let input = input.trim();
     if input.is_empty() {
         return Err(ProfileError::Empty);
@@ -871,6 +928,7 @@ pub fn parse_connection_url(input: &str) -> Result<ParsedConnectionUrl, ProfileE
             read_only_explicit: url::form_urlencoded::parse(query.as_bytes())
                 .any(|(key, _)| key.eq_ignore_ascii_case("mode")),
             mongodb_options: None,
+            pg_options: None,
         });
     }
     if normalized.starts_with("sqlite:") || normalized.starts_with("file:") {
@@ -902,6 +960,7 @@ pub fn parse_connection_url(input: &str) -> Result<ParsedConnectionUrl, ProfileE
     }
     let url = Url::parse(normalized)?;
     let (kind, format) = match (url.scheme().to_ascii_lowercase().as_str(), jdbc) {
+        ("cockroachdb", false) => (DatabaseKind::CockroachDb, ConnectionUrlFormat::CockroachDb),
         ("postgres", false) => (DatabaseKind::Postgres, ConnectionUrlFormat::Postgres),
         ("postgresql", false) => (DatabaseKind::Postgres, ConnectionUrlFormat::PostgreSql),
         ("postgresql", true) => (DatabaseKind::Postgres, ConnectionUrlFormat::JdbcPostgreSql),
@@ -927,6 +986,11 @@ pub fn parse_connection_url(input: &str) -> Result<ParsedConnectionUrl, ProfileE
             ConnectionUrlFormat::ElasticsearchTls,
         ),
         (scheme, _) => return Err(ProfileError::UnsupportedScheme(scheme.to_owned())),
+    };
+    let kind = match driver {
+        Some(driver) if format.is_compatible(driver) => driver,
+        Some(_) => return Err(ProfileError::IncompatibleFormat),
+        None => kind,
     };
     parse_server_url(url, kind, format)
 }
@@ -1079,6 +1143,7 @@ fn parse_mongodb_url(input: &str) -> Result<ParsedConnectionUrl, ProfileError> {
             srv,
             uri_options: options,
         }),
+        pg_options: None,
     })
 }
 
@@ -1165,6 +1230,7 @@ fn parse_jdbc_oracle_url(input: &str) -> Result<ParsedConnectionUrl, ProfileErro
         read_only: false,
         read_only_explicit: false,
         mongodb_options: None,
+        pg_options: None,
     })
 }
 
@@ -1172,7 +1238,15 @@ pub fn import_connection_url(
     input: &str,
     preferred_name: Option<&str>,
 ) -> Result<ImportedProfile, ProfileError> {
-    let parsed = parse_connection_url(input)?;
+    import_connection_url_with_driver(input, preferred_name, None)
+}
+
+pub fn import_connection_url_with_driver(
+    input: &str,
+    preferred_name: Option<&str>,
+    driver: Option<DatabaseKind>,
+) -> Result<ImportedProfile, ProfileError> {
+    let parsed = parse_connection_url_with_driver(input, driver)?;
     let derived_name = if parsed.kind == DatabaseKind::DuckDb && parsed.duckdb_path.is_none() {
         "memory".to_owned()
     } else if let Some(path) = &parsed.duckdb_path {
@@ -1228,6 +1302,7 @@ pub fn import_connection_url(
             catalog_scope,
             mongodb_options: parsed.mongodb_options,
             elasticsearch_options: None,
+            pg_options: parsed.pg_options,
             snowflake_options: parsed.snowflake_options,
         },
         transient_password: parsed.password,
@@ -1277,6 +1352,12 @@ fn parse_server_url(
             }
             .to_owned(),
         )
+    } else if kind == DatabaseKind::CockroachDb {
+        Some(if database.is_empty() {
+            "defaultdb".to_owned()
+        } else {
+            database
+        })
     } else {
         (!database.is_empty()).then_some(database)
     };
@@ -1339,6 +1420,7 @@ fn parse_server_url(
     let mut read_only_explicit = false;
     let mut encrypt = None;
     let mut trust_server_certificate = None;
+    let mut pg_options = PgConnectionOptions::default();
 
     for (key, value) in url.query_pairs() {
         if kind == DatabaseKind::Snowflake
@@ -1363,14 +1445,40 @@ fn parse_server_url(
             }
         } else if (key.eq_ignore_ascii_case("currentSchema")
             || key.eq_ignore_ascii_case("schema") && kind == DatabaseKind::SqlServer)
-            && matches!(kind, DatabaseKind::Postgres | DatabaseKind::SqlServer)
+            && (kind.is_postgres_compatible() || kind == DatabaseKind::SqlServer)
         {
             reject_duplicate(&mut seen_schema, "currentSchema")?;
             default_schema = Some(value.into_owned());
-        } else if key.eq_ignore_ascii_case("sslmode") && kind == DatabaseKind::Postgres {
+        } else if key.eq_ignore_ascii_case("sslmode") && kind.is_postgres_compatible() {
             reject_duplicate(&mut seen_ssl, "ssl")?;
             ssl_mode = parse_ssl_mode(&value)
                 .ok_or_else(|| ProfileError::InvalidQueryParameter("sslmode".into()))?;
+        } else if kind.is_postgres_compatible()
+            && matches!(
+                key.to_ascii_lowercase().as_str(),
+                "sslrootcert" | "sslcert" | "sslkey" | "options"
+            )
+        {
+            let key = key.to_ascii_lowercase();
+            match key.as_str() {
+                "sslrootcert" => {
+                    reject_option_duplicate(&pg_options.ssl_root_cert, &key)?;
+                    pg_options.ssl_root_cert = Some(PathBuf::from(value.into_owned()));
+                }
+                "sslcert" => {
+                    reject_option_duplicate(&pg_options.ssl_client_cert, &key)?;
+                    pg_options.ssl_client_cert = Some(PathBuf::from(value.into_owned()));
+                }
+                "sslkey" => {
+                    reject_option_duplicate(&pg_options.ssl_client_key, &key)?;
+                    pg_options.ssl_client_key = Some(PathBuf::from(value.into_owned()));
+                }
+                "options" => {
+                    reject_option_duplicate(&pg_options.options, &key)?;
+                    pg_options.options = Some(value.into_owned());
+                }
+                _ => unreachable!("recognized PostgreSQL option"),
+            }
         } else if key.eq_ignore_ascii_case("useSSL")
             && matches!(
                 kind,
@@ -1444,6 +1552,7 @@ fn parse_server_url(
     let default_port = match kind {
         DatabaseKind::Snowflake => 443,
         DatabaseKind::Postgres => 5432,
+        DatabaseKind::CockroachDb => 26257,
         DatabaseKind::MySql | DatabaseKind::MariaDb => 3306,
         DatabaseKind::TiDb => 4000,
         DatabaseKind::Oracle => 1521,
@@ -1475,6 +1584,7 @@ fn parse_server_url(
         read_only,
         read_only_explicit,
         mongodb_options: None,
+        pg_options: (pg_options != PgConnectionOptions::default()).then_some(pg_options),
         snowflake_options,
     })
 }
@@ -1552,6 +1662,7 @@ fn parse_jdbc_sql_server_url(input: &str) -> Result<ParsedConnectionUrl, Profile
         read_only: read_only.unwrap_or(false),
         read_only_explicit: read_only.is_some(),
         mongodb_options: None,
+        pg_options: None,
     })
 }
 
@@ -1673,6 +1784,7 @@ fn parse_sqlite_url(input: &str, jdbc: bool) -> Result<ParsedConnectionUrl, Prof
         read_only_explicit: url::form_urlencoded::parse(query.as_bytes())
             .any(|(key, _)| key.eq_ignore_ascii_case("mode")),
         mongodb_options: None,
+        pg_options: None,
     })
 }
 
@@ -1775,6 +1887,7 @@ pub fn format_connection_url(
         return Ok(output);
     }
     let scheme = match format {
+        ConnectionUrlFormat::CockroachDb => "cockroachdb",
         ConnectionUrlFormat::Postgres => "postgres",
         ConnectionUrlFormat::PostgreSql | ConnectionUrlFormat::JdbcPostgreSql => "postgresql",
         ConnectionUrlFormat::MySql | ConnectionUrlFormat::JdbcMySql => "mysql",
@@ -1872,7 +1985,7 @@ pub fn format_connection_url(
         if let Some(user) = profile.user.as_deref().filter(|value| !value.is_empty()) {
             query.push(format!("user={}", utf8_percent_encode(user, QUERY_VALUE)));
         }
-    } else if profile.kind == DatabaseKind::Postgres {
+    } else if profile.kind.is_postgres_compatible() {
         if let Some(schema) = profile
             .default_schema
             .as_deref()
@@ -1884,6 +1997,26 @@ pub fn format_connection_url(
             ));
         }
         query.push(format!("sslmode={}", ssl_mode_value(profile.ssl_mode)));
+        if let Some(options) = &profile.pg_options {
+            for (key, path) in [
+                ("sslrootcert", &options.ssl_root_cert),
+                ("sslcert", &options.ssl_client_cert),
+                ("sslkey", &options.ssl_client_key),
+            ] {
+                if let Some(path) = path {
+                    query.push(format!(
+                        "{key}={}",
+                        utf8_percent_encode(&path.to_string_lossy(), QUERY_VALUE)
+                    ));
+                }
+            }
+            if let Some(options) = &options.options {
+                query.push(format!(
+                    "options={}",
+                    utf8_percent_encode(options, QUERY_VALUE)
+                ));
+            }
+        }
     } else if matches!(
         profile.kind,
         DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::TiDb

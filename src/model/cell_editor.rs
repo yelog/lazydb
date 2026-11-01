@@ -1418,7 +1418,7 @@ pub(crate) fn classify_column_type(
     let base_name = type_name.split('(').next().unwrap_or(&type_name).trim();
 
     let kind = match database_kind {
-        DatabaseKind::Postgres => match base_name {
+        DatabaseKind::Postgres | DatabaseKind::CockroachDb => match base_name {
             "bool" | "boolean" => Some(CellEditorKind::Boolean),
             "date" => Some(CellEditorKind::Date),
             "time" => Some(CellEditorKind::Time),

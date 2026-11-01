@@ -477,6 +477,18 @@ impl Keymap {
             return editor_leader.then_some(Action::EditorKey(event));
         }
         if self.bindings.matches("quit", event) {
+            if event.code == KeyCode::Char('c')
+                && event.modifiers == KeyModifiers::CONTROL
+                && matches!(
+                    app.overlay,
+                    None | Some(Overlay::TransactionExitConfirm { .. })
+                )
+                && app.active_console_opt().is_some_and(|tab| {
+                    tab.query_status == crate::model::workspace::QueryStatus::Running
+                })
+            {
+                return Some(Action::CancelActiveQuery);
+            }
             return Some(Action::Quit);
         }
         if self.bindings.matches("terminal-selection", event) {

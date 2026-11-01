@@ -2241,6 +2241,81 @@ fn preview_uses_selected_relation_identity_without_opening_relation_tabs() {
     assert_eq!(app.tabs.len(), 2);
 }
 
+#[test]
+fn cockroach_workspace_database_switch_refreshes_loaded_roots_without_rebinding_console() {
+    use lazydb::profile::{CatalogScope, CatalogSelection, DatabaseScope};
+    let mut profile = import_connection_url("cockroachdb://root@localhost/app", Some("crdb"))
+        .unwrap()
+        .profile;
+    profile.catalog_scope = CatalogScope {
+        databases: CatalogSelection::Selected(vec![
+            DatabaseScope {
+                name: "app".into(),
+                schemas: CatalogSelection::All,
+            },
+            DatabaseScope {
+                name: "other".into(),
+                schemas: CatalogSelection::All,
+            },
+        ]),
+    };
+    let mut app = App::new(vec![profile.clone()]);
+    app.update(Action::NewConsole);
+    let commands = app.update(Action::RequestConnect(profile.id));
+    let generation = commands
+        .iter()
+        .find_map(|command| match command {
+            Command::Connect { generation, .. } => Some(*generation),
+            _ => None,
+        })
+        .unwrap();
+    let info = |database: &str| ServerInfo {
+        kind: DatabaseKind::CockroachDb,
+        version: "CockroachDB v25.4.6".into(),
+        database: database.into(),
+        current_user: Some("root".into()),
+    };
+    app.update(Action::ConnectionSucceeded {
+        profile_id: profile.id,
+        generation,
+        server: info("app"),
+        mutation_capabilities: Default::default(),
+    });
+    install_database(&mut app, &profile);
+    let original_target = app.active_console().execution_target.clone();
+    app.update(Action::OpenDatabaseSelector);
+    let Some(Overlay::DatabaseSelector(selector)) = app.overlay.as_ref() else {
+        panic!("missing selector");
+    };
+    let index = selector
+        .candidates
+        .iter()
+        .position(|target| target.database == "other")
+        .unwrap();
+    let commands = app.update(Action::SelectDatabaseSelector(index));
+    let generation = commands
+        .iter()
+        .find_map(|command| match command {
+            Command::Connect { generation, .. } => Some(*generation),
+            _ => None,
+        })
+        .expect("switch must connect to selected database");
+    let commands = app.update(Action::ConnectionSucceeded {
+        profile_id: profile.id,
+        generation,
+        server: info("other"),
+        mutation_capabilities: Default::default(),
+    });
+    assert!(
+        commands.iter().any(|command| matches!(command,
+            Command::LoadCatalogPage(request) if request.key.target == CatalogTarget::Databases
+        )),
+        "loaded roots must be refreshed for the new database"
+    );
+    assert_eq!(app.active_console().execution_target, original_target);
+    assert_eq!(app.connection.target.as_ref().unwrap().database, "other");
+}
+
 fn connected_app() -> (App, ConnectionProfile) {
     let mut profile = import_connection_url(":memory:", Some("test"))
         .unwrap()

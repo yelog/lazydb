@@ -7911,6 +7911,7 @@ fn driver_options_use_database_icons_in_each_icon_mode() {
             }
             let display_name = match kind {
                 DatabaseKind::Postgres => "PostgreSQL",
+                DatabaseKind::CockroachDb => "CockroachDB",
                 DatabaseKind::MySql => "MySQL",
                 DatabaseKind::MariaDb => "MariaDB",
                 DatabaseKind::Oracle => "Oracle",

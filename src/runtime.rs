@@ -6957,7 +6957,10 @@ impl Runtime {
                                 query_generation,
                                 transaction_generation,
                                 connection,
-                                message: error.0,
+                                message: error.relation_diagnostic().map_or_else(
+                                    || error.0.clone(),
+                                    |diagnostic| diagnostic.safe_message(),
+                                ),
                             });
                         }
                         Err(_) => {
@@ -7037,7 +7040,10 @@ impl Runtime {
                             query_generation,
                             transaction_generation,
                             connection,
-                            message: error.0,
+                            message: error.relation_diagnostic().map_or_else(
+                                || error.0.clone(),
+                                |diagnostic| diagnostic.safe_message(),
+                            ),
                         });
                     }
                     Err(_) => {
@@ -7103,13 +7109,19 @@ impl Runtime {
                     });
                 }
                 Ok(Err(error)) => {
+                    let unknown = error.relation_diagnostic().is_some_and(|diagnostic| {
+                        diagnostic.category == crate::db::transaction::RelationMutationCategory::ConnectionUnknown
+                    });
                     let _ = sender.send(Action::ManualCommitFailed {
                         tab_id,
                         query_generation,
                         transaction_generation,
                         connection,
-                        message: error.0,
-                        unknown: false,
+                        message: error.relation_diagnostic().map_or_else(
+                            || error.0.clone(),
+                            |diagnostic| diagnostic.safe_message(),
+                        ),
+                        unknown,
                     });
                 }
                 Err(_) => {
@@ -7180,7 +7192,10 @@ impl Runtime {
                         query_generation,
                         transaction_generation,
                         connection,
-                        message: error.0,
+                        message: error.relation_diagnostic().map_or_else(
+                            || error.0.clone(),
+                            |diagnostic| diagnostic.safe_message(),
+                        ),
                         unknown: false,
                     });
                 }
@@ -7221,7 +7236,7 @@ impl Runtime {
             >,
         >,
     ) {
-        let Some(entry) = self.manual_transactions.get(&tab_id) else {
+        let Some(entry) = self.manual_transactions.get_mut(&tab_id) else {
             let _ = reply.send(Err(crate::db::transaction::TransactionError(
                 "Manual transaction worker is not active".into(),
             )));
@@ -7237,13 +7252,21 @@ impl Runtime {
             )));
             return;
         }
-        let _ = entry.request_sender.send(TransactionRequest::Page {
-            source_sql,
-            dialect,
-            count_sql,
-            page,
-            reply,
-        });
+        let (cancel, cancellation) = tokio::sync::oneshot::channel();
+        if entry
+            .request_sender
+            .send(TransactionRequest::Page {
+                source_sql,
+                dialect,
+                count_sql,
+                page,
+                cancel: cancellation,
+                reply,
+            })
+            .is_ok()
+        {
+            entry.cancellation_sender = Some(cancel);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -7346,6 +7369,7 @@ impl Runtime {
             let quarantine_invalidates_connection = match &database {
                 DatabaseConnection::Sqlite(_) => true,
                 DatabaseConnection::Postgres(_)
+                | DatabaseConnection::CockroachDb(_)
                 | DatabaseConnection::MySql(_)
                 | DatabaseConnection::MariaDb(_)
                 | DatabaseConnection::TiDb(_)
@@ -8115,6 +8139,7 @@ async fn save_profile_transaction(
                     && old.catalog_scope != profile.catalog_scope)
                 || old.ssl_mode != profile.ssl_mode
                 || old.elasticsearch_options != profile.elasticsearch_options
+                || old.pg_options != profile.pg_options
         }),
         catalog_scope_changed: old_profile
             .as_ref()
@@ -8336,14 +8361,14 @@ async fn discover_profile_catalog(
         }
     };
     let capabilities = connection.catalog_capabilities();
-    let postgres_databases = match connection.discoverable_postgres_databases().await {
+    let pgwire_databases = match connection.discoverable_pgwire_databases().await {
         Ok(databases) => databases,
         Err(error) => {
             connection.close().await;
             return Err(sanitize_terminal_text(&error.to_string()));
         }
     };
-    let discovery = if let Some(databases) = postgres_databases {
+    let discovery = if let Some(databases) = pgwire_databases {
         connection.close().await;
         let profile = profile.clone();
         let password = password.cloned();
@@ -9784,6 +9809,141 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pgwire_auto_cancellation_interrupts_postgres_session() {
+        assert_pgwire_auto_cancellation("LAZYDB_TEST_POSTGRES_URL", false).await;
+    }
+
+    #[tokio::test]
+    async fn pgwire_auto_cancellation_interrupts_cockroach_session() {
+        assert_pgwire_auto_cancellation("LAZYDB_TEST_COCKROACHDB_URL", true).await;
+    }
+
+    async fn assert_pgwire_auto_cancellation(url_variable: &str, cockroach: bool) {
+        use sqlx::{AssertSqlSafe, Connection};
+        let Ok(url) = std::env::var(url_variable) else {
+            assert!(
+                std::env::var_os("LAZYDB_REQUIRE_DATABASE_TESTS").is_none(),
+                "{url_variable} is required"
+            );
+            return;
+        };
+        let imported = import_connection_url(&url, Some("runtime-auto-cancel")).unwrap();
+        let profile = imported.profile;
+        let identity = ConnectionIdentity {
+            profile_id: profile.id,
+            generation: 1,
+        };
+        let root = DatabaseConnection::connect(&profile, imported.transient_password.as_ref())
+            .await
+            .unwrap();
+        let target = ExecutionTarget::from_profile(&profile);
+        let key = ConnectionKey::new(identity, target.clone());
+        let (event_sender, _events) = mpsc::unbounded_channel();
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = Runtime::new(
+            vec![profile],
+            HashSet::new(),
+            HashMap::new(),
+            None,
+            ProfileStore::new(temp.path().join("profiles.json")),
+            Arc::new(crate::persistence::secrets::NativeSecretStore),
+            event_sender,
+        );
+        runtime.connection.lock().await.insert(
+            key,
+            ActiveConnection {
+                database: root.clone(),
+                target: target.clone(),
+            },
+        );
+        let pg_url = if cockroach {
+            url.replacen("cockroachdb://", "postgresql://", 1)
+        } else {
+            url
+        };
+        let mut observer = sqlx::PgConnection::connect(&pg_url).await.unwrap();
+        let mut blocker = sqlx::PgConnection::connect(&pg_url).await.unwrap();
+        let table = format!("public.lazydb_auto_cancel_{}", Uuid::new_v4().simple());
+        root.execute(&format!(
+            "CREATE TABLE {table} (id INT PRIMARY KEY, value INT); INSERT INTO {table} VALUES (1, 0)"
+        ))
+        .await
+        .unwrap();
+        sqlx::raw_sql(AssertSqlSafe("BEGIN"))
+            .execute(&mut blocker)
+            .await
+            .unwrap();
+        sqlx::raw_sql(AssertSqlSafe(
+            format!("UPDATE {table} SET value = 0 WHERE id = 1").as_str(),
+        ))
+        .execute(&mut blocker)
+        .await
+        .unwrap();
+        let monitor_sql = if cockroach {
+            "SELECT count(*)::INT8 FROM crdb_internal.node_queries WHERE query LIKE $1"
+        } else {
+            "SELECT count(*)::INT8 FROM pg_stat_activity WHERE state = 'active' AND query LIKE $1 AND pid <> pg_backend_pid()"
+        };
+        let tab_id = Uuid::new_v4();
+        let console_id = Uuid::new_v4();
+        // More cancellations than the adapters' six pool slots catches abandoned
+        // SQLx drain tasks as well as cancellation that only changes local UI state.
+        for generation in 1..=8 {
+            runtime.dispatch(Command::RunQuery {
+                connection: identity,
+                target: target.clone(),
+                tab_id,
+                generation,
+                console_id,
+                sql: format!("UPDATE {table} SET value = value + 1 WHERE id = 1"),
+            });
+            for expected_running in [true, false] {
+                tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                    loop {
+                        let running: i64 = sqlx::query_scalar(AssertSqlSafe(monitor_sql))
+                            .bind(format!("UPDATE {table} SET value = value + 1%"))
+                            .fetch_one(&mut observer)
+                            .await
+                            .unwrap();
+                        if (running > 0) == expected_running {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    }
+                })
+                .await
+                .unwrap_or_else(|_| {
+                    panic!("server query running={expected_running}, cancellation {generation}")
+                });
+                if expected_running {
+                    runtime.dispatch(Command::CancelQuery { tab_id, generation });
+                }
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(3), root.execute("SELECT 1"))
+                .await
+                .expect("cancelled sessions must release pool capacity")
+                .unwrap();
+        }
+        sqlx::raw_sql(AssertSqlSafe("ROLLBACK"))
+            .execute(&mut blocker)
+            .await
+            .unwrap();
+        let result = root
+            .execute(&format!("SELECT value FROM {table}"))
+            .await
+            .unwrap();
+        assert_eq!(
+            result.result_sets[0].rows,
+            vec![vec![crate::db::value::CellValue::Integer(0)]],
+            "cancelled pending mutations must never resume when the row lock is released"
+        );
+        root.execute(&format!("DROP TABLE {table}")).await.unwrap();
+        observer.close().await.unwrap();
+        blocker.close().await.unwrap();
+        root.close().await;
+    }
+
+    #[tokio::test]
     async fn cancel_query_command_interrupts_duckdb_runtime_query() {
         let profile = import_connection_url("duckdb::memory:", Some("runtime-cancel"))
             .unwrap()
@@ -10333,6 +10493,190 @@ mod tests {
         assert!(removed.is_some());
         assert!(active.is_empty());
         removed.unwrap().database.close().await;
+    }
+
+    #[tokio::test]
+    async fn manual_commit_propagates_structured_unknown_outcome() {
+        let profile = import_connection_url("cockroachdb://root@localhost/defaultdb", None)
+            .unwrap()
+            .profile;
+        let connection = ConnectionIdentity {
+            profile_id: profile.id,
+            generation: 1,
+        };
+        let target = ExecutionTarget::from_profile(&profile);
+        let tab_id = Uuid::new_v4();
+        let (event_sender, mut events) = mpsc::unbounded_channel();
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = Runtime::new(
+            vec![profile],
+            HashSet::new(),
+            HashMap::new(),
+            None,
+            ProfileStore::new(temp.path().join("connections.toml")),
+            Arc::new(crate::persistence::secrets::NativeSecretStore),
+            event_sender,
+        );
+        let (request_sender, mut requests) = mpsc::unbounded_channel();
+        let worker_handle = tokio::spawn(async move {
+            while let Some(request) = requests.recv().await {
+                match request {
+                    TransactionRequest::Commit { reply } => {
+                        let _ = reply.send(Err(crate::db::transaction::TransactionError::relation(
+                            crate::db::transaction::RelationMutationDiagnostic {
+                                category: crate::db::transaction::RelationMutationCategory::ConnectionUnknown,
+                                sqlstate: Some("40003".into()), operation: "commit".into(), relation: "CockroachDB transaction".into(),
+                                context: None, message: "commit outcome is unknown".into(),
+                            })));
+                    }
+                    TransactionRequest::Shutdown => break,
+                    _ => panic!("unexpected request"),
+                }
+            }
+            WorkerDisposition::Quarantine
+        });
+        runtime.manual_transactions.insert(
+            tab_id,
+            ManualTransactionEntry {
+                connection,
+                target,
+                console_id: tab_id,
+                transaction_id: Uuid::new_v4(),
+                transaction_generation: 4,
+                request_sender,
+                worker_handle,
+                cancellation_sender: None,
+                forced_close_handle: ForcedCloseHandle::new(),
+            },
+        );
+        runtime.manual_commit(connection, tab_id, 2, 4);
+        let action = timeout(Duration::from_secs(2), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(action, Action::ManualCommitFailed { unknown: true, message, .. } if message.contains("commit outcome is unknown") && message.contains("SQLSTATE 40003") && !message.contains("lazydb-relation-diagnostic"))
+        );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn manual_page_cancel_and_rollback_render_structured_diagnostics_safely() {
+        use crate::db::transaction::{
+            RelationMutationCategory, RelationMutationDiagnostic, TransactionError,
+        };
+        use crate::model::pagination::{PageRequest, PageSize};
+
+        let profile = import_connection_url("cockroachdb://root@localhost/defaultdb", None)
+            .unwrap()
+            .profile;
+        let connection = ConnectionIdentity {
+            profile_id: profile.id,
+            generation: 1,
+        };
+        let target = ExecutionTarget::from_profile(&profile);
+        let tab_id = Uuid::new_v4();
+        let (event_sender, mut events) = mpsc::unbounded_channel();
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = Runtime::new(
+            vec![profile],
+            HashSet::new(),
+            HashMap::new(),
+            None,
+            ProfileStore::new(temp.path().join("connections.toml")),
+            Arc::new(crate::persistence::secrets::NativeSecretStore),
+            event_sender,
+        );
+        let (request_sender, mut requests) = mpsc::unbounded_channel();
+        let worker_handle = tokio::spawn(async move {
+            let diagnostic = |operation: &str| {
+                TransactionError::relation(RelationMutationDiagnostic {
+                    category: RelationMutationCategory::InvalidRequest,
+                    sqlstate: Some("40001".into()),
+                    operation: operation.into(),
+                    relation: "CockroachDB transaction".into(),
+                    context: None,
+                    message: "ROLLBACK and restart the entire transaction manually".into(),
+                })
+            };
+            while let Some(request) = requests.recv().await {
+                match request {
+                    TransactionRequest::Page { cancel, reply, .. } => {
+                        cancel
+                            .await
+                            .expect("manual page cancellation must reach its worker");
+                        let _ = reply.send(Err(diagnostic("execute")));
+                    }
+                    TransactionRequest::Rollback { reply } => {
+                        let _ = reply.send(Err(diagnostic("rollback")));
+                    }
+                    TransactionRequest::Shutdown => break,
+                    _ => panic!("unexpected request"),
+                }
+            }
+            WorkerDisposition::Quarantine
+        });
+        runtime.manual_transactions.insert(
+            tab_id,
+            ManualTransactionEntry {
+                connection,
+                target: target.clone(),
+                console_id: tab_id,
+                transaction_id: Uuid::new_v4(),
+                transaction_generation: 4,
+                request_sender,
+                worker_handle,
+                cancellation_sender: None,
+                forced_close_handle: ForcedCloseHandle::new(),
+            },
+        );
+        runtime.manual_execute_page(
+            connection,
+            target,
+            tab_id,
+            tab_id,
+            2,
+            4,
+            "SELECT 1".into(),
+            crate::sql::SqlDialect::Postgres,
+            "SELECT 1".into(),
+            PageRequest::first(PageSize::Ten),
+        );
+        runtime.dispatch(Command::CancelManual {
+            connection,
+            tab_id,
+            query_generation: 2,
+            transaction_generation: 4,
+        });
+        let action = timeout(Duration::from_secs(2), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let Action::ManualQueryPageFailed { message, .. } = action else {
+            panic!("unexpected event: {action:?}");
+        };
+        assert!(message.contains("execute on CockroachDB transaction"));
+        assert!(message.contains("SQLSTATE 40001"));
+        assert!(message.contains("ROLLBACK and restart"));
+        assert!(!message.contains("lazydb-relation-diagnostic"));
+
+        runtime.manual_rollback(connection, tab_id, 2, 4);
+        let action = timeout(Duration::from_secs(2), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let Action::ManualRollbackFailed {
+            message, unknown, ..
+        } = action
+        else {
+            panic!("unexpected event: {action:?}");
+        };
+        assert!(!unknown);
+        assert!(message.contains("rollback on CockroachDB transaction"));
+        assert!(message.contains("SQLSTATE 40001"));
+        assert!(message.contains("ROLLBACK and restart"));
+        assert!(!message.contains("lazydb-relation-diagnostic"));
+        runtime.shutdown().await;
     }
 
     #[tokio::test]
