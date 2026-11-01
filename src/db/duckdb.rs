@@ -1819,6 +1819,14 @@ impl DuckDbAdapter {
         worker
             .await
             .map_err(|error| DatabaseError::internal(format!("DuckDB worker failed: {error}")))?
+            .map_err(|error| {
+                duck_operation_error(
+                    error,
+                    operation.as_ref().is_some_and(|(_, cancelled)| {
+                        cancelled.load(std::sync::atomic::Ordering::SeqCst)
+                    }),
+                )
+            })
     }
 
     pub async fn close(self) {
@@ -3093,6 +3101,15 @@ fn intersect_catalog_scopes(
     CatalogScope { databases }
 }
 
+fn duck_operation_error(mut error: DatabaseError, cancelled: bool) -> DatabaseError {
+    // Some DuckDB C API paths expose only a generic failure code on interrupt.
+    if cancelled && error.category == ErrorCategory::Sql {
+        error.category = ErrorCategory::Cancelled;
+        error.code = Some("cancelled".into());
+    }
+    error
+}
+
 fn duck_error(error: duckdb::Error) -> DatabaseError {
     let interrupted = matches!(
         &error,
@@ -3196,6 +3213,24 @@ mod transaction_tests {
             assert_eq!(error.code.as_deref(), Some(code));
             assert_eq!(error.message, "native diagnostic");
         }
+    }
+
+    #[test]
+    fn operation_cancellation_classifies_generic_native_failures() {
+        for (cancelled, expected) in [
+            (true, ErrorCategory::Cancelled),
+            (false, ErrorCategory::Sql),
+        ] {
+            let native = duckdb::Error::DuckDBFailure(
+                duckdb::ffi::Error::new(duckdb::ffi::DuckDBError),
+                Some("INTERRUPT Error: Interrupted!".into()),
+            );
+            let error = duck_operation_error(duck_error(native), cancelled);
+            assert_eq!(error.category, expected);
+            assert_eq!(error.message, "INTERRUPT Error: Interrupted!");
+        }
+        let error = duck_operation_error(DatabaseError::internal("worker failed"), true);
+        assert_eq!(error.category, ErrorCategory::Internal);
     }
 
     #[tokio::test]
