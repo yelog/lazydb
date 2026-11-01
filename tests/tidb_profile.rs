@@ -237,7 +237,7 @@ fn tidb_registration_preserves_existing_indexes_and_uses_mysql_lsp_dialect() {
         descriptor(DatabaseKind::TiDb).category,
         DatabaseCategory::Relational
     );
-    assert_eq!(DRIVERS.last().unwrap().kind, DatabaseKind::TiDb);
+    assert_eq!(DRIVERS[11].kind, DatabaseKind::TiDb);
     assert_eq!(DRIVER_ORDER[1], DatabaseKind::MySql);
     assert_eq!(DRIVER_ORDER[2], DatabaseKind::MariaDb);
     assert_eq!(DRIVER_ORDER[10], DatabaseKind::ClickHouse);
