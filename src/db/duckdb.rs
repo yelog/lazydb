@@ -3093,10 +3093,26 @@ fn intersect_catalog_scopes(
     CatalogScope { databases }
 }
 
-fn duck_error(error: impl std::fmt::Display) -> DatabaseError {
+fn duck_error(error: duckdb::Error) -> DatabaseError {
+    let interrupted = matches!(
+        &error,
+        duckdb::Error::DuckDBFailure(native, _)
+            if native.extended_code == duckdb::ffi::duckdb_error_type_DUCKDB_ERROR_INTERRUPT
+    );
     DatabaseError {
-        category: ErrorCategory::Sql,
-        code: Some("duckdb_error".into()),
+        category: if interrupted {
+            ErrorCategory::Cancelled
+        } else {
+            ErrorCategory::Sql
+        },
+        code: Some(
+            if interrupted {
+                "cancelled"
+            } else {
+                "duckdb_error"
+            }
+            .into(),
+        ),
         message: crate::security::sanitize_terminal_text(&error.to_string()),
         diagnostic: None,
     }
@@ -3156,6 +3172,30 @@ mod transaction_tests {
             .unwrap();
         assert_eq!(deleted.result_sets[0].affected_rows, 1);
         adapter.close().await;
+    }
+
+    #[test]
+    fn native_interrupt_errors_are_cancelled_while_sql_errors_remain_sql() {
+        for (native_code, category, code) in [
+            (
+                duckdb::ffi::duckdb_error_type_DUCKDB_ERROR_INTERRUPT,
+                ErrorCategory::Cancelled,
+                "cancelled",
+            ),
+            (
+                duckdb::ffi::duckdb_error_type_DUCKDB_ERROR_PARSER,
+                ErrorCategory::Sql,
+                "duckdb_error",
+            ),
+        ] {
+            let error = duck_error(duckdb::Error::DuckDBFailure(
+                duckdb::ffi::Error::new(native_code),
+                Some("native diagnostic".into()),
+            ));
+            assert_eq!(error.category, category);
+            assert_eq!(error.code.as_deref(), Some(code));
+            assert_eq!(error.message, "native diagnostic");
+        }
     }
 
     #[tokio::test]
