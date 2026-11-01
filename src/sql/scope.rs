@@ -280,10 +280,16 @@ fn statement_boundaries(text: &str, dialect: SqlDialect) -> Vec<(usize, usize)> 
                 }
                 _ => index += 1,
             },
-            State::SingleQuote => advance_quoted(bytes, &mut index, b'\'', &mut state),
-            State::DoubleQuote => advance_quoted(bytes, &mut index, b'"', &mut state),
-            State::Backtick => advance_quoted(bytes, &mut index, b'`', &mut state),
-            State::Bracket => advance_quoted(bytes, &mut index, b']', &mut state),
+            State::SingleQuote => advance_quoted(bytes, &mut index, b'\'', &mut state, true),
+            State::DoubleQuote => advance_quoted(
+                bytes,
+                &mut index,
+                b'"',
+                &mut state,
+                dialect == SqlDialect::MySql,
+            ),
+            State::Backtick => advance_quoted(bytes, &mut index, b'`', &mut state, false),
+            State::Bracket => advance_quoted(bytes, &mut index, b']', &mut state, false),
             State::LineComment => {
                 if bytes[index] == b'\n' {
                     state = State::Normal;
@@ -339,7 +345,13 @@ enum State {
     OracleQuote(u8),
 }
 
-fn advance_quoted(bytes: &[u8], index: &mut usize, quote: u8, state: &mut State) {
+fn advance_quoted(
+    bytes: &[u8],
+    index: &mut usize,
+    quote: u8,
+    state: &mut State,
+    backslash_escape: bool,
+) {
     if bytes[*index] == quote {
         if bytes.get(*index + 1) == Some(&quote) {
             *index += 2;
@@ -347,7 +359,7 @@ fn advance_quoted(bytes: &[u8], index: &mut usize, quote: u8, state: &mut State)
             *index += 1;
             *state = State::Normal;
         }
-    } else if bytes[*index] == b'\\' && quote == b'\'' {
+    } else if bytes[*index] == b'\\' && backslash_escape {
         *index = (*index + 2).min(bytes.len());
     } else {
         *index += 1;

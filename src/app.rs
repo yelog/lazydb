@@ -740,7 +740,8 @@ impl App {
             | DatabaseKind::MariaDb
             | DatabaseKind::SqlServer
             | DatabaseKind::Oracle => crate::db::principal::PrincipalCapability::DdlOnly,
-            DatabaseKind::Sqlite
+            DatabaseKind::TiDb
+            | DatabaseKind::Sqlite
             | DatabaseKind::DuckDb
             | DatabaseKind::Redis
             | DatabaseKind::Valkey
@@ -1293,7 +1294,9 @@ impl App {
                     .iter()
                     .find(|profile| profile.id == target.profile_id)
             })
-            .is_some_and(|profile| profile.kind != DatabaseKind::SqlServer)
+            .is_some_and(|profile| {
+                !matches!(profile.kind, DatabaseKind::SqlServer | DatabaseKind::TiDb)
+            })
     }
 
     fn next_console_name(&self) -> String {
@@ -2117,7 +2120,9 @@ impl App {
             .find(|profile| profile.id == tab.descriptor.key.profile_id)
             .map(|profile| match profile.kind {
                 DatabaseKind::Postgres => SqlDialect::Postgres,
-                DatabaseKind::MySql | DatabaseKind::MariaDb => SqlDialect::MySql,
+                DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::TiDb => {
+                    SqlDialect::MySql
+                }
                 DatabaseKind::Oracle => SqlDialect::Generic,
                 DatabaseKind::Sqlite => SqlDialect::Sqlite,
                 DatabaseKind::DuckDb => SqlDialect::DuckDb,
@@ -2738,6 +2743,9 @@ impl App {
                                     .is_some_and(|schema| matches!(schema, "main" | "temp")))
                     })
             });
+            if self.is_tidb_target(tab.execution_target.as_ref()) {
+                tab.transaction_mode = TransactionMode::Auto;
+            }
             let text = snapshot
                 .sql
                 .iter()
@@ -2879,6 +2887,11 @@ impl App {
             .iter()
             .find(|item| item.id == profile.profile_id);
         let mut records = profile.consoles.clone();
+        for console in &mut records {
+            if self.is_tidb_target(console.target.as_ref()) {
+                console.transaction_mode = TransactionMode::Auto;
+            }
+        }
         let mut tabs = Vec::new();
         let persisted_tabs = profile.tabs.clone();
         for persisted in &persisted_tabs {
@@ -6125,6 +6138,15 @@ impl App {
             }
             Action::OpenDashboard => {
                 let requested_target = self.dashboard_target();
+                let profile_id = requested_target
+                    .map(|target| target.profile_id)
+                    .or_else(|| self.active_profile().map(|profile| profile.id));
+                if self.profiles.iter().any(|profile| {
+                    Some(profile.id) == profile_id && profile.kind == DatabaseKind::TiDb
+                }) {
+                    self.notify_warning("Dashboard", "TiDB monitoring is not implemented");
+                    return Vec::new();
+                }
                 if let Some(target) = requested_target
                     && self
                         .connection
@@ -19100,7 +19122,7 @@ impl App {
                 DatabaseKind::MariaDb => {
                     crate::db::mysql::MySqlAdapter::catalog_mutation_capabilities()
                 }
-                DatabaseKind::Oracle => Default::default(),
+                DatabaseKind::TiDb | DatabaseKind::Oracle => Default::default(),
                 DatabaseKind::Sqlite => {
                     crate::db::sqlite::SqliteAdapter::catalog_mutation_capabilities()
                 }
@@ -19115,7 +19137,7 @@ impl App {
                 }
             };
             let namespace_model = match profile.kind {
-                DatabaseKind::MySql | DatabaseKind::MariaDb => {
+                DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::TiDb => {
                     crate::db::catalog::NamespaceModel::DatabaseIsSchema
                 }
                 DatabaseKind::ClickHouse => crate::db::catalog::NamespaceModel::DatabaseIsSchema,
@@ -19144,8 +19166,10 @@ impl App {
             CatalogMutationAnchor::Profile { .. } => None,
             CatalogMutationAnchor::Principal(_) => None,
         };
-        if !matches!(profile.kind, DatabaseKind::MySql | DatabaseKind::MariaDb)
-            && anchor_database.is_some_and(|database| database != &target.database)
+        if !matches!(
+            profile.kind,
+            DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::TiDb
+        ) && anchor_database.is_some_and(|database| database != &target.database)
         {
             return None;
         }
@@ -19162,7 +19186,7 @@ impl App {
         };
         let capabilities = &self.connection.mutation_capabilities;
         let namespace_model = match profile.kind {
-            DatabaseKind::MySql | DatabaseKind::MariaDb => {
+            DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::TiDb => {
                 crate::db::catalog::NamespaceModel::DatabaseIsSchema
             }
             _ => crate::db::catalog::NamespaceModel::DatabaseAndSchema,
@@ -19347,6 +19371,14 @@ impl App {
                 (false, " (query running)"),
                 (false, " (query running)"),
                 (false, " (query running)"),
+                (true, ""),
+            ];
+        }
+        if self.is_tidb_target(tab.execution_target.as_ref()) {
+            return [
+                (true, ""),
+                (false, " (TiDB manual transactions unavailable)"),
+                (false, " (no active transaction)"),
                 (true, ""),
             ];
         }
@@ -19591,7 +19623,9 @@ impl App {
                 .find(|profile| profile.id == tab.descriptor.key.profile_id)
                 .map(|profile| match profile.kind {
                     DatabaseKind::Postgres => SqlDialect::Postgres,
-                    DatabaseKind::MySql | DatabaseKind::MariaDb => SqlDialect::MySql,
+                    DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::TiDb => {
+                        SqlDialect::MySql
+                    }
                     DatabaseKind::Sqlite => SqlDialect::Sqlite,
                     DatabaseKind::SqlServer => SqlDialect::SqlServer,
                     _ => SqlDialect::Generic,
@@ -20503,7 +20537,11 @@ impl App {
         let mut tab = ConsoleTab::new(record.name.clone());
         tab.id = id;
         tab.execution_target = record.execution_target.clone();
-        tab.transaction_mode = record.transaction_mode;
+        tab.transaction_mode = if self.is_tidb_target(tab.execution_target.as_ref()) {
+            TransactionMode::Auto
+        } else {
+            record.transaction_mode
+        };
         if self.editor_text(id).is_err() {
             self.editor.open_console(id, "");
         }
@@ -20511,6 +20549,7 @@ impl App {
             .open_read_only(tab.output_editor_id, &output_text(&tab));
         if let Some(record) = self.sql_editors.iter_mut().find(|record| record.id == id) {
             record.open = true;
+            record.transaction_mode = tab.transaction_mode;
         }
         self.tabs.push(WorkspaceTab::Sql(tab));
     }
@@ -21040,6 +21079,15 @@ impl App {
         if self.overlay == Some(Overlay::ProfileManager) {
             self.overlay = None;
         }
+        if change.connection_settings_changed || change.credentials_changed {
+            let retired = self.retire_profile_connections(profile_id, None);
+            for command in &retired {
+                if let Command::Disconnect { connection } = command {
+                    self.sessions.retire_identity(*connection);
+                }
+            }
+            commands.extend(retired);
+        }
         commands.extend(self.request_connection(profile_id));
         commands
     }
@@ -21402,7 +21450,9 @@ impl App {
                     continue;
                 };
                 let schema = match profile.kind {
-                    DatabaseKind::MySql | DatabaseKind::MariaDb => Some(database.clone()),
+                    DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::TiDb => {
+                        Some(database.clone())
+                    }
                     DatabaseKind::Oracle => entry.qualified_name.schema.clone(),
                     DatabaseKind::Postgres
                     | DatabaseKind::SqlServer
@@ -21514,6 +21564,7 @@ impl App {
             record.execution_target = target.clone();
         }
         self.sync_cached_console_target(console_id, target.as_ref());
+        self.normalize_tidb_console_mode(console_id);
         if let Some(target) = &target {
             self.remember_target(target);
         }
@@ -21603,7 +21654,9 @@ impl App {
             .map(|database| ExecutionTarget {
                 profile_id: profile.id,
                 schema: match profile.kind {
-                    DatabaseKind::MySql | DatabaseKind::MariaDb => Some(database.clone()),
+                    DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::TiDb => {
+                        Some(database.clone())
+                    }
                     DatabaseKind::Sqlite | DatabaseKind::DuckDb => Some("main".to_owned()),
                     DatabaseKind::Postgres | DatabaseKind::SqlServer | DatabaseKind::Oracle => None,
                     DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb => None,
@@ -22557,7 +22610,7 @@ impl App {
         };
         match kind {
             DatabaseKind::Postgres => SqlDialect::Postgres,
-            DatabaseKind::MySql | DatabaseKind::MariaDb => SqlDialect::MySql,
+            DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::TiDb => SqlDialect::MySql,
             DatabaseKind::Oracle => SqlDialect::Oracle,
             DatabaseKind::Sqlite => SqlDialect::Sqlite,
             DatabaseKind::DuckDb => SqlDialect::DuckDb,
@@ -22572,7 +22625,9 @@ impl App {
     pub(crate) fn sql_dialect(&self) -> SqlDialect {
         match self.active_profile().map(|profile| profile.kind) {
             Some(DatabaseKind::Postgres) => SqlDialect::Postgres,
-            Some(DatabaseKind::MySql | DatabaseKind::MariaDb) => SqlDialect::MySql,
+            Some(DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::TiDb) => {
+                SqlDialect::MySql
+            }
             Some(DatabaseKind::Oracle) => SqlDialect::Oracle,
             Some(DatabaseKind::Sqlite) => SqlDialect::Sqlite,
             Some(DatabaseKind::DuckDb) => SqlDialect::DuckDb,
@@ -22596,7 +22651,9 @@ impl App {
             .map(|profile| profile.kind)
         {
             Some(DatabaseKind::Postgres) => SqlDialect::Postgres,
-            Some(DatabaseKind::MySql | DatabaseKind::MariaDb) => SqlDialect::MySql,
+            Some(DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::TiDb) => {
+                SqlDialect::MySql
+            }
             Some(DatabaseKind::Oracle) => SqlDialect::Oracle,
             Some(DatabaseKind::Sqlite) => SqlDialect::Sqlite,
             Some(DatabaseKind::DuckDb) => SqlDialect::DuckDb,
@@ -22660,7 +22717,65 @@ impl App {
         }
     }
 
+    fn is_tidb_target(&self, target: Option<&ExecutionTarget>) -> bool {
+        target.is_some_and(|target| {
+            self.profiles.iter().any(|profile| {
+                profile.id == target.profile_id && profile.kind == DatabaseKind::TiDb
+            })
+        })
+    }
+
+    fn normalize_tidb_console_mode(&mut self, console_id: Uuid) {
+        let reset = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id() == console_id)
+            .and_then(WorkspaceTab::as_console)
+            .is_some_and(|tab| {
+                tab.transaction_state == TransactionState::Idle
+                    && tab.transaction_mode == TransactionMode::Manual
+                    && self.is_tidb_target(tab.execution_target.as_ref())
+            });
+        if !reset {
+            return;
+        }
+        if let Some(tab) = self
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.id() == console_id)
+            .and_then(WorkspaceTab::as_console_mut)
+        {
+            tab.transaction_mode = TransactionMode::Auto;
+        }
+        if let Some(record) = self
+            .sql_editors
+            .iter_mut()
+            .find(|record| record.id == console_id)
+        {
+            record.transaction_mode = TransactionMode::Auto;
+        }
+        self.sync_cached_console_state(console_id);
+    }
+
     fn set_transaction_mode(&mut self, mode: TransactionMode) -> Vec<Command> {
+        if mode == TransactionMode::Manual
+            && self
+                .active_console_opt()
+                .and_then(|tab| tab.execution_target.as_ref())
+                .and_then(|target| {
+                    self.profiles
+                        .iter()
+                        .find(|profile| profile.id == target.profile_id)
+                })
+                .or_else(|| self.active_profile())
+                .is_some_and(|profile| profile.kind == DatabaseKind::TiDb)
+        {
+            self.notify_warning(
+                "Transaction",
+                "TiDB manual transactions are not implemented",
+            );
+            return Vec::new();
+        }
         let Some(tab) = self.active_console_opt() else {
             return Vec::new();
         };
@@ -22779,6 +22894,7 @@ impl App {
             self.notify_warning("Query", "No active SQL console");
             return Vec::new();
         };
+        self.normalize_tidb_console_mode(tab_id);
         let target = self
             .active_console_opt()
             .and_then(|tab| tab.execution_target.clone());
@@ -22950,6 +23066,7 @@ impl App {
         scope: sql::ResolvedScope,
         dialect: SqlDialect,
     ) -> Vec<Command> {
+        self.normalize_tidb_console_mode(tab_id);
         match sql::classify_transaction_sql(&scope.sql, dialect) {
             sql::TransactionSqlClassification::Control(control) => {
                 return self.dispatch_transaction_sql(tab_id, connection, control, scope.sql);
@@ -23008,6 +23125,16 @@ impl App {
         sql: String,
     ) -> Vec<Command> {
         use sql::TransactionControl;
+        if self.profiles.iter().any(|profile| {
+            profile.id == connection.profile_id && profile.kind == DatabaseKind::TiDb
+        }) {
+            self.normalize_tidb_console_mode(tab_id);
+            self.notify_warning(
+                "Transaction",
+                "TiDB manual transactions are not implemented",
+            );
+            return Vec::new();
+        }
         let tab = self.active_console();
         let console_id = tab.id;
         let Some(target) = tab.execution_target.clone() else {
@@ -28208,7 +28335,15 @@ impl App {
         grid.ensure_row_visible(row_count);
     }
 
+    fn active_relation_is_tidb(&self) -> bool {
+        matches!(self.tabs.get(self.active_tab), Some(WorkspaceTab::Relation(tab))
+            if self.profiles.iter().any(|profile| profile.id == tab.descriptor.key.profile_id && profile.kind == DatabaseKind::TiDb))
+    }
+
     fn relation_session_mut(&mut self) -> Option<&mut RelationEditSession> {
+        if self.active_relation_is_tidb() {
+            return None;
+        }
         self.tabs
             .get_mut(self.active_tab)
             .and_then(|tab| match tab {
@@ -28241,6 +28376,9 @@ impl App {
     }
 
     fn relation_edit_cell(&mut self) -> Vec<Command> {
+        if self.active_relation_is_tidb() {
+            return Vec::new();
+        }
         if self.active_relation_is_mongodb() {
             return self.relation_edit_document();
         }
@@ -28875,6 +29013,9 @@ impl App {
     }
 
     fn relation_edit_confirm(&mut self) -> Vec<Command> {
+        if self.active_relation_is_tidb() {
+            return Vec::new();
+        }
         if self.tabs.get(self.active_tab).is_some_and(|tab| {
             matches!(
                 tab,
@@ -29032,6 +29173,9 @@ impl App {
     }
 
     fn relation_save(&mut self) -> Vec<Command> {
+        if self.active_relation_is_tidb() {
+            return Vec::new();
+        }
         use crate::db::mutation::{
             DeleteRowMutation, InsertRowMutation, RelationMutation, RelationMutationRequest,
             RowLocator, UpdateCellMutation,
@@ -29659,6 +29803,9 @@ impl App {
     }
 
     fn relation_delete_range(&mut self, range: std::ops::RangeInclusive<usize>) -> Vec<Command> {
+        if self.active_relation_is_tidb() {
+            return Vec::new();
+        }
         let contains_existing_row = self
             .tabs
             .get(self.active_tab)
@@ -29777,6 +29924,9 @@ impl App {
         }
     }
     fn relation_paste(&mut self) -> Vec<Command> {
+        if self.active_relation_is_tidb() {
+            return Vec::new();
+        }
         if self
             .relation_capabilities()
             .as_ref()
@@ -29799,6 +29949,9 @@ impl App {
         Vec::new()
     }
     fn relation_insert_row(&mut self) -> Vec<Command> {
+        if self.active_relation_is_tidb() {
+            return Vec::new();
+        }
         if self
             .relation_capabilities()
             .as_ref()
@@ -30621,6 +30774,9 @@ impl App {
         if !self.relation_result_is_current(&request, current) {
             return Vec::new();
         }
+        let is_tidb = self.profiles.iter().any(|profile| {
+            profile.id == current.descriptor.key.profile_id && profile.kind == DatabaseKind::TiDb
+        });
         let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(tab_index) else {
             return Vec::new();
         };
@@ -30648,10 +30804,14 @@ impl App {
                     tab.pagination = pagination;
                     tab.grid.selected_row = 0;
                     tab.grid.row_offset = 0;
-                    tab.edit = rows.map(|rows| {
-                        RelationEditSession::from_rows_with_versions(rows, row_versions)
-                            .expect("relation preview row versions must match rows")
-                    });
+                    tab.edit = if is_tidb {
+                        None
+                    } else {
+                        rows.map(|rows| {
+                            RelationEditSession::from_rows_with_versions(rows, row_versions)
+                                .expect("relation preview row versions must match rows")
+                        })
+                    };
                 }
             }
             (RelationRequestKind::Ddl, Ok(RelationSnapshot::Ddl(snapshot))) => {
@@ -30934,6 +31094,7 @@ fn add_explorer_profile(
         DatabaseKind::Postgres
         | DatabaseKind::MySql
         | DatabaseKind::MariaDb
+        | DatabaseKind::TiDb
         | DatabaseKind::Oracle
         | DatabaseKind::SqlServer => {
             let host = profile.host.as_deref().unwrap_or_default();

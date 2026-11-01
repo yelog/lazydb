@@ -189,6 +189,18 @@ fn dialect_specific_mysql_comments_and_unterminated_constructs_are_conservative(
 }
 
 #[test]
+fn mysql_scanner_preserves_escaped_double_quotes_and_embedded_semicolons() {
+    let text = r#"SELECT "a\";b" AS value; SELECT 2;"#;
+    let ranges = scan_statements(text, SqlDialect::MySql);
+    assert_eq!(ranges.len(), 2);
+    assert_eq!(ranges[0].get(text), Some(r#"SELECT "a\";b" AS value;"#));
+    assert_eq!(ranges[1].get(text), Some("SELECT 2;"));
+
+    let identifier = r#"SELECT "ends_with_backslash\"; SELECT 2;"#;
+    assert_eq!(scan_statements(identifier, SqlDialect::Postgres).len(), 2);
+}
+
+#[test]
 fn duckdb_scanner_handles_dollar_quotes_lists_and_nested_comments() {
     let text = "SELECT $$left;right$$, $tag$semi;colon$tag$, [1, 2]; /* outer ; /* inner ; */ end */ SELECT 3;";
     let ranges = scan_statements(text, SqlDialect::DuckDb);

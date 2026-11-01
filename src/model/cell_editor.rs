@@ -1437,6 +1437,7 @@ pub(crate) fn classify_column_type(
         },
         DatabaseKind::MySql
         | DatabaseKind::MariaDb
+        | DatabaseKind::TiDb
         | DatabaseKind::Oracle
         | DatabaseKind::Sqlite
         | DatabaseKind::DuckDb => None,

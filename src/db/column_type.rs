@@ -32,7 +32,7 @@ impl ColumnTypePolicy {
             DatabaseKind::Oracle => "VARCHAR2(255 CHAR)",
             DatabaseKind::Postgres | DatabaseKind::Sqlite => "text",
             DatabaseKind::DuckDb => "VARCHAR",
-            DatabaseKind::MySql | DatabaseKind::MariaDb => "text",
+            DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::TiDb => "text",
             DatabaseKind::SqlServer => "nvarchar(255)",
             DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb => "text",
             DatabaseKind::ClickHouse => "String",

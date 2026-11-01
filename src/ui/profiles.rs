@@ -1434,6 +1434,7 @@ fn url_help(kind: DatabaseKind) -> &'static str {
         DatabaseKind::Postgres => "Accepts postgres://, postgresql://, and jdbc:postgresql://",
         DatabaseKind::MySql => "Accepts mysql:// and jdbc:mysql://",
         DatabaseKind::MariaDb => "Accepts mariadb://",
+        DatabaseKind::TiDb => "Accepts tidb:// (default port 4000)",
         DatabaseKind::Oracle => "Accepts jdbc:oracle:thin:@host:port/service",
         DatabaseKind::SqlServer => "Accepts sqlserver://, mssql://, and jdbc:sqlserver://",
         DatabaseKind::Sqlite => "Accepts sqlite://, file:, and jdbc:sqlite:",
