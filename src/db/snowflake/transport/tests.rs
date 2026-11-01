@@ -234,6 +234,35 @@ async fn reports_sql_failure_without_replaying_the_statement() {
     worker.join().unwrap();
 }
 
+#[tokio::test]
+async fn expired_and_revoked_tokens_are_authentication_errors_without_replay() {
+    for token_type in ["OAUTH", "PROGRAMMATIC_ACCESS_TOKEN"] {
+        for (status, code) in [(401, "390318"), (401, "390303"), (500, "390111")] {
+            let (mut adapter, requests, worker) = mock(vec![(
+                status,
+                json!({"code": code, "message": "Access token expired or revoked"}),
+            )]);
+            adapter.token_type = token_type.into();
+            let error = adapter.execute("SELECT 42").await.unwrap_err();
+            assert_eq!(error.category, ErrorCategory::Authentication);
+            assert_eq!(error.code.as_deref(), Some(code));
+            assert!(!error.message.contains("test-access-token"));
+            worker.join().unwrap();
+            let requests = requests.into_iter().collect::<Vec<_>>();
+            assert_eq!(requests.len(), 1);
+            assert!(requests[0].contains(token_type));
+        }
+    }
+    assert_eq!(
+        api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &json!({"code": "unrelated"})
+        )
+        .category,
+        ErrorCategory::Network
+    );
+}
+
 fn text_result(names: &[&str], rows: Value) -> Value {
     json!({"statementHandle": HANDLE, "resultSetMetaData": {
         "numRows": rows.as_array().unwrap().len(),
