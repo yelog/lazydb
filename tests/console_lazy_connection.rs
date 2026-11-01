@@ -17,13 +17,7 @@ fn unbound_console_can_be_saved_restored_bound_and_executed_lazily() {
     let temp = TempDir::new().unwrap();
     let store = WorkspaceStore::new(temp.path().join("workspace.toml"), temp.path().join("sql"));
 
-    let mut app = App::new(vec![profile.clone()]);
-    app.reveal_startup_profile(None);
-    app.update(Action::NewUnboundConsoleNamed("scratch".into()));
-    app.update(Action::ReplaceEditor("SELECT 1".into()));
-    let console_id = app.active_console().id;
-    assert!(app.active_console().execution_target.is_none());
-    store.save(&app.workspace_snapshot()).unwrap();
+    let console_id = save_unbound_console(&store, profile.clone());
 
     let mut restored = App::new(vec![profile]);
     restored.restore_workspace(store.load().unwrap().unwrap(), None);
@@ -74,6 +68,20 @@ fn unbound_console_can_be_saved_restored_bound_and_executed_lazily() {
         restored.overlay,
         Some(Overlay::ExecutionConfirm { .. })
     ));
+}
+
+fn save_unbound_console(
+    store: &WorkspaceStore,
+    profile: lazydb::profile::ConnectionProfile,
+) -> uuid::Uuid {
+    let mut app = App::new(vec![profile]);
+    app.reveal_startup_profile(None);
+    app.update(Action::NewUnboundConsoleNamed("scratch".into()));
+    app.update(Action::ReplaceEditor("SELECT 1".into()));
+    let console_id = app.active_console().id;
+    assert!(app.active_console().execution_target.is_none());
+    store.save(&app.workspace_snapshot()).unwrap();
+    console_id
 }
 
 #[test]
