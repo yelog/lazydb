@@ -32,22 +32,39 @@ pub struct DuckDbAdapter {
 
 #[derive(Clone)]
 pub(crate) struct DuckDbOperationHandle {
-    id: uuid::Uuid,
     interrupt: Arc<duckdb::InterruptHandle>,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
+    active: Arc<Mutex<bool>>,
 }
 
 impl DuckDbOperationHandle {
     pub(crate) fn cancel(&self) {
-        self.cancelled
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        self.interrupt.interrupt();
+        let active = self
+            .active
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if *active {
+            self.cancelled
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            self.interrupt.interrupt();
+        }
     }
 }
 
-impl Drop for DuckDbOperationHandle {
+struct DuckDbOperationGuard {
+    handle: Option<DuckDbOperationHandle>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl Drop for DuckDbOperationGuard {
     fn drop(&mut self) {
-        let _ = self.id;
+        if let Some(handle) = &self.handle {
+            // Finish any in-flight interrupt before releasing this connection to the next query.
+            *handle
+                .active
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = false;
+        }
     }
 }
 
@@ -1645,17 +1662,17 @@ impl DuckDbAdapter {
         };
         let interrupt = operation
             .as_ref()
-            .map(|(id, cancelled)| DuckDbOperationHandle {
-                id: *id,
+            .map(|(_, cancelled)| DuckDbOperationHandle {
                 interrupt: interrupt.clone(),
                 cancelled: Arc::clone(cancelled),
+                active: Arc::new(Mutex::new(true)),
             });
-        if let (Some(handle), Some(on_start)) = (interrupt.as_ref(), on_start) {
-            on_start(DuckDbOperationHandle {
-                id: handle.id,
-                interrupt: Arc::clone(&handle.interrupt),
-                cancelled: Arc::clone(&handle.cancelled),
-            });
+        let operation_guard = DuckDbOperationGuard {
+            handle: interrupt,
+            _permit: permit,
+        };
+        if let (Some(handle), Some(on_start)) = (operation_guard.handle.as_ref(), on_start) {
+            on_start(handle.clone());
         }
         if operation
             .as_ref()
@@ -1668,13 +1685,13 @@ impl DuckDbAdapter {
                 diagnostic: None,
             });
         }
-        let _operation_guard = interrupt;
         let cancelled = operation
             .as_ref()
             .map(|(_, cancelled)| Arc::clone(cancelled));
         let sql = sql.to_owned();
         let worker = task::spawn_blocking(move || {
-            let _permit = permit;
+            // Keep cancellation active until native work finishes, even if its async waiter is dropped.
+            let _operation_guard = operation_guard;
             let started = Instant::now();
             let connection = connection
                 .lock()
@@ -3231,6 +3248,289 @@ mod transaction_tests {
         }
         let error = duck_operation_error(DatabaseError::internal("worker failed"), true);
         assert_eq!(error.category, ErrorCategory::Internal);
+    }
+
+    #[derive(Clone, Copy)]
+    enum CancelStage {
+        Describe,
+        Prepare,
+        Execute,
+    }
+
+    struct QueryGate {
+        stage: CancelStage,
+        binds: std::sync::atomic::AtomicUsize,
+        reached: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl QueryGate {
+        fn wait(&self) -> Result<(), Box<dyn std::error::Error>> {
+            if let Some(reached) = self.reached.lock().unwrap().take() {
+                let _ = reached.send(());
+                self.release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(std::time::Duration::from_secs(10))?;
+            }
+            Ok(())
+        }
+    }
+
+    struct GatedTable;
+
+    impl duckdb::vtab::VTab for GatedTable {
+        type InitData = std::sync::atomic::AtomicBool;
+        type BindData = Arc<QueryGate>;
+
+        fn bind(
+            bind: &duckdb::vtab::BindInfo,
+        ) -> Result<Self::BindData, Box<dyn std::error::Error>> {
+            // Registration owns an Arc<QueryGate> for the lifetime of these callbacks.
+            let gate = unsafe { &*bind.get_extra_info::<Arc<QueryGate>>() }.clone();
+            let binding = gate.binds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if matches!(
+                (gate.stage, binding),
+                (CancelStage::Describe, 0) | (CancelStage::Prepare, 1)
+            ) {
+                gate.wait()?;
+            }
+            bind.add_result_column(
+                "answer",
+                duckdb::core::LogicalTypeHandle::from(duckdb::core::LogicalTypeId::Bigint),
+            );
+            Ok(gate)
+        }
+
+        fn init(_: &duckdb::vtab::InitInfo) -> Result<Self::InitData, Box<dyn std::error::Error>> {
+            Ok(std::sync::atomic::AtomicBool::new(false))
+        }
+
+        fn func(
+            func: &duckdb::vtab::TableFunctionInfo<Self>,
+            output: &mut duckdb::core::DataChunkHandle,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            if func
+                .get_init_data()
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                output.set_len(0);
+                return Ok(());
+            }
+            let gate = func.get_bind_data();
+            if matches!(gate.stage, CancelStage::Execute) {
+                gate.wait()?;
+            }
+            // The declared BIGINT output has capacity for at least this one row.
+            unsafe { output.flat_vector(0).as_mut_slice::<i64>()[0] = 42 };
+            output.set_len(1);
+            Ok(())
+        }
+    }
+
+    fn install_query_gate(
+        adapter: &DuckDbAdapter,
+        stage: CancelStage,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let (reached, receiver) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let gate = Arc::new(QueryGate {
+            stage,
+            binds: std::sync::atomic::AtomicUsize::new(0),
+            reached: Mutex::new(Some(reached)),
+            release: Mutex::new(wait),
+        });
+        adapter
+            .connection
+            .lock()
+            .unwrap()
+            .register_table_function_with_extra_info::<GatedTable, _>("cancel_gate", &gate)
+            .unwrap();
+        (receiver, release)
+    }
+
+    async fn assert_answer_42(adapter: &DuckDbAdapter) {
+        let result = adapter.execute("SELECT 42").await.unwrap();
+        assert_eq!(
+            result.result_sets[0].rows[0][0],
+            crate::db::value::CellValue::Integer(42)
+        );
+    }
+
+    async fn cancel_at_stage(stage: CancelStage) {
+        let profile = crate::profile::import_connection_url("duckdb::memory:", None)
+            .unwrap()
+            .profile;
+        let adapter = DuckDbAdapter::connect(&profile).await.unwrap();
+        let (reached, release) = install_query_gate(&adapter, stage);
+        let (started, operation) = tokio::sync::oneshot::channel();
+        let query_adapter = adapter.clone();
+        let query = tokio::spawn(async move {
+            query_adapter
+                .execute_with_budget_cancellable(
+                    "SELECT * FROM cancel_gate()",
+                    QueryBudget::UNBOUNDED,
+                    uuid::Uuid::new_v4(),
+                    Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    move |handle| {
+                        let _ = started.send(handle);
+                    },
+                )
+                .await
+        });
+        let handle = operation.await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), reached)
+            .await
+            .unwrap()
+            .unwrap();
+        handle.cancel();
+        release.send(()).unwrap();
+        let error = tokio::time::timeout(std::time::Duration::from_secs(5), query)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.category, ErrorCategory::Cancelled);
+        assert_eq!(error.code.as_deref(), Some("cancelled"));
+        assert_answer_42(&adapter).await;
+        adapter.close().await;
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_describe_binding_preserves_session() {
+        cancel_at_stage(CancelStage::Describe).await;
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_statement_preparation_preserves_session() {
+        cancel_at_stage(CancelStage::Prepare).await;
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_native_execution_preserves_session() {
+        cancel_at_stage(CancelStage::Execute).await;
+    }
+
+    async fn assert_retired_operation_cannot_cancel(sql: &str, cancel_on_start: bool) {
+        let profile = crate::profile::import_connection_url("duckdb::memory:", None)
+            .unwrap()
+            .profile;
+        let adapter = DuckDbAdapter::connect(&profile).await.unwrap();
+        let (started, previous) = tokio::sync::oneshot::channel();
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let result = adapter
+            .execute_with_budget_cancellable(
+                sql,
+                QueryBudget::UNBOUNDED,
+                uuid::Uuid::new_v4(),
+                cancelled.clone(),
+                move |handle| {
+                    if cancel_on_start {
+                        handle.cancel();
+                    }
+                    let _ = started.send(handle);
+                },
+            )
+            .await;
+        if cancel_on_start {
+            assert_eq!(result.unwrap_err().category, ErrorCategory::Cancelled);
+        } else if sql == "SELECT 1" {
+            result.unwrap();
+        } else {
+            assert_eq!(result.unwrap_err().category, ErrorCategory::Sql);
+        }
+        let was_cancelled = cancelled.load(std::sync::atomic::Ordering::SeqCst);
+        let previous = previous.await.unwrap();
+        let (reached, release) = install_query_gate(&adapter, CancelStage::Execute);
+        let query_adapter = adapter.clone();
+        let query =
+            tokio::spawn(async move { query_adapter.execute("SELECT * FROM cancel_gate()").await });
+        tokio::time::timeout(std::time::Duration::from_secs(5), reached)
+            .await
+            .unwrap()
+            .unwrap();
+        previous.cancel();
+        release.send(()).unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), query)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            result.result_sets[0].rows[0][0],
+            crate::db::value::CellValue::Integer(42)
+        );
+        assert_eq!(
+            cancelled.load(std::sync::atomic::Ordering::SeqCst),
+            was_cancelled
+        );
+        assert_answer_42(&adapter).await;
+        adapter.close().await;
+    }
+
+    #[tokio::test]
+    async fn completed_operation_cannot_cancel_next_native_query() {
+        assert_retired_operation_cannot_cancel("SELECT 1", false).await;
+    }
+
+    #[tokio::test]
+    async fn failed_operation_cannot_cancel_next_native_query() {
+        assert_retired_operation_cannot_cancel("SELECT missing_column", false).await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_before_execution_cannot_cancel_next_native_query() {
+        assert_retired_operation_cannot_cancel("SELECT 1", true).await;
+    }
+
+    #[tokio::test]
+    async fn aborted_waiter_keeps_native_cancellation_active_until_worker_finishes() {
+        let profile = crate::profile::import_connection_url("duckdb::memory:", None)
+            .unwrap()
+            .profile;
+        let adapter = DuckDbAdapter::connect(&profile).await.unwrap();
+        let (reached, release) = install_query_gate(&adapter, CancelStage::Execute);
+        let (started, operation) = tokio::sync::oneshot::channel();
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let query_adapter = adapter.clone();
+        let query_cancelled = cancelled.clone();
+        let query = tokio::spawn(async move {
+            query_adapter
+                .execute_with_budget_cancellable(
+                    "SELECT * FROM cancel_gate()",
+                    QueryBudget::UNBOUNDED,
+                    uuid::Uuid::new_v4(),
+                    query_cancelled,
+                    move |handle| {
+                        let _ = started.send(handle);
+                    },
+                )
+                .await
+        });
+        let operation = operation.await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), reached)
+            .await
+            .unwrap()
+            .unwrap();
+        query.abort();
+        assert!(query.await.unwrap_err().is_cancelled());
+        assert!(adapter.operation_gate.clone().try_acquire_owned().is_err());
+        operation.cancel();
+        assert!(cancelled.load(std::sync::atomic::Ordering::SeqCst));
+        release.send(()).unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            assert_answer_42(&adapter),
+        )
+        .await
+        .unwrap();
+        assert!(!*operation.active.lock().unwrap());
+        let permit = adapter.operation_gate.clone().try_acquire_owned().unwrap();
+        drop(permit);
+        adapter.close().await;
     }
 
     #[tokio::test]
