@@ -19,6 +19,7 @@ disable it at runtime.
 | Driver | Interaction model | Catalog / DDL | Relation data editing | Transactions | Cancellation | Monitoring |
 | --- | --- | --- | --- | --- | --- | --- |
 | PostgreSQL | Relational | Available; broad catalog editor | Available when metadata and permissions allow | AUTO/MANUAL | Native cancellation | Metrics and bounded process list |
+| CockroachDB | Relational | Database/schema/table/view catalog, column/key/index metadata, search and native DDL inspection | Not advertised | AUTO/MANUAL; transaction retries require manual restart | Manual transaction session close | Not implemented |
 | MySQL | Relational | Available; table/view catalog mutation | Insert requires reliable primary-key lookup; update/delete require primary key | AUTO/MANUAL | Supported | Metrics and bounded process list |
 | MariaDB | Relational | Available; table/view mutation plus version-gated sequences | Insert supports `RETURNING`, including keyless insert; update/delete require primary key | AUTO/MANUAL | Supported | Metrics and bounded process list |
 | Oracle | Relational | Available; table/view/sequence DDL and catalog mutation slices | Not advertised | AUTO/MANUAL | Not advertised | Not implemented |
@@ -61,6 +62,22 @@ authentication and monitoring limits are described in the catalog section below.
 See the [issue tracker](https://github.com/yelog/lazydb/issues) and
 [release notes](https://github.com/yelog/lazydb/releases) for current priorities
 and version-specific changes.
+
+## CockroachDB
+
+CockroachDB uses an independent driver identity over the shared PostgreSQL wire
+transport. The pinned integration fixture targets v25.4.6. Implemented workflows
+include SQL execution, database/schema/table/view discovery, scoped search,
+column/primary-key/index metadata, filtered and paged previews, native
+`SHOW CREATE` DDL, and AUTO/MANUAL transactions. Existing MCP query and catalog
+tools use the same adapter.
+
+Structured schema editing, relation-grid writes, principal management and
+monitoring are not advertised. Manual transactions do not replay SQL after
+`40001`; roll back and restart the entire transaction. Cancelling a manual
+transaction destroys its dedicated connection. DDL inside multi-statement
+transactions remains subject to CockroachDB schema-change limitations.
+See [CockroachDB setup and tests](cockroachdb.md).
 
 ## MariaDB
 

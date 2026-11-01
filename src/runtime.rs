@@ -6938,7 +6938,10 @@ impl Runtime {
                                 query_generation,
                                 transaction_generation,
                                 connection,
-                                message: error.0,
+                                message: error.relation_diagnostic().map_or_else(
+                                    || error.0.clone(),
+                                    |diagnostic| diagnostic.safe_message(),
+                                ),
                             });
                         }
                         Err(_) => {
@@ -7084,13 +7087,19 @@ impl Runtime {
                     });
                 }
                 Ok(Err(error)) => {
+                    let unknown = error.relation_diagnostic().is_some_and(|diagnostic| {
+                        diagnostic.category == crate::db::transaction::RelationMutationCategory::ConnectionUnknown
+                    });
                     let _ = sender.send(Action::ManualCommitFailed {
                         tab_id,
                         query_generation,
                         transaction_generation,
                         connection,
-                        message: error.0,
-                        unknown: false,
+                        message: error.relation_diagnostic().map_or_else(
+                            || error.0.clone(),
+                            |diagnostic| diagnostic.safe_message(),
+                        ),
+                        unknown,
                     });
                 }
                 Err(_) => {
@@ -7327,6 +7336,7 @@ impl Runtime {
             let quarantine_invalidates_connection = match &database {
                 DatabaseConnection::Sqlite(_) => true,
                 DatabaseConnection::Postgres(_)
+                | DatabaseConnection::CockroachDb(_)
                 | DatabaseConnection::MySql(_)
                 | DatabaseConnection::MariaDb(_)
                 | DatabaseConnection::Oracle(_)
@@ -8310,14 +8320,14 @@ async fn discover_profile_catalog(
         }
     };
     let capabilities = connection.catalog_capabilities();
-    let postgres_databases = match connection.discoverable_postgres_databases().await {
+    let pgwire_databases = match connection.discoverable_pgwire_databases().await {
         Ok(databases) => databases,
         Err(error) => {
             connection.close().await;
             return Err(sanitize_terminal_text(&error.to_string()));
         }
     };
-    let discovery = if let Some(databases) = postgres_databases {
+    let discovery = if let Some(databases) = pgwire_databases {
         connection.close().await;
         let profile = profile.clone();
         let password = password.cloned();
@@ -10294,6 +10304,71 @@ mod tests {
         assert!(removed.is_some());
         assert!(active.is_empty());
         removed.unwrap().database.close().await;
+    }
+
+    #[tokio::test]
+    async fn manual_commit_propagates_structured_unknown_outcome() {
+        let profile = import_connection_url("cockroachdb://root@localhost/defaultdb", None)
+            .unwrap()
+            .profile;
+        let connection = ConnectionIdentity {
+            profile_id: profile.id,
+            generation: 1,
+        };
+        let target = ExecutionTarget::from_profile(&profile);
+        let tab_id = Uuid::new_v4();
+        let (event_sender, mut events) = mpsc::unbounded_channel();
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = Runtime::new(
+            vec![profile],
+            HashSet::new(),
+            HashMap::new(),
+            None,
+            ProfileStore::new(temp.path().join("connections.toml")),
+            Arc::new(crate::persistence::secrets::NativeSecretStore),
+            event_sender,
+        );
+        let (request_sender, mut requests) = mpsc::unbounded_channel();
+        let worker_handle = tokio::spawn(async move {
+            while let Some(request) = requests.recv().await {
+                match request {
+                    TransactionRequest::Commit { reply } => {
+                        let _ = reply.send(Err(crate::db::transaction::TransactionError::relation(
+                            crate::db::transaction::RelationMutationDiagnostic {
+                                category: crate::db::transaction::RelationMutationCategory::ConnectionUnknown,
+                                sqlstate: None, operation: "commit".into(), relation: "CockroachDB transaction".into(),
+                                context: None, message: "commit outcome is unknown".into(),
+                            })));
+                    }
+                    TransactionRequest::Shutdown => break,
+                    _ => panic!("unexpected request"),
+                }
+            }
+            WorkerDisposition::Quarantine
+        });
+        runtime.manual_transactions.insert(
+            tab_id,
+            ManualTransactionEntry {
+                connection,
+                target,
+                console_id: tab_id,
+                transaction_id: Uuid::new_v4(),
+                transaction_generation: 4,
+                request_sender,
+                worker_handle,
+                cancellation_sender: None,
+                forced_close_handle: ForcedCloseHandle::new(),
+            },
+        );
+        runtime.manual_commit(connection, tab_id, 2, 4);
+        let action = timeout(Duration::from_secs(2), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(action, Action::ManualCommitFailed { unknown: true, message, .. } if message.contains("commit outcome is unknown") && !message.contains("lazydb-relation-diagnostic"))
+        );
+        runtime.shutdown().await;
     }
 
     #[tokio::test]

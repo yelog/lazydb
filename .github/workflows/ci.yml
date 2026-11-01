@@ -188,7 +188,7 @@ jobs:
           retention-days: 7
 
   databases:
-    name: PostgreSQL, MySQL, and SQL Server adapters
+    name: SQL and key-value database adapters
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     services:
@@ -261,6 +261,7 @@ jobs:
           --health-retries 20
     env:
       LAZYDB_TEST_POSTGRES_URL: postgresql://postgres:lazydb_test@127.0.0.1:5432/lazydb_test
+      LAZYDB_TEST_COCKROACHDB_URL: cockroachdb://root@127.0.0.1:26257/defaultdb?sslmode=disable
       LAZYDB_TEST_MYSQL_URL: mysql://root:lazydb_test@127.0.0.1:3306/lazydb_test
       LAZYDB_TEST_MARIADB_URL: mariadb://root:lazydb_test@127.0.0.1:3307/lazydb_test
       LAZYDB_TEST_SQLSERVER_URL: sqlserver://sa:LazydbC1!SqlServer2022@127.0.0.1:1433/tempdb?encrypt=false
@@ -284,6 +285,10 @@ jobs:
       - name: Initialize ClickHouse deterministic fixture
         run: |
           ruby -e 'File.read("tests/fixtures/clickhouse/init.sql").split(/;\s*(?=\S)/).each { |sql| next if sql.strip.empty?; system("curl", "--fail", "--silent", "--show-error", "--data-binary", sql, "http://127.0.0.1:18123/") or exit 1 }'
+      - name: Start pinned CockroachDB fixture
+        run: docker compose -f docker-compose.cockroachdb.yml up -d --wait
+      - name: CockroachDB adapter and profile tests
+        run: python3 scripts/ci/run-with-timeout.py 600 -- env LAZYDB_REQUIRE_DATABASE_TESTS=1 cargo test --locked --test cockroach_adapter --test cockroach_commit_faults --test cockroach_profile -- --nocapture --test-threads=1
       - name: Build PostgreSQL adapter tests
         run: python3 scripts/ci/run-with-timeout.py 600 -- cargo test --locked --test postgres_adapter --no-run
       - name: PostgreSQL adapter tests
@@ -315,6 +320,9 @@ jobs:
         run: python3 scripts/ci/run-with-timeout.py 600 -- cargo test --locked --test clickhouse_adapter --test clickhouse_catalog_mutation --test clickhouse_monitoring -- --nocapture --test-threads=1
       - name: ClickHouse deterministic adapter, catalog, principal, monitoring, agent and LSP tests
         run: python3 scripts/ci/run-with-timeout.py 600 -- cargo test --locked --test clickhouse_agent --test clickhouse_catalog --test clickhouse_catalog_drop --test clickhouse_principals --test clickhouse_relation --test clickhouse_sql --test sql_dialect_mapping -- --nocapture --test-threads=1
+      - name: Stop CockroachDB test service
+        if: always()
+        run: docker compose -f docker-compose.cockroachdb.yml down
       - name: Stop ClickHouse test service
         if: always()
         run: docker compose -f docker-compose.clickhouse.yml down --volumes

@@ -21,8 +21,8 @@ silently accepting a setting that LazyDB does not use.
 ## Connection driver categories
 
 New and edited connection forms show **Category** above **Driver**. Choose
-**Relational** for PostgreSQL, MySQL, MariaDB, Oracle, SQL Server, SQLite, DuckDB
-or ClickHouse; choose **Non-relational** for Redis, Valkey, or MongoDB. Left/Right
+**Relational** for PostgreSQL, CockroachDB, MySQL, MariaDB, Oracle, SQL Server,
+SQLite, DuckDB or ClickHouse; choose **Non-relational** for Redis, Valkey, or MongoDB. Left/Right
 changes the focused category or cycles drivers within that category. Categories
 and drivers also support mouse selection. Narrow forms keep full driver names
 in a selection-following window.
@@ -319,25 +319,39 @@ namespace. The profile's visible-object selection scopes Explorer search and
 catalog requests. See [database capabilities](database-capabilities.md#clickhouse)
 for supported objects, mutation boundaries, monitoring and transaction limits.
 
+## CockroachDB Profiles
+
+Select CockroachDB before pasting a PostgreSQL connection URL, or use
+`cockroachdb://` directly. The driver defaults to SQL port `26257`, database
+`defaultdb`, and schema `public`. Non-interactive imports can use
+`connections add --driver cockroachdb --url 'postgresql://...'`.
+
+PostgreSQL and CockroachDB accept `sslrootcert`, `sslcert`, `sslkey`, and
+`options` URL parameters. They are preserved in optional `pg_options` profile
+configuration and through database/schema switches. Certificate parameters
+contain local file paths. Use `sslmode=verify-full` for verified secure
+connections. See [CockroachDB setup and tests](cockroachdb.md).
+
 ## Connection Profile Fields
 
-The current profile file format is version `5`:
+The current profile file format is version `6`:
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `id` | UUID string | Generated on creation | Stable identity used by workspace state and system credential references. Must be unique within the file. |
 | `name` | String | Derived from the database, host, or SQLite filename | Name shown in the Explorer and accepted by `--profile` and agent `--connection`. |
 | `access` | Table | `{ scope = "global" }` | Controls which projects can see a saved profile. |
-| `kind` | `postgres`, `mysql`, `mariadb`, `oracle`, `sqlserver`, `sqlite`, `duckdb`, `redis`, `valkey`, `mongodb`, `clickhouse` | Required | Database adapter to use. Oracle requires Oracle Instant Client; DuckDB requires an optional C API runtime. Redis/Valkey use key/value workflows; MongoDB uses document workflows. See [database capabilities](database-capabilities.md). |
+| `kind` | `postgres`, `cockroachdb`, `mysql`, `mariadb`, `oracle`, `sqlserver`, `sqlite`, `duckdb`, `redis`, `valkey`, `mongodb`, `clickhouse` | Required | Database adapter to use. Oracle requires Oracle Instant Client; DuckDB requires an optional C API runtime. Redis/Valkey use key/value workflows; MongoDB uses document workflows. See [database capabilities](database-capabilities.md). |
 | `url_format` | Kebab-case enum | Driver-specific | URL spelling used when LazyDB displays or regenerates the connection URL. |
-| `host` | String or `null` | `null` | Server hostname or address. PostgreSQL, MySQL/MariaDB, Oracle, SQL Server, and Redis use this field. |
-| `port` | Integer or `null` | Driver default when imported | Server port. PostgreSQL defaults to `5432`, MySQL/MariaDB to `3306`, Oracle to `1521`, SQL Server to `1433`, and Redis to `6379`. SQL Server profiles require an explicit TCP port when connecting. |
+| `host` | String or `null` | `null` | Server hostname or address. PostgreSQL/CockroachDB, MySQL/MariaDB, Oracle, SQL Server, and Redis use this field. |
+| `port` | Integer or `null` | Driver default when imported | Server port. PostgreSQL defaults to `5432`, CockroachDB to `26257`, MySQL/MariaDB to `3306`, Oracle to `1521`, SQL Server to `1433`, and Redis to `6379`. SQL Server profiles require an explicit TCP port when connecting. |
 | `user` | String or `null` | `null` | Server login name. SQL Server uses SQL username/password authentication; SQLite does not use it. |
 | `database` | String or `null` | `null` | Database name for PostgreSQL, MySQL/MariaDB, Oracle service, or SQL Server; logical SQLite path value; or non-negative Redis logical database number. |
-| `default_schema` | String or `null` | `null` | PostgreSQL `currentSchema`, SQL Server schema, or SQLite `main`. MySQL has no separate default-schema field. |
+| `default_schema` | String or `null` | `null` | PostgreSQL/CockroachDB `currentSchema`, SQL Server schema, or SQLite `main`. MySQL has no separate default-schema field. |
 | `sqlite_path` | Path or `null` | `null` | SQLite file path. It is `null` for an in-memory database. |
 | `duckdb_path` | Path or `null` | `null` | DuckDB file path. It is `null` for an in-memory database. |
 | `ssl_mode` | `disable`, `prefer`, `require`, `verify-ca`, `verify-full` | `prefer` | TLS policy for PostgreSQL, MySQL/MariaDB, Oracle, SQL Server, and Redis. SQLite always uses `disable`; Redis accepts `disable` or a TLS-enabled mode, not `prefer`. |
+| `pg_options` | Optional table | Absent | PostgreSQL/CockroachDB `ssl_root_cert`, `ssl_client_cert`, `ssl_client_key` paths and startup `options`. |
 | `credential_policy` | Tagged table | `{ policy = "none" }` | Where the password comes from. |
 | `read_only` | Boolean | `false` | Requests adapter-level read-only behavior. Use database grants for authorization. |
 | `environment` | `development`, `staging`, `production` | `development` | Environment label used by the UI and agent write-policy checks. |
@@ -350,7 +364,8 @@ library search paths. The selected directory must contain the ARM64
 `libclntsh.dylib` on Apple Silicon. Client discovery is process-wide; changing
 the client directory requires restarting LazyDB.
 
-`url_format` accepts `postgres`, `postgresql`, `jdbc-postgresql` for PostgreSQL;
+`url_format` accepts `cockroachdb`, `postgres`, `postgresql`, `jdbc-postgresql`
+for CockroachDB; `postgres`, `postgresql`, `jdbc-postgresql` for PostgreSQL;
 `mysql`, `jdbc-mysql` for MySQL; `mariadb` for MariaDB; `jdbc-oracle` for Oracle;
 `sqlserver`, `mssql`, `jdbc-sqlserver` for SQL Server; `sqlite`, `file-uri`,
 `jdbc-sqlite` for SQLite; `duckdb` for DuckDB; and `redis`, `rediss` for Redis. Defaults are
@@ -576,7 +591,7 @@ Profiles are versioned TOML. Local encrypted profiles contain authenticated
 ciphertext rather than a plaintext password:
 
 ```toml
-version = 5
+version = 6
 
 [[profiles]]
 id = "1c73c7c0-f944-4adc-a73a-1265fe1260a9"

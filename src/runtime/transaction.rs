@@ -139,7 +139,35 @@ where
             return WorkerDisposition::Quarantine;
         }
 
+        let mut rollback_required = false;
         while let Some(request) = receiver.recv().await {
+            if rollback_required {
+                let error = || {
+                    TransactionError(
+                        "Commit failed; ROLLBACK is required before restarting the transaction"
+                            .into(),
+                    )
+                };
+                match request {
+                    TransactionRequest::Execute { reply, .. } => {
+                        let _ = reply.send(Err(error()));
+                        continue;
+                    }
+                    TransactionRequest::Page { reply, .. } => {
+                        let _ = reply.send(Err(error()));
+                        continue;
+                    }
+                    TransactionRequest::RelationMutation { reply, .. } => {
+                        let _ = reply.send(Err(error()));
+                        continue;
+                    }
+                    TransactionRequest::Commit { reply } => {
+                        let _ = reply.send(Err(error()));
+                        continue;
+                    }
+                    TransactionRequest::Rollback { .. } | TransactionRequest::Shutdown => {}
+                }
+            }
             match request {
                 TransactionRequest::Execute {
                     sql, cancel, reply, ..
@@ -265,6 +293,9 @@ where
                 TransactionRequest::Commit { reply } => {
                     let result = guard.backend_mut().commit().await;
                     let safe = result.is_ok() && guard.backend_mut().depth() == 0;
+                    rollback_required = result.as_ref().is_err_and(|error| {
+                        guard.backend_mut().commit_failure_requires_rollback(error)
+                    });
                     if safe {
                         guard.disarm();
                     }
@@ -272,7 +303,9 @@ where
                     if safe {
                         return WorkerDisposition::Committed;
                     }
-                    return WorkerDisposition::Quarantine;
+                    if !rollback_required {
+                        return WorkerDisposition::Quarantine;
+                    }
                 }
                 TransactionRequest::Rollback { reply } => {
                     let result = guard.backend_mut().rollback().await;
@@ -394,6 +427,7 @@ mod tests {
         cancel_fails: bool,
         cancel_closes: bool,
         commit_fails: bool,
+        commit_requires_rollback: bool,
         rollback_fails: bool,
         mutation_fails: bool,
     }
@@ -429,6 +463,9 @@ mod tests {
                 self.depth = 0;
                 Ok(())
             }
+        }
+        fn commit_failure_requires_rollback(&self, _error: &TransactionError) -> bool {
+            self.commit_requires_rollback
         }
         async fn relation_mutation(
             &mut self,
@@ -764,6 +801,38 @@ mod tests {
                 .iter()
                 .any(|entry| entry == "force_close")
         );
+    }
+
+    #[tokio::test]
+    async fn rejected_commit_retains_session_only_for_rollback() {
+        let fake = Fake {
+            commit_fails: true,
+            commit_requires_rollback: true,
+            ..Fake::default()
+        };
+        let log = fake.log.clone();
+        let worker = spawn_transaction_worker(fake);
+        let (reply, result) = oneshot::channel();
+        worker
+            .requests
+            .send(TransactionRequest::Commit { reply })
+            .unwrap();
+        assert!(result.await.unwrap().is_err());
+        assert!(execute(&worker, "must not execute").await.is_err());
+        let (reply, result) = oneshot::channel();
+        worker
+            .requests
+            .send(TransactionRequest::Commit { reply })
+            .unwrap();
+        assert!(result.await.unwrap().is_err());
+        let (reply, result) = oneshot::channel();
+        worker
+            .requests
+            .send(TransactionRequest::Rollback { reply })
+            .unwrap();
+        result.await.unwrap().unwrap();
+        assert_eq!(worker.worker.await.unwrap(), WorkerDisposition::RolledBack);
+        assert_eq!(*log.lock().unwrap(), vec!["begin", "commit", "rollback"]);
     }
 
     #[tokio::test]

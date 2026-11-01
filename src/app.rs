@@ -740,7 +740,8 @@ impl App {
             | DatabaseKind::MariaDb
             | DatabaseKind::SqlServer
             | DatabaseKind::Oracle => crate::db::principal::PrincipalCapability::DdlOnly,
-            DatabaseKind::Sqlite
+            DatabaseKind::CockroachDb
+            | DatabaseKind::Sqlite
             | DatabaseKind::DuckDb
             | DatabaseKind::Redis
             | DatabaseKind::Valkey
@@ -2116,7 +2117,7 @@ impl App {
             .iter()
             .find(|profile| profile.id == tab.descriptor.key.profile_id)
             .map(|profile| match profile.kind {
-                DatabaseKind::Postgres => SqlDialect::Postgres,
+                DatabaseKind::Postgres | DatabaseKind::CockroachDb => SqlDialect::Postgres,
                 DatabaseKind::MySql | DatabaseKind::MariaDb => SqlDialect::MySql,
                 DatabaseKind::Oracle => SqlDialect::Generic,
                 DatabaseKind::Sqlite => SqlDialect::Sqlite,
@@ -13848,7 +13849,13 @@ impl App {
                                 catalog_identity,
                                 CatalogTarget::Databases,
                                 None,
-                                CatalogRequestIntent::Automatic,
+                                if workspace_database_switch
+                                    && profile_kind == DatabaseKind::CockroachDb
+                                {
+                                    CatalogRequestIntent::Refresh
+                                } else {
+                                    CatalogRequestIntent::Automatic
+                                },
                             )
                         })
                         .unwrap_or_default()
@@ -14990,9 +14997,12 @@ impl App {
                     connection,
                     TransactionState::Active,
                 ) {
-                    let postgres = self
-                        .active_profile()
-                        .is_some_and(|profile| profile.kind == DatabaseKind::Postgres);
+                    let aborts_on_statement_error = self.active_profile().is_some_and(|profile| {
+                        matches!(
+                            profile.kind,
+                            DatabaseKind::Postgres | DatabaseKind::CockroachDb
+                        )
+                    });
                     let tab = self
                         .tabs
                         .iter_mut()
@@ -15006,7 +15016,7 @@ impl App {
                         query_generation,
                         message,
                     );
-                    if postgres
+                    if aborts_on_statement_error
                         && let Ok(next) = transaction::transition(
                             tab_snapshot(tab),
                             TransactionEvent::StatementFailed,
@@ -15194,6 +15204,11 @@ impl App {
                     TransactionState::Committing,
                 ) {
                     self.clear_transaction_op_timing(tab_id);
+                    let requires_rollback = !unknown
+                        && self.profiles.iter().any(|profile| {
+                            profile.id == connection.profile_id
+                                && profile.kind == DatabaseKind::CockroachDb
+                        });
                     let mut reconcile = None;
                     let tab = self
                         .tabs
@@ -15207,6 +15222,12 @@ impl App {
                         TransactionEvent::CommitFailed
                     };
                     if let Ok(next) = transaction::transition(tab_snapshot(tab), event) {
+                        let next = if requires_rollback {
+                            transaction::transition(next, TransactionEvent::StatementFailed)
+                                .expect("rejected CockroachDB commit must require rollback")
+                        } else {
+                            next
+                        };
                         let impact = if unknown || event == TransactionEvent::OutcomeUnknown {
                             std::mem::replace(
                                 &mut tab.pending_catalog_change_impact,
@@ -19110,7 +19131,7 @@ impl App {
                 DatabaseKind::MariaDb => {
                     crate::db::mysql::MySqlAdapter::catalog_mutation_capabilities()
                 }
-                DatabaseKind::Oracle => Default::default(),
+                DatabaseKind::CockroachDb | DatabaseKind::Oracle => Default::default(),
                 DatabaseKind::Sqlite => {
                     crate::db::sqlite::SqliteAdapter::catalog_mutation_capabilities()
                 }
@@ -19600,7 +19621,7 @@ impl App {
                 .iter()
                 .find(|profile| profile.id == tab.descriptor.key.profile_id)
                 .map(|profile| match profile.kind {
-                    DatabaseKind::Postgres => SqlDialect::Postgres,
+                    DatabaseKind::Postgres | DatabaseKind::CockroachDb => SqlDialect::Postgres,
                     DatabaseKind::MySql | DatabaseKind::MariaDb => SqlDialect::MySql,
                     DatabaseKind::Sqlite => SqlDialect::Sqlite,
                     DatabaseKind::SqlServer => SqlDialect::SqlServer,
@@ -21415,6 +21436,7 @@ impl App {
                     DatabaseKind::MySql | DatabaseKind::MariaDb => Some(database.clone()),
                     DatabaseKind::Oracle => entry.qualified_name.schema.clone(),
                     DatabaseKind::Postgres
+                    | DatabaseKind::CockroachDb
                     | DatabaseKind::SqlServer
                     | DatabaseKind::Sqlite
                     | DatabaseKind::DuckDb => entry.qualified_name.schema.clone(),
@@ -21597,6 +21619,12 @@ impl App {
             .into_iter()
             .map(|target| target.database)
             .collect::<BTreeSet<_>>();
+        if profile.kind == DatabaseKind::CockroachDb
+            && let crate::profile::CatalogSelection::Selected(selected) =
+                &profile.catalog_scope.databases
+        {
+            databases.extend(selected.iter().map(|database| database.name.clone()));
+        }
         if let Some(state) = self.explorer.normalized.profiles.get(&profile.id) {
             for database in state
                 .catalog
@@ -21615,7 +21643,10 @@ impl App {
                 schema: match profile.kind {
                     DatabaseKind::MySql | DatabaseKind::MariaDb => Some(database.clone()),
                     DatabaseKind::Sqlite | DatabaseKind::DuckDb => Some("main".to_owned()),
-                    DatabaseKind::Postgres | DatabaseKind::SqlServer | DatabaseKind::Oracle => None,
+                    DatabaseKind::Postgres
+                    | DatabaseKind::CockroachDb
+                    | DatabaseKind::SqlServer
+                    | DatabaseKind::Oracle => None,
                     DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb => None,
                     DatabaseKind::ClickHouse => Some(database.clone()),
                 },
@@ -22566,7 +22597,7 @@ impl App {
             return SqlDialect::Generic;
         };
         match kind {
-            DatabaseKind::Postgres => SqlDialect::Postgres,
+            DatabaseKind::Postgres | DatabaseKind::CockroachDb => SqlDialect::Postgres,
             DatabaseKind::MySql | DatabaseKind::MariaDb => SqlDialect::MySql,
             DatabaseKind::Oracle => SqlDialect::Oracle,
             DatabaseKind::Sqlite => SqlDialect::Sqlite,
@@ -22581,7 +22612,7 @@ impl App {
 
     pub(crate) fn sql_dialect(&self) -> SqlDialect {
         match self.active_profile().map(|profile| profile.kind) {
-            Some(DatabaseKind::Postgres) => SqlDialect::Postgres,
+            Some(DatabaseKind::Postgres | DatabaseKind::CockroachDb) => SqlDialect::Postgres,
             Some(DatabaseKind::MySql | DatabaseKind::MariaDb) => SqlDialect::MySql,
             Some(DatabaseKind::Oracle) => SqlDialect::Oracle,
             Some(DatabaseKind::Sqlite) => SqlDialect::Sqlite,
@@ -22605,7 +22636,7 @@ impl App {
             .find(|profile| profile.id == profile_id)
             .map(|profile| profile.kind)
         {
-            Some(DatabaseKind::Postgres) => SqlDialect::Postgres,
+            Some(DatabaseKind::Postgres | DatabaseKind::CockroachDb) => SqlDialect::Postgres,
             Some(DatabaseKind::MySql | DatabaseKind::MariaDb) => SqlDialect::MySql,
             Some(DatabaseKind::Oracle) => SqlDialect::Oracle,
             Some(DatabaseKind::Sqlite) => SqlDialect::Sqlite,
@@ -30652,6 +30683,11 @@ impl App {
         if !self.relation_result_is_current(&request, current) {
             return Vec::new();
         }
+        let supports_grid_edit = self
+            .profiles
+            .iter()
+            .find(|profile| profile.id == request.connection.profile_id)
+            .is_none_or(|profile| profile.kind != DatabaseKind::CockroachDb);
         let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(tab_index) else {
             return Vec::new();
         };
@@ -30679,10 +30715,14 @@ impl App {
                     tab.pagination = pagination;
                     tab.grid.selected_row = 0;
                     tab.grid.row_offset = 0;
-                    tab.edit = rows.map(|rows| {
-                        RelationEditSession::from_rows_with_versions(rows, row_versions)
-                            .expect("relation preview row versions must match rows")
-                    });
+                    tab.edit = if supports_grid_edit {
+                        rows.map(|rows| {
+                            RelationEditSession::from_rows_with_versions(rows, row_versions)
+                                .expect("relation preview row versions must match rows")
+                        })
+                    } else {
+                        None
+                    };
                 }
             }
             (RelationRequestKind::Ddl, Ok(RelationSnapshot::Ddl(snapshot))) => {
@@ -30894,7 +30934,10 @@ fn relation_execution_target(
     }
     if matches!(
         profile.kind,
-        DatabaseKind::Postgres | DatabaseKind::SqlServer | DatabaseKind::Oracle
+        DatabaseKind::Postgres
+            | DatabaseKind::CockroachDb
+            | DatabaseKind::SqlServer
+            | DatabaseKind::Oracle
     ) {
         target.schema = tab.descriptor.qualified_name.schema.clone();
     }
@@ -30963,6 +31006,7 @@ fn add_explorer_profile(
             .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_else(|| "memory".to_owned()),
         DatabaseKind::Postgres
+        | DatabaseKind::CockroachDb
         | DatabaseKind::MySql
         | DatabaseKind::MariaDb
         | DatabaseKind::Oracle

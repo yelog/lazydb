@@ -119,6 +119,7 @@ impl From<ConnectionProfileV5> for ConnectionProfile {
             default_schema: profile.default_schema,
             sqlite_path: profile.sqlite_path,
             mongodb_options: None,
+            pg_options: None,
             duckdb_path: profile.duckdb_path,
             ssl_mode: profile.ssl_mode,
             credential_policy: profile.credential_policy,
@@ -177,6 +178,7 @@ impl From<ConnectionProfileV2> for ConnectionProfile {
             default_schema: profile.default_schema,
             sqlite_path: profile.sqlite_path,
             mongodb_options: None,
+            pg_options: None,
             duckdb_path: profile.duckdb_path,
             ssl_mode: profile.ssl_mode,
             credential_policy: profile

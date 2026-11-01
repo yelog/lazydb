@@ -24,6 +24,7 @@ fn profile(kind: DatabaseKind) -> ConnectionProfile {
         default_schema: Some("public".into()),
         sqlite_path: (kind == DatabaseKind::Sqlite).then(|| PathBuf::from("app.db")),
         mongodb_options: None,
+        pg_options: None,
         duckdb_path: None,
         ssl_mode: SslMode::Prefer,
         credential_policy: CredentialPolicy::None,
@@ -45,6 +46,7 @@ fn profile(kind: DatabaseKind) -> ConnectionProfile {
 fn profile_defaults_produce_backend_valid_targets() {
     for kind in [
         DatabaseKind::Postgres,
+        DatabaseKind::CockroachDb,
         DatabaseKind::MySql,
         DatabaseKind::SqlServer,
         DatabaseKind::Sqlite,
@@ -74,6 +76,90 @@ fn duckdb_execution_target_uses_catalog_and_schema_not_file_path() {
     assert_eq!(target.database, "memory");
     assert_eq!(target.schema.as_deref(), Some("main"));
     assert!(target.is_valid(&profile));
+}
+
+#[test]
+fn cockroach_target_switch_preserves_tls_and_rejects_excluded_namespaces() {
+    use lazydb::profile::{CatalogScope, CatalogSelection, DatabaseScope, import_connection_url};
+    let mut profile = import_connection_url(
+        "cockroachdb://root@db/app?sslmode=verify-full&sslrootcert=ca.crt&sslkey=client.key&options=--cluster%3Dtest",
+        None,
+    ).unwrap().profile;
+    profile.catalog_scope = CatalogScope {
+        databases: CatalogSelection::Selected(vec![
+            DatabaseScope {
+                name: "app".into(),
+                schemas: CatalogSelection::All,
+            },
+            DatabaseScope {
+                name: "other".into(),
+                schemas: CatalogSelection::Selected(vec!["tools".into()]),
+            },
+        ]),
+    };
+    let target = ExecutionTarget {
+        profile_id: profile.id,
+        database: "other".into(),
+        schema: Some("tools".into()),
+    };
+    let configured = target.apply_to_profile(&profile).unwrap();
+    assert_eq!(configured.kind, DatabaseKind::CockroachDb);
+    assert_eq!(configured.database.as_deref(), Some("other"));
+    assert_eq!(configured.default_schema.as_deref(), Some("tools"));
+    assert_eq!(configured.pg_options, profile.pg_options);
+    assert_eq!(configured.ssl_mode, SslMode::VerifyFull);
+    let excluded = ExecutionTarget {
+        schema: Some("public".into()),
+        ..target
+    };
+    assert!(excluded.apply_to_profile(&profile).is_none());
+}
+
+#[test]
+fn cockroach_database_selector_includes_saved_scope_before_catalog_is_loaded() {
+    use lazydb::{
+        action::Action,
+        app::App,
+        model::workspace::{ConnectionStatus, Overlay},
+        profile::{CatalogScope, CatalogSelection, DatabaseScope},
+    };
+    let mut profile = profile(DatabaseKind::CockroachDb);
+    profile.catalog_scope = CatalogScope {
+        databases: CatalogSelection::Selected(vec![
+            DatabaseScope {
+                name: "app".into(),
+                schemas: CatalogSelection::All,
+            },
+            DatabaseScope {
+                name: "other".into(),
+                schemas: CatalogSelection::All,
+            },
+        ]),
+    };
+    let mut app = App::new(Vec::new());
+    app.connection.profile_id = Some(profile.id);
+    app.connection.generation = 1;
+    app.connection.status = ConnectionStatus::Connected;
+    app.connection.target = Some(ExecutionTarget::from_profile(&profile));
+    app.profiles.push(profile);
+    app.update(Action::OpenDatabaseSelector);
+    let Some(Overlay::DatabaseSelector(selector)) = app.overlay.as_ref() else {
+        panic!("database selector must open");
+    };
+    assert_eq!(
+        selector
+            .candidates
+            .iter()
+            .map(|target| target.database.as_str())
+            .collect::<Vec<_>>(),
+        vec!["app", "other"]
+    );
+    assert!(
+        selector
+            .candidates
+            .iter()
+            .all(|target| target.schema.is_none())
+    );
 }
 
 #[test]

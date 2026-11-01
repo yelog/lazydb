@@ -123,6 +123,7 @@ pub enum EditDisabledReason {
     GeneratedColumn(String),
     UnsupportedRowValue,
     UnsupportedInsertResultStrategy,
+    UnsupportedDriver,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -169,6 +170,13 @@ pub fn relation_mutation_capabilities(
     kind: DatabaseKind,
     metadata: &MetadataFingerprint,
 ) -> RelationMutationCapabilities {
+    if kind == DatabaseKind::CockroachDb {
+        return RelationMutationCapabilities {
+            insert: MutationCapability::Unavailable(EditDisabledReason::UnsupportedDriver),
+            update: MutationCapability::Unavailable(EditDisabledReason::UnsupportedDriver),
+            delete: MutationCapability::Unavailable(EditDisabledReason::UnsupportedDriver),
+        };
+    }
     let primary_key_columns = metadata
         .primary_key
         .iter()
@@ -445,6 +453,31 @@ mod tests {
                 primary_key_columns: vec![0],
             })
         );
+    }
+
+    #[test]
+    fn cockroach_grid_mutations_remain_disabled_even_with_a_primary_key() {
+        for primary_key in [Vec::new(), vec!["id".into()]] {
+            let metadata = MetadataFingerprint {
+                relation: "items".into(),
+                columns: vec![("id".into(), "integer".into(), false)],
+                primary_key,
+            };
+            let capabilities = relation_mutation_capabilities(DatabaseKind::CockroachDb, &metadata);
+            assert_eq!(
+                capabilities.insert,
+                MutationCapability::Unavailable(super::EditDisabledReason::UnsupportedDriver)
+            );
+            assert_eq!(
+                capabilities.update,
+                MutationCapability::Unavailable(super::EditDisabledReason::UnsupportedDriver)
+            );
+            assert_eq!(
+                capabilities.delete,
+                MutationCapability::Unavailable(super::EditDisabledReason::UnsupportedDriver)
+            );
+            assert!(!capabilities.allows_keyless_insert());
+        }
     }
 
     #[test]

@@ -8,6 +8,7 @@ pub mod catalog_change_set;
 pub mod catalog_drop;
 pub mod catalog_mutation;
 pub mod clickhouse;
+pub mod cockroach;
 pub mod column_type;
 pub(crate) mod ddl;
 pub mod descriptor;
@@ -20,6 +21,7 @@ pub mod mutation;
 pub mod mysql;
 pub mod oracle;
 pub mod oracle_client;
+pub(crate) mod pgwire;
 pub mod postgres;
 pub mod principal;
 pub mod principal_drop;
@@ -50,6 +52,7 @@ use self::{
     catalog_mutation::CatalogMutationCapabilities,
     catalog_mutation::{CatalogObjectDefinition, CatalogObjectDefinitionRequest},
     clickhouse::ClickHouseAdapter,
+    cockroach::CockroachAdapter,
     mssql::MsSqlAdapter,
     mysql::MySqlAdapter,
     oracle::OracleAdapter,
@@ -300,6 +303,7 @@ fn format_postgres_severity(severity: sqlx::postgres::PgSeverity) -> String {
 #[derive(Clone, Debug)]
 pub enum DatabaseConnection {
     Postgres(PostgresAdapter),
+    CockroachDb(CockroachAdapter),
     MySql(MySqlAdapter),
     MariaDb(MySqlAdapter),
     Oracle(OracleAdapter),
@@ -318,7 +322,7 @@ impl DatabaseConnection {
             Self::MySql(_) | Self::MariaDb(_) | Self::SqlServer(_) | Self::Oracle(_) => {
                 principal::PrincipalCapability::DdlOnly
             }
-            Self::Sqlite(_) | Self::DuckDb(_) | Self::Redis(_) => {
+            Self::CockroachDb(_) | Self::Sqlite(_) | Self::DuckDb(_) | Self::Redis(_) => {
                 principal::PrincipalCapability::Unsupported
             }
             Self::MongoDb(_) => principal::PrincipalCapability::Unsupported,
@@ -352,13 +356,15 @@ impl DatabaseConnection {
                 privileges: Vec::new(),
                 memberships: false,
             },
-            Self::Sqlite(_) | Self::DuckDb(_) | Self::Redis(_) | Self::MongoDb(_) => {
-                principal::PrincipalMutationCapabilities {
-                    permission_targets: Vec::new(),
-                    privileges: Vec::new(),
-                    memberships: false,
-                }
-            }
+            Self::CockroachDb(_)
+            | Self::Sqlite(_)
+            | Self::DuckDb(_)
+            | Self::Redis(_)
+            | Self::MongoDb(_) => principal::PrincipalMutationCapabilities {
+                permission_targets: Vec::new(),
+                privileges: Vec::new(),
+                memberships: false,
+            },
             Self::ClickHouse(_) => ClickHouseAdapter::principal_mutation_capabilities(),
         }
     }
@@ -366,6 +372,9 @@ impl DatabaseConnection {
     pub async fn list_principals(&self) -> Result<PrincipalPage, DatabaseError> {
         match self {
             Self::Postgres(adapter) => adapter.list_principals().await,
+            Self::CockroachDb(_) => Err(DatabaseError::unsupported(
+                "CockroachDB principal management is not implemented",
+            )),
             Self::MySql(adapter) | Self::MariaDb(adapter) => adapter.list_principals().await,
             Self::SqlServer(adapter) => adapter.list_principals().await,
             Self::Oracle(adapter) => adapter.list_principals().await,
@@ -388,9 +397,9 @@ impl DatabaseConnection {
             Self::MySql(adapter) | Self::MariaDb(adapter) => adapter.principal_ddl(principal).await,
             Self::SqlServer(adapter) => adapter.principal_ddl(principal).await,
             Self::Oracle(adapter) => adapter.principal_ddl(principal).await,
-            Self::Sqlite(_) | Self::DuckDb(_) => Err(DatabaseError::unsupported(
-                "This database has no SQL principals",
-            )),
+            Self::CockroachDb(_) | Self::Sqlite(_) | Self::DuckDb(_) => Err(
+                DatabaseError::unsupported("This database has no SQL principals"),
+            ),
             Self::Redis(_) => Err(DatabaseError::unsupported("Redis has no SQL principals")),
             Self::MongoDb(_) => Err(DatabaseError::unsupported(
                 "MongoDB uses document principals",
@@ -411,11 +420,13 @@ impl DatabaseConnection {
             }
             Self::SqlServer(adapter) => adapter.principal_details(principal, target).await,
             Self::Oracle(adapter) => adapter.principal_details(principal, target).await,
-            Self::Sqlite(_) | Self::DuckDb(_) | Self::Redis(_) | Self::MongoDb(_) => {
-                Err(DatabaseError::unsupported(
-                    "This database does not support SQL principal permission details",
-                ))
-            }
+            Self::CockroachDb(_)
+            | Self::Sqlite(_)
+            | Self::DuckDb(_)
+            | Self::Redis(_)
+            | Self::MongoDb(_) => Err(DatabaseError::unsupported(
+                "This database does not support SQL principal permission details",
+            )),
             Self::ClickHouse(adapter) => adapter.principal_details(principal, target).await,
         }
     }
@@ -451,6 +462,9 @@ impl DatabaseConnection {
     pub async fn load_monitor_snapshot(&self) -> Result<monitor::MonitorSnapshot, DatabaseError> {
         match self {
             Self::Postgres(adapter) => adapter.load_monitor_snapshot().await,
+            Self::CockroachDb(_) => Err(DatabaseError::unsupported(
+                "CockroachDB monitoring is not implemented",
+            )),
             Self::MySql(adapter) => adapter.load_monitor_snapshot().await,
             Self::MariaDb(adapter) => adapter.load_monitor_snapshot().await,
             Self::Oracle(_) => Err(DatabaseError {
@@ -480,6 +494,7 @@ impl DatabaseConnection {
     pub async fn load_monitor_metadata(&self) -> Result<monitor::MonitorMetadata, DatabaseError> {
         match self {
             Self::Postgres(adapter) => adapter.load_monitor_metadata().await,
+            Self::CockroachDb(_) => Ok(monitor::MonitorMetadata::default()),
             Self::MySql(adapter) => adapter.load_monitor_metadata().await,
             Self::MariaDb(adapter) => adapter.load_monitor_metadata().await,
             Self::Oracle(_) => Ok(monitor::MonitorMetadata::default()),
@@ -494,6 +509,9 @@ impl DatabaseConnection {
     pub async fn load_process_snapshot(&self) -> Result<monitor::ProcessSnapshot, DatabaseError> {
         match self {
             Self::Postgres(adapter) => adapter.load_process_snapshot().await,
+            Self::CockroachDb(_) => Err(DatabaseError::unsupported(
+                "CockroachDB process monitoring is not implemented",
+            )),
             Self::MySql(adapter) => adapter.load_process_snapshot().await,
             Self::MariaDb(adapter) => adapter.load_process_snapshot().await,
             Self::Oracle(_) => Err(DatabaseError {
@@ -530,6 +548,12 @@ impl DatabaseConnection {
         forced_close: crate::runtime::transaction::ForcedCloseHandle,
     ) -> Result<crate::runtime::transaction::TransactionWorkerHandle, DatabaseError> {
         match self {
+            Self::CockroachDb(adapter) => Ok(
+                crate::runtime::transaction::spawn_transaction_worker_with_forced_close(
+                    adapter.transaction_backend().await?,
+                    forced_close,
+                ),
+            ),
             Self::Postgres(adapter) => Ok(
                 crate::runtime::transaction::spawn_transaction_worker_with_forced_close(
                     adapter.transaction_backend().await?,
@@ -593,6 +617,9 @@ impl DatabaseConnection {
             DatabaseKind::DuckDb => duckdb::DuckDbAdapter::connect(profile)
                 .await
                 .map(Self::DuckDb),
+            DatabaseKind::CockroachDb => CockroachAdapter::connect(profile, password)
+                .await
+                .map(Self::CockroachDb),
             DatabaseKind::Postgres => PostgresAdapter::connect(profile, password)
                 .await
                 .map(Self::Postgres),
@@ -634,6 +661,7 @@ impl DatabaseConnection {
     pub fn kind(&self) -> DatabaseKind {
         match self {
             Self::Postgres(_) => DatabaseKind::Postgres,
+            Self::CockroachDb(_) => DatabaseKind::CockroachDb,
             Self::MySql(_) => DatabaseKind::MySql,
             Self::MariaDb(_) => DatabaseKind::MariaDb,
             Self::Oracle(_) => DatabaseKind::Oracle,
@@ -660,6 +688,7 @@ impl DatabaseConnection {
     pub fn catalog_capabilities(&self) -> CatalogCapabilities {
         match self {
             Self::Postgres(_) => PostgresAdapter::catalog_capabilities(),
+            Self::CockroachDb(_) => CockroachAdapter::catalog_capabilities(),
             Self::MySql(_) => MySqlAdapter::catalog_capabilities(),
             Self::MariaDb(_) => MySqlAdapter::mariadb_catalog_capabilities(),
             Self::Oracle(_) => catalog::CatalogCapabilities {
@@ -713,6 +742,7 @@ impl DatabaseConnection {
     pub fn catalog_mutation_capabilities(&self) -> CatalogMutationCapabilities {
         match self {
             Self::Postgres(adapter) => adapter.mutation_capabilities(),
+            Self::CockroachDb(_) => CatalogMutationCapabilities::default(),
             Self::MySql(_) => MySqlAdapter::catalog_mutation_capabilities(),
             Self::MariaDb(_) => MySqlAdapter::catalog_mutation_capabilities(),
             Self::Oracle(_) => OracleAdapter::catalog_mutation_capabilities(),
@@ -730,6 +760,9 @@ impl DatabaseConnection {
         kind: CatalogKind,
     ) -> catalog_mutation::CatalogMutationAvailability {
         match self {
+            Self::CockroachDb(_) => catalog_mutation::CatalogMutationAvailability::Unavailable {
+                reason: "CockroachDB structured schema editing is not implemented",
+            },
             Self::Oracle(_) => OracleAdapter::catalog_drop_availability(kind),
             Self::DuckDb(_)
                 if matches!(
@@ -758,6 +791,10 @@ impl DatabaseConnection {
     ) -> Result<catalog_drop::CatalogDropPlan, catalog_drop::CatalogDropError> {
         match self {
             Self::Postgres(_) => PostgresAdapter::plan_catalog_drop(request, entry),
+            Self::CockroachDb(_) => Err(catalog_drop::CatalogDropError::Unsupported {
+                kind: entry.kind,
+                reason: "CockroachDB structured schema editing is not implemented".into(),
+            }),
             Self::MySql(_) => MySqlAdapter::plan_catalog_drop(request, entry),
             Self::MariaDb(_) => MySqlAdapter::plan_catalog_drop(request, entry),
             Self::Oracle(_) => OracleAdapter::plan_catalog_drop(request, entry),
@@ -805,7 +842,7 @@ impl DatabaseConnection {
             }
             Self::SqlServer(_) => MsSqlAdapter::plan_catalog_mutation(request, draft, baseline),
             Self::Oracle(_) => OracleAdapter::plan_catalog_mutation(request, draft, baseline),
-            Self::Redis(_) => Err(
+            Self::CockroachDb(_) | Self::Redis(_) => Err(
                 catalog_mutation::CatalogMutationError::UnsupportedOperation {
                     object_type: request.object_type,
                 },
@@ -830,6 +867,9 @@ impl DatabaseConnection {
     ) -> Result<QueryOutcome, DatabaseError> {
         match self {
             Self::Postgres(adapter) => adapter.execute_catalog_mutation(plan).await,
+            Self::CockroachDb(_) => Err(DatabaseError::unsupported(
+                "CockroachDB structured schema editing is not implemented",
+            )),
             Self::MySql(adapter) | Self::MariaDb(adapter) => {
                 adapter.execute_catalog_mutation(plan).await
             }
@@ -921,6 +961,7 @@ impl DatabaseConnection {
     pub async fn probe(&self) -> Result<ServerInfo, DatabaseError> {
         match self {
             Self::Postgres(adapter) => adapter.probe().await,
+            Self::CockroachDb(adapter) => adapter.probe().await,
             Self::MySql(adapter) => adapter.probe().await,
             Self::MariaDb(adapter) => adapter.probe().await,
             Self::Oracle(adapter) => adapter.probe().await,
@@ -953,6 +994,7 @@ impl DatabaseConnection {
     pub async fn discover_catalog_scope(&self) -> Result<CatalogDiscovery, DatabaseError> {
         match self {
             Self::Postgres(adapter) => adapter.discover_catalog_scope().await,
+            Self::CockroachDb(adapter) => adapter.discover_catalog_scope().await,
             Self::MySql(adapter) => adapter.discover_catalog_scope().await,
             Self::MariaDb(adapter) => adapter.discover_catalog_scope().await,
             Self::Oracle(adapter) => adapter.discover_catalog_scope().await,
@@ -976,6 +1018,16 @@ impl DatabaseConnection {
     ) -> Result<Option<Vec<String>>, DatabaseError> {
         match self {
             Self::Postgres(adapter) => adapter.discoverable_databases().await.map(Some),
+            _ => Ok(None),
+        }
+    }
+
+    pub async fn discoverable_pgwire_databases(
+        &self,
+    ) -> Result<Option<Vec<String>>, DatabaseError> {
+        match self {
+            Self::Postgres(adapter) => adapter.discoverable_databases().await.map(Some),
+            Self::CockroachDb(adapter) => adapter.discoverable_databases().await.map(Some),
             Self::MySql(_)
             | Self::MariaDb(_)
             | Self::Oracle(_)
@@ -994,6 +1046,7 @@ impl DatabaseConnection {
     ) -> Result<CatalogPage, DatabaseError> {
         match self {
             Self::Postgres(adapter) => adapter.load_catalog_page(request).await,
+            Self::CockroachDb(adapter) => adapter.load_catalog_page(request).await,
             Self::MySql(adapter) => adapter.load_catalog_page(request).await,
             Self::MariaDb(adapter) => adapter.load_catalog_page(request).await,
             Self::Oracle(adapter) => adapter.load_catalog_page(request).await,
@@ -1028,6 +1081,7 @@ impl DatabaseConnection {
     ) -> Result<Option<catalog::CatalogEntry>, DatabaseError> {
         match self {
             Self::Postgres(adapter) => adapter.resolve_relation_identity(relation).await,
+            Self::CockroachDb(adapter) => adapter.resolve_relation_identity(relation).await,
             Self::MySql(_)
             | Self::MariaDb(_)
             | Self::Oracle(_)
@@ -1047,6 +1101,11 @@ impl DatabaseConnection {
     ) -> Result<Option<catalog::CatalogEntry>, DatabaseError> {
         match self {
             Self::Postgres(adapter) => {
+                adapter
+                    .resolve_relation_identity_with_scope(relation, scope)
+                    .await
+            }
+            Self::CockroachDb(adapter) => {
                 adapter
                     .resolve_relation_identity_with_scope(relation, scope)
                     .await
@@ -1073,6 +1132,9 @@ impl DatabaseConnection {
     ) -> Result<CatalogObjectDefinition, DatabaseError> {
         match self {
             Self::Postgres(adapter) => adapter.load_catalog_object_definition(request).await,
+            Self::CockroachDb(_) => Err(DatabaseError::unsupported(
+                "CockroachDB structured schema editing is not implemented",
+            )),
             Self::MySql(adapter) | Self::MariaDb(adapter) => {
                 adapter.load_catalog_object_definition(request).await
             }
@@ -1096,7 +1158,8 @@ impl DatabaseConnection {
     ) -> Result<Option<catalog_mutation::CatalogOwnerContext>, DatabaseError> {
         match self {
             Self::Postgres(adapter) => adapter.load_catalog_owner_context(request).await.map(Some),
-            Self::MySql(_)
+            Self::CockroachDb(_)
+            | Self::MySql(_)
             | Self::MariaDb(_)
             | Self::Oracle(_)
             | Self::Sqlite(_)
@@ -1114,6 +1177,7 @@ impl DatabaseConnection {
     ) -> Result<CatalogSearchPage, DatabaseError> {
         match self {
             Self::Postgres(adapter) => adapter.search_catalog(request).await,
+            Self::CockroachDb(adapter) => adapter.search_catalog(request).await,
             Self::MySql(adapter) => adapter.search_catalog(request).await,
             Self::MariaDb(adapter) => adapter.search_catalog(request).await,
             Self::Oracle(_) => Err(DatabaseError::configuration(
@@ -1155,6 +1219,7 @@ impl DatabaseConnection {
     ) -> Result<QueryOutcome, DatabaseError> {
         match self {
             Self::Postgres(adapter) => adapter.execute_pool_with_budget(sql, budget).await,
+            Self::CockroachDb(adapter) => adapter.execute_pool_with_budget(sql, budget).await,
             Self::MySql(adapter) => adapter.execute_pool_with_budget(sql, budget).await,
             Self::MariaDb(adapter) => adapter.execute_pool_with_budget(sql, budget).await,
             Self::Oracle(adapter) => adapter.execute_pool_with_budget(sql, budget).await,
@@ -1197,6 +1262,7 @@ impl DatabaseConnection {
     ) -> Result<RelationPreview, DatabaseError> {
         match self {
             Self::Postgres(adapter) => adapter.preview_relation(relation, options, page).await,
+            Self::CockroachDb(adapter) => adapter.preview_relation(relation, options, page).await,
             Self::MySql(adapter) => adapter.preview_relation(relation, options, page).await,
             Self::MariaDb(adapter) => adapter.preview_relation(relation, options, page).await,
             Self::Oracle(adapter) => adapter.preview_relation(relation, options, page).await,
@@ -1239,6 +1305,11 @@ impl DatabaseConnection {
     ) -> Result<RelationPreview, DatabaseError> {
         match self {
             Self::Postgres(adapter) => {
+                adapter
+                    .preview_relation_with_scope(relation, scope, options, page)
+                    .await
+            }
+            Self::CockroachDb(adapter) => {
                 adapter
                     .preview_relation_with_scope(relation, scope, options, page)
                     .await
@@ -1294,6 +1365,7 @@ impl DatabaseConnection {
     pub async fn relation_ddl(&self, relation: &CatalogId) -> Result<RelationDdl, DatabaseError> {
         match self {
             Self::Postgres(adapter) => adapter.relation_ddl(relation).await,
+            Self::CockroachDb(adapter) => adapter.relation_ddl(relation).await,
             Self::MySql(adapter) => adapter.relation_ddl(relation).await,
             Self::MariaDb(adapter) => adapter.relation_ddl(relation).await,
             Self::Oracle(adapter) => adapter.relation_ddl(relation).await,
@@ -1332,6 +1404,7 @@ impl DatabaseConnection {
     ) -> Result<RelationDdl, DatabaseError> {
         match self {
             Self::Postgres(adapter) => adapter.relation_ddl_with_scope(relation, scope).await,
+            Self::CockroachDb(adapter) => adapter.relation_ddl_with_scope(relation, scope).await,
             Self::MySql(adapter) => adapter.relation_ddl_with_scope(relation, scope).await,
             Self::MariaDb(adapter) => adapter.relation_ddl_with_scope(relation, scope).await,
             Self::Oracle(adapter) => adapter.relation_ddl_with_scope(relation, scope).await,
@@ -1356,6 +1429,7 @@ impl DatabaseConnection {
     ) -> Result<Option<String>, DatabaseError> {
         match self {
             Self::Postgres(adapter) => adapter.object_ddl(kind, schema, name).await,
+            Self::CockroachDb(adapter) => adapter.object_ddl(kind, schema, name).await,
             Self::MySql(adapter) => adapter.object_ddl(kind, schema, name).await,
             Self::MariaDb(adapter) => adapter.object_ddl(kind, schema, name).await,
             Self::Oracle(_) => Ok(None),
@@ -1370,7 +1444,7 @@ impl DatabaseConnection {
 
     pub fn quote_identifier(&self, value: &str) -> String {
         match self {
-            Self::Postgres(_) => postgres::quote_identifier(value),
+            Self::Postgres(_) | Self::CockroachDb(_) => postgres::quote_identifier(value),
             Self::MySql(_) => mysql::quote_identifier(value),
             Self::MariaDb(_) => mysql::quote_identifier(value),
             Self::Oracle(_) => format!("\"{}\"", value.replace('"', "\"\"")),
@@ -1386,6 +1460,7 @@ impl DatabaseConnection {
     pub async fn close(self) {
         match self {
             Self::Postgres(adapter) => adapter.close().await,
+            Self::CockroachDb(adapter) => adapter.close().await,
             Self::MySql(adapter) => adapter.close().await,
             Self::MariaDb(adapter) => adapter.close().await,
             Self::Oracle(adapter) => adapter.close().await,

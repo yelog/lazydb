@@ -485,6 +485,7 @@ mod tests {
             sqlite_path: None,
             duckdb_path: None,
             mongodb_options: Some(options),
+            pg_options: None,
             ssl_mode: SslMode::Prefer,
             credential_policy: CredentialPolicy::None,
             read_only: false,
