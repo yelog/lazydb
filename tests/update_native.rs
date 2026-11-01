@@ -5,7 +5,7 @@ use std::{
     io::{BufRead, BufReader, Read, Write},
     net::TcpListener,
     os::unix::fs::symlink,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::mpsc,
     thread,
@@ -20,12 +20,15 @@ struct NativeFixture {
 
 impl NativeFixture {
     fn new() -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        let binary = Path::new(env!("CARGO_BIN_EXE_lazydb"));
+        let dir = tempfile::tempdir_in(binary.parent().unwrap()).unwrap();
         let data = dir.path().join("config");
         let version = env!("CARGO_PKG_VERSION");
         let release = data.join("releases").join(version);
         fs::create_dir_all(&release).unwrap();
-        fs::copy(env!("CARGO_BIN_EXE_lazydb"), release.join("lazydb")).unwrap();
+        // A concurrent spawn can inherit a copy's writable fd until exec, causing ETXTBSY.
+        // Keep the fixture on the binary's filesystem and install it without a writer.
+        fs::hard_link(binary, release.join("lazydb")).unwrap();
         symlink(&release, data.join("current")).unwrap();
         let launcher = dir.path().join("bin/lazydb");
         fs::create_dir_all(launcher.parent().unwrap()).unwrap();
