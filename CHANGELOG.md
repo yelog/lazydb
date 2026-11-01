@@ -12,6 +12,28 @@
 - Cancel running SQL before global quit on `Ctrl-c`, propagate manual pagination cancellation, and discard interrupted PostgreSQL/CockroachDB AUTO sessions after a bounded server cancellation request.
 - Reconnect PostgreSQL-compatible profiles when TLS paths or startup routing options change, and include all permitted CockroachDB databases in workspace selection.
 
+## [0.3.1] - 2026-11-01
+
+### Added
+
+- Add Snowflake connections through the HTTPS SQL API with externally supplied PAT, OAuth, or key-pair JWT tokens and existing encrypted credential storage ([#33](https://github.com/yelog/lazydb/pull/33)).
+- Browse scoped Snowflake databases, schemas, tables, views, and columns; preview paged data and native DDL; execute SQL with explicit database, schema, warehouse, and role context. Preserve exact numbers and quoted identifier case, and handle asynchronous compressed partitions within query budgets.
+
+### Changed
+
+- Classify Snowflake sequence advancement and `SYSTEM$` functions conservatively in the shared SQL policy, and retire Snowflake connections when visible-object scope changes.
+
+### Internal
+
+- Verify real JWT/PAT authentication, invalid/revoked tokens, denied writes, partitioned results, TUI workflows, and a locally packaged macOS ARM64 binary. OAuth and natural token expiry remain unverified against a real account.
+- Document the initial Snowflake boundaries: one statement per SQL API request, no persistent console session or manual transactions, and no advertised structured mutations, monitoring, or user cancellation. See [Snowflake support](docs/snowflake.md).
+
+### Commits
+
+- [`b6f2860`](https://github.com/yelog/lazydb/commit/b6f2860) feat(snowflake): merge SQL API support (#33)
+- [`fc1d53b`](https://github.com/yelog/lazydb/commit/fc1d53b) merge: integrate TiDB support from main
+- [`c1546ed`](https://github.com/yelog/lazydb/commit/c1546ed) feat(snowflake): add SQL API connections and catalog workflows
+
 ## [0.3.0] - 2026-11-01
 
 ### Added

@@ -5,7 +5,8 @@ reference, not a claim that a live server is available on the development
 machine.
 
 For connection setup, see [Configuration](configuration.md). Dedicated guides
-cover [DuckDB runtime and sessions](duckdb.md), [MongoDB](mongodb.md), and the
+cover [DuckDB runtime and sessions](duckdb.md), [MongoDB](mongodb.md),
+[Snowflake](snowflake.md), and the
 [Redis/Valkey browser](redis-browser.md).
 
 ## Driver Matrix
@@ -31,6 +32,7 @@ disable it at runtime.
 | Valkey | Key-value, Redis-compatible | No SQL catalog or DDL | Shared Redis-compatible key/value and collection mutation | No SQL transaction UI | Not applicable | Read-only `INFO` metrics |
 | MongoDB | Document | Database, collection, and index discovery; native document commands, no SQL DDL | Document operations use a separate BSON/EJSON workflow; no relational grid editing | Bounded console transactions on replica sets or sharded clusters; see [MongoDB](mongodb.md#transactions) | No advertised server-side cancellation | Manual `serverStatus`, `dbStats`, and bounded `currentOp`; see [MongoDB](mongodb.md#monitoring-and-principals) |
 | ClickHouse | Relational | Available; database/table/view/MV and bounded native object catalog | Not advertised; supported catalog table-shape edits are separate | No manual transactions | Local request cancellation only; server query may continue | `system.events` counters and bounded `system.processes` |
+| Snowflake | Relational | Database/schema/table/view discovery, column metadata, relation previews and DDL reads; no structured catalog mutation | Not advertised | Independent SQL API statements; no manual transactions | Not advertised | Not supported |
 
 Native key/value and document workflows have their own operation checks. The
 relational grid and SQL transaction flags do not describe those workflows;
@@ -137,6 +139,31 @@ and transaction workflows. Console command support is narrower than the native
 MongoDB command set; see the [MongoDB guide](mongodb.md) for the current command
 scope, topology requirements, permission behavior, and live verification limits.
 
+## Snowflake
+
+Snowflake uses the HTTPS SQL API with certificate verification on port `443`.
+Profiles keep database and schema distinct, default schema to `PUBLIC`, and
+optionally set warehouse and role for each request. Authentication accepts PAT,
+OAuth, or an externally generated key-pair JWT; tokens use the existing secret
+credential storage.
+
+Explorer supports database, schema, table, and view discovery, column metadata,
+bounded relation previews, catalog search, and `GET_DDL` reads. Identifiers are
+quoted and catalog reads obey the profile's visible database/schema scope.
+Results preserve SQL API types and use the shared row/byte budgets, including
+asynchronous execution and partition retrieval. SQL editor completion,
+highlighting, scanning, and parsing use the Snowflake dialect.
+
+SQL API requests do not establish a persistent console session. Each statement
+uses the selected database/schema/warehouse/role independently. Requests accept
+one statement (`MULTI_STATEMENT_COUNT=1`); execute multi-statement buffers one
+statement at a time. Session state such as `USE`, temporary objects, and
+transactions must not be relied on across requests. Manual
+transactions, structured row/catalog editing, principals, monitoring, and
+server cancellation are not advertised. Closing a local request does not
+confirm that server execution stopped. The server's grants remain authoritative.
+See the [Snowflake guide](snowflake.md) for setup and verification limits.
+
 ## ClickHouse
 
 ClickHouse uses the HTTP(S) interface, with `clickhouse://` defaulting to port
@@ -206,6 +233,7 @@ other secrets are never read or reproduced.
 | SQLite | Not applicable | The group expands to an explicit "SQLite does not support users or roles" notice and issues no account query |
 | Redis / Valkey | Not applicable | No `Users & Roles` group is shown |
 | ClickHouse | `system.users`, `system.roles`, `system.grants`, and `system.role_grants`; cluster scope | Safe identity/grant columns only; permission and role-inherited coverage is Partial; structured GRANT/REVOKE/membership mutations are unavailable |
+| Snowflake | Not advertised | No principal-management workflow |
 
 ## Relation Data Mutation Matrix
 
@@ -243,6 +271,7 @@ their adapter tests pass.
 | SQLite | File database + attached aliases | File database, table, view, index, trigger | Table, view, index, trigger | No users/roles; complex table edits require a lossless rebuild plan |
 | Redis / Valkey | Logical database + key namespace | Key and supported collection elements | Values, collection elements, and TTL where native semantics permit | Database number is not a creatable SQL catalog; streams are not freely editable |
 | ClickHouse | Database is schema | Database, table, view and materialized view slices | Table rename/comment/simple appended columns; view rename/comment; unsupported engine/shape changes gated | Preserve native engine, sorting and target definitions; no drop/create emulation |
+| Snowflake | Database + schema | Database, schema, table and view reads | Not advertised | SQL API requests keep explicit database/schema context |
 
 The implementation is deliberately staged. The current implementation status
 for the first mutation slice is:
@@ -258,6 +287,7 @@ for the first mutation slice is:
 | Redis / Valkey | No SQL catalog mutation; native Key-Value mutation supports typed replacement, targeted collection edits, and TTL preservation |
 | MongoDB | Separate native document/catalog workflow; no SQL catalog mutation. See [MongoDB](mongodb.md) for the console and principal boundaries |
 | ClickHouse | Bounded database/table/view/materialized-view mutations; see [ClickHouse](#clickhouse) for engine and table-shape limits |
+| Snowflake | No structured catalog mutation; use explicitly executed SQL where permitted |
 
 Redis mutations are opened from the Redis browser: `a` creates a key under the
 selected database/prefix and `e` edits a loaded key value. Collection values are
@@ -318,6 +348,7 @@ for permission handling and result limits.
 | Valkey | Valkey 8.1.10 verified by the pinned fixture | Logical database + key namespace | Shared Redis-compatible key and collection discovery | Key type, TTL, memory, and typed previews; no SQL catalog |
 | MongoDB | Server permissions gate discovery and monitoring; transactions require a replica set or sharded cluster | Database + collection | Databases, collections, and indexes | Native BSON/EJSON document values and dedicated metadata; see [verification limits](mongodb.md#verification-limits) |
 | ClickHouse | HTTP interface; supported and tested against ClickHouse 25.8 LTS | Database is schema | Tables, views, materialized views, dictionaries, functions; projections are table children | Names, engine/native kind, comments, columns, defaults, and native definition metadata where available |
+| Snowflake | HTTPS SQL API; token and role permissions gate access | Database + schema | Databases, schemas, tables, views, and columns | Column type/nullability and native DDL where available |
 
 PostgreSQL, MySQL, MariaDB, TiDB, SQLite, and ClickHouse advertise lazy children. SQLite opens a pool with
 exactly one physical connection; SQL Server loads its supported catalog groups

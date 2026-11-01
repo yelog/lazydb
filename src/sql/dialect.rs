@@ -8,6 +8,7 @@ pub enum SqlDialect {
     DuckDb,
     Oracle,
     ClickHouse,
+    Snowflake,
     #[default]
     Generic,
 }
@@ -37,6 +38,7 @@ impl SqlDialect {
             crate::profile::DatabaseKind::Valkey => Self::Generic,
             crate::profile::DatabaseKind::MongoDb => Self::Generic,
             crate::profile::DatabaseKind::ClickHouse => Self::ClickHouse,
+            crate::profile::DatabaseKind::Snowflake => Self::Snowflake,
         }
     }
 }
@@ -51,6 +53,7 @@ pub(crate) fn parser_dialect(dialect: SqlDialect) -> &'static dyn sqlparser::dia
         SqlDialect::Generic => &sqlparser::dialect::GenericDialect {},
         SqlDialect::Oracle => &sqlparser::dialect::GenericDialect {},
         SqlDialect::ClickHouse => &sqlparser::dialect::ClickHouseDialect {},
+        SqlDialect::Snowflake => &sqlparser::dialect::SnowflakeDialect {},
     }
 }
 

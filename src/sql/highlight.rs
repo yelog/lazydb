@@ -849,5 +849,6 @@ fn dialect_ref(dialect: SqlDialect) -> &'static dyn Dialect {
         SqlDialect::DuckDb => &sqlparser::dialect::DuckDbDialect {},
         SqlDialect::Generic | SqlDialect::Oracle => &GenericDialect {},
         SqlDialect::ClickHouse => &ClickHouseDialect {},
+        SqlDialect::Snowflake => &sqlparser::dialect::SnowflakeDialect {},
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "lazydb"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 rust-version = "1.94"
 description = "A keyboard-first terminal database IDE"
@@ -31,7 +31,7 @@ nerd-font-symbols = "0.3"
 percent-encoding = "2.3"
 ratatui = { version = "0.30.2", features = ["crossterm_0_29"] }
 regex = "1"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "system-proxy", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "system-proxy", "stream", "gzip"] }
 redis = { version = "=1.5.0", default-features = false, features = ["connection-manager", "tokio-rustls-comp"] }
 mongodb = { version = "=3.8.2", default-features = false, features = ["rustls-tls", "dns-resolver", "compat-3-0-0"] }
 sha2 = "0.10"

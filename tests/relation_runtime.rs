@@ -175,12 +175,17 @@ fn unchanged_relation_response_is_the_only_accepted_identity() {
 }
 
 #[test]
-fn cockroach_preview_has_no_grid_edit_session_while_postgres_keeps_one() {
+fn readonly_grid_drivers_have_no_edit_session_while_postgres_keeps_one() {
     for (url, editable) in [
         (
             "cockroachdb://root@localhost/defaultdb?sslmode=disable",
             false,
         ),
+        (
+            "snowflake://alice@org-account.snowflakecomputing.com/defaultdb",
+            false,
+        ),
+        ("tidb://root@localhost/defaultdb", false),
         (
             "postgresql://postgres@localhost/defaultdb?sslmode=disable",
             true,

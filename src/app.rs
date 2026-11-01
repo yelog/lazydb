@@ -746,7 +746,8 @@ impl App {
             | DatabaseKind::DuckDb
             | DatabaseKind::Redis
             | DatabaseKind::Valkey
-            | DatabaseKind::MongoDb => crate::db::principal::PrincipalCapability::Unsupported,
+            | DatabaseKind::MongoDb
+            | DatabaseKind::Snowflake => crate::db::principal::PrincipalCapability::Unsupported,
             DatabaseKind::ClickHouse => {
                 crate::db::clickhouse::ClickHouseAdapter::principal_capability()
             }
@@ -1296,7 +1297,13 @@ impl App {
                     .find(|profile| profile.id == target.profile_id)
             })
             .is_some_and(|profile| {
-                !matches!(profile.kind, DatabaseKind::SqlServer | DatabaseKind::TiDb)
+                !matches!(
+                    profile.kind,
+                    DatabaseKind::SqlServer
+                        | DatabaseKind::CockroachDb
+                        | DatabaseKind::TiDb
+                        | DatabaseKind::Snowflake
+                )
             })
     }
 
@@ -2131,6 +2138,7 @@ impl App {
                 DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb => {
                     SqlDialect::Generic
                 }
+                DatabaseKind::Snowflake => SqlDialect::Snowflake,
                 DatabaseKind::ClickHouse => SqlDialect::ClickHouse,
             })
             .unwrap_or_else(|| self.sql_dialect());
@@ -19164,7 +19172,7 @@ impl App {
                     crate::db::mssql::MsSqlAdapter::catalog_mutation_capabilities()
                 }
                 DatabaseKind::Redis | DatabaseKind::Valkey => Default::default(),
-                DatabaseKind::MongoDb => Default::default(),
+                DatabaseKind::MongoDb | DatabaseKind::Snowflake => Default::default(),
                 DatabaseKind::ClickHouse => {
                     crate::db::clickhouse::ClickHouseAdapter::catalog_mutation_capabilities()
                 }
@@ -21519,7 +21527,8 @@ impl App {
                     | DatabaseKind::CockroachDb
                     | DatabaseKind::SqlServer
                     | DatabaseKind::Sqlite
-                    | DatabaseKind::DuckDb => entry.qualified_name.schema.clone(),
+                    | DatabaseKind::DuckDb
+                    | DatabaseKind::Snowflake => entry.qualified_name.schema.clone(),
                     DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb => None,
                     DatabaseKind::ClickHouse => Some(database.clone()),
                 };
@@ -21729,7 +21738,8 @@ impl App {
                     DatabaseKind::Postgres
                     | DatabaseKind::CockroachDb
                     | DatabaseKind::SqlServer
-                    | DatabaseKind::Oracle => None,
+                    | DatabaseKind::Oracle
+                    | DatabaseKind::Snowflake => None,
                     DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb => None,
                     DatabaseKind::ClickHouse => Some(database.clone()),
                 },
@@ -22689,6 +22699,7 @@ impl App {
             DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb => {
                 SqlDialect::Generic
             }
+            DatabaseKind::Snowflake => SqlDialect::Snowflake,
             DatabaseKind::ClickHouse => SqlDialect::ClickHouse,
         }
     }
@@ -22706,6 +22717,7 @@ impl App {
             Some(DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb) => {
                 SqlDialect::Generic
             }
+            Some(DatabaseKind::Snowflake) => SqlDialect::Snowflake,
             Some(DatabaseKind::ClickHouse) => SqlDialect::ClickHouse,
             None => SqlDialect::Generic,
         }
@@ -22732,6 +22744,7 @@ impl App {
             Some(DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb) | None => {
                 SqlDialect::Generic
             }
+            Some(DatabaseKind::Snowflake) => SqlDialect::Snowflake,
             Some(DatabaseKind::ClickHouse) => SqlDialect::ClickHouse,
         }
     }
@@ -30871,7 +30884,10 @@ impl App {
             .iter()
             .find(|profile| profile.id == request.connection.profile_id)
             .is_none_or(|profile| {
-                !matches!(profile.kind, DatabaseKind::CockroachDb | DatabaseKind::TiDb)
+                !matches!(
+                    profile.kind,
+                    DatabaseKind::CockroachDb | DatabaseKind::TiDb | DatabaseKind::Snowflake
+                )
             });
         let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(tab_index) else {
             return Vec::new();
@@ -31123,6 +31139,7 @@ fn relation_execution_target(
             | DatabaseKind::CockroachDb
             | DatabaseKind::SqlServer
             | DatabaseKind::Oracle
+            | DatabaseKind::Snowflake
     ) {
         target.schema = tab.descriptor.qualified_name.schema.clone();
     }
@@ -31196,7 +31213,8 @@ fn add_explorer_profile(
         | DatabaseKind::MariaDb
         | DatabaseKind::TiDb
         | DatabaseKind::Oracle
-        | DatabaseKind::SqlServer => {
+        | DatabaseKind::SqlServer
+        | DatabaseKind::Snowflake => {
             let host = profile.host.as_deref().unwrap_or_default();
             profile
                 .port

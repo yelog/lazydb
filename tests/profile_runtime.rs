@@ -268,6 +268,58 @@ async fn pgwire_tls_and_routing_edits_are_connection_changes_even_with_a_rename(
 }
 
 #[tokio::test]
+async fn snowflake_scope_changes_require_a_new_connection_without_changing_other_drivers() {
+    use lazydb::profile::{CatalogSelection, DatabaseKind};
+    for url in [
+        "snowflake://user@org-account.snowflakecomputing.com/DB?schema=PUBLIC",
+        ":memory:",
+    ] {
+        let temp = TempDir::new().unwrap();
+        let store = ProfileStore::new(temp.path().join("connections.toml"));
+        let profile = import_connection_url(url, None).unwrap().profile;
+        let id = profile.id;
+        let original_scope = profile.catalog_scope.clone();
+        store.save(std::slice::from_ref(&profile)).unwrap();
+        let (mut runtime, mut receiver) = runtime(
+            vec![profile.clone()],
+            HashSet::from([id]),
+            store,
+            Arc::new(FakeSecretStore::default()),
+        );
+        let mut saved = profile;
+        let mut expanded_scope = original_scope.clone();
+        if let CatalogSelection::Selected(databases) = &mut expanded_scope.databases {
+            databases[0].schemas = CatalogSelection::All;
+        }
+        // Both widening and narrowing must replace Snowflake's captured adapter scope.
+        for (request_id, scope) in [(1, expanded_scope), (2, original_scope)] {
+            saved.catalog_scope = scope;
+            runtime.dispatch(Command::SaveProfile {
+                request_id,
+                submission: submission(saved.clone(), CredentialUpdate::Preserve),
+                connect: false,
+            });
+            match next_action(&mut receiver).await {
+                Action::ProfileSaved {
+                    change, profile, ..
+                } => {
+                    assert!(change.catalog_scope_changed);
+                    assert_eq!(
+                        change.connection_settings_changed,
+                        saved.kind == DatabaseKind::Snowflake
+                    );
+                    assert!(!change.credentials_changed);
+                    assert!(!change.display_only_changed);
+                    saved = profile;
+                }
+                action => panic!("unexpected action: {action:?}"),
+            }
+        }
+        runtime.shutdown().await;
+    }
+}
+
+#[tokio::test]
 async fn session_password_is_never_persisted_or_sent_to_keyring() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("connections.toml");

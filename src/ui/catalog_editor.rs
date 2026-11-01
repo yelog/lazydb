@@ -3221,6 +3221,7 @@ fn preview(
             crate::profile::DatabaseKind::Redis
             | crate::profile::DatabaseKind::Valkey
             | crate::profile::DatabaseKind::MongoDb => SqlDialect::Generic,
+            crate::profile::DatabaseKind::Snowflake => SqlDialect::Snowflake,
             crate::profile::DatabaseKind::ClickHouse => SqlDialect::ClickHouse,
         })
         .unwrap_or(SqlDialect::Generic);

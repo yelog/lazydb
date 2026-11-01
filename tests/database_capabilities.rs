@@ -63,6 +63,21 @@ fn clickhouse_catalog_capability_is_enabled_with_the_native_adapter() {
 }
 
 #[test]
+fn snowflake_advertises_only_implemented_sql_api_workflows() {
+    assert_eq!(
+        DatabaseCapabilities::for_kind(DatabaseKind::Snowflake),
+        DatabaseCapabilities {
+            catalog: true,
+            relation_ddl: true,
+            relation_edit: false,
+            monitoring: false,
+            manual_transactions: false,
+            cancellation: false,
+        }
+    );
+}
+
+#[test]
 fn valkey_has_the_same_non_relational_static_capabilities_as_redis() {
     assert_eq!(
         DatabaseCapabilities::for_kind(DatabaseKind::Valkey),

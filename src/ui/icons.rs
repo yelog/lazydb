@@ -253,6 +253,7 @@ impl IconSet {
                 DatabaseKind::Redis => dev::DEV_REDIS,
                 DatabaseKind::Valkey => "V",
                 DatabaseKind::MongoDb => "M",
+                DatabaseKind::Snowflake => md::MD_DATABASE,
                 DatabaseKind::ClickHouse => md::MD_DATABASE,
             },
             IconMode::Unicode => match kind {
@@ -268,6 +269,7 @@ impl IconSet {
                 DatabaseKind::Redis => "RD",
                 DatabaseKind::Valkey => "VK",
                 DatabaseKind::MongoDb => "MG",
+                DatabaseKind::Snowflake => "SF",
                 DatabaseKind::ClickHouse => "CH",
             },
             IconMode::Ascii => match kind {
@@ -283,6 +285,7 @@ impl IconSet {
                 DatabaseKind::Redis => "RD",
                 DatabaseKind::Valkey => "VK",
                 DatabaseKind::MongoDb => "MG",
+                DatabaseKind::Snowflake => "SF",
                 DatabaseKind::ClickHouse => "CH",
             },
         }
@@ -301,6 +304,7 @@ impl IconSet {
             DatabaseKind::Redis => ratatui::style::Color::Rgb(220, 45, 45),
             DatabaseKind::Valkey => ratatui::style::Color::Rgb(120, 65, 190),
             DatabaseKind::MongoDb => ratatui::style::Color::Rgb(0, 150, 90),
+            DatabaseKind::Snowflake => ratatui::style::Color::Rgb(41, 181, 232),
             DatabaseKind::ClickHouse => ratatui::style::Color::Rgb(252, 199, 0),
         }
     }

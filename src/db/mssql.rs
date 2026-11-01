@@ -4752,6 +4752,7 @@ mod tests {
             sqlite_path: None,
             mongodb_options: None,
             pg_options: None,
+            snowflake_options: None,
             duckdb_path: None,
             ssl_mode,
             credential_policy: CredentialPolicy::Prompt,

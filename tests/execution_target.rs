@@ -25,6 +25,7 @@ fn profile(kind: DatabaseKind) -> ConnectionProfile {
         sqlite_path: (kind == DatabaseKind::Sqlite).then(|| PathBuf::from("app.db")),
         mongodb_options: None,
         pg_options: None,
+        snowflake_options: None,
         duckdb_path: None,
         ssl_mode: SslMode::Prefer,
         credential_policy: CredentialPolicy::None,
@@ -284,4 +285,73 @@ fn target_override_changes_server_namespace_but_not_sqlite_file() {
     let configured = alias.apply_to_profile(&sqlite).unwrap();
     assert_eq!(configured.sqlite_path, sqlite.sqlite_path);
     assert_eq!(configured.database, sqlite.database);
+}
+
+#[test]
+fn snowflake_saved_profile_and_schema_less_targets_use_public() {
+    use lazydb::profile::{CatalogScope, CatalogSelection, DatabaseScope};
+    let mut profile = profile(DatabaseKind::Snowflake);
+    profile.default_schema = None;
+    profile.catalog_scope =
+        CatalogScope::for_profile(DatabaseKind::Snowflake, "app", Some("PUBLIC"));
+    let mut target = ExecutionTarget::from_profile(&profile);
+    assert_eq!(target.schema.as_deref(), Some("PUBLIC"));
+    assert!(target.is_valid(&profile));
+    assert_eq!(
+        target
+            .apply_to_profile(&profile)
+            .unwrap()
+            .default_schema
+            .as_deref(),
+        Some("PUBLIC")
+    );
+
+    // Saved targets and database explorer selections may have no schema.
+    target.schema = None;
+    assert!(target.is_valid(&profile));
+    let configured = target.apply_to_profile(&profile).unwrap();
+    assert_eq!(configured.default_schema.as_deref(), Some("PUBLIC"));
+    assert_eq!(
+        ExecutionTarget::from_profile(&configured).schema.as_deref(),
+        Some("PUBLIC")
+    );
+
+    // An omitted schema must not bypass a selection excluding PUBLIC.
+    profile.catalog_scope = CatalogScope {
+        databases: CatalogSelection::Selected(vec![DatabaseScope {
+            name: "app".into(),
+            schemas: CatalogSelection::Selected(vec!["RAW".into()]),
+        }]),
+    };
+    assert!(!target.is_valid(&profile));
+    assert!(target.apply_to_profile(&profile).is_none());
+    target.schema = Some("RAW".into());
+    assert!(target.is_valid(&profile));
+    assert_eq!(
+        target
+            .apply_to_profile(&profile)
+            .unwrap()
+            .default_schema
+            .as_deref(),
+        Some("RAW")
+    );
+    target.database = "OTHER".into();
+    assert!(!target.is_valid(&profile));
+}
+
+#[test]
+fn snowflake_execution_target_keeps_database_schema_and_session_options() {
+    let mut profile = lazydb::profile::import_connection_url(
+        "snowflake://alice@org-account.snowflakecomputing.com/DB?schema=RAW&warehouse=WH&role=READER", None,
+    ).unwrap().profile;
+    profile.catalog_scope.databases = lazydb::profile::CatalogSelection::All;
+    let mut target = ExecutionTarget::from_profile(&profile);
+    assert_eq!(target.database, "DB");
+    assert_eq!(target.schema.as_deref(), Some("RAW"));
+    target.database = "OTHER_DB".into();
+    target.schema = Some("OTHER_SCHEMA".into());
+    let configured = target.apply_to_profile(&profile).unwrap();
+    assert_eq!(configured.database.as_deref(), Some("OTHER_DB"));
+    assert_eq!(configured.default_schema.as_deref(), Some("OTHER_SCHEMA"));
+    assert_eq!(configured.snowflake_options, profile.snowflake_options);
 }

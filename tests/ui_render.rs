@@ -7888,6 +7888,7 @@ fn driver_options_use_database_icons_in_each_icon_mode() {
         DatabaseKind::Oracle,
         DatabaseKind::ClickHouse,
         DatabaseKind::TiDb,
+        DatabaseKind::Snowflake,
     ];
 
     for mode in [IconMode::NerdFont, IconMode::Unicode, IconMode::Ascii] {
@@ -7922,6 +7923,7 @@ fn driver_options_use_database_icons_in_each_icon_mode() {
                 DatabaseKind::MongoDb => "MongoDB",
                 DatabaseKind::ClickHouse => "ClickHouse",
                 DatabaseKind::TiDb => "TiDB",
+                DatabaseKind::Snowflake => "Snowflake",
             };
             let label = format!("{} {display_name}", IconSet::new(mode).database(kind));
             assert!(

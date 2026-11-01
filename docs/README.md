@@ -26,7 +26,7 @@ Choose a guide below for the task you want to complete.
 ## Database Guides
 
 PostgreSQL, MySQL, MariaDB, Oracle, SQL Server, SQLite, DuckDB, Redis, Valkey,
-MongoDB, CockroachDB, TiDB, and ClickHouse are covered by the
+MongoDB, CockroachDB, TiDB, ClickHouse, and Snowflake are covered by the
 [capability reference](database-capabilities.md). Additional guides explain
 driver-specific setup and workflows:
 
@@ -40,6 +40,7 @@ driver-specific setup and workflows:
 | MariaDB | [Local test server](mariadb-test-database.md) |
 | CockroachDB | [Connections, supported operations, and local tests](cockroachdb.md) |
 | TiDB | [Connection setup, supported workflows, and local test server](tidb.md) |
+| Snowflake | [SQL API authentication, supported workflows, and verification](snowflake.md) |
 
 ## Integrations
 

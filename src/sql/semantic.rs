@@ -40,7 +40,9 @@ impl CatalogNamespace {
 ///
 /// Entries and coverage deliberately live together. An empty entry list is
 /// not evidence of a missing object until the corresponding namespace has
-/// `Complete` coverage.
+/// `Complete` coverage. For Snowflake, `(None, None)` covers the database
+/// list, `(Some(database), None)` covers that database's schema list, and
+/// `(Some(database), Some(schema))` covers relations within that schema.
 #[derive(Clone, Debug, Default)]
 pub struct CatalogSnapshot {
     entries: Vec<CatalogEntry>,
@@ -107,15 +109,19 @@ impl CatalogSnapshot {
             .filter(|entry| entry.kind == CatalogKind::Schema)
     }
 
-    fn has_database(&self, name: &str) -> bool {
+    fn has_database(&self, name: &str, dialect: SqlDialect) -> bool {
         self.databases()
-            .any(|entry| same_identifier(&entry.qualified_name.object, name))
+            .any(|entry| same_identifier(&entry.qualified_name.object, name, dialect))
     }
 
-    fn has_schema(&self, database: Option<&str>, schema: &str) -> bool {
+    fn has_schema(&self, database: Option<&str>, schema: &str, dialect: SqlDialect) -> bool {
         self.schemas().any(|entry| {
-            same_identifier(&entry.qualified_name.object, schema)
-                && same_optional_identifier(entry.qualified_name.database.as_deref(), database)
+            same_identifier(&entry.qualified_name.object, schema, dialect)
+                && same_optional_identifier(
+                    entry.qualified_name.database.as_deref(),
+                    database,
+                    dialect,
+                )
         })
     }
 
@@ -135,7 +141,24 @@ impl CatalogSnapshot {
             .unwrap_or(CatalogCoverage::NotLoaded)
     }
 
+    /// Resolves unquoted name components in the active dialect.
+    /// Parsed SQL uses `resolve_relation_keys` to preserve quoted identifiers.
     pub fn resolve_relation(&self, name: &[&str], context: &SemanticContext) -> RelationResolution {
+        let folded = name
+            .iter()
+            .map(|value| identifier_key(&sqlparser::ast::Ident::new(*value), context.dialect))
+            .collect::<Vec<_>>();
+        let name = folded.iter().map(String::as_str).collect::<Vec<_>>();
+        self.resolve_relation_keys(&name, context)
+    }
+
+    // Keys from parsed identifiers have already preserved quotes and folded
+    // unquoted Snowflake identifiers. Catalog names are stored verbatim.
+    fn resolve_relation_keys(
+        &self,
+        name: &[&str],
+        context: &SemanticContext,
+    ) -> RelationResolution {
         let Some(namespace) = relation_namespace(name, context) else {
             return RelationResolution::Unknown;
         };
@@ -148,15 +171,19 @@ impl CatalogSnapshot {
         let matches = self
             .relations()
             .filter(|entry| {
-                same_identifier(entry.qualified_name.object.as_str(), object)
-                    && same_optional_identifier(
-                        entry.qualified_name.database.as_deref(),
-                        namespace.database.as_deref(),
-                    )
-                    && same_optional_identifier(
-                        entry.qualified_name.schema.as_deref(),
-                        namespace.schema.as_deref(),
-                    )
+                same_identifier(
+                    entry.qualified_name.object.as_str(),
+                    object,
+                    context.dialect,
+                ) && same_optional_identifier(
+                    entry.qualified_name.database.as_deref(),
+                    namespace.database.as_deref(),
+                    context.dialect,
+                ) && same_optional_identifier(
+                    entry.qualified_name.schema.as_deref(),
+                    namespace.schema.as_deref(),
+                    context.dialect,
+                )
             })
             .collect::<Vec<_>>();
         match matches.as_slice() {
@@ -263,7 +290,15 @@ fn analyze_insert(
         return;
     };
     for column in &insert.columns {
-        validate_relation_column_name(column, &relation, catalog, text, index, analysis);
+        validate_relation_column_name(
+            column,
+            &relation,
+            catalog,
+            context.dialect,
+            text,
+            index,
+            analysis,
+        );
     }
     if let Some(source) = &insert.source {
         analyze_query(source, text, context, catalog, index, analysis, &[]);
@@ -287,11 +322,12 @@ fn analyze_update(
         return;
     };
     let source = RelationSource {
+        dialect: context.dialect,
         name: target
             .0
             .last()
             .and_then(|part| part.as_ident())
-            .map(|ident| ident.value.clone())
+            .map(|ident| identifier_key(ident, context.dialect))
             .unwrap_or_default(),
         relation: Some(relation),
         virtual_columns: Vec::new(),
@@ -305,6 +341,7 @@ fn analyze_update(
                     name,
                     sources[0].relation.as_ref().unwrap(),
                     catalog,
+                    context.dialect,
                     text,
                     index,
                     analysis,
@@ -316,6 +353,7 @@ fn analyze_update(
                         name,
                         sources[0].relation.as_ref().unwrap(),
                         catalog,
+                        context.dialect,
                         text,
                         index,
                         analysis,
@@ -398,14 +436,15 @@ fn resolve_target_name(
         .iter()
         .filter_map(|part| part.as_ident())
         .collect::<Vec<_>>();
-    let values = parts
+    let keys = parts
         .iter()
-        .map(|part| part.value.as_str())
+        .map(|part| identifier_key(part, context.dialect))
         .collect::<Vec<_>>();
+    let values = keys.iter().map(String::as_str).collect::<Vec<_>>();
     if !validate_qualified_namespace(&parts, &values, context, catalog, text, index, analysis) {
         return None;
     }
-    match catalog.resolve_relation(&values, context) {
+    match catalog.resolve_relation_keys(&values, context) {
         RelationResolution::Resolved(id) => Some(id),
         RelationResolution::Missing => {
             if let Some(last) = parts.last() {
@@ -438,12 +477,18 @@ fn validate_qualified_namespace(
     analysis: &mut SemanticAnalysis,
 ) -> bool {
     if values.len() == 3
-        && catalog.databases().next().is_some()
+        && if context.dialect == SqlDialect::Snowflake {
+            catalog
+                .coverage(&CatalogNamespace::new(None::<String>, None::<String>))
+                .can_prove_missing()
+        } else {
+            catalog.databases().next().is_some()
+        }
         && matches!(
             context.dialect,
-            SqlDialect::Postgres | SqlDialect::SqlServer
+            SqlDialect::Postgres | SqlDialect::SqlServer | SqlDialect::Snowflake
         )
-        && !catalog.has_database(values[0])
+        && !catalog.has_database(values[0], context.dialect)
     {
         analysis.diagnostics.push(super::SqlDiagnostic {
             range: ident_range(text, index, parts[0]),
@@ -453,19 +498,25 @@ fn validate_qualified_namespace(
         return false;
     }
     let schema_index = match (context.dialect, values) {
-        (SqlDialect::SqlServer, [_database, _schema, _relation]) => Some(1),
+        (SqlDialect::SqlServer | SqlDialect::Snowflake, [_database, _schema, _relation]) => Some(1),
         (_, [_schema, _relation]) => Some(0),
         _ => None,
     };
-    if let Some(schema_index) = schema_index
-        && catalog.schemas().next().is_some()
-    {
+    if let Some(schema_index) = schema_index {
         let database = if values.len() == 3 {
             Some(values[0])
         } else {
             context.database.as_deref()
         };
-        if !catalog.has_schema(database, values[schema_index]) {
+        let can_prove_missing = if context.dialect == SqlDialect::Snowflake {
+            catalog
+                .coverage(&CatalogNamespace::new(database, None::<String>))
+                .can_prove_missing()
+        } else {
+            catalog.schemas().next().is_some()
+        };
+        if can_prove_missing && !catalog.has_schema(database, values[schema_index], context.dialect)
+        {
             analysis.diagnostics.push(super::SqlDiagnostic {
                 range: ident_range(text, index, parts[schema_index]),
                 message: format!("schema '{}' does not exist", parts[schema_index].value),
@@ -481,6 +532,7 @@ fn validate_relation_column_name(
     name: &sqlparser::ast::ObjectName,
     relation: &CatalogId,
     catalog: &CatalogSnapshot,
+    dialect: SqlDialect,
     text: &str,
     index: &LineIndex,
     analysis: &mut SemanticAnalysis,
@@ -492,10 +544,13 @@ fn validate_relation_column_name(
         analysis.incomplete = true;
         return;
     }
-    if !catalog
-        .relation_columns(relation)
-        .any(|entry| same_identifier(&entry.qualified_name.object, &column.value))
-    {
+    if !catalog.relation_columns(relation).any(|entry| {
+        same_identifier(
+            &entry.qualified_name.object,
+            &identifier_key(column, dialect),
+            dialect,
+        )
+    }) {
         analysis.diagnostics.push(super::SqlDiagnostic {
             range: ident_range(text, index, column),
             message: format!("column '{}' does not exist", column.value),
@@ -532,10 +587,11 @@ fn analyze_query(
                 .alias
                 .columns
                 .iter()
-                .map(|column| column.name.value.clone())
+                .map(|column| identifier_key(&column.name, context.dialect))
                 .collect();
             local_sources.push(RelationSource {
-                name: cte.alias.name.value.clone(),
+                dialect: context.dialect,
+                name: identifier_key(&cte.alias.name, context.dialect),
                 relation: None,
                 virtual_columns: columns,
                 virtual_complete: !cte.alias.columns.is_empty(),
@@ -585,7 +641,7 @@ fn analyze_query(
                 validate_expr(
                     expr,
                     &sources,
-                    &local_sources,
+                    outer_sources,
                     catalog,
                     text,
                     index,
@@ -600,7 +656,7 @@ fn analyze_query(
                 validate_expr(
                     match_condition,
                     &sources,
-                    &local_sources,
+                    outer_sources,
                     catalog,
                     text,
                     index,
@@ -609,7 +665,7 @@ fn analyze_query(
                 validate_expr(
                     expr,
                     &sources,
-                    &local_sources,
+                    outer_sources,
                     catalog,
                     text,
                     index,
@@ -622,10 +678,12 @@ fn analyze_query(
         .projection
         .iter()
         .filter_map(|item| match item {
-            sqlparser::ast::SelectItem::ExprWithAlias { alias, .. } => Some(alias.value.clone()),
-            sqlparser::ast::SelectItem::ExprWithAliases { aliases, .. } => {
-                aliases.first().map(|alias| alias.value.clone())
+            sqlparser::ast::SelectItem::ExprWithAlias { alias, .. } => {
+                Some(identifier_key(alias, context.dialect))
             }
+            sqlparser::ast::SelectItem::ExprWithAliases { aliases, .. } => aliases
+                .first()
+                .map(|alias| identifier_key(alias, context.dialect)),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -650,7 +708,7 @@ fn analyze_query(
             validate_expr(
                 expr,
                 &sources,
-                &local_sources,
+                outer_sources,
                 catalog,
                 text,
                 index,
@@ -662,7 +720,7 @@ fn analyze_query(
         validate_expr(
             expr,
             &sources,
-            &local_sources,
+            outer_sources,
             catalog,
             text,
             index,
@@ -673,7 +731,7 @@ fn analyze_query(
         validate_expr(
             expr,
             &sources,
-            &local_sources,
+            outer_sources,
             catalog,
             text,
             index,
@@ -685,7 +743,7 @@ fn analyze_query(
             validate_expr(
                 expr,
                 &sources,
-                &local_sources,
+                outer_sources,
                 catalog,
                 text,
                 index,
@@ -702,13 +760,13 @@ fn analyze_query(
                 sqlparser::ast::Expr::Identifier(identifier)
                     if output_aliases
                         .iter()
-                        .any(|alias| same_identifier(alias, &identifier.value))
+                        .any(|alias| same_identifier(alias, &identifier_key(identifier, context.dialect), context.dialect))
             );
             if !is_output_alias {
                 validate_expr(
                     &order.expr,
                     &sources,
-                    &local_sources,
+                    outer_sources,
                     catalog,
                     text,
                     index,
@@ -721,6 +779,7 @@ fn analyze_query(
 
 #[derive(Clone)]
 struct RelationSource {
+    dialect: SqlDialect,
     name: String,
     relation: Option<CatalogId>,
     virtual_columns: Vec<String>,
@@ -748,20 +807,23 @@ fn analyze_table_factor(
         .filter_map(|part| part.as_ident())
         .collect::<Vec<_>>();
     let Some(last) = parts.last() else { return };
-    let names = parts
+    let keys = parts
         .iter()
-        .map(|part| part.value.as_str())
+        .map(|part| identifier_key(part, context.dialect))
         .collect::<Vec<_>>();
+    let names = keys.iter().map(String::as_str).collect::<Vec<_>>();
     if names.len() == 1
         && let Some(local) = local_sources
             .iter()
             .rev()
-            .find(|source| same_identifier(&source.name, names[0]))
+            .find(|source| same_identifier(&source.name, names[0], context.dialect))
     {
         sources.push(RelationSource {
-            name: alias
-                .as_ref()
-                .map_or_else(|| last.value.clone(), |alias| alias.name.value.clone()),
+            dialect: context.dialect,
+            name: identifier_key(
+                alias.as_ref().map_or(*last, |alias| &alias.name),
+                context.dialect,
+            ),
             relation: None,
             virtual_columns: local.virtual_columns.clone(),
             virtual_complete: local.virtual_complete,
@@ -771,7 +833,7 @@ fn analyze_table_factor(
     if !validate_qualified_namespace(&parts, &names, context, catalog, text, index, analysis) {
         return;
     }
-    let resolution = catalog.resolve_relation(&names, context);
+    let resolution = catalog.resolve_relation_keys(&names, context);
     let relation = match resolution {
         RelationResolution::Resolved(id) => {
             analysis.dependencies.push(id.clone());
@@ -801,10 +863,12 @@ fn analyze_table_factor(
             None
         }
     };
-    let source_name = alias
-        .as_ref()
-        .map_or_else(|| last.value.clone(), |alias| alias.name.value.clone());
+    let source_name = identifier_key(
+        alias.as_ref().map_or(*last, |alias| &alias.name),
+        context.dialect,
+    );
     sources.push(RelationSource {
+        dialect: context.dialect,
         name: source_name,
         relation,
         virtual_columns: Vec::new(),
@@ -862,10 +926,13 @@ fn validate_qualifier(
     index: &LineIndex,
     analysis: &mut SemanticAnalysis,
 ) {
-    if !sources
-        .iter()
-        .any(|source| same_identifier(&source.name, &qualifier.value))
-    {
+    if !sources.iter().any(|source| {
+        same_identifier(
+            &source.name,
+            &identifier_key(qualifier, source.dialect),
+            source.dialect,
+        )
+    }) {
         analysis.diagnostics.push(super::SqlDiagnostic {
             range: ident_range(text, index, qualifier),
             message: format!(
@@ -889,17 +956,25 @@ fn validate_column(
     analysis: &mut SemanticAnalysis,
 ) {
     let candidates = sources.iter().chain(outer_sources).filter(|source| {
-        qualifier.is_none_or(|qualifier| same_identifier(&source.name, &qualifier.value))
+        qualifier.is_none_or(|qualifier| {
+            same_identifier(
+                &source.name,
+                &identifier_key(qualifier, source.dialect),
+                source.dialect,
+            )
+        })
     });
     let mut match_count = 0usize;
     let mut unknown = false;
     for source in candidates {
         if source.relation.is_none() && source.virtual_complete {
-            if source
-                .virtual_columns
-                .iter()
-                .any(|name| same_identifier(name, &column.value))
-            {
+            if source.virtual_columns.iter().any(|name| {
+                same_identifier(
+                    name,
+                    &identifier_key(column, source.dialect),
+                    source.dialect,
+                )
+            }) {
                 match_count += 1;
             }
             continue;
@@ -910,10 +985,13 @@ fn validate_column(
         };
         match catalog.column_coverage(relation) {
             CatalogCoverage::Complete => {
-                if catalog
-                    .relation_columns(relation)
-                    .any(|entry| same_identifier(&entry.qualified_name.object, &column.value))
-                {
+                if catalog.relation_columns(relation).any(|entry| {
+                    same_identifier(
+                        &entry.qualified_name.object,
+                        &identifier_key(column, source.dialect),
+                        source.dialect,
+                    )
+                }) {
                     match_count += 1;
                 }
             }
@@ -965,13 +1043,25 @@ fn relation_namespace(name: &[&str], context: &SemanticContext) -> Option<Catalo
     }
 }
 
-fn same_identifier(left: &str, right: &str) -> bool {
-    left.eq_ignore_ascii_case(right)
+fn identifier_key(ident: &sqlparser::ast::Ident, dialect: SqlDialect) -> String {
+    if dialect == SqlDialect::Snowflake && ident.quote_style.is_none() {
+        ident.value.to_uppercase()
+    } else {
+        ident.value.clone()
+    }
 }
 
-fn same_optional_identifier(left: Option<&str>, right: Option<&str>) -> bool {
+fn same_identifier(left: &str, right: &str, dialect: SqlDialect) -> bool {
+    if dialect == SqlDialect::Snowflake {
+        left == right
+    } else {
+        left.eq_ignore_ascii_case(right)
+    }
+}
+
+fn same_optional_identifier(left: Option<&str>, right: Option<&str>, dialect: SqlDialect) -> bool {
     match (left, right) {
-        (Some(left), Some(right)) => same_identifier(left, right),
+        (Some(left), Some(right)) => same_identifier(left, right, dialect),
         (None, None) => true,
         _ => false,
     }
