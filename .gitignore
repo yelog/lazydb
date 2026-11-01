@@ -8,6 +8,7 @@ lcov.info
 tarpaulin-report.html
 
 # Local configuration and secrets
+/.claude/
 .env
 .env.*
 !.env.example
