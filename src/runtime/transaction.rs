@@ -172,7 +172,8 @@ where
                 TransactionRequest::Execute {
                     sql, cancel, reply, ..
                 } => {
-                    let outcome = execute_or_cancel(guard.backend_mut(), &sql, cancel).await;
+                    let mut cancel = Some(cancel);
+                    let outcome = execute_or_cancel(guard.backend_mut(), &sql, &mut cancel).await;
                     if let Some(result) = outcome {
                         let _ = reply.send(result);
                         if guard.backend_mut().depth() == 0 {
@@ -180,24 +181,11 @@ where
                             return WorkerDisposition::ImplicitlyEnded;
                         }
                     } else {
-                        if guard.backend_mut().cancel().await.is_err() {
-                            return WorkerDisposition::Quarantine;
-                        }
-                        // Some backends cancel by closing the session. Their depth is already
-                        // zero and rollback would be an operation on a nonexistent client.
-                        if guard.backend_mut().depth() == 0 {
-                            guard.disarm();
+                        let disposition = cancel_and_rollback(&mut guard).await;
+                        if disposition == WorkerDisposition::CancelledAndRolledBack {
                             let _ = reply.send(Err(TransactionError("cancelled".to_owned())));
-                            return WorkerDisposition::CancelledAndRolledBack;
                         }
-                        if guard.backend_mut().rollback().await.is_err()
-                            || guard.backend_mut().depth() != 0
-                        {
-                            return WorkerDisposition::Quarantine;
-                        }
-                        guard.disarm();
-                        let _ = reply.send(Err(TransactionError("cancelled".to_owned())));
-                        return WorkerDisposition::CancelledAndRolledBack;
+                        return disposition;
                     }
                 }
                 TransactionRequest::Page {
@@ -205,10 +193,21 @@ where
                     dialect,
                     count_sql,
                     mut page,
+                    cancel,
                     reply,
                 } => {
+                    let mut cancel = Some(cancel);
                     let total = if page.resolve_total {
-                        match guard.backend_mut().execute(&count_sql).await {
+                        let Some(result) =
+                            execute_or_cancel(guard.backend_mut(), &count_sql, &mut cancel).await
+                        else {
+                            let disposition = cancel_and_rollback(&mut guard).await;
+                            if disposition == WorkerDisposition::CancelledAndRolledBack {
+                                let _ = reply.send(Err(TransactionError("cancelled".into())));
+                            }
+                            return disposition;
+                        };
+                        match result {
                             Ok(outcome) => match count_from_outcome(&outcome) {
                                 Ok(total) => Some(total),
                                 Err(error) => {
@@ -237,7 +236,15 @@ where
                                 return WorkerDisposition::Quarantine;
                             }
                         };
-                    let result = guard.backend_mut().execute(&page_sql).await;
+                    let Some(result) =
+                        execute_or_cancel(guard.backend_mut(), &page_sql, &mut cancel).await
+                    else {
+                        let disposition = cancel_and_rollback(&mut guard).await;
+                        if disposition == WorkerDisposition::CancelledAndRolledBack {
+                            let _ = reply.send(Err(TransactionError("cancelled".into())));
+                        }
+                        return disposition;
+                    };
                     match result {
                         Ok(mut outcome) => {
                             let fetched = outcome.stats.row_count;
@@ -340,19 +347,43 @@ where
     }
 }
 
+async fn cancel_and_rollback<B: TransactionBackend>(
+    guard: &mut ArmedGuard<B>,
+) -> WorkerDisposition {
+    if guard.backend_mut().cancel().await.is_err() {
+        return WorkerDisposition::Quarantine;
+    }
+    // Some backends cancel by closing the session, leaving no client to roll back.
+    if guard.backend_mut().depth() != 0
+        && (guard.backend_mut().rollback().await.is_err() || guard.backend_mut().depth() != 0)
+    {
+        return WorkerDisposition::Quarantine;
+    }
+    guard.disarm();
+    WorkerDisposition::CancelledAndRolledBack
+}
+
 async fn execute_or_cancel<B: TransactionBackend>(
     backend: &mut B,
     sql: &str,
-    cancel: tokio::sync::oneshot::Receiver<()>,
+    cancel: &mut Option<tokio::sync::oneshot::Receiver<()>>,
 ) -> Option<Result<QueryOutcome, TransactionError>> {
+    let Some(cancellation) = cancel.as_mut() else {
+        return Some(backend.execute(sql).await);
+    };
     let execute = backend.execute(sql);
     tokio::pin!(execute);
     tokio::select! {
         biased;
         result = &mut execute => Some(result),
-        cancellation = cancel => match cancellation {
+        result = cancellation => match result {
             Ok(()) => None,
-            Err(_) => Some((&mut execute).await),
+            Err(_) => {
+                // A page can execute both COUNT and SELECT. Do not poll a
+                // completed receiver again if its sender was dropped.
+                *cancel = None;
+                Some((&mut execute).await)
+            },
         },
     }
 }
@@ -445,7 +476,7 @@ mod tests {
         }
         async fn execute(&mut self, sql: &str) -> Result<QueryOutcome, TransactionError> {
             self.log.lock().unwrap().push(sql.to_owned());
-            if sql == "slow" {
+            if sql.contains("slow") {
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }
             if sql == "count" {
@@ -858,11 +889,161 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn page_cancellation_cleans_up_count_and_select_on_open_or_closed_sessions() {
+        use crate::model::pagination::{PageRequest, PageSize};
+
+        for during_count in [false, true] {
+            for cancel_closes in [false, true] {
+                let fake = Fake {
+                    cancel_closes,
+                    ..Fake::default()
+                };
+                let log = fake.log.clone();
+                let worker = spawn_transaction_worker(fake);
+                let (reply, result) = oneshot::channel();
+                let (cancel, cancellation) = oneshot::channel();
+                worker
+                    .requests
+                    .send(TransactionRequest::Page {
+                        source_sql: "SELECT * FROM slow_items".into(),
+                        dialect: crate::sql::SqlDialect::Sqlite,
+                        count_sql: if during_count { "slow" } else { "count" }.into(),
+                        page: PageRequest::last(PageSize::FiveHundred, 0),
+                        cancel: cancellation,
+                        reply,
+                    })
+                    .unwrap();
+                // Wait until the requested phase really started before cancelling it.
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    loop {
+                        if log.lock().unwrap().iter().any(|sql| {
+                            if during_count {
+                                sql == "slow"
+                            } else {
+                                sql.contains("slow_items")
+                            }
+                        }) {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+                cancel.send(()).unwrap();
+                assert_eq!(result.await.unwrap().unwrap_err().0, "cancelled");
+                assert_eq!(
+                    worker.worker.await.unwrap(),
+                    WorkerDisposition::CancelledAndRolledBack
+                );
+                let log = log.lock().unwrap();
+                assert!(log.iter().any(|entry| entry == "cancel"));
+                assert_eq!(log.iter().any(|entry| entry == "rollback"), !cancel_closes);
+                if during_count {
+                    assert!(!log.iter().any(|entry| entry.contains("slow_items")));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn postgres_manual_page_cancellation_rolls_back_pending_writes() {
+        use crate::{
+            db::postgres::PostgresAdapter,
+            model::pagination::{PageRequest, PageSize},
+        };
+
+        let Ok(url) = std::env::var("LAZYDB_TEST_POSTGRES_URL") else {
+            return;
+        };
+        let imported = crate::profile::import_connection_url(&url, None).unwrap();
+        let adapter =
+            PostgresAdapter::connect(&imported.profile, imported.transient_password.as_ref())
+                .await
+                .unwrap();
+        let table = format!(
+            "public.lazydb_page_cancel_{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        adapter
+            .execute(&format!("CREATE TABLE {table} (id INT PRIMARY KEY)"))
+            .await
+            .unwrap();
+        for during_count in [false, true] {
+            let worker = spawn_transaction_worker(adapter.transaction_backend().await.unwrap());
+            worker.readiness.await.unwrap().unwrap();
+            let (reply, result) = oneshot::channel();
+            let (_, cancel) = oneshot::channel();
+            worker
+                .requests
+                .send(TransactionRequest::Execute {
+                    query_generation: 1,
+                    sql: format!("INSERT INTO {table} VALUES (1)"),
+                    cancel,
+                    reply,
+                })
+                .unwrap();
+            result.await.unwrap().unwrap();
+            let (reply, result) = oneshot::channel();
+            let (cancel, cancellation) = oneshot::channel();
+            worker
+                .requests
+                .send(TransactionRequest::Page {
+                    source_sql: format!("SELECT pg_sleep(30) FROM {table}"),
+                    dialect: crate::sql::SqlDialect::Postgres,
+                    count_sql: format!("SELECT count(*) FROM {table} WHERE pg_sleep(30) IS NULL"),
+                    page: if during_count {
+                        PageRequest::last(PageSize::Ten, 0)
+                    } else {
+                        PageRequest::first(PageSize::Ten)
+                    },
+                    cancel: cancellation,
+                    reply,
+                })
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let active = adapter.execute(&format!(
+                        "SELECT count(*) FROM pg_stat_activity WHERE wait_event = 'PgSleep' AND query LIKE '%{table}%'"
+                    )).await.unwrap();
+                    if count_from_outcome(&active).unwrap() > 0 { break; }
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("manual page must start before cancellation");
+            cancel.send(()).unwrap();
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(5), result)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap_err()
+                    .0,
+                "cancelled"
+            );
+            assert_eq!(
+                worker.worker.await.unwrap(),
+                WorkerDisposition::CancelledAndRolledBack
+            );
+            let rows = adapter
+                .execute(&format!("SELECT count(*) FROM {table}"))
+                .await
+                .unwrap();
+            assert_eq!(count_from_outcome(&rows).unwrap(), 0);
+        }
+        adapter
+            .execute(&format!("DROP TABLE {table}"))
+            .await
+            .unwrap();
+        adapter.close().await;
+    }
+
+    #[tokio::test]
     async fn resolved_last_page_rebuilds_page_sql_after_count() {
         let fake = Fake::default();
         let log = fake.log.clone();
         let worker = spawn_transaction_worker(fake);
         let (reply, result) = oneshot::channel();
+        let (_, cancel) = oneshot::channel();
         worker
             .requests
             .send(TransactionRequest::Page {
@@ -873,6 +1054,7 @@ mod tests {
                     crate::model::pagination::PageSize::FiveHundred,
                     1,
                 ),
+                cancel,
                 reply,
             })
             .unwrap();

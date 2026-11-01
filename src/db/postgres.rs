@@ -3992,7 +3992,7 @@ LIMIT 2001
         sql: &str,
         budget: QueryBudget,
     ) -> Result<QueryOutcome, DatabaseError> {
-        super::pgwire::execute_pool(&self.pool, sql, budget).await
+        super::pgwire::execute_pool(&self.pool, super::pgwire::Server::Postgres, sql, budget).await
     }
 
     pub(crate) async fn execute_connection(

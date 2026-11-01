@@ -129,7 +129,7 @@ impl CockroachAdapter {
         sql: &str,
         budget: QueryBudget,
     ) -> Result<QueryOutcome, DatabaseError> {
-        pgwire::execute_pool(&self.pool, sql, budget).await
+        pgwire::execute_pool(&self.pool, pgwire::Server::Cockroach, sql, budget).await
     }
 
     pub async fn transaction_backend(&self) -> Result<CockroachTransactionBackend, DatabaseError> {
@@ -161,11 +161,13 @@ impl CockroachAdapter {
         let scope = &request.scope;
         match &request.key.target {
             CatalogTarget::Databases => {
-                let entries = if scope.allows_database(&database) {
-                    vec![self.database_entry(&database)?]
-                } else {
-                    vec![]
-                };
+                let databases: Vec<String> = sqlx::query_scalar("SELECT datname FROM pg_catalog.pg_database WHERE has_database_privilege(datname, 'CONNECT') ORDER BY datname")
+                    .fetch_all(&mut *connection).await.map_err(sql_error)?;
+                let entries = databases
+                    .into_iter()
+                    .filter(|name| scope.allows_database(name))
+                    .map(|name| self.database_entry(&name))
+                    .collect::<Result<Vec<_>, _>>()?;
                 entry_page(request, entries)
             }
             CatalogTarget::Schemas { database: id } => {

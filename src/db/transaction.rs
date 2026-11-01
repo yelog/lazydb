@@ -21,6 +21,7 @@ pub enum TransactionRequest {
         dialect: crate::sql::SqlDialect,
         count_sql: String,
         page: crate::model::pagination::PageRequest,
+        cancel: tokio::sync::oneshot::Receiver<()>,
         reply: tokio::sync::oneshot::Sender<
             Result<(QueryOutcome, crate::model::pagination::ResultPagination), TransactionError>,
         >,

@@ -9,7 +9,8 @@ use crate::profile::{ConnectionProfile, SslMode};
 use futures_util::TryStreamExt;
 use secrecy::{ExposeSecret, SecretString};
 use sqlx::{
-    AssertSqlSafe, Either, PgPool,
+    AssertSqlSafe, Connection, Either, PgPool, Postgres,
+    pool::PoolConnection,
     postgres::{PgConnectOptions, PgConnection, PgRow, PgSslMode},
 };
 
@@ -96,13 +97,101 @@ fn validate_root_certificate(pem: &[u8]) -> Result<(), DatabaseError> {
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum Server {
+    Postgres,
+    Cockroach,
+}
+
+// SQLx normally drains an unfinished query before recycling a pooled connection.
+// Aborting the caller must instead discard that session and interrupt server work.
+struct ExecutingSession {
+    connection: Option<PoolConnection<Postgres>>,
+    options: std::sync::Arc<PgConnectOptions>,
+    cancel_sql: Option<String>,
+}
+
+impl Drop for ExecutingSession {
+    fn drop(&mut self) {
+        let Some(connection) = self.connection.take() else {
+            return;
+        };
+        let Some(cancel_sql) = self.cancel_sql.take() else {
+            drop(connection.detach());
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            drop(connection.detach());
+            return;
+        };
+        let options = self.options.clone();
+        // Retain the pool permit while cancellation is in flight, bounding control
+        // connections by pool capacity. This guard discards the socket even when
+        // the cancellation task itself is dropped during runtime shutdown.
+        let disposal = Self {
+            connection: Some(connection),
+            options: options.clone(),
+            cancel_sql: None,
+        };
+        runtime.spawn(async move {
+            // Use a separate connection: every pool slot may be executing a query.
+            // Keep the original socket alive until cancellation has been sent so its
+            // backend/session ID cannot be recycled for another client meanwhile.
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                let mut control = PgConnection::connect_with(&options).await?;
+                let result = sqlx::raw_sql(AssertSqlSafe(cancel_sql.as_str()))
+                    .execute(&mut control)
+                    .await;
+                drop(control);
+                result
+            })
+            .await;
+            // Socket disposal is unconditional, including failed cancellation. A
+            // cancellation racing a commit cannot promise that writes rolled back.
+            drop(disposal);
+        });
+    }
+}
+
 pub(crate) async fn execute_pool(
     pool: &PgPool,
+    server: Server,
     sql: &str,
     budget: QueryBudget,
 ) -> Result<QueryOutcome, DatabaseError> {
-    let mut stream = sqlx::raw_sql(AssertSqlSafe(sql)).fetch_many(pool);
-    collect_stream(&mut stream, budget).await
+    let mut session = ExecutingSession {
+        connection: Some(
+            pool.acquire()
+                .await
+                .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Network))?,
+        ),
+        options: pool.connect_options(),
+        cancel_sql: None,
+    };
+    let connection = session.connection.as_mut().expect("executing session");
+    session.cancel_sql = Some(match server {
+        Server::Postgres => {
+            let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut **connection)
+                .await
+                .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Sql))?;
+            format!("SELECT pg_cancel_backend({pid})")
+        }
+        Server::Cockroach => {
+            let id: String = sqlx::query_scalar("SHOW session_id")
+                .fetch_one(&mut **connection)
+                .await
+                .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Sql))?;
+            format!("CANCEL SESSION IF EXISTS '{}'", id.replace('\'', "''"))
+        }
+    });
+    let result = execute_connection(connection, sql, budget).await;
+    session.cancel_sql = None;
+    if result.is_ok() {
+        // Fully drained results can safely return this session to its pool.
+        drop(session.connection.take());
+    }
+    result
 }
 
 pub(crate) async fn execute_connection(

@@ -65,11 +65,16 @@ provide completion or diagnostics for it; MCP write policy still applies.
 CockroachDB transaction retry errors (`40001`) require `ROLLBACK` and a manual
 restart of the whole transaction. LazyDB never automatically replays interactive
 SQL. A rejected commit retains its session only for rollback and blocks further
-SQL until the transaction is rolled back. A network error during commit can
-leave its outcome unknown; inspect the database before issuing the operation
-again. Cancelling a manual transaction drops its dedicated socket immediately,
-without waiting for a TLS shutdown handshake, so the session cannot return to
-the pool with pending work.
+SQL until the transaction is rolled back. A network error during commit or
+SQLSTATE `40003` (`statement_completion_unknown`) leaves its outcome unknown;
+inspect the database before issuing the operation again. Cancelling a manual
+transaction drops its dedicated socket immediately, without waiting for a TLS
+shutdown handshake, so the session cannot return to the pool with pending work.
+This also applies to manual pagination and its row-count query.
+
+AUTO query cancellation discards the executing pooled session and sends a bounded
+server cancellation request through a separate connection. Cancellation can race
+a completed commit; it does not undo writes that have already committed.
 DDL in multi-statement transactions follows CockroachDB's online schema-change
 rules; LazyDB does not make such changes atomic.
 

@@ -103,7 +103,12 @@ impl TransactionBackend for CockroachTransactionBackend {
     }
 }
 
-fn transaction_error(error: DatabaseError, operation: &str) -> TransactionError {
+fn transaction_error(mut error: DatabaseError, operation: &str) -> TransactionError {
+    // CockroachDB can explicitly report an ambiguous commit even when the
+    // connection remains available. The session must still be quarantined.
+    if operation == "commit" && error.code.as_deref() == Some("40003") {
+        error.category = ErrorCategory::Network;
+    }
     let mut message = error.message;
     if error.code.as_deref() == Some("40001") {
         message.push_str("; ROLLBACK and restart the entire transaction manually");
@@ -155,6 +160,30 @@ mod tests {
         );
         assert!(diagnostic.message.contains("commit outcome is unknown"));
         assert!(diagnostic.message.contains("verify the result"));
+    }
+
+    #[test]
+    fn ambiguous_commit_sqlstate_requires_quarantine_and_preserves_recovery_guidance() {
+        let error = transaction_error(
+            DatabaseError {
+                category: ErrorCategory::Sql,
+                code: Some("40003".into()),
+                message: "statement completion unknown".into(),
+                diagnostic: None,
+            },
+            "commit",
+        );
+        let diagnostic = error.relation_diagnostic().unwrap();
+        assert_eq!(
+            diagnostic.category,
+            RelationMutationCategory::ConnectionUnknown
+        );
+        assert_eq!(error.history_snapshot().category, ErrorCategory::Network);
+        assert_eq!(diagnostic.sqlstate.as_deref(), Some("40003"));
+        assert!(diagnostic.safe_message().contains("SQLSTATE 40003"));
+        assert!(diagnostic.message.contains("commit outcome is unknown"));
+        assert!(diagnostic.message.contains("verify the result"));
+        assert!(!diagnostic.message.contains("ROLLBACK and restart"));
     }
 
     #[test]

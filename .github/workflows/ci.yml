@@ -293,6 +293,8 @@ jobs:
         run: python3 scripts/ci/run-with-timeout.py 600 -- cargo test --locked --test postgres_adapter --no-run
       - name: PostgreSQL adapter tests
         run: python3 scripts/ci/run-with-timeout.py 600 -- cargo test --locked --test postgres_adapter -- --nocapture --test-threads=1
+      - name: PostgreSQL and CockroachDB AUTO cancellation tests
+        run: python3 scripts/ci/run-with-timeout.py 600 -- env LAZYDB_REQUIRE_DATABASE_TESTS=1 cargo test --locked --lib pgwire_auto_cancellation_ -- --nocapture --test-threads=1
       - name: PostgreSQL principal permission tests
         run: python3 scripts/ci/run-with-timeout.py 600 -- env LAZYDB_REQUIRE_DATABASE_TESTS=1 cargo test --locked --test postgres_principal_mutations -- --nocapture --test-threads=1
       - name: MySQL adapter tests

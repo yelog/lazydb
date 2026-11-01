@@ -554,6 +554,8 @@ impl RuntimeSession {
                         | Action::ManualStartFailed { .. }
                         | Action::ManualQueryFinished { .. }
                         | Action::ManualQueryFailed { .. }
+                        | Action::ManualQueryPageFinished { .. }
+                        | Action::ManualQueryPageFailed { .. }
                         | Action::ManualCommitted { .. }
                         | Action::ManualCommitFailed { .. }
                         | Action::ManualRolledBack { .. }
@@ -626,6 +628,70 @@ async fn runtime_reports_unknown_and_quarantines_both_commit_disconnects_without
             vec![vec![CellValue::Integer(1), CellValue::Integer(7)]]
         };
         assert_eq!(fixture.rows().await, expected);
+        fixture.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn runtime_manual_page_cancellation_rolls_back_writes_during_count_and_select() {
+    use lazydb::model::pagination::{PageRequest, PageSize};
+
+    for during_count in [false, true] {
+        let Some(fixture) = Fixture::new().await else {
+            return;
+        };
+        let mut session = RuntimeSession::connect(fixture.profile.clone()).await;
+        session
+            .execute(format!("INSERT INTO {} VALUES (1, 7)", fixture.table))
+            .await
+            .unwrap();
+        session.runtime.dispatch(Command::ManualExecutePage {
+            connection: session.connection,
+            target: session.target.clone(),
+            tab_id: session.tab_id,
+            console_id: session.console_id,
+            query_generation: 2,
+            transaction_generation: 1,
+            source_sql: "SELECT pg_sleep(30)".into(),
+            dialect: lazydb::sql::SqlDialect::Postgres,
+            count_sql: if during_count {
+                "SELECT count(*) FROM (SELECT pg_sleep(30)) AS slow"
+            } else {
+                "SELECT 1"
+            }
+            .into(),
+            page: if during_count {
+                PageRequest::last(PageSize::Ten, 0)
+            } else {
+                PageRequest::first(PageSize::Ten)
+            },
+        });
+        // Observe the actual pinned query before cancelling, avoiding a startup race.
+        bounded(async {
+            loop {
+                let active = fixture.observer.execute(
+                    "SELECT query FROM [SHOW CLUSTER QUERIES] WHERE application_name = 'lazydb'"
+                ).await.unwrap();
+                if active.result_sets.iter().flat_map(|set| &set.rows).any(|row| {
+                    matches!(row.first(), Some(CellValue::Text(sql)) if sql.starts_with("SELECT") && sql.contains("pg_sleep(30)") && !sql.contains("SHOW CLUSTER QUERIES"))
+                }) { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await;
+        session.runtime.dispatch(Command::CancelManual {
+            connection: session.connection,
+            tab_id: session.tab_id,
+            query_generation: 2,
+            transaction_generation: 1,
+        });
+        assert!(
+            matches!(session.manual_event().await, Action::ManualQueryPageFailed { message, .. } if message == "cancelled")
+        );
+        bounded(session.runtime.shutdown()).await;
+        assert!(
+            fixture.rows().await.is_empty(),
+            "cancelling a manual page must discard pending writes"
+        );
         fixture.finish().await;
     }
 }

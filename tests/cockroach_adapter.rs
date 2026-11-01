@@ -63,6 +63,69 @@ fn cockroach_catalog_advertises_only_supported_groups() {
 }
 
 #[tokio::test]
+async fn cockroach_root_catalog_lists_accessible_databases_and_applies_scope() {
+    let Some(url) = test_url() else {
+        return;
+    };
+    let imported = import_connection_url(&url, None).unwrap();
+    let adapter =
+        CockroachAdapter::connect(&imported.profile, imported.transient_password.as_ref())
+            .await
+            .unwrap();
+    let expected = adapter.discoverable_databases().await.unwrap();
+    let mut actual = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = adapter
+            .load_catalog_page(&request(
+                imported.profile.id,
+                &CatalogScope {
+                    databases: CatalogSelection::All,
+                },
+                CatalogTarget::Databases,
+                1,
+                cursor,
+            ))
+            .await
+            .unwrap();
+        actual.extend(
+            page.entries
+                .iter()
+                .map(|entry| entry.qualified_name.object.clone()),
+        );
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(actual, expected);
+    let selected = expected.last().unwrap();
+    let page = adapter
+        .load_catalog_page(&request(
+            imported.profile.id,
+            &CatalogScope {
+                databases: CatalogSelection::Selected(vec![DatabaseScope {
+                    name: selected.clone(),
+                    schemas: CatalogSelection::All,
+                }]),
+            },
+            CatalogTarget::Databases,
+            10,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        page.entries
+            .iter()
+            .map(|entry| &entry.qualified_name.object)
+            .collect::<Vec<_>>(),
+        vec![selected]
+    );
+    adapter.close().await;
+}
+
+#[tokio::test]
 async fn cockroach_relation_search_limits_follow_qualified_path_order() {
     let Some(url) = test_url() else {
         return;

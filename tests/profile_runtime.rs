@@ -218,6 +218,56 @@ async fn profile_test_discovers_scope_without_mutating_or_persisting_it() {
 }
 
 #[tokio::test]
+async fn pgwire_tls_and_routing_edits_are_connection_changes_even_with_a_rename() {
+    for kind in [
+        lazydb::profile::DatabaseKind::Postgres,
+        lazydb::profile::DatabaseKind::CockroachDb,
+    ] {
+        let temp = TempDir::new().unwrap();
+        let store = ProfileStore::new(temp.path().join("connections.toml"));
+        let mut original = postgres_profile("original");
+        original.kind = kind;
+        original.url_format = lazydb::profile::ConnectionUrlFormat::default_for(kind);
+        store.save(vec![original.clone()]).unwrap();
+        let (mut runtime, mut receiver) = runtime(
+            vec![original.clone()],
+            HashSet::from([original.id]),
+            store,
+            Arc::new(FakeSecretStore::default()),
+        );
+        for options in [
+            lazydb::profile::PgConnectionOptions {
+                ssl_root_cert: Some("/test/root.crt".into()),
+                ..Default::default()
+            },
+            lazydb::profile::PgConnectionOptions {
+                options: Some("--cluster=test-tenant".into()),
+                ..Default::default()
+            },
+        ] {
+            let mut edited = original.clone();
+            edited.name = "renamed".into();
+            edited.pg_options = Some(options);
+            runtime.dispatch(Command::SaveProfile {
+                request_id: 1,
+                submission: submission(edited.clone(), CredentialUpdate::Preserve),
+                connect: false,
+            });
+            match next_action(&mut receiver).await {
+                Action::ProfileSaved {
+                    change, profile, ..
+                } => {
+                    assert!(change.connection_settings_changed);
+                    assert_eq!(profile.pg_options, edited.pg_options);
+                }
+                action => panic!("unexpected action: {action:?}"),
+            }
+        }
+        runtime.shutdown().await;
+    }
+}
+
+#[tokio::test]
 async fn session_password_is_never_persisted_or_sent_to_keyring() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("connections.toml");
