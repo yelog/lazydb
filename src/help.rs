@@ -1083,7 +1083,7 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
             Dashboard
         ],
         "Ctrl-c",
-        "quit LazyDB"
+        "cancel running SQL; otherwise quit LazyDB"
     ),
     row!(
         TerminalSelection,

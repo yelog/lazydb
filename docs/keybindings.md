@@ -238,7 +238,7 @@ Relation Data while edits or transaction restrictions are pending.
 | `F8` | Open notification history |
 | `F9` | Open the Update Center |
 | `?` | Open Help outside Editor search/input states |
-| `Ctrl-c` | Quit globally; context-specific cancellation may also be offered by its modal |
+| `Ctrl-c` | Cancel the active running SQL query; otherwise quit globally. Manual queries require confirmation and rollback. |
 | `Ctrl-Shift-s` | Release mouse capture for terminal-native text selection; press `Esc` to return |
 | `Tab` / `Shift-Tab` | Move focus between workspace panes where applicable |
 | `Ctrl-PageUp` / `Ctrl-PageDown` | Previous/next workspace tab |
