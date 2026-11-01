@@ -34,7 +34,10 @@ impl ColumnTypePolicy {
             DatabaseKind::DuckDb | DatabaseKind::Snowflake => "VARCHAR",
             DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::TiDb => "text",
             DatabaseKind::SqlServer => "nvarchar(255)",
-            DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb => "text",
+            DatabaseKind::Redis
+            | DatabaseKind::Valkey
+            | DatabaseKind::MongoDb
+            | DatabaseKind::Elasticsearch => "text",
             DatabaseKind::ClickHouse => "String",
         }
     }

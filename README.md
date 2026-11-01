@@ -97,6 +97,7 @@ updates, and removal, see the [installation guide](docs/installation.md).
 | Server SQL | PostgreSQL, CockroachDB, MySQL, MariaDB, TiDB, Oracle, SQL Server, ClickHouse, Snowflake |
 | Embedded SQL | SQLite, DuckDB |
 | Key-value and document | Redis, Valkey, MongoDB |
+| Search | Elasticsearch |
 
 Oracle requires Oracle Instant Client. DuckDB requires an optional C API runtime
 that is not bundled; see [runtime setup](docs/duckdb.md#install-the-optional-runtime).
@@ -104,6 +105,8 @@ Redis and Valkey use a key/value browser; MongoDB uses a document explorer and
 bounded JSON console. See the [MongoDB guide](docs/mongodb.md) for its scope.
 Snowflake uses the HTTPS SQL API with a stored access token; see the
 [Snowflake guide](docs/snowflake.md) for authentication and current limits.
+Elasticsearch provides index and mapping discovery, document previews, and a native
+REST/JSON console; see the [Elasticsearch guide](docs/elasticsearch.md).
 
 Browse the [database capability matrix](docs/database-capabilities.md) for server
 versions, editing, transactions, monitoring, and driver-specific limits.

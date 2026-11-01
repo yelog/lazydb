@@ -785,6 +785,78 @@ async fn edits_preserve_profile_order_and_can_replace_then_forget_a_secret() {
 }
 
 #[tokio::test]
+async fn elasticsearch_auth_and_ca_changes_reconnect_and_store_api_key_encrypted() {
+    use lazydb::{
+        model::profile_manager::ProfileDraft,
+        persistence::local_credentials::LocalCredentialStore,
+        profile::{ElasticsearchAuth, ElasticsearchConnectionOptions},
+    };
+    let temp = TempDir::new().unwrap();
+    let store = ProfileStore::new(temp.path().join("connections.toml"));
+    let key_path = store.credential_key_path();
+    let mut profile = import_connection_url("elasticsearchs://localhost:19201", Some("search"))
+        .unwrap()
+        .profile;
+    profile.elasticsearch_options = Some(ElasticsearchConnectionOptions::default());
+    store.save(vec![profile.clone()]).unwrap();
+    let fake = Arc::new(FakeSecretStore::default());
+    let (mut runtime, mut receiver) = runtime(
+        vec![profile.clone()],
+        HashSet::from([profile.id]),
+        store.clone(),
+        Arc::clone(&fake),
+    );
+    let mut draft = ProfileDraft::edit(&profile, false);
+    draft.set_elasticsearch_auth(ElasticsearchAuth::ApiKey);
+    draft.set_password("encoded-test-api-key");
+    runtime.dispatch(Command::SaveProfile {
+        request_id: 80,
+        submission: draft.validate(&[]).unwrap(),
+        connect: false,
+    });
+    let saved = match next_action(&mut receiver).await {
+        Action::ProfileSaved {
+            profile, change, ..
+        } => {
+            assert!(change.connection_settings_changed);
+            assert!(change.credentials_changed);
+            profile
+        }
+        action => panic!("unexpected action: {action:?}"),
+    };
+    let CredentialPolicy::LocalEncrypted(encrypted) = &saved.credential_policy else {
+        panic!("API key was not encrypted");
+    };
+    let local = LocalCredentialStore::new(key_path, "lazydb");
+    assert_eq!(
+        local.decrypt(saved.id, encrypted).unwrap().expose_secret(),
+        "encoded-test-api-key"
+    );
+    let serialized = fs::read_to_string(store.path()).unwrap();
+    assert!(!serialized.contains("encoded-test-api-key"));
+    assert_eq!(store.load().unwrap().profiles[0], saved);
+    let mut draft = ProfileDraft::edit(&saved, true);
+    draft.ca_cert_path.set("/test/custom-ca.pem");
+    runtime.dispatch(Command::SaveProfile {
+        request_id: 81,
+        submission: draft.validate(&[]).unwrap(),
+        connect: false,
+    });
+    match next_action(&mut receiver).await {
+        Action::ProfileSaved {
+            profile, change, ..
+        } => {
+            assert!(change.connection_settings_changed);
+            assert!(!change.credentials_changed);
+            assert_eq!(profile.credential_policy, saved.credential_policy);
+        }
+        action => panic!("unexpected action: {action:?}"),
+    }
+    assert_eq!(fake.calls(), (0, 0, 0, 0));
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
 async fn profile_save_failure_restores_the_previous_keyring_value() {
     let temp = TempDir::new().unwrap();
     let blocked_parent = temp.path().join("blocked");

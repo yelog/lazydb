@@ -14,6 +14,7 @@ pub(crate) mod ddl;
 pub mod descriptor;
 pub mod duckdb;
 pub mod duckdb_runtime;
+pub mod elasticsearch;
 pub mod mongodb;
 pub mod monitor;
 pub mod mssql;
@@ -54,6 +55,7 @@ use self::{
     catalog_mutation::{CatalogObjectDefinition, CatalogObjectDefinitionRequest},
     clickhouse::ClickHouseAdapter,
     cockroach::CockroachAdapter,
+    elasticsearch::ElasticsearchAdapter,
     mssql::MsSqlAdapter,
     mysql::MySqlAdapter,
     oracle::OracleAdapter,
@@ -316,6 +318,7 @@ pub enum DatabaseConnection {
     MongoDb(mongodb::MongoAdapter),
     ClickHouse(ClickHouseAdapter),
     Snowflake(snowflake::SnowflakeAdapter),
+    Elasticsearch(ElasticsearchAdapter),
 }
 
 impl DatabaseConnection {
@@ -331,7 +334,9 @@ impl DatabaseConnection {
             | Self::Sqlite(_)
             | Self::DuckDb(_)
             | Self::Redis(_) => principal::PrincipalCapability::Unsupported,
-            Self::MongoDb(_) => principal::PrincipalCapability::Unsupported,
+            Self::MongoDb(_) | Self::Elasticsearch(_) => {
+                principal::PrincipalCapability::Unsupported
+            }
             Self::ClickHouse(_) => ClickHouseAdapter::principal_capability(),
         }
     }
@@ -372,7 +377,8 @@ impl DatabaseConnection {
             | Self::Sqlite(_)
             | Self::DuckDb(_)
             | Self::Redis(_)
-            | Self::MongoDb(_) => principal::PrincipalMutationCapabilities {
+            | Self::MongoDb(_)
+            | Self::Elasticsearch(_) => principal::PrincipalMutationCapabilities {
                 permission_targets: Vec::new(),
                 privileges: Vec::new(),
                 memberships: false,
@@ -403,6 +409,9 @@ impl DatabaseConnection {
                 "MongoDB uses document principals",
             )),
             Self::ClickHouse(adapter) => adapter.list_principals().await,
+            Self::Elasticsearch(_) => Err(DatabaseError::unsupported(
+                "Elasticsearch principal management is not supported",
+            )),
         }
     }
 
@@ -429,6 +438,9 @@ impl DatabaseConnection {
                 "MongoDB uses document principals",
             )),
             Self::ClickHouse(adapter) => adapter.principal_ddl(principal).await,
+            Self::Elasticsearch(_) => Err(DatabaseError::unsupported(
+                "Elasticsearch principal DDL is not supported",
+            )),
         }
     }
 
@@ -452,7 +464,8 @@ impl DatabaseConnection {
             | Self::Sqlite(_)
             | Self::DuckDb(_)
             | Self::Redis(_)
-            | Self::MongoDb(_) => Err(DatabaseError::unsupported(
+            | Self::MongoDb(_)
+            | Self::Elasticsearch(_) => Err(DatabaseError::unsupported(
                 "This database does not support SQL principal permission details",
             )),
             Self::ClickHouse(adapter) => adapter.principal_details(principal, target).await,
@@ -522,6 +535,9 @@ impl DatabaseConnection {
                 "MongoDB monitor integration is not implemented yet",
             )),
             Self::ClickHouse(adapter) => adapter.load_monitor_snapshot().await,
+            Self::Elasticsearch(_) => Err(DatabaseError::unsupported(
+                "Elasticsearch monitoring is not supported",
+            )),
         }
     }
 
@@ -540,7 +556,7 @@ impl DatabaseConnection {
             Self::Sqlite(_) | Self::DuckDb(_) => Ok(monitor::MonitorMetadata::default()),
             Self::Redis(_) => Ok(monitor::MonitorMetadata::default()),
             Self::MongoDb(_) => Ok(monitor::MonitorMetadata::default()),
-            Self::ClickHouse(_) => Ok(monitor::MonitorMetadata::default()),
+            Self::ClickHouse(_) | Self::Elasticsearch(_) => Ok(monitor::MonitorMetadata::default()),
         }
     }
 
@@ -584,6 +600,9 @@ impl DatabaseConnection {
                 "MongoDB process list is not implemented yet",
             )),
             Self::ClickHouse(adapter) => adapter.load_process_snapshot().await,
+            Self::Elasticsearch(_) => Err(DatabaseError::unsupported(
+                "Elasticsearch process monitoring is not supported",
+            )),
         }
     }
 
@@ -655,6 +674,9 @@ impl DatabaseConnection {
             Self::ClickHouse(_) => Err(DatabaseError::unsupported(
                 "ClickHouse does not support manual SQL transactions",
             )),
+            Self::Elasticsearch(_) => Err(DatabaseError::unsupported(
+                "Elasticsearch does not support manual transactions",
+            )),
         }
     }
 
@@ -700,6 +722,9 @@ impl DatabaseConnection {
             DatabaseKind::ClickHouse => ClickHouseAdapter::connect(profile, password)
                 .await
                 .map(Self::ClickHouse),
+            DatabaseKind::Elasticsearch => ElasticsearchAdapter::connect(profile, password)
+                .await
+                .map(Self::Elasticsearch),
         }
     }
 
@@ -729,6 +754,7 @@ impl DatabaseConnection {
             Self::Redis(adapter) => adapter.kind(),
             Self::MongoDb(_) => DatabaseKind::MongoDb,
             Self::ClickHouse(_) => DatabaseKind::ClickHouse,
+            Self::Elasticsearch(_) => DatabaseKind::Elasticsearch,
         }
     }
 
@@ -796,6 +822,7 @@ impl DatabaseConnection {
                 supports_lazy_children: false,
             },
             Self::ClickHouse(_) => crate::db::clickhouse::ClickHouseAdapter::catalog_capabilities(),
+            Self::Elasticsearch(_) => ElasticsearchAdapter::catalog_capabilities(),
         }
     }
 
@@ -814,6 +841,7 @@ impl DatabaseConnection {
             Self::Redis(_) => CatalogMutationCapabilities::default(),
             Self::MongoDb(_) => CatalogMutationCapabilities::default(),
             Self::ClickHouse(_) => ClickHouseAdapter::catalog_mutation_capabilities(),
+            Self::Elasticsearch(_) => CatalogMutationCapabilities::default(),
         }
     }
 
@@ -832,6 +860,9 @@ impl DatabaseConnection {
                 reason: "Snowflake structured catalog changes are not implemented; use SQL",
             },
             Self::Oracle(_) => OracleAdapter::catalog_drop_availability(kind),
+            Self::Elasticsearch(_) => catalog_mutation::CatalogMutationAvailability::Unavailable {
+                reason: "Elasticsearch catalog DROP is not supported",
+            },
             Self::DuckDb(_)
                 if matches!(
                     kind,
@@ -886,6 +917,10 @@ impl DatabaseConnection {
                 reason: "MongoDB does not expose SQL catalog objects".to_owned(),
             }),
             Self::ClickHouse(_) => ClickHouseAdapter::plan_catalog_drop(request, entry),
+            Self::Elasticsearch(_) => Err(catalog_drop::CatalogDropError::Unsupported {
+                kind: entry.kind,
+                reason: "Elasticsearch catalog DROP is not supported".to_owned(),
+            }),
         }
     }
 
@@ -933,7 +968,7 @@ impl DatabaseConnection {
                     object_type: request.object_type,
                 },
             ),
-            Self::MongoDb(_) => Err(
+            Self::MongoDb(_) | Self::Elasticsearch(_) => Err(
                 catalog_mutation::CatalogMutationError::UnsupportedOperation {
                     object_type: request.object_type,
                 },
@@ -976,6 +1011,9 @@ impl DatabaseConnection {
                 "MongoDB does not support SQL catalog mutation",
             )),
             Self::ClickHouse(adapter) => adapter.execute_catalog_mutation(plan).await,
+            Self::Elasticsearch(_) => Err(DatabaseError::unsupported(
+                "Elasticsearch catalog mutation is not supported",
+            )),
         }
     }
 
@@ -990,6 +1028,9 @@ impl DatabaseConnection {
                 "TiDB structured catalog mutations are not implemented",
             )),
             Self::DuckDb(adapter) => adapter.execute(plan.sql()).await,
+            Self::Elasticsearch(_) => Err(DatabaseError::unsupported(
+                "Elasticsearch catalog DROP is not supported",
+            )),
             _ => self.execute(plan.sql()).await,
         }
     }
@@ -1068,6 +1109,7 @@ impl DatabaseConnection {
             Self::Redis(adapter) => adapter.probe().await,
             Self::MongoDb(adapter) => adapter.probe().await,
             Self::ClickHouse(adapter) => adapter.probe().await,
+            Self::Elasticsearch(adapter) => adapter.probe().await,
         }
     }
 
@@ -1109,6 +1151,9 @@ impl DatabaseConnection {
             Self::ClickHouse(_) => Err(DatabaseError::unsupported(
                 "ClickHouse catalog scope is profile-defined",
             )),
+            Self::Elasticsearch(_) => Err(DatabaseError::unsupported(
+                "Elasticsearch catalog scope is profile-defined",
+            )),
         }
     }
 
@@ -1138,7 +1183,7 @@ impl DatabaseConnection {
             | Self::SqlServer(_) => Ok(None),
             Self::Redis(_) => Ok(None),
             Self::MongoDb(_) => Ok(None),
-            Self::ClickHouse(_) => Ok(None),
+            Self::ClickHouse(_) | Self::Elasticsearch(_) => Ok(None),
         }
     }
 
@@ -1176,6 +1221,7 @@ impl DatabaseConnection {
                 "MongoDB does not expose SQL catalog pages",
             )),
             Self::ClickHouse(adapter) => adapter.load_catalog_page(request).await,
+            Self::Elasticsearch(adapter) => adapter.load_catalog_page(request).await,
         }
     }
 
@@ -1197,6 +1243,7 @@ impl DatabaseConnection {
             Self::Redis(_) => Ok(None),
             Self::MongoDb(_) => Ok(None),
             Self::ClickHouse(adapter) => adapter.resolve_relation_identity(relation).await,
+            Self::Elasticsearch(adapter) => Ok(adapter.resolve_relation_identity(relation)),
         }
     }
 
@@ -1235,6 +1282,15 @@ impl DatabaseConnection {
                 adapter.catalog_scope = scope.clone();
                 adapter.resolve_relation_identity(relation).await
             }
+            Self::Elasticsearch(adapter) => {
+                elasticsearch::catalog::validate_relation_scope(
+                    adapter.profile_id,
+                    &adapter.database,
+                    relation,
+                    scope,
+                )?;
+                Ok(adapter.resolve_relation_identity(relation))
+            }
         }
     }
 
@@ -1264,6 +1320,9 @@ impl DatabaseConnection {
                 "MongoDB has no SQL catalog object definitions",
             )),
             Self::ClickHouse(adapter) => adapter.load_catalog_object_definition(request).await,
+            Self::Elasticsearch(_) => Err(DatabaseError::unsupported(
+                "Elasticsearch catalog object definitions are not supported",
+            )),
         }
     }
 
@@ -1284,7 +1343,7 @@ impl DatabaseConnection {
             | Self::SqlServer(_) => Ok(None),
             Self::Redis(_) => Ok(None),
             Self::MongoDb(_) => Ok(None),
-            Self::ClickHouse(_) => Ok(None),
+            Self::ClickHouse(_) | Self::Elasticsearch(_) => Ok(None),
         }
     }
 
@@ -1324,6 +1383,7 @@ impl DatabaseConnection {
                 "MongoDB does not support SQL catalog search",
             )),
             Self::ClickHouse(adapter) => adapter.search_catalog(request).await,
+            Self::Elasticsearch(adapter) => adapter.search_catalog(request).await,
         }
     }
 
@@ -1348,6 +1408,7 @@ impl DatabaseConnection {
             Self::DuckDb(adapter) => adapter.execute_with_budget(sql, budget).await,
             Self::SqlServer(adapter) => adapter.execute_pool_with_budget(sql, budget).await,
             Self::ClickHouse(adapter) => adapter.execute_with_budget(sql, budget).await,
+            Self::Elasticsearch(adapter) => adapter.execute_with_budget(sql, budget).await,
             Self::Redis(_) => Err(DatabaseError::configuration(
                 "Redis commands do not use SQL execution",
             )),
@@ -1387,6 +1448,7 @@ impl DatabaseConnection {
                     .preview_relation_with_scope(relation, &adapter.catalog_scope, options, page)
                     .await
             }
+            Self::Elasticsearch(adapter) => adapter.preview_relation(relation, options, page).await,
             Self::Postgres(adapter) => adapter.preview_relation(relation, options, page).await,
             Self::CockroachDb(adapter) => adapter.preview_relation(relation, options, page).await,
             Self::MySql(adapter) => adapter.preview_relation(relation, options, page).await,
@@ -1431,6 +1493,11 @@ impl DatabaseConnection {
         page: crate::model::pagination::PageRequest,
     ) -> Result<RelationPreview, DatabaseError> {
         match self {
+            Self::Elasticsearch(adapter) => {
+                adapter
+                    .preview_relation_with_scope(relation, scope, options, page)
+                    .await
+            }
             Self::Snowflake(adapter) => {
                 adapter
                     .preview_relation_with_scope(relation, scope, options, page)
@@ -1501,6 +1568,9 @@ impl DatabaseConnection {
                     .relation_ddl_with_scope(relation, &adapter.catalog_scope)
                     .await
             }
+            Self::Elasticsearch(_) => Err(DatabaseError::unsupported(
+                "Elasticsearch has mappings rather than SQL DDL",
+            )),
             Self::Postgres(adapter) => adapter.relation_ddl(relation).await,
             Self::CockroachDb(adapter) => adapter.relation_ddl(relation).await,
             Self::MySql(adapter) => adapter.relation_ddl(relation).await,
@@ -1558,6 +1628,9 @@ impl DatabaseConnection {
                 "MongoDB does not support SQL relation DDL",
             )),
             Self::ClickHouse(adapter) => adapter.relation_ddl_with_scope(relation, scope).await,
+            Self::Elasticsearch(_) => Err(DatabaseError::unsupported(
+                "Elasticsearch relation DDL is not supported",
+            )),
         }
     }
 
@@ -1580,7 +1653,7 @@ impl DatabaseConnection {
             Self::SqlServer(adapter) => adapter.object_ddl(kind, schema, name).await,
             Self::Redis(_) => Ok(None),
             Self::MongoDb(_) => Ok(None),
-            Self::ClickHouse(_) => Ok(None),
+            Self::ClickHouse(_) | Self::Elasticsearch(_) => Ok(None),
         }
     }
 
@@ -1596,7 +1669,7 @@ impl DatabaseConnection {
             Self::DuckDb(_) => format!("\"{}\"", value.replace('"', "\"\"")),
             Self::SqlServer(adapter) => adapter.quote_identifier(value),
             Self::Redis(_) => value.to_owned(),
-            Self::MongoDb(_) => value.to_owned(),
+            Self::MongoDb(_) | Self::Elasticsearch(_) => value.to_owned(),
             Self::ClickHouse(_) => format!("`{}`", value.replace('`', "``")),
         }
     }
@@ -1620,6 +1693,7 @@ impl DatabaseConnection {
                     .await;
             }
             Self::ClickHouse(adapter) => adapter.close().await,
+            Self::Elasticsearch(adapter) => adapter.close().await,
         }
     }
 }

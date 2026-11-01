@@ -408,6 +408,7 @@ fn language_name(language: crate::model::sql_history::HistoryLanguage) -> &'stat
     match language {
         crate::model::sql_history::HistoryLanguage::Sql => "sql",
         crate::model::sql_history::HistoryLanguage::Mongo => "mongo",
+        crate::model::sql_history::HistoryLanguage::Rest => "rest",
     }
 }
 
@@ -417,6 +418,7 @@ fn parse_language(
     match value.as_str() {
         "sql" => Ok(crate::model::sql_history::HistoryLanguage::Sql),
         "mongo" => Ok(crate::model::sql_history::HistoryLanguage::Mongo),
+        "rest" => Ok(crate::model::sql_history::HistoryLanguage::Rest),
         _ => Err(HistoryStoreError::InvalidEnum(value)),
     }
 }

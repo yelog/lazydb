@@ -747,6 +747,7 @@ impl App {
             | DatabaseKind::Redis
             | DatabaseKind::Valkey
             | DatabaseKind::MongoDb
+            | DatabaseKind::Elasticsearch
             | DatabaseKind::Snowflake => crate::db::principal::PrincipalCapability::Unsupported,
             DatabaseKind::ClickHouse => {
                 crate::db::clickhouse::ClickHouseAdapter::principal_capability()
@@ -1990,6 +1991,13 @@ impl App {
         let Some(tab) = self.active_console_opt() else {
             return Err(EditorError::MissingSession(Uuid::nil()));
         };
+        if self.active_console_is_elasticsearch() {
+            return self.editor.render_preview_snapshot(
+                tab.id,
+                viewport,
+                crate::model::editor_language::EditorLanguage::Json,
+            );
+        }
         let text = self.active_editor_text().unwrap_or_default();
         let statement = self
             .editor
@@ -2135,9 +2143,10 @@ impl App {
                 DatabaseKind::Sqlite => SqlDialect::Sqlite,
                 DatabaseKind::DuckDb => SqlDialect::DuckDb,
                 DatabaseKind::SqlServer => SqlDialect::SqlServer,
-                DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb => {
-                    SqlDialect::Generic
-                }
+                DatabaseKind::Redis
+                | DatabaseKind::Valkey
+                | DatabaseKind::MongoDb
+                | DatabaseKind::Elasticsearch => SqlDialect::Generic,
                 DatabaseKind::Snowflake => SqlDialect::Snowflake,
                 DatabaseKind::ClickHouse => SqlDialect::ClickHouse,
             })
@@ -2209,6 +2218,16 @@ impl App {
         let Some(Overlay::SqlHistory(view)) = self.overlay.as_ref() else {
             return Err(EditorError::MissingSession(Uuid::nil()));
         };
+        if view
+            .selected_item()
+            .is_some_and(|item| item.language == crate::model::sql_history::HistoryLanguage::Rest)
+        {
+            return self.editor.render_preview_snapshot(
+                view.editor_session_id,
+                viewport,
+                crate::model::editor_language::EditorLanguage::Json,
+            );
+        }
         let dialect = view
             .selected_item()
             .map(|item| self.sql_history_dialect(item.profile_id))
@@ -12580,6 +12599,13 @@ impl App {
                     else {
                         return Vec::new();
                     };
+                    if profile.kind == DatabaseKind::Elasticsearch {
+                        let text = self.editor_text(console_id).unwrap_or_default();
+                        pending.scope = sql::ScopeKind::FullBuffer;
+                        pending.source =
+                            ScopeSource::Contiguous(sql::TextRange::new(0, text.len()));
+                        pending.sql = text;
+                    }
                     pending.target = Some(target.clone());
                     pending.dialect = SqlDialect::for_database_kind(profile.kind);
                     let bind_commands = self.bind_console_target(console_id, target.clone());
@@ -19172,7 +19198,9 @@ impl App {
                     crate::db::mssql::MsSqlAdapter::catalog_mutation_capabilities()
                 }
                 DatabaseKind::Redis | DatabaseKind::Valkey => Default::default(),
-                DatabaseKind::MongoDb | DatabaseKind::Snowflake => Default::default(),
+                DatabaseKind::MongoDb | DatabaseKind::Snowflake | DatabaseKind::Elasticsearch => {
+                    Default::default()
+                }
                 DatabaseKind::ClickHouse => {
                     crate::db::clickhouse::ClickHouseAdapter::catalog_mutation_capabilities()
                 }
@@ -20546,7 +20574,9 @@ impl App {
         let relational_profiles = self
             .profiles
             .iter()
-            .filter(|profile| profile.kind.is_relational())
+            .filter(|profile| {
+                profile.kind.is_relational() || profile.kind == DatabaseKind::Elasticsearch
+            })
             .cloned()
             .collect::<Vec<_>>();
         let selected =
@@ -21530,6 +21560,7 @@ impl App {
                     | DatabaseKind::DuckDb
                     | DatabaseKind::Snowflake => entry.qualified_name.schema.clone(),
                     DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb => None,
+                    DatabaseKind::Elasticsearch => Some(database.clone()),
                     DatabaseKind::ClickHouse => Some(database.clone()),
                 };
                 let candidate = ExecutionTarget {
@@ -21555,7 +21586,9 @@ impl App {
     fn execution_target_candidates_all_profiles(&self) -> Vec<ExecutionTarget> {
         self.profiles
             .iter()
-            .filter(|profile| profile.kind.is_relational())
+            .filter(|profile| {
+                profile.kind.is_relational() || profile.kind == DatabaseKind::Elasticsearch
+            })
             .flat_map(|profile| self.execution_target_candidates(profile))
             .collect()
     }
@@ -21563,7 +21596,7 @@ impl App {
     fn is_sql_editor_target(&self, target: &ExecutionTarget) -> bool {
         self.profiles.iter().any(|profile| {
             profile.id == target.profile_id
-                && profile.kind.is_relational()
+                && (profile.kind.is_relational() || profile.kind == DatabaseKind::Elasticsearch)
                 && target.is_valid(profile)
         })
     }
@@ -21741,6 +21774,7 @@ impl App {
                     | DatabaseKind::Oracle
                     | DatabaseKind::Snowflake => None,
                     DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb => None,
+                    DatabaseKind::Elasticsearch => Some(database.clone()),
                     DatabaseKind::ClickHouse => Some(database.clone()),
                 },
                 database,
@@ -22321,6 +22355,9 @@ impl App {
     }
 
     fn completion_key(&self) -> Option<CompletionScheduleKey> {
+        if self.active_console_is_elasticsearch() {
+            return None;
+        }
         if self.active_editor_mode() != EditorMode::Insert {
             return None;
         }
@@ -22346,7 +22383,20 @@ impl App {
         })
     }
 
+    pub(crate) fn active_console_is_elasticsearch(&self) -> bool {
+        self.active_console_opt()
+            .and_then(|tab| tab.execution_target.as_ref())
+            .is_some_and(|target| {
+                self.profiles.iter().any(|profile| {
+                    profile.id == target.profile_id && profile.kind == DatabaseKind::Elasticsearch
+                })
+            })
+    }
+
     fn editor_diagnostics_key(&self) -> Option<crate::sql::DiagnosticScheduleKey> {
+        if self.active_console_is_elasticsearch() {
+            return None;
+        }
         let tab = self.active_console_opt()?;
         Some(crate::sql::DiagnosticScheduleKey {
             console_id: tab.id,
@@ -22406,6 +22456,9 @@ impl App {
     }
 
     fn complete_now(&mut self, automatic: bool) -> Vec<Command> {
+        if self.active_console_is_elasticsearch() {
+            return Vec::new();
+        }
         if self.active_console_opt().is_none() {
             return Vec::new();
         }
@@ -22696,9 +22749,10 @@ impl App {
             DatabaseKind::Sqlite => SqlDialect::Sqlite,
             DatabaseKind::DuckDb => SqlDialect::DuckDb,
             DatabaseKind::SqlServer => SqlDialect::SqlServer,
-            DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb => {
-                SqlDialect::Generic
-            }
+            DatabaseKind::Redis
+            | DatabaseKind::Valkey
+            | DatabaseKind::MongoDb
+            | DatabaseKind::Elasticsearch => SqlDialect::Generic,
             DatabaseKind::Snowflake => SqlDialect::Snowflake,
             DatabaseKind::ClickHouse => SqlDialect::ClickHouse,
         }
@@ -22714,9 +22768,12 @@ impl App {
             Some(DatabaseKind::Sqlite) => SqlDialect::Sqlite,
             Some(DatabaseKind::DuckDb) => SqlDialect::DuckDb,
             Some(DatabaseKind::SqlServer) => SqlDialect::SqlServer,
-            Some(DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb) => {
-                SqlDialect::Generic
-            }
+            Some(
+                DatabaseKind::Redis
+                | DatabaseKind::Valkey
+                | DatabaseKind::MongoDb
+                | DatabaseKind::Elasticsearch,
+            ) => SqlDialect::Generic,
             Some(DatabaseKind::Snowflake) => SqlDialect::Snowflake,
             Some(DatabaseKind::ClickHouse) => SqlDialect::ClickHouse,
             None => SqlDialect::Generic,
@@ -22741,15 +22798,26 @@ impl App {
             Some(DatabaseKind::Sqlite) => SqlDialect::Sqlite,
             Some(DatabaseKind::DuckDb) => SqlDialect::DuckDb,
             Some(DatabaseKind::SqlServer) => SqlDialect::SqlServer,
-            Some(DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb) | None => {
-                SqlDialect::Generic
-            }
+            Some(
+                DatabaseKind::Redis
+                | DatabaseKind::Valkey
+                | DatabaseKind::MongoDb
+                | DatabaseKind::Elasticsearch,
+            )
+            | None => SqlDialect::Generic,
             Some(DatabaseKind::Snowflake) => SqlDialect::Snowflake,
             Some(DatabaseKind::ClickHouse) => SqlDialect::ClickHouse,
         }
     }
 
     fn format_current(&mut self) {
+        if self.active_console_is_elasticsearch() {
+            self.notify_warning(
+                "Format",
+                "REST requests use native JSON; SQL formatting is unavailable",
+            );
+            return;
+        }
         let Some(id) = self.active_console_opt().map(|tab| tab.id) else {
             return;
         };
@@ -22842,6 +22910,13 @@ impl App {
     }
 
     fn set_transaction_mode(&mut self, mode: TransactionMode) -> Vec<Command> {
+        if mode == TransactionMode::Manual && self.active_console_is_elasticsearch() {
+            self.notify_warning(
+                "Elasticsearch",
+                "Elasticsearch does not support manual transactions",
+            );
+            return Vec::new();
+        }
         if mode == TransactionMode::Manual
             && self
                 .active_console_opt()
@@ -22992,7 +23067,12 @@ impl App {
             })
             .map(|profile| SqlDialect::for_database_kind(profile.kind))
             .unwrap_or(SqlDialect::Generic);
-        let scope = if full_buffer {
+        let native_rest = target.as_ref().is_some_and(|target| {
+            self.profiles.iter().any(|profile| {
+                profile.id == target.profile_id && profile.kind == DatabaseKind::Elasticsearch
+            })
+        });
+        let scope = if full_buffer || native_rest {
             (!sql.trim().is_empty()).then(|| sql::ResolvedScope {
                 kind: sql::ScopeKind::FullBuffer,
                 source: ScopeSource::Contiguous(sql::TextRange::new(0, sql.len())),
@@ -23099,6 +23179,9 @@ impl App {
             self.notify_warning("Query", "No active database connection");
             return Vec::new();
         };
+        if native_rest {
+            return self.run_console_sql_on_session(tab_id, target, connection, scope, dialect);
+        }
         match sql::classify_transaction_sql(&scope.sql, dialect) {
             sql::TransactionSqlClassification::Control(control) => {
                 return self.dispatch_transaction_sql(tab_id, connection, control, scope.sql);
@@ -23150,6 +23233,11 @@ impl App {
         scope: sql::ResolvedScope,
         dialect: SqlDialect,
     ) -> Vec<Command> {
+        if self.profiles.iter().any(|profile| {
+            profile.id == target.profile_id && profile.kind == DatabaseKind::Elasticsearch
+        }) {
+            return self.run_elasticsearch_request(tab_id, target, connection, scope);
+        }
         self.normalize_tidb_console_mode(tab_id);
         match sql::classify_transaction_sql(&scope.sql, dialect) {
             sql::TransactionSqlClassification::Control(control) => {
@@ -23191,6 +23279,83 @@ impl App {
             return Vec::new();
         }
         if draft.requires_confirmation(self.confirmation_policy == ConfirmationPolicy::Always) {
+            self.overlay = Some(Overlay::ExecutionConfirm {
+                draft,
+                focus: ExecutionConfirmFocus::Cancel,
+                preview_offset: 0,
+            });
+            return Vec::new();
+        }
+        self.dispatch_draft(draft)
+    }
+
+    fn run_elasticsearch_request(
+        &mut self,
+        tab_id: Uuid,
+        target: ExecutionTarget,
+        connection: ConnectionIdentity,
+        scope: sql::ResolvedScope,
+    ) -> Vec<Command> {
+        let request = match crate::db::elasticsearch::ElasticsearchRequest::parse(&scope.sql) {
+            Ok(request) => request,
+            Err(error) => {
+                self.notify_error("Elasticsearch", error.message);
+                return Vec::new();
+            }
+        };
+        let read_only = request.is_read_only();
+        if !read_only
+            && self
+                .profiles
+                .iter()
+                .any(|profile| profile.id == target.profile_id && profile.read_only)
+        {
+            self.notify_warning(
+                "Elasticsearch",
+                "This connection is read-only; the REST request was not sent",
+            );
+            return Vec::new();
+        }
+        let Some(tab) = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id() == tab_id)
+            .and_then(WorkspaceTab::as_console)
+        else {
+            return Vec::new();
+        };
+        if tab.query_status == QueryStatus::Running {
+            return Vec::new();
+        }
+        if tab.transaction_mode != TransactionMode::Auto {
+            self.notify_warning(
+                "Elasticsearch",
+                "Elasticsearch requires auto-commit mode and does not support transactions",
+            );
+            return Vec::new();
+        }
+        let draft = sql::ExecutionDraft {
+            console_id: tab_id,
+            query_generation: tab.generation,
+            connection,
+            target,
+            transaction_generation: tab.transaction_generation,
+            document_revision: self.editor.revision(tab_id).unwrap_or_default(),
+            scope: scope.kind,
+            source: scope.source,
+            sql: scope.sql,
+            dialect: SqlDialect::Generic,
+            statement_count: 1,
+            risks: vec![if read_only {
+                sql::SqlRisk::ReadOnly
+            } else {
+                sql::SqlRisk::Unknown
+            }],
+            transaction_mode: tab.transaction_mode,
+            transaction_state: tab.transaction_state,
+            catalog_change_impact: sql::CatalogChangeImpact::None,
+        };
+        if !read_only || self.confirmation_policy == ConfirmationPolicy::Always {
             self.overlay = Some(Overlay::ExecutionConfirm {
                 draft,
                 focus: ExecutionConfirmFocus::Cancel,
@@ -23461,6 +23626,30 @@ impl App {
             self.notify_error("Query", &message);
             return Vec::new();
         }
+        let native_rest = self.profiles.iter().any(|profile| {
+            profile.id == draft.target.profile_id && profile.kind == DatabaseKind::Elasticsearch
+        });
+        if native_rest {
+            let request = match crate::db::elasticsearch::ElasticsearchRequest::parse(&draft.sql) {
+                Ok(request) => request,
+                Err(error) => {
+                    self.notify_error("Elasticsearch", error.message);
+                    return Vec::new();
+                }
+            };
+            if !request.is_read_only()
+                && self
+                    .profiles
+                    .iter()
+                    .any(|profile| profile.id == draft.target.profile_id && profile.read_only)
+            {
+                self.notify_warning(
+                    "Elasticsearch",
+                    "This connection is read-only; the REST request was not sent",
+                );
+                return Vec::new();
+            }
+        }
         let tab = self
             .tabs
             .iter_mut()
@@ -23514,7 +23703,7 @@ impl App {
             draft: draft.clone(),
             result: ExecutionResult::Dispatched,
         });
-        if sql::derived_query_capable(&draft.sql, draft.dialect) {
+        if !native_rest && sql::derived_query_capable(&draft.sql, draft.dialect) {
             vec![Command::RunQueryPage {
                 connection: draft.connection,
                 target: draft.target,
@@ -30344,6 +30533,21 @@ impl App {
         if self.active_relation_is_mongodb() {
             return self.load_active_mongo_relation(refresh, requested_page);
         }
+        let native_search = self.tabs.get(self.active_tab).is_some_and(|tab| {
+            matches!(tab, WorkspaceTab::Relation(tab) if self.profiles.iter().any(|profile| profile.id == tab.descriptor.key.profile_id && profile.kind == DatabaseKind::Elasticsearch))
+        });
+        if native_search
+            && let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab)
+        {
+            tab.query.capability = DataQueryCapability::Unavailable(
+                "Use Query DSL in the REST console to filter or sort Elasticsearch documents"
+                    .into(),
+            );
+            if tab.view == RelationView::Ddl {
+                self.notify_warning("Elasticsearch", "Expand the index in Explorer to inspect its mapping, or use GET /index/_mapping in the REST console");
+                return Vec::new();
+            }
+        }
         let console_id = self
             .tabs
             .get(self.active_tab)
@@ -31065,6 +31269,7 @@ impl App {
         };
         let rows = outcome.stats.row_count;
         let total_ms = outcome.stats.total().as_millis();
+        let response_failed = outcome.stats.response_error.is_some();
         let (is_query, execution_log) = tab
             .last_execution
             .as_ref()
@@ -31081,9 +31286,17 @@ impl App {
         if let Some(last) = tab.last_execution.as_mut()
             && last.draft.query_generation + 1 == generation
         {
-            last.result = ExecutionResult::Succeeded;
+            last.result = if response_failed {
+                ExecutionResult::Failed
+            } else {
+                ExecutionResult::Succeeded
+            };
         }
-        tab.query_status = QueryStatus::Idle;
+        tab.query_status = if response_failed {
+            QueryStatus::Failed
+        } else {
+            QueryStatus::Idle
+        };
         if let Some((context, summary)) = execution_log {
             append_console_output_to_editor(&mut self.editor, tab, context);
             append_console_output_to_editor(&mut self.editor, tab, summary);
@@ -31092,13 +31305,21 @@ impl App {
                 &mut self.editor,
                 tab,
                 OutputEntry::plain(
-                    OutputKind::Success,
-                    format!("{rows} row(s) retrieved in {total_ms} ms"),
+                    if response_failed {
+                        OutputKind::Error
+                    } else {
+                        OutputKind::Success
+                    },
+                    outcome
+                        .stats
+                        .response_error
+                        .clone()
+                        .unwrap_or_else(|| format!("{rows} row(s) retrieved in {total_ms} ms")),
                 ),
             );
         }
         tab.outcome = Some(outcome);
-        tab.result_view = if is_query {
+        tab.result_view = if is_query && !response_failed {
             ResultView::Data
         } else {
             ResultView::Output
@@ -31227,7 +31448,7 @@ fn add_explorer_profile(
                 .map_or_else(|| host.to_owned(), |port| format!("{host}:{port}"))
         }
         DatabaseKind::MongoDb => profile.host.clone().unwrap_or_default(),
-        DatabaseKind::ClickHouse => {
+        DatabaseKind::ClickHouse | DatabaseKind::Elasticsearch => {
             let host = profile.host.as_deref().unwrap_or_default();
             profile
                 .port
@@ -31324,9 +31545,16 @@ fn format_execution_log(
     let elapsed = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
     let timestamp = format_timestamp(elapsed.as_secs(), elapsed.subsec_millis());
     let target = console_target_label(&last.draft.target);
-    let context =
-        format_sql_output_entry(OutputKind::Success, &timestamp, &target, &last.draft.sql);
+    let kind = if outcome.stats.response_error.is_some() {
+        OutputKind::Error
+    } else {
+        OutputKind::Success
+    };
+    let context = format_sql_output_entry(kind, &timestamp, &target, &last.draft.sql);
     let stats = &outcome.stats;
+    if let Some(message) = &stats.response_error {
+        return Some((context, OutputEntry::timestamped(kind, &timestamp, message)));
+    }
     let total_ms = stats.total().as_millis();
     let truncation = if stats.truncated {
         " (result truncated; narrow the query or use pagination)"

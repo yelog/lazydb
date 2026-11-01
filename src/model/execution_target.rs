@@ -73,6 +73,7 @@ mod tests {
             mongodb_options: None,
             pg_options: None,
             snowflake_options: None,
+            elasticsearch_options: None,
             duckdb_path: None,
             ssl_mode: Default::default(),
             credential_policy: Default::default(),
@@ -204,12 +205,15 @@ impl ExecutionTarget {
                     .map(|path| path.display().to_string())
             })
             .or_else(|| (profile.kind == DatabaseKind::DuckDb).then(|| "memory".to_owned()))
+            .filter(|database| !database.is_empty())
+            .or_else(|| (profile.kind == DatabaseKind::Elasticsearch).then(|| "default".to_owned()))
             .unwrap_or_default();
         let schema = match profile.kind {
             DatabaseKind::MySql
             | DatabaseKind::MariaDb
             | DatabaseKind::TiDb
-            | DatabaseKind::ClickHouse => Some(database.clone()),
+            | DatabaseKind::ClickHouse
+            | DatabaseKind::Elasticsearch => Some(database.clone()),
             DatabaseKind::Sqlite => Some("main".to_owned()),
             DatabaseKind::DuckDb => Some(
                 profile
@@ -275,7 +279,7 @@ impl ExecutionTarget {
             DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb => {
                 self.schema.is_none()
             }
-            DatabaseKind::ClickHouse => {
+            DatabaseKind::ClickHouse | DatabaseKind::Elasticsearch => {
                 self.schema.as_deref() == Some(self.database.as_str())
                     && profile
                         .catalog_scope
@@ -305,7 +309,8 @@ impl ExecutionTarget {
             DatabaseKind::MySql
             | DatabaseKind::MariaDb
             | DatabaseKind::TiDb
-            | DatabaseKind::ClickHouse => {
+            | DatabaseKind::ClickHouse
+            | DatabaseKind::Elasticsearch => {
                 configured.database = Some(self.database.clone());
                 configured.default_schema = Some(self.database.clone());
             }

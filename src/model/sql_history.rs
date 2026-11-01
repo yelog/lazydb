@@ -60,6 +60,7 @@ pub enum HistoryLanguage {
     #[default]
     Sql,
     Mongo,
+    Rest,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

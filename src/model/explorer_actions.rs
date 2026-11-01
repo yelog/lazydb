@@ -145,6 +145,7 @@ impl DatabaseKindLabel for DatabaseKind {
             DatabaseKind::MongoDb => "MongoDB",
             DatabaseKind::ClickHouse => "ClickHouse",
             DatabaseKind::Snowflake => "Snowflake",
+            DatabaseKind::Elasticsearch => "Elasticsearch",
         }
     }
 }

@@ -26,7 +26,15 @@ struct Summary {
     warning: Option<String>,
 }
 
+fn is_elasticsearch(draft: &ExecutionDraft, app: &App) -> bool {
+    app.profiles.iter().any(|profile| {
+        profile.id == draft.target.profile_id
+            && profile.kind == crate::profile::DatabaseKind::Elasticsearch
+    })
+}
+
 fn summary(draft: &ExecutionDraft, app: &App) -> Summary {
+    let elasticsearch = is_elasticsearch(draft, app);
     let scope = match draft.scope {
         crate::sql::ScopeKind::VisualChar => "Selected text",
         crate::sql::ScopeKind::VisualLine => "Selected lines",
@@ -91,7 +99,9 @@ fn summary(draft: &ExecutionDraft, app: &App) -> Summary {
             draft.target.schema.as_deref().unwrap_or("none")
         )
     };
-    let title = if has_unknown || draft.statement_count == 0 {
+    let title = if elasticsearch {
+        "Execute REST request?".into()
+    } else if has_unknown || draft.statement_count == 0 {
         "Execute selected SQL?".into()
     } else {
         format!(
@@ -102,14 +112,27 @@ fn summary(draft: &ExecutionDraft, app: &App) -> Summary {
     };
     Summary {
         title,
-        scope: format!("{target}\nScope: {scope}"),
-        reason: "Review the selected SQL before execution.".into(),
+        scope: if elasticsearch {
+            format!("Connection: {connection}\nScope: One complete REST request")
+        } else {
+            format!("{target}\nScope: {scope}")
+        },
+        reason: if elasticsearch {
+            "Review the REST request before sending it to Elasticsearch."
+        } else {
+            "Review the selected SQL before execution."
+        }
+        .into(),
         risks: if counts.is_empty() {
             "Effects could not be fully determined".into()
         } else {
             counts.join("; ")
         },
-        transaction,
+        transaction: if elasticsearch {
+            "Unavailable; Elasticsearch requests cannot be rolled back here".into()
+        } else {
+            transaction
+        },
         warning,
     }
 }
@@ -179,7 +202,12 @@ pub(crate) fn render(
     );
     let mut preview_lines = vec![Line::from(Span::styled(
         format!(
-            "SQL preview  Lines {}-{} of {}",
+            "{} preview  Lines {}-{} of {}",
+            if is_elasticsearch(draft, app) {
+                "REST"
+            } else {
+                "SQL"
+            },
             start + 1,
             end.max(start + 1),
             preview.len()

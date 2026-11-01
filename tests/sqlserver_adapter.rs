@@ -48,6 +48,7 @@ async fn sql_server_connect_requires_a_password_before_network_io() {
         mongodb_options: None,
         pg_options: None,
         snowflake_options: None,
+        elasticsearch_options: None,
         duckdb_path: None,
         ssl_mode: SslMode::Prefer,
         credential_policy: CredentialPolicy::Prompt,

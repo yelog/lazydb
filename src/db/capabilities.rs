@@ -5,12 +5,14 @@ pub enum InteractionModel {
     Relational,
     KeyValue,
     Document,
+    Search,
 }
 
 pub const fn interaction_model(kind: DatabaseKind) -> InteractionModel {
     match kind {
         DatabaseKind::Redis | DatabaseKind::Valkey => InteractionModel::KeyValue,
         DatabaseKind::MongoDb => InteractionModel::Document,
+        DatabaseKind::Elasticsearch => InteractionModel::Search,
         _ => InteractionModel::Relational,
     }
 }
@@ -117,6 +119,14 @@ impl DatabaseCapabilities {
                 monitoring: false,
                 manual_transactions: false,
                 cancellation: false,
+            },
+            DatabaseKind::Elasticsearch => Self {
+                catalog: true,
+                relation_ddl: false,
+                relation_edit: false,
+                monitoring: false,
+                manual_transactions: false,
+                cancellation: true,
             },
             DatabaseKind::Snowflake => Self {
                 catalog: true,

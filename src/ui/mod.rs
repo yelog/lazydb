@@ -3760,8 +3760,17 @@ fn render_editor(
         Some((_, _)) => "TX MANUAL:IDLE",
         None => "TX N/A",
     };
-    let full_left_title = format!(" SQL EDITOR  {mode} ");
-    let compact_left_title = " SQL EDITOR ";
+    let native_rest = app.active_console_is_elasticsearch();
+    let full_left_title = if native_rest {
+        format!(" REST CONSOLE  {mode} ")
+    } else {
+        format!(" SQL EDITOR  {mode} ")
+    };
+    let compact_left_title = if native_rest {
+        " REST CONSOLE "
+    } else {
+        " SQL EDITOR "
+    };
     let query_status = app
         .active_console_opt()
         .and_then(|tab| match tab.query_status {
@@ -3771,7 +3780,11 @@ fn render_editor(
             QueryStatus::Failed => Some(("QUERY ERROR", theme.error)),
         });
     let diagnostic_count = snapshot.semantic_diagnostics.len();
-    let transaction_segment = format!(" {transaction} ");
+    let transaction_segment = if native_rest {
+        String::new()
+    } else {
+        format!(" {transaction} ")
+    };
     let diagnostic_segment = if diagnostic_count > 0 {
         format!(" DIAGNOSTICS {diagnostic_count} ")
     } else {
@@ -4498,7 +4511,11 @@ fn render_data(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, state
             .map(|_| "Query failed - showing previous result")
             .or(match tab.query_status {
                 QueryStatus::Cancelled => Some("Query cancelled - showing previous result"),
-                QueryStatus::Failed => Some("Query failed - showing previous result"),
+                QueryStatus::Failed => Some(
+                    displayed_outcome
+                        .and_then(|outcome| outcome.stats.response_error.as_deref())
+                        .unwrap_or("Query failed - showing previous result"),
+                ),
                 QueryStatus::Idle | QueryStatus::Running => None,
             })
     } else {

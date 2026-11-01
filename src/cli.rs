@@ -770,7 +770,8 @@ mod tests {
                 "clickhouse",
                 "tidb",
                 "cockroachdb",
-                "snowflake"
+                "snowflake",
+                "elasticsearch"
             ])
         );
         assert_eq!(

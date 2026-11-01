@@ -26,6 +26,7 @@ fn profile(kind: DatabaseKind) -> ConnectionProfile {
         mongodb_options: None,
         pg_options: None,
         snowflake_options: None,
+        elasticsearch_options: None,
         duckdb_path: None,
         ssl_mode: SslMode::Prefer,
         credential_policy: CredentialPolicy::None,

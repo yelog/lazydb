@@ -4,6 +4,8 @@
 
 ### Added
 
+- Add Elasticsearch native REST connections, index and mapping discovery, document previews, and a REST/JSON console with write confirmation and read-only enforcement.
+- Support Basic Auth and encoded API keys through existing credential storage, verified HTTPS, and optional PEM CA bundles. Record response-level partial failures while retaining result details.
 - Add CockroachDB as an independent driver with PostgreSQL wire transport, TLS profile options, scoped database/schema/table/view catalogs, native DDL, paged previews, SQL execution, manual transactions, and existing MCP query/catalog access. Structured editing and monitoring remain unavailable; see [CockroachDB support](docs/cockroachdb.md).
 
 ### Fixed
@@ -11,6 +13,11 @@
 - Preserve unknown CockroachDB commit outcomes, including SQLSTATE `40003`, without replaying SQL; require rollback after definitive commit rejection.
 - Cancel running SQL before global quit on `Ctrl-c`, propagate manual pagination cancellation, and discard interrupted PostgreSQL/CockroachDB AUTO sessions after a bounded server cancellation request.
 - Reconnect PostgreSQL-compatible profiles when TLS paths or startup routing options change, and include all permitted CockroachDB databases in workspace selection.
+
+### Internal
+
+- Add deterministic regressions and isolated Docker/terminal CI acceptance, including encrypted profile persistence, restart/reconnect, authentication switching, and CA removal/recovery. Validate Elasticsearch 8.17.0 and 8.19.6 locally.
+- Document permissions and initial boundaries: no SQL emulation, manual transactions, grid-cell editing, dedicated monitoring/principal forms, Cloud ID, mTLS, or automatic PIT/search-after pagination. See [Elasticsearch support](docs/elasticsearch.md).
 
 ## [0.3.1] - 2026-11-01
 
