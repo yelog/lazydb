@@ -1,5 +1,19 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Add TiDB as a separate relational driver with native `tidb://` connection URLs, verified TLS, scoped table/view browsing and search, relation previews, native DDL, and SQL execution. The adapter targets stable TiDB 8.5.0 or newer; TiDB 8.5.3 has been verified locally and on TiDB Cloud Starter (MySQL Compatible).
+- Enforce TiDB client read-only checks across complete SQL batches and relation previews, including sequence-changing `NEXTVAL` and `SETVAL` expressions. Use database grants for server-side authorization. Structured catalog changes, relation-grid writes, manual transaction UI, monitoring, principal management, and native cancellation remain unavailable in this initial release. See [TiDB support](docs/tidb.md) for details.
+
+### Fixed
+
+- Reconnect saved profiles when connection settings or credentials change, so enabling read-only mode takes effect in existing sessions; resolve pending manual transactions before retiring those sessions.
+- Reject sequence-changing functions and nested locking reads in the shared read-only SQL policy, including agent queries against writable TiDB profiles.
+- Refresh TiDB result metadata after schema changes and record execution timing from actual query responses.
+- Preserve MySQL/MariaDB executable comments and escaped double quotes when splitting SQL batches; TiDB execution follows the connection's current SQL quote modes, and ambiguous automatic statement selection requires an explicit selection.
+
 ## [0.2.2] - 2026-10-26
 
 ### Added

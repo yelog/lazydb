@@ -204,9 +204,10 @@ impl ExecutionTarget {
             .or_else(|| (profile.kind == DatabaseKind::DuckDb).then(|| "memory".to_owned()))
             .unwrap_or_default();
         let schema = match profile.kind {
-            DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::ClickHouse => {
-                Some(database.clone())
-            }
+            DatabaseKind::MySql
+            | DatabaseKind::MariaDb
+            | DatabaseKind::TiDb
+            | DatabaseKind::ClickHouse => Some(database.clone()),
             DatabaseKind::Sqlite => Some("main".to_owned()),
             DatabaseKind::DuckDb => Some(
                 profile
@@ -234,7 +235,7 @@ impl ExecutionTarget {
             return false;
         }
         match profile.kind {
-            DatabaseKind::MySql | DatabaseKind::MariaDb => {
+            DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::TiDb => {
                 self.schema.as_deref() == Some(self.database.as_str())
                     && profile
                         .catalog_scope
@@ -278,7 +279,10 @@ impl ExecutionTarget {
                 configured.database = Some(self.database.clone());
                 configured.default_schema = self.schema.clone();
             }
-            DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::ClickHouse => {
+            DatabaseKind::MySql
+            | DatabaseKind::MariaDb
+            | DatabaseKind::TiDb
+            | DatabaseKind::ClickHouse => {
                 configured.database = Some(self.database.clone());
                 configured.default_schema = Some(self.database.clone());
             }

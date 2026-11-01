@@ -23,6 +23,139 @@ fn classifies_queries_and_nested_query_features_conservatively() {
 }
 
 #[test]
+fn visits_subqueries_in_every_expression_position() {
+    for dialect in [SqlDialect::Postgres, SqlDialect::MySql, SqlDialect::MariaDb] {
+        for sql in [
+            "SELECT (SELECT id FROM t FOR UPDATE)",
+            "SELECT 1 WHERE EXISTS (SELECT id FROM t FOR UPDATE)",
+            "SELECT 1 WHERE 1 IN (SELECT id FROM t FOR UPDATE)",
+            "SELECT COALESCE((SELECT id FROM t FOR UPDATE), 0)",
+            "SELECT CASE WHEN true THEN (SELECT id FROM t FOR UPDATE) END",
+            "SELECT 1 ORDER BY (SELECT id FROM t FOR UPDATE)",
+            "SELECT * FROM t JOIN s ON t.id = (SELECT id FROM u FOR UPDATE)",
+            "WITH rows AS (SELECT (SELECT id FROM t FOR UPDATE)) SELECT * FROM rows",
+            "EXPLAIN SELECT (SELECT id FROM t FOR UPDATE)",
+        ] {
+            assert_eq!(
+                classify_sql(sql, dialect).risks,
+                vec![SqlRisk::Dml],
+                "{dialect:?}: {sql}"
+            );
+        }
+        assert_eq!(
+            classify_sql("SELECT (SELECT id FROM t)", dialect).risks,
+            vec![SqlRisk::ReadOnly]
+        );
+    }
+}
+
+#[test]
+fn classifies_sequence_mutations_without_matching_literals_or_columns() {
+    for dialect in [
+        SqlDialect::Postgres,
+        SqlDialect::MySql,
+        SqlDialect::MariaDb,
+        SqlDialect::Generic,
+    ] {
+        for sql in [
+            "SELECT NEXTVAL('seq')",
+            "SELECT SETVAL('seq', 100)",
+            "SELECT (SELECT NEXTVAL('seq'))",
+            "SELECT * FROM t WHERE id = NEXTVAL('seq')",
+            "WITH rows AS (SELECT SETVAL('seq', 100)) SELECT * FROM rows",
+            "EXPLAIN SELECT NEXTVAL('seq')",
+        ] {
+            assert_eq!(
+                classify_sql(sql, dialect).risks,
+                vec![SqlRisk::Dml],
+                "{dialect:?}: {sql}"
+            );
+        }
+        for sql in [
+            "SELECT 'NEXTVAL(seq)', 'SETVAL(seq, 100)', 'FOR UPDATE' /* NEXTVAL(seq) */",
+            "SELECT LASTVAL('seq')",
+            "SELECT t.nextval, t.setval FROM t",
+            "SELECT nextval_column, setval_column FROM t",
+        ] {
+            assert_eq!(
+                classify_sql(sql, dialect).risks,
+                vec![SqlRisk::ReadOnly],
+                "{dialect:?}: {sql}"
+            );
+        }
+    }
+    assert_eq!(
+        classify_sql("SELECT `nextval`(seq)", SqlDialect::MySql).risks,
+        vec![SqlRisk::Dml]
+    );
+    assert_eq!(
+        classify_sql("SELECT pg_catalog.nextval('seq')", SqlDialect::Postgres).risks,
+        vec![SqlRisk::Dml]
+    );
+    assert_eq!(
+        classify_sql("SELECT * FROM nextval('seq')", SqlDialect::Postgres).risks,
+        vec![SqlRisk::Dml]
+    );
+    assert_eq!(
+        classify_sql("SELECT seq.NEXTVAL FROM dual", SqlDialect::Oracle).risks,
+        vec![SqlRisk::Dml]
+    );
+    assert_eq!(
+        classify_sql("SELECT seq.CURRVAL FROM dual", SqlDialect::Oracle).risks,
+        vec![SqlRisk::ReadOnly]
+    );
+    // PostgreSQL quoted function names are case-sensitive; SQLite has no built-in sequence functions.
+    assert_eq!(
+        classify_sql("SELECT \"NEXTVAL\"('seq')", SqlDialect::Postgres).risks,
+        vec![SqlRisk::ReadOnly]
+    );
+    assert_eq!(
+        classify_sql("SELECT nextval('seq')", SqlDialect::Sqlite).risks,
+        vec![SqlRisk::ReadOnly]
+    );
+    for dialect in [
+        SqlDialect::MySql,
+        SqlDialect::MariaDb,
+        SqlDialect::SqlServer,
+    ] {
+        // Unsupported sequence syntax must fail closed if the parser cannot represent it.
+        assert_ne!(
+            classify_sql("SELECT NEXT VALUE FOR seq", dialect).risks,
+            vec![SqlRisk::ReadOnly],
+            "{dialect:?}"
+        );
+    }
+}
+
+#[test]
+fn duckdb_sensitive_functions_use_ast_nodes_including_table_functions() {
+    for sql in [
+        "SELECT 'nextval(seq)', 'setval(seq, 1)', 'read_csv', 'glob(' /* nextval(seq) */",
+        "SELECT read_csv_column FROM t",
+    ] {
+        assert_eq!(
+            classify_sql(sql, SqlDialect::DuckDb).risks,
+            vec![SqlRisk::ReadOnly],
+            "{sql}"
+        );
+    }
+    for sql in [
+        "SELECT (SELECT nextval('seq'))",
+        "SELECT \"nextval\"('seq')",
+        "SELECT * FROM read_csv('file.csv')",
+        "SELECT * FROM read_csv_auto('file.csv')",
+        "SELECT * FROM read_parquet('file.parquet')",
+        "SELECT * FROM glob('*.csv')",
+    ] {
+        assert_eq!(
+            classify_sql(sql, SqlDialect::DuckDb).risks,
+            vec![SqlRisk::Unknown],
+            "{sql}"
+        );
+    }
+}
+
+#[test]
 fn classifies_mutation_ddl_and_transaction_statements() {
     for sql in [
         "INSERT INTO t VALUES (1)",

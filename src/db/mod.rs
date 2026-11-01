@@ -302,6 +302,7 @@ pub enum DatabaseConnection {
     Postgres(PostgresAdapter),
     MySql(MySqlAdapter),
     MariaDb(MySqlAdapter),
+    TiDb(MySqlAdapter),
     Oracle(OracleAdapter),
     Sqlite(SqliteAdapter),
     DuckDb(duckdb::DuckDbAdapter),
@@ -318,7 +319,7 @@ impl DatabaseConnection {
             Self::MySql(_) | Self::MariaDb(_) | Self::SqlServer(_) | Self::Oracle(_) => {
                 principal::PrincipalCapability::DdlOnly
             }
-            Self::Sqlite(_) | Self::DuckDb(_) | Self::Redis(_) => {
+            Self::TiDb(_) | Self::Sqlite(_) | Self::DuckDb(_) | Self::Redis(_) => {
                 principal::PrincipalCapability::Unsupported
             }
             Self::MongoDb(_) => principal::PrincipalCapability::Unsupported,
@@ -352,13 +353,15 @@ impl DatabaseConnection {
                 privileges: Vec::new(),
                 memberships: false,
             },
-            Self::Sqlite(_) | Self::DuckDb(_) | Self::Redis(_) | Self::MongoDb(_) => {
-                principal::PrincipalMutationCapabilities {
-                    permission_targets: Vec::new(),
-                    privileges: Vec::new(),
-                    memberships: false,
-                }
-            }
+            Self::TiDb(_)
+            | Self::Sqlite(_)
+            | Self::DuckDb(_)
+            | Self::Redis(_)
+            | Self::MongoDb(_) => principal::PrincipalMutationCapabilities {
+                permission_targets: Vec::new(),
+                privileges: Vec::new(),
+                memberships: false,
+            },
             Self::ClickHouse(_) => ClickHouseAdapter::principal_mutation_capabilities(),
         }
     }
@@ -370,6 +373,9 @@ impl DatabaseConnection {
             Self::SqlServer(adapter) => adapter.list_principals().await,
             Self::Oracle(adapter) => adapter.list_principals().await,
             Self::Sqlite(adapter) => adapter.list_principals().await,
+            Self::TiDb(_) => Err(DatabaseError::unsupported(
+                "TiDB principal management is not implemented",
+            )),
             Self::DuckDb(_) => Err(DatabaseError::unsupported("DuckDB has no SQL principals")),
             Self::Redis(_) => Err(DatabaseError::unsupported("Redis has no SQL principals")),
             Self::MongoDb(_) => Err(DatabaseError::unsupported(
@@ -388,6 +394,9 @@ impl DatabaseConnection {
             Self::MySql(adapter) | Self::MariaDb(adapter) => adapter.principal_ddl(principal).await,
             Self::SqlServer(adapter) => adapter.principal_ddl(principal).await,
             Self::Oracle(adapter) => adapter.principal_ddl(principal).await,
+            Self::TiDb(_) => Err(DatabaseError::unsupported(
+                "TiDB principal management is not implemented",
+            )),
             Self::Sqlite(_) | Self::DuckDb(_) => Err(DatabaseError::unsupported(
                 "This database has no SQL principals",
             )),
@@ -411,11 +420,13 @@ impl DatabaseConnection {
             }
             Self::SqlServer(adapter) => adapter.principal_details(principal, target).await,
             Self::Oracle(adapter) => adapter.principal_details(principal, target).await,
-            Self::Sqlite(_) | Self::DuckDb(_) | Self::Redis(_) | Self::MongoDb(_) => {
-                Err(DatabaseError::unsupported(
-                    "This database does not support SQL principal permission details",
-                ))
-            }
+            Self::TiDb(_)
+            | Self::Sqlite(_)
+            | Self::DuckDb(_)
+            | Self::Redis(_)
+            | Self::MongoDb(_) => Err(DatabaseError::unsupported(
+                "This database does not support SQL principal permission details",
+            )),
             Self::ClickHouse(adapter) => adapter.principal_details(principal, target).await,
         }
     }
@@ -453,6 +464,9 @@ impl DatabaseConnection {
             Self::Postgres(adapter) => adapter.load_monitor_snapshot().await,
             Self::MySql(adapter) => adapter.load_monitor_snapshot().await,
             Self::MariaDb(adapter) => adapter.load_monitor_snapshot().await,
+            Self::TiDb(_) => Err(DatabaseError::unsupported(
+                "TiDB monitoring is not implemented",
+            )),
             Self::Oracle(_) => Err(DatabaseError {
                 category: ErrorCategory::Unsupported,
                 code: Some("oracle_monitoring_unsupported".into()),
@@ -482,6 +496,9 @@ impl DatabaseConnection {
             Self::Postgres(adapter) => adapter.load_monitor_metadata().await,
             Self::MySql(adapter) => adapter.load_monitor_metadata().await,
             Self::MariaDb(adapter) => adapter.load_monitor_metadata().await,
+            Self::TiDb(_) => Err(DatabaseError::unsupported(
+                "TiDB monitoring is not implemented",
+            )),
             Self::Oracle(_) => Ok(monitor::MonitorMetadata::default()),
             Self::SqlServer(adapter) => adapter.load_monitor_metadata().await,
             Self::Sqlite(_) | Self::DuckDb(_) => Ok(monitor::MonitorMetadata::default()),
@@ -496,6 +513,9 @@ impl DatabaseConnection {
             Self::Postgres(adapter) => adapter.load_process_snapshot().await,
             Self::MySql(adapter) => adapter.load_process_snapshot().await,
             Self::MariaDb(adapter) => adapter.load_process_snapshot().await,
+            Self::TiDb(_) => Err(DatabaseError::unsupported(
+                "TiDB process metrics are not implemented",
+            )),
             Self::Oracle(_) => Err(DatabaseError {
                 category: ErrorCategory::Unsupported,
                 code: Some("oracle_process_list_unsupported".into()),
@@ -578,6 +598,9 @@ impl DatabaseConnection {
             Self::MongoDb(_) => Err(DatabaseError::configuration(
                 "MongoDB uses session transactions",
             )),
+            Self::TiDb(_) => Err(DatabaseError::unsupported(
+                "TiDB manual transactions are not implemented",
+            )),
             Self::ClickHouse(_) => Err(DatabaseError::unsupported(
                 "ClickHouse does not support manual SQL transactions",
             )),
@@ -602,6 +625,9 @@ impl DatabaseConnection {
             DatabaseKind::MariaDb => MySqlAdapter::connect(profile, password)
                 .await
                 .map(Self::MariaDb),
+            DatabaseKind::TiDb => MySqlAdapter::connect(profile, password)
+                .await
+                .map(Self::TiDb),
             DatabaseKind::Oracle => OracleAdapter::connect(profile, password)
                 .await
                 .map(Self::Oracle),
@@ -636,6 +662,7 @@ impl DatabaseConnection {
             Self::Postgres(_) => DatabaseKind::Postgres,
             Self::MySql(_) => DatabaseKind::MySql,
             Self::MariaDb(_) => DatabaseKind::MariaDb,
+            Self::TiDb(_) => DatabaseKind::TiDb,
             Self::Oracle(_) => DatabaseKind::Oracle,
             Self::Sqlite(_) => DatabaseKind::Sqlite,
             Self::DuckDb(_) => DatabaseKind::DuckDb,
@@ -662,6 +689,7 @@ impl DatabaseConnection {
             Self::Postgres(_) => PostgresAdapter::catalog_capabilities(),
             Self::MySql(_) => MySqlAdapter::catalog_capabilities(),
             Self::MariaDb(_) => MySqlAdapter::mariadb_catalog_capabilities(),
+            Self::TiDb(_) => MySqlAdapter::tidb_catalog_capabilities(),
             Self::Oracle(_) => catalog::CatalogCapabilities {
                 namespace_model: catalog::NamespaceModel::DatabaseAndSchema,
                 top_level_groups: vec![
@@ -715,6 +743,7 @@ impl DatabaseConnection {
             Self::Postgres(adapter) => adapter.mutation_capabilities(),
             Self::MySql(_) => MySqlAdapter::catalog_mutation_capabilities(),
             Self::MariaDb(_) => MySqlAdapter::catalog_mutation_capabilities(),
+            Self::TiDb(_) => CatalogMutationCapabilities::default(),
             Self::Oracle(_) => OracleAdapter::catalog_mutation_capabilities(),
             Self::Sqlite(_) => SqliteAdapter::catalog_mutation_capabilities(),
             Self::DuckDb(_) => duckdb::DuckDbAdapter::catalog_mutation_capabilities(),
@@ -730,6 +759,9 @@ impl DatabaseConnection {
         kind: CatalogKind,
     ) -> catalog_mutation::CatalogMutationAvailability {
         match self {
+            Self::TiDb(_) => catalog_mutation::CatalogMutationAvailability::Unavailable {
+                reason: "TiDB structured catalog mutations are not implemented",
+            },
             Self::Oracle(_) => OracleAdapter::catalog_drop_availability(kind),
             Self::DuckDb(_)
                 if matches!(
@@ -760,6 +792,10 @@ impl DatabaseConnection {
             Self::Postgres(_) => PostgresAdapter::plan_catalog_drop(request, entry),
             Self::MySql(_) => MySqlAdapter::plan_catalog_drop(request, entry),
             Self::MariaDb(_) => MySqlAdapter::plan_catalog_drop(request, entry),
+            Self::TiDb(_) => Err(catalog_drop::CatalogDropError::Unsupported {
+                kind: entry.kind,
+                reason: "TiDB structured catalog mutations are not implemented".to_owned(),
+            }),
             Self::Oracle(_) => OracleAdapter::plan_catalog_drop(request, entry),
             Self::Sqlite(_) => SqliteAdapter::plan_catalog_drop(request, entry),
             Self::DuckDb(_) => duckdb::DuckDbAdapter::plan_catalog_drop(request, entry),
@@ -796,6 +832,11 @@ impl DatabaseConnection {
             Self::Postgres(adapter) => {
                 adapter.plan_catalog_mutation_for_adapter(request, draft, baseline)
             }
+            Self::TiDb(_) => Err(
+                catalog_mutation::CatalogMutationError::UnsupportedOperation {
+                    object_type: request.object_type,
+                },
+            ),
             Self::MySql(_) | Self::MariaDb(_) => {
                 MySqlAdapter::plan_catalog_mutation(request, draft, baseline)
             }
@@ -830,6 +871,9 @@ impl DatabaseConnection {
     ) -> Result<QueryOutcome, DatabaseError> {
         match self {
             Self::Postgres(adapter) => adapter.execute_catalog_mutation(plan).await,
+            Self::TiDb(_) => Err(DatabaseError::unsupported(
+                "TiDB structured catalog mutations are not implemented",
+            )),
             Self::MySql(adapter) | Self::MariaDb(adapter) => {
                 adapter.execute_catalog_mutation(plan).await
             }
@@ -854,6 +898,9 @@ impl DatabaseConnection {
         plan.validate()
             .map_err(|error| DatabaseError::configuration(error.to_string()))?;
         match self {
+            Self::TiDb(_) => Err(DatabaseError::unsupported(
+                "TiDB structured catalog mutations are not implemented",
+            )),
             Self::DuckDb(adapter) => adapter.execute(plan.sql()).await,
             _ => self.execute(plan.sql()).await,
         }
@@ -923,6 +970,7 @@ impl DatabaseConnection {
             Self::Postgres(adapter) => adapter.probe().await,
             Self::MySql(adapter) => adapter.probe().await,
             Self::MariaDb(adapter) => adapter.probe().await,
+            Self::TiDb(adapter) => adapter.probe().await,
             Self::Oracle(adapter) => adapter.probe().await,
             Self::Sqlite(adapter) => adapter.probe().await,
             Self::DuckDb(adapter) => adapter.probe().await,
@@ -955,6 +1003,7 @@ impl DatabaseConnection {
             Self::Postgres(adapter) => adapter.discover_catalog_scope().await,
             Self::MySql(adapter) => adapter.discover_catalog_scope().await,
             Self::MariaDb(adapter) => adapter.discover_catalog_scope().await,
+            Self::TiDb(adapter) => adapter.discover_catalog_scope().await,
             Self::Oracle(adapter) => adapter.discover_catalog_scope().await,
             Self::Sqlite(adapter) => adapter.discover_catalog_scope().await,
             Self::DuckDb(adapter) => adapter.discover_catalog_scope().await,
@@ -978,6 +1027,7 @@ impl DatabaseConnection {
             Self::Postgres(adapter) => adapter.discoverable_databases().await.map(Some),
             Self::MySql(_)
             | Self::MariaDb(_)
+            | Self::TiDb(_)
             | Self::Oracle(_)
             | Self::Sqlite(_)
             | Self::DuckDb(_)
@@ -996,6 +1046,7 @@ impl DatabaseConnection {
             Self::Postgres(adapter) => adapter.load_catalog_page(request).await,
             Self::MySql(adapter) => adapter.load_catalog_page(request).await,
             Self::MariaDb(adapter) => adapter.load_catalog_page(request).await,
+            Self::TiDb(adapter) => adapter.load_catalog_page(request).await,
             Self::Oracle(adapter) => adapter.load_catalog_page(request).await,
             Self::Sqlite(adapter) => adapter.load_catalog_page(request).await,
             Self::DuckDb(adapter) => {
@@ -1030,6 +1081,7 @@ impl DatabaseConnection {
             Self::Postgres(adapter) => adapter.resolve_relation_identity(relation).await,
             Self::MySql(_)
             | Self::MariaDb(_)
+            | Self::TiDb(_)
             | Self::Oracle(_)
             | Self::Sqlite(_)
             | Self::DuckDb(_)
@@ -1053,6 +1105,7 @@ impl DatabaseConnection {
             }
             Self::MySql(_)
             | Self::MariaDb(_)
+            | Self::TiDb(_)
             | Self::Oracle(_)
             | Self::Sqlite(_)
             | Self::DuckDb(_)
@@ -1073,7 +1126,7 @@ impl DatabaseConnection {
     ) -> Result<CatalogObjectDefinition, DatabaseError> {
         match self {
             Self::Postgres(adapter) => adapter.load_catalog_object_definition(request).await,
-            Self::MySql(adapter) | Self::MariaDb(adapter) => {
+            Self::MySql(adapter) | Self::MariaDb(adapter) | Self::TiDb(adapter) => {
                 adapter.load_catalog_object_definition(request).await
             }
             Self::Sqlite(adapter) => adapter.load_catalog_object_definition(request).await,
@@ -1098,6 +1151,7 @@ impl DatabaseConnection {
             Self::Postgres(adapter) => adapter.load_catalog_owner_context(request).await.map(Some),
             Self::MySql(_)
             | Self::MariaDb(_)
+            | Self::TiDb(_)
             | Self::Oracle(_)
             | Self::Sqlite(_)
             | Self::DuckDb(_)
@@ -1116,6 +1170,7 @@ impl DatabaseConnection {
             Self::Postgres(adapter) => adapter.search_catalog(request).await,
             Self::MySql(adapter) => adapter.search_catalog(request).await,
             Self::MariaDb(adapter) => adapter.search_catalog(request).await,
+            Self::TiDb(adapter) => adapter.search_catalog(request).await,
             Self::Oracle(_) => Err(DatabaseError::configuration(
                 "Oracle catalog search is not implemented yet",
             )),
@@ -1157,6 +1212,7 @@ impl DatabaseConnection {
             Self::Postgres(adapter) => adapter.execute_pool_with_budget(sql, budget).await,
             Self::MySql(adapter) => adapter.execute_pool_with_budget(sql, budget).await,
             Self::MariaDb(adapter) => adapter.execute_pool_with_budget(sql, budget).await,
+            Self::TiDb(adapter) => adapter.execute_pool_with_budget(sql, budget).await,
             Self::Oracle(adapter) => adapter.execute_pool_with_budget(sql, budget).await,
             Self::Sqlite(adapter) => adapter.execute_pool_with_budget(sql, budget).await,
             Self::DuckDb(adapter) => adapter.execute_with_budget(sql, budget).await,
@@ -1199,6 +1255,7 @@ impl DatabaseConnection {
             Self::Postgres(adapter) => adapter.preview_relation(relation, options, page).await,
             Self::MySql(adapter) => adapter.preview_relation(relation, options, page).await,
             Self::MariaDb(adapter) => adapter.preview_relation(relation, options, page).await,
+            Self::TiDb(adapter) => adapter.preview_relation(relation, options, page).await,
             Self::Oracle(adapter) => adapter.preview_relation(relation, options, page).await,
             Self::Sqlite(adapter) => adapter.preview_relation(relation, options, page).await,
             Self::DuckDb(adapter) => {
@@ -1248,7 +1305,7 @@ impl DatabaseConnection {
                     .preview_relation_with_scope(relation, scope, options, page)
                     .await
             }
-            Self::MariaDb(adapter) => {
+            Self::MariaDb(adapter) | Self::TiDb(adapter) => {
                 adapter
                     .preview_relation_with_scope(relation, scope, options, page)
                     .await
@@ -1296,6 +1353,7 @@ impl DatabaseConnection {
             Self::Postgres(adapter) => adapter.relation_ddl(relation).await,
             Self::MySql(adapter) => adapter.relation_ddl(relation).await,
             Self::MariaDb(adapter) => adapter.relation_ddl(relation).await,
+            Self::TiDb(adapter) => adapter.relation_ddl(relation).await,
             Self::Oracle(adapter) => adapter.relation_ddl(relation).await,
             Self::Sqlite(adapter) => adapter.relation_ddl(relation).await,
             Self::DuckDb(adapter) => {
@@ -1334,6 +1392,7 @@ impl DatabaseConnection {
             Self::Postgres(adapter) => adapter.relation_ddl_with_scope(relation, scope).await,
             Self::MySql(adapter) => adapter.relation_ddl_with_scope(relation, scope).await,
             Self::MariaDb(adapter) => adapter.relation_ddl_with_scope(relation, scope).await,
+            Self::TiDb(adapter) => adapter.relation_ddl_with_scope(relation, scope).await,
             Self::Oracle(adapter) => adapter.relation_ddl_with_scope(relation, scope).await,
             Self::Sqlite(adapter) => adapter.relation_ddl_with_scope(relation, scope).await,
             Self::DuckDb(adapter) => adapter.relation_ddl_with_scope(relation, scope).await,
@@ -1358,6 +1417,7 @@ impl DatabaseConnection {
             Self::Postgres(adapter) => adapter.object_ddl(kind, schema, name).await,
             Self::MySql(adapter) => adapter.object_ddl(kind, schema, name).await,
             Self::MariaDb(adapter) => adapter.object_ddl(kind, schema, name).await,
+            Self::TiDb(adapter) => adapter.object_ddl(kind, schema, name).await,
             Self::Oracle(_) => Ok(None),
             Self::Sqlite(adapter) => adapter.object_ddl(kind, schema, name).await,
             Self::DuckDb(adapter) => adapter.object_ddl(kind, schema, name).await,
@@ -1373,6 +1433,7 @@ impl DatabaseConnection {
             Self::Postgres(_) => postgres::quote_identifier(value),
             Self::MySql(_) => mysql::quote_identifier(value),
             Self::MariaDb(_) => mysql::quote_identifier(value),
+            Self::TiDb(_) => mysql::quote_identifier(value),
             Self::Oracle(_) => format!("\"{}\"", value.replace('"', "\"\"")),
             Self::Sqlite(adapter) => adapter.quote_identifier(value),
             Self::DuckDb(_) => format!("\"{}\"", value.replace('"', "\"\"")),
@@ -1388,6 +1449,7 @@ impl DatabaseConnection {
             Self::Postgres(adapter) => adapter.close().await,
             Self::MySql(adapter) => adapter.close().await,
             Self::MariaDb(adapter) => adapter.close().await,
+            Self::TiDb(adapter) => adapter.close().await,
             Self::Oracle(adapter) => adapter.close().await,
             Self::Sqlite(adapter) => adapter.close().await,
             Self::DuckDb(adapter) => adapter.close().await,
