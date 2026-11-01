@@ -210,6 +210,7 @@ pub enum LspDialect {
     SqlServer,
     Sqlite,
     ClickHouse,
+    Snowflake,
     #[value(name = "duckdb")]
     DuckDb,
     #[default]
@@ -228,6 +229,7 @@ impl From<crate::profile::DatabaseKind> for LspDialect {
             | crate::sql::SqlDialect::Generic
             | crate::sql::SqlDialect::Oracle => Self::Sqlite,
             crate::sql::SqlDialect::ClickHouse => Self::ClickHouse,
+            crate::sql::SqlDialect::Snowflake => Self::Snowflake,
         }
     }
 }
@@ -762,7 +764,8 @@ mod tests {
                 "redis",
                 "valkey",
                 "mongodb",
-                "clickhouse"
+                "clickhouse",
+                "snowflake"
             ])
         );
         assert_eq!(

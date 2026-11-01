@@ -102,6 +102,14 @@ impl DatabaseCapabilities {
                 manual_transactions: false,
                 cancellation: false,
             },
+            DatabaseKind::Snowflake => Self {
+                catalog: true,
+                relation_ddl: true,
+                relation_edit: false,
+                monitoring: false,
+                manual_transactions: false,
+                cancellation: false,
+            },
             DatabaseKind::ClickHouse => Self {
                 catalog: true,
                 relation_ddl: false,

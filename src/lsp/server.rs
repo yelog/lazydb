@@ -210,6 +210,7 @@ fn sql_dialect(dialect: crate::cli::LspDialect) -> SqlDialect {
         crate::cli::LspDialect::SqlServer => SqlDialect::SqlServer,
         crate::cli::LspDialect::Sqlite => SqlDialect::Sqlite,
         crate::cli::LspDialect::ClickHouse => SqlDialect::ClickHouse,
+        crate::cli::LspDialect::Snowflake => SqlDialect::Snowflake,
         crate::cli::LspDialect::DuckDb => SqlDialect::DuckDb,
         crate::cli::LspDialect::Generic => SqlDialect::Generic,
     }

@@ -142,6 +142,7 @@ impl DatabaseKindLabel for DatabaseKind {
             DatabaseKind::Valkey => "Valkey",
             DatabaseKind::MongoDb => "MongoDB",
             DatabaseKind::ClickHouse => "ClickHouse",
+            DatabaseKind::Snowflake => "Snowflake",
         }
     }
 }

@@ -102,6 +102,65 @@ fn oracle_statement_terminators_do_not_change_read_only_risk() {
 }
 
 #[test]
+fn snowflake_side_effecting_expressions_require_approval_in_every_query_position() {
+    for sql in [
+        "SELECT DB.PUBLIC.S.NEXTVAL",
+        "SELECT s.nextval",
+        "SELECT \"DB\".\"PUBLIC\".\"S\".\"NEXTVAL\"",
+        "SELECT SYSTEM$CANCEL_QUERY('query-id')",
+        "SELECT system$abort_session(123)",
+        "SELECT SYSTEM$WAIT(1)",
+        "SELECT GETNEXTVAL('s')",
+        "SELECT * FROM TABLE(GETNEXTVAL(s))",
+        "WITH ids AS (SELECT DB.PUBLIC.S.NEXTVAL AS id) SELECT * FROM ids",
+        "SELECT (SELECT SYSTEM$CANCEL_QUERY('query-id'))",
+        "SELECT 1 WHERE SYSTEM$CANCEL_QUERY('query-id') IS NOT NULL",
+        "SELECT 1 ORDER BY DB.PUBLIC.S.NEXTVAL",
+        "SELECT 1 UNION ALL SELECT DB.PUBLIC.S.NEXTVAL",
+        "EXPLAIN SELECT DB.PUBLIC.S.NEXTVAL",
+    ] {
+        assert!(
+            sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::SnowflakeDialect {}, sql)
+                .is_ok(),
+            "regression must exercise a parsed expression: {sql}"
+        );
+        assert_eq!(
+            classify_sql(sql, SqlDialect::Snowflake).risks,
+            vec![SqlRisk::Unknown],
+            "{sql}"
+        );
+    }
+    let analysis = classify_sql(
+        "SELECT 1; SELECT DB.PUBLIC.S.NEXTVAL; SELECT SYSTEM$CANCEL_QUERY('id')",
+        SqlDialect::Snowflake,
+    );
+    assert_eq!(
+        analysis.risks,
+        vec![SqlRisk::ReadOnly, SqlRisk::Unknown, SqlRisk::Unknown]
+    );
+    assert_eq!(analysis.aggregate, SqlRiskAggregate::MultiStatement);
+}
+
+#[test]
+fn snowflake_risk_classification_ignores_side_effect_names_in_text_and_aliases() {
+    for sql in [
+        "SELECT 1",
+        "SELECT COUNT(*) FROM DB.PUBLIC.USERS",
+        "SELECT 'DB.PUBLIC.S.NEXTVAL', 'SYSTEM$CANCEL_QUERY()'",
+        "SELECT 1 AS NEXTVAL, 2 AS \"SYSTEM$CANCEL_QUERY\"",
+        "SELECT 1 /* SELECT DB.PUBLIC.S.NEXTVAL */",
+        "SELECT 1 -- SYSTEM$CANCEL_QUERY('id')",
+        "WITH rows AS (SELECT 1) SELECT * FROM rows",
+    ] {
+        assert_eq!(
+            classify_sql(sql, SqlDialect::Snowflake).risks,
+            vec![SqlRisk::ReadOnly],
+            "{sql}"
+        );
+    }
+}
+
+#[test]
 fn duckdb_file_and_extension_side_effects_are_unknown() {
     for sql in [
         "COPY (SELECT 1) TO '/tmp/export.csv'",

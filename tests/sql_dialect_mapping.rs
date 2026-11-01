@@ -31,3 +31,20 @@ fn database_kind_mapping_has_one_canonical_sql_dialect() {
         None
     );
 }
+
+#[test]
+fn snowflake_uses_its_native_parser_and_lsp_dialect() {
+    use lazydb::cli::LspDialect;
+    assert_eq!(
+        SqlDialect::for_database_kind(DatabaseKind::Snowflake),
+        SqlDialect::Snowflake
+    );
+    assert!(matches!(
+        LspDialect::from(DatabaseKind::Snowflake),
+        LspDialect::Snowflake
+    ));
+    sqlparser::parser::Parser::parse_sql(
+        &sqlparser::dialect::SnowflakeDialect {},
+        "SELECT payload:key::VARCHAR FROM DB.PUBLIC.EVENTS QUALIFY ROW_NUMBER() OVER (PARTITION BY id ORDER BY created_at DESC) = 1",
+    ).unwrap();
+}

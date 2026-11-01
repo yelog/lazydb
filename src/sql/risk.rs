@@ -106,6 +106,10 @@ fn parse_risks(sql: &str, dialect: SqlDialect) -> Vec<SqlRisk> {
                         || contains_duckdb_sensitive_function(statement))
                 {
                     SqlRisk::Unknown
+                } else if dialect == SqlDialect::Snowflake
+                    && contains_snowflake_side_effect(statement)
+                {
+                    SqlRisk::Unknown
                 } else {
                     classify_statement(statement)
                 }
@@ -217,6 +221,40 @@ fn contains_duckdb_sensitive_function(statement: &Statement) -> bool {
         Statement::Explain { statement, .. } => contains_duckdb_sensitive_function(statement),
         _ => false,
     }
+}
+
+fn contains_snowflake_side_effect(statement: &Statement) -> bool {
+    use std::ops::ControlFlow;
+
+    use sqlparser::ast::Expr;
+
+    // Inspect expressions rather than rendered SQL so strings/comments do not
+    // trigger approval, and nested queries cannot hide sequence advancement.
+    sqlparser::ast::visit_expressions(statement, |expr| {
+        let sensitive = match expr {
+            Expr::CompoundIdentifier(parts) => parts
+                .last()
+                .is_some_and(|ident| ident.value.eq_ignore_ascii_case("NEXTVAL")),
+            Expr::Function(function) => function
+                .name
+                .0
+                .last()
+                .and_then(|part| part.as_ident())
+                .is_some_and(|ident| {
+                    let name = ident.value.to_ascii_uppercase();
+                    // SYSTEM$ includes administrative and state-changing APIs.
+                    // Keep the entire family behind explicit approval.
+                    name.starts_with("SYSTEM$") || matches!(name.as_str(), "NEXTVAL" | "GETNEXTVAL")
+                }),
+            _ => false,
+        };
+        if sensitive {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    })
+    .is_break()
 }
 
 fn classify_query(query: &Query) -> SqlRisk {

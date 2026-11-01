@@ -7887,6 +7887,7 @@ fn driver_options_use_database_icons_in_each_icon_mode() {
         DatabaseKind::Redis,
         DatabaseKind::Oracle,
         DatabaseKind::ClickHouse,
+        DatabaseKind::Snowflake,
     ];
 
     for mode in [IconMode::NerdFont, IconMode::Unicode, IconMode::Ascii] {
@@ -7919,6 +7920,7 @@ fn driver_options_use_database_icons_in_each_icon_mode() {
                 DatabaseKind::Valkey => "Valkey",
                 DatabaseKind::MongoDb => "MongoDB",
                 DatabaseKind::ClickHouse => "ClickHouse",
+                DatabaseKind::Snowflake => "Snowflake",
             };
             let label = format!("{} {display_name}", IconSet::new(mode).database(kind));
             assert!(

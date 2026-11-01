@@ -34,6 +34,14 @@ pub fn preview_sql_for_relation(
 ) -> String {
     let mut parts = Vec::with_capacity(2);
     match kind {
+        DatabaseKind::Snowflake => {
+            if let Some(database) = relation.database.as_deref() {
+                parts.push(database);
+            }
+            if let Some(schema) = relation.schema.as_deref() {
+                parts.push(schema);
+            }
+        }
         DatabaseKind::MySql | DatabaseKind::MariaDb => {
             if let Some(database) = relation.database.as_deref() {
                 parts.push(database);

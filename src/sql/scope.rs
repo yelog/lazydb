@@ -263,10 +263,15 @@ fn statement_boundaries(text: &str, dialect: SqlDialect) -> Vec<(usize, usize)> 
                 }
                 b'$' if matches!(
                     dialect,
-                    SqlDialect::Postgres | SqlDialect::DuckDb | SqlDialect::Generic
+                    SqlDialect::Postgres
+                        | SqlDialect::DuckDb
+                        | SqlDialect::Generic
+                        | SqlDialect::Snowflake
                 ) =>
                 {
-                    if let Some(end) = dollar_tag_end(text, index) {
+                    if let Some(end) = dollar_tag_end(text, index)
+                        .filter(|end| dialect != SqlDialect::Snowflake || *end == index + 2)
+                    {
                         state = State::DollarQuote(TextRange::new(index, end));
                         index = end;
                     } else {
