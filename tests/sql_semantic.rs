@@ -368,3 +368,236 @@ fn qualified_missing_schema_is_reported_at_the_schema_identifier() {
         Some("missing")
     );
 }
+
+fn namespace_entries(database: &str, schema: &str) -> Vec<CatalogEntry> {
+    let profile = Uuid::new_v4();
+    let database_id = CatalogId::new(profile, CatalogKind::Database, [database]);
+    vec![
+        CatalogEntry::database(
+            database_id.clone(),
+            QualifiedName {
+                database: None,
+                schema: None,
+                object: database.into(),
+            },
+            "DATABASE",
+            Default::default(),
+            true,
+        )
+        .unwrap(),
+        CatalogEntry::schema(
+            CatalogId::new(profile, CatalogKind::Schema, [database, schema]),
+            database_id,
+            QualifiedName {
+                database: Some(database.into()),
+                schema: None,
+                object: schema.into(),
+            },
+            "SCHEMA",
+            Default::default(),
+            true,
+        )
+        .unwrap(),
+    ]
+}
+
+#[test]
+fn snowflake_namespace_diagnostics_require_complete_parent_coverage() {
+    let context = SemanticContext::new(SqlDialect::Snowflake, Some("ACTIVE"), Some("PUBLIC"));
+    for status in [
+        CatalogCoverage::NotLoaded,
+        CatalogCoverage::Loading,
+        CatalogCoverage::Failed,
+        CatalogCoverage::OutOfScope,
+        CatalogCoverage::Complete,
+    ] {
+        for (sql, parent, code, missing) in [
+            (
+                "SELECT * FROM OTHER.RAW.EVENTS",
+                CatalogNamespace::new(None::<String>, None::<String>),
+                "sql-unknown-database",
+                "OTHER",
+            ),
+            (
+                "SELECT * FROM ACTIVE.RAW.EVENTS",
+                CatalogNamespace::new(Some("ACTIVE"), None::<String>),
+                "sql-unknown-schema",
+                "RAW",
+            ),
+            (
+                "SELECT * FROM RAW.EVENTS",
+                CatalogNamespace::new(Some("ACTIVE"), None::<String>),
+                "sql-unknown-schema",
+                "RAW",
+            ),
+        ] {
+            // Loading relations in the active schema cannot establish that the
+            // database or schema list is complete.
+            let snapshot = CatalogSnapshot::new(
+                namespace_entries("ACTIVE", "PUBLIC"),
+                [
+                    (parent, status),
+                    (context.default_namespace(), CatalogCoverage::Complete),
+                ],
+            );
+            let analysis = analyze_semantics(sql, &context, &snapshot);
+            if status == CatalogCoverage::Complete {
+                assert_eq!(analysis.diagnostics.len(), 1, "{sql}: {analysis:?}");
+                assert_eq!(analysis.diagnostics[0].code, code);
+                assert_eq!(analysis.diagnostics[0].range.get(sql), Some(missing));
+            } else {
+                assert!(
+                    analysis.diagnostics.is_empty(),
+                    "{status:?}: {sql}: {analysis:?}"
+                );
+                assert!(analysis.incomplete);
+            }
+        }
+    }
+    // Complete empty lists are also evidence; no existing entry is needed.
+    let snapshot = CatalogSnapshot::new(
+        [],
+        [(
+            CatalogNamespace::new(None::<String>, None::<String>),
+            CatalogCoverage::Complete,
+        )],
+    );
+    let analysis = analyze_semantics("SELECT * FROM OTHER.RAW.EVENTS", &context, &snapshot);
+    assert_eq!(analysis.diagnostics[0].code, "sql-unknown-database");
+    let snapshot = CatalogSnapshot::new(
+        [],
+        [(
+            CatalogNamespace::new(Some("ACTIVE"), None::<String>),
+            CatalogCoverage::Complete,
+        )],
+    );
+    let analysis = analyze_semantics("SELECT * FROM RAW.EVENTS", &context, &snapshot);
+    assert_eq!(analysis.diagnostics[0].code, "sql-unknown-schema");
+}
+
+#[test]
+fn snowflake_identifiers_fold_only_when_unquoted() {
+    let context = SemanticContext::new(SqlDialect::Snowflake, Some("DB"), Some("PUBLIC"));
+    let upper = relation("USERS", "DB", "PUBLIC");
+    let lower = relation("users", "DB", "PUBLIC");
+    let upper_id = upper.id.clone();
+    let lower_id = lower.id.clone();
+    let snapshot = CatalogSnapshot::new(
+        [
+            upper.clone(),
+            column(&upper, "ID"),
+            lower.clone(),
+            column(&lower, "id"),
+        ],
+        [(context.default_namespace(), CatalogCoverage::Complete)],
+    )
+    .with_column_coverage([
+        (upper_id.clone(), CatalogCoverage::Complete),
+        (lower_id.clone(), CatalogCoverage::Complete),
+    ]);
+    for (sql, expected) in [
+        ("SELECT id FROM users", &upper_id),
+        ("SELECT \"ID\" FROM \"USERS\"", &upper_id),
+        ("SELECT \"id\" FROM \"users\"", &lower_id),
+        ("SELECT u.id FROM db.public.users AS u", &upper_id),
+        (
+            "SELECT \"u\".\"id\" FROM \"DB\".\"PUBLIC\".\"users\" AS \"u\"",
+            &lower_id,
+        ),
+    ] {
+        let analysis = analyze_semantics(sql, &context, &snapshot);
+        assert!(analysis.diagnostics.is_empty(), "{sql}: {analysis:?}");
+        assert_eq!(
+            analysis.dependencies.as_slice(),
+            std::slice::from_ref(expected),
+            "{sql}"
+        );
+        assert!(!analysis.incomplete, "{sql}");
+    }
+    assert_eq!(
+        snapshot.resolve_relation(&["users"], &context),
+        RelationResolution::Resolved(upper_id)
+    );
+    for sql in [
+        "SELECT \"id\" FROM users",
+        "SELECT id FROM \"users\"",
+        "INSERT INTO users (\"id\") VALUES (1)",
+        "UPDATE \"users\" SET id = 1",
+    ] {
+        let analysis = analyze_semantics(sql, &context, &snapshot);
+        assert_eq!(analysis.diagnostics.len(), 1, "{sql}: {analysis:?}");
+        assert_eq!(analysis.diagnostics[0].code, "sql-unknown-column");
+    }
+}
+
+#[test]
+fn snowflake_quoted_namespaces_aliases_and_ctes_remain_distinct() {
+    let context = SemanticContext::new(SqlDialect::Snowflake, Some("DB"), Some("PUBLIC"));
+    let mut entries = namespace_entries("DB", "PUBLIC");
+    entries.push(relation("USERS", "DB", "PUBLIC"));
+    let snapshot = CatalogSnapshot::new(
+        entries,
+        [
+            (
+                CatalogNamespace::new(None::<String>, None::<String>),
+                CatalogCoverage::Complete,
+            ),
+            (
+                CatalogNamespace::new(Some("DB"), None::<String>),
+                CatalogCoverage::Complete,
+            ),
+            (context.default_namespace(), CatalogCoverage::Complete),
+        ],
+    );
+    for (sql, code) in [
+        ("SELECT * FROM \"db\".PUBLIC.USERS", "sql-unknown-database"),
+        ("SELECT * FROM DB.\"public\".USERS", "sql-unknown-schema"),
+        ("SELECT * FROM \"users\"", "sql-unknown-relation"),
+        ("SELECT u.* FROM USERS AS \"u\"", "sql-unresolved-qualifier"),
+        ("WITH \"users\"(id) AS (SELECT 1) SELECT * FROM users", ""),
+        (
+            "WITH \"rows\"(\"id\") AS (SELECT 1) SELECT id FROM \"rows\"",
+            "sql-unknown-column",
+        ),
+        (
+            "WITH rows(id) AS (SELECT 1) SELECT \"id\" FROM rows",
+            "sql-unknown-column",
+        ),
+    ] {
+        let analysis = analyze_semantics(sql, &context, &snapshot);
+        if code.is_empty() {
+            // Unquoted users must resolve the real table, not the quoted CTE.
+            assert_eq!(analysis.dependencies.len(), 1, "{analysis:?}");
+            assert!(analysis.diagnostics.is_empty());
+        } else {
+            assert_eq!(analysis.diagnostics.len(), 1, "{sql}: {analysis:?}");
+            assert_eq!(analysis.diagnostics[0].code, code, "{sql}");
+        }
+    }
+    for sql in [
+        "WITH \"rows\"(\"id\") AS (SELECT 1) SELECT \"id\" FROM \"rows\"",
+        "WITH rows(id) AS (SELECT 1) SELECT id FROM ROWS",
+        "WITH rows(id) AS (SELECT 1) SELECT id AS \"alias\" FROM rows ORDER BY \"alias\"",
+    ] {
+        let analysis = analyze_semantics(sql, &context, &snapshot);
+        assert!(analysis.diagnostics.is_empty(), "{sql}: {analysis:?}");
+        assert!(!analysis.incomplete);
+    }
+    let sql = "WITH rows(id) AS (SELECT 1) SELECT id AS \"alias\" FROM rows ORDER BY alias";
+    let analysis = analyze_semantics(sql, &context, &snapshot);
+    assert_eq!(analysis.diagnostics.len(), 1, "{analysis:?}");
+    assert_eq!(analysis.diagnostics[0].code, "sql-unknown-column");
+}
+
+#[test]
+fn snowflake_three_part_relation_resolves_the_named_database_and_schema() {
+    let context = SemanticContext::new(SqlDialect::Snowflake, Some("ACTIVE"), Some("PUBLIC"));
+    let entry = relation("EVENTS", "ANALYTICS", "RAW");
+    let expected = entry.id.clone();
+    let namespace = CatalogNamespace::new(Some("ANALYTICS"), Some("RAW"));
+    let snapshot = CatalogSnapshot::new([entry], [(namespace, CatalogCoverage::Complete)]);
+    assert_eq!(
+        snapshot.resolve_relation(&["ANALYTICS", "RAW", "EVENTS"], &context),
+        RelationResolution::Resolved(expected)
+    );
+}

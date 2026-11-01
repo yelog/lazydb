@@ -189,6 +189,123 @@ fn dialect_specific_mysql_comments_and_unterminated_constructs_are_conservative(
 }
 
 #[test]
+fn mysql_scanner_preserves_escaped_double_quotes_and_embedded_semicolons() {
+    let text = r#"SELECT "a\";b" AS value; SELECT 2;"#;
+    let ranges = scan_statements(text, SqlDialect::MySql);
+    assert_eq!(ranges.len(), 2);
+    assert_eq!(ranges[0].get(text), Some(r#"SELECT "a\";b" AS value;"#));
+    assert_eq!(ranges[1].get(text), Some("SELECT 2;"));
+
+    let identifier = r#"SELECT "ends_with_backslash\"; SELECT 2;"#;
+    assert_eq!(scan_statements(identifier, SqlDialect::Postgres).len(), 2);
+}
+
+#[test]
+fn mariadb_scanner_uses_mysql_quote_and_comment_rules() {
+    for (text, expected) in [
+        (
+            r#"SELECT "a\";b" AS value; SELECT 2;"#,
+            vec![r#"SELECT "a\";b" AS value;"#, "SELECT 2;"],
+        ),
+        (
+            "SELECT `odd;name``;suffix`; SELECT 2;",
+            vec!["SELECT `odd;name``;suffix`;", "SELECT 2;"],
+        ),
+        (
+            "SELECT 1 # hidden ;\n; SELECT 2;",
+            vec!["SELECT 1 # hidden ;\n;", "SELECT 2;"],
+        ),
+        (
+            "# comment-only ;\nSELECT 1;",
+            vec!["# comment-only ;\nSELECT 1;"],
+        ),
+        (
+            "SELECT 1--not a comment; SELECT 2-- comment ;\n;",
+            vec!["SELECT 1--not a comment;", "SELECT 2-- comment ;\n;"],
+        ),
+    ] {
+        let actual: Vec<_> = scan_statements(text, SqlDialect::MariaDb)
+            .into_iter()
+            .map(|range| range.get(text).unwrap())
+            .collect();
+        assert_eq!(actual, expected, "SQL: {text}");
+    }
+    assert!(scan_statements("# comment only", SqlDialect::MariaDb).is_empty());
+}
+
+#[test]
+fn mysql_family_executable_comments_are_preserved_as_statements_and_scopes() {
+    for dialect in [SqlDialect::MySql, SqlDialect::MariaDb] {
+        for sql in ["/*!40101 SET NAMES utf8mb4 */", "/*! SET @value = 'a;b' */"] {
+            let text = format!("-- ordinary comment\n{sql}; SELECT 2;");
+            let ranges = scan_statements(&text, dialect);
+            assert_eq!(ranges.len(), 2, "dialect: {dialect:?}, SQL: {text}");
+            assert_eq!(
+                ranges[0].get(&text),
+                Some(format!("-- ordinary comment\n{sql};").as_str())
+            );
+            assert_eq!(ranges[1].get(&text), Some("SELECT 2;"));
+            assert!(resolve_scope(&text, text.find("/*!").unwrap(), None, dialect).is_some());
+            assert_eq!(
+                scan_statements(sql, dialect),
+                vec![TextRange::new(0, sql.len())]
+            );
+            let visual =
+                ScopeSelection::contiguous(ScopeKind::VisualChar, TextRange::new(0, sql.len()));
+            assert!(resolve_scope(sql, 0, Some(&visual), dialect).is_some());
+        }
+    }
+
+    let maria_sql = "/*M!100100 SET @value = 'a;b' */";
+    assert_eq!(
+        scan_statements(maria_sql, SqlDialect::MariaDb),
+        vec![TextRange::new(0, maria_sql.len())]
+    );
+    for dialect in [SqlDialect::MySql, SqlDialect::Postgres, SqlDialect::Generic] {
+        assert!(scan_statements(maria_sql, dialect).is_empty());
+    }
+    for dialect in [SqlDialect::MySql, SqlDialect::MariaDb] {
+        assert!(scan_statements("/* ordinary comment */", dialect).is_empty());
+        assert!(scan_statements("/*+ optimizer hint */", dialect).is_empty());
+        assert!(scan_statements("/* outer /*! nested */ */", dialect).is_empty());
+    }
+    assert!(scan_statements("/*!40101 SET NAMES utf8mb4 */", SqlDialect::Postgres).is_empty());
+}
+
+#[test]
+fn mysql_family_cursor_scope_refuses_mode_dependent_statement_ranges() {
+    for dialect in [SqlDialect::MySql, SqlDialect::MariaDb] {
+        for text in [
+            r#"SELECT "路径\"; SELECT 2;"#,
+            r"SELECT '路径\'; SELECT 2;",
+            r#"SELECT "a\";b" AS value; SELECT 2;"#,
+        ] {
+            for cursor in [0, text.find("SELECT 2").unwrap()] {
+                assert_eq!(resolve_scope(text, cursor, None, dialect), None);
+            }
+            let first_end = text.find(';').unwrap() + 1;
+            let visual =
+                ScopeSelection::contiguous(ScopeKind::VisualChar, TextRange::new(0, first_end));
+            assert_eq!(
+                resolve_scope(text, 0, Some(&visual), dialect).unwrap().sql,
+                &text[..first_end]
+            );
+        }
+        let text = r#"SELECT 'a'';b', "c"";d", `e\`; SELECT 2;"#;
+        assert_eq!(
+            resolve_scope(text, 0, None, dialect).unwrap().sql,
+            &text[..text.find(" SELECT 2").unwrap()]
+        );
+        assert_eq!(
+            resolve_scope(text, text.find("SELECT 2").unwrap(), None, dialect)
+                .unwrap()
+                .sql,
+            "SELECT 2;"
+        );
+    }
+}
+
+#[test]
 fn duckdb_scanner_handles_dollar_quotes_lists_and_nested_comments() {
     let text = "SELECT $$left;right$$, $tag$semi;colon$tag$, [1, 2]; /* outer ; /* inner ; */ end */ SELECT 3;";
     let ranges = scan_statements(text, SqlDialect::DuckDb);
@@ -210,4 +327,45 @@ fn sql_server_scope_ignores_semicolons_in_bracketed_identifiers() {
         "SELECT [odd;name], N'value;still' FROM [dbo].[items];"
     );
     assert_eq!(&text[ranges[1].start..ranges[1].end], "SELECT @value;");
+}
+
+#[test]
+fn snowflake_scope_keeps_identifier_quotes_independent_of_mysql_session_modes() {
+    let text = r#"SELECT "ends_with_backslash\"; SELECT 2;"#;
+    let ranges = scan_statements(text, SqlDialect::Snowflake);
+    assert_eq!(ranges.len(), 2);
+    assert_eq!(
+        resolve_scope(text, 0, None, SqlDialect::Snowflake)
+            .unwrap()
+            .sql,
+        r#"SELECT "ends_with_backslash\";"#
+    );
+    assert_eq!(
+        resolve_scope(
+            text,
+            text.find("SELECT 2").unwrap(),
+            None,
+            SqlDialect::Snowflake,
+        )
+        .unwrap()
+        .sql,
+        "SELECT 2;"
+    );
+}
+
+#[test]
+fn snowflake_scope_keeps_dollar_quoted_body_and_comments_in_one_statement() {
+    let text = "CREATE PROCEDURE p() RETURNS VARCHAR LANGUAGE SQL AS $$ BEGIN RETURN 'a;b'; END; $$; SELECT 2;";
+    let statements = scan_statements(text, SqlDialect::Snowflake);
+    assert_eq!(statements.len(), 2);
+    let scope = resolve_scope(
+        text,
+        text.find("RETURN").unwrap(),
+        None,
+        SqlDialect::Snowflake,
+    )
+    .unwrap();
+    assert!(scope.sql.ends_with("$$;"));
+    let text = "SELECT $$a; -- still a string\n b$$; -- comment\nSELECT 2;";
+    assert_eq!(scan_statements(text, SqlDialect::Snowflake).len(), 2);
 }

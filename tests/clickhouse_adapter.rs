@@ -137,6 +137,7 @@ fn fixture_profile_type_contract_is_explicit() {
         database: Some("default".into()),
         default_schema: Some("default".into()),
         sqlite_path: None,
+        snowflake_options: None,
         duckdb_path: None,
         mongodb_options: None,
         elasticsearch_options: None,

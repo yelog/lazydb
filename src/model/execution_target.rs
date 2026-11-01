@@ -71,6 +71,7 @@ mod tests {
             default_schema: Some("public".into()),
             sqlite_path: None,
             mongodb_options: None,
+            snowflake_options: None,
             elasticsearch_options: None,
             duckdb_path: None,
             ssl_mode: Default::default(),
@@ -209,6 +210,7 @@ impl ExecutionTarget {
         let schema = match profile.kind {
             DatabaseKind::MySql
             | DatabaseKind::MariaDb
+            | DatabaseKind::TiDb
             | DatabaseKind::ClickHouse
             | DatabaseKind::Elasticsearch => Some(database.clone()),
             DatabaseKind::Sqlite => Some("main".to_owned()),
@@ -217,6 +219,12 @@ impl ExecutionTarget {
                     .default_schema
                     .clone()
                     .unwrap_or_else(|| "main".into()),
+            ),
+            DatabaseKind::Snowflake => Some(
+                profile
+                    .default_schema
+                    .clone()
+                    .unwrap_or_else(|| "PUBLIC".into()),
             ),
             DatabaseKind::Postgres | DatabaseKind::SqlServer | DatabaseKind::Oracle => {
                 profile.default_schema.clone()
@@ -238,7 +246,7 @@ impl ExecutionTarget {
             return false;
         }
         match profile.kind {
-            DatabaseKind::MySql | DatabaseKind::MariaDb => {
+            DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::TiDb => {
                 self.schema.as_deref() == Some(self.database.as_str())
                     && profile
                         .catalog_scope
@@ -256,6 +264,9 @@ impl ExecutionTarget {
                         profile.catalog_scope.allows_schema(&self.database, schema)
                     })
             }
+            DatabaseKind::Snowflake => profile
+                .catalog_scope
+                .allows_schema(&self.database, self.schema.as_deref().unwrap_or("PUBLIC")),
             DatabaseKind::Postgres | DatabaseKind::SqlServer | DatabaseKind::Oracle => self
                 .schema
                 .as_deref()
@@ -278,12 +289,18 @@ impl ExecutionTarget {
         }
         let mut configured = profile.clone();
         match profile.kind {
+            DatabaseKind::Snowflake => {
+                configured.database = Some(self.database.clone());
+                configured.default_schema =
+                    Some(self.schema.clone().unwrap_or_else(|| "PUBLIC".into()));
+            }
             DatabaseKind::Postgres | DatabaseKind::SqlServer | DatabaseKind::Oracle => {
                 configured.database = Some(self.database.clone());
                 configured.default_schema = self.schema.clone();
             }
             DatabaseKind::MySql
             | DatabaseKind::MariaDb
+            | DatabaseKind::TiDb
             | DatabaseKind::ClickHouse
             | DatabaseKind::Elasticsearch => {
                 configured.database = Some(self.database.clone());

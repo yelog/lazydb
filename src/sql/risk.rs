@@ -1,5 +1,7 @@
+use std::ops::ControlFlow;
+
 use sqlparser::{
-    ast::{Query, Select, SetExpr, Statement, TableFactor},
+    ast::{Expr, Ident, ObjectName, Query, Select, Statement, TableFactor, Visit, Visitor},
     parser::Parser,
 };
 
@@ -101,14 +103,12 @@ fn parse_risks(sql: &str, dialect: SqlDialect) -> Vec<SqlRisk> {
         Ok(statements) => statements
             .iter()
             .map(|statement| {
-                if dialect == SqlDialect::DuckDb
-                    && (matches!(statement, Statement::CreateSecret { .. })
-                        || contains_duckdb_sensitive_function(statement))
-                {
-                    SqlRisk::Unknown
-                } else {
-                    classify_statement(statement)
-                }
+                let mut visitor = RiskVisitor {
+                    dialect,
+                    risk: SqlRisk::ReadOnly,
+                };
+                let _ = statement.visit(&mut visitor);
+                visitor.risk
             })
             .collect(),
         Err(_) => vec![SqlRisk::Unknown],
@@ -117,20 +117,16 @@ fn parse_risks(sql: &str, dialect: SqlDialect) -> Vec<SqlRisk> {
 
 fn classify_statement(statement: &Statement) -> SqlRisk {
     match statement {
-        Statement::Query(query) => classify_query(query),
-        Statement::Insert(insert) => combine(
-            SqlRisk::Dml,
-            insert
-                .source
-                .as_deref()
-                .map(classify_query)
-                .unwrap_or(SqlRisk::ReadOnly),
-        ),
-        Statement::Update(_) | Statement::Delete(_) | Statement::Merge(_) => SqlRisk::Dml,
+        // Queries and nested statements are classified by RiskVisitor.
+        Statement::Query(_) => SqlRisk::ReadOnly,
+        Statement::Insert(_)
+        | Statement::Update(_)
+        | Statement::Delete(_)
+        | Statement::Merge(_) => SqlRisk::Dml,
         Statement::Call(_) | Statement::Execute { .. } | Statement::Prepare { .. } => {
             SqlRisk::Unknown
         }
-        Statement::Explain { statement, .. } => classify_statement(statement),
+        Statement::Explain { .. } => SqlRisk::ReadOnly,
         Statement::ExplainTable { .. } => SqlRisk::ReadOnly,
         Statement::StartTransaction { .. }
         | Statement::Commit { .. }
@@ -194,95 +190,132 @@ fn classify_statement(statement: &Statement) -> SqlRisk {
     }
 }
 
-fn contains_duckdb_sensitive_function(statement: &Statement) -> bool {
-    fn query_contains(query: &Query) -> bool {
-        let sql = query.to_string().to_ascii_lowercase();
-        [
-            "nextval(",
-            "setval(",
-            "read_csv",
-            "read_parquet",
-            "read_json",
-            "glob(",
-        ]
-        .iter()
-        .any(|function| sql.contains(function))
-            || query
-                .with
-                .as_ref()
-                .is_some_and(|with| with.cte_tables.iter().any(|cte| query_contains(&cte.query)))
-    }
-    match statement {
-        Statement::Query(query) => query_contains(query),
-        Statement::Explain { statement, .. } => contains_duckdb_sensitive_function(statement),
-        _ => false,
-    }
+struct RiskVisitor {
+    dialect: SqlDialect,
+    risk: SqlRisk,
 }
 
-fn classify_query(query: &Query) -> SqlRisk {
-    let mut risk = query
-        .with
-        .as_ref()
-        .map(|with| {
-            with.cte_tables
-                .iter()
-                .map(|cte| classify_query(&cte.query))
-                .fold(SqlRisk::ReadOnly, combine)
-        })
-        .unwrap_or(SqlRisk::ReadOnly);
-    risk = combine(risk, classify_set_expr(&query.body));
-    if !query.locks.is_empty() {
-        risk = combine(risk, SqlRisk::Dml);
+impl RiskVisitor {
+    fn include(&mut self, risk: SqlRisk) {
+        self.risk = self.risk.max(risk);
     }
-    risk
-}
 
-fn classify_set_expr(expr: &SetExpr) -> SqlRisk {
-    match expr {
-        SetExpr::Select(select) => classify_select(select),
-        SetExpr::Query(query) => classify_query(query),
-        SetExpr::SetOperation { left, right, .. } => {
-            combine(classify_set_expr(left), classify_set_expr(right))
+    fn function(&mut self, name: &ObjectName) {
+        let Some(name) = name.0.last().and_then(|part| part.as_ident()) else {
+            return;
+        };
+        if matches!(
+            self.dialect,
+            SqlDialect::Postgres
+                | SqlDialect::MySql
+                | SqlDialect::MariaDb
+                | SqlDialect::DuckDb
+                | SqlDialect::Generic
+        ) && (self.function_name_is(name, "nextval") || self.function_name_is(name, "setval"))
+        {
+            self.include(if self.dialect == SqlDialect::DuckDb {
+                SqlRisk::Unknown
+            } else {
+                SqlRisk::Dml
+            });
         }
-        SetExpr::Values(_) | SetExpr::Table(_) => SqlRisk::ReadOnly,
-        SetExpr::Insert(statement)
-        | SetExpr::Update(statement)
-        | SetExpr::Delete(statement)
-        | SetExpr::Merge(statement) => classify_statement(statement),
-    }
-}
-
-fn classify_select(select: &Select) -> SqlRisk {
-    let mut risk = if select.into.is_some() {
-        SqlRisk::Dml
-    } else {
-        SqlRisk::ReadOnly
-    };
-    for table in &select.from {
-        risk = combine(risk, classify_table_factor(&table.relation));
-        for join in &table.joins {
-            risk = combine(risk, classify_table_factor(&join.relation));
-        }
-    }
-    risk
-}
-
-fn classify_table_factor(factor: &TableFactor) -> SqlRisk {
-    match factor {
-        TableFactor::Derived { subquery, .. } => classify_query(subquery),
-        TableFactor::NestedJoin {
-            table_with_joins, ..
-        } => {
-            let mut risk = classify_table_factor(&table_with_joins.relation);
-            for join in &table_with_joins.joins {
-                risk = combine(risk, classify_table_factor(&join.relation));
+        if self.dialect == SqlDialect::Snowflake {
+            let name = name.value.to_ascii_uppercase();
+            // SYSTEM$ includes administrative and state-changing APIs.
+            // Keep the entire family behind explicit approval.
+            if name.starts_with("SYSTEM$") || matches!(name.as_str(), "NEXTVAL" | "GETNEXTVAL") {
+                self.include(SqlRisk::Unknown);
             }
-            risk
         }
-        _ => SqlRisk::ReadOnly,
+        if self.dialect == SqlDialect::DuckDb {
+            let name = name.value.to_ascii_lowercase();
+            if name.starts_with("read_csv")
+                || name.starts_with("read_parquet")
+                || name.starts_with("read_json")
+                || name == "glob"
+            {
+                self.include(SqlRisk::Unknown);
+            }
+        }
+    }
+
+    fn function_name_is(&self, name: &Ident, expected: &str) -> bool {
+        if self.dialect == SqlDialect::Postgres && name.quote_style.is_some() {
+            name.value == expected
+        } else {
+            name.value.eq_ignore_ascii_case(expected)
+        }
     }
 }
 
-fn combine(left: SqlRisk, right: SqlRisk) -> SqlRisk {
-    left.max(right)
+impl Visitor for RiskVisitor {
+    type Break = ();
+
+    fn pre_visit_statement(&mut self, statement: &Statement) -> ControlFlow<Self::Break> {
+        self.include(
+            if self.dialect == SqlDialect::DuckDb
+                && matches!(statement, Statement::CreateSecret { .. })
+            {
+                SqlRisk::Unknown
+            } else {
+                classify_statement(statement)
+            },
+        );
+        ControlFlow::Continue(())
+    }
+
+    fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<Self::Break> {
+        if !query.locks.is_empty() {
+            self.include(SqlRisk::Dml);
+        }
+        ControlFlow::Continue(())
+    }
+
+    fn pre_visit_select(&mut self, select: &Select) -> ControlFlow<Self::Break> {
+        if select.into.is_some() {
+            self.include(SqlRisk::Dml);
+        }
+        ControlFlow::Continue(())
+    }
+
+    fn pre_visit_expr(&mut self, expression: &Expr) -> ControlFlow<Self::Break> {
+        match expression {
+            Expr::Function(function) => self.function(&function.name),
+            // Inspect AST nodes so literals and aliases do not trigger approval.
+            Expr::CompoundIdentifier(parts)
+                if self.dialect == SqlDialect::Snowflake
+                    && parts
+                        .last()
+                        .is_some_and(|name| name.value.eq_ignore_ascii_case("nextval")) =>
+            {
+                self.include(SqlRisk::Unknown);
+            }
+            // Oracle sequence pseudocolumns are identifiers, not function calls.
+            Expr::CompoundIdentifier(parts)
+                if self.dialect == SqlDialect::Oracle
+                    && parts.last().is_some_and(|name| {
+                        name.quote_style.is_none() && name.value.eq_ignore_ascii_case("nextval")
+                    }) =>
+            {
+                self.include(SqlRisk::Dml);
+            }
+            _ => {}
+        }
+        ControlFlow::Continue(())
+    }
+
+    fn pre_visit_table_factor(&mut self, factor: &TableFactor) -> ControlFlow<Self::Break> {
+        match factor {
+            TableFactor::Table {
+                name,
+                args: Some(_),
+                ..
+            }
+            | TableFactor::Function { name, .. } => {
+                self.function(name);
+            }
+            _ => {}
+        }
+        ControlFlow::Continue(())
+    }
 }

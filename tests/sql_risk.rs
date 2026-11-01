@@ -23,6 +23,144 @@ fn classifies_queries_and_nested_query_features_conservatively() {
 }
 
 #[test]
+fn visits_subqueries_in_every_expression_position() {
+    for dialect in [
+        SqlDialect::Postgres,
+        SqlDialect::MySql,
+        SqlDialect::MariaDb,
+        SqlDialect::Snowflake,
+    ] {
+        for sql in [
+            "SELECT (SELECT id FROM t FOR UPDATE)",
+            "SELECT 1 WHERE EXISTS (SELECT id FROM t FOR UPDATE)",
+            "SELECT 1 WHERE 1 IN (SELECT id FROM t FOR UPDATE)",
+            "SELECT COALESCE((SELECT id FROM t FOR UPDATE), 0)",
+            "SELECT CASE WHEN true THEN (SELECT id FROM t FOR UPDATE) END",
+            "SELECT 1 ORDER BY (SELECT id FROM t FOR UPDATE)",
+            "SELECT * FROM t JOIN s ON t.id = (SELECT id FROM u FOR UPDATE)",
+            "WITH rows AS (SELECT (SELECT id FROM t FOR UPDATE)) SELECT * FROM rows",
+            "EXPLAIN SELECT (SELECT id FROM t FOR UPDATE)",
+        ] {
+            assert_eq!(
+                classify_sql(sql, dialect).risks,
+                vec![SqlRisk::Dml],
+                "{dialect:?}: {sql}"
+            );
+        }
+        assert_eq!(
+            classify_sql("SELECT (SELECT id FROM t)", dialect).risks,
+            vec![SqlRisk::ReadOnly]
+        );
+    }
+}
+
+#[test]
+fn classifies_sequence_mutations_without_matching_literals_or_columns() {
+    for dialect in [
+        SqlDialect::Postgres,
+        SqlDialect::MySql,
+        SqlDialect::MariaDb,
+        SqlDialect::Generic,
+    ] {
+        for sql in [
+            "SELECT NEXTVAL('seq')",
+            "SELECT SETVAL('seq', 100)",
+            "SELECT (SELECT NEXTVAL('seq'))",
+            "SELECT * FROM t WHERE id = NEXTVAL('seq')",
+            "WITH rows AS (SELECT SETVAL('seq', 100)) SELECT * FROM rows",
+            "EXPLAIN SELECT NEXTVAL('seq')",
+        ] {
+            assert_eq!(
+                classify_sql(sql, dialect).risks,
+                vec![SqlRisk::Dml],
+                "{dialect:?}: {sql}"
+            );
+        }
+        for sql in [
+            "SELECT 'NEXTVAL(seq)', 'SETVAL(seq, 100)', 'FOR UPDATE' /* NEXTVAL(seq) */",
+            "SELECT LASTVAL('seq')",
+            "SELECT t.nextval, t.setval FROM t",
+            "SELECT nextval_column, setval_column FROM t",
+        ] {
+            assert_eq!(
+                classify_sql(sql, dialect).risks,
+                vec![SqlRisk::ReadOnly],
+                "{dialect:?}: {sql}"
+            );
+        }
+    }
+    assert_eq!(
+        classify_sql("SELECT `nextval`(seq)", SqlDialect::MySql).risks,
+        vec![SqlRisk::Dml]
+    );
+    assert_eq!(
+        classify_sql("SELECT pg_catalog.nextval('seq')", SqlDialect::Postgres).risks,
+        vec![SqlRisk::Dml]
+    );
+    assert_eq!(
+        classify_sql("SELECT * FROM nextval('seq')", SqlDialect::Postgres).risks,
+        vec![SqlRisk::Dml]
+    );
+    assert_eq!(
+        classify_sql("SELECT seq.NEXTVAL FROM dual", SqlDialect::Oracle).risks,
+        vec![SqlRisk::Dml]
+    );
+    assert_eq!(
+        classify_sql("SELECT seq.CURRVAL FROM dual", SqlDialect::Oracle).risks,
+        vec![SqlRisk::ReadOnly]
+    );
+    // PostgreSQL quoted function names are case-sensitive; SQLite has no built-in sequence functions.
+    assert_eq!(
+        classify_sql("SELECT \"NEXTVAL\"('seq')", SqlDialect::Postgres).risks,
+        vec![SqlRisk::ReadOnly]
+    );
+    assert_eq!(
+        classify_sql("SELECT nextval('seq')", SqlDialect::Sqlite).risks,
+        vec![SqlRisk::ReadOnly]
+    );
+    for dialect in [
+        SqlDialect::MySql,
+        SqlDialect::MariaDb,
+        SqlDialect::SqlServer,
+    ] {
+        // Unsupported sequence syntax must fail closed if the parser cannot represent it.
+        assert_ne!(
+            classify_sql("SELECT NEXT VALUE FOR seq", dialect).risks,
+            vec![SqlRisk::ReadOnly],
+            "{dialect:?}"
+        );
+    }
+}
+
+#[test]
+fn duckdb_sensitive_functions_use_ast_nodes_including_table_functions() {
+    for sql in [
+        "SELECT 'nextval(seq)', 'setval(seq, 1)', 'read_csv', 'glob(' /* nextval(seq) */",
+        "SELECT read_csv_column FROM t",
+    ] {
+        assert_eq!(
+            classify_sql(sql, SqlDialect::DuckDb).risks,
+            vec![SqlRisk::ReadOnly],
+            "{sql}"
+        );
+    }
+    for sql in [
+        "SELECT (SELECT nextval('seq'))",
+        "SELECT \"nextval\"('seq')",
+        "SELECT * FROM read_csv('file.csv')",
+        "SELECT * FROM read_csv_auto('file.csv')",
+        "SELECT * FROM read_parquet('file.parquet')",
+        "SELECT * FROM glob('*.csv')",
+    ] {
+        assert_eq!(
+            classify_sql(sql, SqlDialect::DuckDb).risks,
+            vec![SqlRisk::Unknown],
+            "{sql}"
+        );
+    }
+}
+
+#[test]
 fn classifies_mutation_ddl_and_transaction_statements() {
     for sql in [
         "INSERT INTO t VALUES (1)",
@@ -99,6 +237,69 @@ fn oracle_statement_terminators_do_not_change_read_only_risk() {
         classify_sql("BEGIN NULL; END;", SqlDialect::Oracle).risks,
         vec![SqlRisk::Unknown]
     );
+}
+
+#[test]
+fn snowflake_side_effecting_expressions_require_approval_in_every_query_position() {
+    for sql in [
+        "SELECT DB.PUBLIC.S.NEXTVAL",
+        "SELECT s.nextval",
+        "SELECT \"DB\".\"PUBLIC\".\"S\".\"NEXTVAL\"",
+        "SELECT SYSTEM$CANCEL_QUERY('query-id')",
+        "SELECT system$abort_session(123)",
+        "SELECT SYSTEM$WAIT(1)",
+        "SELECT NEXTVAL('s')",
+        "SELECT GETNEXTVAL('s')",
+        "SELECT * FROM TABLE(GETNEXTVAL(s))",
+        "INSERT INTO t SELECT DB.PUBLIC.S.NEXTVAL",
+        "UPDATE t SET id = GETNEXTVAL('s')",
+        "DELETE FROM t WHERE id = DB.PUBLIC.S.NEXTVAL",
+        "WITH ids AS (SELECT DB.PUBLIC.S.NEXTVAL AS id) SELECT * FROM ids",
+        "SELECT (SELECT SYSTEM$CANCEL_QUERY('query-id'))",
+        "SELECT 1 WHERE SYSTEM$CANCEL_QUERY('query-id') IS NOT NULL",
+        "SELECT 1 ORDER BY DB.PUBLIC.S.NEXTVAL",
+        "SELECT 1 UNION ALL SELECT DB.PUBLIC.S.NEXTVAL",
+        "EXPLAIN SELECT DB.PUBLIC.S.NEXTVAL",
+    ] {
+        assert!(
+            sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::SnowflakeDialect {}, sql)
+                .is_ok(),
+            "regression must exercise a parsed expression: {sql}"
+        );
+        assert_eq!(
+            classify_sql(sql, SqlDialect::Snowflake).risks,
+            vec![SqlRisk::Unknown],
+            "{sql}"
+        );
+    }
+    let analysis = classify_sql(
+        "SELECT 1; SELECT DB.PUBLIC.S.NEXTVAL; SELECT SYSTEM$CANCEL_QUERY('id')",
+        SqlDialect::Snowflake,
+    );
+    assert_eq!(
+        analysis.risks,
+        vec![SqlRisk::ReadOnly, SqlRisk::Unknown, SqlRisk::Unknown]
+    );
+    assert_eq!(analysis.aggregate, SqlRiskAggregate::MultiStatement);
+}
+
+#[test]
+fn snowflake_risk_classification_ignores_side_effect_names_in_text_and_aliases() {
+    for sql in [
+        "SELECT 1",
+        "SELECT COUNT(*) FROM DB.PUBLIC.USERS",
+        "SELECT 'DB.PUBLIC.S.NEXTVAL', 'SYSTEM$CANCEL_QUERY()'",
+        "SELECT 1 AS NEXTVAL, 2 AS \"SYSTEM$CANCEL_QUERY\"",
+        "SELECT 1 /* SELECT DB.PUBLIC.S.NEXTVAL */",
+        "SELECT 1 -- SYSTEM$CANCEL_QUERY('id')",
+        "WITH rows AS (SELECT 1) SELECT * FROM rows",
+    ] {
+        assert_eq!(
+            classify_sql(sql, SqlDialect::Snowflake).risks,
+            vec![SqlRisk::ReadOnly],
+            "{sql}"
+        );
+    }
 }
 
 #[test]

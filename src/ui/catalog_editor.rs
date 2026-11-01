@@ -3209,9 +3209,9 @@ fn preview(
         })
         .map(|profile| match profile.kind {
             crate::profile::DatabaseKind::Postgres => SqlDialect::Postgres,
-            crate::profile::DatabaseKind::MySql | crate::profile::DatabaseKind::MariaDb => {
-                SqlDialect::MySql
-            }
+            crate::profile::DatabaseKind::MySql
+            | crate::profile::DatabaseKind::MariaDb
+            | crate::profile::DatabaseKind::TiDb => SqlDialect::MySql,
             crate::profile::DatabaseKind::Oracle => SqlDialect::Generic,
             crate::profile::DatabaseKind::Sqlite => SqlDialect::Sqlite,
             crate::profile::DatabaseKind::DuckDb => SqlDialect::DuckDb,
@@ -3220,6 +3220,7 @@ fn preview(
             | crate::profile::DatabaseKind::Valkey
             | crate::profile::DatabaseKind::MongoDb
             | crate::profile::DatabaseKind::Elasticsearch => SqlDialect::Generic,
+            crate::profile::DatabaseKind::Snowflake => SqlDialect::Snowflake,
             crate::profile::DatabaseKind::ClickHouse => SqlDialect::ClickHouse,
         })
         .unwrap_or(SqlDialect::Generic);

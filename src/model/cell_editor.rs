@@ -1437,11 +1437,12 @@ pub(crate) fn classify_column_type(
         },
         DatabaseKind::MySql
         | DatabaseKind::MariaDb
+        | DatabaseKind::TiDb
         | DatabaseKind::Oracle
         | DatabaseKind::Sqlite
         | DatabaseKind::DuckDb => None,
         DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb => None,
-        DatabaseKind::ClickHouse | DatabaseKind::Elasticsearch => None,
+        DatabaseKind::ClickHouse | DatabaseKind::Snowflake | DatabaseKind::Elasticsearch => None,
     }?;
 
     Some(ColumnEditorDescription { kind })

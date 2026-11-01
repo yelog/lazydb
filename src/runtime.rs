@@ -7348,11 +7348,14 @@ impl Runtime {
                 DatabaseConnection::Postgres(_)
                 | DatabaseConnection::MySql(_)
                 | DatabaseConnection::MariaDb(_)
+                | DatabaseConnection::TiDb(_)
                 | DatabaseConnection::Oracle(_)
                 | DatabaseConnection::SqlServer(_)
                 | DatabaseConnection::Redis(_)
                 | DatabaseConnection::MongoDb(_) => false,
-                DatabaseConnection::ClickHouse(_) | DatabaseConnection::Elasticsearch(_) => false,
+                DatabaseConnection::ClickHouse(_)
+                | DatabaseConnection::Snowflake(_)
+                | DatabaseConnection::Elasticsearch(_) => false,
                 DatabaseConnection::DuckDb(_) => false,
             };
             let worker = match database
@@ -8107,6 +8110,9 @@ async fn save_profile_transaction(
                 || old.database != profile.database
                 || old.default_schema != profile.default_schema
                 || old.sqlite_path != profile.sqlite_path
+                || old.snowflake_options != profile.snowflake_options
+                || (profile.kind == crate::profile::DatabaseKind::Snowflake
+                    && old.catalog_scope != profile.catalog_scope)
                 || old.ssl_mode != profile.ssl_mode
                 || old.elasticsearch_options != profile.elasticsearch_options
         }),
@@ -8438,13 +8444,26 @@ async fn resolve_profile_password(
         .await
         .map_err(|error| match error {
             crate::persistence::credentials::CredentialResolutionError::InteractionRequired => {
-                "Enter a password to continue".to_owned()
+                if profile.kind == crate::profile::DatabaseKind::Snowflake {
+                    "Enter an access token to continue".to_owned()
+                } else {
+                    "Enter a password to continue".to_owned()
+                }
             }
             crate::persistence::credentials::CredentialResolutionError::Missing => {
-                "Stored password is missing; enter a password to continue".to_owned()
+                if profile.kind == crate::profile::DatabaseKind::Snowflake {
+                    "Stored access token is missing; enter an access token to continue".to_owned()
+                } else {
+                    "Stored password is missing; enter a password to continue".to_owned()
+                }
             }
             crate::persistence::credentials::CredentialResolutionError::Unavailable => {
-                "Stored password is unavailable; enter a password to continue".to_owned()
+                if profile.kind == crate::profile::DatabaseKind::Snowflake {
+                    "Stored access token is unavailable; enter an access token to continue"
+                        .to_owned()
+                } else {
+                    "Stored password is unavailable; enter a password to continue".to_owned()
+                }
             }
             other => sanitize_terminal_text(&other.to_string()),
         })?;

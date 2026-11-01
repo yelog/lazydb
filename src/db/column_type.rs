@@ -31,8 +31,8 @@ impl ColumnTypePolicy {
         match self.kind {
             DatabaseKind::Oracle => "VARCHAR2(255 CHAR)",
             DatabaseKind::Postgres | DatabaseKind::Sqlite => "text",
-            DatabaseKind::DuckDb => "VARCHAR",
-            DatabaseKind::MySql | DatabaseKind::MariaDb => "text",
+            DatabaseKind::DuckDb | DatabaseKind::Snowflake => "VARCHAR",
+            DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::TiDb => "text",
             DatabaseKind::SqlServer => "nvarchar(255)",
             DatabaseKind::Redis
             | DatabaseKind::Valkey

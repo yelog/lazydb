@@ -56,6 +56,14 @@ impl DatabaseCapabilities {
                 manual_transactions: true,
                 cancellation: true,
             },
+            DatabaseKind::TiDb => Self {
+                catalog: true,
+                relation_ddl: true,
+                relation_edit: false,
+                monitoring: false,
+                manual_transactions: false,
+                cancellation: false,
+            },
             DatabaseKind::SqlServer => Self {
                 catalog: true,
                 relation_ddl: true,
@@ -111,6 +119,14 @@ impl DatabaseCapabilities {
                 monitoring: false,
                 manual_transactions: false,
                 cancellation: true,
+            },
+            DatabaseKind::Snowflake => Self {
+                catalog: true,
+                relation_ddl: true,
+                relation_edit: false,
+                monitoring: false,
+                manual_transactions: false,
+                cancellation: false,
             },
             DatabaseKind::ClickHouse => Self {
                 catalog: true,

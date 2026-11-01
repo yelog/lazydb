@@ -59,6 +59,7 @@ pub use relation_filter::{
     relation_column_sort_projection, validate_relation_preview_options,
 };
 pub use risk::{SqlRisk, SqlRiskAggregate, SqlRiskAnalysis, classify_sql};
+pub(crate) use scope::scan_mysql_statements;
 pub use scope::{
     ResolvedScope, ScopeKind, ScopeSelection, ScopeSource, resolve_scope, scan_statements,
 };

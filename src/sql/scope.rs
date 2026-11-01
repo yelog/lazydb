@@ -72,6 +72,8 @@ pub fn resolve_scope(
 
 /// Returns executable statement ranges. Each range includes its terminating
 /// semicolon, when present, and excludes only inter-statement whitespace.
+/// MySQL-family dialects assume ANSI_QUOTES and NO_BACKSLASH_ESCAPES are off;
+/// editor scope selection has no access to the connection's session SQL mode.
 pub fn scan_statements(text: &str, dialect: SqlDialect) -> Vec<TextRange> {
     scan_statement_spans(text, dialect)
         .into_iter()
@@ -79,8 +81,33 @@ pub fn scan_statements(text: &str, dialect: SqlDialect) -> Vec<TextRange> {
         .collect()
 }
 
+/// Scans using the SQL mode of the physical MySQL-protocol connection.
+/// These flags apply to the entire input. Callers executing mode-changing SQL
+/// must rescan the remaining input after refreshing the connection's mode.
+/// Executable comments are preserved verbatim; their version guards are left
+/// for the server to evaluate.
+pub(crate) fn scan_mysql_statements(
+    text: &str,
+    ansi_quotes: bool,
+    no_backslash_escapes: bool,
+) -> Vec<TextRange> {
+    scan_statement_spans_with_mode(text, SqlDialect::MySql, ansi_quotes, no_backslash_escapes)
+        .into_iter()
+        .map(|statement| statement.execution)
+        .collect()
+}
+
 fn scan_statement_spans(text: &str, dialect: SqlDialect) -> Vec<StatementSpan> {
-    statement_boundaries(text, dialect)
+    scan_statement_spans_with_mode(text, dialect, false, false)
+}
+
+fn scan_statement_spans_with_mode(
+    text: &str,
+    dialect: SqlDialect,
+    ansi_quotes: bool,
+    no_backslash_escapes: bool,
+) -> Vec<StatementSpan> {
+    statement_boundaries(text, dialect, ansi_quotes, no_backslash_escapes)
         .into_iter()
         .filter_map(|(start, end)| {
             let execution = meaningful_range(text, TextRange::new(start, end), dialect)?;
@@ -134,10 +161,32 @@ fn resolve_selection(
 
 fn statement_at(text: &str, cursor: usize, dialect: SqlDialect) -> Option<TextRange> {
     let cursor = cursor.min(text.len());
-    scan_statement_spans(text, dialect)
-        .into_iter()
-        .find(|statement| statement.activation.start <= cursor && cursor < statement.activation.end)
-        .map(|statement| statement.execution)
+    let at_cursor = |statements: Vec<StatementSpan>| {
+        statements
+            .into_iter()
+            .find(|statement| {
+                statement.activation.start <= cursor && cursor < statement.activation.end
+            })
+            .map(|statement| statement.execution)
+    };
+    let range = at_cursor(scan_statement_spans(text, dialect))?;
+    if matches!(dialect, SqlDialect::MySql | SqlDialect::MariaDb) {
+        // The editor cannot know the session mode. Refuse automatic selection
+        // when another supported quote mode could execute a different range;
+        // an explicit Visual selection still preserves the user's exact SQL.
+        for (ansi_quotes, no_backslash_escapes) in [(true, false), (false, true), (true, true)] {
+            if at_cursor(scan_statement_spans_with_mode(
+                text,
+                dialect,
+                ansi_quotes,
+                no_backslash_escapes,
+            )) != Some(range)
+            {
+                return None;
+            }
+        }
+    }
+    Some(range)
 }
 
 fn meaningful_range(text: &str, range: TextRange, dialect: SqlDialect) -> Option<TextRange> {
@@ -178,7 +227,10 @@ fn first_code_offset(text: &str, dialect: SqlDialect) -> Option<usize> {
         } else if bytes[index] == b'#'
             && matches!(
                 dialect,
-                SqlDialect::MySql | SqlDialect::Generic | SqlDialect::ClickHouse
+                SqlDialect::MySql
+                    | SqlDialect::MariaDb
+                    | SqlDialect::Generic
+                    | SqlDialect::ClickHouse
             )
         {
             index += 1;
@@ -186,6 +238,13 @@ fn first_code_offset(text: &str, dialect: SqlDialect) -> Option<usize> {
                 index += 1;
             }
         } else if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'*') {
+            if (matches!(dialect, SqlDialect::MySql | SqlDialect::MariaDb)
+                && bytes.get(index + 2) == Some(&b'!'))
+                || (dialect == SqlDialect::MariaDb
+                    && bytes.get(index + 2..index + 4) == Some(b"M!"))
+            {
+                return Some(index);
+            }
             index = skip_block_comment(text, index);
         } else {
             return Some(index);
@@ -194,7 +253,12 @@ fn first_code_offset(text: &str, dialect: SqlDialect) -> Option<usize> {
     None
 }
 
-fn statement_boundaries(text: &str, dialect: SqlDialect) -> Vec<(usize, usize)> {
+fn statement_boundaries(
+    text: &str,
+    dialect: SqlDialect,
+    ansi_quotes: bool,
+    no_backslash_escapes: bool,
+) -> Vec<(usize, usize)> {
     if dialect == SqlDialect::Oracle {
         return super::oracle::scan_statement_boundaries(text).unwrap_or_default();
     }
@@ -225,7 +289,10 @@ fn statement_boundaries(text: &str, dialect: SqlDialect) -> Vec<(usize, usize)> 
                 }
                 b'`' if matches!(
                     dialect,
-                    SqlDialect::MySql | SqlDialect::Generic | SqlDialect::ClickHouse
+                    SqlDialect::MySql
+                        | SqlDialect::MariaDb
+                        | SqlDialect::Generic
+                        | SqlDialect::ClickHouse
                 ) =>
                 {
                     state = State::Backtick;
@@ -250,7 +317,10 @@ fn statement_boundaries(text: &str, dialect: SqlDialect) -> Vec<(usize, usize)> 
                 }
                 b'#' if matches!(
                     dialect,
-                    SqlDialect::MySql | SqlDialect::Generic | SqlDialect::ClickHouse
+                    SqlDialect::MySql
+                        | SqlDialect::MariaDb
+                        | SqlDialect::Generic
+                        | SqlDialect::ClickHouse
                 ) =>
                 {
                     state = State::LineComment;
@@ -263,10 +333,15 @@ fn statement_boundaries(text: &str, dialect: SqlDialect) -> Vec<(usize, usize)> 
                 }
                 b'$' if matches!(
                     dialect,
-                    SqlDialect::Postgres | SqlDialect::DuckDb | SqlDialect::Generic
+                    SqlDialect::Postgres
+                        | SqlDialect::DuckDb
+                        | SqlDialect::Generic
+                        | SqlDialect::Snowflake
                 ) =>
                 {
-                    if let Some(end) = dollar_tag_end(text, index) {
+                    if let Some(end) = dollar_tag_end(text, index)
+                        .filter(|end| dialect != SqlDialect::Snowflake || *end == index + 2)
+                    {
                         state = State::DollarQuote(TextRange::new(index, end));
                         index = end;
                     } else {
@@ -280,10 +355,20 @@ fn statement_boundaries(text: &str, dialect: SqlDialect) -> Vec<(usize, usize)> 
                 }
                 _ => index += 1,
             },
-            State::SingleQuote => advance_quoted(bytes, &mut index, b'\'', &mut state),
-            State::DoubleQuote => advance_quoted(bytes, &mut index, b'"', &mut state),
-            State::Backtick => advance_quoted(bytes, &mut index, b'`', &mut state),
-            State::Bracket => advance_quoted(bytes, &mut index, b']', &mut state),
+            State::SingleQuote => {
+                advance_quoted(bytes, &mut index, b'\'', &mut state, !no_backslash_escapes)
+            }
+            State::DoubleQuote => advance_quoted(
+                bytes,
+                &mut index,
+                b'"',
+                &mut state,
+                matches!(dialect, SqlDialect::MySql | SqlDialect::MariaDb)
+                    && !ansi_quotes
+                    && !no_backslash_escapes,
+            ),
+            State::Backtick => advance_quoted(bytes, &mut index, b'`', &mut state, false),
+            State::Bracket => advance_quoted(bytes, &mut index, b']', &mut state, false),
             State::LineComment => {
                 if bytes[index] == b'\n' {
                     state = State::Normal;
@@ -339,7 +424,13 @@ enum State {
     OracleQuote(u8),
 }
 
-fn advance_quoted(bytes: &[u8], index: &mut usize, quote: u8, state: &mut State) {
+fn advance_quoted(
+    bytes: &[u8],
+    index: &mut usize,
+    quote: u8,
+    state: &mut State,
+    backslash_escape: bool,
+) {
     if bytes[*index] == quote {
         if bytes.get(*index + 1) == Some(&quote) {
             *index += 2;
@@ -347,7 +438,7 @@ fn advance_quoted(bytes: &[u8], index: &mut usize, quote: u8, state: &mut State)
             *index += 1;
             *state = State::Normal;
         }
-    } else if bytes[*index] == b'\\' && quote == b'\'' {
+    } else if bytes[*index] == b'\\' && backslash_escape {
         *index = (*index + 2).min(bytes.len());
     } else {
         *index += 1;
@@ -355,13 +446,7 @@ fn advance_quoted(bytes: &[u8], index: &mut usize, quote: u8, state: &mut State)
 }
 
 fn dash_comment_allowed(bytes: &[u8], index: usize, dialect: SqlDialect) -> bool {
-    if !matches!(
-        dialect,
-        SqlDialect::MySql | SqlDialect::Generic | SqlDialect::ClickHouse
-    ) {
-        return true;
-    }
-    if dialect == SqlDialect::MySql {
+    if matches!(dialect, SqlDialect::MySql | SqlDialect::MariaDb) {
         bytes
             .get(index + 2)
             .is_none_or(|byte| byte.is_ascii_whitespace() || *byte == 0x1a)
@@ -420,4 +505,78 @@ fn dollar_tag_end(text: &str, start: usize) -> Option<usize> {
         index += 1;
     }
     (bytes.get(index) == Some(&b'$')).then_some(index + 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scan_mysql_statements;
+
+    #[test]
+    fn mysql_session_modes_control_string_and_identifier_boundaries() {
+        for ansi_quotes in [false, true] {
+            for no_backslash_escapes in [false, true] {
+                for (text, backslash_escapes) in [
+                    (
+                        r#"SELECT "路径\"; SELECT 2;"#,
+                        !ansi_quotes && !no_backslash_escapes,
+                    ),
+                    (r"SELECT '路径\'; SELECT 2;", !no_backslash_escapes),
+                ] {
+                    let ranges = scan_mysql_statements(text, ansi_quotes, no_backslash_escapes);
+                    let expected = if backslash_escapes {
+                        vec![text]
+                    } else {
+                        vec![&text[..text.find(';').unwrap() + 1], "SELECT 2;"]
+                    };
+                    assert_eq!(
+                        ranges
+                            .iter()
+                            .map(|range| range.get(text).unwrap())
+                            .collect::<Vec<_>>(),
+                        expected,
+                        "ANSI_QUOTES={ansi_quotes}, NO_BACKSLASH_ESCAPES={no_backslash_escapes}, SQL={text}"
+                    );
+                }
+
+                let text = r#"SELECT 'a'';b', "c"";d", `e``;f\`; SELECT 2;"#;
+                let ranges = scan_mysql_statements(text, ansi_quotes, no_backslash_escapes);
+                assert_eq!(ranges.len(), 2);
+                assert_eq!(
+                    ranges[0].get(text),
+                    Some(&text[..text.rfind(" SELECT 2;").unwrap()])
+                );
+                assert_eq!(ranges[1].get(text), Some("SELECT 2;"));
+
+                let text =
+                    "# ordinary ;\n/*!40101 SET NAMES utf8mb4 */; SELECT 1--not comment; SELECT 2;";
+                assert_eq!(
+                    scan_mysql_statements(text, ansi_quotes, no_backslash_escapes).len(),
+                    3
+                );
+                assert!(
+                    scan_mysql_statements("/* comment */", ansi_quotes, no_backslash_escapes)
+                        .is_empty()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mysql_mode_change_can_be_followed_by_rescanning_remaining_source() {
+        let text = "SET sql_mode='ANSI_QUOTES,NO_BACKSLASH_ESCAPES'; SELECT \"路径\\\"; SELECT '路径\\'; SELECT 2;";
+        let first = scan_mysql_statements(text, false, false)[0];
+        assert_eq!(
+            first.get(text),
+            Some("SET sql_mode='ANSI_QUOTES,NO_BACKSLASH_ESCAPES';")
+        );
+        let remaining = &text[first.end..];
+        let ranges = scan_mysql_statements(remaining, true, true);
+        assert_eq!(
+            ranges
+                .iter()
+                .map(|range| range.get(remaining).unwrap())
+                .collect::<Vec<_>>(),
+            vec!["SELECT \"路径\\\";", "SELECT '路径\\';", "SELECT 2;"]
+        );
+    }
 }

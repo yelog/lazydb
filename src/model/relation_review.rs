@@ -34,7 +34,15 @@ pub fn preview_sql_for_relation(
 ) -> String {
     let mut parts = Vec::with_capacity(2);
     match kind {
-        DatabaseKind::MySql | DatabaseKind::MariaDb => {
+        DatabaseKind::Snowflake => {
+            if let Some(database) = relation.database.as_deref() {
+                parts.push(database);
+            }
+            if let Some(schema) = relation.schema.as_deref() {
+                parts.push(schema);
+            }
+        }
+        DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::TiDb => {
             if let Some(database) = relation.database.as_deref() {
                 parts.push(database);
             }
@@ -102,7 +110,7 @@ fn preview_sql_for_parts(
                     .collect::<Vec<_>>();
                 if names.is_empty() {
                     statements.push(match kind {
-                        Some(DatabaseKind::MySql | DatabaseKind::MariaDb) => {
+                        Some(DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::TiDb) => {
                             format!("INSERT INTO {table} () VALUES ();")
                         }
                         _ => format!("INSERT INTO {table} DEFAULT VALUES;"),
@@ -189,7 +197,7 @@ fn predicate_for_kind(
 
 fn quote_identifier(value: &str, kind: Option<DatabaseKind>) -> String {
     match kind {
-        Some(DatabaseKind::MySql | DatabaseKind::MariaDb) => {
+        Some(DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::TiDb) => {
             format!("`{}`", value.replace('`', "``"))
         }
         Some(DatabaseKind::SqlServer) => format!("[{}]", value.replace(']', "]]")),

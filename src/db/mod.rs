@@ -27,6 +27,7 @@ pub mod principal_drop;
 pub mod query;
 pub mod redis;
 pub mod relation_plan;
+pub mod snowflake;
 pub mod sqlite;
 pub mod transaction;
 pub mod value;
@@ -304,6 +305,7 @@ pub enum DatabaseConnection {
     Postgres(PostgresAdapter),
     MySql(MySqlAdapter),
     MariaDb(MySqlAdapter),
+    TiDb(MySqlAdapter),
     Oracle(OracleAdapter),
     Sqlite(SqliteAdapter),
     DuckDb(duckdb::DuckDbAdapter),
@@ -311,17 +313,19 @@ pub enum DatabaseConnection {
     Redis(RedisAdapter),
     MongoDb(mongodb::MongoAdapter),
     ClickHouse(ClickHouseAdapter),
+    Snowflake(snowflake::SnowflakeAdapter),
     Elasticsearch(ElasticsearchAdapter),
 }
 
 impl DatabaseConnection {
     pub fn principal_capability(&self) -> principal::PrincipalCapability {
         match self {
+            Self::Snowflake(_) => principal::PrincipalCapability::Unsupported,
             Self::Postgres(_) => principal::PrincipalCapability::DetailsAndMutation,
             Self::MySql(_) | Self::MariaDb(_) | Self::SqlServer(_) | Self::Oracle(_) => {
                 principal::PrincipalCapability::DdlOnly
             }
-            Self::Sqlite(_) | Self::DuckDb(_) | Self::Redis(_) => {
+            Self::TiDb(_) | Self::Sqlite(_) | Self::DuckDb(_) | Self::Redis(_) => {
                 principal::PrincipalCapability::Unsupported
             }
             Self::MongoDb(_) | Self::Elasticsearch(_) => {
@@ -333,6 +337,11 @@ impl DatabaseConnection {
 
     pub fn principal_mutation_capabilities(&self) -> principal::PrincipalMutationCapabilities {
         match self {
+            Self::Snowflake(_) => principal::PrincipalMutationCapabilities {
+                permission_targets: Vec::new(),
+                privileges: Vec::new(),
+                memberships: false,
+            },
             Self::Postgres(_) => principal::PrincipalMutationCapabilities {
                 permission_targets: vec![
                     principal::PrincipalMutationTargetKind::Database,
@@ -357,7 +366,8 @@ impl DatabaseConnection {
                 privileges: Vec::new(),
                 memberships: false,
             },
-            Self::Sqlite(_)
+            Self::TiDb(_)
+            | Self::Sqlite(_)
             | Self::DuckDb(_)
             | Self::Redis(_)
             | Self::MongoDb(_)
@@ -372,11 +382,17 @@ impl DatabaseConnection {
 
     pub async fn list_principals(&self) -> Result<PrincipalPage, DatabaseError> {
         match self {
+            Self::Snowflake(_) => Err(DatabaseError::unsupported(
+                "Snowflake principal management is not implemented",
+            )),
             Self::Postgres(adapter) => adapter.list_principals().await,
             Self::MySql(adapter) | Self::MariaDb(adapter) => adapter.list_principals().await,
             Self::SqlServer(adapter) => adapter.list_principals().await,
             Self::Oracle(adapter) => adapter.list_principals().await,
             Self::Sqlite(adapter) => adapter.list_principals().await,
+            Self::TiDb(_) => Err(DatabaseError::unsupported(
+                "TiDB principal management is not implemented",
+            )),
             Self::DuckDb(_) => Err(DatabaseError::unsupported("DuckDB has no SQL principals")),
             Self::Redis(_) => Err(DatabaseError::unsupported("Redis has no SQL principals")),
             Self::MongoDb(_) => Err(DatabaseError::unsupported(
@@ -394,10 +410,16 @@ impl DatabaseConnection {
         principal: &PrincipalEntry,
     ) -> Result<PrincipalDdl, DatabaseError> {
         match self {
+            Self::Snowflake(_) => Err(DatabaseError::unsupported(
+                "Snowflake principal management is not implemented",
+            )),
             Self::Postgres(adapter) => adapter.principal_ddl(principal).await,
             Self::MySql(adapter) | Self::MariaDb(adapter) => adapter.principal_ddl(principal).await,
             Self::SqlServer(adapter) => adapter.principal_ddl(principal).await,
             Self::Oracle(adapter) => adapter.principal_ddl(principal).await,
+            Self::TiDb(_) => Err(DatabaseError::unsupported(
+                "TiDB principal management is not implemented",
+            )),
             Self::Sqlite(_) | Self::DuckDb(_) => Err(DatabaseError::unsupported(
                 "This database has no SQL principals",
             )),
@@ -418,13 +440,17 @@ impl DatabaseConnection {
         target: &principal::PrincipalReadTarget,
     ) -> Result<principal::PrincipalDetails, DatabaseError> {
         match self {
+            Self::Snowflake(_) => Err(DatabaseError::unsupported(
+                "Snowflake principal management is not implemented",
+            )),
             Self::Postgres(adapter) => adapter.principal_details(principal, target).await,
             Self::MySql(adapter) | Self::MariaDb(adapter) => {
                 adapter.principal_details(principal, target).await
             }
             Self::SqlServer(adapter) => adapter.principal_details(principal, target).await,
             Self::Oracle(adapter) => adapter.principal_details(principal, target).await,
-            Self::Sqlite(_)
+            Self::TiDb(_)
+            | Self::Sqlite(_)
             | Self::DuckDb(_)
             | Self::Redis(_)
             | Self::MongoDb(_)
@@ -465,9 +491,15 @@ impl DatabaseConnection {
     }
     pub async fn load_monitor_snapshot(&self) -> Result<monitor::MonitorSnapshot, DatabaseError> {
         match self {
+            Self::Snowflake(_) => Err(DatabaseError::unsupported(
+                "Snowflake monitoring is not implemented",
+            )),
             Self::Postgres(adapter) => adapter.load_monitor_snapshot().await,
             Self::MySql(adapter) => adapter.load_monitor_snapshot().await,
             Self::MariaDb(adapter) => adapter.load_monitor_snapshot().await,
+            Self::TiDb(_) => Err(DatabaseError::unsupported(
+                "TiDB monitoring is not implemented",
+            )),
             Self::Oracle(_) => Err(DatabaseError {
                 category: ErrorCategory::Unsupported,
                 code: Some("oracle_monitoring_unsupported".into()),
@@ -497,9 +529,13 @@ impl DatabaseConnection {
 
     pub async fn load_monitor_metadata(&self) -> Result<monitor::MonitorMetadata, DatabaseError> {
         match self {
+            Self::Snowflake(_) => Ok(monitor::MonitorMetadata::default()),
             Self::Postgres(adapter) => adapter.load_monitor_metadata().await,
             Self::MySql(adapter) => adapter.load_monitor_metadata().await,
             Self::MariaDb(adapter) => adapter.load_monitor_metadata().await,
+            Self::TiDb(_) => Err(DatabaseError::unsupported(
+                "TiDB monitoring is not implemented",
+            )),
             Self::Oracle(_) => Ok(monitor::MonitorMetadata::default()),
             Self::SqlServer(adapter) => adapter.load_monitor_metadata().await,
             Self::Sqlite(_) | Self::DuckDb(_) => Ok(monitor::MonitorMetadata::default()),
@@ -511,9 +547,15 @@ impl DatabaseConnection {
 
     pub async fn load_process_snapshot(&self) -> Result<monitor::ProcessSnapshot, DatabaseError> {
         match self {
+            Self::Snowflake(_) => Err(DatabaseError::unsupported(
+                "Snowflake process monitoring is not implemented",
+            )),
             Self::Postgres(adapter) => adapter.load_process_snapshot().await,
             Self::MySql(adapter) => adapter.load_process_snapshot().await,
             Self::MariaDb(adapter) => adapter.load_process_snapshot().await,
+            Self::TiDb(_) => Err(DatabaseError::unsupported(
+                "TiDB process metrics are not implemented",
+            )),
             Self::Oracle(_) => Err(DatabaseError {
                 category: ErrorCategory::Unsupported,
                 code: Some("oracle_process_list_unsupported".into()),
@@ -551,6 +593,9 @@ impl DatabaseConnection {
         forced_close: crate::runtime::transaction::ForcedCloseHandle,
     ) -> Result<crate::runtime::transaction::TransactionWorkerHandle, DatabaseError> {
         match self {
+            Self::Snowflake(_) => Err(DatabaseError::unsupported(
+                "Snowflake SQL API does not retain transactions across requests",
+            )),
             Self::Postgres(adapter) => Ok(
                 crate::runtime::transaction::spawn_transaction_worker_with_forced_close(
                     adapter.transaction_backend().await?,
@@ -599,6 +644,9 @@ impl DatabaseConnection {
             Self::MongoDb(_) => Err(DatabaseError::configuration(
                 "MongoDB uses session transactions",
             )),
+            Self::TiDb(_) => Err(DatabaseError::unsupported(
+                "TiDB manual transactions are not implemented",
+            )),
             Self::ClickHouse(_) => Err(DatabaseError::unsupported(
                 "ClickHouse does not support manual SQL transactions",
             )),
@@ -613,6 +661,9 @@ impl DatabaseConnection {
         password: Option<&SecretString>,
     ) -> Result<Self, DatabaseError> {
         match profile.kind {
+            DatabaseKind::Snowflake => snowflake::SnowflakeAdapter::connect(profile, password)
+                .await
+                .map(Self::Snowflake),
             DatabaseKind::Sqlite => SqliteAdapter::connect(profile).await.map(Self::Sqlite),
             DatabaseKind::DuckDb => duckdb::DuckDbAdapter::connect(profile)
                 .await
@@ -626,6 +677,9 @@ impl DatabaseConnection {
             DatabaseKind::MariaDb => MySqlAdapter::connect(profile, password)
                 .await
                 .map(Self::MariaDb),
+            DatabaseKind::TiDb => MySqlAdapter::connect(profile, password)
+                .await
+                .map(Self::TiDb),
             DatabaseKind::Oracle => OracleAdapter::connect(profile, password)
                 .await
                 .map(Self::Oracle),
@@ -660,9 +714,11 @@ impl DatabaseConnection {
 
     pub fn kind(&self) -> DatabaseKind {
         match self {
+            Self::Snowflake(_) => DatabaseKind::Snowflake,
             Self::Postgres(_) => DatabaseKind::Postgres,
             Self::MySql(_) => DatabaseKind::MySql,
             Self::MariaDb(_) => DatabaseKind::MariaDb,
+            Self::TiDb(_) => DatabaseKind::TiDb,
             Self::Oracle(_) => DatabaseKind::Oracle,
             Self::Sqlite(_) => DatabaseKind::Sqlite,
             Self::DuckDb(_) => DatabaseKind::DuckDb,
@@ -687,9 +743,11 @@ impl DatabaseConnection {
 
     pub fn catalog_capabilities(&self) -> CatalogCapabilities {
         match self {
+            Self::Snowflake(_) => snowflake::SnowflakeAdapter::catalog_capabilities(),
             Self::Postgres(_) => PostgresAdapter::catalog_capabilities(),
             Self::MySql(_) => MySqlAdapter::catalog_capabilities(),
             Self::MariaDb(_) => MySqlAdapter::mariadb_catalog_capabilities(),
+            Self::TiDb(_) => MySqlAdapter::tidb_catalog_capabilities(),
             Self::Oracle(_) => catalog::CatalogCapabilities {
                 namespace_model: catalog::NamespaceModel::DatabaseAndSchema,
                 top_level_groups: vec![
@@ -741,9 +799,11 @@ impl DatabaseConnection {
 
     pub fn catalog_mutation_capabilities(&self) -> CatalogMutationCapabilities {
         match self {
+            Self::Snowflake(_) => CatalogMutationCapabilities::default(),
             Self::Postgres(adapter) => adapter.mutation_capabilities(),
             Self::MySql(_) => MySqlAdapter::catalog_mutation_capabilities(),
             Self::MariaDb(_) => MySqlAdapter::catalog_mutation_capabilities(),
+            Self::TiDb(_) => CatalogMutationCapabilities::default(),
             Self::Oracle(_) => OracleAdapter::catalog_mutation_capabilities(),
             Self::Sqlite(_) => SqliteAdapter::catalog_mutation_capabilities(),
             Self::DuckDb(_) => duckdb::DuckDbAdapter::catalog_mutation_capabilities(),
@@ -760,6 +820,12 @@ impl DatabaseConnection {
         kind: CatalogKind,
     ) -> catalog_mutation::CatalogMutationAvailability {
         match self {
+            Self::TiDb(_) => catalog_mutation::CatalogMutationAvailability::Unavailable {
+                reason: "TiDB structured catalog mutations are not implemented",
+            },
+            Self::Snowflake(_) => catalog_mutation::CatalogMutationAvailability::Unavailable {
+                reason: "Snowflake structured catalog changes are not implemented; use SQL",
+            },
             Self::Oracle(_) => OracleAdapter::catalog_drop_availability(kind),
             Self::Elasticsearch(_) => catalog_mutation::CatalogMutationAvailability::Unavailable {
                 reason: "Elasticsearch catalog DROP is not supported",
@@ -790,9 +856,17 @@ impl DatabaseConnection {
         entry: &catalog::CatalogEntry,
     ) -> Result<catalog_drop::CatalogDropPlan, catalog_drop::CatalogDropError> {
         match self {
+            Self::Snowflake(_) => Err(catalog_drop::CatalogDropError::Unsupported {
+                kind: entry.kind,
+                reason: "Snowflake structured catalog changes are not implemented; use SQL".into(),
+            }),
             Self::Postgres(_) => PostgresAdapter::plan_catalog_drop(request, entry),
             Self::MySql(_) => MySqlAdapter::plan_catalog_drop(request, entry),
             Self::MariaDb(_) => MySqlAdapter::plan_catalog_drop(request, entry),
+            Self::TiDb(_) => Err(catalog_drop::CatalogDropError::Unsupported {
+                kind: entry.kind,
+                reason: "TiDB structured catalog mutations are not implemented".to_owned(),
+            }),
             Self::Oracle(_) => OracleAdapter::plan_catalog_drop(request, entry),
             Self::Sqlite(_) => SqliteAdapter::plan_catalog_drop(request, entry),
             Self::DuckDb(_) => duckdb::DuckDbAdapter::plan_catalog_drop(request, entry),
@@ -830,9 +904,19 @@ impl DatabaseConnection {
         baseline: Option<catalog_mutation::CatalogObjectDefinition>,
     ) -> Result<catalog_mutation::CatalogMutationPlan, catalog_mutation::CatalogMutationError> {
         match self {
+            Self::Snowflake(_) => Err(
+                catalog_mutation::CatalogMutationError::UnsupportedOperation {
+                    object_type: request.object_type,
+                },
+            ),
             Self::Postgres(adapter) => {
                 adapter.plan_catalog_mutation_for_adapter(request, draft, baseline)
             }
+            Self::TiDb(_) => Err(
+                catalog_mutation::CatalogMutationError::UnsupportedOperation {
+                    object_type: request.object_type,
+                },
+            ),
             Self::MySql(_) | Self::MariaDb(_) => {
                 MySqlAdapter::plan_catalog_mutation(request, draft, baseline)
             }
@@ -866,7 +950,13 @@ impl DatabaseConnection {
         plan: &catalog_mutation::CatalogMutationPlan,
     ) -> Result<QueryOutcome, DatabaseError> {
         match self {
+            Self::Snowflake(_) => Err(DatabaseError::unsupported(
+                "Snowflake structured catalog changes are not implemented; use SQL",
+            )),
             Self::Postgres(adapter) => adapter.execute_catalog_mutation(plan).await,
+            Self::TiDb(_) => Err(DatabaseError::unsupported(
+                "TiDB structured catalog mutations are not implemented",
+            )),
             Self::MySql(adapter) | Self::MariaDb(adapter) => {
                 adapter.execute_catalog_mutation(plan).await
             }
@@ -894,6 +984,9 @@ impl DatabaseConnection {
         plan.validate()
             .map_err(|error| DatabaseError::configuration(error.to_string()))?;
         match self {
+            Self::TiDb(_) => Err(DatabaseError::unsupported(
+                "TiDB structured catalog mutations are not implemented",
+            )),
             Self::DuckDb(adapter) => adapter.execute(plan.sql()).await,
             Self::Elasticsearch(_) => Err(DatabaseError::unsupported(
                 "Elasticsearch catalog DROP is not supported",
@@ -963,9 +1056,11 @@ impl DatabaseConnection {
 
     pub async fn probe(&self) -> Result<ServerInfo, DatabaseError> {
         match self {
+            Self::Snowflake(adapter) => adapter.probe().await,
             Self::Postgres(adapter) => adapter.probe().await,
             Self::MySql(adapter) => adapter.probe().await,
             Self::MariaDb(adapter) => adapter.probe().await,
+            Self::TiDb(adapter) => adapter.probe().await,
             Self::Oracle(adapter) => adapter.probe().await,
             Self::Sqlite(adapter) => adapter.probe().await,
             Self::DuckDb(adapter) => adapter.probe().await,
@@ -996,9 +1091,11 @@ impl DatabaseConnection {
 
     pub async fn discover_catalog_scope(&self) -> Result<CatalogDiscovery, DatabaseError> {
         match self {
+            Self::Snowflake(adapter) => adapter.discover_catalog_scope().await,
             Self::Postgres(adapter) => adapter.discover_catalog_scope().await,
             Self::MySql(adapter) => adapter.discover_catalog_scope().await,
             Self::MariaDb(adapter) => adapter.discover_catalog_scope().await,
+            Self::TiDb(adapter) => adapter.discover_catalog_scope().await,
             Self::Oracle(adapter) => adapter.discover_catalog_scope().await,
             Self::Sqlite(adapter) => adapter.discover_catalog_scope().await,
             Self::DuckDb(adapter) => adapter.discover_catalog_scope().await,
@@ -1022,9 +1119,11 @@ impl DatabaseConnection {
         &self,
     ) -> Result<Option<Vec<String>>, DatabaseError> {
         match self {
+            Self::Snowflake(_) => Ok(None),
             Self::Postgres(adapter) => adapter.discoverable_databases().await.map(Some),
             Self::MySql(_)
             | Self::MariaDb(_)
+            | Self::TiDb(_)
             | Self::Oracle(_)
             | Self::Sqlite(_)
             | Self::DuckDb(_)
@@ -1040,9 +1139,11 @@ impl DatabaseConnection {
         request: &CatalogRequest,
     ) -> Result<CatalogPage, DatabaseError> {
         match self {
+            Self::Snowflake(adapter) => adapter.load_catalog_page(request).await,
             Self::Postgres(adapter) => adapter.load_catalog_page(request).await,
             Self::MySql(adapter) => adapter.load_catalog_page(request).await,
             Self::MariaDb(adapter) => adapter.load_catalog_page(request).await,
+            Self::TiDb(adapter) => adapter.load_catalog_page(request).await,
             Self::Oracle(adapter) => adapter.load_catalog_page(request).await,
             Self::Sqlite(adapter) => adapter.load_catalog_page(request).await,
             Self::DuckDb(adapter) => {
@@ -1075,9 +1176,11 @@ impl DatabaseConnection {
         relation: &CatalogId,
     ) -> Result<Option<catalog::CatalogEntry>, DatabaseError> {
         match self {
+            Self::Snowflake(adapter) => adapter.resolve_relation_identity(relation).await,
             Self::Postgres(adapter) => adapter.resolve_relation_identity(relation).await,
             Self::MySql(_)
             | Self::MariaDb(_)
+            | Self::TiDb(_)
             | Self::Oracle(_)
             | Self::Sqlite(_)
             | Self::DuckDb(_)
@@ -1095,6 +1198,11 @@ impl DatabaseConnection {
         scope: &crate::profile::CatalogScope,
     ) -> Result<Option<catalog::CatalogEntry>, DatabaseError> {
         match self {
+            Self::Snowflake(adapter) => {
+                adapter
+                    .resolve_relation_identity_with_scope(relation, scope)
+                    .await
+            }
             Self::Postgres(adapter) => {
                 adapter
                     .resolve_relation_identity_with_scope(relation, scope)
@@ -1102,6 +1210,7 @@ impl DatabaseConnection {
             }
             Self::MySql(_)
             | Self::MariaDb(_)
+            | Self::TiDb(_)
             | Self::Oracle(_)
             | Self::Sqlite(_)
             | Self::DuckDb(_)
@@ -1130,8 +1239,11 @@ impl DatabaseConnection {
         request: &CatalogObjectDefinitionRequest,
     ) -> Result<CatalogObjectDefinition, DatabaseError> {
         match self {
+            Self::Snowflake(_) => Err(DatabaseError::unsupported(
+                "Snowflake structured object definitions are not implemented; use DDL",
+            )),
             Self::Postgres(adapter) => adapter.load_catalog_object_definition(request).await,
-            Self::MySql(adapter) | Self::MariaDb(adapter) => {
+            Self::MySql(adapter) | Self::MariaDb(adapter) | Self::TiDb(adapter) => {
                 adapter.load_catalog_object_definition(request).await
             }
             Self::Sqlite(adapter) => adapter.load_catalog_object_definition(request).await,
@@ -1156,9 +1268,11 @@ impl DatabaseConnection {
         request: &catalog_mutation::CatalogOwnerContextRequest,
     ) -> Result<Option<catalog_mutation::CatalogOwnerContext>, DatabaseError> {
         match self {
+            Self::Snowflake(_) => Ok(None),
             Self::Postgres(adapter) => adapter.load_catalog_owner_context(request).await.map(Some),
             Self::MySql(_)
             | Self::MariaDb(_)
+            | Self::TiDb(_)
             | Self::Oracle(_)
             | Self::Sqlite(_)
             | Self::DuckDb(_)
@@ -1174,9 +1288,11 @@ impl DatabaseConnection {
         request: &CatalogSearchRequest,
     ) -> Result<CatalogSearchPage, DatabaseError> {
         match self {
+            Self::Snowflake(adapter) => adapter.search_catalog(request).await,
             Self::Postgres(adapter) => adapter.search_catalog(request).await,
             Self::MySql(adapter) => adapter.search_catalog(request).await,
             Self::MariaDb(adapter) => adapter.search_catalog(request).await,
+            Self::TiDb(adapter) => adapter.search_catalog(request).await,
             Self::Oracle(_) => Err(DatabaseError::configuration(
                 "Oracle catalog search is not implemented yet",
             )),
@@ -1216,9 +1332,11 @@ impl DatabaseConnection {
         budget: QueryBudget,
     ) -> Result<QueryOutcome, DatabaseError> {
         match self {
+            Self::Snowflake(adapter) => adapter.execute_with_budget(sql, budget).await,
             Self::Postgres(adapter) => adapter.execute_pool_with_budget(sql, budget).await,
             Self::MySql(adapter) => adapter.execute_pool_with_budget(sql, budget).await,
             Self::MariaDb(adapter) => adapter.execute_pool_with_budget(sql, budget).await,
+            Self::TiDb(adapter) => adapter.execute_pool_with_budget(sql, budget).await,
             Self::Oracle(adapter) => adapter.execute_pool_with_budget(sql, budget).await,
             Self::Sqlite(adapter) => adapter.execute_pool_with_budget(sql, budget).await,
             Self::DuckDb(adapter) => adapter.execute_with_budget(sql, budget).await,
@@ -1259,10 +1377,16 @@ impl DatabaseConnection {
         page: crate::model::pagination::PageRequest,
     ) -> Result<RelationPreview, DatabaseError> {
         match self {
+            Self::Snowflake(adapter) => {
+                adapter
+                    .preview_relation_with_scope(relation, &adapter.catalog_scope, options, page)
+                    .await
+            }
             Self::Elasticsearch(adapter) => adapter.preview_relation(relation, options, page).await,
             Self::Postgres(adapter) => adapter.preview_relation(relation, options, page).await,
             Self::MySql(adapter) => adapter.preview_relation(relation, options, page).await,
             Self::MariaDb(adapter) => adapter.preview_relation(relation, options, page).await,
+            Self::TiDb(adapter) => adapter.preview_relation(relation, options, page).await,
             Self::Oracle(adapter) => adapter.preview_relation(relation, options, page).await,
             Self::Sqlite(adapter) => adapter.preview_relation(relation, options, page).await,
             Self::DuckDb(adapter) => {
@@ -1307,6 +1431,11 @@ impl DatabaseConnection {
                     .preview_relation_with_scope(relation, scope, options, page)
                     .await
             }
+            Self::Snowflake(adapter) => {
+                adapter
+                    .preview_relation_with_scope(relation, scope, options, page)
+                    .await
+            }
             Self::Postgres(adapter) => {
                 adapter
                     .preview_relation_with_scope(relation, scope, options, page)
@@ -1317,7 +1446,7 @@ impl DatabaseConnection {
                     .preview_relation_with_scope(relation, scope, options, page)
                     .await
             }
-            Self::MariaDb(adapter) => {
+            Self::MariaDb(adapter) | Self::TiDb(adapter) => {
                 adapter
                     .preview_relation_with_scope(relation, scope, options, page)
                     .await
@@ -1362,12 +1491,18 @@ impl DatabaseConnection {
 
     pub async fn relation_ddl(&self, relation: &CatalogId) -> Result<RelationDdl, DatabaseError> {
         match self {
+            Self::Snowflake(adapter) => {
+                adapter
+                    .relation_ddl_with_scope(relation, &adapter.catalog_scope)
+                    .await
+            }
             Self::Elasticsearch(_) => Err(DatabaseError::unsupported(
                 "Elasticsearch has mappings rather than SQL DDL",
             )),
             Self::Postgres(adapter) => adapter.relation_ddl(relation).await,
             Self::MySql(adapter) => adapter.relation_ddl(relation).await,
             Self::MariaDb(adapter) => adapter.relation_ddl(relation).await,
+            Self::TiDb(adapter) => adapter.relation_ddl(relation).await,
             Self::Oracle(adapter) => adapter.relation_ddl(relation).await,
             Self::Sqlite(adapter) => adapter.relation_ddl(relation).await,
             Self::DuckDb(adapter) => {
@@ -1403,9 +1538,11 @@ impl DatabaseConnection {
         scope: &crate::profile::CatalogScope,
     ) -> Result<RelationDdl, DatabaseError> {
         match self {
+            Self::Snowflake(adapter) => adapter.relation_ddl_with_scope(relation, scope).await,
             Self::Postgres(adapter) => adapter.relation_ddl_with_scope(relation, scope).await,
             Self::MySql(adapter) => adapter.relation_ddl_with_scope(relation, scope).await,
             Self::MariaDb(adapter) => adapter.relation_ddl_with_scope(relation, scope).await,
+            Self::TiDb(adapter) => adapter.relation_ddl_with_scope(relation, scope).await,
             Self::Oracle(adapter) => adapter.relation_ddl_with_scope(relation, scope).await,
             Self::Sqlite(adapter) => adapter.relation_ddl_with_scope(relation, scope).await,
             Self::DuckDb(adapter) => adapter.relation_ddl_with_scope(relation, scope).await,
@@ -1430,9 +1567,11 @@ impl DatabaseConnection {
         name: &str,
     ) -> Result<Option<String>, DatabaseError> {
         match self {
+            Self::Snowflake(_) => Ok(None),
             Self::Postgres(adapter) => adapter.object_ddl(kind, schema, name).await,
             Self::MySql(adapter) => adapter.object_ddl(kind, schema, name).await,
             Self::MariaDb(adapter) => adapter.object_ddl(kind, schema, name).await,
+            Self::TiDb(adapter) => adapter.object_ddl(kind, schema, name).await,
             Self::Oracle(_) => Ok(None),
             Self::Sqlite(adapter) => adapter.object_ddl(kind, schema, name).await,
             Self::DuckDb(adapter) => adapter.object_ddl(kind, schema, name).await,
@@ -1445,9 +1584,11 @@ impl DatabaseConnection {
 
     pub fn quote_identifier(&self, value: &str) -> String {
         match self {
+            Self::Snowflake(_) => snowflake::quote_identifier(value),
             Self::Postgres(_) => postgres::quote_identifier(value),
             Self::MySql(_) => mysql::quote_identifier(value),
             Self::MariaDb(_) => mysql::quote_identifier(value),
+            Self::TiDb(_) => mysql::quote_identifier(value),
             Self::Oracle(_) => format!("\"{}\"", value.replace('"', "\"\"")),
             Self::Sqlite(adapter) => adapter.quote_identifier(value),
             Self::DuckDb(_) => format!("\"{}\"", value.replace('"', "\"\"")),
@@ -1460,9 +1601,11 @@ impl DatabaseConnection {
 
     pub async fn close(self) {
         match self {
+            Self::Snowflake(adapter) => adapter.close().await,
             Self::Postgres(adapter) => adapter.close().await,
             Self::MySql(adapter) => adapter.close().await,
             Self::MariaDb(adapter) => adapter.close().await,
+            Self::TiDb(adapter) => adapter.close().await,
             Self::Oracle(adapter) => adapter.close().await,
             Self::Sqlite(adapter) => adapter.close().await,
             Self::DuckDb(adapter) => adapter.close().await,

@@ -24,6 +24,8 @@ pub enum DatabaseKind {
     MongoDb,
     ClickHouse,
     Elasticsearch,
+    TiDb,
+    Snowflake,
 }
 
 impl DatabaseKind {
@@ -37,11 +39,13 @@ impl DatabaseKind {
             Self::Postgres
                 | Self::MySql
                 | Self::MariaDb
+                | Self::TiDb
                 | Self::Oracle
                 | Self::SqlServer
                 | Self::Sqlite
                 | Self::ClickHouse
                 | Self::DuckDb
+                | Self::Snowflake
         )
     }
 }
@@ -74,6 +78,9 @@ pub enum ConnectionUrlFormat {
     ClickHouseTls,
     Elasticsearch,
     ElasticsearchTls,
+    #[serde(rename = "tidb")]
+    TiDb,
+    Snowflake,
 }
 
 impl ConnectionUrlFormat {
@@ -82,6 +89,7 @@ impl ConnectionUrlFormat {
             DatabaseKind::Postgres => Self::PostgreSql,
             DatabaseKind::MySql => Self::MySql,
             DatabaseKind::MariaDb => Self::MariaDb,
+            DatabaseKind::TiDb => Self::TiDb,
             DatabaseKind::Oracle => Self::JdbcOracle,
             DatabaseKind::SqlServer => Self::SqlServer,
             DatabaseKind::Sqlite => Self::Sqlite,
@@ -91,6 +99,7 @@ impl ConnectionUrlFormat {
             DatabaseKind::MongoDb => Self::MongoDb,
             DatabaseKind::ClickHouse => Self::ClickHouse,
             DatabaseKind::Elasticsearch => Self::Elasticsearch,
+            DatabaseKind::Snowflake => Self::Snowflake,
         }
     }
 
@@ -102,6 +111,7 @@ impl ConnectionUrlFormat {
                 DatabaseKind::Postgres
             ) | (Self::MySql | Self::JdbcMySql, DatabaseKind::MySql)
                 | (Self::MariaDb, DatabaseKind::MariaDb)
+                | (Self::TiDb, DatabaseKind::TiDb)
                 | (Self::JdbcOracle, DatabaseKind::Oracle)
                 | (
                     Self::SqlServer | Self::MsSql | Self::JdbcSqlServer,
@@ -123,6 +133,7 @@ impl ConnectionUrlFormat {
                     DatabaseKind::Elasticsearch
                 )
                 | (Self::DuckDb, DatabaseKind::DuckDb)
+                | (Self::Snowflake, DatabaseKind::Snowflake)
         )
     }
 
@@ -131,6 +142,7 @@ impl ConnectionUrlFormat {
             DatabaseKind::Postgres => &[Self::Postgres, Self::PostgreSql, Self::JdbcPostgreSql],
             DatabaseKind::MySql => &[Self::MySql, Self::JdbcMySql],
             DatabaseKind::MariaDb => &[Self::MariaDb],
+            DatabaseKind::TiDb => &[Self::TiDb],
             DatabaseKind::Oracle => &[Self::JdbcOracle],
             DatabaseKind::SqlServer => &[Self::SqlServer, Self::MsSql, Self::JdbcSqlServer],
             DatabaseKind::Sqlite => &[Self::Sqlite, Self::FileUri, Self::JdbcSqlite],
@@ -140,6 +152,7 @@ impl ConnectionUrlFormat {
             DatabaseKind::MongoDb => &[Self::MongoDb, Self::MongoDbSrv],
             DatabaseKind::ClickHouse => &[Self::ClickHouse, Self::ClickHouseTls],
             DatabaseKind::Elasticsearch => &[Self::Elasticsearch, Self::ElasticsearchTls],
+            DatabaseKind::Snowflake => &[Self::Snowflake],
         }
     }
 }
@@ -195,7 +208,13 @@ impl CatalogScope {
             database
         };
         let schemas = match (kind, default_schema) {
-            (DatabaseKind::MySql | DatabaseKind::ClickHouse | DatabaseKind::Elasticsearch, _)
+            (
+                DatabaseKind::MySql
+                | DatabaseKind::TiDb
+                | DatabaseKind::ClickHouse
+                | DatabaseKind::Elasticsearch,
+                _,
+            )
             | (_, None) => CatalogSelection::All,
             (_, Some(schema)) => CatalogSelection::Selected(vec![schema.to_owned()]),
         };
@@ -565,6 +584,8 @@ pub struct ConnectionProfile {
     pub mongodb_options: Option<MongoConnectionOptions>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elasticsearch_options: Option<ElasticsearchConnectionOptions>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snowflake_options: Option<SnowflakeConnectionOptions>,
 }
 
 #[derive(Debug)]
@@ -721,6 +742,7 @@ fn parse_duckdb_url(input: &str) -> Result<Option<ParsedConnectionUrl>, ProfileE
         read_only,
         read_only_explicit: read_only_seen,
         mongodb_options: None,
+        snowflake_options: None,
     }))
 }
 
@@ -753,6 +775,43 @@ pub struct ParsedConnectionUrl {
     pub read_only: bool,
     pub read_only_explicit: bool,
     pub mongodb_options: Option<MongoConnectionOptions>,
+    pub snowflake_options: Option<SnowflakeConnectionOptions>,
+}
+
+/// SQL API session options. The access token is kept in the shared credential store.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SnowflakeConnectionOptions {
+    pub warehouse: Option<String>,
+    pub role: Option<String>,
+    pub token_type: String,
+}
+
+impl Default for SnowflakeConnectionOptions {
+    fn default() -> Self {
+        Self {
+            warehouse: None,
+            role: None,
+            token_type: "PROGRAMMATIC_ACCESS_TOKEN".to_owned(),
+        }
+    }
+}
+
+impl SnowflakeConnectionOptions {
+    pub fn validate(&self) -> Result<(), ProfileError> {
+        if !matches!(
+            self.token_type.as_str(),
+            "PROGRAMMATIC_ACCESS_TOKEN" | "OAUTH" | "KEYPAIR_JWT"
+        ) {
+            return Err(ProfileError::InvalidQueryParameter("token_type".into()));
+        }
+        for (name, value) in [("warehouse", &self.warehouse), ("role", &self.role)] {
+            if value.as_ref().is_some_and(|value| value.trim().is_empty()) {
+                return Err(ProfileError::InvalidQueryParameter(name.into()));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// MongoDB options which cannot be represented by the shared single-host
@@ -805,6 +864,7 @@ pub fn parse_connection_url(input: &str) -> Result<ParsedConnectionUrl, ProfileE
             default_schema: Some("main".to_owned()),
             sqlite_path: None,
             sqlite_memory: true,
+            snowflake_options: None,
             duckdb_path: None,
             ssl_mode: SslMode::Disable,
             read_only,
@@ -848,12 +908,14 @@ pub fn parse_connection_url(input: &str) -> Result<ParsedConnectionUrl, ProfileE
         ("mysql", false) => (DatabaseKind::MySql, ConnectionUrlFormat::MySql),
         ("mysql", true) => (DatabaseKind::MySql, ConnectionUrlFormat::JdbcMySql),
         ("mariadb", false) => (DatabaseKind::MariaDb, ConnectionUrlFormat::MariaDb),
+        ("tidb", false) => (DatabaseKind::TiDb, ConnectionUrlFormat::TiDb),
         ("sqlserver", false) => (DatabaseKind::SqlServer, ConnectionUrlFormat::SqlServer),
         ("mssql", false) => (DatabaseKind::SqlServer, ConnectionUrlFormat::MsSql),
         ("redis", false) => (DatabaseKind::Redis, ConnectionUrlFormat::Redis),
         ("rediss", false) => (DatabaseKind::Redis, ConnectionUrlFormat::RedisTls),
         ("valkey", false) => (DatabaseKind::Valkey, ConnectionUrlFormat::Valkey),
         ("valkeys", false) => (DatabaseKind::Valkey, ConnectionUrlFormat::ValkeyTls),
+        ("snowflake", false) => (DatabaseKind::Snowflake, ConnectionUrlFormat::Snowflake),
         ("clickhouse", false) => (DatabaseKind::ClickHouse, ConnectionUrlFormat::ClickHouse),
         ("clickhouses", false) => (DatabaseKind::ClickHouse, ConnectionUrlFormat::ClickHouseTls),
         ("elasticsearch", false) => (
@@ -993,6 +1055,7 @@ fn parse_mongodb_url(input: &str) -> Result<ParsedConnectionUrl, ProfileError> {
         default_schema: None,
         sqlite_path: None,
         sqlite_memory: false,
+        snowflake_options: None,
         duckdb_path: None,
         ssl_mode: options
             .iter()
@@ -1096,6 +1159,7 @@ fn parse_jdbc_oracle_url(input: &str) -> Result<ParsedConnectionUrl, ProfileErro
         default_schema: None,
         sqlite_path: None,
         sqlite_memory: false,
+        snowflake_options: None,
         duckdb_path: None,
         ssl_mode: SslMode::Prefer,
         read_only: false,
@@ -1164,10 +1228,31 @@ pub fn import_connection_url(
             catalog_scope,
             mongodb_options: parsed.mongodb_options,
             elasticsearch_options: None,
+            snowflake_options: parsed.snowflake_options,
         },
         transient_password: parsed.password,
         read_only_explicit: parsed.read_only_explicit,
     })
+}
+
+fn validate_snowflake_endpoint(
+    host: &str,
+    port: u16,
+    ssl_mode: SslMode,
+) -> Result<(), ProfileError> {
+    if !host.contains('.')
+        || host.contains(['/', '@', '?', '#', ':'])
+        || host.chars().any(char::is_whitespace)
+    {
+        return Err(ProfileError::InvalidQueryParameter("host".into()));
+    }
+    if port != 443 {
+        return Err(ProfileError::InvalidQueryParameter("port".into()));
+    }
+    if ssl_mode != SslMode::VerifyFull {
+        return Err(ProfileError::InvalidQueryParameter("sslMode".into()));
+    }
+    Ok(())
 }
 
 fn parse_server_url(
@@ -1195,9 +1280,14 @@ fn parse_server_url(
     } else {
         (!database.is_empty()).then_some(database)
     };
-    let user = if kind == DatabaseKind::ClickHouse {
+    let user = if matches!(kind, DatabaseKind::ClickHouse | DatabaseKind::TiDb) {
         Some(if url.username().is_empty() {
-            "default".to_owned()
+            if kind == DatabaseKind::TiDb {
+                "root"
+            } else {
+                "default"
+            }
+            .to_owned()
         } else {
             decode(url.username())
         })
@@ -1207,7 +1297,10 @@ fn parse_server_url(
     let password = url
         .password()
         .map(|value| SecretString::from(decode(value)));
-    let mut default_schema = None;
+    let mut default_schema = (kind == DatabaseKind::Snowflake).then(|| "PUBLIC".to_owned());
+    let mut snowflake_options =
+        (kind == DatabaseKind::Snowflake).then(SnowflakeConnectionOptions::default);
+    let mut seen_snowflake_options = HashSet::new();
     if kind == DatabaseKind::Elasticsearch {
         if url.port() == Some(0) {
             return Err(ProfileError::InvalidQueryParameter("port".into()));
@@ -1216,7 +1309,9 @@ fn parse_server_url(
             return Err(ProfileError::InvalidQueryParameter("fragment".into()));
         }
     }
-    let mut ssl_mode = if matches!(kind, DatabaseKind::ClickHouse | DatabaseKind::Elasticsearch) {
+    let mut ssl_mode = if kind == DatabaseKind::Snowflake {
+        SslMode::VerifyFull
+    } else if matches!(kind, DatabaseKind::ClickHouse | DatabaseKind::Elasticsearch) {
         if matches!(
             format,
             ConnectionUrlFormat::ClickHouseTls | ConnectionUrlFormat::ElasticsearchTls
@@ -1246,7 +1341,27 @@ fn parse_server_url(
     let mut trust_server_certificate = None;
 
     for (key, value) in url.query_pairs() {
-        if (key.eq_ignore_ascii_case("currentSchema")
+        if kind == DatabaseKind::Snowflake
+            && ["schema", "warehouse", "role", "token_type"]
+                .iter()
+                .any(|name| key.eq_ignore_ascii_case(name))
+        {
+            let key = key.to_ascii_lowercase();
+            if !seen_snowflake_options.insert(key.clone()) {
+                return Err(ProfileError::ConflictingQueryParameter(key));
+            }
+            if value.trim().is_empty() {
+                return Err(ProfileError::InvalidQueryParameter(key));
+            }
+            let options = snowflake_options.as_mut().expect("Snowflake options");
+            match key.as_str() {
+                "schema" => default_schema = Some(value.into_owned()),
+                "warehouse" => options.warehouse = Some(value.into_owned()),
+                "role" => options.role = Some(value.into_owned()),
+                "token_type" => options.token_type = value.into_owned(),
+                _ => unreachable!(),
+            }
+        } else if (key.eq_ignore_ascii_case("currentSchema")
             || key.eq_ignore_ascii_case("schema") && kind == DatabaseKind::SqlServer)
             && matches!(kind, DatabaseKind::Postgres | DatabaseKind::SqlServer)
         {
@@ -1257,7 +1372,10 @@ fn parse_server_url(
             ssl_mode = parse_ssl_mode(&value)
                 .ok_or_else(|| ProfileError::InvalidQueryParameter("sslmode".into()))?;
         } else if key.eq_ignore_ascii_case("useSSL")
-            && matches!(kind, DatabaseKind::MySql | DatabaseKind::MariaDb)
+            && matches!(
+                kind,
+                DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::TiDb
+            )
         {
             reject_duplicate(&mut seen_ssl, "ssl")?;
             ssl_mode = if parse_bool(&value, "useSSL")? {
@@ -1266,7 +1384,10 @@ fn parse_server_url(
                 SslMode::Disable
             };
         } else if key.eq_ignore_ascii_case("sslMode")
-            && matches!(kind, DatabaseKind::MySql | DatabaseKind::MariaDb)
+            && matches!(
+                kind,
+                DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::TiDb
+            )
         {
             reject_duplicate(&mut seen_ssl, "ssl")?;
             ssl_mode = parse_ssl_mode(&value)
@@ -1304,9 +1425,27 @@ fn parse_server_url(
         return Err(ProfileError::ConflictingQueryParameter("sslMode".into()));
     }
 
+    if kind == DatabaseKind::Snowflake {
+        validate_snowflake_endpoint(&host, url.port().unwrap_or(443), ssl_mode)?;
+        if database
+            .as_deref()
+            .is_none_or(|database| database.is_empty() || database.contains('/'))
+        {
+            return Err(ProfileError::InvalidQueryParameter("database".into()));
+        }
+        if url.fragment().is_some() {
+            return Err(ProfileError::InvalidQueryParameter("fragment".into()));
+        }
+        snowflake_options
+            .as_ref()
+            .expect("Snowflake options")
+            .validate()?;
+    }
     let default_port = match kind {
+        DatabaseKind::Snowflake => 443,
         DatabaseKind::Postgres => 5432,
         DatabaseKind::MySql | DatabaseKind::MariaDb => 3306,
+        DatabaseKind::TiDb => 4000,
         DatabaseKind::Oracle => 1521,
         DatabaseKind::SqlServer => 1433,
         DatabaseKind::Sqlite | DatabaseKind::DuckDb => {
@@ -1336,6 +1475,7 @@ fn parse_server_url(
         read_only,
         read_only_explicit,
         mongodb_options: None,
+        snowflake_options,
     })
 }
 
@@ -1406,6 +1546,7 @@ fn parse_jdbc_sql_server_url(input: &str) -> Result<ParsedConnectionUrl, Profile
         default_schema,
         sqlite_path: None,
         sqlite_memory: false,
+        snowflake_options: None,
         duckdb_path: None,
         ssl_mode: sql_server_ssl_mode(encrypt, trust_server_certificate)?,
         read_only: read_only.unwrap_or(false),
@@ -1525,6 +1666,7 @@ fn parse_sqlite_url(input: &str, jdbc: bool) -> Result<ParsedConnectionUrl, Prof
         default_schema: Some("main".to_owned()),
         sqlite_path: Some(path),
         sqlite_memory: false,
+        snowflake_options: None,
         duckdb_path: None,
         ssl_mode: SslMode::Disable,
         read_only,
@@ -1637,12 +1779,14 @@ pub fn format_connection_url(
         ConnectionUrlFormat::PostgreSql | ConnectionUrlFormat::JdbcPostgreSql => "postgresql",
         ConnectionUrlFormat::MySql | ConnectionUrlFormat::JdbcMySql => "mysql",
         ConnectionUrlFormat::MariaDb => "mariadb",
+        ConnectionUrlFormat::TiDb => "tidb",
         ConnectionUrlFormat::SqlServer | ConnectionUrlFormat::JdbcSqlServer => "sqlserver",
         ConnectionUrlFormat::MsSql => "mssql",
         ConnectionUrlFormat::Redis => "redis",
         ConnectionUrlFormat::RedisTls => "rediss",
         ConnectionUrlFormat::Valkey => "valkey",
         ConnectionUrlFormat::ValkeyTls => "valkeys",
+        ConnectionUrlFormat::Snowflake => "snowflake",
         ConnectionUrlFormat::ClickHouse => "clickhouse",
         ConnectionUrlFormat::ClickHouseTls => "clickhouses",
         ConnectionUrlFormat::Elasticsearch => "elasticsearch",
@@ -1696,7 +1840,35 @@ pub fn format_connection_url(
         output.push_str(&utf8_percent_encode(database, URL_COMPONENT).to_string());
     }
     let mut query = Vec::new();
-    if profile.kind == DatabaseKind::Oracle {
+    if profile.kind == DatabaseKind::Snowflake {
+        validate_snowflake_endpoint(host, profile.port.unwrap_or(443), profile.ssl_mode)?;
+        if profile
+            .database
+            .as_deref()
+            .is_none_or(|database| database.trim().is_empty() || database.contains('/'))
+        {
+            return Err(ProfileError::InvalidQueryParameter("database".into()));
+        }
+        let fallback = SnowflakeConnectionOptions::default();
+        let options = profile.snowflake_options.as_ref().unwrap_or(&fallback);
+        options.validate()?;
+        for (key, value) in [
+            (
+                "schema",
+                profile.default_schema.as_deref().or(Some("PUBLIC")),
+            ),
+            ("warehouse", options.warehouse.as_deref()),
+            ("role", options.role.as_deref()),
+            ("token_type", Some(options.token_type.as_str())),
+        ] {
+            if let Some(value) = value {
+                if value.trim().is_empty() {
+                    return Err(ProfileError::InvalidQueryParameter(key.into()));
+                }
+                query.push(format!("{key}={}", utf8_percent_encode(value, QUERY_VALUE)));
+            }
+        }
+    } else if profile.kind == DatabaseKind::Oracle {
         if let Some(user) = profile.user.as_deref().filter(|value| !value.is_empty()) {
             query.push(format!("user={}", utf8_percent_encode(user, QUERY_VALUE)));
         }
@@ -1712,7 +1884,10 @@ pub fn format_connection_url(
             ));
         }
         query.push(format!("sslmode={}", ssl_mode_value(profile.ssl_mode)));
-    } else if matches!(profile.kind, DatabaseKind::MySql | DatabaseKind::MariaDb) {
+    } else if matches!(
+        profile.kind,
+        DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::TiDb
+    ) {
         query.push(format!("sslMode={}", ssl_mode_value(profile.ssl_mode)));
     } else if profile.kind.is_redis_compatible() {
         // The redis/rediss and valkey/valkeys schemes are the TLS source of truth.

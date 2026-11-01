@@ -846,6 +846,21 @@ fn relation_insert_text(
                 vec![schema.or(database).unwrap_or_default(), object]
             }
         }
+        SqlDialect::Snowflake => {
+            if database == context.database {
+                if schema == context.schema {
+                    vec![object]
+                } else {
+                    vec![schema.unwrap_or_default(), object]
+                }
+            } else {
+                vec![
+                    database.unwrap_or_default(),
+                    schema.unwrap_or_default(),
+                    object,
+                ]
+            }
+        }
         SqlDialect::Postgres | SqlDialect::SqlServer | SqlDialect::Generic | SqlDialect::Oracle => {
             if database.is_some_and(|value| {
                 context
@@ -880,6 +895,9 @@ fn relation_insert_text(
 }
 
 fn quote_relation_component(value: &str, dialect: SqlDialect) -> String {
+    if dialect == SqlDialect::Snowflake {
+        return quote_identifier(value, dialect);
+    }
     if value
         .bytes()
         .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
@@ -895,7 +913,7 @@ fn quote_relation_component(value: &str, dialect: SqlDialect) -> String {
 }
 
 fn column_insert_text(value: &str, dialect: SqlDialect, quoted: bool) -> String {
-    if dialect == SqlDialect::SqlServer
+    if matches!(dialect, SqlDialect::SqlServer | SqlDialect::Snowflake)
         || quoted
         || !is_bare_identifier(value)
         || is_reserved_word(value, dialect)
@@ -1808,7 +1826,8 @@ fn keywords_for_completion(
                 | SqlDialect::Sqlite
                 | SqlDialect::DuckDb
                 | SqlDialect::Generic
-                | SqlDialect::Oracle => &["ASC", "DESC", "NULLS FIRST", "NULLS LAST"],
+                | SqlDialect::Oracle
+                | SqlDialect::Snowflake => &["ASC", "DESC", "NULLS FIRST", "NULLS LAST"],
                 SqlDialect::ClickHouse => &["ASC", "DESC"],
                 SqlDialect::MySql | SqlDialect::MariaDb | SqlDialect::SqlServer => &["ASC", "DESC"],
             },
@@ -1817,7 +1836,8 @@ fn keywords_for_completion(
                 | SqlDialect::Sqlite
                 | SqlDialect::DuckDb
                 | SqlDialect::Generic
-                | SqlDialect::Oracle => &["NULLS FIRST", "NULLS LAST"],
+                | SqlDialect::Oracle
+                | SqlDialect::Snowflake => &["NULLS FIRST", "NULLS LAST"],
                 SqlDialect::ClickHouse => &[],
                 SqlDialect::MySql | SqlDialect::MariaDb | SqlDialect::SqlServer => &[],
             },
@@ -1826,7 +1846,8 @@ fn keywords_for_completion(
                 | SqlDialect::Sqlite
                 | SqlDialect::DuckDb
                 | SqlDialect::Generic
-                | SqlDialect::Oracle => &["FIRST", "LAST"],
+                | SqlDialect::Oracle
+                | SqlDialect::Snowflake => &["FIRST", "LAST"],
                 SqlDialect::ClickHouse => &[],
                 SqlDialect::MySql | SqlDialect::MariaDb | SqlDialect::SqlServer => &[],
             },
@@ -2939,7 +2960,8 @@ fn keywords(
             SqlDialect::Sqlite
             | SqlDialect::DuckDb
             | SqlDialect::Oracle
-            | SqlDialect::ClickHouse => &[],
+            | SqlDialect::ClickHouse
+            | SqlDialect::Snowflake => &[],
         },
         Context::Ddl(DdlContext::AlterColumnType(_)) => &[],
         Context::Ddl(DdlContext::NewColumnName) => &[],
@@ -3033,6 +3055,16 @@ fn ddl_object_keywords(dialect: SqlDialect, _create: bool) -> &'static [&'static
             "TRIGGER",
             "TYPE",
         ],
+        SqlDialect::Snowflake => &[
+            "DATABASE",
+            "SCHEMA",
+            "TABLE",
+            "VIEW",
+            "FUNCTION",
+            "PROCEDURE",
+            "SEQUENCE",
+            "WAREHOUSE",
+        ],
         SqlDialect::ClickHouse => &["DATABASE", "DICTIONARY", "FUNCTION", "TABLE", "VIEW"],
     }
 }
@@ -3094,6 +3126,13 @@ fn alter_table_action_keywords(dialect: SqlDialect) -> &'static [&'static str] {
             "DROP COLUMN",
             "ADD CONSTRAINT",
             "DROP CONSTRAINT",
+        ],
+        SqlDialect::Snowflake => &[
+            "ADD COLUMN",
+            "DROP COLUMN",
+            "RENAME COLUMN",
+            "RENAME TO",
+            "ALTER COLUMN",
         ],
         SqlDialect::ClickHouse => &[],
     }
@@ -3170,6 +3209,22 @@ fn data_types_for_context(context: Context, dialect: SqlDialect) -> &'static [&'
             "RAW",
             "TIMESTAMP",
             "VARCHAR2",
+        ],
+        SqlDialect::Snowflake => &[
+            "NUMBER",
+            "DECIMAL",
+            "FLOAT",
+            "VARCHAR",
+            "BOOLEAN",
+            "DATE",
+            "TIME",
+            "TIMESTAMP_NTZ",
+            "TIMESTAMP_LTZ",
+            "TIMESTAMP_TZ",
+            "BINARY",
+            "VARIANT",
+            "OBJECT",
+            "ARRAY",
         ],
         SqlDialect::ClickHouse => &[
             "Array",

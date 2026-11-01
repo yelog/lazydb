@@ -1,5 +1,61 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Add Elasticsearch native REST connections, index and mapping discovery, document previews, and a REST/JSON console with write confirmation and read-only enforcement.
+- Support Basic Auth and encoded API keys through existing credential storage, verified HTTPS, and optional PEM CA bundles. Record response-level partial failures while retaining result details.
+
+### Internal
+
+- Add deterministic regressions and isolated Docker/terminal CI acceptance, including encrypted profile persistence, restart/reconnect, authentication switching, and CA removal/recovery. Validate Elasticsearch 8.17.0 and 8.19.6 locally.
+- Document permissions and initial boundaries: no SQL emulation, manual transactions, grid-cell editing, dedicated monitoring/principal forms, Cloud ID, mTLS, or automatic PIT/search-after pagination. See [Elasticsearch support](docs/elasticsearch.md).
+
+## [0.3.1] - 2026-11-01
+
+### Added
+
+- Add Snowflake connections through the HTTPS SQL API with externally supplied PAT, OAuth, or key-pair JWT tokens and existing encrypted credential storage ([#33](https://github.com/yelog/lazydb/pull/33)).
+- Browse scoped Snowflake databases, schemas, tables, views, and columns; preview paged data and native DDL; execute SQL with explicit database, schema, warehouse, and role context. Preserve exact numbers and quoted identifier case, and handle asynchronous compressed partitions within query budgets.
+
+### Changed
+
+- Classify Snowflake sequence advancement and `SYSTEM$` functions conservatively in the shared SQL policy, and retire Snowflake connections when visible-object scope changes.
+
+### Internal
+
+- Verify real JWT/PAT authentication, invalid/revoked tokens, denied writes, partitioned results, TUI workflows, and a locally packaged macOS ARM64 binary. OAuth and natural token expiry remain unverified against a real account.
+- Document the initial Snowflake boundaries: one statement per SQL API request, no persistent console session or manual transactions, and no advertised structured mutations, monitoring, or user cancellation. See [Snowflake support](docs/snowflake.md).
+
+### Commits
+
+- [`b6f2860`](https://github.com/yelog/lazydb/commit/b6f2860) feat(snowflake): merge SQL API support (#33)
+- [`fc1d53b`](https://github.com/yelog/lazydb/commit/fc1d53b) merge: integrate TiDB support from main
+- [`c1546ed`](https://github.com/yelog/lazydb/commit/c1546ed) feat(snowflake): add SQL API connections and catalog workflows
+
+## [0.3.0] - 2026-11-01
+
+### Added
+
+- Add TiDB as a separate relational driver with native `tidb://` connection URLs, verified TLS, scoped table/view browsing and search, relation previews, native DDL, and SQL execution. The adapter targets stable TiDB 8.5.0 or newer; TiDB 8.5.3 has been verified locally and on TiDB Cloud Starter (MySQL Compatible).
+- Enforce TiDB client read-only checks across complete SQL batches and relation previews, including sequence-changing `NEXTVAL` and `SETVAL` expressions. Use database grants for server-side authorization. Structured catalog changes, relation-grid writes, manual transaction UI, monitoring, principal management, and native cancellation remain unavailable in this initial release. See [TiDB support](docs/tidb.md) for details.
+
+### Fixed
+
+- Open MongoDB collection data on first activation and improve bounded document field editors, navigation, and date precision ([#29](https://github.com/yelog/lazydb/pull/29)).
+- Reconnect saved profiles when connection settings or credentials change, so enabling read-only mode takes effect in existing sessions; resolve pending manual transactions before retiring those sessions.
+- Reject sequence-changing functions and nested locking reads in the shared read-only SQL policy, including agent queries against writable TiDB profiles.
+- Refresh TiDB result metadata after schema changes and record execution timing from actual query responses.
+- Preserve MySQL/MariaDB executable comments and escaped double quotes when splitting SQL batches; TiDB execution follows the connection's current SQL quote modes, and ambiguous automatic statement selection requires an explicit selection.
+
+### Commits
+
+- [`986c760`](https://github.com/yelog/lazydb/commit/986c760) feat(tidb): add native TiDB support (#31)
+- [`cf1af6f`](https://github.com/yelog/lazydb/commit/cf1af6f) Merge branch 'main' of github.com:yelog/lazydb
+- [`4904184`](https://github.com/yelog/lazydb/commit/4904184) Merge pull request #29 from yelog/fix/mongodb-explorer-field-editors
+- [`6fe5700`](https://github.com/yelog/lazydb/commit/6fe5700) fix(mongodb): improve collection activation and document field editors
+
 ## [0.2.2] - 2026-10-26
 
 ### Added
