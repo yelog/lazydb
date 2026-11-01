@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.3.0] - 2026-11-01
 
 ### Added
 
@@ -9,10 +9,18 @@
 
 ### Fixed
 
+- Open MongoDB collection data on first activation and improve bounded document field editors, navigation, and date precision ([#29](https://github.com/yelog/lazydb/pull/29)).
 - Reconnect saved profiles when connection settings or credentials change, so enabling read-only mode takes effect in existing sessions; resolve pending manual transactions before retiring those sessions.
 - Reject sequence-changing functions and nested locking reads in the shared read-only SQL policy, including agent queries against writable TiDB profiles.
 - Refresh TiDB result metadata after schema changes and record execution timing from actual query responses.
 - Preserve MySQL/MariaDB executable comments and escaped double quotes when splitting SQL batches; TiDB execution follows the connection's current SQL quote modes, and ambiguous automatic statement selection requires an explicit selection.
+
+### Commits
+
+- [`986c760`](https://github.com/yelog/lazydb/commit/986c760) feat(tidb): add native TiDB support (#31)
+- [`cf1af6f`](https://github.com/yelog/lazydb/commit/cf1af6f) Merge branch 'main' of github.com:yelog/lazydb
+- [`4904184`](https://github.com/yelog/lazydb/commit/4904184) Merge pull request #29 from yelog/fix/mongodb-explorer-field-editors
+- [`6fe5700`](https://github.com/yelog/lazydb/commit/6fe5700) fix(mongodb): improve collection activation and document field editors
 
 ## [0.2.2] - 2026-10-26
 
