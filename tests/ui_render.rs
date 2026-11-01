@@ -7919,6 +7919,7 @@ fn driver_options_use_database_icons_in_each_icon_mode() {
                 DatabaseKind::Valkey => "Valkey",
                 DatabaseKind::MongoDb => "MongoDB",
                 DatabaseKind::ClickHouse => "ClickHouse",
+                DatabaseKind::Elasticsearch => "Elasticsearch",
             };
             let label = format!("{} {display_name}", IconSet::new(mode).database(kind));
             assert!(

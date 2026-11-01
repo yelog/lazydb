@@ -1372,6 +1372,7 @@ impl OracleAdapter {
                         row_count,
                         fetched_row_count,
                         truncated,
+                        response_error: None,
                     },
                 })
             })

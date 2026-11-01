@@ -171,6 +171,7 @@ jobs:
       - name: Build test binaries (macOS)
         if: runner.os == 'macOS'
         run: python3 scripts/ci/run-with-timeout.py 1800 -- cargo +1.94.0 test --locked --all-targets --all-features --timings --no-run
+      # Includes deterministic Elasticsearch transport, profile, REST policy and console tests.
       - run: python3 scripts/ci/run-with-timeout.py 600 -- cargo +1.94.0 test --locked --all-targets --all-features --timings
       - name: Check macOS binary dependencies
         if: runner.os == 'macOS'
@@ -318,6 +319,67 @@ jobs:
       - name: Stop ClickHouse test service
         if: always()
         run: docker compose -f docker-compose.clickhouse.yml down --volumes
+  elasticsearch:
+    name: Elasticsearch REST, TLS and terminal workflows
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      COMPOSE_PROJECT_NAME: lazydb-es-ci-${{ github.run_id }}-${{ github.run_attempt }}
+      LAZYDB_TEST_ELASTICSEARCH_URL: elasticsearch://elastic:lazydb-local-test-only@127.0.0.1:19200
+      LAZYDB_TEST_ELASTICSEARCH_TLS_URL: elasticsearchs://elastic:lazydb-local-test-only@localhost:19201
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - name: Install Rust
+        run: rustup toolchain install 1.94.0 --profile minimal --no-self-update
+      - name: Restore Rust dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: ci-ubuntu-24.04
+          cmd-format: sh scripts/ci/rust-cache-command.sh {0}
+          cache-bin: false
+          save-if: false
+      - name: Build Elasticsearch live tests
+        run: python3 -I scripts/ci/run-with-timeout.py 1200 -- cargo +1.94.0 test --locked --test elasticsearch_live --no-run
+      - name: Build TUI
+        run: python3 -I scripts/ci/run-with-timeout.py 600 -- cargo +1.94.0 build --locked --bin lazydb
+      - name: Validate Elasticsearch fixture
+        run: docker compose -f docker-compose.elasticsearch.yml config --quiet
+      - name: Start isolated HTTP and HTTPS nodes
+        run: docker compose -f docker-compose.elasticsearch.yml up -d --wait --wait-timeout 240
+      - name: Export public test CA
+        run: |
+          es_test_certificate="$RUNNER_TEMP/lazydb-elasticsearch-ca.crt"
+          docker compose -f docker-compose.elasticsearch.yml cp elasticsearch-tls:/usr/share/elasticsearch/config/test-certs/localhost/localhost.crt "$es_test_certificate"
+          printf 'LAZYDB_TEST_ELASTICSEARCH_TLS_CERT=%s\n' "$es_test_certificate" >> "$GITHUB_ENV"
+      - name: Elasticsearch live REST, API key and TLS tests
+        run: python3 -I scripts/ci/run-with-timeout.py 300 -- cargo +1.94.0 test --locked --test elasticsearch_live -- --ignored --test-threads=1
+      - name: Basic Auth console terminal acceptance
+        run: python3 -I scripts/ci/run-with-timeout.py 180 -- python3 -I scripts/ci/test-elasticsearch-tui.py --diagnostics-dir "$RUNNER_TEMP/elasticsearch-diagnostics"
+      - name: API Key and custom CA console terminal acceptance
+        run: python3 -I scripts/ci/run-with-timeout.py 180 -- python3 -I scripts/ci/test-elasticsearch-tui.py --url "$LAZYDB_TEST_ELASTICSEARCH_TLS_URL" --ca-cert "$LAZYDB_TEST_ELASTICSEARCH_TLS_CERT" --api-key --diagnostics-dir "$RUNNER_TEMP/elasticsearch-diagnostics"
+      - name: Connection form, encrypted persistence and reconnect acceptance
+        run: python3 -I scripts/ci/run-with-timeout.py 300 -- python3 -I scripts/ci/test-elasticsearch-profile-tui.py --binary target/debug/lazydb --diagnostics-dir "$RUNNER_TEMP/elasticsearch-diagnostics"
+      - name: Elasticsearch service diagnostics
+        if: failure()
+        run: |
+          mkdir -p "$RUNNER_TEMP/elasticsearch-diagnostics"
+          docker compose -f docker-compose.elasticsearch.yml ps --all > "$RUNNER_TEMP/elasticsearch-diagnostics/compose-status.log"
+          docker compose -f docker-compose.elasticsearch.yml logs --no-color --tail 200 2>&1 | python3 -I -c 'import os, re, sys; text = sys.stdin.read(); text = text.replace(os.environ.get("LAZYDB_TEST_ELASTICSEARCH_PASSWORD", "lazydb-local-test-only"), "[REDACTED]"); text = re.sub(r"(?i)(authorization[\"\x27]?\s*[:=]\s*[\"\x27]?)(?:Basic|ApiKey)\s+[^\s\"\x27,}]+", r"\1[REDACTED]", text); text = re.sub(r"(\w+://)[^\s/@]+@", r"\1[REDACTED]@", text); sys.stdout.write(text)' > "$RUNNER_TEMP/elasticsearch-diagnostics/compose.log"
+      - name: Stop Elasticsearch fixtures
+        if: always()
+        run: docker compose -f docker-compose.elasticsearch.yml down -v --timeout 20
+      - name: Upload Elasticsearch failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v4.4.3
+        with:
+          name: elasticsearch-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/elasticsearch-diagnostics/*.log
+            ${{ runner.temp }}/elasticsearch-diagnostics/profile-tui-sanitized.json
+          if-no-files-found: ignore
+          retention-days: 7
+
   mongodb:
     name: MongoDB replica set and standalone integration
     # MongoDB 8.0 rejects newer Azure kernels: actions/runner-images#15005.

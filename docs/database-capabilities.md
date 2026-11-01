@@ -29,6 +29,7 @@ disable it at runtime.
 | Valkey | Key-value, Redis-compatible | No SQL catalog or DDL | Shared Redis-compatible key/value and collection mutation | No SQL transaction UI | Not applicable | Read-only `INFO` metrics |
 | MongoDB | Document | Database, collection, and index discovery; native document commands, no SQL DDL | Document operations use a separate BSON/EJSON workflow; no relational grid editing | Bounded console transactions on replica sets or sharded clusters; see [MongoDB](mongodb.md#transactions) | No advertised server-side cancellation | Manual `serverStatus`, `dbStats`, and bounded `currentOp`; see [MongoDB](mongodb.md#monitoring-and-principals) |
 | ClickHouse | Relational | Available; database/table/view/MV and bounded native object catalog | Not advertised; supported catalog table-shape edits are separate | No manual transactions | Local request cancellation only; server query may continue | `system.events` counters and bounded `system.processes` |
+| Elasticsearch | Search / REST | Index and mapping discovery; native REST commands, no SQL DDL | Confirmed REST writes; no grid-cell editing | No manual transactions | Local HTTP cancellation; server work may continue | REST APIs only; no dedicated dashboard |
 
 Native key/value and document workflows have their own operation checks. The
 relational grid and SQL transaction flags do not describe those workflows;

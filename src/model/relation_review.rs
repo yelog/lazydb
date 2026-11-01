@@ -51,7 +51,8 @@ pub fn preview_sql_for_relation(
         DatabaseKind::Redis
         | DatabaseKind::Valkey
         | DatabaseKind::MongoDb
-        | DatabaseKind::ClickHouse => {}
+        | DatabaseKind::ClickHouse
+        | DatabaseKind::Elasticsearch => {}
     }
     parts.push(relation.object.as_str());
     preview_sql_for_parts(session, &parts, Some(kind), columns, primary_key_columns)

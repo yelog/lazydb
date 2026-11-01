@@ -591,7 +591,17 @@ fn render_field(
                     .bg(theme.surface),
             ),
             Span::styled(
-                format!("{:<20}", field_label(field, draft.kind)),
+                format!(
+                    "{:<20}",
+                    if field == ProfileField::Password
+                        && draft.kind == DatabaseKind::Elasticsearch
+                        && draft.elasticsearch_auth == crate::profile::ElasticsearchAuth::ApiKey
+                    {
+                        "API key (encoded)"
+                    } else {
+                        field_label(field, draft.kind)
+                    }
+                ),
                 Style::new()
                     .fg(if active { theme.action } else { theme.muted })
                     .bg(theme.surface)
@@ -1224,6 +1234,7 @@ fn is_text_field(field: ProfileField) -> bool {
             | ProfileField::Schema
             | ProfileField::SqlitePath
             | ProfileField::DuckDbPath
+            | ProfileField::CaCertPath
     )
 }
 
@@ -1231,6 +1242,7 @@ fn is_cycle_field(field: ProfileField) -> bool {
     matches!(
         field,
         ProfileField::UrlFormat
+            | ProfileField::ElasticsearchAuth
             | ProfileField::SslMode
             | ProfileField::Environment
             | ProfileField::PasswordStorage
@@ -1326,12 +1338,14 @@ fn field_section(field: ProfileField) -> Option<FormSection> {
         | ProfileField::SqliteMemory
         | ProfileField::SqlitePath
         | ProfileField::DuckDbPath => Some(FormSection::Connection),
-        ProfileField::User | ProfileField::Password | ProfileField::PasswordStorage => {
-            Some(FormSection::Authentication)
-        }
-        ProfileField::SslMode | ProfileField::Environment | ProfileField::ReadOnly => {
-            Some(FormSection::Options)
-        }
+        ProfileField::ElasticsearchAuth
+        | ProfileField::User
+        | ProfileField::Password
+        | ProfileField::PasswordStorage => Some(FormSection::Authentication),
+        ProfileField::CaCertPath
+        | ProfileField::SslMode
+        | ProfileField::Environment
+        | ProfileField::ReadOnly => Some(FormSection::Options),
         _ => None,
     }
 }
@@ -1385,6 +1399,7 @@ fn text_input(draft: &ProfileDraft, field: ProfileField) -> Option<&TextInput> {
         ProfileField::Schema => Some(&draft.schema),
         ProfileField::SqlitePath => Some(&draft.sqlite_path),
         ProfileField::DuckDbPath => Some(&draft.duckdb_path),
+        ProfileField::CaCertPath => Some(&draft.ca_cert_path),
         _ => None,
     }
 }
@@ -1416,6 +1431,14 @@ fn field_value(draft: &ProfileDraft, field: ProfileField) -> String {
         ProfileField::Database => safe_line(draft.database.value()),
         ProfileField::Schema => safe_line(draft.schema.value()),
         ProfileField::VisibleObjects => format!("{} ›", draft.visible_objects_summary()),
+        ProfileField::ElasticsearchAuth => format!(
+            "‹ {} ›",
+            match draft.elasticsearch_auth {
+                crate::profile::ElasticsearchAuth::Basic => "Basic Auth",
+                crate::profile::ElasticsearchAuth::ApiKey => "API Key",
+            }
+        ),
+        ProfileField::CaCertPath => safe_line(draft.ca_cert_path.value()),
         ProfileField::SslMode => format!("‹ {} ›", ssl_name(draft.ssl_mode)),
         ProfileField::Environment => format!("‹ {} ›", environment_name(draft.environment)),
         ProfileField::ReadOnly => toggle_value(draft.read_only),
@@ -1442,6 +1465,9 @@ fn url_help(kind: DatabaseKind) -> &'static str {
         DatabaseKind::Valkey => "Accepts valkey:// and valkeys://",
         DatabaseKind::MongoDb => "Accepts mongodb:// and mongodb+srv://",
         DatabaseKind::ClickHouse => "Accepts clickhouse:// (HTTP) and clickhouses:// (HTTPS)",
+        DatabaseKind::Elasticsearch => {
+            "Accepts elasticsearch:// (HTTP) and elasticsearchs:// (HTTPS)"
+        }
     }
 }
 
@@ -1457,9 +1483,12 @@ fn field_label(field: ProfileField, kind: DatabaseKind) -> &'static str {
         ProfileField::User => "User",
         ProfileField::Password => "Password",
         ProfileField::Database if kind == DatabaseKind::Oracle => "Service Name",
+        ProfileField::Database if kind == DatabaseKind::Elasticsearch => "Namespace (optional)",
         ProfileField::Database => "Database",
         ProfileField::Schema => "Default schema",
         ProfileField::VisibleObjects => "Visible objects",
+        ProfileField::ElasticsearchAuth => "Authentication",
+        ProfileField::CaCertPath => "CA file (optional)",
         ProfileField::SslMode => "SSL mode",
         ProfileField::Environment => "Environment",
         ProfileField::ReadOnly => "Read only",

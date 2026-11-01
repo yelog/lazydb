@@ -24,6 +24,7 @@ fn profile(kind: DatabaseKind) -> ConnectionProfile {
         default_schema: Some("public".into()),
         sqlite_path: (kind == DatabaseKind::Sqlite).then(|| PathBuf::from("app.db")),
         mongodb_options: None,
+        elasticsearch_options: None,
         duckdb_path: None,
         ssl_mode: SslMode::Prefer,
         credential_policy: CredentialPolicy::None,

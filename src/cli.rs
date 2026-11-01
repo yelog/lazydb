@@ -762,7 +762,8 @@ mod tests {
                 "redis",
                 "valkey",
                 "mongodb",
-                "clickhouse"
+                "clickhouse",
+                "elasticsearch"
             ])
         );
         assert_eq!(

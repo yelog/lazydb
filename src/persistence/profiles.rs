@@ -119,6 +119,7 @@ impl From<ConnectionProfileV5> for ConnectionProfile {
             default_schema: profile.default_schema,
             sqlite_path: profile.sqlite_path,
             mongodb_options: None,
+            elasticsearch_options: None,
             duckdb_path: profile.duckdb_path,
             ssl_mode: profile.ssl_mode,
             credential_policy: profile.credential_policy,
@@ -177,6 +178,7 @@ impl From<ConnectionProfileV2> for ConnectionProfile {
             default_schema: profile.default_schema,
             sqlite_path: profile.sqlite_path,
             mongodb_options: None,
+            elasticsearch_options: None,
             duckdb_path: profile.duckdb_path,
             ssl_mode: profile.ssl_mode,
             credential_policy: profile
@@ -727,7 +729,11 @@ fn preserve_unavailable_profiles(
                 .iter_mut()
                 .find(|table| table["id"].as_str() == Some(id))
         }) {
-            merge_missing_profile_fields(current, old_profile);
+            // These options are fully owned by the current profile model. An omitted
+            // value means it was cleared, including an optional CA inside the table.
+            let mut previous = old_profile.clone();
+            previous.remove("elasticsearch_options");
+            merge_missing_profile_fields(current, &previous);
             continue;
         }
         if profile_table_is_unavailable(old_profile) {

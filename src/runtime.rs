@@ -5652,7 +5652,17 @@ impl Runtime {
         let duckdb_query_connections = Arc::clone(&self.duckdb_query_connections);
         self.history_executions
             .insert((tab_id, generation), execution_id);
+        let profiles = Arc::clone(&self.registry);
         let task = tokio::spawn(async move {
+            let profile = profiles
+                .lock()
+                .await
+                .profiles
+                .get(&target.profile_id)
+                .cloned();
+            let native_rest = profile
+                .as_ref()
+                .is_some_and(|profile| profile.kind == crate::profile::DatabaseKind::Elasticsearch);
             let history = crate::model::sql_history::ExecutionHistory {
                 execution_id,
                 operation_id,
@@ -5669,7 +5679,11 @@ impl Runtime {
                 profile_id: Some(target.profile_id),
                 database: Some(target.database.clone()),
                 schema: target.schema.clone(),
-                language: crate::model::sql_history::HistoryLanguage::Sql,
+                language: if native_rest {
+                    crate::model::sql_history::HistoryLanguage::Rest
+                } else {
+                    crate::model::sql_history::HistoryLanguage::Sql
+                },
                 mongo_command: None,
             };
             if let Some(recorder) = &recorder {
@@ -5751,10 +5765,15 @@ impl Runtime {
             {
                 Ok(outcome) => {
                     if let Some(recorder) = &recorder {
+                        let status = if outcome.stats.response_error.is_some() {
+                            crate::model::sql_history::HistoryExecutionStatus::Failed
+                        } else {
+                            crate::model::sql_history::HistoryExecutionStatus::Succeeded
+                        };
                         let _ = recorder
                             .finish_with_certainty(
                                 execution_id,
-                                crate::model::sql_history::HistoryExecutionStatus::Succeeded,
+                                status,
                                 crate::model::sql_history::HistoryResultCertainty::Confirmed,
                                 None,
                                 Some(outcome.stats.row_count),
@@ -7333,7 +7352,7 @@ impl Runtime {
                 | DatabaseConnection::SqlServer(_)
                 | DatabaseConnection::Redis(_)
                 | DatabaseConnection::MongoDb(_) => false,
-                DatabaseConnection::ClickHouse(_) => false,
+                DatabaseConnection::ClickHouse(_) | DatabaseConnection::Elasticsearch(_) => false,
                 DatabaseConnection::DuckDb(_) => false,
             };
             let worker = match database
@@ -8089,6 +8108,7 @@ async fn save_profile_transaction(
                 || old.default_schema != profile.default_schema
                 || old.sqlite_path != profile.sqlite_path
                 || old.ssl_mode != profile.ssl_mode
+                || old.elasticsearch_options != profile.elasticsearch_options
         }),
         catalog_scope_changed: old_profile
             .as_ref()

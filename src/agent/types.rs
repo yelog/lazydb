@@ -69,6 +69,8 @@ pub struct QueryOutcomeJson {
     pub fetch_ms: u128,
     pub row_count: usize,
     pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -94,6 +96,7 @@ impl From<QueryOutcome> for QueryOutcomeJson {
             fetch_ms: outcome.stats.fetch.as_millis(),
             row_count: outcome.stats.row_count,
             truncated: outcome.stats.truncated,
+            response_error: outcome.stats.response_error,
         }
     }
 }

@@ -80,6 +80,13 @@ pub fn authorize_query(profile: &ConnectionProfile, sql: &str) -> Result<(), Pol
     if sql.trim().is_empty() {
         return Err(PolicyError::EmptySql);
     }
+    if profile.kind == crate::profile::DatabaseKind::Elasticsearch {
+        return crate::db::elasticsearch::ElasticsearchRequest::parse(sql)
+            .ok()
+            .filter(|request| request.is_read_only())
+            .map(|_| ())
+            .ok_or(PolicyError::ReadOnlyQueryRequired);
+    }
     let analysis = classify_sql(sql, dialect(profile));
     if is_read_only(&analysis) {
         Ok(())
@@ -95,6 +102,18 @@ pub fn authorize_write(
 ) -> Result<(), PolicyError> {
     if sql.trim().is_empty() {
         return Err(PolicyError::EmptySql);
+    }
+    if profile.kind == crate::profile::DatabaseKind::Elasticsearch {
+        let request = crate::db::elasticsearch::ElasticsearchRequest::parse(sql)
+            .map_err(|_| PolicyError::UnknownSql)?;
+        if let WriteCapability::Denied(error) = write_capability(profile, policy) {
+            return Err(error);
+        }
+        return if request.is_read_only() {
+            Err(PolicyError::UnknownSql)
+        } else {
+            Ok(())
+        };
     }
     let analysis = classify_sql(sql, dialect(profile));
     if analysis.risks.contains(&SqlRisk::Unknown) {

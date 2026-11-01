@@ -197,7 +197,7 @@ fn render_list(
         } else {
             item.sql.clone()
         };
-        let lines = if item.language == crate::model::sql_history::HistoryLanguage::Mongo {
+        let lines = if item.language != crate::model::sql_history::HistoryLanguage::Sql {
             display_text
                 .lines()
                 .map(|line| Line::raw(crate::security::sanitize_terminal_text(line)))
@@ -243,6 +243,8 @@ fn render_list(
                 Paragraph::new(Span::styled(
                     if item.language == crate::model::sql_history::HistoryLanguage::Mongo {
                         "[MONGO] "
+                    } else if item.language == crate::model::sql_history::HistoryLanguage::Rest {
+                        "[REST]  "
                     } else {
                         type_label(kind.unwrap_or(SqlStatementKind::Other))
                     },

@@ -26,6 +26,8 @@ pub struct QueryStats {
     pub row_count: usize,
     pub fetched_row_count: usize,
     pub truncated: bool,
+    /// The server completed the request but reported failures within its response.
+    pub response_error: Option<String>,
 }
 
 impl QueryStats {
@@ -36,6 +38,7 @@ impl QueryStats {
             row_count,
             fetched_row_count: row_count,
             truncated: false,
+            response_error: None,
         }
     }
 
@@ -206,6 +209,7 @@ impl QueryOutcomeAccumulator {
                 row_count,
                 fetched_row_count: self.fetched_rows,
                 truncated: self.truncated,
+                response_error: None,
             },
         }
     }

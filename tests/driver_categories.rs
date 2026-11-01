@@ -16,7 +16,8 @@ fn categories_partition_the_registry_without_changing_machine_names() {
         vec![
             DatabaseKind::Redis,
             DatabaseKind::Valkey,
-            DatabaseKind::MongoDb
+            DatabaseKind::MongoDb,
+            DatabaseKind::Elasticsearch
         ]
     );
     assert_eq!(
@@ -32,7 +33,8 @@ fn categories_partition_the_registry_without_changing_machine_names() {
             "redis",
             "valkey",
             "mongodb",
-            "clickhouse"
+            "clickhouse",
+            "elasticsearch"
         ]
     );
 }

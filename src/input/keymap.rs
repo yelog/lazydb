@@ -5278,6 +5278,7 @@ fn is_text_field(field: ProfileField) -> bool {
             | ProfileField::Database
             | ProfileField::Schema
             | ProfileField::SqlitePath
+            | ProfileField::CaCertPath
     )
 }
 
@@ -5289,6 +5290,7 @@ fn is_cycle_field(field: ProfileField) -> bool {
     matches!(
         field,
         ProfileField::UrlFormat
+            | ProfileField::ElasticsearchAuth
             | ProfileField::SslMode
             | ProfileField::Environment
             | ProfileField::PasswordStorage

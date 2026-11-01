@@ -252,6 +252,7 @@ impl IconSet {
                 DatabaseKind::Valkey => "V",
                 DatabaseKind::MongoDb => "M",
                 DatabaseKind::ClickHouse => md::MD_DATABASE,
+                DatabaseKind::Elasticsearch => "ES",
             },
             IconMode::Unicode => match kind {
                 DatabaseKind::Postgres => "PG",
@@ -265,6 +266,7 @@ impl IconSet {
                 DatabaseKind::Valkey => "VK",
                 DatabaseKind::MongoDb => "MG",
                 DatabaseKind::ClickHouse => "CH",
+                DatabaseKind::Elasticsearch => "ES",
             },
             IconMode::Ascii => match kind {
                 DatabaseKind::Postgres => "PG",
@@ -278,6 +280,7 @@ impl IconSet {
                 DatabaseKind::Valkey => "VK",
                 DatabaseKind::MongoDb => "MG",
                 DatabaseKind::ClickHouse => "CH",
+                DatabaseKind::Elasticsearch => "ES",
             },
         }
     }
@@ -294,6 +297,7 @@ impl IconSet {
             DatabaseKind::Valkey => ratatui::style::Color::Rgb(120, 65, 190),
             DatabaseKind::MongoDb => ratatui::style::Color::Rgb(0, 150, 90),
             DatabaseKind::ClickHouse => ratatui::style::Color::Rgb(252, 199, 0),
+            DatabaseKind::Elasticsearch => ratatui::style::Color::Rgb(0, 191, 179),
         }
     }
 
