@@ -9,6 +9,7 @@
 //! `G`) clamps against it, so a viewport larger than the pane makes the tail of
 //! the DDL unreachable.
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lazydb::{
     action::Action,
     app::App,
@@ -148,8 +149,12 @@ fn relation_ddl(
 /// `with_status` keeps the tab in the `Refreshing` state while the previous DDL
 /// stays on screen, which is the layout that reserves the status rows.
 fn relation_app(with_status: bool) -> (App, Uuid, Uuid) {
+    relation_app_with_sql(with_status, &ddl_text())
+}
+
+fn relation_app_with_sql(with_status: bool, sql: &str) -> (App, Uuid, Uuid) {
     let (mut app, connection) = app_with_connection();
-    let (descriptor, ddl, kind) = relation_ddl(connection, &ddl_text());
+    let (descriptor, ddl, kind) = relation_ddl(connection, sql);
     let mut tab = RelationTab::with_descriptor(descriptor, RelationView::Ddl);
     let request = RelationRequest {
         tab_id: tab.id,
@@ -175,6 +180,14 @@ fn relation_app(with_status: bool) -> (App, Uuid, Uuid) {
     app.update(Action::RelationSucceeded {
         request: request.clone(),
         snapshot: Box::new(RelationSnapshot::Ddl(ddl)),
+    });
+    // Relation editors are initialized lazily by the runtime viewport action.
+    app.update(Action::DdlEditorViewportChanged {
+        session_id,
+        viewport: EditorViewport {
+            width: 1,
+            height: 1,
+        },
     });
     if with_status {
         let previous = match &mut app.tabs[app.active_tab] {
@@ -213,6 +226,10 @@ fn principal_entry(connection: ConnectionIdentity) -> PrincipalEntry {
 
 /// Principal (user/role) tab in the DDL view whose editor holds the DDL text.
 fn principal_app(with_status: bool) -> (App, Uuid) {
+    principal_app_with_sql(with_status, &ddl_text())
+}
+
+fn principal_app_with_sql(with_status: bool, sql: &str) -> (App, Uuid) {
     let (mut app, connection) = app_with_connection();
     let entry = principal_entry(connection);
     app.update(Action::OpenPrincipal {
@@ -245,7 +262,7 @@ fn principal_app(with_status: bool) -> (App, Uuid) {
         request,
         ddl: PrincipalDdl {
             principal: entry,
-            sql: ddl_text(),
+            sql: sql.to_owned(),
         },
     });
     if with_status {
@@ -341,6 +358,99 @@ fn assert_vertical_thumb_reaches_the_end(state: &UiState, session_id: Uuid) {
     );
 }
 
+fn ddl_app(principal: bool, with_status: bool, sql: &str) -> (App, Uuid) {
+    if principal {
+        let (app, _) = principal_app_with_sql(with_status, sql);
+        let WorkspaceTab::PrincipalDdl(tab) = &app.tabs[app.active_tab] else {
+            unreachable!()
+        };
+        let session_id = tab.editor_id;
+        (app, session_id)
+    } else {
+        let (app, _, session_id) = relation_app_with_sql(with_status, sql);
+        (app, session_id)
+    }
+}
+
+#[test]
+fn ddl_horizontal_scroll_reaches_the_final_column_with_line_numbers() {
+    let sql = (1..=DDL_LINES)
+        .map(|line| format!("-- LINE {line} {} LAST_COLUMN", "x".repeat(180)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for principal in [false, true] {
+        for with_status in [false, true] {
+            let (mut app, session_id) = ddl_app(principal, with_status, &sql);
+            let (_, state) = render(&app);
+            let (_, viewport) = published_viewport(&state);
+            let body = state.text_selection_targets.last().unwrap();
+            assert_eq!(body.session_id, session_id);
+            assert_eq!(viewport.width, usize::from(body.hit_maps[0].area.width));
+            record_viewport(&mut app, &state);
+            app.update(Action::EditorScrollBy {
+                session_id,
+                rows: 0,
+                columns: 1_000,
+            });
+            let (buffer, state) = render(&app);
+            let screen = screen_text(&buffer);
+            assert!(screen.contains("LAST_COLUMN"), "{screen}");
+            let (offset, max_offset) = state
+                .hit_regions
+                .iter()
+                .find_map(|region| match region.target {
+                    HitTarget::EditorScrollbarThumb {
+                        session_id: id,
+                        vertical: false,
+                        offset,
+                        max_offset,
+                        ..
+                    } if id == session_id => Some((offset, max_offset)),
+                    _ => None,
+                })
+                .expect("horizontal DDL scrollbar");
+            assert_eq!(offset, max_offset);
+        }
+    }
+}
+
+#[test]
+fn ddl_search_prompt_reserves_a_row_and_keeps_the_last_line_visible() {
+    for principal in [false, true] {
+        for with_status in [false, true] {
+            let (mut app, session_id) = ddl_app(principal, with_status, &ddl_text());
+            let (_, state) = render(&app);
+            let (_, without_prompt) = published_viewport(&state);
+            record_viewport(&mut app, &state);
+            app.update(Action::ReadOnlyEditorKey {
+                session_id,
+                event: KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE),
+            });
+            let (_, state) = render(&app);
+            let (_, with_prompt) = published_viewport(&state);
+            assert_eq!(with_prompt.height + 1, without_prompt.height);
+            assert_eq!(with_prompt.width, without_prompt.width);
+            record_viewport(&mut app, &state);
+            let (screen, state) = scroll_to_end(&mut app, session_id);
+            assert!(screen.contains(LAST_LINE), "{screen}");
+            assert_vertical_thumb_reaches_the_end(&state, session_id);
+            let body = state.text_selection_targets.last().unwrap();
+            let last_line = body.hit_maps.last().expect("visible DDL text");
+            assert_eq!(last_line.line, DDL_LINES - 1);
+            assert!(last_line.area.y < state.cursor.expect("search prompt cursor").position.y);
+
+            app.update(Action::ReadOnlyEditorKey {
+                session_id,
+                event: KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            });
+            let (_, state) = render(&app);
+            assert_eq!(published_viewport(&state).1, without_prompt);
+            record_viewport(&mut app, &state);
+            assert!(scroll_to_end(&mut app, session_id).0.contains(LAST_LINE));
+        }
+    }
+}
+
 #[test]
 fn relation_ddl_viewport_is_the_pane_and_reaches_the_last_line() {
     let (mut app, _, session_id) = relation_app(false);
@@ -349,7 +459,7 @@ fn relation_ddl_viewport_is_the_pane_and_reaches_the_last_line() {
     let (published_session, viewport) = published_viewport(&state);
     assert_eq!(published_session, session_id);
     assert_eq!(viewport.height, DDL_EDITOR_HEIGHT);
-    assert_eq!(viewport.width, pane_width(&state) - 2);
+    assert_eq!(viewport.width, pane_width(&state) - 2 - 4);
     assert_ne!(
         viewport.height,
         usize::from(HEIGHT) - 2,
@@ -387,7 +497,7 @@ fn principal_ddl_viewport_is_the_pane_and_reaches_the_last_line() {
 
     let (session_id, viewport) = published_viewport(&state);
     assert_eq!(viewport.height, DDL_EDITOR_HEIGHT);
-    assert_eq!(viewport.width, pane_width(&state) - 2);
+    assert_eq!(viewport.width, pane_width(&state) - 2 - 4);
 
     record_viewport(&mut app, &state);
     let (screen, state) = scroll_to_end(&mut app, session_id);

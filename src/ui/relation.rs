@@ -1482,17 +1482,26 @@ fn render_ddl(
     };
     let mut block = panel_block(" RELATION DDL ", app.focus == Focus::Results, theme);
     let chunks = relation_ddl_layout(area, status.is_some());
-    let viewport = {
-        let inner = block.inner(chunks[1]);
-        EditorViewport {
-            width: inner.width as usize,
-            height: inner.height as usize,
-        }
+    let inner = block.inner(chunks[1]);
+    let preliminary_viewport = EditorViewport {
+        width: usize::from(inner.width),
+        height: usize::from(inner.height),
     };
-    // Publish the real pane viewport: the runtime records it as the editor
-    // session viewport, and every scroll path clamps against it.
-    state.ddl_editor_viewport = Some((tab.ddl_editor_id, viewport));
-    let editor_snapshot = app.active_ddl_editor_snapshot(viewport).ok();
+    // A newly opened relation may not have an editor session yet. Publish the
+    // initial pane so runtime sync can create it, then redraw with text geometry.
+    state.ddl_editor_viewport = Some((tab.ddl_editor_id, preliminary_viewport));
+    let editor_snapshot = app
+        .active_ddl_editor_snapshot(preliminary_viewport)
+        .ok()
+        .and_then(|snapshot| {
+            let viewport = super::read_only_sql::editor_viewport(inner, &snapshot, true);
+            state.ddl_editor_viewport = Some((tab.ddl_editor_id, viewport));
+            if viewport == preliminary_viewport {
+                Some(snapshot)
+            } else {
+                app.active_ddl_editor_snapshot(viewport).ok()
+            }
+        });
     let snapshot = match &tab.ddl {
         RelationLoad::Ready(snapshot)
         | RelationLoad::Loading {

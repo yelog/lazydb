@@ -667,10 +667,17 @@ fn render_ddl_editor(
         return;
     };
     let editor_id = tab.editor_id;
-    // Publish the real pane viewport: the runtime records it as the editor
-    // session viewport, and every scroll path clamps against it.
-    state.ddl_editor_viewport = Some((editor_id, viewport));
-    let Some(snapshot) = app.active_principal_editor_snapshot(viewport).ok() else {
+    let Ok(preliminary_snapshot) = app.active_principal_editor_snapshot(viewport) else {
+        frame.render_widget(block, area);
+        return;
+    };
+    let text_viewport = super::read_only_sql::editor_viewport(inner, &preliminary_snapshot, true);
+    state.ddl_editor_viewport = Some((editor_id, text_viewport));
+    let Ok(snapshot) = (if text_viewport == viewport {
+        Ok(preliminary_snapshot)
+    } else {
+        app.active_principal_editor_snapshot(text_viewport)
+    }) else {
         frame.render_widget(block, area);
         return;
     };

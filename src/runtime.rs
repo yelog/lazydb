@@ -8888,15 +8888,17 @@ pub async fn run_tui(cli: Cli) -> Result<RunOutcome> {
         runtime.dispatch(Command::CheckSecretStoreAvailability);
         let initial_sequence = keymap.sequence_state(&app, std::time::Instant::now());
         rendered_sequence = initial_sequence.clone();
-        terminal.draw(|frame| {
-            ui::render_with_state_using_icons_sequence_and_theme(
-                frame,
-                &app,
-                &mut ui_state,
-                icons,
-                initial_sequence.as_ref(),
-                theme,
-            )
+        draw_with_ddl_viewport_sync(&mut app, &mut runtime, &mut ui_state, |app, state| {
+            terminal.draw(|frame| {
+                ui::render_with_state_using_icons_sequence_and_theme(
+                    frame,
+                    app,
+                    state,
+                    icons,
+                    initial_sequence.as_ref(),
+                    theme,
+                )
+            })
         })?;
         let startup_check_due =
             crate::persistence::update_check::UpdateCheckCache::read(&paths.update_check_file())
@@ -8913,7 +8915,6 @@ pub async fn run_tui(cli: Cli) -> Result<RunOutcome> {
             terminal.set_cursor_style(cursor.style)?;
         }
         sync_editor_viewport(&mut app, &mut runtime, &ui_state);
-        sync_ddl_editor_viewport(&mut app, &mut runtime, &ui_state);
         sync_output_viewport(&mut app, &mut runtime, &ui_state);
         sync_pane_layout(&mut app, &mut runtime, &ui_state);
         sync_grid_viewport(&mut app, &mut runtime, &ui_state);
@@ -9148,21 +9149,22 @@ pub async fn run_tui(cli: Cli) -> Result<RunOutcome> {
                 keymap.set_sequence_width(terminal.size()?.width);
                 let sequence = keymap.sequence_state(&app, std::time::Instant::now());
                 rendered_sequence = sequence.clone();
-                terminal.draw(|frame| {
-                    ui::render_with_state_using_icons_sequence_and_theme(
-                        frame,
-                        &app,
-                        &mut ui_state,
-                        icons,
-                        sequence.as_ref(),
-                        theme,
-                    )
+                draw_with_ddl_viewport_sync(&mut app, &mut runtime, &mut ui_state, |app, state| {
+                    terminal.draw(|frame| {
+                        ui::render_with_state_using_icons_sequence_and_theme(
+                            frame,
+                            app,
+                            state,
+                            icons,
+                            sequence.as_ref(),
+                            theme,
+                        )
+                    })
                 })?;
                 if let Some(cursor) = ui_state.cursor {
                     terminal.set_cursor_style(cursor.style)?;
                 }
                 sync_editor_viewport(&mut app, &mut runtime, &ui_state);
-                sync_ddl_editor_viewport(&mut app, &mut runtime, &ui_state);
                 sync_output_viewport(&mut app, &mut runtime, &ui_state);
                 sync_pane_layout(&mut app, &mut runtime, &ui_state);
                 sync_grid_viewport(&mut app, &mut runtime, &ui_state);
@@ -9409,9 +9411,25 @@ mod workspace_save_tests {
     }
 }
 
-fn sync_ddl_editor_viewport(app: &mut App, runtime: &mut Runtime, state: &UiState) {
+fn draw_with_ddl_viewport_sync(
+    app: &mut App,
+    runtime: &mut Runtime,
+    state: &mut UiState,
+    mut draw: impl FnMut(&App, &mut UiState) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    loop {
+        draw(app, state)?;
+        // Recording a new viewport can move the cursor's scroll window. Draw
+        // again immediately so the screen and mouse targets use that window.
+        if !sync_ddl_editor_viewport(app, runtime, state) {
+            return Ok(());
+        }
+    }
+}
+
+fn sync_ddl_editor_viewport(app: &mut App, runtime: &mut Runtime, state: &UiState) -> bool {
     let Some((session_id, viewport)) = state.ddl_editor_viewport else {
-        return;
+        return false;
     };
     let current = match app.tabs.get(app.active_tab) {
         Some(crate::model::tab::WorkspaceTab::Relation(tab)) if tab.ddl_editor_id == session_id => {
@@ -9420,17 +9438,165 @@ fn sync_ddl_editor_viewport(app: &mut App, runtime: &mut Runtime, state: &UiStat
         Some(crate::model::tab::WorkspaceTab::PrincipalDdl(tab)) if tab.editor_id == session_id => {
             app.active_principal_editor_viewport().ok()
         }
-        _ => return,
+        _ => return false,
     };
-    if current != Some(viewport) {
-        apply_action(
-            app,
-            runtime,
-            Action::DdlEditorViewportChanged {
-                session_id,
-                viewport,
+    if current == Some(viewport) {
+        return false;
+    }
+    apply_action(
+        app,
+        runtime,
+        Action::DdlEditorViewportChanged {
+            session_id,
+            viewport,
+        },
+    );
+    true
+}
+
+#[cfg(test)]
+mod ddl_viewport_sync_tests {
+    use super::*;
+    use crate::{
+        db::principal::{PrincipalEntry, PrincipalId, PrincipalKind, PrincipalScope},
+        model::{
+            editor::EditorViewport,
+            principal::{PrincipalDdlLoad, PrincipalDdlSnapshot, PrincipalDdlTab, PrincipalView},
+            tab::WorkspaceTab,
+            workspace::Focus,
+        },
+    };
+    use crossterm::event::KeyModifiers;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    #[tokio::test]
+    async fn ddl_resize_redraws_the_synchronized_scroll_window_before_returning() {
+        let profile = import_connection_url("sqlite::memory:", Some("viewport-test"))
+            .unwrap()
+            .profile;
+        let mut app = App::new(vec![profile.clone()]);
+        let mut tab = PrincipalDdlTab::new(PrincipalEntry {
+            id: PrincipalId {
+                profile_id: profile.id,
+                scope: PrincipalScope::Cluster,
+                native_id: "alice".into(),
+                host: None,
             },
+            kind: PrincipalKind::User,
+            name: "alice".into(),
+            native_kind: "user".into(),
+            system: false,
+        });
+        tab.view = PrincipalView::Ddl;
+        tab.load = PrincipalDdlLoad::Ready(PrincipalDdlSnapshot {
+            sql: (1..=100)
+                .map(|line| format!("-- LINE {line} {} LAST_COLUMN", "x".repeat(180)))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            connection: ConnectionIdentity {
+                profile_id: profile.id,
+                generation: 1,
+            },
+        });
+        let session_id = tab.editor_id;
+        app.tabs.push(WorkspaceTab::PrincipalDdl(tab));
+        app.active_tab = app.tabs.len() - 1;
+        app.focus = Focus::Results;
+        app.update(Action::DdlEditorViewportChanged {
+            session_id,
+            viewport: EditorViewport {
+                width: 110,
+                height: 33,
+            },
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let (sender, _receiver) = mpsc::unbounded_channel();
+        let mut runtime = Runtime::new(
+            vec![profile],
+            HashSet::new(),
+            HashMap::new(),
+            None,
+            ProfileStore::new(temp.path().join("connections.toml")),
+            Arc::new(NativeSecretStore),
+            sender,
         );
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        let mut state = UiState::new();
+        draw_with_ddl_viewport_sync(&mut app, &mut runtime, &mut state, |app, state| {
+            terminal
+                .draw(|frame| ui::render_with_state(frame, app, state))
+                .unwrap();
+            Ok(())
+        })
+        .unwrap();
+        for character in ['G', '$'] {
+            app.update(Action::ReadOnlyEditorKey {
+                session_id,
+                event: KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            });
+        }
+
+        for (width, height) in [(80, 20), (140, 45)] {
+            terminal.backend_mut().resize(width, height);
+            let mut frames = Vec::new();
+            draw_with_ddl_viewport_sync(&mut app, &mut runtime, &mut state, |app, state| {
+                terminal
+                    .draw(|frame| ui::render_with_state(frame, app, state))
+                    .unwrap();
+                frames.push(terminal.backend().buffer().clone());
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(frames.len(), 2, "viewport changes must redraw immediately");
+            assert_ne!(
+                frames[0], frames[1],
+                "resize must update the drawn scroll window"
+            );
+            let viewport = state.ddl_editor_viewport.unwrap().1;
+            assert_eq!(app.active_principal_editor_viewport().unwrap(), viewport);
+            let snapshot = app.active_principal_editor_snapshot(viewport).unwrap();
+            assert_eq!(snapshot.cursor.line, 99);
+            assert!(
+                snapshot.cursor_screen_cell.is_some(),
+                "resized cursor must be visible"
+            );
+            let cursor = state.cursor.unwrap().position;
+            assert!(cursor.x < width && cursor.y < height);
+            terminal
+                .draw(|frame| ui::render_with_state(frame, &app, &mut state))
+                .unwrap();
+            assert_eq!(
+                frames.last().unwrap(),
+                terminal.backend().buffer(),
+                "the final frame must already match the synchronized app state"
+            );
+        }
+
+        // Relations initialize their read-only editor on the first viewport
+        // action. Stabilization must also draw that new session's text geometry.
+        let mut tab = crate::model::relation::RelationTab::new("bootstrap");
+        tab.view = crate::model::relation::RelationView::Ddl;
+        let session_id = tab.ddl_editor_id;
+        app.tabs.push(WorkspaceTab::Relation(tab));
+        app.active_tab = app.tabs.len() - 1;
+        let mut draws = 0;
+        draw_with_ddl_viewport_sync(&mut app, &mut runtime, &mut state, |app, state| {
+            terminal
+                .draw(|frame| ui::render_with_state(frame, app, state))
+                .unwrap();
+            draws += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            draws, 3,
+            "initialize the session, then sync its text viewport"
+        );
+        let (published_id, viewport) = state.ddl_editor_viewport.unwrap();
+        assert_eq!(published_id, session_id);
+        assert_eq!(app.active_ddl_editor_viewport().unwrap(), viewport);
+        let body = state.text_selection_targets.last().unwrap();
+        assert_eq!(usize::from(body.hit_maps[0].area.width), viewport.width);
     }
 }
 
