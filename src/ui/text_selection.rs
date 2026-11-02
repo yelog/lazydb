@@ -179,6 +179,45 @@ impl TextSelectionTarget {
             .iter()
             .find_map(|hit_map| hit_map.source_at(column, row))
     }
+
+    /// Resolve a pointer that may sit outside the visible lines.
+    ///
+    /// A drag that leaves the text keeps selecting the nearest visible line
+    /// instead of cancelling.
+    pub fn position_clamped(&self, column: u16, row: u16) -> Option<TextPosition> {
+        let first = self.hit_maps.iter().min_by_key(|map| map.area.y)?;
+        let last = self.hit_maps.iter().max_by_key(|map| map.area.bottom())?;
+        let line = self
+            .hit_maps
+            .iter()
+            .find(|map| row >= map.area.y && row < map.area.bottom())
+            .unwrap_or(if row < first.area.y { first } else { last });
+        Some(line.source_at_horizontal_clamped(column))
+    }
+
+    /// Rows an editor must scroll so a drag that left the visible text keeps
+    /// extending the selection.
+    ///
+    /// Zero while the pointer is inside the text. The further the pointer is
+    /// from the edge it left, the faster the editor scrolls, so a drag that
+    /// only just leaves the pane stays precise.
+    pub fn drag_scroll_rows(&self, row: u16) -> isize {
+        let Some(first) = self.hit_maps.iter().map(|map| map.area.y).min() else {
+            return 0;
+        };
+        let Some(last) = self.hit_maps.iter().map(|map| map.area.bottom()).max() else {
+            return 0;
+        };
+        let (distance, direction) = if row < first {
+            (first.saturating_sub(row), -1)
+        } else if row >= last {
+            (row.saturating_sub(last).saturating_add(1), 1)
+        } else {
+            return 0;
+        };
+        let rows = 1 + isize::try_from(distance.saturating_sub(1).min(3)).unwrap_or(3);
+        direction * rows
+    }
 }
 
 fn contains(area: Rect, column: u16, row: u16) -> bool {

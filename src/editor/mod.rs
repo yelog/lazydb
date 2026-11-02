@@ -497,6 +497,25 @@ impl EditorWorkspace {
         self.press(id, key)
     }
 
+    pub(crate) fn can_scroll_vertically(&self, id: Uuid, rows: isize) -> bool {
+        let Some(session) = self.sessions.get(&id) else {
+            return false;
+        };
+        let (offset, max_row) =
+            if let Some((_, height, total, offset)) = session.preview_layout.get() {
+                (offset, total.saturating_sub(height))
+            } else {
+                let Ok(lines) = self.line_count(id) else {
+                    return false;
+                };
+                (
+                    session.viewport.corner.get_y(),
+                    lines.saturating_sub(session.viewport.get_height().max(1)),
+                )
+            };
+        offset.saturating_add_signed(rows).min(max_row) != offset
+    }
+
     pub(crate) fn scroll(
         &mut self,
         id: Uuid,
@@ -522,6 +541,14 @@ impl EditorWorkspace {
                         .saturating_add_signed(rows)
                         .min(total.saturating_sub(height)),
                 )));
+            return Ok(());
+        }
+        if columns == 0 {
+            let line_count = self.line_count(id)?;
+            let session = self.sessions.get_mut(&id).expect("session checked above");
+            let max_row = line_count.saturating_sub(session.viewport.get_height().max(1));
+            let corner = &mut session.viewport.corner;
+            corner.set_y(corner.get_y().saturating_add_signed(rows).min(max_row));
             return Ok(());
         }
         let text = self.text(id)?;
@@ -1504,7 +1531,7 @@ impl EditorWorkspace {
             session.pending_tail_scroll && viewport.width > 0 && viewport.height > 0;
         let max_row = total_lines.saturating_sub(viewport.height.max(1));
         let first_line = if let Some(preview_first_line) = session.preview_render_first_line.get() {
-            preview_first_line.min(max_row)
+            preview_first_line.min(total_lines.saturating_sub(1))
         } else if tail_requested {
             max_row
         } else {

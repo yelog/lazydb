@@ -1984,6 +1984,10 @@ impl App {
         crate::model::workspace::redis_pane_resize(self.focus, keys_focused, operator, count)
     }
 
+    pub(crate) fn text_drag_can_scroll(&self, session_id: Uuid, rows: isize) -> bool {
+        self.editor.can_scroll_vertically(session_id, rows)
+    }
+
     pub fn active_editor_viewport(&self) -> Result<EditorViewport, EditorError> {
         self.active_console_opt().map_or_else(
             || Err(EditorError::MissingSession(Uuid::nil())),

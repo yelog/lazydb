@@ -50,7 +50,7 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
     time::{Duration, Instant},
 };
@@ -415,6 +415,9 @@ pub struct UiState {
     pub pane_resize_drag: RefCell<Option<PaneResizeDrag>>,
     pub mouse_gesture: RefCell<Option<text_selection::GestureOwner>>,
     pub text_gesture: RefCell<Option<text_selection::TextGesture>>,
+    /// Last pointer cell of an active text-selection drag, so a held button
+    /// keeps scrolling instead of stopping at the visible edge.
+    text_drag_pointer: Cell<Option<(u16, u16)>>,
     pub input_gesture: RefCell<Option<text_selection::InputGesture>>,
     pub text_selection_targets: Vec<text_selection::TextSelectionTarget>,
     pub profile_input_targets: Vec<(ProfileField, text_selection::InputHitMap)>,
@@ -594,6 +597,7 @@ impl UiState {
             pane_resize_drag: RefCell::new(None),
             mouse_gesture: RefCell::new(None),
             text_gesture: RefCell::new(None),
+            text_drag_pointer: Cell::new(None),
             input_gesture: RefCell::new(None),
             text_selection_targets: Vec::new(),
             profile_input_targets: Vec::new(),
@@ -731,8 +735,35 @@ impl UiState {
             return false;
         }
         *owner = Some(text_selection::GestureOwner::Text);
+        self.text_drag_pointer.set(None);
         *self.text_gesture.borrow_mut() = Some(gesture);
         true
+    }
+
+    /// Record where an active text-selection drag points.
+    pub fn track_text_drag(&self, column: u16, row: u16) {
+        self.text_drag_pointer.set(Some((column, row)));
+    }
+
+    /// Extend the active text selection to the recorded drag pointer and report
+    /// the rows its editor must scroll to follow a pointer that left the
+    /// visible text. Returns `None` while the pointer stays inside the text.
+    pub fn follow_text_drag(&self) -> Option<(Uuid, isize)> {
+        let (column, row) = self.text_drag_pointer.get()?;
+        if *self.mouse_gesture.borrow() != Some(text_selection::GestureOwner::Text) {
+            return None;
+        }
+        let gesture = self.text_gesture.borrow().as_ref().copied()?;
+        let target = self
+            .text_selection_targets
+            .iter()
+            .rev()
+            .find(|target| target.session_id == gesture.session_id)?;
+        if let Some(end) = target.position_clamped(column, row) {
+            self.update_text_gesture(end);
+        }
+        let rows = target.drag_scroll_rows(row);
+        (rows != 0).then_some((gesture.session_id, rows))
     }
 
     pub fn update_text_gesture(&self, end: text_selection::TextPosition) -> bool {
@@ -750,6 +781,7 @@ impl UiState {
 
     pub fn end_mouse_gesture(&self) -> Option<text_selection::GestureOwner> {
         let owner = self.mouse_gesture.borrow_mut().take();
+        self.text_drag_pointer.set(None);
         self.text_gesture.borrow_mut().take();
         self.input_gesture.borrow_mut().take();
         owner
@@ -757,6 +789,7 @@ impl UiState {
 
     pub fn cancel_mouse_gesture(&self) {
         self.mouse_gesture.borrow_mut().take();
+        self.text_drag_pointer.set(None);
         self.text_gesture.borrow_mut().take();
         self.input_gesture.borrow_mut().take();
     }

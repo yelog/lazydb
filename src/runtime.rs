@@ -9137,10 +9137,27 @@ pub async fn run_tui(cli: Cli) -> Result<RunOutcome> {
                     for command in app.update(Action::RedisPreviewTick) {
                         runtime.dispatch(command);
                     }
+                    // A held text-selection drag keeps scrolling after its
+                    // pointer, so one gesture can select text off screen.
+                    let drag_autoscroll = ui_state.follow_text_drag().filter(|(session_id, rows)| {
+                        app.text_drag_can_scroll(*session_id, *rows)
+                    });
+                    if let Some((session_id, rows)) = drag_autoscroll {
+                        apply_action(
+                            &mut app,
+                            &mut runtime,
+                            Action::ReadOnlyEditorScroll {
+                                session_id,
+                                rows,
+                                columns: 0,
+                            },
+                        );
+                    }
                     redraw = profile_url_changed
                         || app.notifications.expire(now)
                         || ui_state.advance_animations(now)
                         || expired
+                        || drag_autoscroll.is_some()
                         || sequence_redraw_needed(&rendered_sequence, &after);
                 }
             }
