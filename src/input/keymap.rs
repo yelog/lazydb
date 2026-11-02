@@ -421,6 +421,13 @@ impl Keymap {
                 }
             });
         }
+        if app.overlay.is_none()
+            && is_ddl_only_focus(app)
+            && let Some(session_id) = ddl_only_session_id(app)
+            && app.editor_prompt_active(session_id)
+        {
+            return Some(Action::ReadOnlyEditorKey { session_id, event });
+        }
         if matches!(app.overlay, Some(Overlay::SqlHistory(_))) {
             self.pending = None;
             if let Some(crate::model::workspace::Overlay::SqlHistory(view)) = app.overlay.as_ref()
@@ -2232,8 +2239,8 @@ impl Keymap {
             return None;
         }
         if is_ddl_only_focus(app)
+            && is_read_only_editor_key(event)
             && let Some(session_id) = ddl_only_session_id(app)
-            && (app.editor_prompt_active(session_id) || is_read_only_editor_key(event))
         {
             return Some(Action::ReadOnlyEditorKey { session_id, event });
         }
