@@ -116,6 +116,9 @@ pub fn authorize_write(
         };
     }
     let analysis = classify_sql(sql, dialect(profile));
+    if profile.kind == crate::profile::DatabaseKind::BigQuery && analysis.statement_count != 1 {
+        return Err(PolicyError::UnknownSql);
+    }
     if analysis.risks.contains(&SqlRisk::Unknown) {
         return Err(PolicyError::UnknownSql);
     }

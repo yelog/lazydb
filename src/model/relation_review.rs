@@ -34,7 +34,7 @@ pub fn preview_sql_for_relation(
 ) -> String {
     let mut parts = Vec::with_capacity(2);
     match kind {
-        DatabaseKind::Snowflake => {
+        DatabaseKind::Snowflake | DatabaseKind::BigQuery => {
             if let Some(database) = relation.database.as_deref() {
                 parts.push(database);
             }

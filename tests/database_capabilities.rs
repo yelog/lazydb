@@ -108,3 +108,32 @@ fn opensearch_exposes_search_workflows_without_sql_controls() {
         DatabaseCapabilities::for_kind(DatabaseKind::Elasticsearch)
     );
 }
+
+#[test]
+fn bigquery_registers_only_implemented_workflows_and_cli_dialect() {
+    use lazydb::{cli::LspDialect, db::descriptor};
+    assert_eq!(
+        DatabaseCapabilities::for_kind(DatabaseKind::BigQuery),
+        DatabaseCapabilities {
+            catalog: true,
+            relation_ddl: true,
+            relation_edit: false,
+            monitoring: false,
+            manual_transactions: false,
+            cancellation: true,
+        }
+    );
+    assert_eq!(
+        descriptor::descriptor(DatabaseKind::BigQuery).name,
+        "bigquery"
+    );
+    assert!(descriptor::DRIVER_NAMES.contains(&"bigquery"));
+    assert_eq!(
+        descriptor::DRIVER_LIST.split(',').collect::<Vec<_>>(),
+        descriptor::DRIVER_NAMES,
+    );
+    assert_eq!(
+        LspDialect::from(DatabaseKind::BigQuery),
+        LspDialect::BigQuery
+    );
+}

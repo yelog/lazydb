@@ -4445,11 +4445,25 @@ fn render_result_tabs(
         .map_or_else(
             || "no result".to_owned(),
             |outcome| {
-                format!(
-                    "{} rows  ·  {} ms",
+                let mut text = format!(
+                    "{} rows  ·  {} ms{}",
                     outcome.stats.row_count,
-                    outcome.stats.total().as_millis()
-                )
+                    outcome.stats.total().as_millis(),
+                    if outcome.stats.truncated {
+                        "  ·  truncated"
+                    } else {
+                        ""
+                    }
+                );
+                if let Some(job) = &outcome.stats.bigquery {
+                    if let Some(bytes) = job.total_bytes_billed {
+                        text.push_str(&format!("  ·  {bytes} bytes billed"));
+                    }
+                    if job.cache_hit == Some(true) {
+                        text.push_str("  ·  cache hit");
+                    }
+                }
+                text
             },
         );
     let regions = render_tab_selectors(

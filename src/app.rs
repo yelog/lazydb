@@ -749,7 +749,8 @@ impl App {
             | DatabaseKind::MongoDb
             | DatabaseKind::Elasticsearch
             | DatabaseKind::OpenSearch
-            | DatabaseKind::Snowflake => crate::db::principal::PrincipalCapability::Unsupported,
+            | DatabaseKind::Snowflake
+            | DatabaseKind::BigQuery => crate::db::principal::PrincipalCapability::Unsupported,
             DatabaseKind::ClickHouse => {
                 crate::db::clickhouse::ClickHouseAdapter::principal_capability()
             }
@@ -1305,6 +1306,7 @@ impl App {
                         | DatabaseKind::CockroachDb
                         | DatabaseKind::TiDb
                         | DatabaseKind::Snowflake
+                        | DatabaseKind::BigQuery
                 )
             })
     }
@@ -2032,6 +2034,16 @@ impl App {
         Ok(snapshot)
     }
 
+    fn target_catalog_database<'a>(&'a self, target: &'a ExecutionTarget) -> &'a str {
+        self.profiles
+            .iter()
+            .find(|profile| {
+                profile.id == target.profile_id && profile.kind == DatabaseKind::BigQuery
+            })
+            .and_then(ConnectionProfile::catalog_database)
+            .unwrap_or(&target.database)
+    }
+
     fn semantic_catalog_snapshot(
         &self,
         target: &ExecutionTarget,
@@ -2056,7 +2068,7 @@ impl App {
                 };
                 if parent.native_path.as_slice()
                     != [
-                        target.database.as_str(),
+                        self.target_catalog_database(target),
                         target.schema.as_deref().unwrap_or_default(),
                     ]
                 {
@@ -2160,6 +2172,7 @@ impl App {
                 | DatabaseKind::Elasticsearch
                 | DatabaseKind::OpenSearch => SqlDialect::Generic,
                 DatabaseKind::Snowflake => SqlDialect::Snowflake,
+                DatabaseKind::BigQuery => SqlDialect::BigQuery,
                 DatabaseKind::ClickHouse => SqlDialect::ClickHouse,
             })
             .unwrap_or_else(|| self.sql_dialect());
@@ -4740,6 +4753,38 @@ impl App {
         {
             return Vec::new();
         }
+        // Normalize forwarding actions in this frame instead of recursively
+        // entering the large reducer match again on a bounded thread stack.
+        let action = match action {
+            Action::OpenPrincipalAccessDetails => match self.principal_access_detail_request() {
+                Some(request) => Action::OpenTextDetail(request),
+                None => return Vec::new(),
+            },
+            Action::ViewGridCell => match self.grid_value_detail(self.active_grid_column()) {
+                Some(request) => Action::OpenTextDetail(request),
+                None => return Vec::new(),
+            },
+            Action::ViewRecordViewValue => match self.record_view_value_detail() {
+                Some(request) => Action::OpenTextDetail(request),
+                None => return Vec::new(),
+            },
+            Action::SelectTargetSelector(index) => {
+                let Some(Overlay::TargetSelector {
+                    candidates,
+                    selected,
+                    ..
+                }) = self.overlay.as_mut()
+                else {
+                    return Vec::new();
+                };
+                if index >= candidates.len() {
+                    return Vec::new();
+                }
+                *selected = index;
+                Action::ConfirmTargetSelector
+            }
+            action => action,
+        };
         match action {
             Action::OpenPrincipalDrop => {
                 let Some(ExplorerNodeId::Principal { entry }) =
@@ -5279,11 +5324,9 @@ impl App {
                 }
                 Vec::new()
             }
-            Action::OpenPrincipalAccessDetails => self
-                .principal_access_detail_request()
-                .map_or_else(Vec::new, |request| {
-                    self.update(Action::OpenTextDetail(request))
-                }),
+            Action::OpenPrincipalAccessDetails => {
+                unreachable!("principal detail actions are normalized before dispatch")
+            }
             Action::PrincipalMutationFieldNext => {
                 if let Some(WorkspaceTab::PrincipalDdl(tab)) = self.tabs.get_mut(self.active_tab)
                     && let Some(form) = tab.mutation_draft.as_mut()
@@ -7886,20 +7929,16 @@ impl App {
                 ));
                 Vec::new()
             }
-            Action::ViewGridCell => self
-                .grid_value_detail(self.active_grid_column())
-                .map_or_else(Vec::new, |request| {
-                    self.update(Action::OpenTextDetail(request))
-                }),
+            Action::ViewGridCell => {
+                unreachable!("grid detail actions are normalized before dispatch")
+            }
             Action::CopyRecordViewCell => self.copy_record_view_cell(),
             Action::CopyRecordViewRow { include_headers } => {
                 self.copy_record_view_row(include_headers)
             }
-            Action::ViewRecordViewValue => self
-                .record_view_value_detail()
-                .map_or_else(Vec::new, |request| {
-                    self.update(Action::OpenTextDetail(request))
-                }),
+            Action::ViewRecordViewValue => {
+                unreachable!("record detail actions are normalized before dispatch")
+            }
             Action::CompleteMouseTextSelection {
                 source,
                 session_id,
@@ -12557,18 +12596,8 @@ impl App {
                 }
                 Vec::new()
             }
-            Action::SelectTargetSelector(index) => {
-                if let Some(Overlay::TargetSelector {
-                    candidates,
-                    selected,
-                    ..
-                }) = self.overlay.as_mut()
-                    && index < candidates.len()
-                {
-                    *selected = index;
-                    return self.update(Action::ConfirmTargetSelector);
-                }
-                Vec::new()
+            Action::SelectTargetSelector(_) => {
+                unreachable!("target selection is normalized before dispatch")
             }
             Action::ConfirmTargetSelector => {
                 let Some(Overlay::TargetSelector {
@@ -14689,6 +14718,28 @@ impl App {
                     last.result = ExecutionResult::Failed;
                 }
                 tab.query.capability = unavailable_sql_filter_after_unsuccessful_execution();
+                Vec::new()
+            }
+            Action::QueryCancellationCompleted {
+                tab_id,
+                generation,
+                connection,
+                message,
+            } => {
+                if self.console_query_owner_matches(tab_id, generation, connection)
+                    && self
+                        .tabs
+                        .iter()
+                        .find(|tab| tab.id() == tab_id)
+                        .and_then(WorkspaceTab::as_console)
+                        .is_some_and(|tab| tab.query_status == QueryStatus::Cancelled)
+                {
+                    self.append_console_output(
+                        tab_id,
+                        OutputEntry::plain(OutputKind::Cancelled, &message),
+                    );
+                    self.notify_warning("BigQuery cancellation", message);
+                }
                 Vec::new()
             }
             Action::QueryPageFinished {
@@ -19226,8 +19277,9 @@ impl App {
                 DatabaseKind::Redis | DatabaseKind::Valkey => Default::default(),
                 DatabaseKind::MongoDb
                 | DatabaseKind::Snowflake
-                | DatabaseKind::Elasticsearch
-                | DatabaseKind::OpenSearch => Default::default(),
+                | DatabaseKind::BigQuery
+                | DatabaseKind::OpenSearch
+                | DatabaseKind::Elasticsearch => Default::default(),
                 DatabaseKind::ClickHouse => {
                     crate::db::clickhouse::ClickHouseAdapter::catalog_mutation_capabilities()
                 }
@@ -20481,6 +20533,19 @@ impl App {
     }
 
     fn create_and_activate_sql_editor_named(&mut self, name: String) -> Vec<Command> {
+        let unsupported_project = match self.explorer.normalized.selected.as_ref() {
+            Some(ExplorerNodeId::Catalog(id)) => self.profiles.iter().find(|profile| {
+                profile.id == id.profile_id()
+                    && profile.kind == DatabaseKind::BigQuery
+                    && id.native_path.first().map(String::as_str) != profile.catalog_database()
+            }),
+            _ => None,
+        };
+        if unsupported_project.is_some() {
+            self.notify_warning("BigQuery", "Console targets use the profile's configured data project. Change Data project in the profile, or query the other project with a fully qualified table name.");
+            return Vec::new();
+        }
+
         let name = crate::model::console_document::normalize_name(name);
         if let Err(error) = crate::model::console_document::validate_name(&name) {
             self.notify_warning("Console", error.to_string());
@@ -20583,15 +20648,26 @@ impl App {
                     .profiles
                     .iter()
                     .find(|profile| profile.id == tab.descriptor.key.profile_id)?;
-                let target = ExecutionTarget {
-                    profile_id: profile.id,
-                    database: tab
-                        .descriptor
-                        .qualified_name
-                        .database
-                        .clone()
-                        .or_else(|| profile.database.clone())?,
-                    schema: tab.descriptor.qualified_name.schema.clone(),
+                let target = if profile.kind == DatabaseKind::BigQuery {
+                    let mut target = ExecutionTarget::from_profile(profile);
+                    if tab.descriptor.qualified_name.database.as_deref()
+                        != profile.catalog_database()
+                    {
+                        return None;
+                    }
+                    target.schema = tab.descriptor.qualified_name.schema.clone();
+                    target
+                } else {
+                    ExecutionTarget {
+                        profile_id: profile.id,
+                        database: tab
+                            .descriptor
+                            .qualified_name
+                            .database
+                            .clone()
+                            .or_else(|| profile.database.clone())?,
+                        schema: tab.descriptor.qualified_name.schema.clone(),
+                    }
                 };
                 if self.is_sql_editor_target(&target) {
                     return Some(target);
@@ -21570,9 +21646,15 @@ impl App {
                 if !selectable {
                     continue;
                 }
-                let Some(database) = entry.qualified_name.database.clone() else {
+                let Some(mut database) = entry.qualified_name.database.clone() else {
                     continue;
                 };
+                if profile.kind == DatabaseKind::BigQuery {
+                    if profile.catalog_database() != Some(database.as_str()) {
+                        continue;
+                    }
+                    database = default.database.clone();
+                }
                 let schema = match profile.kind {
                     DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::TiDb => {
                         Some(database.clone())
@@ -21583,7 +21665,8 @@ impl App {
                     | DatabaseKind::SqlServer
                     | DatabaseKind::Sqlite
                     | DatabaseKind::DuckDb
-                    | DatabaseKind::Snowflake => entry.qualified_name.schema.clone(),
+                    | DatabaseKind::Snowflake
+                    | DatabaseKind::BigQuery => entry.qualified_name.schema.clone(),
                     DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb => None,
                     DatabaseKind::Elasticsearch | DatabaseKind::OpenSearch => {
                         Some(database.clone())
@@ -21797,7 +21880,8 @@ impl App {
                     | DatabaseKind::CockroachDb
                     | DatabaseKind::SqlServer
                     | DatabaseKind::Oracle
-                    | DatabaseKind::Snowflake => None,
+                    | DatabaseKind::Snowflake
+                    | DatabaseKind::BigQuery => None,
                     DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb => None,
                     DatabaseKind::Elasticsearch | DatabaseKind::OpenSearch => {
                         Some(database.clone())
@@ -22015,13 +22099,27 @@ impl App {
         generation: u64,
         connection: ConnectionIdentity,
     ) -> bool {
+        self.console_query_owner_matches(tab_id, generation, connection)
+            && self
+                .tabs
+                .iter()
+                .find(|tab| tab.id() == tab_id)
+                .and_then(WorkspaceTab::as_console)
+                .is_some_and(|tab| tab.query_status != QueryStatus::Cancelled)
+    }
+
+    fn console_query_owner_matches(
+        &self,
+        tab_id: Uuid,
+        generation: u64,
+        connection: ConnectionIdentity,
+    ) -> bool {
         self.tabs
             .iter()
             .find(|tab| tab.id() == tab_id)
             .and_then(WorkspaceTab::as_console)
             .is_some_and(|tab| {
-                tab.query_status != QueryStatus::Cancelled
-                    && tab.generation == generation
+                tab.generation == generation
                     && (tab.execution_connection == Some(connection)
                         || (tab.execution_connection.is_none()
                             && tab
@@ -22453,7 +22551,7 @@ impl App {
         let context = tab.execution_target.as_ref().map(|target| {
             SemanticContext::new(
                 dialect,
-                Some(target.database.clone()),
+                Some(self.target_catalog_database(target).to_owned()),
                 target.schema.clone(),
             )
         });
@@ -22534,7 +22632,12 @@ impl App {
         let completion_target = self
             .active_console_opt()
             .and_then(|tab| tab.execution_target.as_ref())
-            .map(|target| (target.database.clone(), target.schema.clone()));
+            .map(|target| {
+                (
+                    self.target_catalog_database(target).to_owned(),
+                    target.schema.clone(),
+                )
+            });
         let completion_context = sql::CompletionContext {
             database: completion_target
                 .as_ref()
@@ -22791,6 +22894,7 @@ impl App {
             | DatabaseKind::Elasticsearch
             | DatabaseKind::OpenSearch => SqlDialect::Generic,
             DatabaseKind::Snowflake => SqlDialect::Snowflake,
+            DatabaseKind::BigQuery => SqlDialect::BigQuery,
             DatabaseKind::ClickHouse => SqlDialect::ClickHouse,
         }
     }
@@ -22813,6 +22917,7 @@ impl App {
                 | DatabaseKind::OpenSearch,
             ) => SqlDialect::Generic,
             Some(DatabaseKind::Snowflake) => SqlDialect::Snowflake,
+            Some(DatabaseKind::BigQuery) => SqlDialect::BigQuery,
             Some(DatabaseKind::ClickHouse) => SqlDialect::ClickHouse,
             None => SqlDialect::Generic,
         }
@@ -22845,6 +22950,7 @@ impl App {
             )
             | None => SqlDialect::Generic,
             Some(DatabaseKind::Snowflake) => SqlDialect::Snowflake,
+            Some(DatabaseKind::BigQuery) => SqlDialect::BigQuery,
             Some(DatabaseKind::ClickHouse) => SqlDialect::ClickHouse,
         }
     }
@@ -23286,6 +23392,14 @@ impl App {
         {
             return self.run_search_rest_request(tab_id, target, connection, scope);
         }
+        if let Some(profile) = self.profiles.iter().find(|profile| {
+            profile.id == target.profile_id && profile.kind == DatabaseKind::BigQuery
+        }) && let Err(error) =
+            crate::db::bigquery::authorize_statement(&scope.sql, profile.read_only)
+        {
+            self.notify_warning("BigQuery", error.message);
+            return Vec::new();
+        }
         self.normalize_tidb_console_mode(tab_id);
         match sql::classify_transaction_sql(&scope.sql, dialect) {
             sql::TransactionSqlClassification::Control(control) => {
@@ -23673,6 +23787,14 @@ impl App {
     fn dispatch_draft(&mut self, draft: sql::ExecutionDraft) -> Vec<Command> {
         if let Err(message) = self.validate_draft(&draft) {
             self.notify_error("Query", &message);
+            return Vec::new();
+        }
+        if let Some(profile) = self.profiles.iter().find(|profile| {
+            profile.id == draft.target.profile_id && profile.kind == DatabaseKind::BigQuery
+        }) && let Err(error) =
+            crate::db::bigquery::authorize_statement(&draft.sql, profile.read_only)
+        {
+            self.notify_warning("BigQuery", error.message);
             return Vec::new();
         }
         let native_rest = self
@@ -27665,7 +27787,7 @@ impl App {
                             && entry
                                 .qualified_name
                                 .object
-                                .eq_ignore_ascii_case(&target.database)
+                                .eq_ignore_ascii_case(self.target_catalog_database(target))
                     })
                     .map(|entry| entry.id.clone())
             });
@@ -31139,7 +31261,10 @@ impl App {
             .is_none_or(|profile| {
                 !matches!(
                     profile.kind,
-                    DatabaseKind::CockroachDb | DatabaseKind::TiDb | DatabaseKind::Snowflake
+                    DatabaseKind::CockroachDb
+                        | DatabaseKind::TiDb
+                        | DatabaseKind::Snowflake
+                        | DatabaseKind::BigQuery
                 )
             });
         let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(tab_index) else {
@@ -31400,6 +31525,9 @@ fn relation_execution_target(
     profile: &ConnectionProfile,
 ) -> Option<ExecutionTarget> {
     let mut target = ExecutionTarget::from_profile(profile);
+    if profile.kind == DatabaseKind::BigQuery {
+        return target.is_valid(profile).then_some(target);
+    }
     if let Some(database) = tab.descriptor.qualified_name.database.clone() {
         target.database = database;
     }
@@ -31410,6 +31538,7 @@ fn relation_execution_target(
             | DatabaseKind::SqlServer
             | DatabaseKind::Oracle
             | DatabaseKind::Snowflake
+            | DatabaseKind::BigQuery
     ) {
         target.schema = tab.descriptor.qualified_name.schema.clone();
     }
@@ -31466,6 +31595,7 @@ fn add_explorer_profile(
     placement: crate::model::explorer::ProfilePlacement,
 ) {
     let endpoint = match profile.kind {
+        DatabaseKind::BigQuery => profile.database.clone().unwrap_or_default(),
         DatabaseKind::Sqlite => profile
             .sqlite_path
             .as_ref()
@@ -31610,7 +31740,7 @@ fn format_execution_log(
     } else {
         ""
     };
-    let summary = if last.draft.statement_count == 1
+    let mut summary = if last.draft.statement_count == 1
         && last.draft.risks.len() == 1
         && last.draft.risks[0] == sql::SqlRisk::ReadOnly
     {
@@ -31632,6 +31762,28 @@ fn format_execution_log(
             stats.fetch.as_millis(),
         )
     };
+    if let Some(job) = &stats.bigquery {
+        summary.push_str(&format!(
+            "\nBigQuery job: {} (project: {}, location: {})",
+            crate::security::sanitize_terminal_text(&job.job_id),
+            crate::security::sanitize_terminal_text(&job.project),
+            crate::security::sanitize_terminal_text(
+                job.location.as_deref().unwrap_or("unspecified")
+            ),
+        ));
+        for (label, value) in [
+            ("bytes processed", job.total_bytes_processed),
+            ("bytes billed", job.total_bytes_billed),
+            ("slot ms", job.slot_millis),
+        ] {
+            if let Some(value) = value {
+                summary.push_str(&format!("; {label}: {value}"));
+            }
+        }
+        if let Some(cache_hit) = job.cache_hit {
+            summary.push_str(&format!("; cache hit: {cache_hit}"));
+        }
+    }
     Some((
         context,
         OutputEntry::timestamped(OutputKind::Success, &timestamp, summary),
@@ -33341,6 +33493,42 @@ mod tests {
     }
 
     #[test]
+    fn bigquery_execution_log_retains_job_identity_and_optional_statistics() {
+        let (mut app, tab_id, generation) = connected_query_app("SELECT id FROM users");
+        let connection = app.connection.active_identity().unwrap();
+        let mut outcome = empty_outcome();
+        outcome.stats.bigquery = Some(Box::new(crate::db::query::BigQueryJobStats {
+            job_id: "lazydb_job_123".into(),
+            project: "billing-project".into(),
+            location: Some("EU".into()),
+            total_bytes_processed: Some(1234),
+            total_bytes_billed: Some(4096),
+            slot_millis: Some(42),
+            cache_hit: Some(false),
+        }));
+        app.update(Action::QueryFinished {
+            tab_id,
+            generation,
+            connection,
+            outcome,
+        });
+        let output = app
+            .editor_text(app.active_console().output_editor_id)
+            .unwrap();
+        for expected in [
+            "lazydb_job_123",
+            "project: billing-project",
+            "location: EU",
+            "bytes processed: 1234",
+            "bytes billed: 4096",
+            "slot ms: 42",
+            "cache hit: false",
+        ] {
+            assert!(output.contains(expected), "missing {expected}: {output}");
+        }
+    }
+
+    #[test]
     fn truncated_query_result_is_explained_in_console_output() {
         let (mut app, tab_id, generation) = connected_query_app("SELECT id FROM users");
         let connection = app.connection.active_identity().unwrap();
@@ -33384,6 +33572,66 @@ mod tests {
             Some(&ExecutionResult::Failed)
         );
         assert!(app.update(Action::SubmitDataQuery).is_empty());
+    }
+
+    #[test]
+    fn bigquery_cancellation_completion_requires_cancelled_owner_and_generation() {
+        for stale in ["current", "new-run", "other-connection", "other-tab"] {
+            let (mut app, tab_id, generation) = connected_query_app("SELECT * FROM users");
+            let mut connection = app.connection.active_identity().unwrap();
+            app.update(Action::CancelActiveQuery);
+            let notifications = app.notifications.history().count();
+            let output_id = app.active_console().output_editor_id;
+            let output = app.editor_text(output_id).unwrap().to_owned();
+            let mut completion_tab = tab_id;
+            match stale {
+                "new-run" => {
+                    app.active_console_mut().generation += 1;
+                }
+                "other-connection" => {
+                    connection.generation += 1;
+                }
+                "other-tab" => {
+                    completion_tab = Uuid::new_v4();
+                }
+                _ => {}
+            }
+            app.update(Action::QueryCancellationCompleted {
+                tab_id: completion_tab,
+                generation,
+                connection,
+                message: "cancellation request accepted; remote final state unknown".into(),
+            });
+            assert_eq!(app.active_console().query_status, QueryStatus::Cancelled);
+            if stale == "current" {
+                assert_eq!(app.notifications.history().count(), notifications + 1);
+                assert!(
+                    app.editor_text(output_id)
+                        .unwrap()
+                        .contains("remote final state unknown")
+                );
+            } else {
+                assert_eq!(app.notifications.history().count(), notifications);
+                assert_eq!(app.editor_text(output_id).unwrap(), output);
+            }
+        }
+    }
+
+    #[test]
+    fn bigquery_cross_project_relation_uses_configured_billing_target() {
+        let profile = import_connection_url(
+            "bigquery://billing-project/analytics?data_project=data-project",
+            None,
+        )
+        .unwrap()
+        .profile;
+        let mut tab = RelationTab::new("other-project.other_dataset.events");
+        tab.descriptor.qualified_name.database = Some("other-project".into());
+        tab.descriptor.qualified_name.schema = Some("other_dataset".into());
+        assert_eq!(
+            super::relation_execution_target(&tab, &profile),
+            Some(ExecutionTarget::from_profile(&profile))
+        );
     }
 
     #[test]

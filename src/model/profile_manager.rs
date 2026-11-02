@@ -115,6 +115,11 @@ pub enum ProfileField {
     SqliteMemory,
     SqlitePath,
     DuckDbPath,
+    CredentialsFile,
+    Location,
+    DataProject,
+    MaximumBytesBilled,
+    QueryTimeoutSecs,
     Test,
     Save,
     Cancel,
@@ -209,6 +214,7 @@ impl DiscoveryFingerprint {
         profile.database.hash(&mut hasher);
         profile.default_schema.hash(&mut hasher);
         profile.snowflake_options.hash(&mut hasher);
+        profile.bigquery_options.hash(&mut hasher);
         (profile.ssl_mode as u8).hash(&mut hasher);
         profile.elasticsearch_options.hash(&mut hasher);
         profile.opensearch_options.hash(&mut hasher);
@@ -400,6 +406,12 @@ pub struct ProfileDraft {
     pub pg_options: Option<crate::profile::PgConnectionOptions>,
     pub snowflake_options: Option<crate::profile::SnowflakeConnectionOptions>,
     pub duckdb_path: TextInput,
+    pub credentials_file: TextInput,
+    pub location: TextInput,
+    pub data_project: TextInput,
+    pub maximum_bytes_billed: TextInput,
+    pub query_timeout_secs: TextInput,
+
     pub original_credential_policy: CredentialPolicy,
     pub has_stored_credential: bool,
     pub catalog_scope: CatalogScope,
@@ -446,6 +458,7 @@ impl ProfileDraft {
 
     pub fn new(kind: DatabaseKind) -> Self {
         let (host, port, schema, ssl_mode) = match kind {
+            DatabaseKind::BigQuery => ("", "", "", SslMode::VerifyFull),
             DatabaseKind::Snowflake => ("", "443", "PUBLIC", SslMode::VerifyFull),
             DatabaseKind::Postgres => ("localhost", "5432", "public", SslMode::Prefer),
             DatabaseKind::CockroachDb => ("localhost", "26257", "public", SslMode::Prefer),
@@ -501,6 +514,12 @@ impl ProfileDraft {
             snowflake_options: (kind == DatabaseKind::Snowflake)
                 .then(crate::profile::SnowflakeConnectionOptions::default),
             duckdb_path: TextInput::default(),
+            credentials_file: TextInput::default(),
+            location: TextInput::default(),
+            data_project: TextInput::default(),
+            maximum_bytes_billed: TextInput::from("1000000000"),
+            query_timeout_secs: TextInput::from("120"),
+
             original_credential_policy: CredentialPolicy::None,
             has_stored_credential: false,
             catalog_scope: CatalogScope::for_profile(kind, "", Some(schema)),
@@ -555,10 +574,11 @@ impl ProfileDraft {
             .unwrap_or_default();
         let derived_scope = CatalogScope::for_profile(
             profile.kind,
-            profile.database.as_deref().unwrap_or_default(),
+            profile.catalog_database().unwrap_or_default(),
             profile.default_schema.as_deref(),
         );
 
+        let bigquery = profile.bigquery_options.clone().unwrap_or_default();
         let mut draft = Self {
             profile_id: profile.id,
             access: profile.access.clone(),
@@ -587,6 +607,11 @@ impl ProfileDraft {
             mongodb_options: profile.mongodb_options.clone(),
             pg_options: profile.pg_options.clone(),
             snowflake_options: profile.snowflake_options.clone(),
+            credentials_file: TextInput::from(bigquery.credentials_file.unwrap_or_default()),
+            location: TextInput::from(bigquery.location.unwrap_or_default()),
+            data_project: TextInput::from(bigquery.data_project.unwrap_or_default()),
+            maximum_bytes_billed: TextInput::from(bigquery.maximum_bytes_billed.to_string()),
+            query_timeout_secs: TextInput::from(bigquery.query_timeout_secs.to_string()),
             user: TextInput::from(profile.user.clone().unwrap_or_default()),
             password: SecretTextInput::default(),
             database: TextInput::from(profile.database.clone().unwrap_or_default()),
@@ -859,10 +884,26 @@ impl ProfileDraft {
         };
         self.url_format = parsed.format;
         self.mongodb_options = parsed.mongodb_options.clone();
-        if parsed.kind.is_postgres_compatible() {
+        if parsed.kind.is_postgres_compatible() || parsed.kind == DatabaseKind::BigQuery {
             self.pg_options = parsed.pg_options;
         }
         self.snowflake_options = parsed.snowflake_options.clone();
+        let bigquery = parsed.bigquery_options.unwrap_or_default();
+        self.credentials_file
+            .set(bigquery.credentials_file.unwrap_or_default());
+        self.location.set(bigquery.location.unwrap_or_default());
+        self.data_project
+            .set(bigquery.data_project.unwrap_or_default());
+        self.maximum_bytes_billed
+            .set(bigquery.maximum_bytes_billed.to_string());
+        self.query_timeout_secs
+            .set(bigquery.query_timeout_secs.to_string());
+        if parsed.kind == DatabaseKind::BigQuery {
+            self.password = SecretTextInput::default();
+            self.has_stored_credential = false;
+            self.credential_reset = true;
+            self.credential_changed();
+        }
         self.host.set(parsed.host.unwrap_or_default());
         self.port
             .set(parsed.port.map(|port| port.to_string()).unwrap_or_default());
@@ -1042,6 +1083,11 @@ impl ProfileDraft {
                 | ProfileField::Schema
                 | ProfileField::SqlitePath
                 | ProfileField::DuckDbPath
+                | ProfileField::CredentialsFile
+                | ProfileField::Location
+                | ProfileField::DataProject
+                | ProfileField::MaximumBytesBilled
+                | ProfileField::QueryTimeoutSecs
         ) {
             self.invalidate_catalog_discovery();
         }
@@ -1081,6 +1127,7 @@ impl ProfileDraft {
         if matches!(
             field,
             ProfileField::Database
+                | ProfileField::DataProject
                 | ProfileField::Schema
                 | ProfileField::SqlitePath
                 | ProfileField::DuckDbPath
@@ -1149,6 +1196,7 @@ impl ProfileDraft {
 
     pub fn visible_fields(&self) -> &'static [ProfileField] {
         match (self.kind, self.sqlite_memory) {
+            (DatabaseKind::BigQuery, _) => &BIGQUERY_FIELDS,
             (DatabaseKind::Postgres | DatabaseKind::CockroachDb, _) => &POSTGRES_FIELDS,
             (DatabaseKind::MySql, _) => &MYSQL_FIELDS,
             (DatabaseKind::SqlServer | DatabaseKind::Snowflake, _) => &POSTGRES_FIELDS,
@@ -1176,7 +1224,7 @@ impl ProfileDraft {
     }
 
     pub fn password_storage_choices(&self) -> &'static [PasswordStorageChoice] {
-        if self.kind == DatabaseKind::Sqlite {
+        if matches!(self.kind, DatabaseKind::Sqlite | DatabaseKind::BigQuery) {
             &[]
         } else if matches!(
             self.system_credential_availability,
@@ -1226,6 +1274,23 @@ impl ProfileDraft {
             mongodb_options,
             duckdb_path,
         ) = match self.kind {
+            DatabaseKind::BigQuery => {
+                let profile = self.connection_profile_for_url()?;
+                profile
+                    .validate_bigquery()
+                    .map_err(bigquery_validation_error)?;
+                (
+                    None,
+                    None,
+                    None,
+                    profile.database,
+                    profile.default_schema,
+                    None,
+                    SslMode::VerifyFull,
+                    None,
+                    None,
+                )
+            }
             DatabaseKind::Postgres
             | DatabaseKind::CockroachDb
             | DatabaseKind::MySql
@@ -1555,14 +1620,22 @@ impl ProfileDraft {
         let catalog_scope = match self.catalog_scope_mode {
             CatalogScopeMode::Derived => CatalogScope::for_profile(
                 self.kind,
-                database.as_deref().unwrap_or_default(),
+                if self.kind == DatabaseKind::BigQuery {
+                    non_empty(&self.data_project).unwrap_or(database.as_deref().unwrap_or_default())
+                } else {
+                    database.as_deref().unwrap_or_default()
+                },
                 default_schema.as_deref(),
             ),
             CatalogScopeMode::Explicit => self.catalog_scope.clone(),
         };
         catalog_scope
             .validate(
-                database.as_deref().unwrap_or_default(),
+                if self.kind == DatabaseKind::BigQuery {
+                    non_empty(&self.data_project).unwrap_or(database.as_deref().unwrap_or_default())
+                } else {
+                    database.as_deref().unwrap_or_default()
+                },
                 default_schema.as_deref(),
             )
             .map_err(|error| {
@@ -1586,8 +1659,13 @@ impl ProfileDraft {
                 mongodb_options,
                 elasticsearch_options: self.elasticsearch_options(),
                 opensearch_options: self.opensearch_options(),
-                pg_options: self.pg_options.clone(),
-                snowflake_options: self.snowflake_options.clone(),
+                pg_options: (self.kind != DatabaseKind::BigQuery)
+                    .then(|| self.pg_options.clone())
+                    .flatten(),
+                snowflake_options: (self.kind != DatabaseKind::BigQuery)
+                    .then(|| self.snowflake_options.clone())
+                    .flatten(),
+                bigquery_options: self.bigquery_options()?,
                 duckdb_path,
                 ssl_mode,
                 credential_policy,
@@ -1598,6 +1676,51 @@ impl ProfileDraft {
             credential,
             self.credential_revision,
         ))
+    }
+
+    fn bigquery_options(
+        &self,
+    ) -> Result<Option<crate::profile::BigQueryOptions>, ProfileValidationError> {
+        if self.kind != DatabaseKind::BigQuery {
+            return Ok(None);
+        }
+        let number = |input: &TextInput, field, maximum| {
+            let raw = input.value().trim();
+            let invalid = || {
+                ProfileValidationError::new(
+                    field,
+                    format!("must be an integer from 1 to {maximum}"),
+                )
+            };
+            if raw.is_empty() || !raw.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err(invalid());
+            }
+            raw.parse::<u64>()
+                .ok()
+                .filter(|value| *value > 0 && *value <= maximum)
+                .ok_or_else(invalid)
+        };
+        let options = crate::profile::BigQueryOptions {
+            credentials_file: optional(&self.credentials_file),
+            location: optional(&self.location),
+            data_project: optional(&self.data_project),
+            maximum_bytes_billed: number(
+                &self.maximum_bytes_billed,
+                ProfileField::MaximumBytesBilled,
+                i64::MAX as u64,
+            )?,
+            query_timeout_secs: number(
+                &self.query_timeout_secs,
+                ProfileField::QueryTimeoutSecs,
+                86_400,
+            )?,
+        };
+        options.validate().map_err(|error| {
+            if matches!(&error, crate::profile::ProfileError::InvalidQueryParameter(name) if name == "project") {
+                ProfileValidationError::new(ProfileField::DataProject, error.to_string())
+            } else { bigquery_validation_error(error) }
+        })?;
+        Ok(Some(options))
     }
 
     fn elasticsearch_options(&self) -> Option<crate::profile::ElasticsearchConnectionOptions> {
@@ -1649,7 +1772,7 @@ impl ProfileDraft {
         {
             return CredentialUpdate::Forget;
         }
-        if self.kind == DatabaseKind::Sqlite {
+        if matches!(self.kind, DatabaseKind::Sqlite | DatabaseKind::BigQuery) {
             return if !matches!(self.original_credential_policy, CredentialPolicy::None) {
                 CredentialUpdate::Forget
             } else {
@@ -1680,6 +1803,10 @@ impl ProfileDraft {
             return;
         }
         let (database, default_schema) = match self.kind {
+            DatabaseKind::BigQuery => (
+                non_empty(&self.data_project).unwrap_or(self.database.value()),
+                optional(&self.schema),
+            ),
             DatabaseKind::Postgres
             | DatabaseKind::CockroachDb
             | DatabaseKind::SqlServer
@@ -1728,6 +1855,11 @@ impl ProfileDraft {
             ProfileField::Schema => Some(&mut self.schema),
             ProfileField::SqlitePath => Some(&mut self.sqlite_path),
             ProfileField::DuckDbPath => Some(&mut self.duckdb_path),
+            ProfileField::CredentialsFile => Some(&mut self.credentials_file),
+            ProfileField::Location => Some(&mut self.location),
+            ProfileField::DataProject => Some(&mut self.data_project),
+            ProfileField::MaximumBytesBilled => Some(&mut self.maximum_bytes_billed),
+            ProfileField::QueryTimeoutSecs => Some(&mut self.query_timeout_secs),
             ProfileField::CaCertPath => Some(&mut self.ca_cert_path),
             _ => None,
         }
@@ -1750,6 +1882,11 @@ impl ProfileDraft {
             ProfileField::Schema => Some(&self.schema),
             ProfileField::SqlitePath => Some(&self.sqlite_path),
             ProfileField::DuckDbPath => Some(&self.duckdb_path),
+            ProfileField::CredentialsFile => Some(&self.credentials_file),
+            ProfileField::Location => Some(&self.location),
+            ProfileField::DataProject => Some(&self.data_project),
+            ProfileField::MaximumBytesBilled => Some(&self.maximum_bytes_billed),
+            ProfileField::QueryTimeoutSecs => Some(&self.query_timeout_secs),
             ProfileField::CaCertPath => Some(&self.ca_cert_path),
             _ => None,
         }
@@ -1834,6 +1971,17 @@ impl ProfileDraft {
             ConnectionUrlFormat::default_for(kind)
         };
         match kind {
+            DatabaseKind::BigQuery => {
+                self.host.set("");
+                self.port.set("");
+                self.user.set("");
+                self.password = SecretTextInput::default();
+                self.has_stored_credential = false;
+                self.credential_reset = true;
+                self.credential_changed();
+                self.schema.set("");
+                self.ssl_mode = SslMode::VerifyFull;
+            }
             DatabaseKind::Snowflake => {
                 self.ssl_mode = SslMode::VerifyFull;
                 if self.schema.value().trim().is_empty()
@@ -2016,6 +2164,23 @@ impl ProfileDraft {
 
     fn connection_profile_for_url(&self) -> Result<ConnectionProfile, ProfileValidationError> {
         let (host, port, user, database, default_schema, sqlite_path) = match self.kind {
+            DatabaseKind::BigQuery => {
+                let project = required(
+                    &self.database,
+                    ProfileField::Database,
+                    "execution / billing project is required",
+                )?;
+                crate::profile::validate_bigquery_project(&project)
+                    .map_err(bigquery_validation_error)?;
+                (
+                    None,
+                    None,
+                    None,
+                    Some(project),
+                    optional(&self.schema),
+                    None,
+                )
+            }
             DatabaseKind::DuckDb => {
                 let raw = optional(&self.duckdb_path);
                 if raw.is_none() && self.read_only {
@@ -2263,11 +2428,18 @@ impl ProfileDraft {
             database,
             default_schema,
             sqlite_path,
-            mongodb_options: self.mongodb_options.clone(),
+            mongodb_options: (self.kind != DatabaseKind::BigQuery)
+                .then(|| self.mongodb_options.clone())
+                .flatten(),
             elasticsearch_options: self.elasticsearch_options(),
             opensearch_options: self.opensearch_options(),
-            pg_options: self.pg_options.clone(),
-            snowflake_options: self.snowflake_options.clone(),
+            pg_options: (self.kind != DatabaseKind::BigQuery)
+                .then(|| self.pg_options.clone())
+                .flatten(),
+            snowflake_options: (self.kind != DatabaseKind::BigQuery)
+                .then(|| self.snowflake_options.clone())
+                .flatten(),
+            bigquery_options: self.bigquery_options()?,
             duckdb_path: (self.kind == DatabaseKind::DuckDb)
                 .then(|| optional(&self.duckdb_path).map(PathBuf::from))
                 .flatten(),
@@ -3097,6 +3269,20 @@ fn non_empty(input: &TextInput) -> Option<&str> {
     (!value.is_empty()).then_some(value)
 }
 
+fn bigquery_validation_error(error: crate::profile::ProfileError) -> ProfileValidationError {
+    let field = match &error {
+        crate::profile::ProfileError::InvalidQueryParameter(name) => match name.as_str() {
+            "project" => ProfileField::Database,
+            "dataset" => ProfileField::Schema,
+            "credentials_file" => ProfileField::CredentialsFile,
+            "location" => ProfileField::Location,
+            _ => ProfileField::Url,
+        },
+        _ => ProfileField::Url,
+    };
+    ProfileValidationError::new(field, error.to_string())
+}
+
 fn default_port(kind: DatabaseKind) -> Option<u16> {
     match kind {
         DatabaseKind::Postgres => Some(5432),
@@ -3105,7 +3291,7 @@ fn default_port(kind: DatabaseKind) -> Option<u16> {
         DatabaseKind::TiDb => Some(4000),
         DatabaseKind::Oracle => Some(1521),
         DatabaseKind::SqlServer => Some(1433),
-        DatabaseKind::Sqlite | DatabaseKind::DuckDb => None,
+        DatabaseKind::Sqlite | DatabaseKind::DuckDb | DatabaseKind::BigQuery => None,
         DatabaseKind::Redis | DatabaseKind::Valkey => Some(6379),
         DatabaseKind::MongoDb => Some(27017),
         DatabaseKind::ClickHouse => Some(8123),
@@ -3445,6 +3631,26 @@ fn redact_authority_password(value: &str) -> (String, Vec<(usize, usize)>) {
 fn redact_url_query_passwords(value: &str) -> String {
     crate::security::redact_url_query_credentials(value)
 }
+
+const BIGQUERY_FIELDS: [ProfileField; 17] = [
+    ProfileField::DatabaseCategory,
+    ProfileField::Kind,
+    ProfileField::Name,
+    ProfileField::Database,
+    ProfileField::Schema,
+    ProfileField::DataProject,
+    ProfileField::VisibleObjects,
+    ProfileField::CredentialsFile,
+    ProfileField::Location,
+    ProfileField::MaximumBytesBilled,
+    ProfileField::QueryTimeoutSecs,
+    ProfileField::Environment,
+    ProfileField::ReadOnly,
+    ProfileField::Url,
+    ProfileField::Test,
+    ProfileField::Save,
+    ProfileField::Cancel,
+];
 
 const POSTGRES_FIELDS: [ProfileField; 18] = [
     ProfileField::DatabaseCategory,

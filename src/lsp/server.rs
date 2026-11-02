@@ -211,6 +211,7 @@ fn sql_dialect(dialect: crate::cli::LspDialect) -> SqlDialect {
         crate::cli::LspDialect::Sqlite => SqlDialect::Sqlite,
         crate::cli::LspDialect::ClickHouse => SqlDialect::ClickHouse,
         crate::cli::LspDialect::Snowflake => SqlDialect::Snowflake,
+        crate::cli::LspDialect::BigQuery => SqlDialect::BigQuery,
         crate::cli::LspDialect::DuckDb => SqlDialect::DuckDb,
         crate::cli::LspDialect::Generic => SqlDialect::Generic,
     }

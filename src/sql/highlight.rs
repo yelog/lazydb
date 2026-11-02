@@ -9,7 +9,6 @@ use sqlparser::{
         ClickHouseDialect, Dialect, GenericDialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect,
         SQLiteDialect,
     },
-    parser::Parser,
     tokenizer::{Token, TokenWithSpan, Tokenizer, Whitespace},
 };
 
@@ -89,8 +88,14 @@ fn lexical_highlights(text: &str, dialect: SqlDialect) -> Vec<HighlightSpan> {
     let index = LineIndex::new(text);
     let parser_dialect = dialect_ref(dialect);
     let mut tokenizer = Tokenizer::new(parser_dialect, text);
-    let mut tokens = Vec::new();
-    let _ = tokenizer.tokenize_with_location_into_buf(&mut tokens);
+    let mut tokens = if dialect == SqlDialect::BigQuery {
+        super::bigquery::tokenize(text).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    if tokens.is_empty() {
+        let _ = tokenizer.tokenize_with_location_into_buf(&mut tokens);
+    }
     tokens
         .into_iter()
         .filter_map(|token| span_for(text, &index, token, dialect))
@@ -605,7 +610,7 @@ impl Visitor for SemanticCollector<'_> {
 }
 
 fn semantic_highlights_for(source: &str, dialect: SqlDialect) -> Option<Vec<SemanticHighlight>> {
-    let statements = Parser::parse_sql(dialect_ref(dialect), source).ok()?;
+    let statements = super::dialect::parse_sql(dialect, source).ok()?;
     let index = LineIndex::new(source);
     let mut collector = SemanticCollector {
         text: source,
@@ -824,7 +829,17 @@ fn span_for(
         | Token::NationalStringLiteral(_)
         | Token::DoubleQuotedString(_)
         | Token::DollarQuotedString(_)
-        | Token::EscapedStringLiteral(_) => HighlightKind::String,
+        | Token::EscapedStringLiteral(_)
+        | Token::TripleSingleQuotedString(_)
+        | Token::TripleDoubleQuotedString(_)
+        | Token::SingleQuotedByteStringLiteral(_)
+        | Token::DoubleQuotedByteStringLiteral(_)
+        | Token::TripleSingleQuotedByteStringLiteral(_)
+        | Token::TripleDoubleQuotedByteStringLiteral(_)
+        | Token::SingleQuotedRawStringLiteral(_)
+        | Token::DoubleQuotedRawStringLiteral(_)
+        | Token::TripleSingleQuotedRawStringLiteral(_)
+        | Token::TripleDoubleQuotedRawStringLiteral(_) => HighlightKind::String,
         Token::Number(_, _) => HighlightKind::Number,
         Token::Whitespace(
             Whitespace::SingleLineComment { .. } | Whitespace::MultiLineComment(_),
@@ -850,5 +865,6 @@ fn dialect_ref(dialect: SqlDialect) -> &'static dyn Dialect {
         SqlDialect::Generic | SqlDialect::Oracle => &GenericDialect {},
         SqlDialect::ClickHouse => &ClickHouseDialect {},
         SqlDialect::Snowflake => &sqlparser::dialect::SnowflakeDialect {},
+        SqlDialect::BigQuery => &sqlparser::dialect::BigQueryDialect {},
     }
 }

@@ -56,6 +56,31 @@ fn duckdb_profile(path: &std::path::Path, name: &str) -> ConnectionProfile {
 }
 
 #[test]
+fn bigquery_agent_selection_keeps_billing_project_and_driver_limits() {
+    let profile = import_connection_url(
+        "bigquery://billing-project/analytics?data_project=data-project&maximum_bytes_billed=123456&query_timeout_secs=45",
+        Some("warehouse"),
+    ).unwrap().profile;
+    let temp = TempDir::new().unwrap();
+    let service = service(&temp, vec![profile]);
+    let selected = service.select(None).unwrap();
+    assert_eq!(
+        selected.profile.database.as_deref(),
+        Some("billing-project")
+    );
+    assert_eq!(selected.profile.catalog_database(), Some("data-project"));
+    let options = selected.profile.bigquery_options.as_ref().unwrap();
+    assert_eq!(options.maximum_bytes_billed, 123456);
+    assert_eq!(options.query_timeout_secs, 45);
+    assert_eq!(
+        service.connections()[0].database.as_deref(),
+        Some("billing-project")
+    );
+    let serialized = serde_json::to_value(&service.connections()[0]).unwrap();
+    assert!(serialized.get("credentials_file").is_none());
+}
+
+#[test]
 fn connection_projection_never_exposes_sql_server_credentials() {
     let mut profile = import_connection_url("sqlserver://db.example.test/app", Some("mssql"))
         .unwrap()

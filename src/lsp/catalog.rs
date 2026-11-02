@@ -477,7 +477,7 @@ impl CatalogProvider {
 
     pub fn completion_context(&self) -> crate::sql::CompletionContext<'_> {
         crate::sql::CompletionContext {
-            database: self.profile.database.as_deref(),
+            database: self.profile.catalog_database(),
             schema: self.profile.default_schema.as_deref(),
         }
     }

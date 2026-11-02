@@ -143,6 +143,17 @@ fn unbound_execution_selects_target_connects_and_resumes_once() {
 }
 
 #[test]
+fn unbound_execution_fits_a_two_megabyte_thread_stack() {
+    std::thread::Builder::new()
+        .name("unbound-console-default-stack".into())
+        .stack_size(2 * 1024 * 1024)
+        .spawn(unbound_execution_selects_target_connects_and_resumes_once)
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 fn unbound_execution_is_discarded_when_document_changes_before_selection() {
     let profile = import_connection_url(":memory:", Some("stale-run"))
         .unwrap()

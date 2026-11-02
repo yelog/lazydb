@@ -1,7 +1,6 @@
 use sqlparser::ast::{Query, SetExpr, Statement, TableFactor};
-use sqlparser::parser::Parser;
 
-use super::{SqlDialect, dialect::parser_dialect, split_sql_server_batches};
+use super::{SqlDialect, split_sql_server_batches};
 
 /// A user-facing family of SQL statements.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -27,7 +26,7 @@ pub fn classify_statement_kind(sql: &str, dialect: SqlDialect) -> SqlStatementKi
 
     let mut kinds = Vec::new();
     for batch in batches {
-        let statements = match Parser::parse_sql(parser_dialect(dialect), batch) {
+        let statements = match super::dialect::parse_sql(dialect, batch) {
             Ok(statements) => statements,
             Err(_) => return SqlStatementKind::Other,
         };

@@ -5,12 +5,21 @@
 ### Added
 
 - Add OpenSearch as an independent native REST driver with Basic/None authentication, verified HTTPS and optional PEM CA bundles, index/mapping discovery, paged document previews, REST/NDJSON execution, and existing CLI/MCP policies. See [OpenSearch support](docs/opensearch.md).
+- Add native Google BigQuery connections with refreshable ADC, separate billing/data projects, dataset/location settings and secret-free profile URLs.
+- Browse scoped BigQuery projects, datasets, tables/views and nested columns; run single GoogleSQL jobs with bounded paging, native billing limits, previews, native DDL, query statistics and cancellation status. Integrate existing TUI, CLI/MCP and read/write policy; see [BigQuery support](docs/bigquery.md).
+- Add deterministic BigQuery HTTP/authentication fixtures, profile/SQL/policy regressions, isolated PTY checks and explicit opt-in cloud TUI acceptance. Verify developer ADC, native types/pagination, same- and separate-project workflows, production TUI/CLI, billing limits and location errors against real BigQuery; remaining authentication/cancellation matrix limits are documented.
 - Add Elasticsearch native REST connections, index and mapping discovery, document previews, and a REST/JSON console with write confirmation and read-only enforcement.
 - Support Basic Auth and encoded API keys through existing credential storage, verified HTTPS, and optional PEM CA bundles. Record response-level partial failures while retaining result details.
 - Add CockroachDB as an independent driver with PostgreSQL wire transport, TLS profile options, scoped database/schema/table/view catalogs, native DDL, paged previews, SQL execution, manual transactions, and existing MCP query/catalog access. Structured editing and monitoring remain unavailable; see [CockroachDB support](docs/cockroachdb.md).
 
 ### Fixed
 
+- Enforce BigQuery read-only profiles before confirmation, at dispatch and in the native adapter; reconnect when the policy changes and preserve the flag through URL roundtrips.
+- Forget saved password references when switching through an ADC-only BigQuery draft, including switching back to a password-based driver before saving.
+- Preserve unknown BigQuery job outcomes in history while keeping definitive submission rejections free of cancellation and unknown-billing warnings.
+- Send an explicit zero content length for native BigQuery cancellation POSTs, preventing Google's HTTP 411 rejection.
+- Quote BigQuery preview sort columns with GoogleSQL backticks and use the shared compatibility parser for valid GoogleSQL filters.
+- Keep cleared transport options and credential references cleared when saving a profile after switching drivers, so an existing connection can become a valid ADC-only BigQuery profile and survive restart.
 - Load complete cell values into the scrollable detail viewer so long JSON documents remain readable beyond the grid preview.
 - Keep refresh requests behind search REST write policy; preserve unknown write outcomes after oversized/invalid responses, usernames during secret-free URL edits, and current authorization after read-only changes. Exclude preview lookahead documents from retained-result budgets and restore unsupported search DDL tabs as document previews.
 - Reject late query results after cancellation and preserve unknown search REST write outcomes in history. Prevent cleared search credentials/usernames from returning during profile compatibility merges.

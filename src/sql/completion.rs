@@ -351,7 +351,16 @@ pub fn complete_with_mode(
             statement_cursor,
             active_scopes.last().copied().flatten(),
         );
-    let bindings = visible_relation_bindings(&tokens, &active_scopes);
+    let mut bindings = visible_relation_bindings(&tokens, &active_scopes);
+    if dialect == SqlDialect::BigQuery {
+        for binding in &mut bindings {
+            binding.name = binding
+                .name
+                .iter()
+                .flat_map(|part| part.split('.').map(str::to_owned))
+                .collect();
+        }
+    }
     let visible_relations = bindings
         .iter()
         .flat_map(|binding| relation_ids(index, binding, completion_context))
@@ -486,7 +495,11 @@ pub fn complete_with_mode(
         }));
         candidates.push(CompletionCandidate {
             label: display_text(name),
-            insert_text: if matches!(kind, CompletionKind::Table | CompletionKind::View) {
+            insert_text: if dialect == SqlDialect::BigQuery
+                && matches!(kind, CompletionKind::Table | CompletionKind::View)
+            {
+                relation_insert_text(entry, completion_context, dialect, &qualifiers)
+            } else if matches!(kind, CompletionKind::Table | CompletionKind::View) {
                 match insertion_mode {
                     CompletionInsertionMode::Contextual => {
                         relation_insert_text(entry, completion_context, dialect, &qualifiers)
@@ -510,7 +523,13 @@ pub fn complete_with_mode(
             } else {
                 completion_detail(entry).map(|detail| display_text(&detail))
             },
-            replace,
+            replace: if dialect == SqlDialect::BigQuery
+                && matches!(kind, CompletionKind::Table | CompletionKind::View)
+            {
+                bigquery_relation_replace(text, identifier_replace, cursor)
+            } else {
+                replace
+            },
             score: CompletionScore {
                 context: context_score,
                 name_match: match name_match {
@@ -739,7 +758,16 @@ pub fn completion_dependencies(
     } else {
         visible_relation_bindings(&tokens, &active_scopes)
             .into_iter()
-            .flat_map(|binding| relation_ids(index, &binding, completion_context))
+            .flat_map(|mut binding| {
+                if dialect == SqlDialect::BigQuery {
+                    binding.name = binding
+                        .name
+                        .iter()
+                        .flat_map(|part| part.split('.').map(str::to_owned))
+                        .collect();
+                }
+                relation_ids(index, &binding, completion_context)
+            })
             .for_each(|relation| {
                 relation_children.insert(relation);
             });
@@ -826,6 +854,27 @@ fn relation_insert_text(
     qualifiers: &[String],
 ) -> String {
     let object = entry.qualified_name.object.as_str();
+    if dialect == SqlDialect::BigQuery {
+        // A GoogleSQL table path is quoted as one identifier. The execution
+        // database may be a billing project, so retain the catalog data project.
+        let parts = if qualifiers.is_empty() {
+            [
+                entry.qualified_name.database.as_deref(),
+                entry.qualified_name.schema.as_deref(),
+                Some(object),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+        } else {
+            qualifiers
+                .iter()
+                .map(String::as_str)
+                .chain(std::iter::once(object))
+                .collect()
+        };
+        return quote_identifier(&parts.join("."), dialect);
+    }
     if !qualifiers.is_empty() {
         return quote_identifier(object, dialect);
     }
@@ -884,7 +933,7 @@ fn relation_insert_text(
                 ]
             }
         }
-        SqlDialect::ClickHouse => vec![object],
+        SqlDialect::ClickHouse | SqlDialect::BigQuery => vec![object],
     };
     parts
         .into_iter()
@@ -1048,6 +1097,21 @@ fn should_offer_ordering_completion(text: &str, cursor: usize, dialect: SqlDiale
 }
 
 fn cursor_is_in_comment_or_literal(text: &str, dialect: SqlDialect) -> bool {
+    if dialect == SqlDialect::BigQuery {
+        use sqlparser::tokenizer::{Token, Whitespace};
+        return match super::bigquery::tokenize(text) {
+            Err(error) => !error.message.contains("delimiter '`'"),
+            Ok(tokens) => {
+                matches!(
+                    tokens.last(),
+                    Some(sqlparser::tokenizer::TokenWithSpan {
+                        token: Token::Whitespace(Whitespace::SingleLineComment { .. }),
+                        ..
+                    })
+                ) && !text.ends_with('\n')
+            }
+        };
+    }
     let bytes = text.as_bytes();
     let mut index = 0;
     while index < bytes.len() {
@@ -1827,7 +1891,8 @@ fn keywords_for_completion(
                 | SqlDialect::DuckDb
                 | SqlDialect::Generic
                 | SqlDialect::Oracle
-                | SqlDialect::Snowflake => &["ASC", "DESC", "NULLS FIRST", "NULLS LAST"],
+                | SqlDialect::Snowflake
+                | SqlDialect::BigQuery => &["ASC", "DESC", "NULLS FIRST", "NULLS LAST"],
                 SqlDialect::ClickHouse => &["ASC", "DESC"],
                 SqlDialect::MySql | SqlDialect::MariaDb | SqlDialect::SqlServer => &["ASC", "DESC"],
             },
@@ -1837,7 +1902,8 @@ fn keywords_for_completion(
                 | SqlDialect::DuckDb
                 | SqlDialect::Generic
                 | SqlDialect::Oracle
-                | SqlDialect::Snowflake => &["NULLS FIRST", "NULLS LAST"],
+                | SqlDialect::Snowflake
+                | SqlDialect::BigQuery => &["NULLS FIRST", "NULLS LAST"],
                 SqlDialect::ClickHouse => &[],
                 SqlDialect::MySql | SqlDialect::MariaDb | SqlDialect::SqlServer => &[],
             },
@@ -1847,7 +1913,8 @@ fn keywords_for_completion(
                 | SqlDialect::DuckDb
                 | SqlDialect::Generic
                 | SqlDialect::Oracle
-                | SqlDialect::Snowflake => &["FIRST", "LAST"],
+                | SqlDialect::Snowflake
+                | SqlDialect::BigQuery => &["FIRST", "LAST"],
                 SqlDialect::ClickHouse => &[],
                 SqlDialect::MySql | SqlDialect::MariaDb | SqlDialect::SqlServer => &[],
             },
@@ -2271,7 +2338,24 @@ fn identifier_at(
         let prefix = text[token.start..cursor]
             .trim_matches(['"', '`', '[', ']'])
             .to_owned();
-        let qualifiers = qualifiers_before(&tokens, index);
+        let mut qualifiers = qualifiers_before(&tokens, index);
+        if dialect == SqlDialect::BigQuery {
+            qualifiers = qualifiers
+                .iter()
+                .flat_map(|part| part.split('.').map(str::to_owned))
+                .collect();
+        }
+        if dialect == SqlDialect::BigQuery && token.quoted {
+            let mut parts = prefix.split('.').map(str::to_owned).collect::<Vec<_>>();
+            let prefix = parts.pop().unwrap_or_default();
+            qualifiers.extend(parts);
+            return (
+                TextRange::new(token.start, token.end),
+                prefix,
+                qualifiers,
+                true,
+            );
+        }
         return (
             TextRange::new(token.start, token.end),
             prefix,
@@ -2284,10 +2368,17 @@ fn identifier_at(
             .then_some(index)
     });
     if let Some(index) = after_dot {
+        let mut qualifiers = qualifiers_before(&tokens, index + 1);
+        if dialect == SqlDialect::BigQuery {
+            qualifiers = qualifiers
+                .iter()
+                .flat_map(|part| part.split('.').map(str::to_owned))
+                .collect();
+        }
         return (
             TextRange::new(cursor, cursor),
             String::new(),
-            qualifiers_before(&tokens, index + 1),
+            qualifiers,
             false,
         );
     }
@@ -2297,6 +2388,26 @@ fn identifier_at(
         Vec::new(),
         false,
     )
+}
+
+fn bigquery_relation_replace(text: &str, segment: TextRange, cursor: usize) -> TextRange {
+    let tokens = completion_tokens(text, SqlDialect::BigQuery);
+    let mut start = segment.start;
+    let mut position = tokens
+        .iter()
+        .position(|token| token.start == start)
+        .unwrap_or_else(|| tokens.partition_point(|token| token.end <= cursor));
+    // After a trailing dot, include it and all preceding path components.
+    if position > 0 && tokens[position - 1].kind == CompletionTokenKind::Dot {
+        while position >= 2 && tokens[position - 1].kind == CompletionTokenKind::Dot {
+            if !matches!(tokens[position - 2].kind, CompletionTokenKind::Word(_)) {
+                break;
+            }
+            start = tokens[position - 2].start;
+            position -= 2;
+        }
+    }
+    TextRange::new(start, segment.end.max(cursor))
 }
 
 fn qualifiers_before(tokens: &[CompletionToken], stop: usize) -> Vec<String> {
@@ -2324,6 +2435,19 @@ fn qualified_candidate_indices(
 ) -> Vec<usize> {
     if qualifiers.is_empty() {
         return candidate_indices(index, None, prefix);
+    }
+    if dialect == SqlDialect::BigQuery && qualifiers.len() == 2 {
+        return index
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| {
+                entry.kind.is_relation()
+                    && entry.qualified_name.database.as_deref() == Some(qualifiers[0].as_str())
+                    && entry.qualified_name.schema.as_deref() == Some(qualifiers[1].as_str())
+            })
+            .map(|(position, _)| position)
+            .collect();
     }
     let qualifier = &qualifiers[0];
     if qualifiers.len() == 1 {
@@ -2729,6 +2853,9 @@ fn token_word(token: Option<&CompletionToken>) -> Option<&str> {
 }
 
 fn completion_tokens(text: &str, dialect: SqlDialect) -> Vec<CompletionToken> {
+    if dialect == SqlDialect::BigQuery {
+        return bigquery_completion_tokens(text);
+    }
     let bytes = text.as_bytes();
     let mut tokens = Vec::new();
     let mut index = 0;
@@ -2886,6 +3013,91 @@ fn completion_tokens(text: &str, dialect: SqlDialect) -> Vec<CompletionToken> {
     tokens
 }
 
+fn bigquery_completion_tokens(text: &str) -> Vec<CompletionToken> {
+    use sqlparser::tokenizer::{Token, Tokenizer};
+    let mut raw = Vec::new();
+    let error = match super::bigquery::tokenize(text) {
+        Ok(tokens) => {
+            raw = tokens;
+            None
+        }
+        Err(error) => {
+            let _ = Tokenizer::new(super::dialect::parser_dialect(SqlDialect::BigQuery), text)
+                .tokenize_with_location_into_buf(&mut raw);
+            Some(error)
+        }
+    };
+    let lines = super::LineIndex::new(text);
+    let mut depth: usize = 0;
+    let mut scope_starts = Vec::new();
+    let mut tokens = Vec::new();
+    for token in raw {
+        let range = lines.range(text, token.span.start, token.span.end);
+        let (kind, quoted) = match token.token {
+            Token::Whitespace(_) | Token::EOF => continue,
+            Token::Word(word) => (
+                CompletionTokenKind::Word(word.value),
+                word.quote_style.is_some(),
+            ),
+            Token::Period => (CompletionTokenKind::Dot, false),
+            Token::Comma => (CompletionTokenKind::Comma, false),
+            Token::LParen => (CompletionTokenKind::LeftParen, false),
+            Token::RParen => (CompletionTokenKind::RightParen, false),
+            Token::LBracket => (CompletionTokenKind::LeftBracket, false),
+            Token::RBracket => (CompletionTokenKind::RightBracket, false),
+            Token::Mul => (CompletionTokenKind::Star, false),
+            Token::Eq => (CompletionTokenKind::Equals, false),
+            Token::Number(_, _)
+            | Token::SingleQuotedString(_)
+            | Token::DoubleQuotedString(_)
+            | Token::TripleSingleQuotedString(_)
+            | Token::TripleDoubleQuotedString(_)
+            | Token::SingleQuotedByteStringLiteral(_)
+            | Token::DoubleQuotedByteStringLiteral(_)
+            | Token::TripleSingleQuotedByteStringLiteral(_)
+            | Token::TripleDoubleQuotedByteStringLiteral(_)
+            | Token::SingleQuotedRawStringLiteral(_)
+            | Token::DoubleQuotedRawStringLiteral(_)
+            | Token::TripleSingleQuotedRawStringLiteral(_)
+            | Token::TripleDoubleQuotedRawStringLiteral(_) => (CompletionTokenKind::Literal, false),
+            _ => (CompletionTokenKind::Operator, false),
+        };
+        if kind == CompletionTokenKind::RightParen {
+            depth = depth.saturating_sub(1);
+            scope_starts.pop();
+        }
+        tokens.push(CompletionToken {
+            kind: kind.clone(),
+            start: range.start,
+            end: range.end,
+            depth,
+            scope_start: scope_starts.last().copied(),
+            quoted,
+        });
+        if kind == CompletionTokenKind::LeftParen {
+            depth += 1;
+            scope_starts.push(range.start);
+        }
+    }
+    // The lexer reports unfinished backticks at EOF. Retain that path so
+    // completion can replace it with one correctly closed quoted identifier.
+    if error.is_some_and(|error| error.message.contains("delimiter '`'")) {
+        let start = tokens.last().map_or(0, |token| token.end);
+        if let Some(relative) = text[start..].find('`') {
+            let start = start + relative;
+            tokens.push(CompletionToken {
+                kind: CompletionTokenKind::Word(text[start + 1..].to_owned()),
+                start,
+                end: text.len(),
+                depth,
+                scope_start: scope_starts.last().copied(),
+                quoted: true,
+            });
+        }
+    }
+    tokens
+}
+
 fn is_identifier_byte(byte: u8, dialect: SqlDialect) -> bool {
     byte.is_ascii_alphanumeric()
         || byte == b'_'
@@ -2897,6 +3109,9 @@ fn is_identifier_byte(byte: u8, dialect: SqlDialect) -> bool {
 pub fn quote_identifier(value: &str, dialect: SqlDialect) -> String {
     if dialect == SqlDialect::SqlServer {
         return format!("[{}]", value.replace(']', "]]"));
+    }
+    if dialect == SqlDialect::BigQuery {
+        return format!("`{}`", value.replace('\\', "\\\\").replace('`', "\\`"));
     }
     let (quote, escaped) = if matches!(dialect, SqlDialect::MySql | SqlDialect::ClickHouse) {
         ('`', value.replace('`', "``"))
@@ -2961,7 +3176,8 @@ fn keywords(
             | SqlDialect::DuckDb
             | SqlDialect::Oracle
             | SqlDialect::ClickHouse
-            | SqlDialect::Snowflake => &[],
+            | SqlDialect::Snowflake
+            | SqlDialect::BigQuery => &[],
         },
         Context::Ddl(DdlContext::AlterColumnType(_)) => &[],
         Context::Ddl(DdlContext::NewColumnName) => &[],
@@ -3008,6 +3224,7 @@ fn keywords(
             _ => &["ASC", "DESC", "NULLS FIRST", "NULLS LAST"],
         },
         Context::Expression(ExpressionContext::Returning) => &["CASE", "NULL", "TRUE", "FALSE"],
+        Context::Relation if dialect == SqlDialect::BigQuery => &["UNNEST"],
         Context::Relation => &["LATERAL"],
         Context::Qualifier | Context::Routine => &[],
     }
@@ -3066,6 +3283,7 @@ fn ddl_object_keywords(dialect: SqlDialect, _create: bool) -> &'static [&'static
             "WAREHOUSE",
         ],
         SqlDialect::ClickHouse => &["DATABASE", "DICTIONARY", "FUNCTION", "TABLE", "VIEW"],
+        SqlDialect::BigQuery => &["SCHEMA", "TABLE", "VIEW", "MATERIALIZED VIEW", "FUNCTION"],
     }
 }
 
@@ -3135,6 +3353,14 @@ fn alter_table_action_keywords(dialect: SqlDialect) -> &'static [&'static str] {
             "ALTER COLUMN",
         ],
         SqlDialect::ClickHouse => &[],
+        SqlDialect::BigQuery => &[
+            "ADD COLUMN",
+            "DROP COLUMN",
+            "ALTER COLUMN",
+            "RENAME COLUMN",
+            "RENAME TO",
+            "SET OPTIONS",
+        ],
     }
 }
 
@@ -3225,6 +3451,25 @@ fn data_types_for_context(context: Context, dialect: SqlDialect) -> &'static [&'
             "VARIANT",
             "OBJECT",
             "ARRAY",
+        ],
+        SqlDialect::BigQuery => &[
+            "INT64",
+            "FLOAT64",
+            "NUMERIC",
+            "BIGNUMERIC",
+            "BOOL",
+            "STRING",
+            "BYTES",
+            "DATE",
+            "DATETIME",
+            "TIME",
+            "TIMESTAMP",
+            "INTERVAL",
+            "JSON",
+            "GEOGRAPHY",
+            "ARRAY",
+            "STRUCT",
+            "RANGE",
         ],
         SqlDialect::ClickHouse => &[
             "Array",

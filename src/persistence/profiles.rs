@@ -123,6 +123,7 @@ impl From<ConnectionProfileV5> for ConnectionProfile {
             opensearch_options: None,
             pg_options: None,
             snowflake_options: None,
+            bigquery_options: None,
             duckdb_path: profile.duckdb_path,
             ssl_mode: profile.ssl_mode,
             credential_policy: profile.credential_policy,
@@ -185,6 +186,7 @@ impl From<ConnectionProfileV2> for ConnectionProfile {
             opensearch_options: None,
             pg_options: None,
             snowflake_options: None,
+            bigquery_options: None,
             duckdb_path: profile.duckdb_path,
             ssl_mode: profile.ssl_mode,
             credential_policy: profile
@@ -311,6 +313,17 @@ impl ProfileStore {
         let mut unavailable = Vec::new();
         for (index, value) in profiles.iter().enumerate() {
             match value.clone().try_into::<ConnectionProfile>() {
+                Ok(profile)
+                    if profile.kind == DatabaseKind::BigQuery
+                        && profile.validate_bigquery().is_err() =>
+                {
+                    unavailable.push(UnavailableProfile {
+                        id: Some(profile.id),
+                        name: profile.name,
+                        kind: Some("bigquery".into()),
+                        reason: ProfileUnavailableReason::InvalidConfiguration,
+                    });
+                }
                 Ok(profile) => supported.push(profile),
                 Err(error) => {
                     let table = value.as_table();
@@ -745,6 +758,24 @@ fn preserve_unavailable_profiles(
             previous.remove("credential_policy");
             // An absent username is an explicit clear, including switching to no auth.
             previous.remove("user");
+            previous.remove("bigquery_options");
+            if current["kind"].as_str() != previous["kind"].as_str() {
+                // Switching drivers explicitly clears fields omitted by the new
+                // profile; retaining old transport fields can invalidate ADC profiles.
+                for field in [
+                    "host",
+                    "port",
+                    "database",
+                    "default_schema",
+                    "sqlite_path",
+                    "duckdb_path",
+                    "mongodb_options",
+                    "pg_options",
+                    "snowflake_options",
+                ] {
+                    previous.remove(field);
+                }
+            }
             merge_missing_profile_fields(current, &previous);
             continue;
         }
@@ -777,7 +808,12 @@ fn profile_table_is_unavailable(table: &toml_edit::Table) -> bool {
         .ok()
         .and_then(|document| document.get("profiles").cloned())
         .and_then(|profiles| profiles.as_array()?.first().cloned())
-        .is_none_or(|profile| profile.try_into::<ConnectionProfile>().is_err())
+        .is_none_or(|profile| match profile.try_into::<ConnectionProfile>() {
+            Err(_) => true,
+            Ok(profile) => {
+                profile.kind == DatabaseKind::BigQuery && profile.validate_bigquery().is_err()
+            }
+        })
 }
 
 fn normalize_table_positions(table: &mut toml_edit::Table, next_position: &mut isize) {

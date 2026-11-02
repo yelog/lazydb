@@ -40,6 +40,7 @@ impl ColumnTypePolicy {
             | DatabaseKind::Elasticsearch
             | DatabaseKind::OpenSearch => "text",
             DatabaseKind::ClickHouse => "String",
+            DatabaseKind::BigQuery => "STRING",
         }
     }
 

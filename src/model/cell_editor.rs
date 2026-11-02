@@ -1444,8 +1444,9 @@ pub(crate) fn classify_column_type(
         DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb => None,
         DatabaseKind::ClickHouse
         | DatabaseKind::Snowflake
-        | DatabaseKind::Elasticsearch
-        | DatabaseKind::OpenSearch => None,
+        | DatabaseKind::BigQuery
+        | DatabaseKind::OpenSearch
+        | DatabaseKind::Elasticsearch => None,
     }?;
 
     Some(ColumnEditorDescription { kind })

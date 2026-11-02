@@ -27,6 +27,15 @@ confirmation = "risky"
 # Driver authentication/CA options (including OpenSearch) belong to saved
 # profiles in connections.toml, not to application defaults in this file.
 default_access = "global"
+# BigQuery connection profiles use Application Default Credentials (ADC).
+# URL example: bigquery://billing-project/dataset?location=US&data_project=data-project
+# The URL authority is the execution/billing project; default_schema is the dataset.
+# Per-profile [profiles.bigquery_options] defaults in connections.toml:
+# maximum_bytes_billed = 1000000000
+# query_timeout_secs = 120
+# maximum_bytes_billed accepts 1..=9223372036854775807; query_timeout_secs accepts 1..=86400.
+# credentials_file, location, and data_project are optional; data_project defaults
+# to the execution project. Only the ADC file path is saved, never its contents.
 
 [dashboard]
 refresh_interval_seconds = 5
