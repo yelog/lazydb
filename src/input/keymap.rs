@@ -2232,8 +2232,8 @@ impl Keymap {
             return None;
         }
         if is_ddl_only_focus(app)
-            && is_read_only_editor_key(event)
             && let Some(session_id) = ddl_only_session_id(app)
+            && (app.editor_prompt_active(session_id) || is_read_only_editor_key(event))
         {
             return Some(Action::ReadOnlyEditorKey { session_id, event });
         }
