@@ -66,6 +66,34 @@ fn vertical_drag_scroll_clamps_at_both_ends_and_preserves_horizontal_offset() {
 }
 
 #[test]
+fn wrapped_drag_scroll_reaches_the_final_source_line() {
+    let text = (1..=120)
+        .map(|line| format!("REDIS_LINE_{line:03}: {}", "synthetic text ".repeat(4)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (mut workspace, id) = fixture(&text);
+    let viewport = EditorViewport {
+        width: 46,
+        height: 33,
+    };
+    workspace
+        .render_wrapped_preview_snapshot(id, viewport, EditorLanguage::Plain, true)
+        .unwrap();
+    workspace.scroll(id, isize::MAX, 0).unwrap();
+    let snapshot = workspace
+        .render_wrapped_preview_snapshot(id, viewport, EditorLanguage::Plain, true)
+        .unwrap();
+    assert_eq!(snapshot.lines.last().unwrap().line, 119);
+    assert!(
+        snapshot
+            .lines
+            .iter()
+            .any(|line| line.display_text.contains("REDIS_LINE_120"))
+    );
+    assert!(!workspace.can_scroll_vertically(id, 1));
+}
+
+#[test]
 fn short_and_wrapped_previews_stop_drag_scrolling_at_their_rendered_limits() {
     let (mut workspace, id) = fixture("short");
     let viewport = EditorViewport {

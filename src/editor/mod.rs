@@ -1531,7 +1531,7 @@ impl EditorWorkspace {
             session.pending_tail_scroll && viewport.width > 0 && viewport.height > 0;
         let max_row = total_lines.saturating_sub(viewport.height.max(1));
         let first_line = if let Some(preview_first_line) = session.preview_render_first_line.get() {
-            preview_first_line.min(max_row)
+            preview_first_line.min(total_lines.saturating_sub(1))
         } else if tail_requested {
             max_row
         } else {
