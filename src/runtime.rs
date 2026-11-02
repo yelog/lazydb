@@ -9138,7 +9138,9 @@ pub async fn run_tui(cli: Cli) -> Result<RunOutcome> {
                     }
                     // A held text-selection drag keeps scrolling after its
                     // pointer, so one gesture can select text off screen.
-                    let drag_autoscroll = ui_state.follow_text_drag();
+                    let drag_autoscroll = ui_state.follow_text_drag().filter(|(session_id, rows)| {
+                        app.text_drag_can_scroll(*session_id, *rows)
+                    });
                     if let Some((session_id, rows)) = drag_autoscroll {
                         apply_action(
                             &mut app,

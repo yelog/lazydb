@@ -751,6 +751,7 @@ impl UiState {
         let target = self
             .text_selection_targets
             .iter()
+            .rev()
             .find(|target| target.session_id == gesture.session_id)?;
         if let Some(end) = target.position_clamped(column, row) {
             self.update_text_gesture(end);

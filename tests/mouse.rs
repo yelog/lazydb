@@ -2779,6 +2779,43 @@ fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
     }
 }
 
+#[test]
+fn text_drag_and_release_keep_the_topmost_line_number_gutter_mapping() {
+    let app = App::new(Vec::new());
+    let session_id = Uuid::new_v4();
+    let mut ui = text_drag_ui(session_id);
+    let mut text_body = multiline_text_target(session_id);
+    for hit_map in &mut text_body.hit_maps {
+        hit_map.area.x += 5;
+        hit_map.area.width -= 5;
+    }
+    ui.text_selection_targets.push(text_body);
+    map_mouse(
+        mouse(MouseEventKind::Down(MouseButton::Left), 17, 10),
+        &ui,
+        &app,
+    );
+    map_mouse(
+        mouse(MouseEventKind::Drag(MouseButton::Left), 17, 11),
+        &ui,
+        &app,
+    );
+    assert_eq!(
+        ui.text_gesture.borrow().as_ref().unwrap().end,
+        TextPosition { line: 1, column: 2 }
+    );
+    let release = map_mouse(
+        mouse(MouseEventKind::Up(MouseButton::Left), 17, 12),
+        &ui,
+        &app,
+    );
+    assert!(
+        matches!(release, Some(Action::CompleteMouseTextSelection { end, .. })
+        if end.line == 2 && end.column == 2)
+    );
+    assert_eq!(ui.follow_text_drag(), None);
+}
+
 fn multiline_text_target(session_id: Uuid) -> TextSelectionTarget {
     TextSelectionTarget {
         session_id,

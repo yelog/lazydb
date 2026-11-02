@@ -131,6 +131,7 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                 let target = ui
                     .text_selection_targets
                     .iter()
+                    .rev()
                     .find(|target| target.session_id == gesture.session_id)?;
                 if !matches!(
                     gesture.source,
@@ -182,6 +183,7 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                 let target = ui
                     .text_selection_targets
                     .iter()
+                    .rev()
                     .find(|target| target.session_id == gesture.session_id)?;
                 if gesture.source != crate::ui::text_selection::TextGestureSource::Editor
                     || gesture.session_id != target.session_id
@@ -365,6 +367,7 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                 if let Some(target) = ui
                     .text_selection_targets
                     .iter()
+                    .rev()
                     .find(|target| target.session_id == gesture.session_id)
                     && let Some(end) = target.position_clamped(event.column, event.row)
                 {

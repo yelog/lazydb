@@ -38,6 +38,59 @@ fn fixture(text: &str) -> (EditorWorkspace, Uuid) {
 }
 
 #[test]
+fn vertical_drag_scroll_clamps_at_both_ends_and_preserves_horizontal_offset() {
+    let (mut workspace, id) = fixture(&"wide-column-界\n".repeat(100));
+    let viewport = EditorViewport {
+        width: 5,
+        height: 4,
+    };
+    workspace.set_viewport(id, viewport).unwrap();
+    workspace.scroll(id, 0, 3).unwrap();
+    assert!(!workspace.can_scroll_vertically(id, -1));
+    assert!(workspace.can_scroll_vertically(id, 1));
+    workspace.scroll(id, isize::MAX, 0).unwrap();
+    let snapshot = workspace.render_plain_snapshot(id, viewport).unwrap();
+    assert_eq!(snapshot.first_line, 97);
+    assert_eq!(snapshot.horizontal_offset, 3);
+    assert!(!workspace.can_scroll_vertically(id, 1));
+    assert!(workspace.can_scroll_vertically(id, -1));
+    workspace.scroll(id, isize::MIN, 0).unwrap();
+    assert!(!workspace.can_scroll_vertically(id, -1));
+    assert_eq!(
+        workspace
+            .render_plain_snapshot(id, viewport)
+            .unwrap()
+            .first_line,
+        0
+    );
+}
+
+#[test]
+fn short_and_wrapped_previews_stop_drag_scrolling_at_their_rendered_limits() {
+    let (mut workspace, id) = fixture("short");
+    let viewport = EditorViewport {
+        width: 5,
+        height: 4,
+    };
+    workspace.set_viewport(id, viewport).unwrap();
+    assert!(!workspace.can_scroll_vertically(id, 1));
+    assert!(!workspace.can_scroll_vertically(id, -1));
+    let (mut workspace, id) = fixture(&"word ".repeat(20));
+    let snapshot = workspace
+        .render_wrapped_preview_snapshot(id, viewport, EditorLanguage::Plain, true)
+        .unwrap();
+    assert!(snapshot.total_lines > viewport.height);
+    assert!(workspace.can_scroll_vertically(id, 1));
+    workspace.scroll(id, 99, 0).unwrap();
+    assert!(!workspace.can_scroll_vertically(id, 1));
+    assert!(workspace.can_scroll_vertically(id, -1));
+    let snapshot = workspace
+        .render_wrapped_preview_snapshot(id, viewport, EditorLanguage::Plain, true)
+        .unwrap();
+    assert_eq!(snapshot.first_line, snapshot.total_lines - viewport.height);
+}
+
+#[test]
 fn redis_value_session_supports_vim_editing_search_yank_paste_undo_redo_and_save() {
     let id = Uuid::new_v4();
     let mut workspace = EditorWorkspace::new();
