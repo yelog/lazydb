@@ -8912,8 +8912,8 @@ pub async fn run_tui(cli: Cli) -> Result<RunOutcome> {
         if let Some(cursor) = ui_state.cursor {
             terminal.set_cursor_style(cursor.style)?;
         }
-        sync_ddl_editor_viewport(&mut app, &mut runtime, terminal.size()?);
         sync_editor_viewport(&mut app, &mut runtime, &ui_state);
+        sync_ddl_editor_viewport(&mut app, &mut runtime, &ui_state);
         sync_output_viewport(&mut app, &mut runtime, &ui_state);
         sync_pane_layout(&mut app, &mut runtime, &ui_state);
         sync_grid_viewport(&mut app, &mut runtime, &ui_state);
@@ -9148,7 +9148,6 @@ pub async fn run_tui(cli: Cli) -> Result<RunOutcome> {
                 keymap.set_sequence_width(terminal.size()?.width);
                 let sequence = keymap.sequence_state(&app, std::time::Instant::now());
                 rendered_sequence = sequence.clone();
-                sync_ddl_editor_viewport(&mut app, &mut runtime, terminal.size()?);
                 terminal.draw(|frame| {
                     ui::render_with_state_using_icons_sequence_and_theme(
                         frame,
@@ -9163,6 +9162,7 @@ pub async fn run_tui(cli: Cli) -> Result<RunOutcome> {
                     terminal.set_cursor_style(cursor.style)?;
                 }
                 sync_editor_viewport(&mut app, &mut runtime, &ui_state);
+                sync_ddl_editor_viewport(&mut app, &mut runtime, &ui_state);
                 sync_output_viewport(&mut app, &mut runtime, &ui_state);
                 sync_pane_layout(&mut app, &mut runtime, &ui_state);
                 sync_grid_viewport(&mut app, &mut runtime, &ui_state);
@@ -9409,30 +9409,20 @@ mod workspace_save_tests {
     }
 }
 
-fn sync_ddl_editor_viewport(app: &mut App, runtime: &mut Runtime, area: ratatui::layout::Rect) {
-    if let Some((session_id, viewport)) = ui::principal::principal_ddl_viewport(area, app) {
-        if app
-            .active_principal_editor_viewport()
-            .ok()
-            .is_none_or(|current| current != viewport)
-        {
-            apply_action(
-                app,
-                runtime,
-                Action::DdlEditorViewportChanged {
-                    session_id,
-                    viewport,
-                },
-            );
-        }
+fn sync_ddl_editor_viewport(app: &mut App, runtime: &mut Runtime, state: &UiState) {
+    let Some((session_id, viewport)) = state.ddl_editor_viewport else {
         return;
-    }
-    if let Some((session_id, viewport)) = ui::relation::ddl_editor_viewport(area, app)
-        && app
-            .active_ddl_editor_viewport()
-            .ok()
-            .is_none_or(|current| current != viewport)
-    {
+    };
+    let current = match app.tabs.get(app.active_tab) {
+        Some(crate::model::tab::WorkspaceTab::Relation(tab)) if tab.ddl_editor_id == session_id => {
+            app.active_ddl_editor_viewport().ok()
+        }
+        Some(crate::model::tab::WorkspaceTab::PrincipalDdl(tab)) if tab.editor_id == session_id => {
+            app.active_principal_editor_viewport().ok()
+        }
+        _ => return,
+    };
+    if current != Some(viewport) {
         apply_action(
             app,
             runtime,

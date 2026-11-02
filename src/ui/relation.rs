@@ -702,30 +702,6 @@ fn render_document_fields(
     }
 }
 
-pub(crate) fn ddl_editor_viewport(area: Rect, app: &App) -> Option<(uuid::Uuid, EditorViewport)> {
-    let Some(WorkspaceTab::Relation(tab)) = app.tabs.get(app.active_tab) else {
-        return None;
-    };
-    if tab.view != RelationView::Ddl {
-        return None;
-    }
-    let status = !matches!(tab.ddl, RelationLoad::Ready(_));
-    let layout = relation_ddl_layout(area, status);
-    let inner = panel_block(
-        " RELATION DDL ",
-        app.focus == Focus::Results,
-        Theme::default(),
-    )
-    .inner(layout[1]);
-    Some((
-        tab.ddl_editor_id,
-        EditorViewport {
-            width: inner.width as usize,
-            height: inner.height as usize,
-        },
-    ))
-}
-
 fn register_json_selection_target(
     state: &mut super::UiState,
     tab_id: uuid::Uuid,
@@ -1492,7 +1468,7 @@ fn render_ddl(
     area: Rect,
     app: &App,
     theme: Theme,
-    _state: &mut super::UiState,
+    state: &mut super::UiState,
 ) {
     let Some(WorkspaceTab::Relation(tab)) = app.tabs.get(app.active_tab) else {
         return;
@@ -1513,6 +1489,9 @@ fn render_ddl(
             height: inner.height as usize,
         }
     };
+    // Publish the real pane viewport: the runtime records it as the editor
+    // session viewport, and every scroll path clamps against it.
+    state.ddl_editor_viewport = Some((tab.ddl_editor_id, viewport));
     let editor_snapshot = app.active_ddl_editor_snapshot(viewport).ok();
     let snapshot = match &tab.ddl {
         RelationLoad::Ready(snapshot)
@@ -1589,19 +1568,19 @@ fn render_ddl(
                 chunks[0],
                 message,
                 theme,
-                _state,
+                state,
                 tab,
                 RelationView::Ddl,
             );
         } else {
-            render_status(frame, chunks[0], message, retry, cancel, theme, _state);
+            render_status(frame, chunks[0], message, retry, cancel, theme, state);
         }
         render_ddl_editor(
             frame,
             chunks[1],
             app,
             theme,
-            _state,
+            state,
             block,
             editor_snapshot.as_ref(),
         );
@@ -1612,7 +1591,7 @@ fn render_ddl(
         chunks[1],
         app,
         theme,
-        _state,
+        state,
         block,
         editor_snapshot.as_ref(),
     );

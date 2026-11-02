@@ -393,6 +393,11 @@ pub struct UiState {
     pub redis_keys_viewport_rows: Option<(Uuid, usize)>,
     pub redis_preview_viewport_rows: Option<(Uuid, usize, usize)>,
     pub redis_editor_viewport: Option<(Uuid, crate::model::editor::EditorViewport)>,
+    /// Editor viewport of the DDL pane the last render actually drew.
+    ///
+    /// The DDL pane lives inside the workspace content area, so its viewport is
+    /// smaller than the terminal. Only the render knows the real rect.
+    pub ddl_editor_viewport: Option<(Uuid, crate::model::editor::EditorViewport)>,
     pub redis_info_scroll: u16,
     pub ddl_viewport: Option<DdlViewportMetrics>,
     pub cursor: Option<CursorSpec>,
@@ -572,6 +577,7 @@ impl UiState {
             redis_keys_viewport_rows: None,
             redis_preview_viewport_rows: None,
             redis_editor_viewport: None,
+            ddl_editor_viewport: None,
             redis_info_scroll: 0,
             ddl_viewport: None,
             cursor: None,
@@ -1166,6 +1172,7 @@ fn render_with_state_at(
     state.redis_keys_viewport_rows = None;
     state.redis_preview_viewport_rows = None;
     state.redis_editor_viewport = None;
+    state.ddl_editor_viewport = None;
     state.ddl_viewport = None;
     state.cursor = None;
     state.text_selection_targets.clear();
