@@ -446,12 +446,16 @@ def run(args, report):
                 require(not (root / "connections.toml").exists(), "empty profile configuration")
                 tui.send(b"\r")
                 tui.wait(lambda: tui.contains("NEW CONNECTION"), "new connection form")
-                # Initial focus Kind -> Category; choose Non-relational, then last driver.
+                # Select by visible identity so adding another driver cannot
+                # silently redirect this acceptance flow to a different product.
                 tui.send(b"\x1b[Z")
                 tui.send(b"\x1b[C")
                 tui.tabs(1)
-                tui.send(b"\x1b[D")
-                tui.wait(lambda: tui.contains("Elasticsearch PROFILE"), "Elasticsearch driver selection")
+                for _ in range(8):
+                    if tui.contains("Elasticsearch PROFILE"):
+                        break
+                    tui.send(b"\x1b[C")
+                require(tui.contains("Elasticsearch PROFILE"), "Elasticsearch driver selection")
                 tui.tabs(1)
                 tui.fill(name)
                 tui.tabs(1)
