@@ -7924,6 +7924,7 @@ fn driver_options_use_database_icons_in_each_icon_mode() {
                 DatabaseKind::ClickHouse => "ClickHouse",
                 DatabaseKind::TiDb => "TiDB",
                 DatabaseKind::Snowflake => "Snowflake",
+                DatabaseKind::BigQuery => "BigQuery",
                 DatabaseKind::Elasticsearch => "Elasticsearch",
                 DatabaseKind::OpenSearch => "OpenSearch",
             };

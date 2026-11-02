@@ -211,6 +211,38 @@ fn has_code(text: &str, dialect: SqlDialect) -> bool {
 }
 
 fn first_code_offset(text: &str, dialect: SqlDialect) -> Option<usize> {
+    if dialect == SqlDialect::BigQuery {
+        let result = super::bigquery::tokenize(text);
+        let mut tokens = Vec::new();
+        let error = match result {
+            Ok(parsed) => {
+                tokens = parsed;
+                None
+            }
+            Err(error) => {
+                let _ = sqlparser::tokenizer::Tokenizer::new(
+                    super::dialect::parser_dialect(dialect),
+                    text,
+                )
+                .tokenize_with_location_into_buf(&mut tokens);
+                Some(error)
+            }
+        };
+        let index = super::LineIndex::new(text);
+        return tokens
+            .iter()
+            .find(|token| {
+                !matches!(
+                    token.token,
+                    sqlparser::tokenizer::Token::Whitespace(_)
+                        | sqlparser::tokenizer::Token::SemiColon
+                )
+            })
+            .map(|token| index.offset(text, token.span.start.line, token.span.start.column))
+            .or_else(|| {
+                error.map(|error| index.offset(text, error.location.line, error.location.column))
+            });
+    }
     let bytes = text.as_bytes();
     let mut index = 0;
     while index < bytes.len() {
@@ -261,6 +293,28 @@ fn statement_boundaries(
 ) -> Vec<(usize, usize)> {
     if dialect == SqlDialect::Oracle {
         return super::oracle::scan_statement_boundaries(text).unwrap_or_default();
+    }
+    if dialect == SqlDialect::BigQuery {
+        // Use the official lexer for raw/bytes/triple-quoted literals and escaped
+        // backtick paths. An incomplete literal keeps the remaining buffer whole.
+        let mut tokens = super::bigquery::tokenize(text).unwrap_or_default();
+        if tokens.is_empty() {
+            let _ =
+                sqlparser::tokenizer::Tokenizer::new(super::dialect::parser_dialect(dialect), text)
+                    .tokenize_with_location_into_buf(&mut tokens);
+        }
+        let index = super::LineIndex::new(text);
+        let mut start = 0;
+        let mut boundaries = Vec::new();
+        for token in tokens {
+            if token.token == sqlparser::tokenizer::Token::SemiColon {
+                let end = index.offset(text, token.span.end.line, token.span.end.column);
+                boundaries.push((start, end));
+                start = end;
+            }
+        }
+        boundaries.push((start, text.len()));
+        return boundaries;
     }
     let bytes = text.as_bytes();
     let mut boundaries = Vec::new();

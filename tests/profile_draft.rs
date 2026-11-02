@@ -955,6 +955,8 @@ fn driver_cycle_includes_duckdb_after_sqlite() {
     state.cycle(1);
     assert_eq!(state.draft.as_ref().unwrap().kind, DatabaseKind::Snowflake);
     state.cycle(1);
+    assert_eq!(state.draft.as_ref().unwrap().kind, DatabaseKind::BigQuery);
+    state.cycle(1);
     assert_eq!(state.draft.as_ref().unwrap().kind, DatabaseKind::Postgres);
 }
 

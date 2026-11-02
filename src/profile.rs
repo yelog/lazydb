@@ -28,6 +28,7 @@ pub enum DatabaseKind {
     OpenSearch,
     TiDb,
     Snowflake,
+    BigQuery,
 }
 
 impl DatabaseKind {
@@ -57,6 +58,7 @@ impl DatabaseKind {
                 | Self::ClickHouse
                 | Self::DuckDb
                 | Self::Snowflake
+                | Self::BigQuery
         )
     }
 }
@@ -96,6 +98,8 @@ pub enum ConnectionUrlFormat {
     #[serde(rename = "tidb")]
     TiDb,
     Snowflake,
+    #[serde(rename = "bigquery")]
+    BigQuery,
 }
 
 impl ConnectionUrlFormat {
@@ -117,6 +121,7 @@ impl ConnectionUrlFormat {
             DatabaseKind::Elasticsearch => Self::Elasticsearch,
             DatabaseKind::OpenSearch => Self::OpenSearch,
             DatabaseKind::Snowflake => Self::Snowflake,
+            DatabaseKind::BigQuery => Self::BigQuery,
         }
     }
 
@@ -158,6 +163,7 @@ impl ConnectionUrlFormat {
                 )
                 | (Self::DuckDb, DatabaseKind::DuckDb)
                 | (Self::Snowflake, DatabaseKind::Snowflake)
+                | (Self::BigQuery, DatabaseKind::BigQuery)
         )
     }
 
@@ -184,6 +190,7 @@ impl ConnectionUrlFormat {
             DatabaseKind::Elasticsearch => &[Self::Elasticsearch, Self::ElasticsearchTls],
             DatabaseKind::OpenSearch => &[Self::OpenSearch, Self::OpenSearchTls],
             DatabaseKind::Snowflake => &[Self::Snowflake],
+            DatabaseKind::BigQuery => &[Self::BigQuery],
         }
     }
 }
@@ -639,6 +646,8 @@ pub struct ConnectionProfile {
     pub opensearch_options: Option<OpenSearchConnectionOptions>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snowflake_options: Option<SnowflakeConnectionOptions>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bigquery_options: Option<BigQueryOptions>,
 }
 
 #[derive(Debug)]
@@ -797,6 +806,7 @@ fn parse_duckdb_url(input: &str) -> Result<Option<ParsedConnectionUrl>, ProfileE
         mongodb_options: None,
         pg_options: None,
         snowflake_options: None,
+        bigquery_options: None,
     }))
 }
 
@@ -831,6 +841,7 @@ pub struct ParsedConnectionUrl {
     pub mongodb_options: Option<MongoConnectionOptions>,
     pub pg_options: Option<PgConnectionOptions>,
     pub snowflake_options: Option<SnowflakeConnectionOptions>,
+    pub bigquery_options: Option<BigQueryOptions>,
 }
 
 /// PostgreSQL protocol options. Certificate material remains in the referenced
@@ -846,6 +857,245 @@ pub struct PgConnectionOptions {
     pub ssl_client_key: Option<PathBuf>,
     #[serde(default)]
     pub options: Option<String>,
+}
+
+/// BigQuery uses Application Default Credentials. Only an optional file path is persisted.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BigQueryOptions {
+    pub credentials_file: Option<String>,
+    pub location: Option<String>,
+    pub data_project: Option<String>,
+    pub maximum_bytes_billed: u64,
+    pub query_timeout_secs: u64,
+}
+
+impl Default for BigQueryOptions {
+    fn default() -> Self {
+        Self {
+            credentials_file: None,
+            location: None,
+            data_project: None,
+            maximum_bytes_billed: 1_000_000_000,
+            query_timeout_secs: 120,
+        }
+    }
+}
+
+impl BigQueryOptions {
+    pub fn effective_data_project<'a>(&'a self, execution_project: &'a str) -> &'a str {
+        self.data_project.as_deref().unwrap_or(execution_project)
+    }
+
+    pub fn validate(&self) -> Result<(), ProfileError> {
+        if let Some(project) = &self.data_project {
+            validate_bigquery_project(project)?;
+        }
+        if self.maximum_bytes_billed == 0 || self.maximum_bytes_billed > i64::MAX as u64 {
+            return Err(ProfileError::InvalidQueryParameter(
+                "maximum_bytes_billed".into(),
+            ));
+        }
+        if !(1..=86_400).contains(&self.query_timeout_secs) {
+            return Err(ProfileError::InvalidQueryParameter(
+                "query_timeout_secs".into(),
+            ));
+        }
+        for (name, value) in [
+            ("credentials_file", &self.credentials_file),
+            ("location", &self.location),
+        ] {
+            if value
+                .as_ref()
+                .is_some_and(|value| value.trim().is_empty() || value.chars().any(char::is_control))
+            {
+                return Err(ProfileError::InvalidQueryParameter(name.into()));
+            }
+        }
+        Ok(())
+    }
+}
+
+pub fn validate_bigquery_project(project: &str) -> Result<(), ProfileError> {
+    let bytes = project.as_bytes();
+    if !(6..=30).contains(&bytes.len())
+        || !bytes[0].is_ascii_lowercase()
+        || !bytes.last().is_some_and(u8::is_ascii_alphanumeric)
+        || !bytes
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+    {
+        return Err(ProfileError::InvalidQueryParameter("project".into()));
+    }
+    Ok(())
+}
+
+impl ConnectionProfile {
+    /// The metadata project may differ from the execution and billing project.
+    pub fn catalog_database(&self) -> Option<&str> {
+        let database = self.database.as_deref()?;
+        Some(if self.kind == DatabaseKind::BigQuery {
+            self.bigquery_options
+                .as_ref()
+                .map_or(database, |options| options.effective_data_project(database))
+        } else {
+            database
+        })
+    }
+
+    pub fn validate_bigquery(&self) -> Result<(), ProfileError> {
+        validate_bigquery_project(self.database.as_deref().unwrap_or_default())?;
+        if self.host.is_some()
+            || self.port.is_some()
+            || self.user.is_some()
+            || self.sqlite_path.is_some()
+            || self.duckdb_path.is_some()
+            || self.mongodb_options.is_some()
+            || self.pg_options.is_some()
+            || self.elasticsearch_options.is_some()
+            || self.snowflake_options.is_some()
+            || self.ssl_mode != SslMode::VerifyFull
+            || !matches!(self.credential_policy, CredentialPolicy::None)
+        {
+            return Err(ProfileError::InvalidQueryParameter("authentication".into()));
+        }
+        if self.default_schema.as_ref().is_some_and(|dataset| {
+            dataset.is_empty()
+                || dataset.len() > 1024
+                || !dataset
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        }) {
+            return Err(ProfileError::InvalidQueryParameter("dataset".into()));
+        }
+        self.bigquery_options
+            .as_ref()
+            .unwrap_or(&BigQueryOptions::default())
+            .validate()
+    }
+}
+
+fn parse_bigquery_url(url: Url, input: &str) -> Result<ParsedConnectionUrl, ProfileError> {
+    // Validate the original authority and path before URL normalization can hide
+    // userinfo, uppercase project names, or dot segments.
+    let rest = input
+        .get(11..)
+        .filter(|_| {
+            input
+                .get(..11)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("bigquery://"))
+        })
+        .ok_or_else(|| ProfileError::InvalidQueryParameter("authority".into()))?;
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let project = rest[..authority_end].to_owned();
+    validate_bigquery_project(&project)?;
+    if url.fragment().is_some() {
+        return Err(ProfileError::InvalidQueryParameter("fragment".into()));
+    }
+    let raw_path = rest[authority_end..].split('?').next().unwrap_or_default();
+    let dataset = percent_decode_str(raw_path.strip_prefix('/').unwrap_or(raw_path))
+        .decode_utf8()
+        .map_err(|_| ProfileError::InvalidQueryParameter("dataset".into()))?
+        .into_owned();
+    let mut options = BigQueryOptions::default();
+    let mut read_only = None;
+    let mut seen = HashSet::new();
+    for (key, value) in url.query_pairs() {
+        let key = key.to_ascii_lowercase();
+        let key = if key == "readonly" {
+            "read_only".to_owned()
+        } else {
+            key
+        };
+        if !seen.insert(key.clone()) {
+            return Err(ProfileError::ConflictingQueryParameter(key));
+        }
+        match key.as_str() {
+            "read_only" => read_only = Some(parse_bool(&value, "readOnly")?),
+            "credentials_file" => options.credentials_file = Some(value.into_owned()),
+            "location" => options.location = Some(value.into_owned()),
+            "data_project" => options.data_project = Some(value.into_owned()),
+            "maximum_bytes_billed" | "query_timeout_secs" => {
+                let number =
+                    if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
+                        value.parse::<u64>().ok()
+                    } else {
+                        None
+                    }
+                    .ok_or_else(|| ProfileError::InvalidQueryParameter(key.clone()))?;
+                if key == "maximum_bytes_billed" {
+                    options.maximum_bytes_billed = number;
+                } else {
+                    options.query_timeout_secs = number;
+                }
+            }
+            _ => return Err(ProfileError::UnknownQueryParameter(key)),
+        }
+    }
+    options.validate()?;
+    if !dataset.is_empty()
+        && (dataset.len() > 1024
+            || !dataset
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'))
+    {
+        return Err(ProfileError::InvalidQueryParameter("dataset".into()));
+    }
+    Ok(ParsedConnectionUrl {
+        kind: DatabaseKind::BigQuery,
+        format: ConnectionUrlFormat::BigQuery,
+        host: None,
+        port: None,
+        user: None,
+        password: None,
+        database: Some(project),
+        default_schema: (!dataset.is_empty()).then_some(dataset),
+        sqlite_path: None,
+        sqlite_memory: false,
+        duckdb_path: None,
+        ssl_mode: SslMode::VerifyFull,
+        read_only: read_only.unwrap_or(false),
+        read_only_explicit: read_only.is_some(),
+        mongodb_options: None,
+        pg_options: None,
+        snowflake_options: None,
+        bigquery_options: Some(options),
+    })
+}
+
+fn format_bigquery_url(profile: &ConnectionProfile) -> Result<String, ProfileError> {
+    profile.validate_bigquery()?;
+    let defaults = BigQueryOptions::default();
+    let options = profile.bigquery_options.as_ref().unwrap_or(&defaults);
+    let mut output = format!(
+        "bigquery://{}/{}",
+        profile.database.as_deref().unwrap_or_default(),
+        profile.default_schema.as_deref().unwrap_or_default()
+    );
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    for (name, value) in [
+        ("location", &options.location),
+        ("data_project", &options.data_project),
+        ("credentials_file", &options.credentials_file),
+    ] {
+        if let Some(value) = value {
+            query.append_pair(name, value);
+        }
+    }
+    if profile.read_only {
+        query.append_pair("readOnly", "true");
+    }
+    query.append_pair(
+        "maximum_bytes_billed",
+        &options.maximum_bytes_billed.to_string(),
+    );
+    query.append_pair(
+        "query_timeout_secs",
+        &options.query_timeout_secs.to_string(),
+    );
+    output.push('?');
+    output.push_str(&query.finish());
+    Ok(output)
 }
 
 /// SQL API session options. The access token is kept in the shared credential store.
@@ -955,6 +1205,7 @@ fn parse_connection_url_inner(
             sqlite_path: None,
             sqlite_memory: true,
             snowflake_options: None,
+            bigquery_options: None,
             duckdb_path: None,
             ssl_mode: SslMode::Disable,
             read_only,
@@ -992,6 +1243,9 @@ fn parse_connection_url_inner(
         return Ok(parsed);
     }
     let url = Url::parse(normalized)?;
+    if url.scheme() == "bigquery" && !jdbc {
+        return parse_bigquery_url(url, normalized);
+    }
     let (kind, format) = match (url.scheme().to_ascii_lowercase().as_str(), jdbc) {
         ("cockroachdb", false) => (DatabaseKind::CockroachDb, ConnectionUrlFormat::CockroachDb),
         ("postgres", false) => (DatabaseKind::Postgres, ConnectionUrlFormat::Postgres),
@@ -1155,6 +1409,7 @@ fn parse_mongodb_url(input: &str) -> Result<ParsedConnectionUrl, ProfileError> {
         sqlite_path: None,
         sqlite_memory: false,
         snowflake_options: None,
+        bigquery_options: None,
         duckdb_path: None,
         ssl_mode: options
             .iter()
@@ -1260,6 +1515,7 @@ fn parse_jdbc_oracle_url(input: &str) -> Result<ParsedConnectionUrl, ProfileErro
         sqlite_path: None,
         sqlite_memory: false,
         snowflake_options: None,
+        bigquery_options: None,
         duckdb_path: None,
         ssl_mode: SslMode::Prefer,
         read_only: false,
@@ -1312,7 +1568,12 @@ pub fn import_connection_url_with_driver(
     };
     let catalog_scope = CatalogScope::for_profile(
         parsed.kind,
-        scope_database,
+        parsed
+            .bigquery_options
+            .as_ref()
+            .map_or(scope_database, |options| {
+                options.effective_data_project(scope_database)
+            }),
         parsed.default_schema.as_deref(),
     );
     Ok(ImportedProfile {
@@ -1340,6 +1601,7 @@ pub fn import_connection_url_with_driver(
             opensearch_options: None,
             pg_options: parsed.pg_options,
             snowflake_options: parsed.snowflake_options,
+            bigquery_options: parsed.bigquery_options,
         },
         transient_password: parsed.password,
         read_only_explicit: parsed.read_only_explicit,
@@ -1591,6 +1853,7 @@ fn parse_server_url(
             .validate()?;
     }
     let default_port = match kind {
+        DatabaseKind::BigQuery => unreachable!("BigQuery has its own project URL parser"),
         DatabaseKind::Snowflake => 443,
         DatabaseKind::Postgres => 5432,
         DatabaseKind::CockroachDb => 26257,
@@ -1627,6 +1890,7 @@ fn parse_server_url(
         mongodb_options: None,
         pg_options: (pg_options != PgConnectionOptions::default()).then_some(pg_options),
         snowflake_options,
+        bigquery_options: None,
     })
 }
 
@@ -1698,6 +1962,7 @@ fn parse_jdbc_sql_server_url(input: &str) -> Result<ParsedConnectionUrl, Profile
         sqlite_path: None,
         sqlite_memory: false,
         snowflake_options: None,
+        bigquery_options: None,
         duckdb_path: None,
         ssl_mode: sql_server_ssl_mode(encrypt, trust_server_certificate)?,
         read_only: read_only.unwrap_or(false),
@@ -1819,6 +2084,7 @@ fn parse_sqlite_url(input: &str, jdbc: bool) -> Result<ParsedConnectionUrl, Prof
         sqlite_path: Some(path),
         sqlite_memory: false,
         snowflake_options: None,
+        bigquery_options: None,
         duckdb_path: None,
         ssl_mode: SslMode::Disable,
         read_only,
@@ -1858,6 +2124,9 @@ pub fn format_connection_url(
 ) -> Result<String, ProfileError> {
     if !format.is_compatible(profile.kind) {
         return Err(ProfileError::IncompatibleFormat);
+    }
+    if profile.kind == DatabaseKind::BigQuery {
+        return format_bigquery_url(profile);
     }
     if profile.kind == DatabaseKind::Sqlite {
         let memory =

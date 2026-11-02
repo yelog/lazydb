@@ -3224,6 +3224,7 @@ fn preview(
             | crate::profile::DatabaseKind::Elasticsearch
             | crate::profile::DatabaseKind::OpenSearch => SqlDialect::Generic,
             crate::profile::DatabaseKind::Snowflake => SqlDialect::Snowflake,
+            crate::profile::DatabaseKind::BigQuery => SqlDialect::BigQuery,
             crate::profile::DatabaseKind::ClickHouse => SqlDialect::ClickHouse,
         })
         .unwrap_or(SqlDialect::Generic);

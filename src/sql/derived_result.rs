@@ -150,6 +150,14 @@ fn derived_alias(dialect: SqlDialect, name: &str) -> String {
 }
 
 fn parse_source(source: &str, dialect: SqlDialect) -> Result<String, DerivedQueryError> {
+    // GoogleSQL value tables (SELECT AS STRUCT / VALUE), duplicate column names,
+    // and ordering can change meaning inside a SELECT * wrapper. Keep execution
+    // and result budgets in the adapter until a semantics-preserving path exists.
+    if dialect == SqlDialect::BigQuery {
+        return Err(DerivedQueryError(
+            "derived result queries are not supported for GoogleSQL".into(),
+        ));
+    }
     let prepared = if dialect == SqlDialect::Oracle {
         super::oracle::prepare_oracle_statement(source)
             .map_err(|error| DerivedQueryError(error.to_string()))?

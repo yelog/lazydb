@@ -484,6 +484,7 @@ mod tests {
             default_schema: None,
             sqlite_path: None,
             snowflake_options: None,
+            bigquery_options: None,
             duckdb_path: None,
             mongodb_options: Some(options),
             elasticsearch_options: None,

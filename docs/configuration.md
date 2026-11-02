@@ -22,7 +22,7 @@ silently accepting a setting that LazyDB does not use.
 
 New and edited connection forms show **Category** above **Driver**. Choose
 **Relational** for PostgreSQL, CockroachDB, MySQL, MariaDB, TiDB, Oracle,
-SQL Server, SQLite, DuckDB, ClickHouse, or Snowflake; choose **Non-relational**
+SQL Server, SQLite, DuckDB, ClickHouse, Snowflake, or BigQuery; choose **Non-relational**
 for Redis, Valkey, MongoDB, Elasticsearch, or OpenSearch. Left/Right
 changes the focused category or cycles drivers within that category. Categories
 and drivers also support mouse selection. Narrow forms keep full driver names
@@ -378,6 +378,28 @@ Database field is a virtual catalog namespace, defaulting to `default`, and does
 not restrict native REST request paths. See [OpenSearch](opensearch.md) for
 permission differences, write/cancellation behavior and verification limits.
 
+## BigQuery Profiles
+
+Choose **Relational → BigQuery**. Authentication uses ADC with automatic refresh;
+complete developer login outside LazyDB with `gcloud auth application-default login`,
+set `GOOGLE_APPLICATION_CREDENTIALS` to a service-account JSON, or select an
+explicit ADC credentials file. No password field or token is stored in the profile.
+
+```text
+bigquery://billing-project/analytics?data_project=data-project&location=US&maximum_bytes_billed=1000000000&query_timeout_secs=120
+```
+
+`database` is the execution/billing project, `default_schema` is the dataset,
+and `bigquery_options.data_project` is the default data project (otherwise the
+execution project). The API endpoint is fixed verified Google HTTPS; the URL
+project is not a server. Options are `data_project`, `location`, `credentials_file`,
+`maximum_bytes_billed` (default 1 GB), `query_timeout_secs` (default 120, range
+1–86400), and shared read-only flags. Credentials JSON and tokens are never
+exported. File paths are nonsecret profile configuration. Every query, including
+preview and DDL, uses the billing cap; result row/byte limits and SQL LIMIT do
+not constrain scan cost. See [BigQuery](bigquery.md) for IAM, ADC sources,
+project discovery limits, cancellation and verification scope.
+
 ## Connection Profile Fields
 
 The current profile file format is version `6`:
@@ -387,19 +409,21 @@ The current profile file format is version `6`:
 | `id` | UUID string | Generated on creation | Stable identity used by workspace state and system credential references. Must be unique within the file. |
 | `name` | String | Derived from the database, host, or SQLite filename | Name shown in the Explorer and accepted by `--profile` and agent `--connection`. |
 | `access` | Table | `{ scope = "global" }` | Controls which projects can see a saved profile. |
-| `kind` | `postgres`, `cockroachdb`, `mysql`, `mariadb`, `tidb`, `oracle`, `sqlserver`, `sqlite`, `duckdb`, `redis`, `valkey`, `mongodb`, `clickhouse`, `snowflake`, `elasticsearch`, `opensearch` | Required | Database adapter to use. Oracle requires Oracle Instant Client; DuckDB requires an optional C API runtime. Redis/Valkey use key/value workflows; MongoDB uses document workflows. See [database capabilities](database-capabilities.md). |
+| `kind` | `postgres`, `cockroachdb`, `mysql`, `mariadb`, `tidb`, `oracle`, `sqlserver`, `sqlite`, `duckdb`, `redis`, `valkey`, `mongodb`, `clickhouse`, `snowflake`, `bigquery`, `elasticsearch`, `opensearch` | Required | Database adapter to use. Oracle requires Oracle Instant Client; DuckDB requires an optional C API runtime. Redis/Valkey use key/value workflows; MongoDB uses document workflows. See [database capabilities](database-capabilities.md). |
 | `url_format` | Kebab-case enum | Driver-specific | URL spelling used when LazyDB displays or regenerates the connection URL. |
 | `host` | String or `null` | `null` | Server hostname or address. PostgreSQL/CockroachDB, MySQL/MariaDB/TiDB, Oracle, SQL Server, and Redis use this field. |
 | `port` | Integer or `null` | Driver default when imported | Server port. PostgreSQL defaults to `5432`, CockroachDB to `26257`, MySQL/MariaDB to `3306`, TiDB to `4000`, Oracle to `1521`, SQL Server to `1433`, and Redis to `6379`. SQL Server profiles require an explicit TCP port when connecting. |
 | `user` | String or `null` | `null` | Server login name. SQL Server uses SQL username/password authentication; SQLite does not use it. |
-| `database` | String or `null` | `null` | Database name for PostgreSQL/CockroachDB, MySQL/MariaDB/TiDB, Snowflake, Oracle service, or SQL Server; logical SQLite path value; or non-negative Redis logical database number. |
-| `default_schema` | String or `null` | `null` | PostgreSQL/CockroachDB `currentSchema`, SQL Server schema, Snowflake schema (defaults to `PUBLIC`), or SQLite `main`. MySQL, MariaDB, and TiDB have no separate default-schema field. |
+| `database` | String or `null` | `null` | Database name for PostgreSQL/CockroachDB, MySQL/MariaDB/TiDB, Snowflake, Oracle service, or SQL Server; BigQuery execution/billing project; logical SQLite path value; or non-negative Redis logical database number. |
+| `default_schema` | String or `null` | `null` | PostgreSQL/CockroachDB `currentSchema`, SQL Server schema, Snowflake schema (defaults to `PUBLIC`), BigQuery default dataset, or SQLite `main`. MySQL, MariaDB, and TiDB have no separate default-schema field. |
 | `sqlite_path` | Path or `null` | `null` | SQLite file path. It is `null` for an in-memory database. |
 | `duckdb_path` | Path or `null` | `null` | DuckDB file path. It is `null` for an in-memory database. |
 | `ssl_mode` | `disable`, `prefer`, `require`, `verify-ca`, `verify-full` | `prefer` | TLS policy for PostgreSQL/CockroachDB, MySQL/MariaDB/TiDB, Oracle, SQL Server, and Redis. SQLite always uses `disable`; Redis accepts `disable` or a TLS-enabled mode, not `prefer`. Snowflake requires `verify-full` and port `443`. OpenSearch accepts only `disable` (HTTP) or `verify-full` (verified HTTPS). |
 | `pg_options` | Optional table | Absent | PostgreSQL/CockroachDB `ssl_root_cert`, `ssl_client_cert`, `ssl_client_key` paths and startup `options`. |
 | `snowflake_options` | Table or omitted | PAT with no warehouse or role override | Snowflake `warehouse`, `role`, and `token_type`; accepts `PROGRAMMATIC_ACCESS_TOKEN`, `OAUTH`, or `KEYPAIR_JWT`. Contains no credentials. |
 | `opensearch_options` | Optional table | Basic auth, no extra CA | OpenSearch `auth` (`basic`/`none`) and `ca_cert_path`; independent of Elasticsearch options, contains no credentials. |
+
+| `bigquery_options` | Table or omitted | ADC, 1 GB billing cap, 120 second timeout | `credentials_file`, `data_project`, `location`, `maximum_bytes_billed`, `query_timeout_secs`; contains no credential contents. BigQuery `database` is the billing project and `default_schema` is its default data dataset. |
 | `credential_policy` | Tagged table | `{ policy = "none" }` | Where the password or Snowflake access token comes from. |
 | `read_only` | Boolean | `false` | Requests adapter-level read-only behavior. Use database grants for authorization. |
 | `environment` | `development`, `staging`, `production` | `development` | Environment label used by the UI and agent write-policy checks. |
@@ -416,7 +440,7 @@ the client directory requires restarting LazyDB.
 for CockroachDB; `postgres`, `postgresql`, `jdbc-postgresql` for PostgreSQL;
 `mysql`, `jdbc-mysql` for MySQL; `mariadb` for MariaDB; `tidb` for TiDB; `jdbc-oracle` for Oracle;
 `sqlserver`, `mssql`, `jdbc-sqlserver` for SQL Server; `sqlite`, `file-uri`,
-`jdbc-sqlite` for SQLite; `duckdb` for DuckDB; `snowflake` for Snowflake; and `redis`, `rediss` for Redis. Defaults are
+`jdbc-sqlite` for SQLite; `duckdb` for DuckDB; `snowflake` for Snowflake; `bigquery` for BigQuery; and `redis`, `rediss` for Redis. Defaults are
 `postgresql`, `mysql`, `mariadb`, `tidb`, `jdbc-oracle`, `sqlserver`, `sqlite`, `duckdb`,
 `snowflake`, and `redis` respectively. See the [DuckDB guide](duckdb.md) for its local file and memory URL formats.
 

@@ -1370,6 +1370,12 @@ pub enum Action {
         connection: ConnectionIdentity,
         message: String,
     },
+    QueryCancellationCompleted {
+        tab_id: Uuid,
+        generation: u64,
+        connection: ConnectionIdentity,
+        message: String,
+    },
     SqlHistoryLoaded {
         overlay_id: Uuid,
         generation: u64,

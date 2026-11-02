@@ -128,6 +128,14 @@ impl DatabaseCapabilities {
                 manual_transactions: false,
                 cancellation: true,
             },
+            DatabaseKind::BigQuery => Self {
+                catalog: true,
+                relation_ddl: true,
+                relation_edit: false,
+                monitoring: false,
+                manual_transactions: false,
+                cancellation: true,
+            },
             DatabaseKind::Snowflake => Self {
                 catalog: true,
                 relation_ddl: true,

@@ -214,6 +214,8 @@ pub enum LspDialect {
     Sqlite,
     ClickHouse,
     Snowflake,
+    #[value(name = "bigquery")]
+    BigQuery,
     #[value(name = "duckdb")]
     DuckDb,
     #[default]
@@ -233,6 +235,7 @@ impl From<crate::profile::DatabaseKind> for LspDialect {
             | crate::sql::SqlDialect::Oracle => Self::Sqlite,
             crate::sql::SqlDialect::ClickHouse => Self::ClickHouse,
             crate::sql::SqlDialect::Snowflake => Self::Snowflake,
+            crate::sql::SqlDialect::BigQuery => Self::BigQuery,
         }
     }
 }
@@ -771,6 +774,7 @@ mod tests {
                 "tidb",
                 "cockroachdb",
                 "snowflake",
+                "bigquery",
                 "elasticsearch",
                 "opensearch"
             ])

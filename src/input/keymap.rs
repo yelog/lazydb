@@ -5291,6 +5291,11 @@ fn is_text_field(field: ProfileField) -> bool {
             | ProfileField::Schema
             | ProfileField::SqlitePath
             | ProfileField::CaCertPath
+            | ProfileField::CredentialsFile
+            | ProfileField::Location
+            | ProfileField::DataProject
+            | ProfileField::MaximumBytesBilled
+            | ProfileField::QueryTimeoutSecs
     )
 }
 

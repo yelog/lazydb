@@ -3,7 +3,7 @@ use std::ops::ControlFlow;
 
 use crate::db::catalog::{CatalogEntry, CatalogId, CatalogKind};
 
-use super::{SqlDialect, TextRange, analysis::LineIndex, dialect::parser_dialect};
+use super::{SqlDialect, TextRange, analysis::LineIndex};
 
 /// Whether the catalog contains enough information to make a negative claim.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -237,9 +237,7 @@ pub fn analyze_semantics(
         dependencies: Vec::new(),
         incomplete: false,
     };
-    let Ok(statements) =
-        sqlparser::parser::Parser::parse_sql(parser_dialect(context.dialect), text)
-    else {
+    let Ok(statements) = super::dialect::parse_sql(context.dialect, text) else {
         return analysis;
     };
     let index = LineIndex::new(text);
@@ -477,7 +475,10 @@ fn validate_qualified_namespace(
     analysis: &mut SemanticAnalysis,
 ) -> bool {
     if values.len() == 3
-        && if context.dialect == SqlDialect::Snowflake {
+        && if matches!(
+            context.dialect,
+            SqlDialect::Snowflake | SqlDialect::BigQuery
+        ) {
             catalog
                 .coverage(&CatalogNamespace::new(None::<String>, None::<String>))
                 .can_prove_missing()
@@ -486,7 +487,10 @@ fn validate_qualified_namespace(
         }
         && matches!(
             context.dialect,
-            SqlDialect::Postgres | SqlDialect::SqlServer | SqlDialect::Snowflake
+            SqlDialect::Postgres
+                | SqlDialect::SqlServer
+                | SqlDialect::Snowflake
+                | SqlDialect::BigQuery
         )
         && !catalog.has_database(values[0], context.dialect)
     {
@@ -498,7 +502,10 @@ fn validate_qualified_namespace(
         return false;
     }
     let schema_index = match (context.dialect, values) {
-        (SqlDialect::SqlServer | SqlDialect::Snowflake, [_database, _schema, _relation]) => Some(1),
+        (
+            SqlDialect::SqlServer | SqlDialect::Snowflake | SqlDialect::BigQuery,
+            [_database, _schema, _relation],
+        ) => Some(1),
         (_, [_schema, _relation]) => Some(0),
         _ => None,
     };
@@ -508,7 +515,10 @@ fn validate_qualified_namespace(
         } else {
             context.database.as_deref()
         };
-        let can_prove_missing = if context.dialect == SqlDialect::Snowflake {
+        let can_prove_missing = if matches!(
+            context.dialect,
+            SqlDialect::Snowflake | SqlDialect::BigQuery
+        ) {
             catalog
                 .coverage(&CatalogNamespace::new(database, None::<String>))
                 .can_prove_missing()

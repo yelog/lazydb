@@ -6,7 +6,7 @@ machine.
 
 For connection setup, see [Configuration](configuration.md). Dedicated guides
 cover [DuckDB runtime and sessions](duckdb.md), [MongoDB](mongodb.md),
-[Snowflake](snowflake.md), and the
+[Snowflake](snowflake.md), [BigQuery](bigquery.md), and the
 [Redis/Valkey browser](redis-browser.md).
 
 ## Driver Matrix
@@ -33,6 +33,7 @@ disable it at runtime.
 | MongoDB | Document | Database, collection, and index discovery; native document commands, no SQL DDL | Document operations use a separate BSON/EJSON workflow; no relational grid editing | Bounded console transactions on replica sets or sharded clusters; see [MongoDB](mongodb.md#transactions) | No advertised server-side cancellation | Manual `serverStatus`, `dbStats`, and bounded `currentOp`; see [MongoDB](mongodb.md#monitoring-and-principals) |
 | ClickHouse | Relational | Available; database/table/view/MV and bounded native object catalog | Not advertised; supported catalog table-shape edits are separate | No manual transactions | Local request cancellation only; server query may continue | `system.events` counters and bounded `system.processes` |
 | Snowflake | Relational | Database/schema/table/view discovery, column metadata, relation previews and DDL reads; no structured catalog mutation | Not advertised | Independent SQL API statements; no manual transactions | Not advertised | Not supported |
+| Google BigQuery | Relational / GoogleSQL | Scoped project/dataset/table/view catalogs, nested columns, search, lookahead previews and native INFORMATION_SCHEMA DDL | Not advertised | Independent jobs; no scripts, sessions or manual transactions | Native jobs.cancel, accepted request and final state reported separately | Not implemented |
 | Elasticsearch | Search / REST | Index and mapping discovery; native REST commands, no SQL DDL | Confirmed REST writes; no grid-cell editing | No manual transactions | Local HTTP cancellation; server work may continue | REST APIs only; no dedicated dashboard |
 | OpenSearch | Search / REST; independent driver | Index and mapping discovery; shared REST/NDJSON console, no SQL DDL | Confirmed REST writes; no grid-cell editing | No manual transactions | Local HTTP cancellation; server work may continue | REST APIs only; no dedicated dashboard |
 

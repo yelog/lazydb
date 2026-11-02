@@ -26,6 +26,7 @@ fn profile(kind: DatabaseKind) -> ConnectionProfile {
         mongodb_options: None,
         pg_options: None,
         snowflake_options: None,
+        bigquery_options: None,
         elasticsearch_options: None,
         opensearch_options: None,
         duckdb_path: None,
@@ -378,4 +379,65 @@ fn opensearch_virtual_namespace_round_trips_and_respects_scope() {
     profile.catalog_scope = CatalogScope::for_profile(DatabaseKind::OpenSearch, "other", None);
     assert!(!target.is_valid(&profile));
     assert!(target.apply_to_profile(&profile).is_none());
+}
+
+#[test]
+fn bigquery_targets_keep_billing_project_and_scope_datasets_to_data_project() {
+    use lazydb::profile::{BigQueryOptions, CatalogScope};
+    let mut profile = profile(DatabaseKind::BigQuery);
+    profile.database = Some("billing-project".into());
+    profile.default_schema = Some("analytics".into());
+    profile.bigquery_options = Some(BigQueryOptions {
+        data_project: Some("data-project".into()),
+        ..Default::default()
+    });
+    profile.catalog_scope =
+        CatalogScope::for_profile(DatabaseKind::BigQuery, "data-project", Some("analytics"));
+    let target = ExecutionTarget::from_profile(&profile);
+    assert_eq!(target.database, "billing-project");
+    assert_eq!(target.schema.as_deref(), Some("analytics"));
+    assert!(target.is_valid(&profile));
+    let configured = target.apply_to_profile(&profile).unwrap();
+    assert_eq!(configured.database.as_deref(), Some("billing-project"));
+    assert_eq!(configured.catalog_database(), Some("data-project"));
+    assert_eq!(configured.bigquery_options, profile.bigquery_options);
+
+    let mut wrong_project = target.clone();
+    wrong_project.database = "data-project".into();
+    assert!(!wrong_project.is_valid(&profile));
+    let mut wrong_dataset = target;
+    wrong_dataset.schema = Some("outside_scope".into());
+    assert!(!wrong_dataset.is_valid(&profile));
+}
+
+#[test]
+fn bigquery_catalog_selection_retains_execution_project_and_rejects_other_projects() {
+    use lazydb::{
+        db::catalog::{CatalogId, CatalogKind},
+        model::{execution_target::resolve_default_target, explorer::ExplorerNodeId},
+        profile::{BigQueryOptions, CatalogScope, CatalogSelection},
+    };
+    let mut profile = profile(DatabaseKind::BigQuery);
+    profile.database = Some("billing-project".into());
+    profile.bigquery_options = Some(BigQueryOptions {
+        data_project: Some("data-project".into()),
+        ..Default::default()
+    });
+    profile.catalog_scope = CatalogScope {
+        databases: CatalogSelection::All,
+    };
+    let selected = ExplorerNodeId::Catalog(CatalogId::new(
+        profile.id,
+        CatalogKind::Schema,
+        ["data-project", "reporting"],
+    ));
+    let target = resolve_default_target(Some(&selected), &[profile.clone()], &[]).unwrap();
+    assert_eq!(target.database, "billing-project");
+    assert_eq!(target.schema.as_deref(), Some("reporting"));
+    let selected = ExplorerNodeId::Catalog(CatalogId::new(
+        profile.id,
+        CatalogKind::Schema,
+        ["other-project", "reporting"],
+    ));
+    assert!(resolve_default_target(Some(&selected), &[profile], &[]).is_none());
 }

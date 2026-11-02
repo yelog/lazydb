@@ -1373,6 +1373,7 @@ impl OracleAdapter {
                         fetched_row_count,
                         truncated,
                         response_error: None,
+                        bigquery: None,
                     },
                 })
             })

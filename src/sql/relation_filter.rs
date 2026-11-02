@@ -1,9 +1,6 @@
-use sqlparser::{
-    ast::{Expr, Ident, OrderByExpr, OrderByKind, Query, SetExpr, Statement},
-    parser::Parser,
-};
+use sqlparser::ast::{Expr, Ident, OrderByExpr, OrderByKind, Query, SetExpr, Statement};
 
-use super::{SqlDialect, dialect::parser_dialect, quote_identifier};
+use super::{SqlDialect, dialect::parse_sql, quote_identifier};
 use crate::model::relation::RelationPreviewOptions;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -66,7 +63,7 @@ pub fn cycle_relation_column_sort(
     if items.is_empty() {
         items.push(order_by_column(target.as_ref(), dialect));
         items.last_mut().expect("just pushed").options.asc = Some(false);
-        return Ok(format_order_by(&items));
+        return Ok(format_order_by(&items, dialect));
     }
 
     let matches: Vec<usize> = items
@@ -83,7 +80,7 @@ pub fn cycle_relation_column_sort(
             for index in matches.into_iter().rev() {
                 items.remove(index);
             }
-            return Ok(format_order_by(&items));
+            return Ok(format_order_by(&items, dialect));
         }
     };
 
@@ -93,10 +90,13 @@ pub fn cycle_relation_column_sort(
         items.push(order_by_column(target.as_ref(), dialect));
         items.last_mut().expect("just pushed").options.asc = Some(next == SortDirection::Asc);
     }
-    Ok(format_order_by(&items))
+    Ok(format_order_by(&items, dialect))
 }
 
 fn order_by_column(name: &str, dialect: SqlDialect) -> OrderByExpr {
+    if dialect == SqlDialect::BigQuery {
+        return OrderByExpr::from(Ident::with_quote('`', name));
+    }
     let quote = if dialect == SqlDialect::SqlServer {
         '['
     } else if dialect == SqlDialect::MySql {
@@ -183,7 +183,7 @@ fn parse_preview_query(
         query.push_str(" ORDER BY ");
         query.push_str(clause);
     }
-    Parser::parse_sql(parser_dialect(dialect), &query)
+    parse_sql(dialect, &query)
         .map_err(|error| RelationFilterError(format!("invalid preview clause: {error}")))
 }
 
@@ -213,10 +213,21 @@ fn direction(item: &OrderByExpr) -> SortDirection {
     }
 }
 
-fn format_order_by(items: &[OrderByExpr]) -> String {
+fn format_order_by(items: &[OrderByExpr], dialect: SqlDialect) -> String {
     items
         .iter()
-        .map(ToString::to_string)
+        .map(|item| {
+            if dialect == SqlDialect::BigQuery
+                && let Expr::Identifier(name) = &item.expr
+            {
+                // sqlparser doubles backticks; GoogleSQL requires backslash escapes.
+                let mut item = item.clone();
+                item.expr = Expr::Identifier(Ident::new(quote_identifier(&name.value, dialect)));
+                item.to_string()
+            } else {
+                item.to_string()
+            }
+        })
         .collect::<Vec<_>>()
         .join(", ")
 }

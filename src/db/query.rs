@@ -19,6 +19,17 @@ pub struct ResultSet {
     pub affected_rows: u64,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct BigQueryJobStats {
+    pub job_id: String,
+    pub project: String,
+    pub location: Option<String>,
+    pub total_bytes_processed: Option<u64>,
+    pub total_bytes_billed: Option<u64>,
+    pub slot_millis: Option<u64>,
+    pub cache_hit: Option<bool>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct QueryStats {
     pub execution: Duration,
@@ -28,6 +39,7 @@ pub struct QueryStats {
     pub truncated: bool,
     /// The server completed the request but reported failures within its response.
     pub response_error: Option<String>,
+    pub bigquery: Option<Box<BigQueryJobStats>>,
 }
 
 impl QueryStats {
@@ -39,6 +51,7 @@ impl QueryStats {
             fetched_row_count: row_count,
             truncated: false,
             response_error: None,
+            bigquery: None,
         }
     }
 
@@ -214,6 +227,7 @@ impl QueryOutcomeAccumulator {
                 fetched_row_count: self.fetched_rows,
                 truncated: self.truncated,
                 response_error: None,
+                bigquery: None,
             },
         }
     }
