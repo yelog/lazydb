@@ -8,14 +8,17 @@ OpenSearch support in PR #43. Its base tree is exactly identical to the previous
 validated integration baseline at `5460c22`:
 `a66cc1d2b973f6afa9e1a071a76514e8dbca63b0`.
 
-A fresh `yelog/bigquery-pr-ready` branch/worktree contains the BigQuery delta
-against that main commit. The original BigQuery worktree at `782a3b1` and the
-integration worktree at `5460c22` are preserved unchanged. No commit, push, rebase,
-reset or remote PR has been created. Checking GitHub main was read-only.
+The `yelog/bigquery-pr-ready` branch/worktree contains the BigQuery delta against
+that main commit. The original BigQuery worktree at `782a3b1` and the integration
+worktree at `5460c22` are preserved unchanged. After explicit authorization, the
+initial candidate was committed as `e220050` and pushed as draft PR #46. No
+rebase, reset or history rewrite was performed.
 
-Freeze the native BigQuery driver, required shared dispatch/profile/SQL changes,
-correctness regressions and documentation as one coherent feature candidate:
-64 modified tracked files and 19 new files, 83 files total. The new driver,
+The initial source freeze contains the native driver, required shared
+integration, correctness regressions and documentation: 64 modified tracked
+files and 19 new files, 83 files total. The CI follow-up also modifies the existing
+workflow, console-connection test and principal-overview test, making the PR total
+86 files. The new driver,
 GoogleSQL module, deterministic tests, opt-in live tests and all three PTY scripts
 must be included; a tracked-only diff is incomplete. Preserve the native
 cancellation-owner and cross-driver credential regressions needed alongside the
@@ -76,14 +79,22 @@ URLs. Conservative statement classification and read-only/write-confirmation
 policies apply to execution.
 
 The PR is based on main after native OpenSearch support was merged. The final
-main-based candidate passed **3,803 tests, zero failures and 30 ignored cases**
-across 210 reported binaries with `cargo test --locked --all-targets --all-features`.
-Formatting, all-target/all-feature Clippy with warnings denied and the locked
-all-feature production build also passed. Fresh PTY runs passed the fixture-backed
-connect/catalog/preview/DDL/query workflow and production profile/save/restart,
-including temporary-file cleanup and terminal restoration. All three new Python
-scripts passed syntax checks; locked offline Cargo metadata discovers the new
-test targets and retains `google-cloud-auth =1.4.0` with default features disabled.
+main-based candidate passed **3,806 tests, zero failures and 30 ignored cases**
+across 210 reported binaries using
+`cargo test --locked --all-targets --all-features --no-fail-fast`, without a
+`RUST_MIN_STACK` override. Formatting, all-target/all-feature Clippy with warnings
+denied and the locked all-feature production build also passed. Fresh PTY runs
+passed the fixture-backed connect/catalog/preview/DDL/query workflow and production
+profile/save/restart, including temporary-file cleanup and terminal restoration.
+All three new Python scripts passed syntax checks; locked offline Cargo metadata
+discovers the new test targets and retains `google-cloud-auth =1.4.0` with default
+features disabled.
+
+Target selection and principal/grid/record detail forwarding normalize within
+the reducer instead of recursively allocating another large reducer frame.
+Explicit 2 MiB stack regressions cover those paths. DuckDB CI compiles its test
+binaries under a separate bounded build step, preserving each execution step's
+600-second deadline.
 
 Real developer-ADC verification passed native types, pagination, billing and
 location boundaries, production TUI/CLI workflows, and both same-project and
@@ -150,3 +161,33 @@ do not create keys, modify IAM, enable billing or create cloud resources.
 
 These are local follow-up records, not newly created public issues. They do not
 expand the frozen implementation, grant cloud permissions or authorize releases.
+
+## CI follow-up — 2026-11-02
+
+The first PR CI run, `41426620053`, passed 11 jobs and failed three. Both Rust
+jobs aborted in `unbound_execution_selects_target_connects_and_resumes_once`
+with a stack overflow. Earlier local full-suite checks used
+`RUST_MIN_STACK=16777216`; removing that override reproduced the same abort.
+The clicked-target action recursively dispatched confirmation through the large
+reducer. Normalizing it before the main match confirms the target in the same
+frame. The first default-stack full-suite follow-up exposed the same forwarding
+pattern in principal and grid detail views. Those detail actions, including
+record-value details, now normalize to `OpenTextDetail` in the same frame too.
+Explicit 2 MiB regressions cover lazy console execution, principal details and
+both grid/record value details even if the parent environment requests a larger
+default stack.
+
+The Intel macOS native-runtime job exhausted its 600-second command deadline
+after compilation took 9m 56s. Its test executable had only run for about 1.4s;
+the evidence does not establish a stalled DuckDB query. A separate bounded
+1,200-second `--no-run` build prepares both runtime and adapter tests. Each
+existing execution step retains its 600-second deadline. No DuckDB production
+code or timeout-wrapper implementation was changed.
+
+Final follow-up checks passed without a `RUST_MIN_STACK` override: 3,806 tests,
+zero failures and 30 ignored cases across 210 reported binaries. The three focused
+stack-regression suites passed 269 tests with one ignored case. Formatting,
+all-target/all-feature Clippy with warnings denied, the production build and
+both BigQuery terminal workflows also passed. Workflow YAML and the separate
+compile/runtime deadlines were checked. The original 83-file freeze remains a
+record of the first submitted candidate; the CI follow-up is a new change.

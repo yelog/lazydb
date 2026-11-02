@@ -81,6 +81,9 @@ jobs:
       - name: Test generated ABI and isolated loader fixtures
         shell: bash
         run: python3 scripts/ci/run-with-timeout.py 600 -- cargo +1.94.0 test --locked -p libduckdb-sys --features generator-tests --all-targets
+      - name: Build DuckDB runtime and adapter tests
+        shell: bash
+        run: python3 scripts/ci/run-with-timeout.py 1200 -- cargo +1.94.0 test --locked -p lazydb --test duckdb_runtime --test duckdb_adapter --no-run
       - name: Test missing runtime and live DuckDB query
         shell: bash
         run: python3 scripts/ci/run-with-timeout.py 600 -- cargo +1.94.0 test --locked -p lazydb --test duckdb_runtime

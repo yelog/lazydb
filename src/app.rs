@@ -4749,6 +4749,38 @@ impl App {
         {
             return Vec::new();
         }
+        // Normalize forwarding actions in this frame instead of recursively
+        // entering the large reducer match again on a bounded thread stack.
+        let action = match action {
+            Action::OpenPrincipalAccessDetails => match self.principal_access_detail_request() {
+                Some(request) => Action::OpenTextDetail(request),
+                None => return Vec::new(),
+            },
+            Action::ViewGridCell => match self.grid_value_detail(self.active_grid_column()) {
+                Some(request) => Action::OpenTextDetail(request),
+                None => return Vec::new(),
+            },
+            Action::ViewRecordViewValue => match self.record_view_value_detail() {
+                Some(request) => Action::OpenTextDetail(request),
+                None => return Vec::new(),
+            },
+            Action::SelectTargetSelector(index) => {
+                let Some(Overlay::TargetSelector {
+                    candidates,
+                    selected,
+                    ..
+                }) = self.overlay.as_mut()
+                else {
+                    return Vec::new();
+                };
+                if index >= candidates.len() {
+                    return Vec::new();
+                }
+                *selected = index;
+                Action::ConfirmTargetSelector
+            }
+            action => action,
+        };
         match action {
             Action::OpenPrincipalDrop => {
                 let Some(ExplorerNodeId::Principal { entry }) =
@@ -5288,11 +5320,9 @@ impl App {
                 }
                 Vec::new()
             }
-            Action::OpenPrincipalAccessDetails => self
-                .principal_access_detail_request()
-                .map_or_else(Vec::new, |request| {
-                    self.update(Action::OpenTextDetail(request))
-                }),
+            Action::OpenPrincipalAccessDetails => {
+                unreachable!("principal detail actions are normalized before dispatch")
+            }
             Action::PrincipalMutationFieldNext => {
                 if let Some(WorkspaceTab::PrincipalDdl(tab)) = self.tabs.get_mut(self.active_tab)
                     && let Some(form) = tab.mutation_draft.as_mut()
@@ -7895,20 +7925,16 @@ impl App {
                 ));
                 Vec::new()
             }
-            Action::ViewGridCell => self
-                .grid_value_detail(self.active_grid_column())
-                .map_or_else(Vec::new, |request| {
-                    self.update(Action::OpenTextDetail(request))
-                }),
+            Action::ViewGridCell => {
+                unreachable!("grid detail actions are normalized before dispatch")
+            }
             Action::CopyRecordViewCell => self.copy_record_view_cell(),
             Action::CopyRecordViewRow { include_headers } => {
                 self.copy_record_view_row(include_headers)
             }
-            Action::ViewRecordViewValue => self
-                .record_view_value_detail()
-                .map_or_else(Vec::new, |request| {
-                    self.update(Action::OpenTextDetail(request))
-                }),
+            Action::ViewRecordViewValue => {
+                unreachable!("record detail actions are normalized before dispatch")
+            }
             Action::CompleteMouseTextSelection {
                 source,
                 session_id,
@@ -12566,18 +12592,8 @@ impl App {
                 }
                 Vec::new()
             }
-            Action::SelectTargetSelector(index) => {
-                if let Some(Overlay::TargetSelector {
-                    candidates,
-                    selected,
-                    ..
-                }) = self.overlay.as_mut()
-                    && index < candidates.len()
-                {
-                    *selected = index;
-                    return self.update(Action::ConfirmTargetSelector);
-                }
-                Vec::new()
+            Action::SelectTargetSelector(_) => {
+                unreachable!("target selection is normalized before dispatch")
             }
             Action::ConfirmTargetSelector => {
                 let Some(Overlay::TargetSelector {

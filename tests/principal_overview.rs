@@ -289,6 +289,17 @@ fn overview_v_and_enter_open_readonly_details_for_selected_permission() {
 }
 
 #[test]
+fn overview_details_fit_a_two_megabyte_thread_stack() {
+    std::thread::Builder::new()
+        .name("principal-details-default-stack".into())
+        .stack_size(2 * 1024 * 1024)
+        .spawn(overview_v_and_enter_open_readonly_details_for_selected_permission)
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 fn overview_y_copies_complete_selected_permission_record() {
     let (mut app, tab_index) = app_with_access(3);
     if let WorkspaceTab::PrincipalDdl(tab) = &mut app.tabs[tab_index] {

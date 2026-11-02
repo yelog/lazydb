@@ -2812,6 +2812,20 @@ fn grid_value_detail_uses_complete_value_without_query_io() {
 }
 
 #[test]
+fn value_details_fit_a_two_megabyte_thread_stack() {
+    std::thread::Builder::new()
+        .name("value-details-default-stack".into())
+        .stack_size(2 * 1024 * 1024)
+        .spawn(|| {
+            grid_value_detail_uses_complete_value_without_query_io();
+            record_view_value_detail_displays_complete_value_without_query_io();
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 fn sql_editor_marks_only_the_statement_at_the_cursor() {
     let mut app = fixture();
     app.update(Action::ReplaceEditor("SELECT 1;\nSELECT 2;".into()));
