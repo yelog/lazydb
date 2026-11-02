@@ -5662,7 +5662,7 @@ impl Runtime {
                 .cloned();
             let native_rest = profile
                 .as_ref()
-                .is_some_and(|profile| profile.kind == crate::profile::DatabaseKind::Elasticsearch);
+                .is_some_and(|profile| profile.kind.is_search_rest());
             let history = crate::model::sql_history::ExecutionHistory {
                 execution_id,
                 operation_id,
@@ -5739,30 +5739,46 @@ impl Runtime {
             }
             let registry_for_start = Arc::clone(&operation_registry);
             let cancel_flag_for_start = Arc::clone(&cancel_flag);
-            match database
-                .execute_with_budget_cancellable(
-                    &sql,
-                    crate::db::query::QueryBudget {
-                        max_rows: 10_000,
-                        max_bytes: 16 * 1024 * 1024,
-                    },
-                    operation_id,
-                    cancel_flag,
-                    move |operation| {
-                        let key = (tab_id, generation);
-                        let mut registry = registry_for_start
-                            .lock()
-                            .expect("DuckDB operation registry poisoned");
-                        registry.insert(key, (operation_id, operation));
-                        if cancel_flag_for_start.load(std::sync::atomic::Ordering::SeqCst)
-                            && let Some((_, operation)) = registry.remove(&key)
-                        {
-                            operation.cancel();
-                        }
-                    },
-                )
-                .await
-            {
+            let authorization = if database.kind().is_search_rest() {
+                let current_profile = profiles
+                    .lock()
+                    .await
+                    .profiles
+                    .get(&target.profile_id)
+                    .cloned();
+                authorize_search_rest_execution(current_profile.as_ref(), database.kind(), &sql)
+            } else {
+                Ok(())
+            };
+            let result = match authorization {
+                Err(error) => Err(error),
+                Ok(()) => {
+                    database
+                        .execute_with_budget_cancellable(
+                            &sql,
+                            crate::db::query::QueryBudget {
+                                max_rows: 10_000,
+                                max_bytes: 16 * 1024 * 1024,
+                            },
+                            operation_id,
+                            cancel_flag,
+                            move |operation| {
+                                let key = (tab_id, generation);
+                                let mut registry = registry_for_start
+                                    .lock()
+                                    .expect("DuckDB operation registry poisoned");
+                                registry.insert(key, (operation_id, operation));
+                                if cancel_flag_for_start.load(std::sync::atomic::Ordering::SeqCst)
+                                    && let Some((_, operation)) = registry.remove(&key)
+                                {
+                                    operation.cancel();
+                                }
+                            },
+                        )
+                        .await
+                }
+            };
+            match result {
                 Ok(outcome) => {
                     if let Some(recorder) = &recorder {
                         let status = if outcome.stats.response_error.is_some() {
@@ -5794,7 +5810,7 @@ impl Runtime {
                             .finish_with_certainty(
                                 execution_id,
                                 crate::model::sql_history::HistoryExecutionStatus::Failed,
-                                crate::model::sql_history::HistoryResultCertainty::Confirmed,
+                                search_rest_error_certainty(database.kind(), &sql, &error),
                                 None,
                                 None,
                                 None,
@@ -7379,7 +7395,8 @@ impl Runtime {
                 | DatabaseConnection::MongoDb(_) => false,
                 DatabaseConnection::ClickHouse(_)
                 | DatabaseConnection::Snowflake(_)
-                | DatabaseConnection::Elasticsearch(_) => false,
+                | DatabaseConnection::Elasticsearch(_)
+                | DatabaseConnection::OpenSearch(_) => false,
                 DatabaseConnection::DuckDb(_) => false,
             };
             let worker = match database
@@ -8139,6 +8156,8 @@ async fn save_profile_transaction(
                     && old.catalog_scope != profile.catalog_scope)
                 || old.ssl_mode != profile.ssl_mode
                 || old.elasticsearch_options != profile.elasticsearch_options
+                || old.opensearch_options != profile.opensearch_options
+                || (profile.kind.is_search_rest() && old.read_only != profile.read_only)
                 || old.pg_options != profile.pg_options
         }),
         catalog_scope_changed: old_profile
@@ -8146,7 +8165,7 @@ async fn save_profile_transaction(
             .is_none_or(|old| old.catalog_scope != profile.catalog_scope),
         display_only_changed: old_profile.as_ref().is_none_or(|old| {
             old.name != profile.name
-                || old.read_only != profile.read_only
+                || (!profile.kind.is_search_rest() && old.read_only != profile.read_only)
                 || old.environment != profile.environment
         }),
         credentials_changed,
@@ -9713,10 +9732,139 @@ fn catalog_mutation_outcome_unknown(
         && error_category == crate::db::ErrorCategory::Network
 }
 
+fn search_rest_error_certainty(
+    kind: crate::profile::DatabaseKind,
+    request: &str,
+    error: &DatabaseError,
+) -> crate::model::sql_history::HistoryResultCertainty {
+    use crate::model::sql_history::HistoryResultCertainty;
+    if kind.is_search_rest()
+        && (error.category == crate::db::ErrorCategory::Network
+            || error.code.as_deref() == Some("search_rest_write_outcome_unknown"))
+        && crate::db::elasticsearch::ElasticsearchRequest::parse(request)
+            .is_ok_and(|request| !request.is_read_only())
+    {
+        HistoryResultCertainty::Unknown
+    } else {
+        HistoryResultCertainty::Confirmed
+    }
+}
+
+fn authorize_search_rest_execution(
+    profile: Option<&ConnectionProfile>,
+    connected_kind: crate::profile::DatabaseKind,
+    request: &str,
+) -> Result<(), DatabaseError> {
+    if !connected_kind.is_search_rest() {
+        return Ok(());
+    }
+    let profile = profile
+        .filter(|profile| profile.kind == connected_kind)
+        .ok_or_else(|| {
+            DatabaseError::configuration(
+                "Search REST connection profile changed or was removed; reconnect before executing",
+            )
+        })?;
+    let request = crate::db::elasticsearch::ElasticsearchRequest::parse(request)?;
+    if profile.read_only && !request.is_read_only() {
+        return Err(DatabaseError::configuration(
+            "This connection is read-only; the REST request was not sent",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{db::transaction::WorkerDisposition, profile::import_connection_url};
+
+    #[test]
+    fn search_rest_write_failures_have_unknown_history_outcomes() {
+        use crate::{
+            db::ErrorCategory, model::sql_history::HistoryResultCertainty, profile::DatabaseKind,
+        };
+        for (category, code) in [
+            (ErrorCategory::Network, None),
+            (
+                ErrorCategory::Internal,
+                Some("search_rest_write_outcome_unknown"),
+            ),
+            (
+                ErrorCategory::Sql,
+                Some("search_rest_write_outcome_unknown"),
+            ),
+        ] {
+            let error = DatabaseError {
+                category,
+                code: code.map(str::to_owned),
+                message: "Response unavailable".into(),
+                diagnostic: None,
+            };
+            for kind in [DatabaseKind::Elasticsearch, DatabaseKind::OpenSearch] {
+                assert_eq!(
+                    search_rest_error_certainty(kind, "DELETE /books", &error),
+                    HistoryResultCertainty::Unknown,
+                );
+                for request in ["POST /books/_search\n{}", "SELECT 1"] {
+                    assert_eq!(
+                        search_rest_error_certainty(kind, request, &error),
+                        HistoryResultCertainty::Confirmed
+                    );
+                }
+            }
+            assert_eq!(
+                search_rest_error_certainty(DatabaseKind::Postgres, "DELETE /books", &error),
+                HistoryResultCertainty::Confirmed,
+            );
+        }
+        for kind in [DatabaseKind::Elasticsearch, DatabaseKind::OpenSearch] {
+            for category in [
+                ErrorCategory::Configuration,
+                ErrorCategory::Internal,
+                ErrorCategory::Sql,
+            ] {
+                let error = DatabaseError {
+                    category,
+                    code: None,
+                    message: "Request rejected".into(),
+                    diagnostic: None,
+                };
+                assert_eq!(
+                    search_rest_error_certainty(kind, "DELETE /books", &error),
+                    HistoryResultCertainty::Confirmed,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn search_rest_execution_rechecks_latest_read_only_and_product_configuration() {
+        for (url, kind) in [
+            (
+                "elasticsearch://localhost",
+                crate::profile::DatabaseKind::Elasticsearch,
+            ),
+            (
+                "opensearch://localhost",
+                crate::profile::DatabaseKind::OpenSearch,
+            ),
+        ] {
+            let mut profile = import_connection_url(url, None).unwrap().profile;
+            assert!(authorize_search_rest_execution(Some(&profile), kind, "DELETE /books").is_ok());
+            profile.read_only = true;
+            assert!(
+                authorize_search_rest_execution(Some(&profile), kind, "DELETE /books").is_err()
+            );
+            assert!(
+                authorize_search_rest_execution(Some(&profile), kind, "POST /books/_search\n{}")
+                    .is_ok()
+            );
+            assert!(authorize_search_rest_execution(None, kind, "GET /").is_err());
+            profile.kind = crate::profile::DatabaseKind::Postgres;
+            assert!(authorize_search_rest_execution(Some(&profile), kind, "GET /").is_err());
+        }
+    }
 
     #[test]
     fn catalog_drop_cascade_escalation_requires_postgres_schema_restrict_sqlstate() {

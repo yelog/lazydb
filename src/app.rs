@@ -748,6 +748,7 @@ impl App {
             | DatabaseKind::Valkey
             | DatabaseKind::MongoDb
             | DatabaseKind::Elasticsearch
+            | DatabaseKind::OpenSearch
             | DatabaseKind::Snowflake => crate::db::principal::PrincipalCapability::Unsupported,
             DatabaseKind::ClickHouse => {
                 crate::db::clickhouse::ClickHouseAdapter::principal_capability()
@@ -1856,7 +1857,10 @@ impl App {
             title,
             source_session_id,
             source_revision,
-            value.preview(80).text,
+            match value {
+                CellValue::Null => "<null>".into(),
+                _ => value.clipboard_text(),
+            },
             value.clipboard_text(),
             None,
         ))
@@ -1912,7 +1916,10 @@ impl App {
             title,
             source_session_id,
             source_revision,
-            value.preview(80).text,
+            match value {
+                CellValue::Null => "<null>".into(),
+                _ => value.clipboard_text(),
+            },
             value.clipboard_text(),
             Some(Box::new(Overlay::RecordView(match &self.overlay {
                 Some(Overlay::RecordView(view)) => view.clone(),
@@ -1991,7 +1998,7 @@ impl App {
         let Some(tab) = self.active_console_opt() else {
             return Err(EditorError::MissingSession(Uuid::nil()));
         };
-        if self.active_console_is_elasticsearch() {
+        if self.active_console_is_search_rest() {
             return self.editor.render_preview_snapshot(
                 tab.id,
                 viewport,
@@ -2146,7 +2153,8 @@ impl App {
                 DatabaseKind::Redis
                 | DatabaseKind::Valkey
                 | DatabaseKind::MongoDb
-                | DatabaseKind::Elasticsearch => SqlDialect::Generic,
+                | DatabaseKind::Elasticsearch
+                | DatabaseKind::OpenSearch => SqlDialect::Generic,
                 DatabaseKind::Snowflake => SqlDialect::Snowflake,
                 DatabaseKind::ClickHouse => SqlDialect::ClickHouse,
             })
@@ -2948,7 +2956,11 @@ impl App {
                             kind: relation.catalog_kind,
                             title: relation.title.clone(),
                         },
-                        relation.view,
+                        if selected.is_some_and(|profile| profile.kind.is_search_rest()) {
+                            RelationView::Data
+                        } else {
+                            relation.view
+                        },
                     );
                     tabs.push(WorkspaceTab::Relation(tab));
                 }
@@ -12599,7 +12611,7 @@ impl App {
                     else {
                         return Vec::new();
                     };
-                    if profile.kind == DatabaseKind::Elasticsearch {
+                    if profile.kind.is_search_rest() {
                         let text = self.editor_text(console_id).unwrap_or_default();
                         pending.scope = sql::ScopeKind::FullBuffer;
                         pending.source =
@@ -12963,6 +12975,14 @@ impl App {
             Action::OpenSelectedRelation { view } => self.open_selected_relation(view),
             Action::OpenCatalogRelation { id, view } => self.open_catalog_relation(&id, view),
             Action::SetRelationView(view) => {
+                if view == RelationView::Ddl
+                    && self.tabs.get(self.active_tab).is_some_and(|tab| matches!(tab,
+                        WorkspaceTab::Relation(tab) if self.profiles.iter().any(|profile|
+                            profile.id == tab.descriptor.key.profile_id && profile.kind.is_search_rest())))
+                {
+                    self.notify_warning("Search REST", "Expand the index in Explorer to inspect its mapping, or use GET /index/_mapping in the REST console");
+                    return Vec::new();
+                }
                 self.clear_active_data_query_focus();
                 if let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab) {
                     tab.view = view;
@@ -13408,7 +13428,9 @@ impl App {
                 let Some((order_by, columns, dialect)) =
                     self.tabs.get(self.active_tab).and_then(|tab| match tab {
                         WorkspaceTab::Relation(tab) if tab.view == RelationView::Data => {
-                            if matches!(tab.data, RelationLoad::Loading { .. }) {
+                            if !matches!(tab.query.capability, DataQueryCapability::Relation)
+                                || matches!(tab.data, RelationLoad::Loading { .. })
+                            {
                                 return None;
                             }
                             Some((
@@ -19198,9 +19220,10 @@ impl App {
                     crate::db::mssql::MsSqlAdapter::catalog_mutation_capabilities()
                 }
                 DatabaseKind::Redis | DatabaseKind::Valkey => Default::default(),
-                DatabaseKind::MongoDb | DatabaseKind::Snowflake | DatabaseKind::Elasticsearch => {
-                    Default::default()
-                }
+                DatabaseKind::MongoDb
+                | DatabaseKind::Snowflake
+                | DatabaseKind::Elasticsearch
+                | DatabaseKind::OpenSearch => Default::default(),
                 DatabaseKind::ClickHouse => {
                     crate::db::clickhouse::ClickHouseAdapter::catalog_mutation_capabilities()
                 }
@@ -20574,9 +20597,7 @@ impl App {
         let relational_profiles = self
             .profiles
             .iter()
-            .filter(|profile| {
-                profile.kind.is_relational() || profile.kind == DatabaseKind::Elasticsearch
-            })
+            .filter(|profile| profile.kind.is_relational() || profile.kind.is_search_rest())
             .cloned()
             .collect::<Vec<_>>();
         let selected =
@@ -21560,7 +21581,9 @@ impl App {
                     | DatabaseKind::DuckDb
                     | DatabaseKind::Snowflake => entry.qualified_name.schema.clone(),
                     DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb => None,
-                    DatabaseKind::Elasticsearch => Some(database.clone()),
+                    DatabaseKind::Elasticsearch | DatabaseKind::OpenSearch => {
+                        Some(database.clone())
+                    }
                     DatabaseKind::ClickHouse => Some(database.clone()),
                 };
                 let candidate = ExecutionTarget {
@@ -21586,9 +21609,7 @@ impl App {
     fn execution_target_candidates_all_profiles(&self) -> Vec<ExecutionTarget> {
         self.profiles
             .iter()
-            .filter(|profile| {
-                profile.kind.is_relational() || profile.kind == DatabaseKind::Elasticsearch
-            })
+            .filter(|profile| profile.kind.is_relational() || profile.kind.is_search_rest())
             .flat_map(|profile| self.execution_target_candidates(profile))
             .collect()
     }
@@ -21596,7 +21617,7 @@ impl App {
     fn is_sql_editor_target(&self, target: &ExecutionTarget) -> bool {
         self.profiles.iter().any(|profile| {
             profile.id == target.profile_id
-                && (profile.kind.is_relational() || profile.kind == DatabaseKind::Elasticsearch)
+                && (profile.kind.is_relational() || profile.kind.is_search_rest())
                 && target.is_valid(profile)
         })
     }
@@ -21774,7 +21795,9 @@ impl App {
                     | DatabaseKind::Oracle
                     | DatabaseKind::Snowflake => None,
                     DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb => None,
-                    DatabaseKind::Elasticsearch => Some(database.clone()),
+                    DatabaseKind::Elasticsearch | DatabaseKind::OpenSearch => {
+                        Some(database.clone())
+                    }
                     DatabaseKind::ClickHouse => Some(database.clone()),
                 },
                 database,
@@ -21993,7 +22016,8 @@ impl App {
             .find(|tab| tab.id() == tab_id)
             .and_then(WorkspaceTab::as_console)
             .is_some_and(|tab| {
-                tab.generation == generation
+                tab.query_status != QueryStatus::Cancelled
+                    && tab.generation == generation
                     && (tab.execution_connection == Some(connection)
                         || (tab.execution_connection.is_none()
                             && tab
@@ -22355,7 +22379,7 @@ impl App {
     }
 
     fn completion_key(&self) -> Option<CompletionScheduleKey> {
-        if self.active_console_is_elasticsearch() {
+        if self.active_console_is_search_rest() {
             return None;
         }
         if self.active_editor_mode() != EditorMode::Insert {
@@ -22383,18 +22407,26 @@ impl App {
         })
     }
 
-    pub(crate) fn active_console_is_elasticsearch(&self) -> bool {
+    fn search_rest_product(&self, profile_id: Uuid) -> &'static str {
+        self.profiles
+            .iter()
+            .find(|profile| profile.id == profile_id)
+            .map(|profile| crate::db::descriptor::descriptor(profile.kind).display_name)
+            .unwrap_or("Search REST")
+    }
+
+    pub(crate) fn active_console_is_search_rest(&self) -> bool {
         self.active_console_opt()
             .and_then(|tab| tab.execution_target.as_ref())
             .is_some_and(|target| {
-                self.profiles.iter().any(|profile| {
-                    profile.id == target.profile_id && profile.kind == DatabaseKind::Elasticsearch
-                })
+                self.profiles
+                    .iter()
+                    .any(|profile| profile.id == target.profile_id && profile.kind.is_search_rest())
             })
     }
 
     fn editor_diagnostics_key(&self) -> Option<crate::sql::DiagnosticScheduleKey> {
-        if self.active_console_is_elasticsearch() {
+        if self.active_console_is_search_rest() {
             return None;
         }
         let tab = self.active_console_opt()?;
@@ -22456,7 +22488,7 @@ impl App {
     }
 
     fn complete_now(&mut self, automatic: bool) -> Vec<Command> {
-        if self.active_console_is_elasticsearch() {
+        if self.active_console_is_search_rest() {
             return Vec::new();
         }
         if self.active_console_opt().is_none() {
@@ -22752,7 +22784,8 @@ impl App {
             DatabaseKind::Redis
             | DatabaseKind::Valkey
             | DatabaseKind::MongoDb
-            | DatabaseKind::Elasticsearch => SqlDialect::Generic,
+            | DatabaseKind::Elasticsearch
+            | DatabaseKind::OpenSearch => SqlDialect::Generic,
             DatabaseKind::Snowflake => SqlDialect::Snowflake,
             DatabaseKind::ClickHouse => SqlDialect::ClickHouse,
         }
@@ -22772,7 +22805,8 @@ impl App {
                 DatabaseKind::Redis
                 | DatabaseKind::Valkey
                 | DatabaseKind::MongoDb
-                | DatabaseKind::Elasticsearch,
+                | DatabaseKind::Elasticsearch
+                | DatabaseKind::OpenSearch,
             ) => SqlDialect::Generic,
             Some(DatabaseKind::Snowflake) => SqlDialect::Snowflake,
             Some(DatabaseKind::ClickHouse) => SqlDialect::ClickHouse,
@@ -22802,7 +22836,8 @@ impl App {
                 DatabaseKind::Redis
                 | DatabaseKind::Valkey
                 | DatabaseKind::MongoDb
-                | DatabaseKind::Elasticsearch,
+                | DatabaseKind::Elasticsearch
+                | DatabaseKind::OpenSearch,
             )
             | None => SqlDialect::Generic,
             Some(DatabaseKind::Snowflake) => SqlDialect::Snowflake,
@@ -22811,7 +22846,7 @@ impl App {
     }
 
     fn format_current(&mut self) {
-        if self.active_console_is_elasticsearch() {
+        if self.active_console_is_search_rest() {
             self.notify_warning(
                 "Format",
                 "REST requests use native JSON; SQL formatting is unavailable",
@@ -22910,10 +22945,17 @@ impl App {
     }
 
     fn set_transaction_mode(&mut self, mode: TransactionMode) -> Vec<Command> {
-        if mode == TransactionMode::Manual && self.active_console_is_elasticsearch() {
+        if mode == TransactionMode::Manual && self.active_console_is_search_rest() {
+            let product = self.search_rest_product(
+                self.active_console()
+                    .execution_target
+                    .as_ref()
+                    .unwrap()
+                    .profile_id,
+            );
             self.notify_warning(
-                "Elasticsearch",
-                "Elasticsearch does not support manual transactions",
+                product,
+                format!("{product} does not support manual transactions"),
             );
             return Vec::new();
         }
@@ -23068,9 +23110,9 @@ impl App {
             .map(|profile| SqlDialect::for_database_kind(profile.kind))
             .unwrap_or(SqlDialect::Generic);
         let native_rest = target.as_ref().is_some_and(|target| {
-            self.profiles.iter().any(|profile| {
-                profile.id == target.profile_id && profile.kind == DatabaseKind::Elasticsearch
-            })
+            self.profiles
+                .iter()
+                .any(|profile| profile.id == target.profile_id && profile.kind.is_search_rest())
         });
         let scope = if full_buffer || native_rest {
             (!sql.trim().is_empty()).then(|| sql::ResolvedScope {
@@ -23233,10 +23275,12 @@ impl App {
         scope: sql::ResolvedScope,
         dialect: SqlDialect,
     ) -> Vec<Command> {
-        if self.profiles.iter().any(|profile| {
-            profile.id == target.profile_id && profile.kind == DatabaseKind::Elasticsearch
-        }) {
-            return self.run_elasticsearch_request(tab_id, target, connection, scope);
+        if self
+            .profiles
+            .iter()
+            .any(|profile| profile.id == target.profile_id && profile.kind.is_search_rest())
+        {
+            return self.run_search_rest_request(tab_id, target, connection, scope);
         }
         self.normalize_tidb_console_mode(tab_id);
         match sql::classify_transaction_sql(&scope.sql, dialect) {
@@ -23289,17 +23333,18 @@ impl App {
         self.dispatch_draft(draft)
     }
 
-    fn run_elasticsearch_request(
+    fn run_search_rest_request(
         &mut self,
         tab_id: Uuid,
         target: ExecutionTarget,
         connection: ConnectionIdentity,
         scope: sql::ResolvedScope,
     ) -> Vec<Command> {
+        let product = self.search_rest_product(target.profile_id);
         let request = match crate::db::elasticsearch::ElasticsearchRequest::parse(&scope.sql) {
             Ok(request) => request,
             Err(error) => {
-                self.notify_error("Elasticsearch", error.message);
+                self.notify_error(product, error.message);
                 return Vec::new();
             }
         };
@@ -23311,7 +23356,7 @@ impl App {
                 .any(|profile| profile.id == target.profile_id && profile.read_only)
         {
             self.notify_warning(
-                "Elasticsearch",
+                product,
                 "This connection is read-only; the REST request was not sent",
             );
             return Vec::new();
@@ -23329,8 +23374,8 @@ impl App {
         }
         if tab.transaction_mode != TransactionMode::Auto {
             self.notify_warning(
-                "Elasticsearch",
-                "Elasticsearch requires auto-commit mode and does not support transactions",
+                product,
+                format!("{product} requires auto-commit mode and does not support transactions"),
             );
             return Vec::new();
         }
@@ -23626,14 +23671,16 @@ impl App {
             self.notify_error("Query", &message);
             return Vec::new();
         }
-        let native_rest = self.profiles.iter().any(|profile| {
-            profile.id == draft.target.profile_id && profile.kind == DatabaseKind::Elasticsearch
-        });
+        let native_rest = self
+            .profiles
+            .iter()
+            .any(|profile| profile.id == draft.target.profile_id && profile.kind.is_search_rest());
         if native_rest {
+            let product = self.search_rest_product(draft.target.profile_id);
             let request = match crate::db::elasticsearch::ElasticsearchRequest::parse(&draft.sql) {
                 Ok(request) => request,
                 Err(error) => {
-                    self.notify_error("Elasticsearch", error.message);
+                    self.notify_error(product, error.message);
                     return Vec::new();
                 }
             };
@@ -23644,7 +23691,7 @@ impl App {
                     .any(|profile| profile.id == draft.target.profile_id && profile.read_only)
             {
                 self.notify_warning(
-                    "Elasticsearch",
+                    product,
                     "This connection is read-only; the REST request was not sent",
                 );
                 return Vec::new();
@@ -30534,19 +30581,17 @@ impl App {
             return self.load_active_mongo_relation(refresh, requested_page);
         }
         let native_search = self.tabs.get(self.active_tab).is_some_and(|tab| {
-            matches!(tab, WorkspaceTab::Relation(tab) if self.profiles.iter().any(|profile| profile.id == tab.descriptor.key.profile_id && profile.kind == DatabaseKind::Elasticsearch))
+            matches!(tab, WorkspaceTab::Relation(tab) if self.profiles.iter().any(|profile| profile.id == tab.descriptor.key.profile_id && profile.kind.is_search_rest()))
         });
         if native_search
             && let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab)
         {
             tab.query.capability = DataQueryCapability::Unavailable(
-                "Use Query DSL in the REST console to filter or sort Elasticsearch documents"
-                    .into(),
+                "Use Query DSL in the REST console to filter or sort documents".into(),
             );
-            if tab.view == RelationView::Ddl {
-                self.notify_warning("Elasticsearch", "Expand the index in Explorer to inspect its mapping, or use GET /index/_mapping in the REST console");
-                return Vec::new();
-            }
+            // Opening via Explorer, navigation, or a restored tab can request
+            // DDL even though search indices only expose the document view.
+            tab.view = RelationView::Data;
         }
         let console_id = self
             .tabs
@@ -31448,7 +31493,7 @@ fn add_explorer_profile(
                 .map_or_else(|| host.to_owned(), |port| format!("{host}:{port}"))
         }
         DatabaseKind::MongoDb => profile.host.clone().unwrap_or_default(),
-        DatabaseKind::ClickHouse | DatabaseKind::Elasticsearch => {
+        DatabaseKind::ClickHouse | DatabaseKind::Elasticsearch | DatabaseKind::OpenSearch => {
             let host = profile.host.as_deref().unwrap_or_default();
             profile
                 .port

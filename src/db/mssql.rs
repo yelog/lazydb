@@ -4756,6 +4756,7 @@ mod tests {
             pg_options: None,
             snowflake_options: None,
             elasticsearch_options: None,
+            opensearch_options: None,
             duckdb_path: None,
             ssl_mode,
             credential_policy: CredentialPolicy::Prompt,

@@ -120,6 +120,7 @@ impl From<ConnectionProfileV5> for ConnectionProfile {
             sqlite_path: profile.sqlite_path,
             mongodb_options: None,
             elasticsearch_options: None,
+            opensearch_options: None,
             pg_options: None,
             snowflake_options: None,
             duckdb_path: profile.duckdb_path,
@@ -181,6 +182,7 @@ impl From<ConnectionProfileV2> for ConnectionProfile {
             sqlite_path: profile.sqlite_path,
             mongodb_options: None,
             elasticsearch_options: None,
+            opensearch_options: None,
             pg_options: None,
             snowflake_options: None,
             duckdb_path: profile.duckdb_path,
@@ -737,6 +739,12 @@ fn preserve_unavailable_profiles(
             // value means it was cleared, including an optional CA inside the table.
             let mut previous = old_profile.clone();
             previous.remove("elasticsearch_options");
+            previous.remove("opensearch_options");
+            // Credential policies are tagged variants. Merging a previous reference
+            // into `None` would retain a removed secret and invalidate the variant.
+            previous.remove("credential_policy");
+            // An absent username is an explicit clear, including switching to no auth.
+            previous.remove("user");
             merge_missing_profile_fields(current, &previous);
             continue;
         }

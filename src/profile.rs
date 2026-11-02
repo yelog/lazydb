@@ -25,11 +25,16 @@ pub enum DatabaseKind {
     MongoDb,
     ClickHouse,
     Elasticsearch,
+    OpenSearch,
     TiDb,
     Snowflake,
 }
 
 impl DatabaseKind {
+    pub const fn is_search_rest(self) -> bool {
+        matches!(self, Self::Elasticsearch | Self::OpenSearch)
+    }
+
     pub const fn is_redis_compatible(self) -> bool {
         matches!(self, Self::Redis | Self::Valkey)
     }
@@ -86,6 +91,8 @@ pub enum ConnectionUrlFormat {
     ClickHouseTls,
     Elasticsearch,
     ElasticsearchTls,
+    OpenSearch,
+    OpenSearchTls,
     #[serde(rename = "tidb")]
     TiDb,
     Snowflake,
@@ -108,6 +115,7 @@ impl ConnectionUrlFormat {
             DatabaseKind::MongoDb => Self::MongoDb,
             DatabaseKind::ClickHouse => Self::ClickHouse,
             DatabaseKind::Elasticsearch => Self::Elasticsearch,
+            DatabaseKind::OpenSearch => Self::OpenSearch,
             DatabaseKind::Snowflake => Self::Snowflake,
         }
     }
@@ -144,6 +152,10 @@ impl ConnectionUrlFormat {
                     Self::Elasticsearch | Self::ElasticsearchTls,
                     DatabaseKind::Elasticsearch
                 )
+                | (
+                    Self::OpenSearch | Self::OpenSearchTls,
+                    DatabaseKind::OpenSearch
+                )
                 | (Self::DuckDb, DatabaseKind::DuckDb)
                 | (Self::Snowflake, DatabaseKind::Snowflake)
         )
@@ -170,6 +182,7 @@ impl ConnectionUrlFormat {
             DatabaseKind::MongoDb => &[Self::MongoDb, Self::MongoDbSrv],
             DatabaseKind::ClickHouse => &[Self::ClickHouse, Self::ClickHouseTls],
             DatabaseKind::Elasticsearch => &[Self::Elasticsearch, Self::ElasticsearchTls],
+            DatabaseKind::OpenSearch => &[Self::OpenSearch, Self::OpenSearchTls],
             DatabaseKind::Snowflake => &[Self::Snowflake],
         }
     }
@@ -218,9 +231,9 @@ impl CatalogScope {
                 databases: CatalogSelection::All,
             };
         }
-        // Elasticsearch exposes a cluster through a virtual database namespace.
+        // Search REST drivers expose a cluster through a virtual database namespace.
         // This name never restricts which indices can be queried.
-        let database = if kind == DatabaseKind::Elasticsearch && database.trim().is_empty() {
+        let database = if kind.is_search_rest() && database.trim().is_empty() {
             "default"
         } else {
             database
@@ -230,7 +243,8 @@ impl CatalogScope {
                 DatabaseKind::MySql
                 | DatabaseKind::TiDb
                 | DatabaseKind::ClickHouse
-                | DatabaseKind::Elasticsearch,
+                | DatabaseKind::Elasticsearch
+                | DatabaseKind::OpenSearch,
                 _,
             )
             | (_, None) => CatalogSelection::All,
@@ -569,6 +583,23 @@ pub struct ElasticsearchConnectionOptions {
     pub ca_cert_path: Option<PathBuf>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenSearchAuth {
+    #[default]
+    Basic,
+    None,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpenSearchConnectionOptions {
+    #[serde(default)]
+    pub auth: OpenSearchAuth,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca_cert_path: Option<PathBuf>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConnectionProfile {
@@ -604,6 +635,8 @@ pub struct ConnectionProfile {
     pub pg_options: Option<PgConnectionOptions>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elasticsearch_options: Option<ElasticsearchConnectionOptions>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opensearch_options: Option<OpenSearchConnectionOptions>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snowflake_options: Option<SnowflakeConnectionOptions>,
 }
@@ -985,6 +1018,8 @@ fn parse_connection_url_inner(
             DatabaseKind::Elasticsearch,
             ConnectionUrlFormat::ElasticsearchTls,
         ),
+        ("opensearch", false) => (DatabaseKind::OpenSearch, ConnectionUrlFormat::OpenSearch),
+        ("opensearchs", false) => (DatabaseKind::OpenSearch, ConnectionUrlFormat::OpenSearchTls),
         (scheme, _) => return Err(ProfileError::UnsupportedScheme(scheme.to_owned())),
     };
     let kind = match driver {
@@ -1302,6 +1337,7 @@ pub fn import_connection_url_with_driver(
             catalog_scope,
             mongodb_options: parsed.mongodb_options,
             elasticsearch_options: None,
+            opensearch_options: None,
             pg_options: parsed.pg_options,
             snowflake_options: parsed.snowflake_options,
         },
@@ -1382,7 +1418,7 @@ fn parse_server_url(
     let mut snowflake_options =
         (kind == DatabaseKind::Snowflake).then(SnowflakeConnectionOptions::default);
     let mut seen_snowflake_options = HashSet::new();
-    if kind == DatabaseKind::Elasticsearch {
+    if kind.is_search_rest() {
         if url.port() == Some(0) {
             return Err(ProfileError::InvalidQueryParameter("port".into()));
         }
@@ -1392,10 +1428,15 @@ fn parse_server_url(
     }
     let mut ssl_mode = if kind == DatabaseKind::Snowflake {
         SslMode::VerifyFull
-    } else if matches!(kind, DatabaseKind::ClickHouse | DatabaseKind::Elasticsearch) {
+    } else if matches!(
+        kind,
+        DatabaseKind::ClickHouse | DatabaseKind::Elasticsearch | DatabaseKind::OpenSearch
+    ) {
         if matches!(
             format,
-            ConnectionUrlFormat::ClickHouseTls | ConnectionUrlFormat::ElasticsearchTls
+            ConnectionUrlFormat::ClickHouseTls
+                | ConnectionUrlFormat::ElasticsearchTls
+                | ConnectionUrlFormat::OpenSearchTls
         ) {
             SslMode::VerifyFull
         } else {
@@ -1562,7 +1603,7 @@ fn parse_server_url(
         }
         DatabaseKind::Redis | DatabaseKind::Valkey => 6379,
         DatabaseKind::MongoDb => unreachable!("MongoDB has its own multi-seed URL parser"),
-        DatabaseKind::Elasticsearch => 9200,
+        DatabaseKind::Elasticsearch | DatabaseKind::OpenSearch => 9200,
         DatabaseKind::ClickHouse => match format {
             ConnectionUrlFormat::ClickHouseTls if url.port().is_none() => 8443,
             _ => 8123,
@@ -1904,6 +1945,8 @@ pub fn format_connection_url(
         ConnectionUrlFormat::ClickHouseTls => "clickhouses",
         ConnectionUrlFormat::Elasticsearch => "elasticsearch",
         ConnectionUrlFormat::ElasticsearchTls => "elasticsearchs",
+        ConnectionUrlFormat::OpenSearch => "opensearch",
+        ConnectionUrlFormat::OpenSearchTls => "opensearchs",
         _ => return Err(ProfileError::IncompatibleFormat),
     };
     let host = profile.host.as_deref().ok_or(ProfileError::MissingHost)?;
@@ -1922,6 +1965,7 @@ pub fn format_connection_url(
         .user
         .as_deref()
         .filter(|value| !value.is_empty())
+        .filter(|_| profile.kind != DatabaseKind::OpenSearch)
         .filter(|_| {
             profile.kind != DatabaseKind::Elasticsearch
                 || profile
@@ -2024,8 +2068,11 @@ pub fn format_connection_url(
         query.push(format!("sslMode={}", ssl_mode_value(profile.ssl_mode)));
     } else if profile.kind.is_redis_compatible() {
         // The redis/rediss and valkey/valkeys schemes are the TLS source of truth.
-    } else if profile.kind == DatabaseKind::Elasticsearch {
-        let expected_ssl_mode = if format == ConnectionUrlFormat::ElasticsearchTls {
+    } else if profile.kind.is_search_rest() {
+        let expected_ssl_mode = if matches!(
+            format,
+            ConnectionUrlFormat::ElasticsearchTls | ConnectionUrlFormat::OpenSearchTls
+        ) {
             SslMode::VerifyFull
         } else {
             SslMode::Disable

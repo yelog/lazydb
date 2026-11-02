@@ -707,3 +707,79 @@ async fn error_response_limit_preserves_http_classification() {
         }
     }
 }
+
+#[tokio::test]
+async fn search_write_responses_without_decodable_results_have_unknown_outcomes() {
+    for scheme in ["elasticsearch", "opensearch"] {
+        for oversized in [false, true] {
+            let product_identity = if scheme == "opensearch" {
+                json!({"version":{"distribution":"opensearch","number":"2.19.4"}})
+            } else {
+                identity()
+            };
+            let response = if oversized {
+                vec![b'x'; 33 * 1024 * 1024]
+            } else {
+                b"invalid JSON".to_vec()
+            };
+            let (url, server) = raw_server(vec![
+                HttpResponse::new(200, product_identity.to_string()),
+                HttpResponse::new(200, response),
+            ]);
+            let url = url.replacen("elasticsearch:", &format!("{scheme}:"), 1);
+            let imported = import_connection_url(&url, None).unwrap();
+            let connection = DatabaseConnection::connect(
+                &imported.profile,
+                imported.transient_password.as_ref(),
+            )
+            .await
+            .unwrap();
+            let error = connection
+                .execute("DELETE /books/_doc/1")
+                .await
+                .unwrap_err();
+            assert_eq!(error.category, ErrorCategory::Configuration);
+            assert_eq!(
+                error.code.as_deref(),
+                Some("search_rest_write_outcome_unknown")
+            );
+            assert!(error.message.contains("outcome may be unknown"));
+            assert!(error.message.contains("not replayed"));
+            connection.close().await;
+            assert_eq!(server.join().unwrap().len(), 2);
+        }
+    }
+}
+
+#[tokio::test]
+async fn opensearch_diagnostics_preserve_product_names_in_paths_and_server_reasons() {
+    let mut imported = import_connection_url("opensearchs://localhost", None).unwrap();
+    let missing =
+        std::env::temp_dir().join(format!("Elasticsearch-ca-{}.pem", uuid::Uuid::new_v4()));
+    imported.profile.opensearch_options = Some(lazydb::profile::OpenSearchConnectionOptions {
+        ca_cert_path: Some(missing.clone()),
+        ..Default::default()
+    });
+    let error = DatabaseConnection::connect(&imported.profile, None)
+        .await
+        .unwrap_err();
+    assert!(error.message.contains("OpenSearch CA"));
+    assert!(error.message.contains(&missing.display().to_string()));
+    let (url, server) = raw_server(vec![HttpResponse::new(
+        403,
+        json!({"error":{"reason":"Elasticsearch-named-resource denied"}}).to_string(),
+    )]);
+    let imported =
+        import_connection_url(&url.replacen("elasticsearch:", "opensearch:", 1), None).unwrap();
+    let error =
+        DatabaseConnection::connect(&imported.profile, imported.transient_password.as_ref())
+            .await
+            .unwrap_err();
+    assert!(error.message.starts_with("OpenSearch HTTP"));
+    assert!(
+        error
+            .message
+            .contains("Elasticsearch-named-resource denied")
+    );
+    server.join().unwrap();
+}

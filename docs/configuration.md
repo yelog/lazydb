@@ -23,7 +23,7 @@ silently accepting a setting that LazyDB does not use.
 New and edited connection forms show **Category** above **Driver**. Choose
 **Relational** for PostgreSQL, CockroachDB, MySQL, MariaDB, TiDB, Oracle,
 SQL Server, SQLite, DuckDB, ClickHouse, or Snowflake; choose **Non-relational**
-for Redis, Valkey, or MongoDB. Left/Right
+for Redis, Valkey, MongoDB, Elasticsearch, or OpenSearch. Left/Right
 changes the focused category or cycles drivers within that category. Categories
 and drivers also support mouse selection. Narrow forms keep full driver names
 in a selection-following window.
@@ -359,6 +359,25 @@ the access token stays in the selected credential store. URL and form edits
 preserve these options. See [Snowflake](snowflake.md) for authentication setup,
 SQL API session limits, and verification coverage.
 
+## OpenSearch Profiles
+
+Select **Non-relational → OpenSearch**, or import `opensearch://host:9200` for
+HTTP / `opensearchs://user@host:9200` for verified HTTPS. Both default to `9200`.
+Select **Basic Auth** and enter username/password, or explicitly select **None**
+for a server that accepts unauthenticated requests. URL credentials select Basic;
+generated OpenSearch URLs omit both username and password. API keys and AWS
+SigV4 are not implemented.
+
+Saved profiles use `kind = "opensearch"`, `url_format = "open-search"` or
+`"open-search-tls"`, and `ssl_mode = "disable"` or `"verify-full"`. The optional
+`opensearch_options` table holds `auth = "basic"` / `"none"` and `ca_cert_path`
+for a PEM CA certificate/bundle. These options are separate from Elasticsearch's
+options. A CA path requires verified HTTPS; hostname checks remain active.
+Credentials use the existing `credential_policy`, not this options table. The
+Database field is a virtual catalog namespace, defaulting to `default`, and does
+not restrict native REST request paths. See [OpenSearch](opensearch.md) for
+permission differences, write/cancellation behavior and verification limits.
+
 ## Connection Profile Fields
 
 The current profile file format is version `6`:
@@ -368,7 +387,7 @@ The current profile file format is version `6`:
 | `id` | UUID string | Generated on creation | Stable identity used by workspace state and system credential references. Must be unique within the file. |
 | `name` | String | Derived from the database, host, or SQLite filename | Name shown in the Explorer and accepted by `--profile` and agent `--connection`. |
 | `access` | Table | `{ scope = "global" }` | Controls which projects can see a saved profile. |
-| `kind` | `postgres`, `cockroachdb`, `mysql`, `mariadb`, `tidb`, `oracle`, `sqlserver`, `sqlite`, `duckdb`, `redis`, `valkey`, `mongodb`, `clickhouse`, `snowflake` | Required | Database adapter to use. Oracle requires Oracle Instant Client; DuckDB requires an optional C API runtime. Redis/Valkey use key/value workflows; MongoDB uses document workflows. See [database capabilities](database-capabilities.md). |
+| `kind` | `postgres`, `cockroachdb`, `mysql`, `mariadb`, `tidb`, `oracle`, `sqlserver`, `sqlite`, `duckdb`, `redis`, `valkey`, `mongodb`, `clickhouse`, `snowflake`, `elasticsearch`, `opensearch` | Required | Database adapter to use. Oracle requires Oracle Instant Client; DuckDB requires an optional C API runtime. Redis/Valkey use key/value workflows; MongoDB uses document workflows. See [database capabilities](database-capabilities.md). |
 | `url_format` | Kebab-case enum | Driver-specific | URL spelling used when LazyDB displays or regenerates the connection URL. |
 | `host` | String or `null` | `null` | Server hostname or address. PostgreSQL/CockroachDB, MySQL/MariaDB/TiDB, Oracle, SQL Server, and Redis use this field. |
 | `port` | Integer or `null` | Driver default when imported | Server port. PostgreSQL defaults to `5432`, CockroachDB to `26257`, MySQL/MariaDB to `3306`, TiDB to `4000`, Oracle to `1521`, SQL Server to `1433`, and Redis to `6379`. SQL Server profiles require an explicit TCP port when connecting. |
@@ -377,9 +396,10 @@ The current profile file format is version `6`:
 | `default_schema` | String or `null` | `null` | PostgreSQL/CockroachDB `currentSchema`, SQL Server schema, Snowflake schema (defaults to `PUBLIC`), or SQLite `main`. MySQL, MariaDB, and TiDB have no separate default-schema field. |
 | `sqlite_path` | Path or `null` | `null` | SQLite file path. It is `null` for an in-memory database. |
 | `duckdb_path` | Path or `null` | `null` | DuckDB file path. It is `null` for an in-memory database. |
-| `ssl_mode` | `disable`, `prefer`, `require`, `verify-ca`, `verify-full` | `prefer` | TLS policy for PostgreSQL/CockroachDB, MySQL/MariaDB/TiDB, Oracle, SQL Server, and Redis. SQLite always uses `disable`; Redis accepts `disable` or a TLS-enabled mode, not `prefer`. Snowflake requires `verify-full` and port `443`. |
+| `ssl_mode` | `disable`, `prefer`, `require`, `verify-ca`, `verify-full` | `prefer` | TLS policy for PostgreSQL/CockroachDB, MySQL/MariaDB/TiDB, Oracle, SQL Server, and Redis. SQLite always uses `disable`; Redis accepts `disable` or a TLS-enabled mode, not `prefer`. Snowflake requires `verify-full` and port `443`. OpenSearch accepts only `disable` (HTTP) or `verify-full` (verified HTTPS). |
 | `pg_options` | Optional table | Absent | PostgreSQL/CockroachDB `ssl_root_cert`, `ssl_client_cert`, `ssl_client_key` paths and startup `options`. |
 | `snowflake_options` | Table or omitted | PAT with no warehouse or role override | Snowflake `warehouse`, `role`, and `token_type`; accepts `PROGRAMMATIC_ACCESS_TOKEN`, `OAUTH`, or `KEYPAIR_JWT`. Contains no credentials. |
+| `opensearch_options` | Optional table | Basic auth, no extra CA | OpenSearch `auth` (`basic`/`none`) and `ca_cert_path`; independent of Elasticsearch options, contains no credentials. |
 | `credential_policy` | Tagged table | `{ policy = "none" }` | Where the password or Snowflake access token comes from. |
 | `read_only` | Boolean | `false` | Requests adapter-level read-only behavior. Use database grants for authorization. |
 | `environment` | `development`, `staging`, `production` | `development` | Environment label used by the UI and agent write-policy checks. |
@@ -399,6 +419,9 @@ for CockroachDB; `postgres`, `postgresql`, `jdbc-postgresql` for PostgreSQL;
 `jdbc-sqlite` for SQLite; `duckdb` for DuckDB; `snowflake` for Snowflake; and `redis`, `rediss` for Redis. Defaults are
 `postgresql`, `mysql`, `mariadb`, `tidb`, `jdbc-oracle`, `sqlserver`, `sqlite`, `duckdb`,
 `snowflake`, and `redis` respectively. See the [DuckDB guide](duckdb.md) for its local file and memory URL formats.
+
+OpenSearch additionally accepts `open-search` (default HTTP) and `open-search-tls`
+(verified HTTPS); their URL schemes are `opensearch://` and `opensearchs://`.
 
 TiDB profiles retain their own product identity and use `tidb://root@host:4000/database`
 with MySQL-compatible TLS parameters. For TiDB Cloud, use `sslMode=verify-full`.
@@ -688,6 +711,8 @@ back any open transaction on that session.
   compatibility transaction flag is not treated as read-only enforcement. Use
   database grants as the authorization boundary; see [TiDB](tidb.md).
 - SQL Server configures the session as read-only where supported by the driver.
+- OpenSearch rejects writes, unknown/stateful REST APIs, and unsafe paths before
+  HTTP dispatch. Server grants remain authoritative; see [OpenSearch](opensearch.md).
 
 For PostgreSQL and MySQL, use a database role with read-only grants as the actual
 security boundary. Session settings can be changed by sufficiently privileged

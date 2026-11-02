@@ -4,18 +4,23 @@
 
 ### Added
 
+- Add OpenSearch as an independent native REST driver with Basic/None authentication, verified HTTPS and optional PEM CA bundles, index/mapping discovery, paged document previews, REST/NDJSON execution, and existing CLI/MCP policies. See [OpenSearch support](docs/opensearch.md).
 - Add Elasticsearch native REST connections, index and mapping discovery, document previews, and a REST/JSON console with write confirmation and read-only enforcement.
 - Support Basic Auth and encoded API keys through existing credential storage, verified HTTPS, and optional PEM CA bundles. Record response-level partial failures while retaining result details.
 - Add CockroachDB as an independent driver with PostgreSQL wire transport, TLS profile options, scoped database/schema/table/view catalogs, native DDL, paged previews, SQL execution, manual transactions, and existing MCP query/catalog access. Structured editing and monitoring remain unavailable; see [CockroachDB support](docs/cockroachdb.md).
 
 ### Fixed
 
+- Load complete cell values into the scrollable detail viewer so long JSON documents remain readable beyond the grid preview.
+- Keep refresh requests behind search REST write policy; preserve unknown write outcomes after oversized/invalid responses, usernames during secret-free URL edits, and current authorization after read-only changes. Exclude preview lookahead documents from retained-result budgets and restore unsupported search DDL tabs as document previews.
+- Reject late query results after cancellation and preserve unknown search REST write outcomes in history. Prevent cleared search credentials/usernames from returning during profile compatibility merges.
 - Preserve unknown CockroachDB commit outcomes, including SQLSTATE `40003`, without replaying SQL; require rollback after definitive commit rejection.
 - Cancel running SQL before global quit on `Ctrl-c`, propagate manual pagination cancellation, and discard interrupted PostgreSQL/CockroachDB AUTO sessions after a bounded server cancellation request.
 - Reconnect PostgreSQL-compatible profiles when TLS paths or startup routing options change, and include all permitted CockroachDB databases in workspace selection.
 
 ### Internal
 
+- Add an independent OpenSearch 2.19.4 CI job for live REST/TLS/Security tests and HTTP/HTTPS terminal acceptance, with bounded stages, fixture cleanup and restricted failure diagnostics. Extend real document preview acceptance to 100/120/160-column terminals and nested long documents.
 - Add deterministic regressions and isolated Docker/terminal CI acceptance, including encrypted profile persistence, restart/reconnect, authentication switching, and CA removal/recovery. Validate Elasticsearch 8.17.0 and 8.19.6 locally.
 - Document permissions and initial boundaries: no SQL emulation, manual transactions, grid-cell editing, dedicated monitoring/principal forms, Cloud ID, mTLS, or automatic PIT/search-after pagination. See [Elasticsearch support](docs/elasticsearch.md).
 

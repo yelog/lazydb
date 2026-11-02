@@ -213,6 +213,16 @@ adapter with a distinct product kind. This is intentionally not SQLx `AnyPool`:
 native catalog, type, SSL, DDL, cancellation, transaction, and key-value
 behavior must remain visible.
 
+Elasticsearch and OpenSearch retain independent profile kinds, connection variants,
+URL schemes and authentication options while sharing the search REST adapter. Its
+product parameter controls authentication and probing; OpenSearch requires the
+server's `version.distribution = "opensearch"` and a nonempty version. Native REST
+execution reuses immutable request confirmation, owner/generation validation and
+result budgets. Indices use the existing relation catalog identity; SQL-only
+editing, transactions, DDL and query controls remain unavailable. Transport rejects
+external paths, traversal and redirects, disables retries, and reports potentially
+unknown remote write outcomes after network errors.
+
 Catalog requests use bounded keyset pages (maximum page size 500), with separate
 targets for databases, schemas, groups, objects, and relation children. The
 PostgreSQL adapter requires server version 12 or newer; the Oracle MySQL catalog

@@ -3221,7 +3221,8 @@ fn preview(
             crate::profile::DatabaseKind::Redis
             | crate::profile::DatabaseKind::Valkey
             | crate::profile::DatabaseKind::MongoDb
-            | crate::profile::DatabaseKind::Elasticsearch => SqlDialect::Generic,
+            | crate::profile::DatabaseKind::Elasticsearch
+            | crate::profile::DatabaseKind::OpenSearch => SqlDialect::Generic,
             crate::profile::DatabaseKind::Snowflake => SqlDialect::Snowflake,
             crate::profile::DatabaseKind::ClickHouse => SqlDialect::ClickHouse,
         })

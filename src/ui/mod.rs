@@ -3760,7 +3760,7 @@ fn render_editor(
         Some((_, _)) => "TX MANUAL:IDLE",
         None => "TX N/A",
     };
-    let native_rest = app.active_console_is_elasticsearch();
+    let native_rest = app.active_console_is_search_rest();
     let full_left_title = if native_rest {
         format!(" REST CONSOLE  {mode} ")
     } else {
@@ -4460,7 +4460,11 @@ fn render_data(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, state
     let block = panel_block(" RESULT SET ", app.focus == Focus::Results, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let query_height = query_bar::height(&query, inner.width, state.activity_icons);
+    let query_height = if app.active_console_is_search_rest() {
+        0
+    } else {
+        query_bar::height(&query, inner.width, state.activity_icons)
+    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([

@@ -1243,6 +1243,7 @@ fn is_cycle_field(field: ProfileField) -> bool {
         field,
         ProfileField::UrlFormat
             | ProfileField::ElasticsearchAuth
+            | ProfileField::OpenSearchAuth
             | ProfileField::SslMode
             | ProfileField::Environment
             | ProfileField::PasswordStorage
@@ -1339,6 +1340,7 @@ fn field_section(field: ProfileField) -> Option<FormSection> {
         | ProfileField::SqlitePath
         | ProfileField::DuckDbPath => Some(FormSection::Connection),
         ProfileField::ElasticsearchAuth
+        | ProfileField::OpenSearchAuth
         | ProfileField::User
         | ProfileField::Password
         | ProfileField::PasswordStorage => Some(FormSection::Authentication),
@@ -1438,6 +1440,13 @@ fn field_value(draft: &ProfileDraft, field: ProfileField) -> String {
                 crate::profile::ElasticsearchAuth::ApiKey => "API Key",
             }
         ),
+        ProfileField::OpenSearchAuth => format!(
+            "‹ {} ›",
+            match draft.opensearch_auth {
+                crate::profile::OpenSearchAuth::Basic => "Basic Auth",
+                crate::profile::OpenSearchAuth::None => "None",
+            }
+        ),
         ProfileField::CaCertPath => safe_line(draft.ca_cert_path.value()),
         ProfileField::SslMode => format!("‹ {} ›", ssl_name(draft.ssl_mode)),
         ProfileField::Environment => format!("‹ {} ›", environment_name(draft.environment)),
@@ -1472,6 +1481,7 @@ fn url_help(kind: DatabaseKind) -> &'static str {
         DatabaseKind::Elasticsearch => {
             "Accepts elasticsearch:// (HTTP) and elasticsearchs:// (HTTPS)"
         }
+        DatabaseKind::OpenSearch => "Accepts opensearch:// (HTTP) and opensearchs:// (HTTPS)",
         DatabaseKind::Snowflake => {
             "Accepts snowflake://user:token@full-host/database?warehouse=...&role=..."
         }
@@ -1491,11 +1501,11 @@ fn field_label(field: ProfileField, kind: DatabaseKind) -> &'static str {
         ProfileField::Password if kind == DatabaseKind::Snowflake => "Access token",
         ProfileField::Password => "Password",
         ProfileField::Database if kind == DatabaseKind::Oracle => "Service Name",
-        ProfileField::Database if kind == DatabaseKind::Elasticsearch => "Namespace (optional)",
+        ProfileField::Database if kind.is_search_rest() => "Namespace (optional)",
         ProfileField::Database => "Database",
         ProfileField::Schema => "Default schema",
         ProfileField::VisibleObjects => "Visible objects",
-        ProfileField::ElasticsearchAuth => "Authentication",
+        ProfileField::ElasticsearchAuth | ProfileField::OpenSearchAuth => "Authentication",
         ProfileField::CaCertPath => "CA file (optional)",
         ProfileField::SslMode => "SSL mode",
         ProfileField::Environment => "Environment",

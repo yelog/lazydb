@@ -84,3 +84,27 @@ fn valkey_has_the_same_non_relational_static_capabilities_as_redis() {
         DatabaseCapabilities::for_kind(DatabaseKind::Redis)
     );
 }
+
+#[test]
+fn opensearch_exposes_search_workflows_without_sql_controls() {
+    use lazydb::db::capabilities::{InteractionModel, interaction_model};
+    assert_eq!(
+        interaction_model(DatabaseKind::OpenSearch),
+        InteractionModel::Search
+    );
+    assert_eq!(
+        DatabaseCapabilities::for_kind(DatabaseKind::OpenSearch),
+        DatabaseCapabilities {
+            catalog: true,
+            relation_ddl: false,
+            relation_edit: false,
+            monitoring: false,
+            manual_transactions: false,
+            cancellation: true,
+        }
+    );
+    assert_eq!(
+        DatabaseCapabilities::for_kind(DatabaseKind::OpenSearch),
+        DatabaseCapabilities::for_kind(DatabaseKind::Elasticsearch)
+    );
+}

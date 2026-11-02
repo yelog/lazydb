@@ -146,6 +146,7 @@ impl DatabaseKindLabel for DatabaseKind {
             DatabaseKind::ClickHouse => "ClickHouse",
             DatabaseKind::Snowflake => "Snowflake",
             DatabaseKind::Elasticsearch => "Elasticsearch",
+            DatabaseKind::OpenSearch => "OpenSearch",
         }
     }
 }

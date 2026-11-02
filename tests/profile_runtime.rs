@@ -320,6 +320,53 @@ async fn snowflake_scope_changes_require_a_new_connection_without_changing_other
 }
 
 #[tokio::test]
+async fn search_rest_read_only_changes_require_reconnect_in_both_directions() {
+    for url in [
+        "opensearch://localhost",
+        "elasticsearch://localhost",
+        ":memory:",
+    ] {
+        let temp = TempDir::new().unwrap();
+        let store = ProfileStore::new(temp.path().join("connections.toml"));
+        let mut profile = import_connection_url(url, None).unwrap().profile;
+        store.save(vec![profile.clone()]).unwrap();
+        let (mut runtime, mut receiver) = runtime(
+            vec![profile.clone()],
+            HashSet::from([profile.id]),
+            store,
+            Arc::new(FakeSecretStore::default()),
+        );
+        for (request_id, read_only) in [(1, true), (2, false)] {
+            profile.read_only = read_only;
+            runtime.dispatch(Command::SaveProfile {
+                request_id,
+                submission: submission(profile.clone(), CredentialUpdate::Preserve),
+                connect: false,
+            });
+            match next_action(&mut receiver).await {
+                Action::ProfileSaved {
+                    change,
+                    profile: saved,
+                    ..
+                } => {
+                    assert_eq!(saved.read_only, read_only);
+                    assert_eq!(
+                        change.connection_settings_changed,
+                        profile.kind.is_search_rest()
+                    );
+                    assert_eq!(change.display_only_changed, !profile.kind.is_search_rest());
+                    assert!(!change.credentials_changed);
+                    assert!(!change.catalog_scope_changed);
+                    profile = saved;
+                }
+                action => panic!("unexpected action: {action:?}"),
+            }
+        }
+        runtime.shutdown().await;
+    }
+}
+
+#[tokio::test]
 async fn session_password_is_never_persisted_or_sent_to_keyring() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("connections.toml");

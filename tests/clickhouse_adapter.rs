@@ -141,6 +141,7 @@ fn fixture_profile_type_contract_is_explicit() {
         duckdb_path: None,
         mongodb_options: None,
         elasticsearch_options: None,
+        opensearch_options: None,
         pg_options: None,
         ssl_mode: SslMode::Disable,
         credential_policy: CredentialPolicy::None,

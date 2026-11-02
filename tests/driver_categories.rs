@@ -17,7 +17,8 @@ fn categories_partition_the_registry_without_changing_machine_names() {
             DatabaseKind::Redis,
             DatabaseKind::Valkey,
             DatabaseKind::MongoDb,
-            DatabaseKind::Elasticsearch
+            DatabaseKind::Elasticsearch,
+            DatabaseKind::OpenSearch
         ]
     );
     assert_eq!(
@@ -37,7 +38,8 @@ fn categories_partition_the_registry_without_changing_machine_names() {
             "tidb",
             "cockroachdb",
             "snowflake",
-            "elasticsearch"
+            "elasticsearch",
+            "opensearch"
         ]
     );
 }

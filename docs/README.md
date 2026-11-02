@@ -35,6 +35,7 @@ driver-specific setup and workflows:
 | DuckDB | [Runtime setup, files, in-memory sessions, and SQL support](duckdb.md) |
 | MongoDB | [Document console, monitoring, principals, and transactions](mongodb.md) |
 | Elasticsearch | [Connections, indices, mappings, and REST queries](elasticsearch.md) |
+| OpenSearch | [Basic/None authentication, HTTPS, indices, and REST queries](opensearch.md) |
 | Redis / Valkey | [Browser](redis-browser.md) · [Value formats](redis-value-preview.md) |
 | Oracle | [Client setup](configuration.md#connection-profile-fields) · [Table editor](oracle-table-editor.md) · [Catalog drop behavior](oracle-catalog-drop.md) |
 | ClickHouse | [Supported operations](database-capabilities.md#clickhouse) · [Connection setup](configuration.md#clickhouse-profiles) · [Local test server](clickhouse-test-database.md) |

@@ -37,7 +37,7 @@ jobs:
           - os: macos-15-intel
             target: x86_64-apple-darwin
             cargo_jobs: 4
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
           - os: windows-2025
             target: x86_64-pc-windows-msvc
@@ -139,7 +139,7 @@ jobs:
         include:
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
     env:
       LAZYDB_DUCKDB_TARGET: ${{ matrix.target }}
@@ -411,6 +411,71 @@ jobs:
           path: |
             ${{ runner.temp }}/elasticsearch-diagnostics/*.log
             ${{ runner.temp }}/elasticsearch-diagnostics/profile-tui-sanitized.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+  opensearch:
+    name: OpenSearch REST, TLS and terminal workflows
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      COMPOSE_PROJECT_NAME: lazydb-os-ci-${{ github.run_id }}-${{ github.run_attempt }}
+      LAZYDB_TEST_OPENSEARCH_URL: opensearch://127.0.0.1:19300
+      LAZYDB_TEST_OPENSEARCH_TLS_URL: opensearchs://admin:LazyDB-local-test-Only-2026!@localhost:19301
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - name: Install Rust
+        run: rustup toolchain install 1.94.0 --profile minimal --no-self-update
+      - name: Restore Rust dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: ci-ubuntu-24.04
+          cmd-format: sh scripts/ci/rust-cache-command.sh {0}
+          cache-bin: false
+          save-if: false
+      - name: Build OpenSearch live tests
+        run: python3 -I scripts/ci/run-with-timeout.py 1200 -- cargo +1.94.0 test --locked --test opensearch_live --no-run
+      - name: Build TUI
+        run: python3 -I scripts/ci/run-with-timeout.py 600 -- cargo +1.94.0 build --locked --bin lazydb
+      - name: Configure OpenSearch virtual memory requirement
+        run: sudo sysctl -w vm.max_map_count=262144
+      - name: Validate OpenSearch fixture
+        run: docker compose -f docker-compose.opensearch.yml config --quiet
+      - name: Start isolated None HTTP and Basic HTTPS nodes
+        run: python3 -I scripts/ci/run-with-timeout.py 360 -- docker compose -f docker-compose.opensearch.yml up -d --wait --wait-timeout 300
+      - name: Export public test CA
+        run: |
+          os_test_certificate="$RUNNER_TEMP/lazydb-opensearch-ca.pem"
+          docker compose -f docker-compose.opensearch.yml cp opensearch-tls:/usr/share/opensearch/config/test-certs/ca.pem "$os_test_certificate"
+          printf 'LAZYDB_TEST_OPENSEARCH_TLS_CERT=%s\n' "$os_test_certificate" >> "$GITHUB_ENV"
+      - name: OpenSearch live REST, Security permissions and TLS tests
+        run: python3 -I scripts/ci/run-with-timeout.py 300 -- cargo +1.94.0 test --locked --test opensearch_live -- --ignored --test-threads=1
+      - name: None HTTP console terminal acceptance
+        run: python3 -I scripts/ci/run-with-timeout.py 180 -- python3 -I scripts/ci/test-opensearch-tui.py --diagnostics-dir "$RUNNER_TEMP/opensearch-diagnostics/http"
+      - name: Basic HTTPS console terminal acceptance
+        run: python3 -I scripts/ci/run-with-timeout.py 180 -- python3 -I scripts/ci/test-opensearch-tui.py --url "$LAZYDB_TEST_OPENSEARCH_TLS_URL" --ca-cert "$LAZYDB_TEST_OPENSEARCH_TLS_CERT" --diagnostics-dir "$RUNNER_TEMP/opensearch-diagnostics/https"
+      - name: Connection form, encrypted persistence and reconnect acceptance
+        run: python3 -I scripts/ci/run-with-timeout.py 300 -- python3 -I scripts/ci/test-opensearch-profile-tui.py --binary target/debug/lazydb --diagnostics-dir "$RUNNER_TEMP/opensearch-diagnostics/profile"
+      - name: OpenSearch fixture status diagnostics
+        if: failure()
+        run: |
+          mkdir -p "$RUNNER_TEMP/opensearch-diagnostics"
+          # Keep only lifecycle fields; service logs/configuration can contain credentials.
+          docker compose -f docker-compose.opensearch.yml ps --all --format '{{.Service}} {{.State}} {{.Health}}' > "$RUNNER_TEMP/opensearch-diagnostics/fixture-status.log"
+      - name: Stop OpenSearch fixtures
+        if: always()
+        run: python3 -I scripts/ci/run-with-timeout.py 90 -- docker compose -f docker-compose.opensearch.yml down -v --timeout 20
+      - name: Upload OpenSearch failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v4.4.3
+        with:
+          name: opensearch-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/opensearch-diagnostics/fixture-status.log
+            ${{ runner.temp }}/opensearch-diagnostics/http/opensearch-console-sanitized.json
+            ${{ runner.temp }}/opensearch-diagnostics/https/opensearch-console-sanitized.json
+            ${{ runner.temp }}/opensearch-diagnostics/profile/opensearch-profile-sanitized.json
           if-no-files-found: ignore
           retention-days: 7
 
