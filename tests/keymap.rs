@@ -5261,6 +5261,14 @@ fn ddl_view_maps_navigation_without_using_grid_move() {
             "code={code:?}"
         );
     }
+    for character in ['G', '$', 'N'] {
+        let event = KeyEvent::new(KeyCode::Char(character), KeyModifiers::SHIFT);
+        assert_eq!(
+            keymap.map(event, &app),
+            Some(Action::ReadOnlyEditorKey { session_id, event }),
+            "terminal Shift event for {character}"
+        );
+    }
 }
 
 #[test]

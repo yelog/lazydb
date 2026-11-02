@@ -5475,7 +5475,11 @@ fn is_read_only_editor_key(event: KeyEvent) -> bool {
         KeyCode::Char('c') if event.modifiers == KeyModifiers::CONTROL => false,
         KeyCode::Char('w') if event.modifiers == KeyModifiers::CONTROL => false,
         KeyCode::F(1 | 5) | KeyCode::Tab | KeyCode::BackTab => false,
-        _ => event.modifiers.is_empty() || event.modifiers == KeyModifiers::CONTROL,
+        _ => {
+            event.modifiers.is_empty()
+                || event.modifiers == KeyModifiers::CONTROL
+                || event.modifiers == KeyModifiers::SHIFT
+        }
     }
 }
 
