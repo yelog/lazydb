@@ -71,36 +71,11 @@ fn render_tabs(
     }
 }
 
-/// Editor viewport geometry for the active principal tab.
-///
-/// `runtime.rs` and `render` must agree on this so mouse coordinates and
-/// scrollbar thumbs line up.
-pub(crate) fn principal_ddl_viewport(
-    area: Rect,
-    app: &App,
-) -> Option<(uuid::Uuid, EditorViewport)> {
-    let Some(WorkspaceTab::PrincipalDdl(tab)) = app.tabs.get(app.active_tab) else {
-        return None;
-    };
-    if tab.view != PrincipalView::Ddl {
-        return None;
-    }
-    let layout = principal_ddl_layout(area, tab.load.status().is_some());
-    let block = ddl_block(app.focus == Focus::Results, Theme::default());
-    let inner = block.inner(layout[2]);
-    Some((
-        tab.editor_id,
-        EditorViewport {
-            width: inner.width as usize,
-            height: inner.height as usize,
-        },
-    ))
-}
-
 fn ddl_block(focused: bool, theme: Theme) -> ratatui::widgets::Block<'static> {
     panel_block("", focused, theme)
 }
 
+/// Workspace view for a single database user or role.
 pub(crate) fn render(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -691,11 +666,21 @@ fn render_ddl_editor(
         frame.render_widget(block, area);
         return;
     };
-    let Some(snapshot) = app.active_principal_editor_snapshot(viewport).ok() else {
+    let editor_id = tab.editor_id;
+    let Ok(preliminary_snapshot) = app.active_principal_editor_snapshot(viewport) else {
         frame.render_widget(block, area);
         return;
     };
-    let editor_id = tab.editor_id;
+    let text_viewport = super::read_only_sql::editor_viewport(inner, &preliminary_snapshot, true);
+    state.ddl_editor_viewport = Some((editor_id, text_viewport));
+    let Ok(snapshot) = (if text_viewport == viewport {
+        Ok(preliminary_snapshot)
+    } else {
+        app.active_principal_editor_snapshot(text_viewport)
+    }) else {
+        frame.render_widget(block, area);
+        return;
+    };
     super::register_text_selection_target(
         state,
         editor_id,
