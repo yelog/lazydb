@@ -79,7 +79,7 @@ impl ReadOnlySqlEditor<'_> {
                         } else {
                             String::new()
                         },
-                        width = gutter_width as usize - 1
+                        width = gutter_width - 1
                     ))
                     .style(Style::new().fg(theme.muted)),
                     Rect::new(
