@@ -141,11 +141,21 @@ classification. Token edits invalidate the draft's catalog discovery and reject
 results from the previous credential revision; the selected visible-object
 scope is preserved.
 
-Natural PAT expiry remains unverified against a real account. Snowflake accepts
-`DAYS_TO_EXPIRY` as whole days with a minimum of 1, so it cannot be shortened to
-seconds for this check. Revocation and an expired OAuth token do not establish
-PAT natural-expiry coverage. These checks do not cover every terminal emulator
-or account policy configuration.
+A dedicated, role-restricted PAT with `DAYS_TO_EXPIRY=1` passed connection and
+`SELECT 42` checks on 2026-11-01. Its server-reported expiration was
+2026-11-02 08:45:10.652 UTC. At 08:50:32 UTC, without revocation, token alteration,
+or clock changes, the SQL API rejected it with HTTP 401, code `394401`, and
+`Programmatic access token is expired.` The official v0.3.1 package also rejected
+the saved connection. This confirms natural PAT expiry rejection separately
+from the previously tested revocation and OAuth expiry cases.
+
+PAT replacement through the profile form, restart/reconnect, and refreshed
+catalog discovery after natural expiry remain unverified. The browser task
+space was unavailable when the timed check resumed, so replacement and cloud
+cleanup were paused; the dedicated resources remain pending cleanup in
+[#36](https://github.com/yelog/lazydb/issues/36). The live expired-token and
+replacement test has not run with this PAT. These checks do not cover every
+terminal emulator or account policy configuration.
 
 `tests/snowflake_live.rs` is an ignored, opt-in integration test. It reads a
 credential-free `LAZYDB_SNOWFLAKE_TEST_URL` and the access token from
