@@ -998,6 +998,7 @@ pub enum Action {
     MongoRelationDocumentDeleted {
         tab_id: Uuid,
         tab_generation: u64,
+        request_id: Uuid,
         ids: Vec<mongodb::bson::Bson>,
     },
     /// Reports why the documents a MongoDB relation tab marked for deletion
@@ -1005,6 +1006,7 @@ pub enum Action {
     MongoRelationDocumentDeleteFailed {
         tab_id: Uuid,
         tab_generation: u64,
+        request_id: Uuid,
         ids: Vec<mongodb::bson::Bson>,
         message: String,
     },
@@ -1915,14 +1917,15 @@ pub enum Command {
         expected: mongodb::bson::Document,
         replacement: mongodb::bson::Document,
     },
-    /// Deletes every document a MongoDB relation tab marked for deletion,
-    /// bounded to the `_id` each marked grid row was loaded with.
+    /// Deletes each marked MongoDB document only while its loaded BSON snapshot
+    /// still matches, with a single-document limit for every selected row.
     DeleteMongoRelationDocuments {
         tab_id: Uuid,
         tab_generation: u64,
+        request_id: Uuid,
         connection: ConnectionIdentity,
         namespace: crate::db::mongodb::types::MongoNamespace,
-        ids: Vec<mongodb::bson::Bson>,
+        documents: Vec<mongodb::bson::Document>,
     },
     RunMongoConsole {
         tab_id: Uuid,

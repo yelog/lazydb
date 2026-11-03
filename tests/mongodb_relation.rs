@@ -3043,11 +3043,13 @@ fn preview_for(page_request: PageRequest, documents: &[MongoDocument]) -> Relati
 
 #[derive(Debug)]
 struct DocumentsDeleteCommand {
+    request_id: Uuid,
     tab_id: Uuid,
     tab_generation: u64,
     connection: ConnectionIdentity,
     namespace: MongoNamespace,
     ids: Vec<mongodb::bson::Bson>,
+    documents: Vec<mongodb::bson::Document>,
 }
 
 /// Asserts the commit emitted exactly one bounded document delete, that it is
@@ -3061,22 +3063,28 @@ fn one_documents_delete_command(commands: &[Command]) -> DocumentsDeleteCommand 
     );
     let [
         Command::DeleteMongoRelationDocuments {
+            request_id,
             tab_id,
             tab_generation,
             connection,
             namespace,
-            ids,
+            documents,
         },
     ] = commands
     else {
         panic!("the commit emits exactly one document delete and nothing else, got {commands:?}")
     };
     DocumentsDeleteCommand {
+        request_id: *request_id,
         tab_id: *tab_id,
         tab_generation: *tab_generation,
         connection: *connection,
         namespace: namespace.clone(),
-        ids: ids.clone(),
+        ids: documents
+            .iter()
+            .map(|document| document.get("_id").unwrap().clone())
+            .collect(),
+        documents: documents.clone(),
     }
 }
 
@@ -3324,6 +3332,7 @@ fn s7_a_successful_commit_reloads_and_clears_the_marks() {
     let delete = one_documents_delete_command(&commands);
 
     let commands = app.update(Action::MongoRelationDocumentDeleted {
+        request_id: delete.request_id,
         tab_id: delete.tab_id,
         tab_generation: delete.tab_generation,
         ids: delete.ids.clone(),
@@ -3385,6 +3394,7 @@ fn s8_a_failed_commit_keeps_the_page_and_the_marks() {
     let message = "MongoDB operation failed; inspect the error code and connection settings";
 
     let commands = app.update(Action::MongoRelationDocumentDeleteFailed {
+        request_id: delete.request_id,
         tab_id: delete.tab_id,
         tab_generation: delete.tab_generation,
         ids: delete.ids.clone(),
@@ -3424,6 +3434,7 @@ fn s8_a_failed_commit_keeps_the_page_and_the_marks() {
         (Uuid::new_v4(), delete.tab_generation),
     ] {
         let commands = app.update(Action::MongoRelationDocumentDeleted {
+            request_id: delete.request_id,
             tab_id,
             tab_generation,
             ids: delete.ids.clone(),
@@ -3433,6 +3444,7 @@ fn s8_a_failed_commit_keeps_the_page_and_the_marks() {
             "a stale success reloads nothing, got {commands:?}"
         );
         let commands = app.update(Action::MongoRelationDocumentDeleteFailed {
+            request_id: delete.request_id,
             tab_id,
             tab_generation,
             ids: delete.ids.clone(),
@@ -3582,10 +3594,10 @@ fn s10b_a_grid_insert_alone_is_refused_visibly() {
     );
 }
 
-/// S4: the filter carries only the loaded `_id`s, in their loaded BSON types,
-/// and an empty set can never widen into a match-everything delete.
+/// S4: each delete carries its loaded BSON identity and snapshot, and has a
+/// single-document limit. Empty requests cannot become unbounded deletes.
 #[test]
-fn s4b_the_delete_filter_is_only_the_loaded_ids() {
+fn s4b_the_delete_command_keeps_loaded_bson_ids_and_document_guards() {
     let oid = object_id(RUEDAS_ID);
     let string_id = mongodb::bson::Bson::String("natural-key".into());
     let int_id = mongodb::bson::Bson::Int32(7);
@@ -3607,23 +3619,40 @@ fn s4b_the_delete_filter_is_only_the_loaded_ids() {
         delete.ids, expected,
         "the ids are the loaded BSON values, never their rendering"
     );
-    let filter = lazydb::db::mongodb::mutation::delete_many_filter(&delete.ids);
-    assert_eq!(filter, mongodb::bson::doc! { "_id": { "$in": expected } });
-    assert_eq!(
-        filter.keys().collect::<Vec<_>>(),
-        vec!["_id"],
-        "no other field takes part in the delete"
-    );
+    let command = lazydb::db::mongodb::mutation::delete_documents_command(
+        MONGO_COLLECTION,
+        &delete.documents,
+    )
+    .unwrap();
+    let deletes = command.get_array("deletes").unwrap();
+    assert_eq!(deletes.len(), expected.len());
+    for (index, statement) in deletes.iter().enumerate() {
+        let statement = statement.as_document().unwrap();
+        assert_eq!(statement.get_i32("limit"), Ok(1));
+        let filter = statement.get_document("q").unwrap();
+        assert_eq!(
+            filter.get_document("_id").unwrap().get("$eq"),
+            Some(&expected[index])
+        );
+        assert_eq!(
+            filter
+                .get_document("$expr")
+                .unwrap()
+                .get_array("$eq")
+                .unwrap()[1],
+            mongodb::bson::Bson::Document(
+                mongodb::bson::doc! { "$literal": delete.documents[index].clone() }
+            ),
+        );
+    }
     assert!(
         !delete
             .ids
             .contains(&mongodb::bson::Bson::String(RUEDAS_ID.to_owned())),
         "the rendered hex of an ObjectId never reaches the filter"
     );
-    assert_eq!(
-        lazydb::db::mongodb::mutation::delete_many_filter(&[]),
-        mongodb::bson::doc! { "_id": { "$in": [] } },
-        "an empty $in matches no document, never everything"
+    assert!(
+        lazydb::db::mongodb::mutation::delete_documents_command(MONGO_COLLECTION, &[]).is_err()
     );
 }
 
@@ -3635,6 +3664,7 @@ fn s7b_a_committed_delete_is_never_emitted_twice() {
     press_delete(&mut app, 0);
     let delete = one_documents_delete_command(&app.update(Action::RelationCommit));
     let commands = app.update(Action::MongoRelationDocumentDeleted {
+        request_id: delete.request_id,
         tab_id: delete.tab_id,
         tab_generation: delete.tab_generation,
         ids: delete.ids.clone(),
@@ -3677,6 +3707,7 @@ fn s8b_a_partial_delete_is_reported_and_keeps_the_marks() {
         .expect("a partial delete is never silent");
 
     let commands = app.update(Action::MongoRelationDocumentDeleteFailed {
+        request_id: delete.request_id,
         tab_id: delete.tab_id,
         tab_generation: delete.tab_generation,
         ids: delete.ids.clone(),
@@ -4013,4 +4044,310 @@ fn the_sql_delete_key_still_marks_the_row_for_a_save() {
         vec![0],
         "the SQL row is marked exactly like a MongoDB row"
     );
+}
+
+#[test]
+fn a_pending_document_delete_freezes_the_grid_and_blocks_duplicate_saves() {
+    let (mut app, _) = mongo_app_with_page(bike_documents());
+    press_delete(&mut app, 0);
+    let delete = one_documents_delete_command(&app.update(Action::RelationCommit));
+    let before = row_values(&app);
+    assert!(app.update(Action::RelationCommit).is_empty());
+
+    active_relation_tab_mut(&mut app).grid.selected_row = 1;
+    for action in [
+        Action::RelationDeleteCurrent,
+        Action::RelationUndo,
+        Action::RelationRedo,
+        Action::RelationRollback,
+        Action::RelationEditCell,
+        Action::RelationInsertRow,
+        Action::RelationPaste,
+        Action::RelationVisualLine,
+        Action::RelationEditCancel,
+    ] {
+        assert!(app.update(action).is_empty());
+        assert_eq!(row_values(&app), before);
+        assert_eq!(marked_rows(&app), vec![0]);
+        assert_eq!(document_mode(&app), Some(RelationGridMode::Busy));
+    }
+
+    let commands = app.update(Action::MongoRelationDocumentDeleteFailed {
+        request_id: delete.request_id,
+        tab_id: delete.tab_id,
+        tab_generation: delete.tab_generation,
+        ids: delete.ids.clone(),
+        message: "permission denied".into(),
+    });
+    assert!(commands.is_empty());
+    assert_eq!(document_mode(&app), Some(RelationGridMode::Browse));
+    assert_eq!(marked_rows(&app), vec![0]);
+    press_delete(&mut app, 1);
+    assert_eq!(marked_rows(&app), vec![0, 1]);
+    one_documents_delete_command(&app.update(Action::RelationCommit));
+}
+
+#[test]
+fn a_background_document_delete_reloads_before_editing_a_remaining_row() {
+    let (mut app, _) = mongo_app_with_page(bike_documents());
+    press_delete(&mut app, 0);
+    let delete = one_documents_delete_command(&app.update(Action::RelationCommit));
+    let relation_index = app.active_tab;
+    app.tabs
+        .push(WorkspaceTab::MongoBrowser(MongoBrowserTab::new(
+            delete.connection.profile_id,
+            mongo_namespace(),
+        )));
+    app.update(Action::ActivateTab(app.tabs.len() - 1));
+    let commands = app.update(Action::MongoRelationDocumentDeleted {
+        request_id: delete.request_id,
+        tab_id: delete.tab_id,
+        tab_generation: delete.tab_generation,
+        ids: delete.ids.clone(),
+    });
+    assert!(commands.is_empty(), "a background tab loads on activation");
+
+    let commands = app.update(Action::ActivateTab(relation_index));
+    let reload = mongo_preview_request(&commands);
+    let remaining = bike_documents()[1..].to_vec();
+    app.update(Action::MongoRelationPreviewLoaded {
+        request: reload.clone(),
+        preview: Box::new(preview_for(reload.page, &remaining)),
+        documents: remaining,
+    });
+    active_relation_tab_mut(&mut app).grid.selected_row = 1;
+    app.update(Action::RelationEditCell);
+    assert_eq!(document_state(&app).id, object_id(CADENA_ID));
+    set_document_text(
+        &mut app,
+        &format!(r#"{{"_id": {{"$oid": "{CADENA_ID}"}}, "name": "Updated chain"}}"#),
+    );
+    let replacement = one_replace_command(&app.update(Action::RelationEditConfirm));
+    assert_eq!(replacement.id, object_id(CADENA_ID));
+}
+
+#[test]
+fn a_document_delete_from_ddl_invalidates_the_data_snapshot() {
+    let (mut app, _) = mongo_app_with_page(bike_documents());
+    press_delete(&mut app, 0);
+    app.update(Action::SetRelationView(RelationView::Ddl));
+    let delete = one_documents_delete_command(&app.update(Action::RelationCommit));
+    app.update(Action::MongoRelationDocumentDeleted {
+        request_id: delete.request_id,
+        tab_id: delete.tab_id,
+        tab_generation: delete.tab_generation,
+        ids: delete.ids.clone(),
+    });
+    assert!(matches!(
+        active_relation_tab(&app).data,
+        RelationLoad::Empty
+    ));
+    assert!(active_relation_tab(&app).mongodb_documents.is_none());
+
+    let commands = app.update(Action::SetRelationView(RelationView::Data));
+    let reload = mongo_preview_request(&commands);
+    let remaining = bike_documents()[1..].to_vec();
+    app.update(Action::MongoRelationPreviewLoaded {
+        request: reload.clone(),
+        preview: Box::new(preview_for(reload.page, &remaining)),
+        documents: remaining,
+    });
+    active_relation_tab_mut(&mut app).grid.selected_row = 1;
+    app.update(Action::RelationEditCell);
+    assert_eq!(document_state(&app).id, object_id(CADENA_ID));
+}
+
+#[test]
+fn a_failed_post_delete_reload_never_exposes_stale_documents() {
+    let (mut app, _) = mongo_app_with_page(bike_documents());
+    press_delete(&mut app, 0);
+    let delete = one_documents_delete_command(&app.update(Action::RelationCommit));
+    let commands = app.update(Action::MongoRelationDocumentDeleted {
+        request_id: delete.request_id,
+        tab_id: delete.tab_id,
+        tab_generation: delete.tab_generation,
+        ids: delete.ids.clone(),
+    });
+    let reload = mongo_preview_request(&commands);
+    app.update(Action::RelationFailed {
+        request: reload,
+        message: "reload failed".into(),
+    });
+    active_relation_tab_mut(&mut app).grid.selected_row = 1;
+    assert!(app.update(Action::RelationEditCell).is_empty());
+    assert!(active_relation_tab(&app).mongodb_documents.is_none());
+    assert!(!matches!(
+        document_mode(&app),
+        Some(RelationGridMode::EditDocument(_))
+    ));
+}
+
+fn commit_document_delete_from_quit_review(app: &mut App) -> DocumentsDeleteCommand {
+    app.update(Action::Quit);
+    assert!(app.review_preview_session_id().is_some());
+    one_documents_delete_command(&app.update(Action::ConfirmTransactionExitChoice(
+        lazydb::model::transaction::TransactionExitChoice::Commit,
+    )))
+}
+
+#[test]
+fn committing_document_deletions_on_quit_continues_the_exit() {
+    let (mut app, _) = mongo_app_with_page(bike_documents());
+    press_delete(&mut app, 0);
+    let delete = commit_document_delete_from_quit_review(&mut app);
+    let commands = app.update(Action::MongoRelationDocumentDeleted {
+        request_id: delete.request_id,
+        tab_id: delete.tab_id,
+        tab_generation: delete.tab_generation,
+        ids: delete.ids.clone(),
+    });
+    assert!(
+        commands
+            .iter()
+            .any(|command| matches!(command, Command::FlushWorkspace { .. }))
+    );
+    assert!(
+        !commands
+            .iter()
+            .any(|command| matches!(command, Command::LoadMongoRelationPreview(_)))
+    );
+}
+
+#[test]
+fn a_failed_document_delete_on_quit_releases_the_deferred_wait() {
+    let (mut app, _) = mongo_app_with_page(bike_documents());
+    press_delete(&mut app, 0);
+    let delete = commit_document_delete_from_quit_review(&mut app);
+    app.update(Action::MongoRelationDocumentDeleteFailed {
+        request_id: delete.request_id,
+        tab_id: delete.tab_id,
+        tab_generation: delete.tab_generation,
+        ids: delete.ids.clone(),
+        message: "permission denied".into(),
+    });
+    assert_eq!(marked_rows(&app), vec![0]);
+    app.update(Action::Quit);
+    assert!(app.review_preview_session_id().is_some());
+}
+
+#[test]
+fn an_old_document_delete_result_cannot_finish_a_new_attempt() {
+    let (mut app, _) = mongo_app_with_page(bike_documents());
+    press_delete(&mut app, 0);
+    let first = one_documents_delete_command(&app.update(Action::RelationCommit));
+    app.update(Action::MongoRelationDocumentDeleteFailed {
+        tab_id: first.tab_id,
+        tab_generation: first.tab_generation,
+        request_id: first.request_id,
+        ids: first.ids.clone(),
+        message: "permission denied".into(),
+    });
+    let second = one_documents_delete_command(&app.update(Action::RelationCommit));
+    assert_ne!(first.request_id, second.request_id);
+    let notifications = notification_bodies(&app);
+    for action in [
+        Action::MongoRelationDocumentDeleted {
+            tab_id: first.tab_id,
+            tab_generation: first.tab_generation,
+            request_id: first.request_id,
+            ids: first.ids.clone(),
+        },
+        Action::MongoRelationDocumentDeleteFailed {
+            tab_id: first.tab_id,
+            tab_generation: first.tab_generation,
+            request_id: first.request_id,
+            ids: first.ids,
+            message: "stale failure".into(),
+        },
+    ] {
+        assert!(app.update(action).is_empty());
+        assert_eq!(marked_rows(&app), vec![0]);
+        assert_eq!(document_mode(&app), Some(RelationGridMode::Busy));
+        assert_eq!(notification_bodies(&app), notifications);
+    }
+    let commands = app.update(Action::MongoRelationDocumentDeleted {
+        tab_id: second.tab_id,
+        tab_generation: second.tab_generation,
+        request_id: second.request_id,
+        ids: second.ids,
+    });
+    mongo_preview_request(&commands);
+}
+
+#[test]
+fn mongodb_delete_review_shows_the_guarded_command_and_confirms_the_selected_commit() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use lazydb::input::keymap::Keymap;
+
+    let (mut app, _) = mongo_app_with_page(bike_documents());
+    press_delete(&mut app, 0);
+    app.focus = Focus::Results;
+    let mut keymap = Keymap::default();
+    let save = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+    let action = keymap.map(save, &app).expect("Ctrl-S opens review");
+    assert!(matches!(action, Action::OpenTransactionControl));
+    assert!(app.update(action).is_empty());
+    let Some(lazydb::model::workspace::Overlay::RelationTransactionConfirm(review)) = &app.overlay
+    else {
+        panic!("document deletion must be reviewable")
+    };
+    let command: serde_json::Value =
+        serde_json::from_str(&review.sql).expect("MongoDB command EJSON");
+    assert_eq!(command["delete"], MONGO_COLLECTION);
+    let deletes = command["deletes"].as_array().unwrap();
+    assert_eq!(deletes.len(), 1);
+    assert_eq!(deletes[0]["limit"]["$numberInt"], "1");
+    assert_eq!(deletes[0]["q"]["_id"]["$eq"]["$oid"], RUEDAS_ID);
+    for _ in 0..2 {
+        let action = keymap
+            .map(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &app)
+            .unwrap();
+        app.update(action);
+    }
+    let action = keymap
+        .map(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &app)
+        .expect("Enter confirms the selected Commit button");
+    let deletion = one_documents_delete_command(&app.update(action));
+    assert_eq!(deletion.ids, vec![object_id(RUEDAS_ID)]);
+    assert_eq!(deletion.documents, vec![bike_documents()[0].bson.clone()]);
+}
+
+#[test]
+fn pending_document_deletions_keep_their_tab_until_deferred_exit_is_resolved() {
+    for success in [true, false] {
+        let (mut app, _) = mongo_app_with_page(bike_documents());
+        press_delete(&mut app, 0);
+        let delete = commit_document_delete_from_quit_review(&mut app);
+        assert!(app.update(Action::CloseTab(delete.tab_id)).is_empty());
+        assert!(app.tabs.iter().any(|tab| tab.id() == delete.tab_id));
+        assert_eq!(document_mode(&app), Some(RelationGridMode::Busy));
+        let action = if success {
+            Action::MongoRelationDocumentDeleted {
+                tab_id: delete.tab_id,
+                tab_generation: delete.tab_generation,
+                request_id: delete.request_id,
+                ids: delete.ids,
+            }
+        } else {
+            Action::MongoRelationDocumentDeleteFailed {
+                tab_id: delete.tab_id,
+                tab_generation: delete.tab_generation,
+                request_id: delete.request_id,
+                ids: delete.ids,
+                message: "permission denied".into(),
+            }
+        };
+        let commands = app.update(action);
+        if success {
+            assert!(
+                commands
+                    .iter()
+                    .any(|command| matches!(command, Command::FlushWorkspace { .. }))
+            );
+        } else {
+            assert!(commands.is_empty());
+            app.update(Action::Quit);
+            assert!(app.review_preview_session_id().is_some());
+        }
+    }
 }

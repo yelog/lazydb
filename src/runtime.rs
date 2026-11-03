@@ -1156,15 +1156,17 @@ impl Runtime {
             Command::DeleteMongoRelationDocuments {
                 tab_id,
                 tab_generation,
+                request_id,
                 connection,
                 namespace,
-                ids,
+                documents,
             } => self.delete_mongo_relation_documents(
                 tab_id,
                 tab_generation,
+                request_id,
                 connection,
                 namespace,
-                ids,
+                documents,
             ),
             Command::InsertMongoDocuments {
                 tab_id,
@@ -2180,35 +2182,64 @@ impl Runtime {
         &mut self,
         tab_id: Uuid,
         tab_generation: u64,
+        request_id: Uuid,
         connection: ConnectionIdentity,
         namespace: crate::db::mongodb::types::MongoNamespace,
-        ids: Vec<mongodb::bson::Bson>,
+        documents: Vec<mongodb::bson::Document>,
     ) {
         let active = Arc::clone(&self.connection);
+        let registry = Arc::clone(&self.registry);
         let sender = self.event_sender.clone();
+        let ids = documents
+            .iter()
+            .filter_map(|document| document.get("_id").cloned())
+            .collect();
         self.background_tasks.push(tokio::spawn(async move {
-            let database = active_database(active, connection).await;
-            let result = match database {
-                Some(DatabaseConnection::MongoDb(adapter)) => {
-                    adapter
-                        .delete_documents_by_ids_detailed(&namespace, ids.clone())
-                        .await
+            let result = async {
+                let profile = registry
+                    .lock()
+                    .await
+                    .profiles
+                    .get(&connection.profile_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        DatabaseError::configuration("MongoDB profile no longer exists")
+                    })?;
+                if profile.kind != crate::profile::DatabaseKind::MongoDb {
+                    return Err(DatabaseError::configuration(
+                        "This relation is not a MongoDB collection",
+                    ));
                 }
-                _ => Err(DatabaseError::configuration(
-                    "MongoDB connection is not active",
-                )),
-            };
+                if profile.read_only {
+                    return Err(DatabaseError::configuration(
+                        crate::model::relation_edit::MONGODB_READ_ONLY_MESSAGE,
+                    ));
+                }
+                match active_database(active, connection).await {
+                    Some(DatabaseConnection::MongoDb(adapter)) => {
+                        adapter
+                            .delete_documents_detailed(&namespace, documents)
+                            .await
+                    }
+                    _ => Err(DatabaseError::configuration(
+                        "MongoDB connection is not active",
+                    )),
+                }
+            }
+            .await;
             let action = match result {
                 Ok(outcome) => {
                     match crate::db::mongodb::mutation::delete_outcome_message(&outcome) {
                         None => Action::MongoRelationDocumentDeleted {
                             tab_id,
                             tab_generation,
+                            request_id,
                             ids,
                         },
                         Some(message) => Action::MongoRelationDocumentDeleteFailed {
                             tab_id,
                             tab_generation,
+                            request_id,
                             ids,
                             message: message.to_owned(),
                         },
@@ -2217,6 +2248,7 @@ impl Runtime {
                 Err(error) => Action::MongoRelationDocumentDeleteFailed {
                     tab_id,
                     tab_generation,
+                    request_id,
                     ids,
                     message: error.message,
                 },
@@ -10155,6 +10187,89 @@ fn authorize_profile_execution(
 mod tests {
     use super::*;
     use crate::{db::transaction::WorkerDisposition, profile::import_connection_url};
+
+    #[tokio::test]
+    async fn relation_document_deletes_recheck_the_current_profile_before_io() {
+        for (change, expected) in [
+            (
+                "read_only",
+                crate::model::relation_edit::MONGODB_READ_ONLY_MESSAGE,
+            ),
+            ("removed", "MongoDB profile no longer exists"),
+            ("driver", "This relation is not a MongoDB collection"),
+        ] {
+            let profile = import_connection_url("mongodb://localhost:27017/app", None)
+                .unwrap()
+                .profile;
+            let identity = ConnectionIdentity {
+                profile_id: profile.id,
+                generation: 1,
+            };
+            let (sender, mut events) = mpsc::unbounded_channel();
+            let temp = tempfile::tempdir().unwrap();
+            let mut runtime = Runtime::new(
+                vec![profile],
+                HashSet::new(),
+                HashMap::new(),
+                None,
+                ProfileStore::new(temp.path().join("profiles.toml")),
+                Arc::new(crate::persistence::secrets::NativeSecretStore),
+                sender,
+            );
+            let tab_id = Uuid::new_v4();
+            let request_id = Uuid::new_v4();
+            runtime.delete_mongo_relation_documents(
+                tab_id,
+                3,
+                request_id,
+                identity,
+                crate::db::mongodb::types::MongoNamespace::collection("app", "items"),
+                vec![mongodb::bson::doc! { "_id": 7 }],
+            );
+            // The single-threaded test has not yielded to the queued worker.
+            let mut registry = runtime.registry.lock().await;
+            match change {
+                "removed" => {
+                    registry.profiles.remove(&identity.profile_id);
+                }
+                "read_only" => {
+                    registry
+                        .profiles
+                        .get_mut(&identity.profile_id)
+                        .unwrap()
+                        .read_only = true;
+                }
+                "driver" => {
+                    registry
+                        .profiles
+                        .get_mut(&identity.profile_id)
+                        .unwrap()
+                        .kind = crate::profile::DatabaseKind::Sqlite;
+                }
+                _ => unreachable!(),
+            }
+            drop(registry);
+            let action = tokio::time::timeout(Duration::from_secs(1), events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let Action::MongoRelationDocumentDeleteFailed {
+                tab_id: actual_tab,
+                tab_generation,
+                request_id: actual_request,
+                message,
+                ..
+            } = action
+            else {
+                panic!("unexpected deletion result: {action:?}")
+            };
+            assert_eq!(actual_tab, tab_id);
+            assert_eq!(tab_generation, 3);
+            assert_eq!(actual_request, request_id);
+            assert_eq!(message, expected);
+            runtime.shutdown().await;
+        }
+    }
 
     #[test]
     fn search_rest_write_failures_have_unknown_history_outcomes() {
