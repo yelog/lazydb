@@ -4877,7 +4877,7 @@ fn map_relation_data(event: KeyEvent, app: &App) -> Option<Action> {
         };
     }
 
-    if !event.modifiers.is_empty() {
+    if !event.modifiers.is_empty() && event.modifiers != KeyModifiers::SHIFT {
         return match (event.modifiers, event.code) {
             (KeyModifiers::CONTROL, KeyCode::Char('s')) => Some(Action::OpenTransactionControl),
             (KeyModifiers::CONTROL, KeyCode::Char('r')) => Some(Action::RelationRedo),

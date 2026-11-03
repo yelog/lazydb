@@ -3476,10 +3476,17 @@ fn s8_a_failed_commit_keeps_the_page_and_the_marks() {
 /// commits through the same `Ctrl-S` path.
 #[test]
 fn s9_a_visual_range_marks_every_row_in_the_range() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use lazydb::input::keymap::Keymap;
+
     let (mut app, _request) = mongo_app_with_page(bike_documents());
     let before = row_values(&app);
 
-    app.update(Action::RelationVisualLine);
+    app.focus = Focus::Results;
+    let action = Keymap::default()
+        .map(KeyEvent::new(KeyCode::Char('V'), KeyModifiers::SHIFT), &app)
+        .expect("a real terminal's Shift-V enters range selection");
+    app.update(action);
     active_relation_tab_mut(&mut app).grid.selected_row = 2;
 
     let commands = app.update(Action::RelationDeleteSelected);

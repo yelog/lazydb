@@ -4536,6 +4536,43 @@ fn relation_transaction_review_uses_ctrl_s_without_direct_rollback() {
 }
 
 #[test]
+fn relation_visual_line_accepts_the_shift_modifier_sent_by_terminals() {
+    let mut app = App::new(Vec::new());
+    let mut relation = lazydb::model::relation::RelationTab::new("items");
+    relation.edit = Some(
+        lazydb::model::relation_edit::RelationEditSession::from_rows(vec![vec![
+            lazydb::db::value::CellValue::Integer(1),
+        ]]),
+    );
+    app.tabs
+        .push(lazydb::model::tab::WorkspaceTab::Relation(relation));
+    app.active_tab = app.tabs.len() - 1;
+    app.focus = lazydb::model::workspace::Focus::Results;
+    let mut keymap = Keymap::default();
+    for modifiers in [KeyModifiers::NONE, KeyModifiers::SHIFT] {
+        let action = keymap.map(KeyEvent::new(KeyCode::Char('V'), modifiers), &app);
+        assert_eq!(action, Some(Action::RelationVisualLine));
+        app.update(action.unwrap());
+        assert!(matches!(
+            &app.tabs[app.active_tab],
+            lazydb::model::tab::WorkspaceTab::Relation(tab)
+                if matches!(tab.edit.as_ref().map(|edit| &edit.mode),
+                    Some(lazydb::model::relation_edit::RelationGridMode::VisualLine { anchor: 0 }))
+        ));
+        app.update(Action::RelationEditCancel);
+    }
+    for modifiers in [
+        KeyModifiers::ALT,
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ] {
+        assert_eq!(
+            keymap.map(KeyEvent::new(KeyCode::Char('V'), modifiers), &app),
+            None
+        );
+    }
+}
+
+#[test]
 fn transaction_review_tab_cycles_preview_and_buttons() {
     let mut app = App::new(Vec::new());
     let mut relation = lazydb::model::relation::RelationTab::new("users");
