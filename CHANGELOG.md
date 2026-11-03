@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.3.2] - 2026-11-03
 
 ### Added
 
@@ -11,6 +11,11 @@
 - Add Elasticsearch native REST connections, index and mapping discovery, document previews, and a REST/JSON console with write confirmation and read-only enforcement.
 - Support Basic Auth and encoded API keys through existing credential storage, verified HTTPS, and optional PEM CA bundles. Record response-level partial failures while retaining result details.
 - Add CockroachDB as an independent driver with PostgreSQL wire transport, TLS profile options, scoped database/schema/table/view catalogs, native DDL, paged previews, SQL execution, manual transactions, and existing MCP query/catalog access. Structured editing and monitoring remain unavailable; see [CockroachDB support](docs/cockroachdb.md).
+- Stage MongoDB relation document deletions with `dd` or visual selection and an explicit `Ctrl-s` review/commit workflow; match original BSON snapshots and reject unsupported collection types or unacknowledged writes ([`a59362f`](https://github.com/yelog/lazydb/commit/a59362f)).
+
+### Changed
+
+- Make `Ctrl-c` cancel an active SQL query before quitting; manual queries require confirmation and rollback ([`ec04bbf`](https://github.com/yelog/lazydb/commit/ec04bbf)).
 
 ### Fixed
 
@@ -24,14 +29,75 @@
 - Keep refresh requests behind search REST write policy; preserve unknown write outcomes after oversized/invalid responses, usernames during secret-free URL edits, and current authorization after read-only changes. Exclude preview lookahead documents from retained-result budgets and restore unsupported search DDL tabs as document previews.
 - Reject late query results after cancellation and preserve unknown search REST write outcomes in history. Prevent cleared search credentials/usernames from returning during profile compatibility merges.
 - Preserve unknown CockroachDB commit outcomes, including SQLSTATE `40003`, without replaying SQL; require rollback after definitive commit rejection.
-- Cancel running SQL before global quit on `Ctrl-c`, propagate manual pagination cancellation, and discard interrupted PostgreSQL/CockroachDB AUTO sessions after a bounded server cancellation request.
+- Propagate manual pagination cancellation and discard interrupted PostgreSQL/CockroachDB AUTO sessions after a bounded server cancellation request.
 - Reconnect PostgreSQL-compatible profiles when TLS paths or startup routing options change, and include all permitted CockroachDB databases in workspace selection.
+- Synchronize rendered DDL viewports with navigation/search input and retain complete wrapped text selections while dragging across scrollable panes ([`a1ed71b`](https://github.com/yelog/lazydb/commit/a1ed71b), [`ec1c0e2`](https://github.com/yelog/lazydb/commit/ec1c0e2)).
+- Preserve native DuckDB query cancellation and retire cancellation handles when work ends, including generic native error paths ([`33ac3eb`](https://github.com/yelog/lazydb/commit/33ac3eb), [`48cd3bf`](https://github.com/yelog/lazydb/commit/48cd3bf)).
+- Classify known Snowflake token lifecycle failures as authentication errors while preserving unknown server error classifications ([`782a3b1`](https://github.com/yelog/lazydb/commit/782a3b1)).
+- Harden MongoDB staged deletes against changed documents, read-only profiles, concurrent edits/saves, and partial or uncertain write outcomes; invalidate related cached pages only after confirmed deletion ([`3be1e5e`](https://github.com/yelog/lazydb/commit/3be1e5e)).
 
 ### Internal
 
 - Add an independent OpenSearch 2.19.4 CI job for live REST/TLS/Security tests and HTTP/HTTPS terminal acceptance, with bounded stages, fixture cleanup and restricted failure diagnostics. Extend real document preview acceptance to 100/120/160-column terminals and nested long documents.
 - Add deterministic regressions and isolated Docker/terminal CI acceptance, including encrypted profile persistence, restart/reconnect, authentication switching, and CA removal/recovery. Validate Elasticsearch 8.17.0 and 8.19.6 locally.
 - Document permissions and initial boundaries: no SQL emulation, manual transactions, grid-cell editing, dedicated monitoring/principal forms, Cloud ID, mTLS, or automatic PIT/search-after pagination. See [Elasticsearch support](docs/elasticsearch.md).
+- Add the project-scoped Codex release skill and document both Codex and OpenCode invocation ([`34960c6`](https://github.com/yelog/lazydb/commit/34960c6)).
+- Separate native CI compilation/execution budgets, select search drivers by identity, update rust-cache, and harden native updater executable fixtures.
+- Document real Snowflake natural PAT expiry rejection, replacement, and reconnect validation with its remaining deployment limits.
+
+### Commits
+
+- [`34960c6`](https://github.com/yelog/lazydb/commit/34960c6) feat(skills): add Codex release workflow
+- [`3be1e5e`](https://github.com/yelog/lazydb/commit/3be1e5e) fix(mongodb): harden staged relation deletes (#50)
+- [`a59362f`](https://github.com/yelog/lazydb/commit/a59362f) feat(mongodb): stage relation document deletes and commit them on save (#42)
+- [`d53cb49`](https://github.com/yelog/lazydb/commit/d53cb49) Merge branch 'main' of github.com:yelog/lazydb
+- [`982eb37`](https://github.com/yelog/lazydb/commit/982eb37) feat(bigquery): merge native GoogleSQL and ADC support (#46)
+- [`ec1c0e2`](https://github.com/yelog/lazydb/commit/ec1c0e2) fix(ui): follow held text selections across scrollable panes (#49)
+- [`a1ed71b`](https://github.com/yelog/lazydb/commit/a1ed71b) fix(ui): synchronize DDL text viewports and terminal navigation (#47)
+- [`cbe48ba`](https://github.com/yelog/lazydb/commit/cbe48ba) fix(ui): retain the final source lines in wrapped drag previews
+- [`a0c3baf`](https://github.com/yelog/lazydb/commit/a0c3baf) fix(ui): handle DDL prompt input before numeric prefixes
+- [`4a52597`](https://github.com/yelog/lazydb/commit/4a52597) fix(ui): give DDL search prompts ownership of text input
+- [`f0f1a6e`](https://github.com/yelog/lazydb/commit/f0f1a6e) fix(ui): route shifted DDL navigation keys to the editor
+- [`4fdd443`](https://github.com/yelog/lazydb/commit/4fdd443) style(ui): remove redundant gutter width cast
+- [`3b6d88f`](https://github.com/yelog/lazydb/commit/3b6d88f) fix(ui): synchronize DDL text viewports before accepting input
+- [`850fc93`](https://github.com/yelog/lazydb/commit/850fc93) fix(ui): preserve drag coordinates and stop at scroll limits
+- [`03c7e42`](https://github.com/yelog/lazydb/commit/03c7e42) fix(ui): keep scrolling while a text selection drags past the pane
+- [`baf0394`](https://github.com/yelog/lazydb/commit/baf0394) fix(ci): avoid reducer recursion and separate native build budgets
+- [`dc87897`](https://github.com/yelog/lazydb/commit/dc87897) fix(ui): record the DDL pane viewport the render drew into
+- [`e220050`](https://github.com/yelog/lazydb/commit/e220050) feat(bigquery): add native GoogleSQL and refreshable ADC workflows
+- [`75883cf`](https://github.com/yelog/lazydb/commit/75883cf) docs(snowflake): complete natural PAT expiry acceptance (#44)
+- [`68b99bd`](https://github.com/yelog/lazydb/commit/68b99bd) docs(snowflake): complete natural PAT expiry acceptance
+- [`101e6ab`](https://github.com/yelog/lazydb/commit/101e6ab) docs(snowflake): record natural PAT expiry rejection
+- [`ad33262`](https://github.com/yelog/lazydb/commit/ad33262) feat(opensearch): merge native REST support (#43)
+- [`5460c22`](https://github.com/yelog/lazydb/commit/5460c22) fix(ci): select search drivers by identity and retire macOS 14
+- [`dcb8f03`](https://github.com/yelog/lazydb/commit/dcb8f03) feat(opensearch): add native REST connections and terminal workflows
+- [`782a3b1`](https://github.com/yelog/lazydb/commit/782a3b1) fix(snowflake): merge token lifecycle authentication handling (#41)
+- [`33ac3eb`](https://github.com/yelog/lazydb/commit/33ac3eb) fix(duckdb): merge cancellation handle lifecycle protection (#40)
+- [`62e658a`](https://github.com/yelog/lazydb/commit/62e658a) fix(snowflake): classify token lifecycle authentication failures
+- [`7358b87`](https://github.com/yelog/lazydb/commit/7358b87) chore: merge main updater fixture fix
+- [`eafc152`](https://github.com/yelog/lazydb/commit/eafc152) fix(duckdb): retire cancellation handles when native work ends
+- [`600a6ed`](https://github.com/yelog/lazydb/commit/600a6ed) test(update): fix executable-busy native fixtures (#39)
+- [`394ad15`](https://github.com/yelog/lazydb/commit/394ad15) test(update): avoid writable executable copies in native fixtures
+- [`b487245`](https://github.com/yelog/lazydb/commit/b487245) chore(git): ignore project Claude Code directory
+- [`e0a6638`](https://github.com/yelog/lazydb/commit/e0a6638) Merge pull request #30 from yelog/dependabot/github_actions/Swatinem/rust-cache-2.9.3
+- [`fd1a566`](https://github.com/yelog/lazydb/commit/fd1a566) build(deps): bump Swatinem/rust-cache from 2.9.2 to 2.9.3
+- [`5848926`](https://github.com/yelog/lazydb/commit/5848926) feat(elasticsearch): merge native REST support (#37)
+- [`d70c9ef`](https://github.com/yelog/lazydb/commit/d70c9ef) test(console): release saved app before restoring workspace
+- [`4a5f0f9`](https://github.com/yelog/lazydb/commit/4a5f0f9) merge: integrate CockroachDB and DuckDB cancellation fixes
+- [`4699a45`](https://github.com/yelog/lazydb/commit/4699a45) feat(cockroachdb): merge native catalog and transaction support (#34)
+- [`48cd3bf`](https://github.com/yelog/lazydb/commit/48cd3bf) fix(duckdb): preserve cancellation across generic native errors
+- [`540b2cb`](https://github.com/yelog/lazydb/commit/540b2cb) fix(duckdb): classify native query interruption as cancellation
+- [`7baa217`](https://github.com/yelog/lazydb/commit/7baa217) merge: integrate Snowflake support before CockroachDB merge
+- [`b9d0976`](https://github.com/yelog/lazydb/commit/b9d0976) docs(elasticsearch): clarify hosted validation status
+- [`8a88fd0`](https://github.com/yelog/lazydb/commit/8a88fd0) merge: integrate current main with Elasticsearch support
+- [`0a9b516`](https://github.com/yelog/lazydb/commit/0a9b516) feat(elasticsearch): add native REST workflows and secure connections
+- [`a1fc794`](https://github.com/yelog/lazydb/commit/a1fc794) test(drivers): preserve TiDB index when registering CockroachDB
+- [`f3bfd8c`](https://github.com/yelog/lazydb/commit/f3bfd8c) Merge origin/main into CockroachDB support
+- [`826c9f0`](https://github.com/yelog/lazydb/commit/826c9f0) fix(cockroachdb): harden cancellation and uncertain transaction outcomes
+- [`ec04bbf`](https://github.com/yelog/lazydb/commit/ec04bbf) fix(input): cancel running SQL before handling global quit
+- [`ed282ac`](https://github.com/yelog/lazydb/commit/ed282ac) feat(cockroachdb): add native catalog and transaction support
+
+## [Unreleased]
 
 ## [0.3.1] - 2026-11-01
 
@@ -2532,4 +2598,5 @@ Changes that are not part of a tagged release go here.
   lazy shells without persisting result data across restarts, and profile
   deletion removes the workspace.
 
-[unreleased]: https://github.com/yelog/lazydb/compare/HEAD...HEAD
+[unreleased]: https://github.com/yelog/lazydb/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/yelog/lazydb/compare/v0.3.1...v0.3.2
