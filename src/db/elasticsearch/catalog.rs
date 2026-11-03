@@ -39,7 +39,7 @@ impl ElasticsearchAdapter {
             .map_err(catalog_error)?;
         if self.database.is_empty() {
             return Err(catalog_error(
-                "Elasticsearch virtual database cannot be empty",
+                "Search REST virtual database cannot be empty",
             ));
         }
         let entries = match &request.key.target {
@@ -89,7 +89,7 @@ impl ElasticsearchAdapter {
                 validate_identity(self.profile_id, &self.database, schema, CatalogKind::Schema)?;
                 if *group != ObjectGroup::Tables {
                     return Err(DatabaseError::unsupported(
-                        "Elasticsearch catalog only supports the Tables (INDEX) group",
+                        "Search REST catalog only supports the Tables (INDEX) group",
                     ));
                 }
                 self.index_names()
@@ -114,7 +114,7 @@ impl ElasticsearchAdapter {
             CatalogTarget::ProjectionChildren { table } => {
                 validate_identity(self.profile_id, &self.database, table, CatalogKind::Table)?;
                 return Err(DatabaseError::unsupported(
-                    "Elasticsearch catalog does not support projections",
+                    "Search REST catalog does not support projections",
                 ));
             }
         };
@@ -128,12 +128,12 @@ impl ElasticsearchAdapter {
         request.validate().map_err(catalog_error)?;
         if request.connection.profile_id != self.profile_id {
             return Err(catalog_error(
-                "Elasticsearch catalog search belongs to a different profile",
+                "Search REST catalog search belongs to a different profile",
             ));
         }
         if self.database.is_empty() {
             return Err(catalog_error(
-                "Elasticsearch virtual database cannot be empty",
+                "Search REST virtual database cannot be empty",
             ));
         }
         if !request.scope.allows_schema(&self.database, &self.database) {
@@ -198,7 +198,7 @@ pub(crate) fn validate_relation_scope(
     validate_identity(profile_id, database, relation, CatalogKind::Table)?;
     if !scope.allows_schema(database, database) {
         return Err(catalog_error(
-            "Elasticsearch index is outside the captured catalog scope",
+            "Search REST index is outside the captured catalog scope",
         ));
     }
     Ok(())
@@ -216,7 +216,7 @@ fn validate_identity(
         CatalogKind::Table => 3,
         _ => {
             return Err(catalog_error(
-                "unsupported Elasticsearch catalog identity kind",
+                "unsupported search REST catalog identity kind",
             ));
         }
     };
@@ -229,7 +229,7 @@ fn validate_identity(
         || (length == 3 && !is_user_index(&id.native_path[2]))
     {
         return Err(catalog_error(
-            "Elasticsearch catalog identity must belong to this profile and virtual namespace",
+            "Search REST catalog identity must belong to this profile and virtual namespace",
         ));
     }
     Ok(())
@@ -250,20 +250,18 @@ fn is_user_index(name: &str) -> bool {
 fn parse_index_names(value: &Value) -> Result<Vec<String>, DatabaseError> {
     let rows = value
         .as_array()
-        .ok_or_else(|| catalog_error("Elasticsearch index catalog is not an array"))?;
+        .ok_or_else(|| catalog_error("Search REST index catalog is not an array"))?;
     let mut names = Vec::new();
     for row in rows {
         let name = row
             .get("index")
             .and_then(Value::as_str)
-            .ok_or_else(|| catalog_error("Elasticsearch index catalog has no index name"))?;
+            .ok_or_else(|| catalog_error("Search REST index catalog has no index name"))?;
         if name.starts_with('.') {
             continue;
         }
         if !is_user_index(name) {
-            return Err(catalog_error(
-                "Elasticsearch returned an invalid index name",
-            ));
+            return Err(catalog_error("Search REST returned an invalid index name"));
         }
         names.push(name.to_owned());
     }
@@ -335,7 +333,7 @@ fn mapping_entries(
         .and_then(|value| value.get("mappings"))
         .and_then(Value::as_object)
         .ok_or_else(|| {
-            catalog_error("Elasticsearch response has no mappings for the requested index")
+            catalog_error("Search REST response has no mappings for the requested index")
         })?;
     let mut fields = BTreeMap::new();
     if let Some(properties) = mappings.get("properties") {
@@ -357,7 +355,7 @@ fn mapping_entries(
                 OptionalMetadata::Unsupported,
                 CatalogMetadata::Column(ColumnMetadata::new(
                     u32::try_from(position + 1)
-                        .map_err(|_| catalog_error("too many Elasticsearch mapping fields"))?,
+                        .map_err(|_| catalog_error("too many search REST mapping fields"))?,
                     native_type,
                     true,
                 )),
@@ -374,11 +372,11 @@ fn collect_fields(
 ) -> Result<(), DatabaseError> {
     let properties = value
         .as_object()
-        .ok_or_else(|| catalog_error("Elasticsearch mapping fields must be an object"))?;
+        .ok_or_else(|| catalog_error("Search REST mapping fields must be an object"))?;
     for (name, definition) in properties {
         if name.is_empty() || !definition.is_object() {
             return Err(catalog_error(
-                "Elasticsearch mapping has an invalid field definition",
+                "Search REST mapping has an invalid field definition",
             ));
         }
         let path = if prefix.is_empty() {
@@ -392,7 +390,7 @@ fn collect_fields(
             None => "unknown",
             _ => {
                 return Err(catalog_error(
-                    "Elasticsearch mapping field type must be a string",
+                    "Search REST mapping field type must be a string",
                 ));
             }
         };
@@ -400,7 +398,7 @@ fn collect_fields(
             && previous != native_type
         {
             return Err(catalog_error(
-                "Elasticsearch mapping has conflicting dotted field paths",
+                "Search REST mapping has conflicting dotted field paths",
             ));
         }
         for key in ["properties", "fields"] {
@@ -442,7 +440,7 @@ fn entry_page(
 }
 
 fn catalog_error(error: impl std::fmt::Display) -> DatabaseError {
-    DatabaseError::configuration(format!("Elasticsearch catalog: {error}"))
+    DatabaseError::configuration(format!("Search REST catalog: {error}"))
 }
 
 #[cfg(test)]

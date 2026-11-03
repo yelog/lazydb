@@ -24,7 +24,7 @@ pub struct DatabaseDescriptor {
     pub category: DatabaseCategory,
 }
 
-pub const DRIVERS: [DatabaseDescriptor; 15] = [
+pub const DRIVERS: [DatabaseDescriptor; 17] = [
     DatabaseDescriptor {
         kind: DatabaseKind::Postgres,
         name: "postgres",
@@ -110,9 +110,21 @@ pub const DRIVERS: [DatabaseDescriptor; 15] = [
         category: DatabaseCategory::Relational,
     },
     DatabaseDescriptor {
+        kind: DatabaseKind::BigQuery,
+        name: "bigquery",
+        display_name: "BigQuery",
+        category: DatabaseCategory::Relational,
+    },
+    DatabaseDescriptor {
         kind: DatabaseKind::Elasticsearch,
         name: "elasticsearch",
         display_name: "Elasticsearch",
+        category: DatabaseCategory::NonRelational,
+    },
+    DatabaseDescriptor {
+        kind: DatabaseKind::OpenSearch,
+        name: "opensearch",
+        display_name: "OpenSearch",
         category: DatabaseCategory::NonRelational,
     },
 ];
@@ -133,9 +145,11 @@ pub const DRIVER_NAMES: [&str; DRIVERS.len()] = [
     DRIVERS[12].name,
     DRIVERS[13].name,
     DRIVERS[14].name,
+    DRIVERS[15].name,
+    DRIVERS[16].name,
 ];
 
-pub const DRIVER_LIST: &str = "postgres,mysql,mariadb,oracle,sqlserver,sqlite,duckdb,redis,valkey,mongodb,clickhouse,tidb,cockroachdb,snowflake,elasticsearch";
+pub const DRIVER_LIST: &str = "postgres,mysql,mariadb,oracle,sqlserver,sqlite,duckdb,redis,valkey,mongodb,clickhouse,tidb,cockroachdb,snowflake,bigquery,elasticsearch,opensearch";
 
 pub fn kinds() -> impl Iterator<Item = DatabaseKind> {
     DRIVERS.iter().map(|descriptor| descriptor.kind)

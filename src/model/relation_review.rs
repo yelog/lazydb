@@ -34,7 +34,7 @@ pub fn preview_sql_for_relation(
 ) -> String {
     let mut parts = Vec::with_capacity(2);
     match kind {
-        DatabaseKind::Snowflake => {
+        DatabaseKind::Snowflake | DatabaseKind::BigQuery => {
             if let Some(database) = relation.database.as_deref() {
                 parts.push(database);
             }
@@ -61,7 +61,8 @@ pub fn preview_sql_for_relation(
         | DatabaseKind::Valkey
         | DatabaseKind::MongoDb
         | DatabaseKind::ClickHouse
-        | DatabaseKind::Elasticsearch => {}
+        | DatabaseKind::Elasticsearch
+        | DatabaseKind::OpenSearch => {}
     }
     parts.push(relation.object.as_str());
     preview_sql_for_parts(session, &parts, Some(kind), columns, primary_key_columns)

@@ -141,11 +141,27 @@ classification. Token edits invalidate the draft's catalog discovery and reject
 results from the previous credential revision; the selected visible-object
 scope is preserved.
 
-Natural PAT expiry remains unverified against a real account. Snowflake accepts
-`DAYS_TO_EXPIRY` as whole days with a minimum of 1, so it cannot be shortened to
-seconds for this check. Revocation and an expired OAuth token do not establish
-PAT natural-expiry coverage. These checks do not cover every terminal emulator
-or account policy configuration.
+A dedicated, role-restricted PAT with `DAYS_TO_EXPIRY=1` passed connection and
+`SELECT 42` checks on 2026-11-01. Its server-reported expiration was
+2026-11-02 08:45:10.652 UTC. At 08:50:32 UTC, without revocation, token alteration,
+or clock changes, the SQL API rejected it with HTTP 401, code `394401`, and
+`Programmatic access token is expired.` The official v0.3.1 package also rejected
+the saved connection. This confirms natural PAT expiry rejection separately
+from the previously tested revocation and OAuth expiry cases.
+
+On 2026-11-02, a replacement PAT for the same service user and restricted role
+was entered through the official v0.3.1 profile's masked Access token field.
+Connection testing and saving passed with local encrypted storage; neither token
+appeared in the profile text, and the encryption key had mode `0600`. A new TUI
+process restored the saved credential, loaded the database and `PUBLIC` schema,
+and returned `42` with the intended role. The opt-in expired-token and replacement
+test also passed against the real account: the expired credential produced an
+`Authentication` error, while replacement connectivity, query execution, and
+fresh catalog discovery succeeded. The dedicated user (including both PATs),
+role, database, warehouse, and user-level network policy were dropped afterward;
+local tokens, isolated configuration/encryption key, and test exports were
+removed. These checks do not cover every terminal emulator or account policy
+configuration.
 
 `tests/snowflake_live.rs` is an ignored, opt-in integration test. It reads a
 credential-free `LAZYDB_SNOWFLAKE_TEST_URL` and the access token from
@@ -178,8 +194,8 @@ prove why the old token failed: record that it worked before its expiration and
 was never revoked. Also verify replacement through the profile's access-token
 field, local encrypted storage, restart/reconnect, and visible-object refresh.
 Revoke remaining test tokens, drop only the dedicated resources, and remove
-local secrets after acceptance. Until that timed run is recorded, keep
-[#36](https://github.com/yelog/lazydb/issues/36) open.
+local secrets after acceptance. The completed run above is tracked in
+[#36](https://github.com/yelog/lazydb/issues/36).
 
 Reference: [Snowflake OAuth custom clients](https://docs.snowflake.com/en/user-guide/oauth-custom)
 and [PAT creation and expiration](https://docs.snowflake.com/en/sql-reference/sql/alter-user-add-programmatic-access-token).

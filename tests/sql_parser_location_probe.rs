@@ -10,6 +10,7 @@ fn dialect(dialect: SqlDialect) -> &'static dyn sqlparser::dialect::Dialect {
         SqlDialect::ClickHouse => &sqlparser::dialect::ClickHouseDialect {},
         SqlDialect::DuckDb => &sqlparser::dialect::DuckDbDialect {},
         SqlDialect::Snowflake => &sqlparser::dialect::SnowflakeDialect {},
+        SqlDialect::BigQuery => &sqlparser::dialect::BigQueryDialect {},
         SqlDialect::Generic | SqlDialect::Oracle => &sqlparser::dialect::GenericDialect {},
     }
 }

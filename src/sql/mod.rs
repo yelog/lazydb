@@ -5,6 +5,7 @@
 
 mod analysis;
 mod batch;
+mod bigquery;
 mod builtins;
 mod catalog_change;
 mod completion;

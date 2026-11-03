@@ -8,7 +8,7 @@ use lazydb::{
 
 #[test]
 fn categories_partition_the_registry_without_changing_machine_names() {
-    assert_eq!(drivers_in(DatabaseCategory::Relational).count(), 11);
+    assert_eq!(drivers_in(DatabaseCategory::Relational).count(), 12);
     assert_eq!(
         drivers_in(DatabaseCategory::NonRelational)
             .map(|d| d.kind)
@@ -17,7 +17,8 @@ fn categories_partition_the_registry_without_changing_machine_names() {
             DatabaseKind::Redis,
             DatabaseKind::Valkey,
             DatabaseKind::MongoDb,
-            DatabaseKind::Elasticsearch
+            DatabaseKind::Elasticsearch,
+            DatabaseKind::OpenSearch
         ]
     );
     assert_eq!(
@@ -37,7 +38,9 @@ fn categories_partition_the_registry_without_changing_machine_names() {
             "tidb",
             "cockroachdb",
             "snowflake",
-            "elasticsearch"
+            "bigquery",
+            "elasticsearch",
+            "opensearch"
         ]
     );
 }

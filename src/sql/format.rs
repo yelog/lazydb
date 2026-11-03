@@ -20,6 +20,11 @@ pub fn format_sql(sql: &str, dialect: SqlDialect) -> Result<String, FormatError>
     if has_dollar_quoted_body(sql) {
         return Err(FormatError::ProceduralBody);
     }
+    let (format_source, protected) = if dialect == SqlDialect::BigQuery {
+        protect_google_sql_tokens(sql)?
+    } else {
+        (sql.to_owned(), Vec::new())
+    };
     let options = sqlformat::FormatOptions {
         uppercase: Some(true),
         dialect: match dialect {
@@ -29,7 +34,10 @@ pub fn format_sql(sql: &str, dialect: SqlDialect) -> Result<String, FormatError>
         },
         ..Default::default()
     };
-    let formatted = sqlformat::format(sql, &sqlformat::QueryParams::None, &options);
+    let mut formatted = sqlformat::format(&format_source, &sqlformat::QueryParams::None, &options);
+    for (placeholder, original) in protected {
+        formatted = formatted.replace(&placeholder, &original);
+    }
     let parser_dialect: &dyn ParserDialect = match dialect {
         SqlDialect::Postgres => &PostgreSqlDialect {},
         SqlDialect::MySql | SqlDialect::MariaDb => &MySqlDialect {},
@@ -39,13 +47,75 @@ pub fn format_sql(sql: &str, dialect: SqlDialect) -> Result<String, FormatError>
         SqlDialect::Generic | SqlDialect::Oracle => &GenericDialect {},
         SqlDialect::ClickHouse => &ClickHouseDialect {},
         SqlDialect::Snowflake => &sqlparser::dialect::SnowflakeDialect {},
+        SqlDialect::BigQuery => &sqlparser::dialect::BigQueryDialect {},
     };
-    let before = meaningful_tokens(parser_dialect, sql);
-    let after = meaningful_tokens(parser_dialect, &formatted);
+    let before = if dialect == SqlDialect::BigQuery {
+        google_sql_meaningful_tokens(sql)
+    } else {
+        meaningful_tokens(parser_dialect, sql)
+    };
+    let after = if dialect == SqlDialect::BigQuery {
+        google_sql_meaningful_tokens(&formatted)
+    } else {
+        meaningful_tokens(parser_dialect, &formatted)
+    };
     if before.is_none() || after.is_none() || before != after {
         return Err(FormatError::MeaningChanged);
     }
     Ok(formatted)
+}
+
+fn protect_google_sql_tokens(sql: &str) -> Result<(String, Vec<(String, String)>), FormatError> {
+    // sqlformat has no GoogleSQL lexer. Protect quoted tokens with ordinary
+    // string placeholders, then restore exact source bytes before token checks.
+    let tokens = super::bigquery::tokenize(sql).map_err(|_| FormatError::MeaningChanged)?;
+    let lines = super::LineIndex::new(sql);
+    let mut source = String::new();
+    let mut protected = Vec::new();
+    let mut end = 0;
+    for token in tokens {
+        let range = lines.range(sql, token.span.start, token.span.end);
+        let original = range.get(sql).ok_or(FormatError::MeaningChanged)?;
+        if matches!(token.token, Token::Whitespace(_) | Token::Word(_))
+            && !original.starts_with('`')
+        {
+            continue;
+        }
+        if !original.contains(['\'', '"', '`']) {
+            continue;
+        }
+        let mut placeholder = format!("'__lazydb_google_sql_{}__'", protected.len());
+        while sql.contains(&placeholder) {
+            placeholder.insert(1, '_');
+        }
+        source.push_str(&sql[end..range.start]);
+        source.push_str(&placeholder);
+        protected.push((placeholder, original.to_owned()));
+        end = range.end;
+    }
+    source.push_str(&sql[end..]);
+    Ok((source, protected))
+}
+
+fn google_sql_meaningful_tokens(sql: &str) -> Option<Vec<String>> {
+    let lines = super::LineIndex::new(sql);
+    super::bigquery::tokenize(sql)
+        .ok()?
+        .into_iter()
+        .filter(|token| !matches!(token.token, Token::Whitespace(_)))
+        .map(|token| match token.token {
+            Token::Word(word)
+                if word.quote_style.is_none()
+                    && word.keyword != sqlparser::keywords::Keyword::NoKeyword =>
+            {
+                Some(format!("keyword:{:?}", word.keyword))
+            }
+            _ => lines
+                .range(sql, token.span.start, token.span.end)
+                .get(sql)
+                .map(str::to_owned),
+        })
+        .collect()
 }
 
 fn meaningful_tokens(dialect: &dyn ParserDialect, sql: &str) -> Option<Vec<String>> {

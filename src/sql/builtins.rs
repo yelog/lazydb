@@ -202,6 +202,33 @@ fn dialect_builtins(dialect: SqlDialect) -> &'static [Builtin] {
         SqlDialect::SqlServer => SQL_SERVER,
         SqlDialect::Sqlite => SQLITE,
         SqlDialect::ClickHouse => CLICKHOUSE,
+        SqlDialect::BigQuery => &[
+            Builtin {
+                name: "ARRAY",
+                kind: CompletionKind::Function,
+                detail: "ARRAY(...)",
+            },
+            Builtin {
+                name: "STRUCT",
+                kind: CompletionKind::Function,
+                detail: "STRUCT(...)",
+            },
+            Builtin {
+                name: "UNNEST",
+                kind: CompletionKind::Function,
+                detail: "UNNEST(...)",
+            },
+            Builtin {
+                name: "ARRAY_AGG",
+                kind: CompletionKind::Function,
+                detail: "ARRAY_AGG(...)",
+            },
+            Builtin {
+                name: "SAFE_CAST",
+                kind: CompletionKind::Function,
+                detail: "SAFE_CAST(... AS type)",
+            },
+        ],
         SqlDialect::DuckDb => &[],
         SqlDialect::Generic | SqlDialect::Oracle | SqlDialect::Snowflake => &[],
     }
@@ -233,6 +260,7 @@ fn default_value_dialect_builtins(dialect: SqlDialect) -> &'static [Builtin] {
         | SqlDialect::Generic
         | SqlDialect::Oracle
         | SqlDialect::ClickHouse
-        | SqlDialect::Snowflake => &[],
+        | SqlDialect::Snowflake
+        | SqlDialect::BigQuery => &[],
     }
 }

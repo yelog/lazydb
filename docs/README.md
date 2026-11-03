@@ -26,7 +26,7 @@ Choose a guide below for the task you want to complete.
 ## Database Guides
 
 PostgreSQL, MySQL, MariaDB, Oracle, SQL Server, SQLite, DuckDB, Redis, Valkey,
-MongoDB, CockroachDB, TiDB, ClickHouse, and Snowflake are covered by the
+MongoDB, CockroachDB, TiDB, ClickHouse, Snowflake, and BigQuery are covered by the
 [capability reference](database-capabilities.md). Additional guides explain
 driver-specific setup and workflows:
 
@@ -35,6 +35,7 @@ driver-specific setup and workflows:
 | DuckDB | [Runtime setup, files, in-memory sessions, and SQL support](duckdb.md) |
 | MongoDB | [Document console, monitoring, principals, and transactions](mongodb.md) |
 | Elasticsearch | [Connections, indices, mappings, and REST queries](elasticsearch.md) |
+| OpenSearch | [Basic/None authentication, HTTPS, indices, and REST queries](opensearch.md) |
 | Redis / Valkey | [Browser](redis-browser.md) · [Value formats](redis-value-preview.md) |
 | Oracle | [Client setup](configuration.md#connection-profile-fields) · [Table editor](oracle-table-editor.md) · [Catalog drop behavior](oracle-catalog-drop.md) |
 | ClickHouse | [Supported operations](database-capabilities.md#clickhouse) · [Connection setup](configuration.md#clickhouse-profiles) · [Local test server](clickhouse-test-database.md) |
@@ -42,6 +43,7 @@ driver-specific setup and workflows:
 | CockroachDB | [Connections, supported operations, and local tests](cockroachdb.md) |
 | TiDB | [Connection setup, supported workflows, and local test server](tidb.md) |
 | Snowflake | [SQL API authentication, supported workflows, and verification](snowflake.md) |
+| Google BigQuery | [ADC, GoogleSQL, projects/datasets, billing limits and tests](bigquery.md) |
 
 ## Integrations
 

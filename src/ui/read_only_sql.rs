@@ -7,13 +7,41 @@ use ratatui::{
 };
 use uuid::Uuid;
 
-use crate::model::editor::EditorMode;
-use crate::model::editor::EditorRenderSnapshot;
+use crate::model::editor::{EditorMode, EditorRenderSnapshot, EditorViewport};
 
 use super::{
     CursorSpec, CursorStyle, UiState, editor_line_spans, mouse_selection_cells,
     register_text_selection_target, render_editor_scrollbars, theme::Theme,
 };
+
+fn editor_columns(
+    inner: Rect,
+    snapshot: &EditorRenderSnapshot,
+    show_line_numbers: bool,
+) -> [Rect; 2] {
+    let gutter_width = if show_line_numbers {
+        snapshot.logical_line_count.max(1).to_string().len() + 1
+    } else {
+        0
+    } as u16;
+    let columns =
+        Layout::horizontal([Constraint::Length(gutter_width), Constraint::Min(1)]).split(inner);
+    [columns[0], columns[1]]
+}
+
+/// The text cells available after the line-number gutter and prompt row.
+/// Use the same layout as the renderer, including on very narrow panes.
+pub(crate) fn editor_viewport(
+    inner: Rect,
+    snapshot: &EditorRenderSnapshot,
+    show_line_numbers: bool,
+) -> EditorViewport {
+    let body = editor_columns(inner, snapshot, show_line_numbers)[1];
+    EditorViewport {
+        width: usize::from(body.width),
+        height: usize::from(body.height).saturating_sub(usize::from(snapshot.prompt.is_some())),
+    }
+}
 
 /// Render a read-only editor snapshot without assuming which workspace tab
 /// owns the editor session. DDL and modal viewers can therefore share the
@@ -35,17 +63,9 @@ impl ReadOnlySqlEditor<'_> {
         state: &mut UiState,
     ) {
         let inner = self.block.inner(area);
-        let gutter_width = if self.show_line_numbers {
-            self.snapshot.logical_line_count.max(1).to_string().len() + 1
-        } else {
-            0
-        } as u16;
-        let columns =
-            Layout::horizontal([Constraint::Length(gutter_width), Constraint::Min(1)]).split(inner);
-        let gutter = columns[0];
-        let body = columns[1];
-        let prompt_height = usize::from(self.snapshot.prompt.is_some());
-        let viewport_height = usize::from(body.height).saturating_sub(prompt_height);
+        let [gutter, body] = editor_columns(inner, self.snapshot, self.show_line_numbers);
+        let gutter_width = self.snapshot.logical_line_count.max(1).to_string().len() + 1;
+        let viewport_height = editor_viewport(inner, self.snapshot, self.show_line_numbers).height;
         let selection_body = Rect::new(body.x, body.y, body.width, viewport_height as u16);
         register_text_selection_target(state, self.session_id, selection_body, self.snapshot);
         frame.render_widget(self.block, area);
@@ -59,7 +79,7 @@ impl ReadOnlySqlEditor<'_> {
                         } else {
                             String::new()
                         },
-                        width = gutter_width as usize - 1
+                        width = gutter_width - 1
                     ))
                     .style(Style::new().fg(theme.muted)),
                     Rect::new(

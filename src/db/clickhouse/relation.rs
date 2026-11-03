@@ -165,6 +165,7 @@ impl ClickHouseAdapter {
                 fetched_row_count: fetched,
                 truncated: fetched > page.size.get(),
                 response_error: None,
+                bigquery: None,
             },
             result_sets: vec![result],
         };

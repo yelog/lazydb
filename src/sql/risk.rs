@@ -99,7 +99,12 @@ fn contains_clickhouse_mutation(sql: &str) -> bool {
 }
 
 fn parse_risks(sql: &str, dialect: SqlDialect) -> Vec<SqlRisk> {
-    match Parser::parse_sql(parser_dialect(dialect), sql) {
+    let parsed = if dialect == SqlDialect::BigQuery {
+        super::bigquery::parse(sql)
+    } else {
+        Parser::parse_sql(parser_dialect(dialect), sql)
+    };
+    match parsed {
         Ok(statements) => statements
             .iter()
             .map(|statement| {
@@ -113,6 +118,35 @@ fn parse_risks(sql: &str, dialect: SqlDialect) -> Vec<SqlRisk> {
             .collect(),
         Err(_) => vec![SqlRisk::Unknown],
     }
+}
+
+fn classify_statement_for_dialect(statement: &Statement, dialect: SqlDialect) -> SqlRisk {
+    if dialect == SqlDialect::BigQuery {
+        // GoogleSQL execution is stateless and single-statement. Do not inherit
+        // generic classifications for scripts, session controls or dynamic SQL.
+        return match statement {
+            Statement::Query(_) => SqlRisk::ReadOnly,
+            Statement::Insert(_)
+            | Statement::Update(_)
+            | Statement::Delete(_)
+            | Statement::Merge(_) => SqlRisk::Dml,
+            Statement::CreateTable(_)
+            | Statement::CreateView(_)
+            | Statement::CreateSchema { .. }
+            | Statement::CreateFunction(_)
+            | Statement::AlterTable(_)
+            | Statement::AlterSchema(_)
+            | Statement::AlterView { .. }
+            | Statement::Drop { .. }
+            | Statement::DropFunction(_)
+            | Statement::Truncate(_) => SqlRisk::Ddl,
+            Statement::StartTransaction { .. }
+            | Statement::Commit { .. }
+            | Statement::Rollback { .. } => SqlRisk::TransactionControl,
+            _ => SqlRisk::Unknown,
+        };
+    }
+    classify_statement(statement)
 }
 
 fn classify_statement(statement: &Statement) -> SqlRisk {
@@ -258,13 +292,21 @@ impl Visitor for RiskVisitor {
             {
                 SqlRisk::Unknown
             } else {
-                classify_statement(statement)
+                classify_statement_for_dialect(statement, self.dialect)
             },
         );
         ControlFlow::Continue(())
     }
 
     fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<Self::Break> {
+        if self.dialect == SqlDialect::BigQuery
+            && query
+                .pipe_operators
+                .iter()
+                .any(|operator| matches!(operator, sqlparser::ast::PipeOperator::Call { .. }))
+        {
+            self.include(SqlRisk::Unknown);
+        }
         if !query.locks.is_empty() {
             self.include(SqlRisk::Dml);
         }

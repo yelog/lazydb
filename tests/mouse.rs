@@ -278,7 +278,11 @@ fn editor_drag_outside_visible_area_clamps_to_nearest_visible_source_line() {
             &ui,
             &app
         ),
-        None
+        Some(Action::ReadOnlyEditorScroll {
+            session_id,
+            rows: 4,
+            columns: 0
+        })
     );
     assert_eq!(
         ui.text_gesture.borrow().as_ref().map(|gesture| gesture.end),
@@ -463,7 +467,14 @@ fn text_drag_keeps_the_starting_session_when_pointer_crosses_panes() {
         &app,
     );
 
-    assert_eq!(action, None);
+    assert_eq!(
+        action,
+        Some(Action::ReadOnlyEditorScroll {
+            session_id: output_id,
+            rows: -4,
+            columns: 0
+        })
+    );
     assert_eq!(ui.text_gesture.borrow().unwrap().session_id, output_id);
 }
 
@@ -2766,4 +2777,206 @@ fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
         row,
         modifiers: KeyModifiers::NONE,
     }
+}
+
+#[test]
+fn text_drag_and_release_keep_the_topmost_line_number_gutter_mapping() {
+    let app = App::new(Vec::new());
+    let session_id = Uuid::new_v4();
+    let mut ui = text_drag_ui(session_id);
+    let mut text_body = multiline_text_target(session_id);
+    for hit_map in &mut text_body.hit_maps {
+        hit_map.area.x += 5;
+        hit_map.area.width -= 5;
+    }
+    ui.text_selection_targets.push(text_body);
+    map_mouse(
+        mouse(MouseEventKind::Down(MouseButton::Left), 17, 10),
+        &ui,
+        &app,
+    );
+    map_mouse(
+        mouse(MouseEventKind::Drag(MouseButton::Left), 17, 11),
+        &ui,
+        &app,
+    );
+    assert_eq!(
+        ui.text_gesture.borrow().as_ref().unwrap().end,
+        TextPosition { line: 1, column: 2 }
+    );
+    let release = map_mouse(
+        mouse(MouseEventKind::Up(MouseButton::Left), 17, 12),
+        &ui,
+        &app,
+    );
+    assert!(
+        matches!(release, Some(Action::CompleteMouseTextSelection { end, .. })
+        if end.line == 2 && end.column == 2)
+    );
+    assert_eq!(ui.follow_text_drag(), None);
+}
+
+fn multiline_text_target(session_id: Uuid) -> TextSelectionTarget {
+    TextSelectionTarget {
+        session_id,
+        hit_maps: (0..3)
+            .map(|line| TextHitMap {
+                area: Rect::new(10, 10 + line as u16, 20, 1),
+                line,
+                source_to_display_cells: (0..=20).collect(),
+                horizontal_offset: 0,
+            })
+            .collect(),
+    }
+}
+
+fn text_drag_ui(session_id: Uuid) -> UiState {
+    let mut ui = UiState::new();
+    ui.text_selection_targets
+        .push(multiline_text_target(session_id));
+    ui.hit_regions.push(HitRegion {
+        area: Rect::new(0, 0, 40, 30),
+        target: HitTarget::Focus(Focus::Results),
+    });
+    ui
+}
+
+#[test]
+fn dragging_a_text_selection_past_the_last_line_scrolls_the_editor() {
+    let app = App::new(Vec::new());
+    let ui = text_drag_ui(Uuid::new_v4());
+    let session_id = ui.text_selection_targets[0].session_id;
+
+    let down = map_mouse(
+        mouse(MouseEventKind::Down(MouseButton::Left), 11, 10),
+        &ui,
+        &app,
+    );
+    assert!(matches!(down, Some(Action::SetEditorMouseCursor { .. })));
+
+    // One row past the last visible line scrolls one row down.
+    assert_eq!(
+        map_mouse(
+            mouse(MouseEventKind::Drag(MouseButton::Left), 11, 13),
+            &ui,
+            &app
+        ),
+        Some(Action::ReadOnlyEditorScroll {
+            session_id,
+            rows: 1,
+            columns: 0
+        })
+    );
+    // Dragging further from the pane scrolls faster.
+    assert_eq!(
+        map_mouse(
+            mouse(MouseEventKind::Drag(MouseButton::Left), 11, 16),
+            &ui,
+            &app
+        ),
+        Some(Action::ReadOnlyEditorScroll {
+            session_id,
+            rows: 4,
+            columns: 0
+        })
+    );
+    // The gesture keeps extending to the last visible line while it scrolls.
+    assert_eq!(
+        ui.text_gesture
+            .borrow()
+            .as_ref()
+            .map(|gesture| gesture.end.line),
+        Some(2)
+    );
+}
+
+#[test]
+fn dragging_a_text_selection_above_the_first_line_scrolls_the_editor_up() {
+    let app = App::new(Vec::new());
+    let ui = text_drag_ui(Uuid::new_v4());
+    let session_id = ui.text_selection_targets[0].session_id;
+
+    let down = map_mouse(
+        mouse(MouseEventKind::Down(MouseButton::Left), 11, 12),
+        &ui,
+        &app,
+    );
+    assert!(matches!(down, Some(Action::SetEditorMouseCursor { .. })));
+
+    assert_eq!(
+        map_mouse(
+            mouse(MouseEventKind::Drag(MouseButton::Left), 11, 9),
+            &ui,
+            &app
+        ),
+        Some(Action::ReadOnlyEditorScroll {
+            session_id,
+            rows: -1,
+            columns: 0
+        })
+    );
+}
+
+#[test]
+fn dragging_inside_the_visible_text_never_scrolls_the_editor() {
+    let app = App::new(Vec::new());
+    let ui = text_drag_ui(Uuid::new_v4());
+
+    let down = map_mouse(
+        mouse(MouseEventKind::Down(MouseButton::Left), 11, 10),
+        &ui,
+        &app,
+    );
+    assert!(matches!(down, Some(Action::SetEditorMouseCursor { .. })));
+    assert_eq!(
+        map_mouse(
+            mouse(MouseEventKind::Drag(MouseButton::Left), 15, 11),
+            &ui,
+            &app
+        ),
+        None
+    );
+    assert_eq!(
+        map_mouse(
+            mouse(MouseEventKind::Drag(MouseButton::Left), 15, 12),
+            &ui,
+            &app
+        ),
+        None
+    );
+}
+
+#[test]
+fn a_held_text_selection_drag_keeps_scrolling_without_new_mouse_events() {
+    let app = App::new(Vec::new());
+    let ui = text_drag_ui(Uuid::new_v4());
+    let session_id = ui.text_selection_targets[0].session_id;
+
+    let down = map_mouse(
+        mouse(MouseEventKind::Down(MouseButton::Left), 11, 10),
+        &ui,
+        &app,
+    );
+    assert!(matches!(down, Some(Action::SetEditorMouseCursor { .. })));
+    assert!(
+        map_mouse(
+            mouse(MouseEventKind::Drag(MouseButton::Left), 11, 14),
+            &ui,
+            &app
+        )
+        .is_some()
+    );
+
+    // The tick that follows a drag repeats the scroll while the button stays
+    // down, so a pointer parked below the pane keeps scrolling.
+    assert_eq!(
+        ui.follow_text_drag(),
+        Some((session_id, 2)),
+        "a held drag must keep scrolling"
+    );
+    assert_eq!(ui.follow_text_drag(), Some((session_id, 2)));
+
+    // Releasing the button stops it.
+    ui.end_mouse_gesture();
+    assert_eq!(ui.follow_text_drag(), None);
 }

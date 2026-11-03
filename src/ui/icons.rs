@@ -254,8 +254,10 @@ impl IconSet {
                 DatabaseKind::Valkey => "V",
                 DatabaseKind::MongoDb => "M",
                 DatabaseKind::Snowflake => md::MD_DATABASE,
+                DatabaseKind::BigQuery => md::MD_DATABASE,
                 DatabaseKind::ClickHouse => md::MD_DATABASE,
                 DatabaseKind::Elasticsearch => "ES",
+                DatabaseKind::OpenSearch => "OS",
             },
             IconMode::Unicode => match kind {
                 DatabaseKind::Postgres => "PG",
@@ -271,8 +273,10 @@ impl IconSet {
                 DatabaseKind::Valkey => "VK",
                 DatabaseKind::MongoDb => "MG",
                 DatabaseKind::Snowflake => "SF",
+                DatabaseKind::BigQuery => "BQ",
                 DatabaseKind::ClickHouse => "CH",
                 DatabaseKind::Elasticsearch => "ES",
+                DatabaseKind::OpenSearch => "OS",
             },
             IconMode::Ascii => match kind {
                 DatabaseKind::Postgres => "PG",
@@ -288,8 +292,10 @@ impl IconSet {
                 DatabaseKind::Valkey => "VK",
                 DatabaseKind::MongoDb => "MG",
                 DatabaseKind::Snowflake => "SF",
+                DatabaseKind::BigQuery => "BQ",
                 DatabaseKind::ClickHouse => "CH",
                 DatabaseKind::Elasticsearch => "ES",
+                DatabaseKind::OpenSearch => "OS",
             },
         }
     }
@@ -308,8 +314,10 @@ impl IconSet {
             DatabaseKind::Valkey => ratatui::style::Color::Rgb(120, 65, 190),
             DatabaseKind::MongoDb => ratatui::style::Color::Rgb(0, 150, 90),
             DatabaseKind::Snowflake => ratatui::style::Color::Rgb(41, 181, 232),
+            DatabaseKind::BigQuery => ratatui::style::Color::Rgb(66, 133, 244),
             DatabaseKind::ClickHouse => ratatui::style::Color::Rgb(252, 199, 0),
             DatabaseKind::Elasticsearch => ratatui::style::Color::Rgb(0, 191, 179),
+            DatabaseKind::OpenSearch => ratatui::style::Color::Rgb(0, 100, 181),
         }
     }
 

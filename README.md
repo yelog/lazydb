@@ -94,10 +94,10 @@ updates, and removal, see the [installation guide](docs/installation.md).
 
 | Type | Databases |
 | --- | --- |
-| Server SQL | PostgreSQL, CockroachDB, MySQL, MariaDB, TiDB, Oracle, SQL Server, ClickHouse, Snowflake |
+| Server SQL | PostgreSQL, CockroachDB, MySQL, MariaDB, TiDB, Oracle, SQL Server, ClickHouse, Snowflake, Google BigQuery |
 | Embedded SQL | SQLite, DuckDB |
 | Key-value and document | Redis, Valkey, MongoDB |
-| Search | Elasticsearch |
+| Search | Elasticsearch, OpenSearch |
 
 Oracle requires Oracle Instant Client. DuckDB requires an optional C API runtime
 that is not bundled; see [runtime setup](docs/duckdb.md#install-the-optional-runtime).
@@ -105,8 +105,12 @@ Redis and Valkey use a key/value browser; MongoDB uses a document explorer and
 bounded JSON console. See the [MongoDB guide](docs/mongodb.md) for its scope.
 Snowflake uses the HTTPS SQL API with a stored access token; see the
 [Snowflake guide](docs/snowflake.md) for authentication and current limits.
+Google BigQuery uses refreshable ADC and GoogleSQL jobs with per-profile billing
+limits; see the [BigQuery guide](docs/bigquery.md).
 Elasticsearch provides index and mapping discovery, document previews, and a native
 REST/JSON console; see the [Elasticsearch guide](docs/elasticsearch.md).
+OpenSearch has its own driver with Basic/None authentication and shares the REST
+browser/console; see [OpenSearch setup and verification limits](docs/opensearch.md).
 
 Browse the [database capability matrix](docs/database-capabilities.md) for server
 versions, editing, transactions, monitoring, and driver-specific limits.

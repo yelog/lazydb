@@ -1,0 +1,73 @@
+services:
+  opensearch:
+    image: opensearchproject/opensearch:2.19.4
+    environment:
+      discovery.type: single-node
+      cluster.routing.allocation.disk.threshold_enabled: "false"
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      DISABLE_SECURITY_PLUGIN: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+    mem_limit: 2g
+    ports:
+      - "127.0.0.1:${LAZYDB_TEST_OPENSEARCH_PORT:-19300}:9200"
+    volumes:
+      - http-data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl --silent --fail http://localhost:9200/_cluster/health >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+
+  certificates:
+    image: alpine:3.22.2
+    user: "0"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        apk add --no-cache openssl
+        if [ ! -f /certs/localhost.pem ]; then
+          openssl req -x509 -newkey rsa:2048 -nodes -days 30 -subj '/CN=LazyDB disposable OpenSearch CA' -keyout /certs/ca-key.pem -out /certs/ca.pem
+          openssl req -newkey rsa:2048 -nodes -subj '/CN=localhost' -keyout /certs/localhost-key.pem -out /certs/localhost.csr
+          printf 'subjectAltName=DNS:localhost\nextendedKeyUsage=serverAuth\n' > /certs/localhost.ext
+          openssl x509 -req -days 30 -in /certs/localhost.csr -CA /certs/ca.pem -CAkey /certs/ca-key.pem -CAcreateserial -extfile /certs/localhost.ext -out /certs/localhost.pem
+          rm /certs/localhost.csr /certs/localhost.ext
+        fi
+        chown -R 1000:1000 /certs
+        chmod 750 /certs
+        chmod 640 /certs/*
+    volumes:
+      - certificates:/certs
+
+  opensearch-tls:
+    image: opensearchproject/opensearch:2.19.4
+    depends_on:
+      certificates:
+        condition: service_completed_successfully
+    environment:
+      discovery.type: single-node
+      cluster.routing.allocation.disk.threshold_enabled: "false"
+      OPENSEARCH_INITIAL_ADMIN_PASSWORD: "${LAZYDB_TEST_OPENSEARCH_PASSWORD:-LazyDB-local-test-Only-2026!}"
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+      plugins.security.ssl.http.enabled: "true"
+      plugins.security.ssl.http.pemcert_filepath: test-certs/localhost.pem
+      plugins.security.ssl.http.pemkey_filepath: test-certs/localhost-key.pem
+      plugins.security.ssl.http.pemtrustedcas_filepath: test-certs/ca.pem
+    mem_limit: 2g
+    volumes:
+      - certificates:/usr/share/opensearch/config/test-certs:ro
+      - tls-data:/usr/share/opensearch/data
+    ports:
+      - "127.0.0.1:${LAZYDB_TEST_OPENSEARCH_TLS_PORT:-19301}:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl --silent --fail --cacert config/test-certs/ca.pem -u admin:$$OPENSEARCH_INITIAL_ADMIN_PASSWORD https://localhost:9200/_cluster/health >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+
+volumes:
+  certificates:
+  http-data:
+  tls-data:

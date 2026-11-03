@@ -642,6 +642,9 @@ pub struct Runtime {
     duckdb_sessions: Arc<Mutex<duckdb::DuckDbSessions>>,
     connection_attempts: Arc<StdMutex<ConnectionAttempts>>,
     query_tasks: HashMap<(Uuid, u64), JoinHandle<()>>,
+    bigquery_cancellations: Arc<
+        StdMutex<HashMap<(Uuid, u64), (ConnectionIdentity, tokio_util::sync::CancellationToken)>>,
+    >,
     duckdb_query_interrupts:
         Arc<StdMutex<HashMap<(Uuid, u64), (Uuid, crate::db::duckdb::DuckDbOperationHandle)>>>,
     cancelled_queries: Arc<StdMutex<HashSet<(Uuid, u64)>>>,
@@ -787,6 +790,7 @@ impl Runtime {
             duckdb_sessions: Arc::new(Mutex::new(duckdb::DuckDbSessions::default())),
             connection_attempts: Arc::new(StdMutex::new(ConnectionAttempts::default())),
             query_tasks: HashMap::new(),
+            bigquery_cancellations: Arc::new(StdMutex::new(HashMap::new())),
             duckdb_query_interrupts: Arc::new(StdMutex::new(HashMap::new())),
             cancelled_queries: Arc::new(StdMutex::new(HashSet::new())),
             duckdb_query_generations: Arc::new(StdMutex::new(HashSet::new())),
@@ -856,6 +860,10 @@ impl Runtime {
 
     pub fn dispatch(&mut self, command: Command) {
         self.query_tasks.retain(|_, task| !task.is_finished());
+        self.bigquery_cancellations
+            .lock()
+            .expect("BigQuery cancellation registry poisoned")
+            .retain(|key, _| self.query_tasks.contains_key(key));
         self.duckdb_query_interrupts
             .lock()
             .expect("DuckDB operation registry poisoned")
@@ -1495,7 +1503,21 @@ impl Runtime {
                 if let Some((_, operation)) = operation {
                     operation.cancel();
                 }
-                if !is_duckdb && let Some(task) = self.query_tasks.remove(&(tab_id, generation)) {
+                let is_bigquery = if let Some((_, cancel)) = self
+                    .bigquery_cancellations
+                    .lock()
+                    .expect("BigQuery cancellation registry poisoned")
+                    .get(&(tab_id, generation))
+                {
+                    cancel.cancel();
+                    true
+                } else {
+                    false
+                };
+                if !is_duckdb
+                    && !is_bigquery
+                    && let Some(task) = self.query_tasks.remove(&(tab_id, generation))
+                {
                     task.abort();
                 }
                 if let Some(execution_id) = self.history_executions.remove(&(tab_id, generation))
@@ -3973,6 +3995,16 @@ impl Runtime {
     }
 
     fn disconnect(&mut self, expected: ConnectionIdentity) {
+        for (identity, cancel) in self
+            .bigquery_cancellations
+            .lock()
+            .expect("BigQuery cancellation registry poisoned")
+            .values()
+        {
+            if *identity == expected {
+                cancel.cancel();
+            }
+        }
         let operation_keys = self
             .duckdb_query_connections
             .lock()
@@ -5653,6 +5685,14 @@ impl Runtime {
         self.history_executions
             .insert((tab_id, generation), execution_id);
         let profiles = Arc::clone(&self.registry);
+        // Register before spawning: cancellation can arrive before the driver is resolved.
+        // Other adapters remove this reservation before starting native work.
+        let query_cancel = tokio_util::sync::CancellationToken::new();
+        let bigquery_cancellations = Arc::clone(&self.bigquery_cancellations);
+        bigquery_cancellations
+            .lock()
+            .expect("BigQuery cancellation registry poisoned")
+            .insert((tab_id, generation), (expected, query_cancel.clone()));
         let task = tokio::spawn(async move {
             let profile = profiles
                 .lock()
@@ -5662,7 +5702,7 @@ impl Runtime {
                 .cloned();
             let native_rest = profile
                 .as_ref()
-                .is_some_and(|profile| profile.kind == crate::profile::DatabaseKind::Elasticsearch);
+                .is_some_and(|profile| profile.kind.is_search_rest());
             let history = crate::model::sql_history::ExecutionHistory {
                 execution_id,
                 operation_id,
@@ -5700,6 +5740,10 @@ impl Runtime {
                 None => None,
             };
             let Some(database) = database else {
+                bigquery_cancellations
+                    .lock()
+                    .expect("BigQuery cancellation registry poisoned")
+                    .remove(&(tab_id, generation));
                 if let Some(recorder) = &recorder {
                     let _ = recorder
                         .finish(
@@ -5718,6 +5762,17 @@ impl Runtime {
                 });
                 return;
             };
+            let is_bigquery = matches!(database, DatabaseConnection::BigQuery(_));
+            if !is_bigquery {
+                bigquery_cancellations
+                    .lock()
+                    .expect("BigQuery cancellation registry poisoned")
+                    .remove(&(tab_id, generation));
+                if query_cancel.is_cancelled() && !matches!(database, DatabaseConnection::DuckDb(_))
+                {
+                    return;
+                }
+            }
             let is_duckdb = matches!(database, DatabaseConnection::DuckDb(_));
             if is_duckdb {
                 duckdb_query_generations
@@ -5739,30 +5794,87 @@ impl Runtime {
             }
             let registry_for_start = Arc::clone(&operation_registry);
             let cancel_flag_for_start = Arc::clone(&cancel_flag);
-            match database
-                .execute_with_budget_cancellable(
-                    &sql,
-                    crate::db::query::QueryBudget {
-                        max_rows: 10_000,
-                        max_bytes: 16 * 1024 * 1024,
-                    },
-                    operation_id,
-                    cancel_flag,
-                    move |operation| {
-                        let key = (tab_id, generation);
-                        let mut registry = registry_for_start
-                            .lock()
-                            .expect("DuckDB operation registry poisoned");
-                        registry.insert(key, (operation_id, operation));
-                        if cancel_flag_for_start.load(std::sync::atomic::Ordering::SeqCst)
-                            && let Some((_, operation)) = registry.remove(&key)
-                        {
-                            operation.cancel();
-                        }
-                    },
-                )
-                .await
-            {
+            let authorization = if database.kind().is_search_rest() || is_bigquery {
+                let current_profile = profiles
+                    .lock()
+                    .await
+                    .profiles
+                    .get(&target.profile_id)
+                    .cloned();
+                authorize_profile_execution(current_profile.as_ref(), database.kind(), &sql)
+            } else {
+                Ok(())
+            };
+            let budget = crate::db::query::QueryBudget {
+                max_rows: 10_000,
+                max_bytes: 16 * 1024 * 1024,
+            };
+            let result = match authorization {
+                Err(error) => Err(error),
+                Ok(()) => {
+                    if let DatabaseConnection::BigQuery(adapter) = &database {
+                        adapter
+                            .execute_cancellable_with_budget(&sql, budget, query_cancel.clone())
+                            .await
+                    } else {
+                        database
+                            .execute_with_budget_cancellable(
+                                &sql,
+                                budget,
+                                operation_id,
+                                cancel_flag,
+                                move |operation| {
+                                    let key = (tab_id, generation);
+                                    let mut registry = registry_for_start
+                                        .lock()
+                                        .expect("DuckDB operation registry poisoned");
+                                    registry.insert(key, (operation_id, operation));
+                                    if cancel_flag_for_start
+                                        .load(std::sync::atomic::Ordering::SeqCst)
+                                        && let Some((_, operation)) = registry.remove(&key)
+                                    {
+                                        operation.cancel();
+                                    }
+                                },
+                            )
+                            .await
+                    }
+                }
+            };
+            bigquery_cancellations
+                .lock()
+                .expect("BigQuery cancellation registry poisoned")
+                .remove(&(tab_id, generation));
+            if is_bigquery && query_cancel.is_cancelled() {
+                if let Some(recorder) = &recorder {
+                    let _ = recorder
+                        .finish_with_certainty(
+                            execution_id,
+                            crate::model::sql_history::HistoryExecutionStatus::Cancelled,
+                            crate::model::sql_history::HistoryResultCertainty::Unknown,
+                            None,
+                            None,
+                            None,
+                        )
+                        .await;
+                }
+                let message = match result {
+                    Err(error) => error.output_message(),
+                    Ok(_) => "BigQuery job completed before cancellation was observed; results were not collected".into(),
+                };
+                let _ = sender.send(Action::QueryCancellationCompleted {
+                    tab_id,
+                    generation,
+                    connection: expected,
+                    message,
+                });
+                cancelled_queries_for_cleanup
+                    .lock()
+                    .expect("cancelled query registry poisoned")
+                    .remove(&(tab_id, generation));
+                return;
+            }
+            match result {
                 Ok(outcome) => {
                     if let Some(recorder) = &recorder {
                         let status = if outcome.stats.response_error.is_some() {
@@ -5794,7 +5906,7 @@ impl Runtime {
                             .finish_with_certainty(
                                 execution_id,
                                 crate::model::sql_history::HistoryExecutionStatus::Failed,
-                                crate::model::sql_history::HistoryResultCertainty::Confirmed,
+                                query_error_certainty(database.kind(), &sql, &error),
                                 None,
                                 None,
                                 None,
@@ -7379,6 +7491,8 @@ impl Runtime {
                 | DatabaseConnection::MongoDb(_) => false,
                 DatabaseConnection::ClickHouse(_)
                 | DatabaseConnection::Snowflake(_)
+                | DatabaseConnection::BigQuery(_)
+                | DatabaseConnection::OpenSearch(_)
                 | DatabaseConnection::Elasticsearch(_) => false,
                 DatabaseConnection::DuckDb(_) => false,
             };
@@ -7507,12 +7621,26 @@ impl Runtime {
         {
             operation.cancel();
         }
+        for (_, cancel) in self
+            .bigquery_cancellations
+            .lock()
+            .expect("BigQuery cancellation registry poisoned")
+            .values()
+        {
+            cancel.cancel();
+        }
         for (key, task) in self.query_tasks.drain() {
-            if !self
-                .duckdb_query_generations
+            let is_bigquery = self
+                .bigquery_cancellations
                 .lock()
-                .expect("DuckDB query registry poisoned")
-                .contains(&key)
+                .expect("BigQuery cancellation registry poisoned")
+                .contains_key(&key);
+            if !is_bigquery
+                && !self
+                    .duckdb_query_generations
+                    .lock()
+                    .expect("DuckDB query registry poisoned")
+                    .contains(&key)
             {
                 task.abort();
             }
@@ -8135,10 +8263,18 @@ async fn save_profile_transaction(
                 || old.default_schema != profile.default_schema
                 || old.sqlite_path != profile.sqlite_path
                 || old.snowflake_options != profile.snowflake_options
-                || (profile.kind == crate::profile::DatabaseKind::Snowflake
-                    && old.catalog_scope != profile.catalog_scope)
+                || old.bigquery_options != profile.bigquery_options
+                || (matches!(
+                    profile.kind,
+                    crate::profile::DatabaseKind::Snowflake
+                        | crate::profile::DatabaseKind::BigQuery
+                ) && old.catalog_scope != profile.catalog_scope)
                 || old.ssl_mode != profile.ssl_mode
                 || old.elasticsearch_options != profile.elasticsearch_options
+                || old.opensearch_options != profile.opensearch_options
+                || ((profile.kind.is_search_rest()
+                    || profile.kind == crate::profile::DatabaseKind::BigQuery)
+                    && old.read_only != profile.read_only)
                 || old.pg_options != profile.pg_options
         }),
         catalog_scope_changed: old_profile
@@ -8146,7 +8282,9 @@ async fn save_profile_transaction(
             .is_none_or(|old| old.catalog_scope != profile.catalog_scope),
         display_only_changed: old_profile.as_ref().is_none_or(|old| {
             old.name != profile.name
-                || old.read_only != profile.read_only
+                || (!profile.kind.is_search_rest()
+                    && profile.kind != crate::profile::DatabaseKind::BigQuery
+                    && old.read_only != profile.read_only)
                 || old.environment != profile.environment
         }),
         credentials_changed,
@@ -8869,15 +9007,17 @@ pub async fn run_tui(cli: Cli) -> Result<RunOutcome> {
         runtime.dispatch(Command::CheckSecretStoreAvailability);
         let initial_sequence = keymap.sequence_state(&app, std::time::Instant::now());
         rendered_sequence = initial_sequence.clone();
-        terminal.draw(|frame| {
-            ui::render_with_state_using_icons_sequence_and_theme(
-                frame,
-                &app,
-                &mut ui_state,
-                icons,
-                initial_sequence.as_ref(),
-                theme,
-            )
+        draw_with_ddl_viewport_sync(&mut app, &mut runtime, &mut ui_state, |app, state| {
+            terminal.draw(|frame| {
+                ui::render_with_state_using_icons_sequence_and_theme(
+                    frame,
+                    app,
+                    state,
+                    icons,
+                    initial_sequence.as_ref(),
+                    theme,
+                )
+            })
         })?;
         let startup_check_due =
             crate::persistence::update_check::UpdateCheckCache::read(&paths.update_check_file())
@@ -8893,7 +9033,6 @@ pub async fn run_tui(cli: Cli) -> Result<RunOutcome> {
         if let Some(cursor) = ui_state.cursor {
             terminal.set_cursor_style(cursor.style)?;
         }
-        sync_ddl_editor_viewport(&mut app, &mut runtime, terminal.size()?);
         sync_editor_viewport(&mut app, &mut runtime, &ui_state);
         sync_output_viewport(&mut app, &mut runtime, &ui_state);
         sync_pane_layout(&mut app, &mut runtime, &ui_state);
@@ -9117,10 +9256,27 @@ pub async fn run_tui(cli: Cli) -> Result<RunOutcome> {
                     for command in app.update(Action::RedisPreviewTick) {
                         runtime.dispatch(command);
                     }
+                    // A held text-selection drag keeps scrolling after its
+                    // pointer, so one gesture can select text off screen.
+                    let drag_autoscroll = ui_state.follow_text_drag().filter(|(session_id, rows)| {
+                        app.text_drag_can_scroll(*session_id, *rows)
+                    });
+                    if let Some((session_id, rows)) = drag_autoscroll {
+                        apply_action(
+                            &mut app,
+                            &mut runtime,
+                            Action::ReadOnlyEditorScroll {
+                                session_id,
+                                rows,
+                                columns: 0,
+                            },
+                        );
+                    }
                     redraw = profile_url_changed
                         || app.notifications.expire(now)
                         || ui_state.advance_animations(now)
                         || expired
+                        || drag_autoscroll.is_some()
                         || sequence_redraw_needed(&rendered_sequence, &after);
                 }
             }
@@ -9129,16 +9285,17 @@ pub async fn run_tui(cli: Cli) -> Result<RunOutcome> {
                 keymap.set_sequence_width(terminal.size()?.width);
                 let sequence = keymap.sequence_state(&app, std::time::Instant::now());
                 rendered_sequence = sequence.clone();
-                sync_ddl_editor_viewport(&mut app, &mut runtime, terminal.size()?);
-                terminal.draw(|frame| {
-                    ui::render_with_state_using_icons_sequence_and_theme(
-                        frame,
-                        &app,
-                        &mut ui_state,
-                        icons,
-                        sequence.as_ref(),
-                        theme,
-                    )
+                draw_with_ddl_viewport_sync(&mut app, &mut runtime, &mut ui_state, |app, state| {
+                    terminal.draw(|frame| {
+                        ui::render_with_state_using_icons_sequence_and_theme(
+                            frame,
+                            app,
+                            state,
+                            icons,
+                            sequence.as_ref(),
+                            theme,
+                        )
+                    })
                 })?;
                 if let Some(cursor) = ui_state.cursor {
                     terminal.set_cursor_style(cursor.style)?;
@@ -9390,38 +9547,192 @@ mod workspace_save_tests {
     }
 }
 
-fn sync_ddl_editor_viewport(app: &mut App, runtime: &mut Runtime, area: ratatui::layout::Rect) {
-    if let Some((session_id, viewport)) = ui::principal::principal_ddl_viewport(area, app) {
-        if app
-            .active_principal_editor_viewport()
-            .ok()
-            .is_none_or(|current| current != viewport)
-        {
-            apply_action(
-                app,
-                runtime,
-                Action::DdlEditorViewportChanged {
-                    session_id,
-                    viewport,
-                },
+fn draw_with_ddl_viewport_sync(
+    app: &mut App,
+    runtime: &mut Runtime,
+    state: &mut UiState,
+    mut draw: impl FnMut(&App, &mut UiState) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    loop {
+        draw(app, state)?;
+        // Recording a new viewport can move the cursor's scroll window. Draw
+        // again immediately so the screen and mouse targets use that window.
+        if !sync_ddl_editor_viewport(app, runtime, state) {
+            return Ok(());
+        }
+    }
+}
+
+fn sync_ddl_editor_viewport(app: &mut App, runtime: &mut Runtime, state: &UiState) -> bool {
+    let Some((session_id, viewport)) = state.ddl_editor_viewport else {
+        return false;
+    };
+    let current = match app.tabs.get(app.active_tab) {
+        Some(crate::model::tab::WorkspaceTab::Relation(tab)) if tab.ddl_editor_id == session_id => {
+            app.active_ddl_editor_viewport().ok()
+        }
+        Some(crate::model::tab::WorkspaceTab::PrincipalDdl(tab)) if tab.editor_id == session_id => {
+            app.active_principal_editor_viewport().ok()
+        }
+        _ => return false,
+    };
+    if current == Some(viewport) {
+        return false;
+    }
+    apply_action(
+        app,
+        runtime,
+        Action::DdlEditorViewportChanged {
+            session_id,
+            viewport,
+        },
+    );
+    true
+}
+
+#[cfg(test)]
+mod ddl_viewport_sync_tests {
+    use super::*;
+    use crate::{
+        db::principal::{PrincipalEntry, PrincipalId, PrincipalKind, PrincipalScope},
+        model::{
+            editor::EditorViewport,
+            principal::{PrincipalDdlLoad, PrincipalDdlSnapshot, PrincipalDdlTab, PrincipalView},
+            tab::WorkspaceTab,
+            workspace::Focus,
+        },
+    };
+    use crossterm::event::KeyModifiers;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    #[tokio::test]
+    async fn ddl_resize_redraws_the_synchronized_scroll_window_before_returning() {
+        let profile = import_connection_url("sqlite::memory:", Some("viewport-test"))
+            .unwrap()
+            .profile;
+        let mut app = App::new(vec![profile.clone()]);
+        let mut tab = PrincipalDdlTab::new(PrincipalEntry {
+            id: PrincipalId {
+                profile_id: profile.id,
+                scope: PrincipalScope::Cluster,
+                native_id: "alice".into(),
+                host: None,
+            },
+            kind: PrincipalKind::User,
+            name: "alice".into(),
+            native_kind: "user".into(),
+            system: false,
+        });
+        tab.view = PrincipalView::Ddl;
+        tab.load = PrincipalDdlLoad::Ready(PrincipalDdlSnapshot {
+            sql: (1..=100)
+                .map(|line| format!("-- LINE {line} {} LAST_COLUMN", "x".repeat(180)))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            connection: ConnectionIdentity {
+                profile_id: profile.id,
+                generation: 1,
+            },
+        });
+        let session_id = tab.editor_id;
+        app.tabs.push(WorkspaceTab::PrincipalDdl(tab));
+        app.active_tab = app.tabs.len() - 1;
+        app.focus = Focus::Results;
+        app.update(Action::DdlEditorViewportChanged {
+            session_id,
+            viewport: EditorViewport {
+                width: 110,
+                height: 33,
+            },
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let (sender, _receiver) = mpsc::unbounded_channel();
+        let mut runtime = Runtime::new(
+            vec![profile],
+            HashSet::new(),
+            HashMap::new(),
+            None,
+            ProfileStore::new(temp.path().join("connections.toml")),
+            Arc::new(NativeSecretStore),
+            sender,
+        );
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        let mut state = UiState::new();
+        draw_with_ddl_viewport_sync(&mut app, &mut runtime, &mut state, |app, state| {
+            terminal
+                .draw(|frame| ui::render_with_state(frame, app, state))
+                .unwrap();
+            Ok(())
+        })
+        .unwrap();
+        for character in ['G', '$'] {
+            app.update(Action::ReadOnlyEditorKey {
+                session_id,
+                event: KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            });
+        }
+
+        for (width, height) in [(80, 20), (140, 45)] {
+            terminal.backend_mut().resize(width, height);
+            let mut frames = Vec::new();
+            draw_with_ddl_viewport_sync(&mut app, &mut runtime, &mut state, |app, state| {
+                terminal
+                    .draw(|frame| ui::render_with_state(frame, app, state))
+                    .unwrap();
+                frames.push(terminal.backend().buffer().clone());
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(frames.len(), 2, "viewport changes must redraw immediately");
+            assert_ne!(
+                frames[0], frames[1],
+                "resize must update the drawn scroll window"
+            );
+            let viewport = state.ddl_editor_viewport.unwrap().1;
+            assert_eq!(app.active_principal_editor_viewport().unwrap(), viewport);
+            let snapshot = app.active_principal_editor_snapshot(viewport).unwrap();
+            assert_eq!(snapshot.cursor.line, 99);
+            assert!(
+                snapshot.cursor_screen_cell.is_some(),
+                "resized cursor must be visible"
+            );
+            let cursor = state.cursor.unwrap().position;
+            assert!(cursor.x < width && cursor.y < height);
+            terminal
+                .draw(|frame| ui::render_with_state(frame, &app, &mut state))
+                .unwrap();
+            assert_eq!(
+                frames.last().unwrap(),
+                terminal.backend().buffer(),
+                "the final frame must already match the synchronized app state"
             );
         }
-        return;
-    }
-    if let Some((session_id, viewport)) = ui::relation::ddl_editor_viewport(area, app)
-        && app
-            .active_ddl_editor_viewport()
-            .ok()
-            .is_none_or(|current| current != viewport)
-    {
-        apply_action(
-            app,
-            runtime,
-            Action::DdlEditorViewportChanged {
-                session_id,
-                viewport,
-            },
+
+        // Relations initialize their read-only editor on the first viewport
+        // action. Stabilization must also draw that new session's text geometry.
+        let mut tab = crate::model::relation::RelationTab::new("bootstrap");
+        tab.view = crate::model::relation::RelationView::Ddl;
+        let session_id = tab.ddl_editor_id;
+        app.tabs.push(WorkspaceTab::Relation(tab));
+        app.active_tab = app.tabs.len() - 1;
+        let mut draws = 0;
+        draw_with_ddl_viewport_sync(&mut app, &mut runtime, &mut state, |app, state| {
+            terminal
+                .draw(|frame| ui::render_with_state(frame, app, state))
+                .unwrap();
+            draws += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            draws, 3,
+            "initialize the session, then sync its text viewport"
         );
+        let (published_id, viewport) = state.ddl_editor_viewport.unwrap();
+        assert_eq!(published_id, session_id);
+        assert_eq!(app.active_ddl_editor_viewport().unwrap(), viewport);
+        let body = state.text_selection_targets.last().unwrap();
+        assert_eq!(usize::from(body.hit_maps[0].area.width), viewport.width);
     }
 }
 
@@ -9713,10 +10024,218 @@ fn catalog_mutation_outcome_unknown(
         && error_category == crate::db::ErrorCategory::Network
 }
 
+fn query_error_certainty(
+    kind: crate::profile::DatabaseKind,
+    request: &str,
+    error: &DatabaseError,
+) -> crate::model::sql_history::HistoryResultCertainty {
+    use crate::model::sql_history::HistoryResultCertainty;
+    if kind == crate::profile::DatabaseKind::BigQuery
+        && matches!(
+            error.code.as_deref(),
+            Some("job_outcome_unknown" | "cancel_requested" | "local_wait_stopped")
+        )
+    {
+        return HistoryResultCertainty::Unknown;
+    }
+    if kind.is_search_rest()
+        && (error.category == crate::db::ErrorCategory::Network
+            || error.code.as_deref() == Some("search_rest_write_outcome_unknown"))
+        && crate::db::elasticsearch::ElasticsearchRequest::parse(request)
+            .is_ok_and(|request| !request.is_read_only())
+    {
+        HistoryResultCertainty::Unknown
+    } else {
+        HistoryResultCertainty::Confirmed
+    }
+}
+
+fn authorize_profile_execution(
+    profile: Option<&ConnectionProfile>,
+    connected_kind: crate::profile::DatabaseKind,
+    request: &str,
+) -> Result<(), DatabaseError> {
+    if connected_kind == crate::profile::DatabaseKind::BigQuery {
+        let profile = profile
+            .filter(|profile| profile.kind == connected_kind)
+            .ok_or_else(|| DatabaseError::configuration(
+                "BigQuery connection profile changed or was removed; reconnect before executing",
+            ))?;
+        return crate::db::bigquery::authorize_statement(request, profile.read_only);
+    }
+    if !connected_kind.is_search_rest() {
+        return Ok(());
+    }
+    let profile = profile
+        .filter(|profile| profile.kind == connected_kind)
+        .ok_or_else(|| {
+            DatabaseError::configuration(
+                "Search REST connection profile changed or was removed; reconnect before executing",
+            )
+        })?;
+    let request = crate::db::elasticsearch::ElasticsearchRequest::parse(request)?;
+    if profile.read_only && !request.is_read_only() {
+        return Err(DatabaseError::configuration(
+            "This connection is read-only; the REST request was not sent",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{db::transaction::WorkerDisposition, profile::import_connection_url};
+
+    #[test]
+    fn search_rest_write_failures_have_unknown_history_outcomes() {
+        use crate::{
+            db::ErrorCategory, model::sql_history::HistoryResultCertainty, profile::DatabaseKind,
+        };
+        for (category, code) in [
+            (ErrorCategory::Network, None),
+            (
+                ErrorCategory::Internal,
+                Some("search_rest_write_outcome_unknown"),
+            ),
+            (
+                ErrorCategory::Sql,
+                Some("search_rest_write_outcome_unknown"),
+            ),
+        ] {
+            let error = DatabaseError {
+                category,
+                code: code.map(str::to_owned),
+                message: "Response unavailable".into(),
+                diagnostic: None,
+            };
+            for kind in [DatabaseKind::Elasticsearch, DatabaseKind::OpenSearch] {
+                assert_eq!(
+                    query_error_certainty(kind, "DELETE /books", &error),
+                    HistoryResultCertainty::Unknown,
+                );
+                for request in ["POST /books/_search\n{}", "SELECT 1"] {
+                    assert_eq!(
+                        query_error_certainty(kind, request, &error),
+                        HistoryResultCertainty::Confirmed
+                    );
+                }
+            }
+            assert_eq!(
+                query_error_certainty(DatabaseKind::Postgres, "DELETE /books", &error),
+                HistoryResultCertainty::Confirmed,
+            );
+        }
+        for kind in [DatabaseKind::Elasticsearch, DatabaseKind::OpenSearch] {
+            for category in [
+                ErrorCategory::Configuration,
+                ErrorCategory::Internal,
+                ErrorCategory::Sql,
+            ] {
+                let error = DatabaseError {
+                    category,
+                    code: None,
+                    message: "Request rejected".into(),
+                    diagnostic: None,
+                };
+                assert_eq!(
+                    query_error_certainty(kind, "DELETE /books", &error),
+                    HistoryResultCertainty::Confirmed,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bigquery_history_preserves_unknown_job_outcomes() {
+        use crate::{
+            db::ErrorCategory, model::sql_history::HistoryResultCertainty, profile::DatabaseKind,
+        };
+        for code in [
+            "job_outcome_unknown",
+            "cancel_requested",
+            "local_wait_stopped",
+        ] {
+            let error = DatabaseError {
+                category: ErrorCategory::Cancelled,
+                code: Some(code.into()),
+                message: "local waiting stopped".into(),
+                diagnostic: None,
+            };
+            assert_eq!(
+                query_error_certainty(
+                    DatabaseKind::BigQuery,
+                    "DELETE FROM fixture.t WHERE TRUE",
+                    &error
+                ),
+                HistoryResultCertainty::Unknown
+            );
+        }
+        for code in ["profile_read_only", "invalidQuery", "403", "stopped"] {
+            let error = DatabaseError {
+                category: ErrorCategory::Sql,
+                code: Some(code.into()),
+                message: "definitive failure".into(),
+                diagnostic: None,
+            };
+            assert_eq!(
+                query_error_certainty(
+                    DatabaseKind::BigQuery,
+                    "DELETE FROM fixture.t WHERE TRUE",
+                    &error
+                ),
+                HistoryResultCertainty::Confirmed
+            );
+        }
+    }
+
+    #[test]
+    fn bigquery_execution_rechecks_latest_read_only_and_driver() {
+        let mut profile = import_connection_url("bigquery://billing-project/fixture", None)
+            .unwrap()
+            .profile;
+        let kind = crate::profile::DatabaseKind::BigQuery;
+        let sql = "DELETE FROM fixture.t WHERE TRUE";
+        assert!(authorize_profile_execution(Some(&profile), kind, sql).is_ok());
+        profile.read_only = true;
+        assert_eq!(
+            authorize_profile_execution(Some(&profile), kind, sql)
+                .unwrap_err()
+                .code
+                .as_deref(),
+            Some("profile_read_only")
+        );
+        assert!(authorize_profile_execution(Some(&profile), kind, "SELECT 1").is_ok());
+        assert!(authorize_profile_execution(None, kind, sql).is_err());
+        profile.kind = crate::profile::DatabaseKind::Postgres;
+        assert!(authorize_profile_execution(Some(&profile), kind, sql).is_err());
+    }
+
+    #[test]
+    fn search_rest_execution_rechecks_latest_read_only_and_product_configuration() {
+        for (url, kind) in [
+            (
+                "elasticsearch://localhost",
+                crate::profile::DatabaseKind::Elasticsearch,
+            ),
+            (
+                "opensearch://localhost",
+                crate::profile::DatabaseKind::OpenSearch,
+            ),
+        ] {
+            let mut profile = import_connection_url(url, None).unwrap().profile;
+            assert!(authorize_profile_execution(Some(&profile), kind, "DELETE /books").is_ok());
+            profile.read_only = true;
+            assert!(authorize_profile_execution(Some(&profile), kind, "DELETE /books").is_err());
+            assert!(
+                authorize_profile_execution(Some(&profile), kind, "POST /books/_search\n{}")
+                    .is_ok()
+            );
+            assert!(authorize_profile_execution(None, kind, "GET /").is_err());
+            profile.kind = crate::profile::DatabaseKind::Postgres;
+            assert!(authorize_profile_execution(Some(&profile), kind, "GET /").is_err());
+        }
+    }
 
     #[test]
     fn catalog_drop_cascade_escalation_requires_postgres_schema_restrict_sqlstate() {
@@ -9941,6 +10460,129 @@ mod tests {
         observer.close().await.unwrap();
         blocker.close().await.unwrap();
         root.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "child process for scripts/ci/test-bigquery-tui.py; needs its isolated PTY fixture"]
+    async fn bigquery_pty_fixture_child() {
+        use clap::Parser;
+        let endpoint = std::env::var("LAZYDB_TEST_BIGQUERY_PTY_ENDPOINT")
+            .expect("PTY fixture endpoint must be explicit");
+        let endpoint = url::Url::parse(&endpoint).expect("valid fixture URL");
+        assert_eq!(endpoint.scheme(), "http");
+        assert_eq!(endpoint.host_str(), Some("127.0.0.1"));
+        crate::db::bigquery::BigQueryAdapter::install_test_fixture_endpoint(endpoint)
+            .expect("valid isolated fixture endpoint");
+        let cli = Cli::parse_from(["lazydb", "--mouse", "off", "--color", "never"]);
+        super::run_tui(cli)
+            .await
+            .expect("fixture TUI exits cleanly");
+    }
+
+    #[tokio::test]
+    async fn query_target_mismatch_removes_bigquery_cancellation_reservation() {
+        let profile = import_connection_url("bigquery://billing-project/analytics", None)
+            .unwrap()
+            .profile;
+        let identity = ConnectionIdentity {
+            profile_id: profile.id,
+            generation: 1,
+        };
+        let target = ExecutionTarget::from_profile(&profile);
+        let (event_sender, mut events) = mpsc::unbounded_channel();
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = Runtime::new(
+            vec![profile],
+            HashSet::new(),
+            HashMap::new(),
+            None,
+            ProfileStore::new(temp.path().join("profiles.toml")),
+            Arc::new(crate::persistence::secrets::NativeSecretStore),
+            event_sender,
+        );
+        let key = (Uuid::new_v4(), 1);
+        runtime.run_query(
+            identity,
+            target,
+            key.0,
+            key.1,
+            Uuid::new_v4(),
+            "SELECT 1".into(),
+        );
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if matches!(events.recv().await, Some(Action::QueryFailed { .. })) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("missing execution target must fail promptly");
+        assert!(runtime.bigquery_cancellations.lock().unwrap().is_empty());
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn bigquery_cancellation_is_awaited_on_cancel_disconnect_and_shutdown() {
+        for lifecycle in ["cancel", "disconnect", "shutdown"] {
+            let profile = import_connection_url("bigquery://billing-project/analytics", None)
+                .unwrap()
+                .profile;
+            let identity = ConnectionIdentity {
+                profile_id: profile.id,
+                generation: 1,
+            };
+            let (event_sender, _events) = mpsc::unbounded_channel();
+            let temp = tempfile::tempdir().unwrap();
+            let mut runtime = Runtime::new(
+                vec![profile],
+                HashSet::new(),
+                HashMap::new(),
+                None,
+                ProfileStore::new(temp.path().join("profiles.toml")),
+                Arc::new(crate::persistence::secrets::NativeSecretStore),
+                event_sender,
+            );
+            let key = (Uuid::new_v4(), 1);
+            let cancel = tokio_util::sync::CancellationToken::new();
+            runtime
+                .bigquery_cancellations
+                .lock()
+                .unwrap()
+                .insert(key, (identity, cancel.clone()));
+            let (cleanup_finished, cleanup) = tokio::sync::oneshot::channel();
+            runtime.query_tasks.insert(
+                key,
+                tokio::spawn(async move {
+                    cancel.cancelled().await;
+                    // Native jobs.cancel is asynchronous. The task must survive long
+                    // enough to finish that awaited adapter cleanup.
+                    tokio::task::yield_now().await;
+                    let _ = cleanup_finished.send(());
+                }),
+            );
+            if lifecycle == "shutdown" {
+                runtime.shutdown().await;
+            } else {
+                match lifecycle {
+                    "cancel" => runtime.dispatch(Command::CancelQuery {
+                        tab_id: key.0,
+                        generation: key.1,
+                    }),
+                    "disconnect" => runtime.disconnect(identity),
+                    _ => unreachable!(),
+                }
+                let task = runtime.query_tasks.remove(&key).unwrap();
+                tokio::time::timeout(Duration::from_secs(1), task)
+                    .await
+                    .expect("BigQuery cancellation cleanup must finish promptly")
+                    .expect("cooperative query task must finish");
+                runtime.shutdown().await;
+            }
+            cleanup
+                .await
+                .expect("runtime must not abort cooperative cancellation cleanup");
+        }
     }
 
     #[tokio::test]

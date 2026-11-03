@@ -52,20 +52,6 @@ fn input_position_clamped(
     line.source_at_horizontal_clamped(column)
 }
 
-fn text_position_clamped(
-    maps: &[crate::ui::text_selection::TextHitMap],
-    column: u16,
-    row: u16,
-) -> Option<crate::ui::text_selection::TextPosition> {
-    let first = maps.iter().min_by_key(|map| map.area.y)?;
-    let last = maps.iter().max_by_key(|map| map.area.bottom())?;
-    let line = maps
-        .iter()
-        .find(|map| row >= map.area.y && row < map.area.bottom())
-        .unwrap_or(if row < first.area.y { first } else { last });
-    Some(line.source_at_horizontal_clamped(column))
-}
-
 pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
     // Toasts own their visible cells, even above modal inputs and selection targets.
     if let Some(
@@ -145,6 +131,7 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                 let target = ui
                     .text_selection_targets
                     .iter()
+                    .rev()
                     .find(|target| target.session_id == gesture.session_id)?;
                 if !matches!(
                     gesture.source,
@@ -156,7 +143,7 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                     ui.cancel_mouse_gesture();
                     return None;
                 }
-                let end = text_position_clamped(&target.hit_maps, event.column, event.row)?;
+                let end = target.position_clamped(event.column, event.row)?;
                 ui.update_text_gesture(end);
                 return None;
             }
@@ -196,6 +183,7 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                 let target = ui
                     .text_selection_targets
                     .iter()
+                    .rev()
                     .find(|target| target.session_id == gesture.session_id)?;
                 if gesture.source != crate::ui::text_selection::TextGestureSource::Editor
                     || gesture.session_id != target.session_id
@@ -203,9 +191,17 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                     ui.cancel_mouse_gesture();
                     return None;
                 }
-                let end = text_position_clamped(&target.hit_maps, event.column, event.row)?;
-                ui.update_text_gesture(end);
-                return None;
+                // A drag that leaves the visible text keeps extending the
+                // selection while the editor scrolls after the pointer, so one
+                // gesture can reach text that is off screen.
+                ui.track_text_drag(event.column, event.row);
+                return ui.follow_text_drag().map(|(session_id, rows)| {
+                    Action::ReadOnlyEditorScroll {
+                        session_id,
+                        rows,
+                        columns: 0,
+                    }
+                });
             }
             if let Some(drag) = *ui.pane_resize_drag.borrow() {
                 return pane_resize_action(drag, pane_resize_pointer(drag.split, event), ui, app);
@@ -365,20 +361,20 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                         .iter()
                         .any(|target| target.session_id == gesture.session_id);
                 if !target_matches {
-                    ui.mouse_gesture.borrow_mut().take();
+                    ui.end_mouse_gesture();
                     return None;
                 }
                 if let Some(target) = ui
                     .text_selection_targets
                     .iter()
+                    .rev()
                     .find(|target| target.session_id == gesture.session_id)
-                    && let Some(end) =
-                        text_position_clamped(&target.hit_maps, event.column, event.row)
+                    && let Some(end) = target.position_clamped(event.column, event.row)
                 {
                     gesture.has_dragged |= end != gesture.start;
                     gesture.end = end;
                 }
-                ui.mouse_gesture.borrow_mut().take();
+                ui.end_mouse_gesture();
                 if !gesture.has_dragged {
                     return None;
                 }

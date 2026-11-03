@@ -50,7 +50,7 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
     time::{Duration, Instant},
 };
@@ -393,6 +393,11 @@ pub struct UiState {
     pub redis_keys_viewport_rows: Option<(Uuid, usize)>,
     pub redis_preview_viewport_rows: Option<(Uuid, usize, usize)>,
     pub redis_editor_viewport: Option<(Uuid, crate::model::editor::EditorViewport)>,
+    /// Editor viewport of the DDL pane the last render actually drew.
+    ///
+    /// The DDL pane lives inside the workspace content area, so its viewport is
+    /// smaller than the terminal. Only the render knows the real rect.
+    pub ddl_editor_viewport: Option<(Uuid, crate::model::editor::EditorViewport)>,
     pub redis_info_scroll: u16,
     pub ddl_viewport: Option<DdlViewportMetrics>,
     pub cursor: Option<CursorSpec>,
@@ -410,6 +415,9 @@ pub struct UiState {
     pub pane_resize_drag: RefCell<Option<PaneResizeDrag>>,
     pub mouse_gesture: RefCell<Option<text_selection::GestureOwner>>,
     pub text_gesture: RefCell<Option<text_selection::TextGesture>>,
+    /// Last pointer cell of an active text-selection drag, so a held button
+    /// keeps scrolling instead of stopping at the visible edge.
+    text_drag_pointer: Cell<Option<(u16, u16)>>,
     pub input_gesture: RefCell<Option<text_selection::InputGesture>>,
     pub text_selection_targets: Vec<text_selection::TextSelectionTarget>,
     pub profile_input_targets: Vec<(ProfileField, text_selection::InputHitMap)>,
@@ -572,6 +580,7 @@ impl UiState {
             redis_keys_viewport_rows: None,
             redis_preview_viewport_rows: None,
             redis_editor_viewport: None,
+            ddl_editor_viewport: None,
             redis_info_scroll: 0,
             ddl_viewport: None,
             cursor: None,
@@ -588,6 +597,7 @@ impl UiState {
             pane_resize_drag: RefCell::new(None),
             mouse_gesture: RefCell::new(None),
             text_gesture: RefCell::new(None),
+            text_drag_pointer: Cell::new(None),
             input_gesture: RefCell::new(None),
             text_selection_targets: Vec::new(),
             profile_input_targets: Vec::new(),
@@ -725,8 +735,35 @@ impl UiState {
             return false;
         }
         *owner = Some(text_selection::GestureOwner::Text);
+        self.text_drag_pointer.set(None);
         *self.text_gesture.borrow_mut() = Some(gesture);
         true
+    }
+
+    /// Record where an active text-selection drag points.
+    pub fn track_text_drag(&self, column: u16, row: u16) {
+        self.text_drag_pointer.set(Some((column, row)));
+    }
+
+    /// Extend the active text selection to the recorded drag pointer and report
+    /// the rows its editor must scroll to follow a pointer that left the
+    /// visible text. Returns `None` while the pointer stays inside the text.
+    pub fn follow_text_drag(&self) -> Option<(Uuid, isize)> {
+        let (column, row) = self.text_drag_pointer.get()?;
+        if *self.mouse_gesture.borrow() != Some(text_selection::GestureOwner::Text) {
+            return None;
+        }
+        let gesture = self.text_gesture.borrow().as_ref().copied()?;
+        let target = self
+            .text_selection_targets
+            .iter()
+            .rev()
+            .find(|target| target.session_id == gesture.session_id)?;
+        if let Some(end) = target.position_clamped(column, row) {
+            self.update_text_gesture(end);
+        }
+        let rows = target.drag_scroll_rows(row);
+        (rows != 0).then_some((gesture.session_id, rows))
     }
 
     pub fn update_text_gesture(&self, end: text_selection::TextPosition) -> bool {
@@ -744,6 +781,7 @@ impl UiState {
 
     pub fn end_mouse_gesture(&self) -> Option<text_selection::GestureOwner> {
         let owner = self.mouse_gesture.borrow_mut().take();
+        self.text_drag_pointer.set(None);
         self.text_gesture.borrow_mut().take();
         self.input_gesture.borrow_mut().take();
         owner
@@ -751,6 +789,7 @@ impl UiState {
 
     pub fn cancel_mouse_gesture(&self) {
         self.mouse_gesture.borrow_mut().take();
+        self.text_drag_pointer.set(None);
         self.text_gesture.borrow_mut().take();
         self.input_gesture.borrow_mut().take();
     }
@@ -1166,6 +1205,7 @@ fn render_with_state_at(
     state.redis_keys_viewport_rows = None;
     state.redis_preview_viewport_rows = None;
     state.redis_editor_viewport = None;
+    state.ddl_editor_viewport = None;
     state.ddl_viewport = None;
     state.cursor = None;
     state.text_selection_targets.clear();
@@ -3760,7 +3800,7 @@ fn render_editor(
         Some((_, _)) => "TX MANUAL:IDLE",
         None => "TX N/A",
     };
-    let native_rest = app.active_console_is_elasticsearch();
+    let native_rest = app.active_console_is_search_rest();
     let full_left_title = if native_rest {
         format!(" REST CONSOLE  {mode} ")
     } else {
@@ -4405,11 +4445,25 @@ fn render_result_tabs(
         .map_or_else(
             || "no result".to_owned(),
             |outcome| {
-                format!(
-                    "{} rows  ·  {} ms",
+                let mut text = format!(
+                    "{} rows  ·  {} ms{}",
                     outcome.stats.row_count,
-                    outcome.stats.total().as_millis()
-                )
+                    outcome.stats.total().as_millis(),
+                    if outcome.stats.truncated {
+                        "  ·  truncated"
+                    } else {
+                        ""
+                    }
+                );
+                if let Some(job) = &outcome.stats.bigquery {
+                    if let Some(bytes) = job.total_bytes_billed {
+                        text.push_str(&format!("  ·  {bytes} bytes billed"));
+                    }
+                    if job.cache_hit == Some(true) {
+                        text.push_str("  ·  cache hit");
+                    }
+                }
+                text
             },
         );
     let regions = render_tab_selectors(
@@ -4460,7 +4514,11 @@ fn render_data(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, state
     let block = panel_block(" RESULT SET ", app.focus == Focus::Results, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let query_height = query_bar::height(&query, inner.width, state.activity_icons);
+    let query_height = if app.active_console_is_search_rest() {
+        0
+    } else {
+        query_bar::height(&query, inner.width, state.activity_icons)
+    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([

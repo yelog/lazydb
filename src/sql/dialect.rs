@@ -11,6 +11,7 @@ pub enum SqlDialect {
     Snowflake,
     #[default]
     Generic,
+    BigQuery,
 }
 
 impl SqlDialect {
@@ -19,7 +20,8 @@ impl SqlDialect {
             crate::profile::DatabaseKind::Redis
             | crate::profile::DatabaseKind::Valkey
             | crate::profile::DatabaseKind::MongoDb
-            | crate::profile::DatabaseKind::Elasticsearch => None,
+            | crate::profile::DatabaseKind::Elasticsearch
+            | crate::profile::DatabaseKind::OpenSearch => None,
             _ => Some(Self::for_database_kind(kind)),
         }
     }
@@ -37,11 +39,12 @@ impl SqlDialect {
             crate::profile::DatabaseKind::Oracle => Self::Oracle,
             crate::profile::DatabaseKind::Redis => Self::Generic,
             crate::profile::DatabaseKind::Valkey => Self::Generic,
-            crate::profile::DatabaseKind::MongoDb | crate::profile::DatabaseKind::Elasticsearch => {
-                Self::Generic
-            }
+            crate::profile::DatabaseKind::MongoDb
+            | crate::profile::DatabaseKind::Elasticsearch
+            | crate::profile::DatabaseKind::OpenSearch => Self::Generic,
             crate::profile::DatabaseKind::ClickHouse => Self::ClickHouse,
             crate::profile::DatabaseKind::Snowflake => Self::Snowflake,
+            crate::profile::DatabaseKind::BigQuery => Self::BigQuery,
         }
     }
 }
@@ -57,6 +60,18 @@ pub(crate) fn parser_dialect(dialect: SqlDialect) -> &'static dyn sqlparser::dia
         SqlDialect::Oracle => &sqlparser::dialect::GenericDialect {},
         SqlDialect::ClickHouse => &sqlparser::dialect::ClickHouseDialect {},
         SqlDialect::Snowflake => &sqlparser::dialect::SnowflakeDialect {},
+        SqlDialect::BigQuery => &sqlparser::dialect::BigQueryDialect {},
+    }
+}
+
+pub(super) fn parse_sql(
+    dialect: SqlDialect,
+    sql: &str,
+) -> Result<Vec<sqlparser::ast::Statement>, sqlparser::parser::ParserError> {
+    if dialect == SqlDialect::BigQuery {
+        super::bigquery::parse(sql)
+    } else {
+        sqlparser::parser::Parser::parse_sql(parser_dialect(dialect), sql)
     }
 }
 

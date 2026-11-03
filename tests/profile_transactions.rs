@@ -343,3 +343,59 @@ fn saved_profile_reconnect_preserves_uncommitted_relation_edits() {
         if matches!(relation.edit.as_ref().unwrap().rows[0].state, EditableRowState::Updated { .. }))
     );
 }
+
+#[test]
+fn invalid_bigquery_profiles_remain_unavailable_and_survive_other_profile_saves() {
+    use lazydb::profile_compatibility::ProfileUnavailableReason;
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("connections.toml");
+    let store = ProfileStore::new(path.clone());
+    let saved = import_connection_url("bigquery://billing-project/analytics", None)
+        .unwrap()
+        .profile;
+    let id = saved.id;
+    store.save(vec![saved]).unwrap();
+    let contents = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("billing-project", "invalid_project");
+    std::fs::write(&path, contents).unwrap();
+    let report = store.load_report().unwrap();
+    assert!(report.collection.profiles.is_empty());
+    assert_eq!(report.unavailable.len(), 1);
+    assert_eq!(report.unavailable[0].id, Some(id));
+    assert_eq!(
+        report.unavailable[0].reason,
+        ProfileUnavailableReason::InvalidConfiguration
+    );
+    store.save(vec![profile("unrelated")]).unwrap();
+    assert_eq!(store.load_report().unwrap().unavailable[0].id, Some(id));
+}
+
+#[test]
+fn bigquery_persistence_round_trips_options_and_allows_clearing_them() {
+    use lazydb::profile::BigQueryOptions;
+    let temp = tempdir().unwrap();
+    let store = ProfileStore::new(temp.path().join("connections.toml"));
+    let mut saved = import_connection_url("bigquery://billing-project/analytics", None)
+        .unwrap()
+        .profile;
+    saved.bigquery_options = Some(BigQueryOptions {
+        credentials_file: Some("/test/adc.json".into()),
+        location: Some("EU".into()),
+        data_project: Some("data-project".into()),
+        maximum_bytes_billed: 123_456,
+        query_timeout_secs: 42,
+    });
+    store.save(vec![saved.clone()]).unwrap();
+    assert_eq!(store.load().unwrap().profiles, [saved.clone()]);
+
+    let options = saved.bigquery_options.as_mut().unwrap();
+    options.credentials_file = None;
+    options.location = None;
+    options.data_project = None;
+    store.save(vec![saved.clone()]).unwrap();
+    assert_eq!(store.load().unwrap().profiles, [saved.clone()]);
+    saved.bigquery_options = None;
+    store.save(vec![saved.clone()]).unwrap();
+    assert_eq!(store.load().unwrap().profiles, [saved]);
+}

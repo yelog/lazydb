@@ -213,6 +213,16 @@ adapter with a distinct product kind. This is intentionally not SQLx `AnyPool`:
 native catalog, type, SSL, DDL, cancellation, transaction, and key-value
 behavior must remain visible.
 
+Elasticsearch and OpenSearch retain independent profile kinds, connection variants,
+URL schemes and authentication options while sharing the search REST adapter. Its
+product parameter controls authentication and probing; OpenSearch requires the
+server's `version.distribution = "opensearch"` and a nonempty version. Native REST
+execution reuses immutable request confirmation, owner/generation validation and
+result budgets. Indices use the existing relation catalog identity; SQL-only
+editing, transactions, DDL and query controls remain unavailable. Transport rejects
+external paths, traversal and redirects, disables retries, and reports potentially
+unknown remote write outcomes after network errors.
+
 Catalog requests use bounded keyset pages (maximum page size 500), with separate
 targets for databases, schemas, groups, objects, and relation children. The
 PostgreSQL adapter requires server version 12 or newer; the Oracle MySQL catalog
@@ -256,6 +266,22 @@ Dynamic user SQL consumes SQLx `raw_sql().fetch_many()` so statement result
 markers are retained. Each adapter decodes its concrete row type into owned
 `CellValue` values. NULL, empty text, and empty binary remain distinct. Unknown
 types become `Unsupported` values rather than failing the complete query.
+
+### BigQuery jobs
+
+BigQuery uses a separate native REST adapter with refreshable ADC supplied by
+the official Google authentication library. Profile `database` and execution
+target database identify the billing project; the default catalog/data project
+is separate profile configuration, and dataset maps to schema. Metadata and
+completion project onto the data project without changing query owner identity.
+The adapter submits one GoogleSQL statement with a stable client job ID, recovers
+ambiguous submission responses by reading that job, and never replays SQL.
+Bounded polling and page tokens preserve project/location. Every query includes
+a native billed-bytes cap independent of retained row/byte budgets. Runtime
+cooperatively cancels through an owner/generation token so `jobs.cancel` can be
+awaited; local cancellation, request acceptance and remote completion remain
+separate states. The production Google endpoint is fixed. Only library tests
+can install a validated loopback fixture endpoint for real TUI acceptance.
 
 ## Rendering Boundary
 

@@ -2895,6 +2895,7 @@ async fn execute_pool(
             fetched_row_count,
             truncated,
             response_error: None,
+            bigquery: None,
         },
     })
 }
@@ -3011,6 +3012,7 @@ async fn execute_one_batch(
             fetched_row_count,
             truncated,
             response_error: None,
+            bigquery: None,
         },
     })
 }
@@ -4755,7 +4757,9 @@ mod tests {
             mongodb_options: None,
             pg_options: None,
             snowflake_options: None,
+            bigquery_options: None,
             elasticsearch_options: None,
+            opensearch_options: None,
             duckdb_path: None,
             ssl_mode,
             credential_policy: CredentialPolicy::Prompt,

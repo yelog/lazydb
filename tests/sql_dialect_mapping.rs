@@ -56,3 +56,11 @@ fn snowflake_uses_its_native_parser_and_lsp_dialect() {
         "SELECT payload:key::VARCHAR FROM DB.PUBLIC.EVENTS QUALIFY ROW_NUMBER() OVER (PARTITION BY id ORDER BY created_at DESC) = 1",
     ).unwrap();
 }
+
+#[test]
+fn search_rest_products_do_not_advertise_sql_dialects() {
+    for kind in [DatabaseKind::Elasticsearch, DatabaseKind::OpenSearch] {
+        assert_eq!(SqlDialect::try_for_database_kind(kind), None);
+        assert_eq!(SqlDialect::for_database_kind(kind), SqlDialect::Generic);
+    }
+}

@@ -19,7 +19,15 @@ pub fn resolve_default_target(
             ) =>
         {
             let profile = profile_for(id.profile_id())?;
-            let database = id.native_path.first()?.clone();
+            let catalog_database = id.native_path.first()?;
+            let database = if profile.kind == DatabaseKind::BigQuery {
+                if profile.catalog_database() != Some(catalog_database.as_str()) {
+                    return None;
+                }
+                profile.database.clone()?
+            } else {
+                catalog_database.clone()
+            };
             let schema = (id.kind == crate::db::catalog::CatalogKind::Schema)
                 .then(|| id.native_path.get(1).cloned())
                 .flatten();
@@ -73,7 +81,9 @@ mod tests {
             mongodb_options: None,
             pg_options: None,
             snowflake_options: None,
+            bigquery_options: None,
             elasticsearch_options: None,
+            opensearch_options: None,
             duckdb_path: None,
             ssl_mode: Default::default(),
             credential_policy: Default::default(),
@@ -206,14 +216,15 @@ impl ExecutionTarget {
             })
             .or_else(|| (profile.kind == DatabaseKind::DuckDb).then(|| "memory".to_owned()))
             .filter(|database| !database.is_empty())
-            .or_else(|| (profile.kind == DatabaseKind::Elasticsearch).then(|| "default".to_owned()))
+            .or_else(|| (profile.kind.is_search_rest()).then(|| "default".to_owned()))
             .unwrap_or_default();
         let schema = match profile.kind {
             DatabaseKind::MySql
             | DatabaseKind::MariaDb
             | DatabaseKind::TiDb
             | DatabaseKind::ClickHouse
-            | DatabaseKind::Elasticsearch => Some(database.clone()),
+            | DatabaseKind::Elasticsearch
+            | DatabaseKind::OpenSearch => Some(database.clone()),
             DatabaseKind::Sqlite => Some("main".to_owned()),
             DatabaseKind::DuckDb => Some(
                 profile
@@ -227,6 +238,7 @@ impl ExecutionTarget {
                     .clone()
                     .unwrap_or_else(|| "PUBLIC".into()),
             ),
+            DatabaseKind::BigQuery => profile.default_schema.clone(),
             DatabaseKind::Postgres
             | DatabaseKind::CockroachDb
             | DatabaseKind::SqlServer
@@ -241,13 +253,23 @@ impl ExecutionTarget {
     }
 
     pub fn is_valid(&self, profile: &ConnectionProfile) -> bool {
-        if self.profile_id != profile.id
-            || self.database.is_empty()
-            || !profile.catalog_scope.allows_database(&self.database)
-        {
+        if self.profile_id != profile.id || self.database.is_empty() {
+            return false;
+        }
+        if profile.kind == DatabaseKind::BigQuery {
+            return profile.database.as_deref() == Some(self.database.as_str())
+                && profile.catalog_database().is_some_and(|project| {
+                    profile.catalog_scope.allows_database(project)
+                        && self.schema.as_deref().is_none_or(|dataset| {
+                            profile.catalog_scope.allows_schema(project, dataset)
+                        })
+                });
+        }
+        if !profile.catalog_scope.allows_database(&self.database) {
             return false;
         }
         match profile.kind {
+            DatabaseKind::BigQuery => unreachable!("BigQuery target validation handled above"),
             DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::TiDb => {
                 self.schema.as_deref() == Some(self.database.as_str())
                     && profile
@@ -279,7 +301,7 @@ impl ExecutionTarget {
             DatabaseKind::Redis | DatabaseKind::Valkey | DatabaseKind::MongoDb => {
                 self.schema.is_none()
             }
-            DatabaseKind::ClickHouse | DatabaseKind::Elasticsearch => {
+            DatabaseKind::ClickHouse | DatabaseKind::Elasticsearch | DatabaseKind::OpenSearch => {
                 self.schema.as_deref() == Some(self.database.as_str())
                     && profile
                         .catalog_scope
@@ -294,6 +316,9 @@ impl ExecutionTarget {
         }
         let mut configured = profile.clone();
         match profile.kind {
+            DatabaseKind::BigQuery => {
+                configured.default_schema = self.schema.clone();
+            }
             DatabaseKind::Snowflake => {
                 configured.database = Some(self.database.clone());
                 configured.default_schema =
@@ -310,7 +335,8 @@ impl ExecutionTarget {
             | DatabaseKind::MariaDb
             | DatabaseKind::TiDb
             | DatabaseKind::ClickHouse
-            | DatabaseKind::Elasticsearch => {
+            | DatabaseKind::Elasticsearch
+            | DatabaseKind::OpenSearch => {
                 configured.database = Some(self.database.clone());
                 configured.default_schema = Some(self.database.clone());
             }

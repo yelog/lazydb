@@ -1,4 +1,4 @@
-use sqlparser::{parser::Parser, tokenizer::Tokenizer};
+use sqlparser::tokenizer::Tokenizer;
 use uuid::Uuid;
 
 use super::{
@@ -38,7 +38,14 @@ pub fn diagnose_sql(text: &str, dialect: SqlDialect) -> Vec<SqlDiagnostic> {
 }
 
 fn diagnose_statement(text: &str, dialect: SqlDialect, offset: usize) -> Vec<SqlDiagnostic> {
-    if let Err(error) = Tokenizer::new(parser_dialect(dialect), text).tokenize() {
+    let tokenized = if dialect == SqlDialect::BigQuery {
+        super::bigquery::tokenize(text).map(|_| ())
+    } else {
+        Tokenizer::new(parser_dialect(dialect), text)
+            .tokenize()
+            .map(|_| ())
+    };
+    if let Err(error) = tokenized {
         let index = LineIndex::new(text);
         let start = offset + index.offset(text, error.location.line, error.location.column);
         let end = start
@@ -52,7 +59,7 @@ fn diagnose_statement(text: &str, dialect: SqlDialect, offset: usize) -> Vec<Sql
             code: "sql-tokenizer",
         }];
     }
-    if let Err(error) = Parser::parse_sql(parser_dialect(dialect), text) {
+    if let Err(error) = super::dialect::parse_sql(dialect, text) {
         let message = error.to_string();
         // sqlparser exposes parser locations only as a trailing message suffix.
         let location = message.rsplit_once(" at Line: ").and_then(|(_, location)| {

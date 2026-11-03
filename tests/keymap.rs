@@ -5261,6 +5261,53 @@ fn ddl_view_maps_navigation_without_using_grid_move() {
             "code={code:?}"
         );
     }
+    for character in ['G', '$', 'N'] {
+        let event = KeyEvent::new(KeyCode::Char(character), KeyModifiers::SHIFT);
+        assert_eq!(
+            keymap.map(event, &app),
+            Some(Action::ReadOnlyEditorKey { session_id, event }),
+            "terminal Shift event for {character}"
+        );
+    }
+}
+
+#[test]
+fn ddl_search_prompt_accepts_reserved_pane_shortcut_characters() {
+    let mut app = App::new(Vec::new());
+    let tab = RelationTab::new("users");
+    let session_id = tab.ddl_editor_id;
+    app.tabs.push(WorkspaceTab::Relation(tab));
+    app.active_tab = 1;
+    app.focus = Focus::Results;
+    app.update(Action::SetRelationView(
+        lazydb::model::relation::RelationView::Ddl,
+    ));
+    app.update(Action::ReadOnlyEditorKey {
+        session_id,
+        event: key(KeyCode::Char('/')),
+    });
+    let mut keymap = Keymap::default();
+    for character in "Drop_123".chars() {
+        let modifiers = if character.is_ascii_uppercase() {
+            KeyModifiers::SHIFT
+        } else {
+            KeyModifiers::NONE
+        };
+        let event = KeyEvent::new(KeyCode::Char(character), modifiers);
+        let action = keymap.map(event, &app);
+        assert_eq!(
+            action,
+            Some(Action::ReadOnlyEditorKey { session_id, event })
+        );
+        app.update(action.unwrap());
+    }
+    let snapshot = app
+        .active_ddl_editor_snapshot(lazydb::model::editor::EditorViewport {
+            width: 60,
+            height: 10,
+        })
+        .unwrap();
+    assert_eq!(snapshot.prompt.unwrap().text, "Drop_123");
 }
 
 #[test]

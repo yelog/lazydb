@@ -107,6 +107,7 @@ pub enum ProfileField {
     VisibleObjects,
     SslMode,
     ElasticsearchAuth,
+    OpenSearchAuth,
     CaCertPath,
     Environment,
     ReadOnly,
@@ -114,6 +115,11 @@ pub enum ProfileField {
     SqliteMemory,
     SqlitePath,
     DuckDbPath,
+    CredentialsFile,
+    Location,
+    DataProject,
+    MaximumBytesBilled,
+    QueryTimeoutSecs,
     Test,
     Save,
     Cancel,
@@ -208,8 +214,10 @@ impl DiscoveryFingerprint {
         profile.database.hash(&mut hasher);
         profile.default_schema.hash(&mut hasher);
         profile.snowflake_options.hash(&mut hasher);
+        profile.bigquery_options.hash(&mut hasher);
         (profile.ssl_mode as u8).hash(&mut hasher);
         profile.elasticsearch_options.hash(&mut hasher);
+        profile.opensearch_options.hash(&mut hasher);
         profile.pg_options.hash(&mut hasher);
         profile.sqlite_path.hash(&mut hasher);
         (profile.kind == DatabaseKind::Sqlite
@@ -386,6 +394,7 @@ pub struct ProfileDraft {
     pub schema: TextInput,
     pub ssl_mode: SslMode,
     pub elasticsearch_auth: crate::profile::ElasticsearchAuth,
+    pub opensearch_auth: crate::profile::OpenSearchAuth,
     pub ca_cert_path: TextInput,
     credential_reset: bool,
     pub environment: Environment,
@@ -397,6 +406,12 @@ pub struct ProfileDraft {
     pub pg_options: Option<crate::profile::PgConnectionOptions>,
     pub snowflake_options: Option<crate::profile::SnowflakeConnectionOptions>,
     pub duckdb_path: TextInput,
+    pub credentials_file: TextInput,
+    pub location: TextInput,
+    pub data_project: TextInput,
+    pub maximum_bytes_billed: TextInput,
+    pub query_timeout_secs: TextInput,
+
     pub original_credential_policy: CredentialPolicy,
     pub has_stored_credential: bool,
     pub catalog_scope: CatalogScope,
@@ -443,6 +458,7 @@ impl ProfileDraft {
 
     pub fn new(kind: DatabaseKind) -> Self {
         let (host, port, schema, ssl_mode) = match kind {
+            DatabaseKind::BigQuery => ("", "", "", SslMode::VerifyFull),
             DatabaseKind::Snowflake => ("", "443", "PUBLIC", SslMode::VerifyFull),
             DatabaseKind::Postgres => ("localhost", "5432", "public", SslMode::Prefer),
             DatabaseKind::CockroachDb => ("localhost", "26257", "public", SslMode::Prefer),
@@ -458,7 +474,9 @@ impl ProfileDraft {
             }
             DatabaseKind::MongoDb => ("localhost", "27017", "", SslMode::Prefer),
             DatabaseKind::ClickHouse => ("localhost", "8123", "", SslMode::Disable),
-            DatabaseKind::Elasticsearch => ("localhost", "9200", "", SslMode::Disable),
+            DatabaseKind::Elasticsearch | DatabaseKind::OpenSearch => {
+                ("localhost", "9200", "", SslMode::Disable)
+            }
         };
 
         let mut draft = Self {
@@ -483,6 +501,7 @@ impl ProfileDraft {
             schema: TextInput::from(schema),
             ssl_mode,
             elasticsearch_auth: Default::default(),
+            opensearch_auth: Default::default(),
             ca_cert_path: TextInput::default(),
             credential_reset: false,
             environment: Environment::Development,
@@ -495,6 +514,12 @@ impl ProfileDraft {
             snowflake_options: (kind == DatabaseKind::Snowflake)
                 .then(crate::profile::SnowflakeConnectionOptions::default),
             duckdb_path: TextInput::default(),
+            credentials_file: TextInput::default(),
+            location: TextInput::default(),
+            data_project: TextInput::default(),
+            maximum_bytes_billed: TextInput::from("1000000000"),
+            query_timeout_secs: TextInput::from("120"),
+
             original_credential_policy: CredentialPolicy::None,
             has_stored_credential: false,
             catalog_scope: CatalogScope::for_profile(kind, "", Some(schema)),
@@ -549,10 +574,11 @@ impl ProfileDraft {
             .unwrap_or_default();
         let derived_scope = CatalogScope::for_profile(
             profile.kind,
-            profile.database.as_deref().unwrap_or_default(),
+            profile.catalog_database().unwrap_or_default(),
             profile.default_schema.as_deref(),
         );
 
+        let bigquery = profile.bigquery_options.clone().unwrap_or_default();
         let mut draft = Self {
             profile_id: profile.id,
             access: profile.access.clone(),
@@ -581,6 +607,11 @@ impl ProfileDraft {
             mongodb_options: profile.mongodb_options.clone(),
             pg_options: profile.pg_options.clone(),
             snowflake_options: profile.snowflake_options.clone(),
+            credentials_file: TextInput::from(bigquery.credentials_file.unwrap_or_default()),
+            location: TextInput::from(bigquery.location.unwrap_or_default()),
+            data_project: TextInput::from(bigquery.data_project.unwrap_or_default()),
+            maximum_bytes_billed: TextInput::from(bigquery.maximum_bytes_billed.to_string()),
+            query_timeout_secs: TextInput::from(bigquery.query_timeout_secs.to_string()),
             user: TextInput::from(profile.user.clone().unwrap_or_default()),
             password: SecretTextInput::default(),
             database: TextInput::from(profile.database.clone().unwrap_or_default()),
@@ -591,13 +622,25 @@ impl ProfileDraft {
                 .as_ref()
                 .map(|options| options.auth)
                 .unwrap_or_default(),
+            opensearch_auth: profile
+                .opensearch_options
+                .as_ref()
+                .map(|options| options.auth)
+                .unwrap_or_default(),
             ca_cert_path: TextInput::from(
-                profile
-                    .elasticsearch_options
-                    .as_ref()
-                    .and_then(|options| options.ca_cert_path.as_ref())
-                    .map(|path| path.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
+                if profile.kind == DatabaseKind::OpenSearch {
+                    profile
+                        .opensearch_options
+                        .as_ref()
+                        .and_then(|options| options.ca_cert_path.as_ref())
+                } else {
+                    profile
+                        .elasticsearch_options
+                        .as_ref()
+                        .and_then(|options| options.ca_cert_path.as_ref())
+                }
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default(),
             ),
             credential_reset: false,
             environment: profile.environment,
@@ -804,6 +847,10 @@ impl ProfileDraft {
     }
 
     fn apply_parsed_url(&mut self, parsed: ParsedConnectionUrl) {
+        let preserve_opensearch_user = self.kind == DatabaseKind::OpenSearch
+            && parsed.kind == self.kind
+            && parsed.user.is_none()
+            && parsed.password.is_none();
         self.recent_drivers[usize::from(self.category() == DatabaseCategory::NonRelational)] =
             Some(self.kind);
         // URL credentials are always Basic Auth, never an API key.
@@ -812,7 +859,21 @@ impl ProfileDraft {
         {
             self.set_elasticsearch_auth(crate::profile::ElasticsearchAuth::Basic);
         }
-        if parsed.kind != DatabaseKind::Elasticsearch {
+        if self.kind == DatabaseKind::OpenSearch
+            && (parsed.kind != self.kind || parsed.user.is_some() || parsed.password.is_some())
+        {
+            self.set_opensearch_auth(crate::profile::OpenSearchAuth::Basic);
+        }
+        if self.kind != parsed.kind
+            && (self.kind == DatabaseKind::OpenSearch || parsed.kind == DatabaseKind::OpenSearch)
+        {
+            self.password = SecretTextInput::default();
+            self.has_stored_credential = false;
+            self.credential_reset = true;
+            self.credential_changed();
+            self.ca_cert_path.set("");
+            self.opensearch_auth = Default::default();
+        } else if !parsed.kind.is_search_rest() {
             self.ca_cert_path.set("");
         }
         self.kind = parsed.kind;
@@ -823,14 +884,32 @@ impl ProfileDraft {
         };
         self.url_format = parsed.format;
         self.mongodb_options = parsed.mongodb_options.clone();
-        if parsed.kind.is_postgres_compatible() {
+        if parsed.kind.is_postgres_compatible() || parsed.kind == DatabaseKind::BigQuery {
             self.pg_options = parsed.pg_options;
         }
         self.snowflake_options = parsed.snowflake_options.clone();
+        let bigquery = parsed.bigquery_options.unwrap_or_default();
+        self.credentials_file
+            .set(bigquery.credentials_file.unwrap_or_default());
+        self.location.set(bigquery.location.unwrap_or_default());
+        self.data_project
+            .set(bigquery.data_project.unwrap_or_default());
+        self.maximum_bytes_billed
+            .set(bigquery.maximum_bytes_billed.to_string());
+        self.query_timeout_secs
+            .set(bigquery.query_timeout_secs.to_string());
+        if parsed.kind == DatabaseKind::BigQuery {
+            self.password = SecretTextInput::default();
+            self.has_stored_credential = false;
+            self.credential_reset = true;
+            self.credential_changed();
+        }
         self.host.set(parsed.host.unwrap_or_default());
         self.port
             .set(parsed.port.map(|port| port.to_string()).unwrap_or_default());
-        self.user.set(parsed.user.unwrap_or_default());
+        if !preserve_opensearch_user {
+            self.user.set(parsed.user.unwrap_or_default());
+        }
         self.database.set(parsed.database.unwrap_or_default());
         self.schema.set(parsed.default_schema.unwrap_or_default());
         self.ssl_mode = parsed.ssl_mode;
@@ -1004,6 +1083,11 @@ impl ProfileDraft {
                 | ProfileField::Schema
                 | ProfileField::SqlitePath
                 | ProfileField::DuckDbPath
+                | ProfileField::CredentialsFile
+                | ProfileField::Location
+                | ProfileField::DataProject
+                | ProfileField::MaximumBytesBilled
+                | ProfileField::QueryTimeoutSecs
         ) {
             self.invalidate_catalog_discovery();
         }
@@ -1043,6 +1127,7 @@ impl ProfileDraft {
         if matches!(
             field,
             ProfileField::Database
+                | ProfileField::DataProject
                 | ProfileField::Schema
                 | ProfileField::SqlitePath
                 | ProfileField::DuckDbPath
@@ -1111,6 +1196,7 @@ impl ProfileDraft {
 
     pub fn visible_fields(&self) -> &'static [ProfileField] {
         match (self.kind, self.sqlite_memory) {
+            (DatabaseKind::BigQuery, _) => &BIGQUERY_FIELDS,
             (DatabaseKind::Postgres | DatabaseKind::CockroachDb, _) => &POSTGRES_FIELDS,
             (DatabaseKind::MySql, _) => &MYSQL_FIELDS,
             (DatabaseKind::SqlServer | DatabaseKind::Snowflake, _) => &POSTGRES_FIELDS,
@@ -1128,11 +1214,17 @@ impl ProfileDraft {
                 &ELASTICSEARCH_API_KEY_FIELDS
             }
             (DatabaseKind::Elasticsearch, _) => &ELASTICSEARCH_FIELDS,
+            (DatabaseKind::OpenSearch, _)
+                if self.opensearch_auth == crate::profile::OpenSearchAuth::None =>
+            {
+                &OPENSEARCH_NO_AUTH_FIELDS
+            }
+            (DatabaseKind::OpenSearch, _) => &OPENSEARCH_FIELDS,
         }
     }
 
     pub fn password_storage_choices(&self) -> &'static [PasswordStorageChoice] {
-        if self.kind == DatabaseKind::Sqlite {
+        if matches!(self.kind, DatabaseKind::Sqlite | DatabaseKind::BigQuery) {
             &[]
         } else if matches!(
             self.system_credential_availability,
@@ -1182,6 +1274,23 @@ impl ProfileDraft {
             mongodb_options,
             duckdb_path,
         ) = match self.kind {
+            DatabaseKind::BigQuery => {
+                let profile = self.connection_profile_for_url()?;
+                profile
+                    .validate_bigquery()
+                    .map_err(bigquery_validation_error)?;
+                (
+                    None,
+                    None,
+                    None,
+                    profile.database,
+                    profile.default_schema,
+                    None,
+                    SslMode::VerifyFull,
+                    None,
+                    None,
+                )
+            }
             DatabaseKind::Postgres
             | DatabaseKind::CockroachDb
             | DatabaseKind::MySql
@@ -1376,7 +1485,7 @@ impl ProfileDraft {
                     None,
                 )
             }
-            DatabaseKind::Elasticsearch => {
+            DatabaseKind::Elasticsearch | DatabaseKind::OpenSearch => {
                 let host = required(&self.host, ProfileField::Host, "host is required")?;
                 let port = self
                     .port
@@ -1394,11 +1503,13 @@ impl ProfileDraft {
                 if !self.url_format.is_compatible(self.kind) {
                     return Err(ProfileValidationError::new(
                         ProfileField::UrlFormat,
-                        "connection URL format is incompatible with Elasticsearch",
+                        "connection URL format is incompatible with the search driver",
                     ));
                 }
-                let expected_ssl_mode = if self.url_format == ConnectionUrlFormat::ElasticsearchTls
-                {
+                let expected_ssl_mode = if matches!(
+                    self.url_format,
+                    ConnectionUrlFormat::ElasticsearchTls | ConnectionUrlFormat::OpenSearchTls
+                ) {
                     SslMode::VerifyFull
                 } else {
                     SslMode::Disable
@@ -1406,7 +1517,7 @@ impl ProfileDraft {
                 if self.ssl_mode != expected_ssl_mode {
                     return Err(ProfileValidationError::new(
                         ProfileField::SslMode,
-                        "Elasticsearch URL format requires disabled TLS or full certificate verification",
+                        "search URL format requires disabled TLS or full certificate verification",
                     ));
                 }
                 if optional(&self.ca_cert_path).is_some() && self.ssl_mode != SslMode::VerifyFull {
@@ -1415,7 +1526,8 @@ impl ProfileDraft {
                         "CA certificate requires HTTPS with full certificate verification",
                     ));
                 }
-                if self.elasticsearch_auth == crate::profile::ElasticsearchAuth::ApiKey
+                if self.kind == DatabaseKind::Elasticsearch
+                    && self.elasticsearch_auth == crate::profile::ElasticsearchAuth::ApiKey
                     && self.password_len() == 0
                     && !self.has_stored_credential
                     && (self.credential_reset
@@ -1429,7 +1541,10 @@ impl ProfileDraft {
                 (
                     Some(host),
                     Some(port),
-                    (self.elasticsearch_auth == crate::profile::ElasticsearchAuth::Basic)
+                    ((self.kind == DatabaseKind::Elasticsearch
+                        && self.elasticsearch_auth == crate::profile::ElasticsearchAuth::Basic)
+                        || (self.kind == DatabaseKind::OpenSearch
+                            && self.opensearch_auth == crate::profile::OpenSearchAuth::Basic))
                         .then(|| optional(&self.user))
                         .flatten(),
                     optional(&self.database),
@@ -1505,14 +1620,22 @@ impl ProfileDraft {
         let catalog_scope = match self.catalog_scope_mode {
             CatalogScopeMode::Derived => CatalogScope::for_profile(
                 self.kind,
-                database.as_deref().unwrap_or_default(),
+                if self.kind == DatabaseKind::BigQuery {
+                    non_empty(&self.data_project).unwrap_or(database.as_deref().unwrap_or_default())
+                } else {
+                    database.as_deref().unwrap_or_default()
+                },
                 default_schema.as_deref(),
             ),
             CatalogScopeMode::Explicit => self.catalog_scope.clone(),
         };
         catalog_scope
             .validate(
-                database.as_deref().unwrap_or_default(),
+                if self.kind == DatabaseKind::BigQuery {
+                    non_empty(&self.data_project).unwrap_or(database.as_deref().unwrap_or_default())
+                } else {
+                    database.as_deref().unwrap_or_default()
+                },
                 default_schema.as_deref(),
             )
             .map_err(|error| {
@@ -1535,8 +1658,14 @@ impl ProfileDraft {
                 sqlite_path,
                 mongodb_options,
                 elasticsearch_options: self.elasticsearch_options(),
-                pg_options: self.pg_options.clone(),
-                snowflake_options: self.snowflake_options.clone(),
+                opensearch_options: self.opensearch_options(),
+                pg_options: (self.kind != DatabaseKind::BigQuery)
+                    .then(|| self.pg_options.clone())
+                    .flatten(),
+                snowflake_options: (self.kind != DatabaseKind::BigQuery)
+                    .then(|| self.snowflake_options.clone())
+                    .flatten(),
+                bigquery_options: self.bigquery_options()?,
                 duckdb_path,
                 ssl_mode,
                 credential_policy,
@@ -1549,6 +1678,51 @@ impl ProfileDraft {
         ))
     }
 
+    fn bigquery_options(
+        &self,
+    ) -> Result<Option<crate::profile::BigQueryOptions>, ProfileValidationError> {
+        if self.kind != DatabaseKind::BigQuery {
+            return Ok(None);
+        }
+        let number = |input: &TextInput, field, maximum| {
+            let raw = input.value().trim();
+            let invalid = || {
+                ProfileValidationError::new(
+                    field,
+                    format!("must be an integer from 1 to {maximum}"),
+                )
+            };
+            if raw.is_empty() || !raw.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err(invalid());
+            }
+            raw.parse::<u64>()
+                .ok()
+                .filter(|value| *value > 0 && *value <= maximum)
+                .ok_or_else(invalid)
+        };
+        let options = crate::profile::BigQueryOptions {
+            credentials_file: optional(&self.credentials_file),
+            location: optional(&self.location),
+            data_project: optional(&self.data_project),
+            maximum_bytes_billed: number(
+                &self.maximum_bytes_billed,
+                ProfileField::MaximumBytesBilled,
+                i64::MAX as u64,
+            )?,
+            query_timeout_secs: number(
+                &self.query_timeout_secs,
+                ProfileField::QueryTimeoutSecs,
+                86_400,
+            )?,
+        };
+        options.validate().map_err(|error| {
+            if matches!(&error, crate::profile::ProfileError::InvalidQueryParameter(name) if name == "project") {
+                ProfileValidationError::new(ProfileField::DataProject, error.to_string())
+            } else { bigquery_validation_error(error) }
+        })?;
+        Ok(Some(options))
+    }
+
     fn elasticsearch_options(&self) -> Option<crate::profile::ElasticsearchConnectionOptions> {
         (self.kind == DatabaseKind::Elasticsearch).then(|| {
             crate::profile::ElasticsearchConnectionOptions {
@@ -1556,6 +1730,27 @@ impl ProfileDraft {
                 ca_cert_path: optional(&self.ca_cert_path).map(PathBuf::from),
             }
         })
+    }
+
+    fn opensearch_options(&self) -> Option<crate::profile::OpenSearchConnectionOptions> {
+        (self.kind == DatabaseKind::OpenSearch).then(|| {
+            crate::profile::OpenSearchConnectionOptions {
+                auth: self.opensearch_auth,
+                ca_cert_path: optional(&self.ca_cert_path).map(PathBuf::from),
+            }
+        })
+    }
+
+    pub fn set_opensearch_auth(&mut self, auth: crate::profile::OpenSearchAuth) {
+        if self.opensearch_auth == auth {
+            return;
+        }
+        self.opensearch_auth = auth;
+        self.password = SecretTextInput::default();
+        self.has_stored_credential = false;
+        self.credential_reset = true;
+        self.credential_changed();
+        self.refresh_url();
     }
 
     pub fn set_elasticsearch_auth(&mut self, auth: crate::profile::ElasticsearchAuth) {
@@ -1572,7 +1767,12 @@ impl ProfileDraft {
     }
 
     fn credential_update(&self) -> CredentialUpdate {
-        if self.kind == DatabaseKind::Sqlite {
+        if self.kind == DatabaseKind::OpenSearch
+            && self.opensearch_auth == crate::profile::OpenSearchAuth::None
+        {
+            return CredentialUpdate::Forget;
+        }
+        if matches!(self.kind, DatabaseKind::Sqlite | DatabaseKind::BigQuery) {
             return if !matches!(self.original_credential_policy, CredentialPolicy::None) {
                 CredentialUpdate::Forget
             } else {
@@ -1603,6 +1803,10 @@ impl ProfileDraft {
             return;
         }
         let (database, default_schema) = match self.kind {
+            DatabaseKind::BigQuery => (
+                non_empty(&self.data_project).unwrap_or(self.database.value()),
+                optional(&self.schema),
+            ),
             DatabaseKind::Postgres
             | DatabaseKind::CockroachDb
             | DatabaseKind::SqlServer
@@ -1629,7 +1833,9 @@ impl ProfileDraft {
                 Some(optional(&self.schema).unwrap_or_else(|| "main".into())),
             ),
             DatabaseKind::Redis | DatabaseKind::Valkey => (self.database.value(), None),
-            DatabaseKind::MongoDb | DatabaseKind::Elasticsearch => (self.database.value(), None),
+            DatabaseKind::MongoDb | DatabaseKind::Elasticsearch | DatabaseKind::OpenSearch => {
+                (self.database.value(), None)
+            }
             DatabaseKind::ClickHouse => (
                 self.database.value(),
                 Some(self.database.value().to_owned()),
@@ -1649,6 +1855,11 @@ impl ProfileDraft {
             ProfileField::Schema => Some(&mut self.schema),
             ProfileField::SqlitePath => Some(&mut self.sqlite_path),
             ProfileField::DuckDbPath => Some(&mut self.duckdb_path),
+            ProfileField::CredentialsFile => Some(&mut self.credentials_file),
+            ProfileField::Location => Some(&mut self.location),
+            ProfileField::DataProject => Some(&mut self.data_project),
+            ProfileField::MaximumBytesBilled => Some(&mut self.maximum_bytes_billed),
+            ProfileField::QueryTimeoutSecs => Some(&mut self.query_timeout_secs),
             ProfileField::CaCertPath => Some(&mut self.ca_cert_path),
             _ => None,
         }
@@ -1671,6 +1882,11 @@ impl ProfileDraft {
             ProfileField::Schema => Some(&self.schema),
             ProfileField::SqlitePath => Some(&self.sqlite_path),
             ProfileField::DuckDbPath => Some(&self.duckdb_path),
+            ProfileField::CredentialsFile => Some(&self.credentials_file),
+            ProfileField::Location => Some(&self.location),
+            ProfileField::DataProject => Some(&self.data_project),
+            ProfileField::MaximumBytesBilled => Some(&self.maximum_bytes_billed),
+            ProfileField::QueryTimeoutSecs => Some(&self.query_timeout_secs),
             ProfileField::CaCertPath => Some(&self.ca_cert_path),
             _ => None,
         }
@@ -1726,6 +1942,14 @@ impl ProfileDraft {
             self.set_elasticsearch_auth(crate::profile::ElasticsearchAuth::Basic);
             self.ca_cert_path.set("");
         }
+        if self.kind == DatabaseKind::OpenSearch || kind == DatabaseKind::OpenSearch {
+            self.set_opensearch_auth(crate::profile::OpenSearchAuth::Basic);
+            self.password = SecretTextInput::default();
+            self.has_stored_credential = false;
+            self.credential_reset = true;
+            self.credential_changed();
+            self.ca_cert_path.set("");
+        }
         let previous = self.kind;
         self.recent_drivers[usize::from(self.category() == DatabaseCategory::NonRelational)] =
             Some(previous);
@@ -1747,6 +1971,17 @@ impl ProfileDraft {
             ConnectionUrlFormat::default_for(kind)
         };
         match kind {
+            DatabaseKind::BigQuery => {
+                self.host.set("");
+                self.port.set("");
+                self.user.set("");
+                self.password = SecretTextInput::default();
+                self.has_stored_credential = false;
+                self.credential_reset = true;
+                self.credential_changed();
+                self.schema.set("");
+                self.ssl_mode = SslMode::VerifyFull;
+            }
             DatabaseKind::Snowflake => {
                 self.ssl_mode = SslMode::VerifyFull;
                 if self.schema.value().trim().is_empty()
@@ -1859,7 +2094,7 @@ impl ProfileDraft {
                     self.ssl_mode = SslMode::Disable;
                 }
             }
-            DatabaseKind::Elasticsearch => {
+            DatabaseKind::Elasticsearch | DatabaseKind::OpenSearch => {
                 if self.host.value().trim().is_empty() {
                     self.host.set("localhost");
                 }
@@ -1929,6 +2164,23 @@ impl ProfileDraft {
 
     fn connection_profile_for_url(&self) -> Result<ConnectionProfile, ProfileValidationError> {
         let (host, port, user, database, default_schema, sqlite_path) = match self.kind {
+            DatabaseKind::BigQuery => {
+                let project = required(
+                    &self.database,
+                    ProfileField::Database,
+                    "execution / billing project is required",
+                )?;
+                crate::profile::validate_bigquery_project(&project)
+                    .map_err(bigquery_validation_error)?;
+                (
+                    None,
+                    None,
+                    None,
+                    Some(project),
+                    optional(&self.schema),
+                    None,
+                )
+            }
             DatabaseKind::DuckDb => {
                 let raw = optional(&self.duckdb_path);
                 if raw.is_none() && self.read_only {
@@ -2107,7 +2359,7 @@ impl ProfileDraft {
                     path,
                 )
             }
-            DatabaseKind::Elasticsearch => {
+            DatabaseKind::Elasticsearch | DatabaseKind::OpenSearch => {
                 let host = required(&self.host, ProfileField::Host, "host is required")?;
                 let port = self
                     .port
@@ -2176,10 +2428,18 @@ impl ProfileDraft {
             database,
             default_schema,
             sqlite_path,
-            mongodb_options: self.mongodb_options.clone(),
+            mongodb_options: (self.kind != DatabaseKind::BigQuery)
+                .then(|| self.mongodb_options.clone())
+                .flatten(),
             elasticsearch_options: self.elasticsearch_options(),
-            pg_options: self.pg_options.clone(),
-            snowflake_options: self.snowflake_options.clone(),
+            opensearch_options: self.opensearch_options(),
+            pg_options: (self.kind != DatabaseKind::BigQuery)
+                .then(|| self.pg_options.clone())
+                .flatten(),
+            snowflake_options: (self.kind != DatabaseKind::BigQuery)
+                .then(|| self.snowflake_options.clone())
+                .flatten(),
+            bigquery_options: self.bigquery_options()?,
             duckdb_path: (self.kind == DatabaseKind::DuckDb)
                 .then(|| optional(&self.duckdb_path).map(PathBuf::from))
                 .flatten(),
@@ -2850,8 +3110,11 @@ impl ProfileManagerState {
                     ConnectionUrlFormat::compatible_formats(draft.kind),
                     delta,
                 );
-                if draft.kind == DatabaseKind::Elasticsearch {
-                    draft.ssl_mode = if draft.url_format == ConnectionUrlFormat::ElasticsearchTls {
+                if draft.kind.is_search_rest() {
+                    draft.ssl_mode = if matches!(
+                        draft.url_format,
+                        ConnectionUrlFormat::ElasticsearchTls | ConnectionUrlFormat::OpenSearchTls
+                    ) {
                         SslMode::VerifyFull
                     } else {
                         SslMode::Disable
@@ -2869,8 +3132,18 @@ impl ProfileManagerState {
                     delta,
                 ));
             }
+            ProfileField::OpenSearchAuth => {
+                draft.set_opensearch_auth(cycle_value(
+                    draft.opensearch_auth,
+                    &[
+                        crate::profile::OpenSearchAuth::Basic,
+                        crate::profile::OpenSearchAuth::None,
+                    ],
+                    delta,
+                ));
+            }
             ProfileField::SslMode => {
-                let choices: &[SslMode] = if draft.kind == DatabaseKind::Elasticsearch {
+                let choices: &[SslMode] = if draft.kind.is_search_rest() {
                     &[SslMode::Disable, SslMode::VerifyFull]
                 } else if draft.kind == DatabaseKind::Snowflake {
                     &[SslMode::VerifyFull]
@@ -2889,11 +3162,14 @@ impl ProfileManagerState {
                 if draft.kind.is_redis_compatible() {
                     draft.url_format = redis_compatible_url_format(draft.kind, draft.ssl_mode);
                 }
-                if draft.kind == DatabaseKind::Elasticsearch {
-                    draft.url_format = if draft.ssl_mode == SslMode::Disable {
-                        ConnectionUrlFormat::Elasticsearch
-                    } else {
-                        ConnectionUrlFormat::ElasticsearchTls
+                if draft.kind.is_search_rest() {
+                    draft.url_format = match (draft.kind, draft.ssl_mode) {
+                        (DatabaseKind::OpenSearch, SslMode::Disable) => {
+                            ConnectionUrlFormat::OpenSearch
+                        }
+                        (DatabaseKind::OpenSearch, _) => ConnectionUrlFormat::OpenSearchTls,
+                        (_, SslMode::Disable) => ConnectionUrlFormat::Elasticsearch,
+                        _ => ConnectionUrlFormat::ElasticsearchTls,
                     };
                 }
                 draft.invalidate_catalog_discovery();
@@ -2993,6 +3269,20 @@ fn non_empty(input: &TextInput) -> Option<&str> {
     (!value.is_empty()).then_some(value)
 }
 
+fn bigquery_validation_error(error: crate::profile::ProfileError) -> ProfileValidationError {
+    let field = match &error {
+        crate::profile::ProfileError::InvalidQueryParameter(name) => match name.as_str() {
+            "project" => ProfileField::Database,
+            "dataset" => ProfileField::Schema,
+            "credentials_file" => ProfileField::CredentialsFile,
+            "location" => ProfileField::Location,
+            _ => ProfileField::Url,
+        },
+        _ => ProfileField::Url,
+    };
+    ProfileValidationError::new(field, error.to_string())
+}
+
 fn default_port(kind: DatabaseKind) -> Option<u16> {
     match kind {
         DatabaseKind::Postgres => Some(5432),
@@ -3001,11 +3291,11 @@ fn default_port(kind: DatabaseKind) -> Option<u16> {
         DatabaseKind::TiDb => Some(4000),
         DatabaseKind::Oracle => Some(1521),
         DatabaseKind::SqlServer => Some(1433),
-        DatabaseKind::Sqlite | DatabaseKind::DuckDb => None,
+        DatabaseKind::Sqlite | DatabaseKind::DuckDb | DatabaseKind::BigQuery => None,
         DatabaseKind::Redis | DatabaseKind::Valkey => Some(6379),
         DatabaseKind::MongoDb => Some(27017),
         DatabaseKind::ClickHouse => Some(8123),
-        DatabaseKind::Elasticsearch => Some(9200),
+        DatabaseKind::Elasticsearch | DatabaseKind::OpenSearch => Some(9200),
         DatabaseKind::Snowflake => Some(443),
     }
 }
@@ -3342,6 +3632,26 @@ fn redact_url_query_passwords(value: &str) -> String {
     crate::security::redact_url_query_credentials(value)
 }
 
+const BIGQUERY_FIELDS: [ProfileField; 17] = [
+    ProfileField::DatabaseCategory,
+    ProfileField::Kind,
+    ProfileField::Name,
+    ProfileField::Database,
+    ProfileField::Schema,
+    ProfileField::DataProject,
+    ProfileField::VisibleObjects,
+    ProfileField::CredentialsFile,
+    ProfileField::Location,
+    ProfileField::MaximumBytesBilled,
+    ProfileField::QueryTimeoutSecs,
+    ProfileField::Environment,
+    ProfileField::ReadOnly,
+    ProfileField::Url,
+    ProfileField::Test,
+    ProfileField::Save,
+    ProfileField::Cancel,
+];
+
 const POSTGRES_FIELDS: [ProfileField; 18] = [
     ProfileField::DatabaseCategory,
     ProfileField::Kind,
@@ -3395,6 +3705,47 @@ const ELASTICSEARCH_FIELDS: [ProfileField; 19] = [
     ProfileField::User,
     ProfileField::Password,
     ProfileField::PasswordStorage,
+    ProfileField::SslMode,
+    ProfileField::CaCertPath,
+    ProfileField::Environment,
+    ProfileField::ReadOnly,
+    ProfileField::Url,
+    ProfileField::Test,
+    ProfileField::Save,
+    ProfileField::Cancel,
+];
+
+const OPENSEARCH_FIELDS: [ProfileField; 19] = [
+    ProfileField::DatabaseCategory,
+    ProfileField::Kind,
+    ProfileField::Name,
+    ProfileField::Host,
+    ProfileField::Port,
+    ProfileField::Database,
+    ProfileField::VisibleObjects,
+    ProfileField::OpenSearchAuth,
+    ProfileField::User,
+    ProfileField::Password,
+    ProfileField::PasswordStorage,
+    ProfileField::SslMode,
+    ProfileField::CaCertPath,
+    ProfileField::Environment,
+    ProfileField::ReadOnly,
+    ProfileField::Url,
+    ProfileField::Test,
+    ProfileField::Save,
+    ProfileField::Cancel,
+];
+
+const OPENSEARCH_NO_AUTH_FIELDS: [ProfileField; 16] = [
+    ProfileField::DatabaseCategory,
+    ProfileField::Kind,
+    ProfileField::Name,
+    ProfileField::Host,
+    ProfileField::Port,
+    ProfileField::Database,
+    ProfileField::VisibleObjects,
+    ProfileField::OpenSearchAuth,
     ProfileField::SslMode,
     ProfileField::CaCertPath,
     ProfileField::Environment,

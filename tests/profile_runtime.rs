@@ -320,6 +320,53 @@ async fn snowflake_scope_changes_require_a_new_connection_without_changing_other
 }
 
 #[tokio::test]
+async fn adapter_read_only_changes_require_reconnect_in_both_directions() {
+    for url in [
+        "opensearch://localhost",
+        "elasticsearch://localhost",
+        "bigquery://billing-project/analytics",
+        ":memory:",
+    ] {
+        let temp = TempDir::new().unwrap();
+        let store = ProfileStore::new(temp.path().join("connections.toml"));
+        let mut profile = import_connection_url(url, None).unwrap().profile;
+        store.save(vec![profile.clone()]).unwrap();
+        let (mut runtime, mut receiver) = runtime(
+            vec![profile.clone()],
+            HashSet::from([profile.id]),
+            store,
+            Arc::new(FakeSecretStore::default()),
+        );
+        for (request_id, read_only) in [(1, true), (2, false)] {
+            profile.read_only = read_only;
+            runtime.dispatch(Command::SaveProfile {
+                request_id,
+                submission: submission(profile.clone(), CredentialUpdate::Preserve),
+                connect: false,
+            });
+            match next_action(&mut receiver).await {
+                Action::ProfileSaved {
+                    change,
+                    profile: saved,
+                    ..
+                } => {
+                    assert_eq!(saved.read_only, read_only);
+                    let reconnect = profile.kind.is_search_rest()
+                        || profile.kind == lazydb::profile::DatabaseKind::BigQuery;
+                    assert_eq!(change.connection_settings_changed, reconnect);
+                    assert_eq!(change.display_only_changed, !reconnect);
+                    assert!(!change.credentials_changed);
+                    assert!(!change.catalog_scope_changed);
+                    profile = saved;
+                }
+                action => panic!("unexpected action: {action:?}"),
+            }
+        }
+        runtime.shutdown().await;
+    }
+}
+
+#[tokio::test]
 async fn session_password_is_never_persisted_or_sent_to_keyring() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("connections.toml");
@@ -1250,5 +1297,67 @@ async fn app_changes_only_after_runtime_completion_is_applied() {
     assert!(app.profiles.is_empty());
     app.update(completion);
     assert_eq!(app.profiles.len(), 1);
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn bigquery_option_edits_invalidate_connections() {
+    use lazydb::profile::BigQueryOptions;
+    let temp = TempDir::new().unwrap();
+    let store = ProfileStore::new(temp.path().join("connections.toml"));
+    let original = import_connection_url("bigquery://billing-project/analytics", None)
+        .unwrap()
+        .profile;
+    store.save(vec![original.clone()]).unwrap();
+    let (mut runtime, mut receiver) = runtime(
+        vec![original.clone()],
+        HashSet::from([original.id]),
+        store,
+        Arc::new(FakeSecretStore::default()),
+    );
+    let defaults = BigQueryOptions::default();
+    for (index, options) in [
+        BigQueryOptions {
+            credentials_file: Some("/test/adc.json".into()),
+            ..defaults.clone()
+        },
+        BigQueryOptions {
+            location: Some("EU".into()),
+            ..defaults.clone()
+        },
+        BigQueryOptions {
+            data_project: Some("data-project".into()),
+            ..defaults.clone()
+        },
+        BigQueryOptions {
+            maximum_bytes_billed: 2_000_000_000,
+            ..defaults.clone()
+        },
+        BigQueryOptions {
+            query_timeout_secs: 60,
+            ..defaults
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        // Reset between cases so each option independently proves invalidation.
+        for (offset, options) in [Some(options), original.bigquery_options.clone()]
+            .into_iter()
+            .enumerate()
+        {
+            let mut edited = original.clone();
+            edited.bigquery_options = options;
+            runtime.dispatch(Command::SaveProfile {
+                request_id: (index * 2 + offset) as u64 + 1,
+                submission: submission(edited, CredentialUpdate::Preserve),
+                connect: false,
+            });
+            match next_action(&mut receiver).await {
+                Action::ProfileSaved { change, .. } => assert!(change.connection_settings_changed),
+                action => panic!("unexpected action: {action:?}"),
+            }
+        }
+    }
     runtime.shutdown().await;
 }

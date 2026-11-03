@@ -190,11 +190,19 @@ pub(crate) fn render(
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(2), Constraint::Min(1)])
         .split(area);
+    let native_rest = app.profiles.iter().any(|profile| {
+        profile.id == tab.descriptor.key.profile_id && profile.kind.is_search_rest()
+    });
+    let labels: &[&str] = if native_rest {
+        &["DATA"]
+    } else {
+        &["DATA", "DDL"]
+    };
     let regions = super::render_tab_selectors(
         frame,
         chunks[0],
-        &["DATA", "DDL"],
-        usize::from(tab.view == RelationView::Ddl),
+        labels,
+        usize::from(!native_rest && tab.view == RelationView::Ddl),
         theme,
     );
     for (region, view) in regions
@@ -694,30 +702,6 @@ fn render_document_fields(
     }
 }
 
-pub(crate) fn ddl_editor_viewport(area: Rect, app: &App) -> Option<(uuid::Uuid, EditorViewport)> {
-    let Some(WorkspaceTab::Relation(tab)) = app.tabs.get(app.active_tab) else {
-        return None;
-    };
-    if tab.view != RelationView::Ddl {
-        return None;
-    }
-    let status = !matches!(tab.ddl, RelationLoad::Ready(_));
-    let layout = relation_ddl_layout(area, status);
-    let inner = panel_block(
-        " RELATION DDL ",
-        app.focus == Focus::Results,
-        Theme::default(),
-    )
-    .inner(layout[1]);
-    Some((
-        tab.ddl_editor_id,
-        EditorViewport {
-            width: inner.width as usize,
-            height: inner.height as usize,
-        },
-    ))
-}
-
 fn register_json_selection_target(
     state: &mut super::UiState,
     tab_id: uuid::Uuid,
@@ -1032,6 +1016,9 @@ fn render_data(
     let Some(WorkspaceTab::Relation(tab)) = app.tabs.get(app.active_tab) else {
         return;
     };
+    let native_rest = app.profiles.iter().any(|profile| {
+        profile.id == tab.descriptor.key.profile_id && profile.kind.is_search_rest()
+    });
     let (snapshot, status) = match &tab.data {
         RelationLoad::Ready(snapshot) => (Some(snapshot), None),
         RelationLoad::Loading { previous, .. } => (
@@ -1096,7 +1083,11 @@ fn render_data(
         let block = panel_block(" RELATION DATA ", app.focus == Focus::Results, theme);
         let inner = block.inner(area);
         frame.render_widget(block, area);
-        let query_height = super::query_bar::height(&tab.query, inner.width, state.activity_icons);
+        let query_height = if native_rest {
+            0
+        } else {
+            super::query_bar::height(&tab.query, inner.width, state.activity_icons)
+        };
         let body = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -1149,6 +1140,7 @@ fn render_data(
                 .as_deref()
                 .unwrap_or_default(),
             app.sql_dialect(),
+            !native_rest,
         );
         let sql = sanitize_terminal_text(&snapshot.value.sql);
         let footer = body[3];
@@ -1227,11 +1219,11 @@ fn render_data(
         let body = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(super::query_bar::height(
-                    &tab.query,
-                    inner.width,
-                    state.activity_icons,
-                )),
+                Constraint::Length(if native_rest {
+                    0
+                } else {
+                    super::query_bar::height(&tab.query, inner.width, state.activity_icons)
+                }),
                 Constraint::Min(1),
                 Constraint::Length(1),
             ])
@@ -1375,6 +1367,7 @@ fn render_relation_result_table(
     edit: Option<&crate::model::relation_edit::RelationEditSession>,
     order_by_clause: &str,
     dialect: crate::sql::SqlDialect,
+    sort_interactive: bool,
 ) {
     let icons = state.activity_icons;
     let column_names = result
@@ -1398,8 +1391,8 @@ fn render_relation_result_table(
         state,
         edit,
         icons,
-        Some(sort_projection.as_slice()),
-        true,
+        sort_interactive.then_some(sort_projection.as_slice()),
+        sort_interactive,
     );
 }
 
@@ -1475,7 +1468,7 @@ fn render_ddl(
     area: Rect,
     app: &App,
     theme: Theme,
-    _state: &mut super::UiState,
+    state: &mut super::UiState,
 ) {
     let Some(WorkspaceTab::Relation(tab)) = app.tabs.get(app.active_tab) else {
         return;
@@ -1489,14 +1482,26 @@ fn render_ddl(
     };
     let mut block = panel_block(" RELATION DDL ", app.focus == Focus::Results, theme);
     let chunks = relation_ddl_layout(area, status.is_some());
-    let viewport = {
-        let inner = block.inner(chunks[1]);
-        EditorViewport {
-            width: inner.width as usize,
-            height: inner.height as usize,
-        }
+    let inner = block.inner(chunks[1]);
+    let preliminary_viewport = EditorViewport {
+        width: usize::from(inner.width),
+        height: usize::from(inner.height),
     };
-    let editor_snapshot = app.active_ddl_editor_snapshot(viewport).ok();
+    // A newly opened relation may not have an editor session yet. Publish the
+    // initial pane so runtime sync can create it, then redraw with text geometry.
+    state.ddl_editor_viewport = Some((tab.ddl_editor_id, preliminary_viewport));
+    let editor_snapshot = app
+        .active_ddl_editor_snapshot(preliminary_viewport)
+        .ok()
+        .and_then(|snapshot| {
+            let viewport = super::read_only_sql::editor_viewport(inner, &snapshot, true);
+            state.ddl_editor_viewport = Some((tab.ddl_editor_id, viewport));
+            if viewport == preliminary_viewport {
+                Some(snapshot)
+            } else {
+                app.active_ddl_editor_snapshot(viewport).ok()
+            }
+        });
     let snapshot = match &tab.ddl {
         RelationLoad::Ready(snapshot)
         | RelationLoad::Loading {
@@ -1572,19 +1577,19 @@ fn render_ddl(
                 chunks[0],
                 message,
                 theme,
-                _state,
+                state,
                 tab,
                 RelationView::Ddl,
             );
         } else {
-            render_status(frame, chunks[0], message, retry, cancel, theme, _state);
+            render_status(frame, chunks[0], message, retry, cancel, theme, state);
         }
         render_ddl_editor(
             frame,
             chunks[1],
             app,
             theme,
-            _state,
+            state,
             block,
             editor_snapshot.as_ref(),
         );
@@ -1595,7 +1600,7 @@ fn render_ddl(
         chunks[1],
         app,
         theme,
-        _state,
+        state,
         block,
         editor_snapshot.as_ref(),
     );

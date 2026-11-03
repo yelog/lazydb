@@ -71,6 +71,8 @@ pub struct QueryOutcomeJson {
     pub truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bigquery: Option<crate::db::query::BigQueryJobStats>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -97,6 +99,7 @@ impl From<QueryOutcome> for QueryOutcomeJson {
             row_count: outcome.stats.row_count,
             truncated: outcome.stats.truncated,
             response_error: outcome.stats.response_error,
+            bigquery: outcome.stats.bigquery.map(|stats| *stats),
         }
     }
 }

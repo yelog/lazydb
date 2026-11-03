@@ -195,7 +195,7 @@ fn render_form(
         } else {
             error.message.clone()
         }
-    } else if manager.selected_field == ProfileField::Url {
+    } else if manager.selected_field == ProfileField::Url || draft.kind == DatabaseKind::BigQuery {
         url_help(draft.kind).to_owned()
     } else {
         String::new()
@@ -977,6 +977,55 @@ mod tests {
     };
 
     #[test]
+    fn bigquery_form_renders_billing_dataset_adc_and_limits_without_password() {
+        let mut app = App::new(Vec::new());
+        let mut manager = ProfileManagerState::new(false);
+        manager.start_new(DatabaseKind::BigQuery);
+        let draft = manager.draft.as_mut().unwrap();
+        draft.name.set("BigQuery");
+        draft.paste(ProfileField::Database, "billing-project");
+        draft.paste(ProfileField::Schema, "analytics");
+        app.profile_manager = Some(manager);
+        let mut terminal = Terminal::new(TestBackend::new(120, 42)).unwrap();
+        let mut state = UiState::default();
+        terminal
+            .draw(|frame| {
+                render_profile_manager(
+                    frame,
+                    frame.area(),
+                    &app,
+                    &mut state,
+                    Theme::default(),
+                    IconSet::default(),
+                );
+            })
+            .unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        for label in [
+            "Billing project",
+            "Default dataset",
+            "Data project",
+            "ADC file",
+            "Location",
+            "Max billed bytes",
+            "Query timeout",
+            "1000000000",
+            "120",
+        ] {
+            assert!(text.contains(label), "missing {label}");
+        }
+        assert!(!text.contains("Password"));
+        assert!(!text.contains("SSL mode"));
+        assert!(text.contains("Application Default Credentials"));
+    }
+
+    #[test]
     fn delete_confirmation_shows_error_without_hiding_actions() {
         let mut app = App::new(Vec::new());
         let mut manager = ProfileManagerState {
@@ -1235,6 +1284,11 @@ fn is_text_field(field: ProfileField) -> bool {
             | ProfileField::SqlitePath
             | ProfileField::DuckDbPath
             | ProfileField::CaCertPath
+            | ProfileField::CredentialsFile
+            | ProfileField::Location
+            | ProfileField::DataProject
+            | ProfileField::MaximumBytesBilled
+            | ProfileField::QueryTimeoutSecs
     )
 }
 
@@ -1243,6 +1297,7 @@ fn is_cycle_field(field: ProfileField) -> bool {
         field,
         ProfileField::UrlFormat
             | ProfileField::ElasticsearchAuth
+            | ProfileField::OpenSearchAuth
             | ProfileField::SslMode
             | ProfileField::Environment
             | ProfileField::PasswordStorage
@@ -1333,16 +1388,22 @@ fn field_section(field: ProfileField) -> Option<FormSection> {
         | ProfileField::Host
         | ProfileField::Port
         | ProfileField::Database
+        | ProfileField::DataProject
         | ProfileField::Schema
         | ProfileField::VisibleObjects
         | ProfileField::SqliteMemory
         | ProfileField::SqlitePath
         | ProfileField::DuckDbPath => Some(FormSection::Connection),
-        ProfileField::ElasticsearchAuth
+        ProfileField::CredentialsFile
+        | ProfileField::ElasticsearchAuth
+        | ProfileField::OpenSearchAuth
         | ProfileField::User
         | ProfileField::Password
         | ProfileField::PasswordStorage => Some(FormSection::Authentication),
-        ProfileField::CaCertPath
+        ProfileField::Location
+        | ProfileField::MaximumBytesBilled
+        | ProfileField::QueryTimeoutSecs
+        | ProfileField::CaCertPath
         | ProfileField::SslMode
         | ProfileField::Environment
         | ProfileField::ReadOnly => Some(FormSection::Options),
@@ -1399,6 +1460,11 @@ fn text_input(draft: &ProfileDraft, field: ProfileField) -> Option<&TextInput> {
         ProfileField::Schema => Some(&draft.schema),
         ProfileField::SqlitePath => Some(&draft.sqlite_path),
         ProfileField::DuckDbPath => Some(&draft.duckdb_path),
+        ProfileField::CredentialsFile => Some(&draft.credentials_file),
+        ProfileField::Location => Some(&draft.location),
+        ProfileField::DataProject => Some(&draft.data_project),
+        ProfileField::MaximumBytesBilled => Some(&draft.maximum_bytes_billed),
+        ProfileField::QueryTimeoutSecs => Some(&draft.query_timeout_secs),
         ProfileField::CaCertPath => Some(&draft.ca_cert_path),
         _ => None,
     }
@@ -1438,6 +1504,18 @@ fn field_value(draft: &ProfileDraft, field: ProfileField) -> String {
                 crate::profile::ElasticsearchAuth::ApiKey => "API Key",
             }
         ),
+        ProfileField::OpenSearchAuth => format!(
+            "‹ {} ›",
+            match draft.opensearch_auth {
+                crate::profile::OpenSearchAuth::Basic => "Basic Auth",
+                crate::profile::OpenSearchAuth::None => "None",
+            }
+        ),
+        ProfileField::CredentialsFile => safe_line(draft.credentials_file.value()),
+        ProfileField::Location => safe_line(draft.location.value()),
+        ProfileField::DataProject => safe_line(draft.data_project.value()),
+        ProfileField::MaximumBytesBilled => safe_line(draft.maximum_bytes_billed.value()),
+        ProfileField::QueryTimeoutSecs => safe_line(draft.query_timeout_secs.value()),
         ProfileField::CaCertPath => safe_line(draft.ca_cert_path.value()),
         ProfileField::SslMode => format!("‹ {} ›", ssl_name(draft.ssl_mode)),
         ProfileField::Environment => format!("‹ {} ›", environment_name(draft.environment)),
@@ -1454,6 +1532,9 @@ fn field_value(draft: &ProfileDraft, field: ProfileField) -> String {
 
 fn url_help(kind: DatabaseKind) -> &'static str {
     match kind {
+        DatabaseKind::BigQuery => {
+            "Application Default Credentials (ADC); optional file path. URL: bigquery://project/dataset"
+        }
         DatabaseKind::Postgres => "Accepts postgres://, postgresql://, and jdbc:postgresql://",
         DatabaseKind::CockroachDb => {
             "Accepts cockroachdb://, postgres://, postgresql://, and jdbc:postgresql://"
@@ -1472,6 +1553,7 @@ fn url_help(kind: DatabaseKind) -> &'static str {
         DatabaseKind::Elasticsearch => {
             "Accepts elasticsearch:// (HTTP) and elasticsearchs:// (HTTPS)"
         }
+        DatabaseKind::OpenSearch => "Accepts opensearch:// (HTTP) and opensearchs:// (HTTPS)",
         DatabaseKind::Snowflake => {
             "Accepts snowflake://user:token@full-host/database?warehouse=...&role=..."
         }
@@ -1491,11 +1573,18 @@ fn field_label(field: ProfileField, kind: DatabaseKind) -> &'static str {
         ProfileField::Password if kind == DatabaseKind::Snowflake => "Access token",
         ProfileField::Password => "Password",
         ProfileField::Database if kind == DatabaseKind::Oracle => "Service Name",
-        ProfileField::Database if kind == DatabaseKind::Elasticsearch => "Namespace (optional)",
+        ProfileField::Database if kind.is_search_rest() => "Namespace (optional)",
+        ProfileField::Database if kind == DatabaseKind::BigQuery => "Billing project",
         ProfileField::Database => "Database",
+        ProfileField::Schema if kind == DatabaseKind::BigQuery => "Default dataset",
+        ProfileField::CredentialsFile => "ADC file (optional)",
+        ProfileField::Location => "Location (optional)",
+        ProfileField::DataProject => "Data project (optional)",
+        ProfileField::MaximumBytesBilled => "Max billed bytes",
+        ProfileField::QueryTimeoutSecs => "Query timeout (secs)",
         ProfileField::Schema => "Default schema",
         ProfileField::VisibleObjects => "Visible objects",
-        ProfileField::ElasticsearchAuth => "Authentication",
+        ProfileField::ElasticsearchAuth | ProfileField::OpenSearchAuth => "Authentication",
         ProfileField::CaCertPath => "CA file (optional)",
         ProfileField::SslMode => "SSL mode",
         ProfileField::Environment => "Environment",

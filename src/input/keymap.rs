@@ -421,6 +421,13 @@ impl Keymap {
                 }
             });
         }
+        if app.overlay.is_none()
+            && is_ddl_only_focus(app)
+            && let Some(session_id) = ddl_only_session_id(app)
+            && app.editor_prompt_active(session_id)
+        {
+            return Some(Action::ReadOnlyEditorKey { session_id, event });
+        }
         if matches!(app.overlay, Some(Overlay::SqlHistory(_))) {
             self.pending = None;
             if let Some(crate::model::workspace::Overlay::SqlHistory(view)) = app.overlay.as_ref()
@@ -5291,6 +5298,11 @@ fn is_text_field(field: ProfileField) -> bool {
             | ProfileField::Schema
             | ProfileField::SqlitePath
             | ProfileField::CaCertPath
+            | ProfileField::CredentialsFile
+            | ProfileField::Location
+            | ProfileField::DataProject
+            | ProfileField::MaximumBytesBilled
+            | ProfileField::QueryTimeoutSecs
     )
 }
 
@@ -5303,6 +5315,7 @@ fn is_cycle_field(field: ProfileField) -> bool {
         field,
         ProfileField::UrlFormat
             | ProfileField::ElasticsearchAuth
+            | ProfileField::OpenSearchAuth
             | ProfileField::SslMode
             | ProfileField::Environment
             | ProfileField::PasswordStorage
@@ -5474,7 +5487,11 @@ fn is_read_only_editor_key(event: KeyEvent) -> bool {
         KeyCode::Char('c') if event.modifiers == KeyModifiers::CONTROL => false,
         KeyCode::Char('w') if event.modifiers == KeyModifiers::CONTROL => false,
         KeyCode::F(1 | 5) | KeyCode::Tab | KeyCode::BackTab => false,
-        _ => event.modifiers.is_empty() || event.modifiers == KeyModifiers::CONTROL,
+        _ => {
+            event.modifiers.is_empty()
+                || event.modifiers == KeyModifiers::CONTROL
+                || event.modifiers == KeyModifiers::SHIFT
+        }
     }
 }
 

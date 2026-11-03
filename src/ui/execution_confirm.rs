@@ -26,15 +26,20 @@ struct Summary {
     warning: Option<String>,
 }
 
-fn is_elasticsearch(draft: &ExecutionDraft, app: &App) -> bool {
-    app.profiles.iter().any(|profile| {
-        profile.id == draft.target.profile_id
-            && profile.kind == crate::profile::DatabaseKind::Elasticsearch
-    })
+fn is_search_rest(draft: &ExecutionDraft, app: &App) -> bool {
+    app.profiles
+        .iter()
+        .any(|profile| profile.id == draft.target.profile_id && profile.kind.is_search_rest())
 }
 
 fn summary(draft: &ExecutionDraft, app: &App) -> Summary {
-    let elasticsearch = is_elasticsearch(draft, app);
+    let native_rest = is_search_rest(draft, app);
+    let product = app
+        .profiles
+        .iter()
+        .find(|profile| profile.id == draft.target.profile_id)
+        .map(|profile| crate::db::descriptor::descriptor(profile.kind).display_name)
+        .unwrap_or("Search REST");
     let scope = match draft.scope {
         crate::sql::ScopeKind::VisualChar => "Selected text",
         crate::sql::ScopeKind::VisualLine => "Selected lines",
@@ -99,7 +104,7 @@ fn summary(draft: &ExecutionDraft, app: &App) -> Summary {
             draft.target.schema.as_deref().unwrap_or("none")
         )
     };
-    let title = if elasticsearch {
+    let title = if native_rest {
         "Execute REST request?".into()
     } else if has_unknown || draft.statement_count == 0 {
         "Execute selected SQL?".into()
@@ -112,24 +117,23 @@ fn summary(draft: &ExecutionDraft, app: &App) -> Summary {
     };
     Summary {
         title,
-        scope: if elasticsearch {
+        scope: if native_rest {
             format!("Connection: {connection}\nScope: One complete REST request")
         } else {
             format!("{target}\nScope: {scope}")
         },
-        reason: if elasticsearch {
-            "Review the REST request before sending it to Elasticsearch."
+        reason: if native_rest {
+            format!("Review the REST request before sending it to {product}.")
         } else {
-            "Review the selected SQL before execution."
-        }
-        .into(),
+            "Review the selected SQL before execution.".into()
+        },
         risks: if counts.is_empty() {
             "Effects could not be fully determined".into()
         } else {
             counts.join("; ")
         },
-        transaction: if elasticsearch {
-            "Unavailable; Elasticsearch requests cannot be rolled back here".into()
+        transaction: if native_rest {
+            format!("Unavailable; {product} requests cannot be rolled back here")
         } else {
             transaction
         },
@@ -203,7 +207,7 @@ pub(crate) fn render(
     let mut preview_lines = vec![Line::from(Span::styled(
         format!(
             "{} preview  Lines {}-{} of {}",
-            if is_elasticsearch(draft, app) {
+            if is_search_rest(draft, app) {
                 "REST"
             } else {
                 "SQL"
