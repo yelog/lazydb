@@ -4576,6 +4576,7 @@ impl App {
                         | Action::CancelTransactionMenu
                         | Action::RelationCommit
                         | Action::RelationRollback
+                        | Action::ConfirmTransactionExitChoice(_)
                         | Action::RelationTransactionStarted { .. }
                         | Action::RelationTransactionStartFailed { .. }
                         | Action::RelationMutationSucceeded { .. }
@@ -19713,6 +19714,14 @@ impl App {
         else {
             return Vec::new();
         };
+        if tab
+            .edit
+            .as_ref()
+            .is_some_and(|edit| edit.pending_mongodb_delete.is_some())
+        {
+            self.notify_warning("Relation", "Wait for the document deletion to finish");
+            return Vec::new();
+        }
         let has_dirty_rows = tab.edit.as_ref().is_some_and(|edit| {
             edit.rows.iter().any(|row| {
                 !matches!(
@@ -19724,7 +19733,31 @@ impl App {
         if tab.transaction_state == TransactionState::Idle && !has_dirty_rows {
             return Vec::new();
         }
-        let sql = if tab.transaction_state == TransactionState::Idle {
+        let is_mongodb = self.profiles.iter().any(|profile| {
+            profile.id == tab.descriptor.key.profile_id && profile.kind == DatabaseKind::MongoDb
+        });
+        let sql = if is_mongodb {
+            self.plan_mongo_document_deletions(tab)
+                .and_then(|deletions| {
+                    let Some(deletions) = deletions else {
+                        return Ok(String::new());
+                    };
+                    let command = crate::db::mongodb::mutation::delete_documents_command(
+                        deletions
+                            .namespace
+                            .collection
+                            .as_deref()
+                            .unwrap_or_default(),
+                        &deletions.documents,
+                    )
+                    .map_err(|error| error.message)?;
+                    serde_json::to_string_pretty(
+                        &mongodb::bson::Bson::Document(command).into_canonical_extjson(),
+                    )
+                    .map_err(|error| error.to_string())
+                })
+                .unwrap_or_else(|message| format!("Cannot prepare MongoDB deletion: {message}"))
+        } else if tab.transaction_state == TransactionState::Idle {
             let snapshot = match &tab.data {
                 RelationLoad::Ready(snapshot) => Some(snapshot),
                 RelationLoad::Loading { previous, .. }
@@ -20405,6 +20438,15 @@ impl App {
         let Some(index) = self.tabs.iter().position(|tab| tab.id() == id) else {
             return Vec::new();
         };
+        if matches!(&self.tabs[index], WorkspaceTab::Relation(tab)
+            if tab.edit.as_ref().is_some_and(|edit| edit.pending_mongodb_delete.is_some()))
+        {
+            self.notify_warning(
+                "Relation",
+                "Wait for the document deletion to finish before closing this tab",
+            );
+            return Vec::new();
+        }
         let was_console = self.tabs[index].as_console().is_some();
         if let WorkspaceTab::MongoConsole(console) = &self.tabs[index] {
             let command = self
@@ -28795,9 +28837,19 @@ impl App {
         self.tabs
             .get_mut(self.active_tab)
             .and_then(|tab| match tab {
-                WorkspaceTab::Relation(tab) if tab.view == RelationView::Data => tab.edit.as_mut(),
+                WorkspaceTab::Relation(tab) if tab.view == RelationView::Data => tab
+                    .edit
+                    .as_mut()
+                    .filter(|edit| edit.pending_mongodb_delete.is_none()),
                 _ => None,
             })
+    }
+
+    fn active_mongo_relation_delete_pending(&self) -> bool {
+        self.tabs.get(self.active_tab).is_some_and(|tab| {
+            matches!(tab, WorkspaceTab::Relation(tab)
+                if tab.edit.as_ref().is_some_and(|edit| edit.pending_mongodb_delete.is_some()))
+        })
     }
 
     fn relation_capabilities(&self) -> Option<crate::db::mutation::RelationMutationCapabilities> {
@@ -28948,6 +29000,9 @@ impl App {
     /// Nothing is written here: the modal only plans a replacement. Every
     /// refusal below leaves the page and the command stream untouched.
     fn relation_edit_document(&mut self) -> Vec<Command> {
+        if self.active_mongo_relation_delete_pending() {
+            return Vec::new();
+        }
         let row = self.active_grid_row();
         let Some(WorkspaceTab::Relation(tab)) = self.tabs.get(self.active_tab) else {
             return Vec::new();
@@ -29205,10 +29260,10 @@ impl App {
     /// grid row was loaded with, so the write can only ever remove those
     /// documents. `Ok(None)` means the commit had nothing marked, which is not a
     /// refusal: it writes and says nothing.
-    fn plan_mongo_document_deletions(&self) -> Result<Option<MongoDocumentDeletions>, String> {
-        let Some(WorkspaceTab::Relation(tab)) = self.tabs.get(self.active_tab) else {
-            return Err("the relation tab is no longer open".to_owned());
-        };
+    fn plan_mongo_document_deletions(
+        &self,
+        tab: &RelationTab,
+    ) -> Result<Option<MongoDocumentDeletions>, String> {
         // The tab's own profile decides whether this connection may write.
         let profile = self
             .profiles
@@ -29222,6 +29277,9 @@ impl App {
             .edit
             .as_ref()
             .ok_or_else(|| "the relation tab has no editable rows".to_owned())?;
+        if edit.pending_mongodb_delete.is_some() {
+            return Err("Wait for the document deletion to finish".to_owned());
+        }
         let marked = edit
             .rows
             .iter()
@@ -29254,12 +29312,13 @@ impl App {
             .ok_or_else(|| {
                 "the document page no longer matches the grid; reload the collection".to_owned()
             })?;
-        let ids = marked
+        let documents = marked
             .into_iter()
             .map(|index| {
                 documents
                     .get(index)
-                    .and_then(|document| document.bson.get("_id").cloned())
+                    .filter(|document| document.bson.contains_key("_id"))
+                    .map(|document| document.bson.clone())
                     .ok_or_else(|| {
                         "a marked document has no _id, so it cannot be deleted".to_owned()
                     })
@@ -29280,14 +29339,17 @@ impl App {
             tab_generation: tab.generation,
             connection,
             namespace,
-            ids,
+            documents,
         }))
     }
 
     /// Commits the rows a MongoDB relation marked for deletion as one write
     /// bounded to their `_id`s.
     fn mongo_relation_documents_delete(&mut self) -> Vec<Command> {
-        let deletions = match self.plan_mongo_document_deletions() {
+        let Some(WorkspaceTab::Relation(tab)) = self.tabs.get(self.active_tab) else {
+            return Vec::new();
+        };
+        let deletions = match self.plan_mongo_document_deletions(tab) {
             Ok(deletions) => deletions,
             Err(message) => {
                 self.notify_warning("Relation", message);
@@ -29299,12 +29361,20 @@ impl App {
             // nothing, instead of complaining about a page with no changes.
             return Vec::new();
         };
+        let request_id = Uuid::new_v4();
+        if let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab)
+            && let Some(edit) = tab.edit.as_mut()
+        {
+            edit.pending_mongodb_delete = Some(request_id);
+            edit.mode = RelationGridMode::Busy;
+        }
         vec![Command::DeleteMongoRelationDocuments {
             tab_id: deletions.tab_id,
             tab_generation: deletions.tab_generation,
+            request_id,
             connection: deletions.connection,
             namespace: deletions.namespace,
-            ids: deletions.ids,
+            documents: deletions.documents,
         }]
     }
 
@@ -29315,18 +29385,20 @@ impl App {
     /// so it is dropped instead of notifying, clearing marks or reloading
     /// anything.
     fn mongo_relation_document_delete_result(&mut self, action: Action) -> Vec<Command> {
-        let (tab_id, tab_generation, ids, failure) = match action {
+        let (tab_id, tab_generation, request_id, ids, failure) = match action {
             Action::MongoRelationDocumentDeleted {
                 tab_id,
                 tab_generation,
+                request_id,
                 ids,
-            } => (tab_id, tab_generation, ids, None),
+            } => (tab_id, tab_generation, request_id, ids, None),
             Action::MongoRelationDocumentDeleteFailed {
                 tab_id,
                 tab_generation,
+                request_id,
                 ids,
                 message,
-            } => (tab_id, tab_generation, ids, Some(message)),
+            } => (tab_id, tab_generation, request_id, ids, Some(message)),
             _ => return Vec::new(),
         };
         let Some(index) = self.tabs.iter().position(|tab| tab.id() == tab_id) else {
@@ -29335,6 +29407,7 @@ impl App {
         let current = matches!(
             self.tabs.get(index),
             Some(WorkspaceTab::Relation(tab)) if tab.generation == tab_generation
+                && tab.edit.as_ref().is_some_and(|edit| edit.pending_mongodb_delete == Some(request_id))
         );
         if !current {
             return Vec::new();
@@ -29343,9 +29416,17 @@ impl App {
             return Vec::new();
         };
         if let Some(message) = failure {
-            // The page the failed delete addressed stays on screen with its
-            // marks: the documents are still there, so reloading would only hide
-            // the error and lose the work the save was going to commit.
+            if let Some(edit) = tab.edit.as_mut() {
+                edit.pending_mongodb_delete = None;
+                edit.mode = RelationGridMode::Browse;
+            }
+            if self
+                .resolving_deferred
+                .as_ref()
+                .is_some_and(|prompt| prompt.target == DeferredTransactionTarget::Relation(tab_id))
+            {
+                self.resolving_deferred = None;
+            }
             self.notify_error("Relation", message);
             return Vec::new();
         }
@@ -29360,6 +29441,21 @@ impl App {
         if let Some(edit) = tab.edit.as_mut() {
             edit.commit_changes();
         }
+        let mut commands = [
+            pending_relation_request(&tab.data),
+            pending_relation_request(&tab.ddl),
+        ]
+        .into_iter()
+        .flatten()
+        .map(Command::CancelRelationRequest)
+        .collect::<Vec<_>>();
+        // The grid, raw documents and inferred structure form one snapshot.
+        // Drop all of it even on background tabs or while DDL is selected.
+        tab.generation = tab.generation.saturating_add(1);
+        tab.data = RelationLoad::Empty;
+        tab.mongodb_documents = None;
+        tab.ddl = RelationLoad::Empty;
+        tab.ddl_refresh_needed = true;
         self.notify_success(
             "Relation",
             if deleted == 1 {
@@ -29368,10 +29464,22 @@ impl App {
                 format!("{deleted} documents deleted from {collection}")
             },
         );
-        if index != self.active_tab {
-            return Vec::new();
+        if self
+            .resolving_deferred
+            .as_ref()
+            .is_some_and(|prompt| prompt.target == DeferredTransactionTarget::Relation(tab_id))
+        {
+            let prompt = self
+                .resolving_deferred
+                .take()
+                .expect("matching deferred deletion");
+            commands.extend(self.continue_deferred(prompt.intent));
+            return commands;
         }
-        self.load_active_relation_with_page(true, Some(page))
+        if index == self.active_tab {
+            commands.extend(self.load_active_relation_with_page(true, Some(page)));
+        }
+        commands
     }
 
     fn relation_edit_insert(&mut self, character: char) {
@@ -29760,6 +29868,9 @@ impl App {
     }
 
     fn relation_commit(&mut self, commit: bool) -> Vec<Command> {
+        if self.active_mongo_relation_delete_pending() {
+            return Vec::new();
+        }
         if commit
             && self
                 .tabs
@@ -30615,7 +30726,7 @@ impl App {
         Vec::new()
     }
     fn relation_insert_row(&mut self) -> Vec<Command> {
-        if self.active_relation_is_tidb() {
+        if self.active_relation_is_tidb() || self.active_mongo_relation_delete_pending() {
             return Vec::new();
         }
         if self
@@ -30645,6 +30756,9 @@ impl App {
         self.relation_edit_cell()
     }
     fn relation_undo(&mut self) -> Vec<Command> {
+        if self.active_mongo_relation_delete_pending() {
+            return Vec::new();
+        }
         if let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab)
             && tab.transaction_state == TransactionState::Idle
         {
@@ -30656,6 +30770,9 @@ impl App {
         self.relation_history_command(PendingMutationHistory::Undo)
     }
     fn relation_redo(&mut self) -> Vec<Command> {
+        if self.active_mongo_relation_delete_pending() {
+            return Vec::new();
+        }
         if let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab)
             && tab.transaction_state == TransactionState::Idle
         {
@@ -31763,7 +31880,7 @@ struct MongoDocumentDeletions {
     tab_generation: u64,
     connection: ConnectionIdentity,
     namespace: crate::db::mongodb::types::MongoNamespace,
-    ids: Vec<mongodb::bson::Bson>,
+    documents: Vec<mongodb::bson::Document>,
 }
 
 /// Shown when a MongoDB relation's commit would have to write a row some other

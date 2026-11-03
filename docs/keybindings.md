@@ -622,7 +622,7 @@ cannot be parsed.
 | `gg/G`, `H/M/L`, page controls | Move rows and viewport |
 | `y` | Copy current cell to the clipboard |
 | `Y` | Copy current row as TSV |
-| `dd` | Delete current row after the real pending sequence |
+| `dd` | Mark the current row for deletion |
 | `e` | Edit selected cell when editing is available |
 | `a` | Insert row when editing is available |
 | `V` | Enter Visual Line when editing is available |
@@ -636,6 +636,12 @@ cannot be parsed.
 `y` copies the current cell immediately. `Y` copies the current row as TSV.
 `Enter`, `[` and `]` are not executable Relation Data bindings in the current
 mapper and are not documented as actions.
+
+MongoDB collections use the same staged deletion controls: `dd` marks one
+document, or `V` followed by `d` marks a range. `Ctrl-s` opens the deletion
+review; select Commit and press `Enter` to submit. While the request is running,
+further edits, saves, undo, and discard wait for its result. See [MongoDB](mongodb.md)
+for supported collection types and conflict handling.
 
 ### EditCell
 
@@ -725,6 +731,8 @@ controls. `p` returns to Data, `r` refreshes the relation, and `Ctrl-c` remains
 ## Relation DDL
 
 Relation DDL is a read-only Vim text view.
+
+`Ctrl-s` opens the review for pending relation row edits from this view.
 
 | Keys | Behavior |
 | --- | --- |

@@ -2,6 +2,7 @@ use std::collections::{BTreeSet, VecDeque};
 
 use mongodb::bson::spec::ElementType;
 use mongodb::bson::{Bson, Document};
+use uuid::Uuid;
 
 use crate::db::mongodb::types::{MongoDocument, MongoNamespace};
 use crate::db::mutation::RelationMutationRequest;
@@ -836,6 +837,8 @@ pub struct RelationEditSession {
     pub mutation_redo: Vec<RelationMutationHistory>,
     pub pending_mutation_history: Option<PendingMutationHistory>,
     pub pending_save: VecDeque<RelationMutationRequest>,
+    /// Correlates a relation document deletion with the edit session it freezes.
+    pub pending_mongodb_delete: Option<Uuid>,
     pub save_after_metadata_load: bool,
     pub(crate) display_revision: u64,
 }
@@ -1015,6 +1018,7 @@ impl RelationEditSession {
 
     pub fn has_pending_work(&self) -> bool {
         matches!(self.mode, RelationGridMode::Busy)
+            || self.pending_mongodb_delete.is_some()
             || !self.pending_save.is_empty()
             || self.save_after_metadata_load
             || self.pending_mutation_history.is_some()
@@ -1086,6 +1090,7 @@ impl RelationEditSession {
         self.mutation_redo.clear();
         self.pending_mutation_history = None;
         self.pending_save.clear();
+        self.pending_mongodb_delete = None;
         self.save_after_metadata_load = false;
         self.sync_history_depth();
     }

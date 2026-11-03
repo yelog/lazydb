@@ -10,7 +10,7 @@ S2. The delete key on the current row of a MongoDB collection's relation tab mar
 
 S3. With no document at the cursor, nothing is marked and nothing is emitted.
 
-S4. `Ctrl-S` on a MongoDB relation with exactly one or more rows marked for deletion emits exactly one `Command::DeleteMongoRelationDocuments` carrying the tab id, tab generation, connection, namespace and every marked row's `_id`, and emits no `Command::RelationMutation`. The filter it becomes carries only `_id` and only those loaded values; an empty set is never emitted.
+S4. `Ctrl-S` on a MongoDB relation with exactly one or more rows marked for deletion emits exactly one `Command::DeleteMongoRelationDocuments` carrying the tab id, tab generation, request UUID, connection, namespace and every marked row's loaded BSON snapshot, and emits no `Command::RelationMutation`. Each delete matches the original `_id` and complete snapshot, with `limit: 1`; an empty request is never emitted. The review displays this MongoDB command.
 
 S5. With no row marked for deletion, `Ctrl-S` emits nothing and says nothing.
 
@@ -26,6 +26,12 @@ S10. A row that is dirty with anything other than a deletion (`Updated`, or an i
 
 S11. The browser tab's `d` delete (`Action::MongoDeleteSelected` → `Runtime::mutate_mongo_delete`) keeps working unchanged.
 
+S12. The edit session remains busy until the matching request UUID completes. Duplicate saves and competing edits, undo or discard emit nothing. Old results cannot complete a later attempt.
+
+S13. A confirmed deletion invalidates DATA, BSON and inferred structure together, even on a background tab or while DDL is selected. A matching deferred exit continues after success and is released after failure.
+
+S14. Only ordinary collections are accepted; time-series collections and views are refused before any write. Partial or uncertain results never claim full success. Deletion does not require cluster administration privileges.
+
 ## Tasks
 
 T1 | S1-S3, S9, S10 | `src/app.rs` — staged marks, range marks, commit gate, save branch | one commit
@@ -33,6 +39,8 @@ T2 | S4-S8 | `src/action.rs`, `src/runtime.rs`, `src/db/mongodb/` — plural com
 T3 | S1-S11 | `tests/mongodb_relation.rs`, `src/db/mongodb/mutation.rs` — one regression test per rule | one commit
 
 ## Log
+
+L12. Maintainer follow-up after upstream PR #42: use full snapshot guards and one-document limits in a single batch instead of `_id`-only `deleteMany`, which can over-delete time-series measurements or documents sharing an id across shards. This supersedes the `_id`-only assumptions in L6-L10. Add request correlation, freeze pending edits, invalidate all page representations, display the actual MongoDB command in review, and finish deferred exits.
 
 L1. User report, verbatim: "cada vez que quiero borrar un registro en mongodb", with a screenshot of the toast "Cannot update or delete existing rows without a primary key; no changes were saved".
 

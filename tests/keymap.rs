@@ -1238,6 +1238,34 @@ fn paste_ignores_relation_query_focus_outside_results_and_busy_grid() {
 }
 
 #[test]
+fn busy_relation_keys_do_not_fall_through_to_query_inputs() {
+    let mut app = App::new(Vec::new());
+    let mut relation = RelationTab::new("items");
+    let mut edit = lazydb::model::relation_edit::RelationEditSession::from_rows(Vec::new());
+    edit.mode = lazydb::model::relation_edit::RelationGridMode::Busy;
+    relation.edit = Some(edit);
+    app.tabs.push(WorkspaceTab::Relation(relation));
+    app.active_tab = app.tabs.len() - 1;
+    app.focus = Focus::Results;
+    let mut keymap = Keymap::default();
+    for event in [
+        control(KeyCode::Char('s')),
+        key(KeyCode::Char('s')),
+        key(KeyCode::Char('/')),
+    ] {
+        assert_eq!(keymap.map(event, &app), None, "busy key: {event:?}");
+    }
+    assert_eq!(
+        keymap.map(control(KeyCode::Char('n')), &app),
+        Some(Action::NextTab)
+    );
+    assert_eq!(
+        keymap.map(control(KeyCode::Char('p')), &app),
+        Some(Action::PreviousTab)
+    );
+}
+
+#[test]
 fn cell_presence_shortcuts_do_not_override_json_or_relation_transaction_keys() {
     let mut app = App::new(Vec::new());
     app.tabs
@@ -4536,6 +4564,43 @@ fn relation_transaction_review_uses_ctrl_s_without_direct_rollback() {
 }
 
 #[test]
+fn relation_visual_line_accepts_the_shift_modifier_sent_by_terminals() {
+    let mut app = App::new(Vec::new());
+    let mut relation = lazydb::model::relation::RelationTab::new("items");
+    relation.edit = Some(
+        lazydb::model::relation_edit::RelationEditSession::from_rows(vec![vec![
+            lazydb::db::value::CellValue::Integer(1),
+        ]]),
+    );
+    app.tabs
+        .push(lazydb::model::tab::WorkspaceTab::Relation(relation));
+    app.active_tab = app.tabs.len() - 1;
+    app.focus = lazydb::model::workspace::Focus::Results;
+    let mut keymap = Keymap::default();
+    for modifiers in [KeyModifiers::NONE, KeyModifiers::SHIFT] {
+        let action = keymap.map(KeyEvent::new(KeyCode::Char('V'), modifiers), &app);
+        assert_eq!(action, Some(Action::RelationVisualLine));
+        app.update(action.unwrap());
+        assert!(matches!(
+            &app.tabs[app.active_tab],
+            lazydb::model::tab::WorkspaceTab::Relation(tab)
+                if matches!(tab.edit.as_ref().map(|edit| &edit.mode),
+                    Some(lazydb::model::relation_edit::RelationGridMode::VisualLine { anchor: 0 }))
+        ));
+        app.update(Action::RelationEditCancel);
+    }
+    for modifiers in [
+        KeyModifiers::ALT,
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ] {
+        assert_eq!(
+            keymap.map(KeyEvent::new(KeyCode::Char('V'), modifiers), &app),
+            None
+        );
+    }
+}
+
+#[test]
 fn transaction_review_tab_cycles_preview_and_buttons() {
     let mut app = App::new(Vec::new());
     let mut relation = lazydb::model::relation::RelationTab::new("users");
@@ -5269,6 +5334,25 @@ fn ddl_view_maps_navigation_without_using_grid_move() {
             "terminal Shift event for {character}"
         );
     }
+}
+
+#[test]
+fn relation_save_from_ddl_opens_the_pending_changes_review() {
+    let mut app = App::new(Vec::new());
+    let mut relation = RelationTab::new("items");
+    let mut edit = lazydb::model::relation_edit::RelationEditSession::from_rows(vec![vec![
+        lazydb::db::value::CellValue::Integer(1),
+    ]]);
+    edit.delete_rows(0..=0);
+    relation.edit = Some(edit);
+    relation.view = lazydb::model::relation::RelationView::Ddl;
+    app.tabs.push(WorkspaceTab::Relation(relation));
+    app.active_tab = app.tabs.len() - 1;
+    app.focus = Focus::Results;
+    let action = Keymap::default().map(control(KeyCode::Char('s')), &app);
+    assert_eq!(action, Some(Action::OpenTransactionControl));
+    app.update(action.unwrap());
+    assert!(app.review_preview_session_id().is_some());
 }
 
 #[test]

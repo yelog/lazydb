@@ -1,4 +1,9 @@
-use mongodb::bson::{Bson, Document};
+use futures_util::TryStreamExt;
+use mongodb::{
+    bson::{Bson, Document, doc},
+    options::{Acknowledgment, WriteConcern},
+    results::CollectionType,
+};
 
 use crate::db::DatabaseError;
 
@@ -64,22 +69,100 @@ pub fn error_is_definitely_rejected(error: &mongodb::error::Error) -> bool {
     )
 }
 
+/// A multi-document delete can fail after deleting some matching documents.
+/// Neither command/write errors nor response decoding errors prove that it
+/// removed nothing; only failures known to precede the write are definite.
+fn bulk_delete_error_is_definitely_rejected(error: &mongodb::error::Error) -> bool {
+    use mongodb::error::ErrorKind;
+    matches!(
+        error.kind.as_ref(),
+        ErrorKind::InvalidArgument { .. }
+            | ErrorKind::Authentication { .. }
+            | ErrorKind::BsonSerialization(_)
+    )
+}
+
 impl MongoMutationOutcome {
     pub const fn is_fully_confirmed(&self) -> bool {
         matches!(self, Self::Confirmed { .. })
     }
 }
 
-/// The filter that bounds a bulk document delete to the `_id`s the marked grid
-/// rows were loaded with.
-///
-/// Every value is an `_id` exactly as it was loaded, never its rendering, so a
-/// delete can never retarget another document. `_id` is the only field in the
-/// filter on purpose.
-pub fn delete_many_filter(ids: &[Bson]) -> Document {
-    mongodb::bson::doc! {
-        "_id": { "$in": Bson::Array(ids.to_vec()) }
+/// Builds one ordered delete command from the original loaded BSON snapshots.
+/// Each statement compares the whole document and can delete at most one row,
+/// including when `_id` is not globally unique across shards.
+pub fn delete_documents_command(
+    collection: &str,
+    documents: &[Document],
+) -> Result<Document, DatabaseError> {
+    if collection.is_empty() || collection.contains('\0') {
+        return Err(DatabaseError::configuration(
+            "MongoDB collection namespace is required",
+        ));
     }
+    if collection.starts_with("system.") {
+        return Err(DatabaseError::configuration(
+            "MongoDB staged deletion requires an ordinary collection",
+        ));
+    }
+    if documents.is_empty() || documents.len() > 100_000 {
+        return Err(DatabaseError::configuration(
+            "a document delete requires 1..=100000 original documents",
+        ));
+    }
+    let deletes = documents
+        .iter()
+        .map(|document| {
+            let id = document.get("_id").ok_or_else(|| {
+                DatabaseError::configuration("a document delete requires each original _id")
+            })?;
+            if matches!(id, Bson::RegularExpression(_)) {
+                return Err(DatabaseError::configuration(
+                    "a document delete requires literal _id values",
+                ));
+            }
+            Ok(doc! {
+                "q": super::exact_document_guard(id.clone(), document),
+                "limit": 1,
+                "collation": { "locale": "simple" },
+            })
+        })
+        .collect::<Result<Vec<_>, DatabaseError>>()?;
+    let command = doc! { "delete": collection, "deletes": deletes, "ordered": true };
+    validate_delete_command_size(&command)?;
+    Ok(command)
+}
+
+fn validate_delete_command_size(command: &Document) -> Result<(), DatabaseError> {
+    let encoded = mongodb::bson::to_vec(command)
+        .map_err(|_| DatabaseError::configuration("MongoDB delete command is not valid BSON"))?;
+    if encoded.len() > 16 * 1024 * 1024 {
+        return Err(DatabaseError::configuration(
+            "MongoDB delete command exceeds the 16 MiB BSON limit; select fewer documents",
+        ));
+    }
+    Ok(())
+}
+
+fn apply_delete_write_concern(
+    command: &mut Document,
+    write_concern: Option<&WriteConcern>,
+) -> Result<(), DatabaseError> {
+    if let Some(concern) = write_concern {
+        if concern.w == Some(Acknowledgment::Nodes(0)) {
+            return Err(DatabaseError::configuration(
+                "MongoDB staged deletion requires acknowledged write concern (w must not be 0)",
+            ));
+        }
+        command.insert(
+            "writeConcern",
+            mongodb::bson::to_document(concern).map_err(|_| {
+                DatabaseError::configuration("MongoDB write concern is not valid BSON")
+            })?,
+        );
+        validate_delete_command_size(command)?;
+    }
+    Ok(())
 }
 
 /// The message the tab shows when a delete did not apply, or `None` when every
@@ -105,49 +188,93 @@ pub fn delete_outcome_message(outcome: &MongoMutationOutcome) -> Option<&'static
 }
 
 impl MongoAdapter {
-    /// Deletes every document the marked grid rows were loaded from, bounded to
-    /// their `_id`s.
-    ///
-    /// This is the whole write surface of a MongoDB relation tab's commit: one
-    /// `deleteMany` against `{_id: {$in: <loaded ids>}}`, never a delete by any
-    /// other field. An empty list is refused, because a filter that addresses no
-    /// document must never become a delete of everything.
-    pub async fn delete_documents_by_ids_detailed(
+    /// Deletes the marked rows only while their original BSON snapshots match.
+    /// The standard delete command limits every statement to one document and
+    /// preserves the database/client write concern. Ordinary collections need
+    /// only collection metadata access, with no topology or index privileges.
+    pub async fn delete_documents_detailed(
         &self,
         namespace: &MongoNamespace,
-        ids: Vec<Bson>,
+        documents: Vec<Document>,
     ) -> Result<MongoMutationOutcome, DatabaseError> {
+        if namespace.database.is_empty()
+            || namespace.database.contains('\0')
+            || namespace.database.contains('.')
+        {
+            return Err(DatabaseError::configuration(
+                "MongoDB database namespace is invalid",
+            ));
+        }
         let collection = namespace.collection.as_deref().ok_or_else(|| {
             DatabaseError::configuration("MongoDB collection namespace is required")
         })?;
-        if ids.is_empty() {
+        let mut command = delete_documents_command(collection, &documents)?;
+        let database = self.client().database(&namespace.database);
+        // run_command does not inherit write concern automatically. Reject w:0
+        // before any I/O and explicitly preserve the configured acknowledgement.
+        apply_delete_write_concern(&mut command, database.write_concern())?;
+        let mut descriptions = database
+            .list_collections()
+            .filter(doc! { "name": collection })
+            .await
+            .map_err(map_error)?;
+        let description = descriptions
+            .try_next()
+            .await
+            .map_err(map_error)?
+            .ok_or_else(|| {
+                DatabaseError::configuration("MongoDB collection is no longer available")
+            })?;
+        if description.name != collection
+            || !matches!(description.collection_type, CollectionType::Collection)
+            || description.options.timeseries.is_some()
+            || description.options.view_on.is_some()
+            || description.options.capped == Some(true)
+        {
             return Err(DatabaseError::configuration(
-                "a document delete requires at least one _id",
+                "MongoDB staged deletion requires an ordinary collection",
             ));
         }
-        let requested = ids.len() as u64;
-        let result = self
-            .client()
-            .database(&namespace.database)
-            .collection::<Document>(collection)
-            .delete_many(delete_many_filter(&ids))
-            .await;
+        let requested = documents.len() as u64;
+        let result = database.run_command(command).await;
         match result {
-            Ok(result) => Ok(bounded_delete_outcome(result.deleted_count, requested)),
-            Err(error) if error_is_definitely_rejected(&error) => Err(map_error(error)),
+            Ok(response) => Ok(delete_response_outcome(&response, requested)),
+            Err(error) if bulk_delete_error_is_definitely_rejected(&error) => Err(map_error(error)),
             Err(_) => Ok(MongoMutationOutcome::Unknown { requested }),
         }
     }
+}
+
+fn delete_response_outcome(response: &Document, requested: u64) -> MongoMutationOutcome {
+    let successful = matches!(response.get("ok"), Some(Bson::Int32(1) | Bson::Int64(1)))
+        || response.get_f64("ok") == Ok(1.0);
+    if !successful
+        || response.contains_key("writeConcernError")
+        || response
+            .get("writeErrors")
+            .is_some_and(|errors| !matches!(errors, Bson::Array(errors) if errors.is_empty()))
+    {
+        return MongoMutationOutcome::Unknown { requested };
+    }
+    let affected = match response.get("n") {
+        Some(Bson::Int32(count)) if *count >= 0 => *count as u64,
+        Some(Bson::Int64(count)) if *count >= 0 => *count as u64,
+        _ => return MongoMutationOutcome::Unknown { requested },
+    };
+    bounded_delete_outcome(affected, requested)
 }
 
 /// The outcome of a bounded bulk delete, from how many documents the server
 /// removed out of how many the filter addressed.
 ///
 /// A delete that removed fewer documents than it addressed is `Partial`, never
-/// `Confirmed`: at least one marked document was already gone.
+/// `Confirmed`: at least one marked document was already gone. Removing more
+/// documents than requested violates the bound and must remain `Unknown`.
 fn bounded_delete_outcome(affected: u64, requested: u64) -> MongoMutationOutcome {
-    if affected >= requested {
+    if affected == requested {
         MongoMutationOutcome::Confirmed { affected }
+    } else if affected > requested {
+        MongoMutationOutcome::Unknown { requested }
     } else {
         MongoMutationOutcome::Partial {
             affected,
@@ -195,35 +322,51 @@ mod tests {
     }
 
     #[test]
-    fn the_delete_filter_is_exactly_the_loaded_ids() {
-        let first = mongodb::bson::Bson::ObjectId(mongodb::bson::oid::ObjectId::new());
-        let second = mongodb::bson::Bson::String("natural-key".into());
-        let ids = vec![first.clone(), second.clone()];
-        let filter = super::delete_many_filter(&ids);
+    fn the_delete_command_limits_each_original_bson_snapshot_to_one_document() {
+        use mongodb::bson::{doc, oid::ObjectId};
 
-        assert_eq!(
-            filter,
-            mongodb::bson::doc! { "_id": { "$in": ids.clone() } },
-            "the filter is the loaded _id values and nothing else"
-        );
-        assert_eq!(
-            filter.keys().collect::<Vec<_>>(),
-            vec!["_id"],
-            "no other field can widen or retarget the delete"
-        );
-        let Some(mongodb::bson::Bson::Document(bound)) = filter.get("_id") else {
-            panic!("the _id filter is an operator document, got {filter:?}")
-        };
-        assert_eq!(
-            bound.keys().collect::<Vec<_>>(),
-            vec!["$in"],
-            "$in is the only operator, so nothing can be negated or widened"
-        );
-        assert_eq!(
-            bound.get("$in"),
-            Some(&mongodb::bson::Bson::Array(ids)),
-            "the values keep the BSON types they were loaded with, never a re-serialized string"
-        );
+        let documents = vec![
+            doc! { "_id": ObjectId::new(), "value": { "$gt": 0 } },
+            doc! { "_id": "natural-key", "value": [1, 2, 3] },
+        ];
+        let command = super::delete_documents_command("items", &documents).unwrap();
+        assert_eq!(command.get_str("delete"), Ok("items"));
+        assert_eq!(command.get_bool("ordered"), Ok(true));
+        let deletes = command.get_array("deletes").unwrap();
+        assert_eq!(deletes.len(), documents.len());
+        for (delete, original) in deletes.iter().zip(documents) {
+            assert_eq!(
+                delete.as_document().unwrap(),
+                &doc! {
+                    "q": {
+                        "_id": { "$eq": original.get("_id").unwrap().clone() },
+                        "$expr": { "$eq": ["$$ROOT", { "$literal": original }] },
+                    },
+                    "limit": 1,
+                    "collation": { "locale": "simple" },
+                },
+                "the full typed snapshot is a literal and every statement is bounded"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_delete_snapshots_are_refused_before_a_command_can_be_sent() {
+        use mongodb::bson::{Bson, Regex, doc};
+
+        for documents in [
+            Vec::new(),
+            vec![doc! { "value": 1 }],
+            vec![doc! { "_id": Bson::RegularExpression(Regex {
+                pattern: ".*".into(), options: String::new(),
+            }) }],
+            vec![doc! { "_id": 1, "value": "x".repeat(16 * 1024 * 1024) }],
+        ] {
+            assert!(super::delete_documents_command("items", &documents).is_err());
+        }
+        assert!(super::delete_documents_command("", &[doc! { "_id": 1 }]).is_err());
+        assert!(super::delete_documents_command("bad\0name", &[doc! { "_id": 1 }]).is_err());
+        assert!(super::delete_documents_command("system.items", &[doc! { "_id": 1 }]).is_err());
     }
 
     #[test]
@@ -249,6 +392,114 @@ mod tests {
             },
             "an addressed set that vanished is partial, never confirmed"
         );
+    }
+
+    #[test]
+    fn a_bulk_delete_that_exceeded_the_bound_is_unknown() {
+        assert_eq!(
+            super::bounded_delete_outcome(2, 1),
+            MongoMutationOutcome::Unknown { requested: 1 },
+            "removing two documents for one loaded id must never confirm success"
+        );
+    }
+
+    #[test]
+    fn bulk_delete_server_and_response_errors_do_not_prove_rejection() {
+        use mongodb::{
+            bson::{doc, from_document},
+            error::{CommandError, ErrorKind, WriteError, WriteFailure},
+        };
+        for code in [13, 50, 112, 11601] {
+            let response = doc! { "code": code, "errmsg": "delete failed" };
+            let command = from_document::<CommandError>(response.clone()).unwrap();
+            let write = from_document::<WriteError>(response).unwrap();
+            for error in [
+                ErrorKind::Command(command).into(),
+                ErrorKind::Write(WriteFailure::WriteError(write)).into(),
+            ] {
+                assert!(!super::bulk_delete_error_is_definitely_rejected(&error));
+            }
+        }
+        let decoding_error = from_document::<u64>(doc! {}).unwrap_err();
+        assert!(!super::bulk_delete_error_is_definitely_rejected(
+            &decoding_error.into()
+        ));
+        let serialization_error = ErrorKind::BsonSerialization(serde::ser::Error::custom(
+            "cannot serialize the delete request",
+        ))
+        .into();
+        assert!(super::bulk_delete_error_is_definitely_rejected(
+            &serialization_error
+        ));
+    }
+
+    #[test]
+    fn delete_responses_confirm_only_valid_counts_without_server_errors() {
+        use mongodb::bson::doc;
+
+        assert_eq!(
+            super::delete_response_outcome(&doc! { "ok": 1.0, "n": 2 }, 2),
+            MongoMutationOutcome::Confirmed { affected: 2 }
+        );
+        assert_eq!(
+            super::delete_response_outcome(&doc! { "ok": 1, "n": 1_i64, "writeErrors": [] }, 2),
+            MongoMutationOutcome::Partial {
+                affected: 1,
+                requested: 2
+            }
+        );
+        assert_eq!(
+            super::delete_response_outcome(&doc! { "ok": 1, "n": 0 }, 2),
+            MongoMutationOutcome::Partial {
+                affected: 0,
+                requested: 2
+            }
+        );
+        for response in [
+            doc! { "ok": 1, "n": 2, "writeErrors": [{ "index": 1, "code": 50 }] },
+            doc! { "ok": 1, "n": 2, "writeConcernError": { "code": 64 } },
+            doc! { "ok": 1, "n": 2, "writeErrors": "malformed" },
+            doc! { "ok": 1, "n": 3 },
+            doc! { "ok": 1, "n": -1 },
+            doc! { "ok": 1, "n": "2" },
+            doc! { "ok": 1 },
+            doc! { "n": 2 },
+            doc! { "ok": 0, "n": 2 },
+        ] {
+            assert_eq!(
+                super::delete_response_outcome(&response, 2),
+                MongoMutationOutcome::Unknown { requested: 2 },
+                "an error or invalid count cannot prove a fully applied delete: {response:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn raw_delete_preserves_write_concern_and_refuses_unacknowledged_writes() {
+        use mongodb::{
+            bson::doc,
+            options::{Acknowledgment, WriteConcern},
+        };
+
+        let mut command = super::delete_documents_command("items", &[doc! { "_id": 1 }]).unwrap();
+        let default = command.clone();
+        super::apply_delete_write_concern(&mut command, None).unwrap();
+        assert_eq!(
+            command, default,
+            "an unspecified concern keeps the server default"
+        );
+        let acknowledged = WriteConcern::builder()
+            .w(Acknowledgment::Majority)
+            .w_timeout(std::time::Duration::from_millis(1234))
+            .journal(true)
+            .build();
+        super::apply_delete_write_concern(&mut command, Some(&acknowledged)).unwrap();
+        assert_eq!(
+            command.get_document("writeConcern").unwrap(),
+            &mongodb::bson::to_document(&acknowledged).unwrap()
+        );
+        let unacknowledged = WriteConcern::builder().w(Acknowledgment::Nodes(0)).build();
+        assert!(super::apply_delete_write_concern(&mut command, Some(&unacknowledged)).is_err());
     }
 
     #[test]
