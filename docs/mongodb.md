@@ -5,7 +5,7 @@ LazyDB connects with a MongoDB profile and keeps document data in BSON/EJSON for
 ## Staged document deletion
 
 In a collection's DATA grid, `dd` marks a document for deletion. `V` followed by
-`d` marks a range. `Ctrl-s` opens the review; select Commit and press `Enter` to
+`d` marks a range. `Ctrl-s` opens the review from DATA or DDL; select Commit and press `Enter` to
 submit the marked documents. Undo or discard can remove the marks before submission;
 the grid waits for the result before accepting more edits, another save, or tab closure.
 

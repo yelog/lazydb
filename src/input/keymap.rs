@@ -2229,6 +2229,17 @@ impl Keymap {
             }
         }
         if is_ddl_only_focus(app)
+            && matches!(
+                app.tabs.get(app.active_tab),
+                Some(crate::model::tab::WorkspaceTab::Relation(_))
+            )
+            && event.modifiers == KeyModifiers::CONTROL
+            && event.code == KeyCode::Char('s')
+        {
+            self.pending = None;
+            return Some(Action::OpenTransactionControl);
+        }
+        if is_ddl_only_focus(app)
             && event.modifiers.is_empty()
             && event.code == KeyCode::Char(' ')
             && app
@@ -5590,6 +5601,14 @@ fn map_data_query(event: KeyEvent, app: &App) -> Option<Action> {
         Some(crate::model::tab::WorkspaceTab::Relation(tab))
             if tab.view == crate::model::relation::RelationView::Data =>
         {
+            if tab.edit.as_ref().is_some_and(|edit| {
+                matches!(
+                    edit.mode,
+                    crate::model::relation_edit::RelationGridMode::Busy
+                )
+            }) {
+                return None;
+            }
             Some(&tab.query)
         }
         Some(crate::model::tab::WorkspaceTab::Sql(tab))

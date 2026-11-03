@@ -732,6 +732,8 @@ controls. `p` returns to Data, `r` refreshes the relation, and `Ctrl-c` remains
 
 Relation DDL is a read-only Vim text view.
 
+`Ctrl-s` opens the review for pending relation row edits from this view.
+
 | Keys | Behavior |
 | --- | --- |
 | `j/k`, arrows | Move through DDL |

@@ -1238,6 +1238,34 @@ fn paste_ignores_relation_query_focus_outside_results_and_busy_grid() {
 }
 
 #[test]
+fn busy_relation_keys_do_not_fall_through_to_query_inputs() {
+    let mut app = App::new(Vec::new());
+    let mut relation = RelationTab::new("items");
+    let mut edit = lazydb::model::relation_edit::RelationEditSession::from_rows(Vec::new());
+    edit.mode = lazydb::model::relation_edit::RelationGridMode::Busy;
+    relation.edit = Some(edit);
+    app.tabs.push(WorkspaceTab::Relation(relation));
+    app.active_tab = app.tabs.len() - 1;
+    app.focus = Focus::Results;
+    let mut keymap = Keymap::default();
+    for event in [
+        control(KeyCode::Char('s')),
+        key(KeyCode::Char('s')),
+        key(KeyCode::Char('/')),
+    ] {
+        assert_eq!(keymap.map(event, &app), None, "busy key: {event:?}");
+    }
+    assert_eq!(
+        keymap.map(control(KeyCode::Char('n')), &app),
+        Some(Action::NextTab)
+    );
+    assert_eq!(
+        keymap.map(control(KeyCode::Char('p')), &app),
+        Some(Action::PreviousTab)
+    );
+}
+
+#[test]
 fn cell_presence_shortcuts_do_not_override_json_or_relation_transaction_keys() {
     let mut app = App::new(Vec::new());
     app.tabs
@@ -5306,6 +5334,25 @@ fn ddl_view_maps_navigation_without_using_grid_move() {
             "terminal Shift event for {character}"
         );
     }
+}
+
+#[test]
+fn relation_save_from_ddl_opens_the_pending_changes_review() {
+    let mut app = App::new(Vec::new());
+    let mut relation = RelationTab::new("items");
+    let mut edit = lazydb::model::relation_edit::RelationEditSession::from_rows(vec![vec![
+        lazydb::db::value::CellValue::Integer(1),
+    ]]);
+    edit.delete_rows(0..=0);
+    relation.edit = Some(edit);
+    relation.view = lazydb::model::relation::RelationView::Ddl;
+    app.tabs.push(WorkspaceTab::Relation(relation));
+    app.active_tab = app.tabs.len() - 1;
+    app.focus = Focus::Results;
+    let action = Keymap::default().map(control(KeyCode::Char('s')), &app);
+    assert_eq!(action, Some(Action::OpenTransactionControl));
+    app.update(action.unwrap());
+    assert!(app.review_preview_session_id().is_some());
 }
 
 #[test]
