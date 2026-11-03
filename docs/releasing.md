@@ -1,7 +1,12 @@
 # Releasing LazyDB
 
-LazyDB releases are prepared with the project-level OpenCode `release` skill
-and built by `.github/workflows/release.yml`.
+LazyDB releases are prepared with the project-level `release` skill in Codex
+or OpenCode and built by `.github/workflows/release.yml`.
+
+- Codex: [`.agents/skills/release/SKILL.md`](../.agents/skills/release/SKILL.md),
+  invoked with `$release beta` or `$release stable` from this repository.
+- OpenCode: [`.opencode/skills/release/SKILL.md`](../.opencode/skills/release/SKILL.md),
+  invoked with `release beta` or `release stable`.
 
 See [CI builds and dependency caches](ci.md) for the pinned toolchain, build
 profiles, cache ownership, and build timing diagnostics used by both workflows.
@@ -31,7 +36,7 @@ vMAJOR.MINOR.PATCH
 vMAJOR.MINOR.PATCH-beta.N
 ```
 
-Use the OpenCode skill with `release beta` or `release stable`. The skill
+Use the release skill with the desired channel as shown above. The skill
 reviews commits and the actual diff, recommends the next version, and asks for
 one confirmation before editing. This prompt explicitly includes the release
 scope: update Changelog and Cargo versions, run all checks, create a release
@@ -53,7 +58,7 @@ an exact state report. No force-push, tag replacement, or automatic republicatio
 is allowed. Interrupted runs verify Git/GitHub state and resume the same
 authorized release without repeating completed operations or routine questions.
 
-OpenCode tool permissions, branch protection, and GitHub Environment reviewers
+Agent tool permissions, branch protection, and GitHub Environment reviewers
 are independent controls. The skill does not bypass or change them. If they
 block progress, it reports the required external action rather than claiming
 the release is complete. Completion requires all required CI, Release, and
