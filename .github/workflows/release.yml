@@ -101,7 +101,7 @@ jobs:
         include:
           - os: macos-15-intel
             target: x86_64-apple-darwin
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
@@ -389,7 +389,7 @@ jobs:
   homebrew:
     needs: [plan, publish]
     if: needs.plan.outputs.channel == 'stable' && needs.publish.result == 'success'
-    runs-on: macos-14
+    runs-on: macos-15
     environment: release
     permissions:
       contents: read

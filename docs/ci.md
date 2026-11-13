@@ -29,7 +29,7 @@ dependencies before saving, and does not cache installed Cargo executables.
 | Cache family | Writer | Readers |
 | --- | --- | --- |
 | `ci-ubuntu-24.04` | Main-branch Ubuntu Rust job | Ubuntu Rust job, database job, Release quality job |
-| `ci-macos-14` | Main-branch macOS Rust job | macOS Rust job |
+| `ci-macos-15` | Main-branch macOS Rust job | macOS Rust job |
 | `ci-ubuntu-22.04` | Main-branch MongoDB job | MongoDB job |
 | `release-<os>-<target>` | Corresponding macOS/Windows release build | Later builds of the same environment |
 | `release-linux-<target>-<image>-<scripts>` | Corresponding Linux release build | Later builds using the same image and scripts |
