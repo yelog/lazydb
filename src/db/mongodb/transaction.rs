@@ -43,6 +43,7 @@ pub fn supports_transactions(hello: &Document) -> bool {
 pub struct MongoSessionTransaction {
     session: ClientSession,
     active: bool,
+    route: crate::db::transport::ConnectionRoute,
 }
 
 impl Drop for MongoSessionTransaction {
@@ -147,7 +148,7 @@ impl MongoAdapter {
         &self,
     ) -> Result<MongoSessionTransaction, DatabaseError> {
         let hello = self
-            .client()
+            .checked_client()?
             .database("admin")
             .run_command(doc! { "hello": 1 })
             .await
@@ -158,7 +159,7 @@ impl MongoAdapter {
             ));
         }
         let mut session = self
-            .client()
+            .checked_client()?
             .start_session()
             .await
             .map_err(super::map_error)?;
@@ -169,6 +170,7 @@ impl MongoAdapter {
         Ok(MongoSessionTransaction {
             session,
             active: true,
+            route: self.route.clone(),
         })
     }
 }
@@ -184,6 +186,7 @@ impl MongoSessionTransaction {
                 "MongoDB transaction is no longer active",
             ));
         }
+        self.route.ensure_alive()?;
         let parsed = parse_command(
             &mongodb::bson::to_bson(&command)
                 .map_err(|error| DatabaseError::configuration(error.to_string()))?
@@ -202,8 +205,6 @@ impl MongoSessionTransaction {
         parsed
             .validate_supported_fields()
             .map_err(|error| DatabaseError::unsupported(error.to_string()))?;
-        let mut command = command;
-        command.insert("$db", database);
         self.session
             .client()
             .database(database)
@@ -219,6 +220,7 @@ impl MongoSessionTransaction {
                 "MongoDB transaction is no longer active",
             ));
         }
+        self.route.ensure_alive()?;
         match self.session.commit_transaction().await {
             Ok(()) => {
                 self.active = false;
@@ -262,6 +264,7 @@ impl MongoSessionTransaction {
                 "MongoDB transaction is no longer active",
             ));
         }
+        self.route.ensure_alive()?;
         match self.session.abort_transaction().await {
             Ok(()) => {
                 self.active = false;
@@ -277,7 +280,9 @@ impl MongoSessionTransaction {
 
     pub async fn abort_on_drop(mut self) {
         if self.active {
-            let _ = self.session.abort_transaction().await;
+            if self.route.is_alive() {
+                let _ = self.session.abort_transaction().await;
+            }
             self.active = false;
         }
     }

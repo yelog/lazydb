@@ -4,7 +4,7 @@ mod relation;
 use std::{collections::BTreeSet, time::Duration};
 
 use futures_util::StreamExt;
-use reqwest::{Client, Method, StatusCode, Url, header};
+use reqwest::{Client, Method, Proxy, StatusCode, Url, header};
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::{Value, json};
 
@@ -12,6 +12,7 @@ use crate::{
     db::{
         DatabaseError, ErrorCategory, ServerInfo,
         query::{ColumnMeta, QueryBudget, QueryOutcome, QueryOutcomeAccumulator},
+        transport::{ConnectionRoute, TransportEndpoint},
         value::CellValue,
     },
     profile::{ConnectionProfile, DatabaseKind, ElasticsearchAuth, OpenSearchAuth, SslMode},
@@ -32,6 +33,7 @@ pub struct ElasticsearchAdapter {
     read_only: bool,
     pub(crate) profile_id: uuid::Uuid,
     pub(crate) database: String,
+    route: ConnectionRoute,
 }
 
 /// A single Kibana-style REST request. Paths always remain on the configured server.
@@ -162,16 +164,34 @@ impl ElasticsearchAdapter {
         profile: &ConnectionProfile,
         password: Option<&SecretString>,
     ) -> Result<Self, DatabaseError> {
-        Self::connect_inner(profile, password).await
+        let route = ConnectionRoute::require_direct(profile)?;
+        Self::connect_routed(profile, password, route).await
+    }
+
+    pub(crate) async fn connect_routed(
+        profile: &ConnectionProfile,
+        password: Option<&SecretString>,
+        route: ConnectionRoute,
+    ) -> Result<Self, DatabaseError> {
+        Self::connect_inner(profile, password, route).await
     }
 
     async fn connect_inner(
         profile: &ConnectionProfile,
         password: Option<&SecretString>,
+        route: ConnectionRoute,
     ) -> Result<Self, DatabaseError> {
         if !profile.kind.is_search_rest() {
             return Err(DatabaseError::configuration(
                 "Search REST adapter requires an Elasticsearch or OpenSearch profile",
+            ));
+        }
+        if !matches!(
+            &route.endpoint,
+            TransportEndpoint::Direct | TransportEndpoint::Socks5(_)
+        ) {
+            return Err(DatabaseError::unsupported(
+                "Search REST connections support only direct or SOCKS5 transport",
             ));
         }
         let product = crate::db::descriptor::descriptor(profile.kind).display_name;
@@ -263,6 +283,13 @@ impl ElasticsearchAdapter {
             .retry(reqwest::retry::never())
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(30));
+        if let TransportEndpoint::Socks5(proxy) = &route.endpoint {
+            builder = builder
+                .no_proxy()
+                .proxy(Proxy::all(format!("socks5h://{proxy}")).map_err(|_| {
+                    DatabaseError::configuration(format!("invalid {product} SOCKS5 proxy endpoint"))
+                })?);
+        }
         if let Some(path) = ca_cert_path {
             let pem = std::fs::read(&path).map_err(|error| {
                 DatabaseError::configuration(format!(
@@ -305,6 +332,7 @@ impl ElasticsearchAdapter {
                 .clone()
                 .filter(|value| !value.is_empty())
                 .unwrap_or_else(|| "default".into()),
+            route,
         };
         adapter.probe().await?;
         Ok(adapter)
@@ -409,7 +437,7 @@ impl ElasticsearchAdapter {
             }
             error
         };
-        let network_error = |error| uncertain_response(network_error(error));
+        let network_error = |error| uncertain_response(reqwest_error(error));
         let url = self
             .endpoint
             .join(path)
@@ -444,7 +472,11 @@ impl ElasticsearchAdapter {
                 )
                 .body(body.to_owned());
         }
-        let response = request.send().await.map_err(network_error)?;
+        let route = self.route.clone();
+        let response = route
+            .guard(async move { request.send().await.map_err(reqwest_error) })
+            .await
+            .map_err(&uncertain_response)?;
         let status = response.status();
         let limit = if status.is_success() {
             MAX_RESPONSE_BYTES
@@ -526,7 +558,7 @@ pub(crate) fn index_path(index: &str, suffix: &str) -> String {
     format!("/{}/{suffix}", encoded.replace('+', "%20"))
 }
 
-fn network_error(error: reqwest::Error) -> DatabaseError {
+fn reqwest_error(error: reqwest::Error) -> DatabaseError {
     DatabaseError {
         category: ErrorCategory::Network,
         code: None,
@@ -727,6 +759,36 @@ fn cell(value: &Value) -> CellValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::profile::{SshOptions, import_connection_url};
+
+    #[tokio::test]
+    async fn direct_connect_rejects_ssh_profiles_before_network_io() {
+        let mut imported =
+            import_connection_url("elasticsearch://127.0.0.1:1", Some("secret")).unwrap();
+        imported.profile.ssh = Some(SshOptions::default());
+
+        let error = ElasticsearchAdapter::connect(&imported.profile, None)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.category, ErrorCategory::Configuration);
+    }
+
+    #[tokio::test]
+    async fn tcp_route_fails_closed_before_network_io() {
+        let imported =
+            import_connection_url("elasticsearch://127.0.0.1:1", Some("secret")).unwrap();
+        let route = ConnectionRoute {
+            endpoint: TransportEndpoint::Tcp("127.0.0.1:19200".parse().unwrap()),
+            lease: None,
+        };
+
+        let error = ElasticsearchAdapter::connect_routed(&imported.profile, None, route)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.category, ErrorCategory::Unsupported);
+    }
 
     #[test]
     fn parses_native_requests_and_classifies_writes() {

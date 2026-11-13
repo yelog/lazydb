@@ -84,6 +84,7 @@ mod tests {
             bigquery_options: None,
             elasticsearch_options: None,
             opensearch_options: None,
+            ssh: None,
             duckdb_path: None,
             ssl_mode: Default::default(),
             credential_policy: Default::default(),

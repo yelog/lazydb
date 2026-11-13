@@ -1745,6 +1745,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "fast-socks5"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d09fe4a491909a716088083eeb5bcc25427330fdbcd4ecd3dfa5469b3da795df"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "log",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-stream",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2915,6 +2929,7 @@ dependencies = [
  "oracle",
  "percent-encoding",
  "pretty_assertions",
+ "process-wrap",
  "ratatui",
  "redis",
  "regex",
@@ -3347,6 +3362,7 @@ dependencies = [
  "bson",
  "derive-where",
  "derive_more 2.1.1",
+ "fast-socks5",
  "futures-core",
  "futures-io",
  "futures-util",

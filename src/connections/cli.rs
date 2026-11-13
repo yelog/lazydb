@@ -25,7 +25,7 @@ use crate::{
     },
     profile::{
         ConnectionProfile, CredentialPolicy, DatabaseKind, ProfileAccess, ProfileCollection,
-        import_connection_url_with_driver,
+        SshOptions, import_connection_url_with_driver,
     },
     project::ProjectContext,
 };
@@ -97,7 +97,18 @@ struct ConnectionSummary {
     read_only: bool,
     credential_storage: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
+    ssh: Option<ConnectionSshSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     changed: Option<bool>,
+}
+
+#[derive(Serialize)]
+struct ConnectionSshSummary {
+    host: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    user: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -118,6 +129,68 @@ struct UnavailableConnectionSummary {
 struct ListSummary {
     connections: Vec<ConnectionSummary>,
     unavailable: Vec<UnavailableConnectionSummary>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct SshOptionsUpdate {
+    host: Option<String>,
+    user: Option<String>,
+    port: Option<u16>,
+    identity_file: Option<PathBuf>,
+    config_file: Option<PathBuf>,
+    proxy_jump: Option<String>,
+    known_hosts_file: Option<PathBuf>,
+    no_ssh: bool,
+}
+
+impl SshOptionsUpdate {
+    fn requested(&self) -> bool {
+        self.host.is_some()
+            || self.user.is_some()
+            || self.port.is_some()
+            || self.identity_file.is_some()
+            || self.config_file.is_some()
+            || self.proxy_jump.is_some()
+            || self.known_hosts_file.is_some()
+    }
+
+    fn apply(&self, previous: Option<&SshOptions>) -> Option<SshOptions> {
+        if self.no_ssh {
+            return None;
+        }
+        if !self.requested() {
+            return previous.cloned();
+        }
+        let previous = previous.cloned().unwrap_or_default();
+        Some(SshOptions {
+            host: self.host.clone().unwrap_or_else(|| previous.host.clone()),
+            port: self.port.or(previous.port),
+            user: merge_optional_text(self.user.as_deref(), previous.user),
+            identity_file: merge_optional_path(self.identity_file.as_ref(), previous.identity_file),
+            config_file: merge_optional_path(self.config_file.as_ref(), previous.config_file),
+            proxy_jump: merge_optional_text(self.proxy_jump.as_deref(), previous.proxy_jump),
+            known_hosts_file: merge_optional_path(
+                self.known_hosts_file.as_ref(),
+                previous.known_hosts_file,
+            ),
+        })
+    }
+}
+
+fn merge_optional_text(value: Option<&str>, previous: Option<String>) -> Option<String> {
+    match value {
+        Some("") => None,
+        Some(value) => Some(value.to_owned()),
+        None => previous,
+    }
+}
+
+fn merge_optional_path(value: Option<&PathBuf>, previous: Option<PathBuf>) -> Option<PathBuf> {
+    match value {
+        Some(path) if path.as_os_str().is_empty() => None,
+        Some(path) => Some(path.clone()),
+        None => previous,
+    }
 }
 
 pub async fn run(
@@ -152,7 +225,30 @@ pub async fn run(
             password_stdin,
             upsert,
             read_write,
+            ssh_host,
+            ssh_user,
+            ssh_port,
+            ssh_identity_file,
+            ssh_config_file,
+            ssh_proxy_jump,
+            ssh_known_hosts_file,
+            no_ssh,
         } => {
+            if no_ssh
+                && (ssh_host.is_some()
+                    || ssh_user.is_some()
+                    || ssh_port.is_some()
+                    || ssh_identity_file.is_some()
+                    || ssh_config_file.is_some()
+                    || ssh_proxy_jump.is_some()
+                    || ssh_known_hosts_file.is_some())
+            {
+                return Err(error(
+                    "invalid_arguments",
+                    "--no-ssh cannot be combined with SSH connection options.",
+                    2,
+                ));
+            }
             if cli_read_only && read_write {
                 return Err(error(
                     "invalid_arguments",
@@ -318,6 +414,16 @@ pub async fn run(
             let original_scope = scope;
             let original_root = context.root;
             let explicit_read_only = cli_read_only || read_write || url_read_only_explicit;
+            let ssh_update = SshOptionsUpdate {
+                host: ssh_host,
+                user: ssh_user,
+                port: ssh_port,
+                identity_file: ssh_identity_file,
+                config_file: ssh_config_file,
+                proxy_jump: ssh_proxy_jump,
+                known_hosts_file: ssh_known_hosts_file,
+                no_ssh,
+            };
             let profile = imported.profile;
             let password = password;
             let operation_native_store = native_store.clone();
@@ -384,6 +490,10 @@ pub async fn run(
                             )
                             .map_err(|_| "catalog_scope_conflict: saved catalog scope is incompatible with the new URL".to_owned())?;
                     }
+                    saved.ssh = ssh_update.apply(previous.as_ref().and_then(|profile| profile.ssh.as_ref()));
+                    saved
+                        .validate_ssh()
+                        .map_err(|reason| format!("invalid_ssh_configuration: {reason}"))?;
                     if let Some(password) = password {
                         if password.expose_secret().len() > MAX_PASSWORD_BYTES {
                             return Err("credential_input_invalid: password is too long".to_owned());
@@ -570,26 +680,41 @@ pub async fn run(
                         4,
                     )
                 })?;
-            let connection = tokio::time::timeout(
-                remaining(),
-                DatabaseConnection::connect(profile, password.as_ref()),
-            )
-            .await
-            .map_err(|_| error("timeout", "Connection test timed out.", 6))?
-            .map_err(|_| error("connection_failed", "Unable to connect to the database.", 6))?;
-            let probe = tokio::time::timeout(remaining(), connection.probe()).await;
-            let server = match probe {
-                Ok(Ok(server)) => server,
-                Ok(Err(_)) => {
-                    close_test_connection(connection).await;
-                    return Err(error("connection_failed", "Database probe failed.", 6));
-                }
-                Err(_) => {
-                    close_test_connection(connection).await;
-                    return Err(error("timeout", "Connection test timed out.", 6));
-                }
-            };
-            close_test_connection(connection).await;
+            let settings = AppSettings::load(app_paths()?.settings_file()).map_err(|_| {
+                error(
+                    "invalid_configuration",
+                    "Unable to read SSH connection defaults.",
+                    2,
+                )
+            })?;
+            let connector =
+                crate::connections::DatabaseConnector::with_ssh_config(settings.connections.ssh);
+            let result = async {
+                let connection = tokio::time::timeout(
+                    remaining(),
+                    connector.connect(profile, password.as_ref()),
+                )
+                .await
+                .map_err(|_| error("timeout", "Connection test timed out.", 6))?
+                .map_err(map_connect_error)?;
+                let probe = tokio::time::timeout(remaining(), connection.probe()).await;
+                let server = match probe {
+                    Ok(Ok(server)) => server,
+                    Ok(Err(_)) => {
+                        close_test_connection(connection).await;
+                        return Err(error("connection_failed", "Database probe failed.", 6));
+                    }
+                    Err(_) => {
+                        close_test_connection(connection).await;
+                        return Err(error("timeout", "Connection test timed out.", 6));
+                    }
+                };
+                close_test_connection(connection).await;
+                Ok(server)
+            }
+            .await;
+            connector.shutdown().await;
+            let server = result?;
             Ok(render(
                 "connections.test",
                 TestSummary {
@@ -696,6 +821,11 @@ fn summarize(profile: &ConnectionProfile, changed: Option<bool>) -> ConnectionSu
         user: profile.user.clone(),
         read_only: profile.read_only,
         credential_storage,
+        ssh: profile.ssh.as_ref().map(|ssh| ConnectionSshSummary {
+            host: ssh.host.clone(),
+            port: ssh.port,
+            user: ssh.user.clone(),
+        }),
         changed,
     }
 }
@@ -774,7 +904,23 @@ fn render_connection_line(value: &serde_json::Value) -> String {
         .and_then(serde_json::Value::as_bool)
         .map(|changed| format!(" changed={changed}"))
         .unwrap_or_default();
-    format!("{name} ({kind}, {scope}) id={id}{changed}")
+    let ssh = value
+        .get("ssh")
+        .and_then(serde_json::Value::as_object)
+        .map(|ssh| {
+            let host = ssh
+                .get("host")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown");
+            let port = ssh
+                .get("port")
+                .and_then(serde_json::Value::as_u64)
+                .map(|port| format!(":{port}"))
+                .unwrap_or_default();
+            format!(" ssh={host}{port}")
+        })
+        .unwrap_or_default();
+    format!("{name} ({kind}, {scope}) id={id}{ssh}{changed}")
 }
 
 pub fn render_error(command: &'static str, error: &ConnectionCliError, json: bool) -> String {
@@ -800,6 +946,74 @@ fn error(code: &'static str, message: &str, exit_code: i32) -> ConnectionCliErro
         code,
         message: message.to_owned(),
         exit_code,
+    }
+}
+
+fn map_connect_error(connect_error: crate::db::DatabaseError) -> ConnectionCliError {
+    match connect_error.code.as_deref() {
+        Some("ssh_unavailable") => error(
+            "ssh_unavailable",
+            "OpenSSH client is unavailable; install OpenSSH and retry.",
+            6,
+        ),
+        Some("ssh_unsupported") => error(
+            "ssh_unsupported",
+            "The installed OpenSSH client or SSH configuration is unsupported.",
+            6,
+        ),
+        Some("ssh_configuration") => error(
+            "ssh_configuration",
+            "The SSH tunnel configuration is invalid.",
+            6,
+        ),
+        Some("ssh_host_key_unknown") => error(
+            "ssh_host_key_unknown",
+            "The SSH host key is not trusted; verify it with system ssh first.",
+            6,
+        ),
+        Some("ssh_host_key_changed") => error(
+            "ssh_host_key_changed",
+            "The SSH host key changed; verify the new key before updating known_hosts.",
+            6,
+        ),
+        Some("ssh_interaction_required") => error(
+            "ssh_interaction_required",
+            "SSH requires interactive authentication; unlock the key with ssh-add first.",
+            6,
+        ),
+        Some("ssh_authentication_failed") => error(
+            "ssh_authentication_failed",
+            "SSH authentication failed; check the SSH user, key, and agent.",
+            6,
+        ),
+        Some("ssh_network") => error(
+            "ssh_network",
+            "SSH could not connect to the bastion; check its host, port, and network.",
+            6,
+        ),
+        Some("ssh_timeout") => error("ssh_timeout", "SSH connection test timed out.", 6),
+        Some("ssh_forward_conflict") => error(
+            "ssh_forward_conflict",
+            "SSH could not bind its private forwarding endpoint.",
+            6,
+        ),
+        Some("ssh_destination_unreachable") => error(
+            "ssh_destination_unreachable",
+            "The SSH bastion could not reach the database host and port.",
+            6,
+        ),
+        Some("ssh_tunnel_exited") => error(
+            "ssh_tunnel_exited",
+            "The SSH tunnel disconnected during the connection test.",
+            6,
+        ),
+        Some("ssh_cancelled") => error(
+            "ssh_cancelled",
+            "The SSH tunnel connection was cancelled.",
+            6,
+        ),
+        Some("connection_timeout") => error("timeout", "Connection test timed out.", 6),
+        _ => error("connection_failed", "Unable to connect to the database.", 6),
     }
 }
 
@@ -840,6 +1054,12 @@ fn map_mutation_error(mutation_error: ProfileMutationError) -> ConnectionCliErro
                 error(
                     "catalog_scope_conflict",
                     "The saved catalog scope is incompatible with the new connection URL.",
+                    2,
+                )
+            } else if message.starts_with("invalid_ssh_configuration:") {
+                error(
+                    "invalid_ssh_configuration",
+                    "The SSH tunnel configuration is invalid or unsupported for this driver.",
                     2,
                 )
             } else if message.starts_with("credential_rollback_failed:") {
@@ -970,7 +1190,9 @@ mod tests {
 
     use crate::cli::Cli;
 
-    use super::read_password;
+    use crate::db::{DatabaseError, ErrorCategory};
+
+    use super::{map_connect_error, read_password};
 
     #[test]
     fn connection_password_environment_value_is_never_returned_in_errors() {
@@ -997,5 +1219,42 @@ mod tests {
         ])
         .unwrap();
         assert!(cli.url.is_none());
+    }
+
+    #[test]
+    fn ssh_connector_errors_keep_stable_codes_and_safe_messages() {
+        for code in [
+            "ssh_unavailable",
+            "ssh_unsupported",
+            "ssh_configuration",
+            "ssh_host_key_unknown",
+            "ssh_host_key_changed",
+            "ssh_interaction_required",
+            "ssh_authentication_failed",
+            "ssh_network",
+            "ssh_timeout",
+            "ssh_forward_conflict",
+            "ssh_destination_unreachable",
+            "ssh_tunnel_exited",
+            "ssh_cancelled",
+        ] {
+            let mapped = map_connect_error(DatabaseError {
+                category: ErrorCategory::Network,
+                code: Some(code.to_owned()),
+                message: "hostile remote diagnostics".to_owned(),
+                diagnostic: None,
+            });
+            assert_eq!(mapped.code, code);
+            assert!(!mapped.message.contains("hostile"));
+            assert_eq!(mapped.exit_code, 6);
+        }
+
+        let timeout = map_connect_error(DatabaseError {
+            category: ErrorCategory::Network,
+            code: Some("connection_timeout".to_owned()),
+            message: "internal deadline detail".to_owned(),
+            diagnostic: None,
+        });
+        assert_eq!(timeout.code, "timeout");
     }
 }

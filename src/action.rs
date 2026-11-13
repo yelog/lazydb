@@ -1840,6 +1840,7 @@ pub enum Command {
         request_id: u64,
         submission: ProfileSubmission,
     },
+    CancelProfileConnections,
     DiscoverProfileCatalog {
         request_id: u64,
         submission: ProfileSubmission,

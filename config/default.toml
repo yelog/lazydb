@@ -36,6 +36,27 @@ default_access = "global"
 # maximum_bytes_billed accepts 1..=9223372036854775807; query_timeout_secs accepts 1..=86400.
 # credentials_file, location, and data_project are optional; data_project defaults
 # to the execution project. Only the ADC file path is saved, never its contents.
+#
+# SSH tunneling uses the system OpenSSH client. The application total connect
+# deadline and keepalive policy are bounded; per-profile SSH connection settings
+# live in connections.toml.
+# connect_timeout_seconds accepts 1..=300;
+# server_alive_interval_seconds accepts 1..=3600;
+# server_alive_count_max accepts 1..=10.
+# Per-profile example:
+# [profiles.ssh]
+# host = "bastion.example.com"
+# port = 2222
+# user = "alice"
+# identity_file = "~/.ssh/id_ed25519"
+# config_file = "~/.ssh/config"
+# proxy_jump = "ops@jump.example.com:2200"
+# known_hosts_file = "~/.ssh/known_hosts"
+
+[connections.ssh]
+connect_timeout_seconds = 30
+server_alive_interval_seconds = 30
+server_alive_count_max = 3
 
 [dashboard]
 refresh_interval_seconds = 5

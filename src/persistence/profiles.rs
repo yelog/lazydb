@@ -53,6 +53,8 @@ pub enum PersistenceError {
     MissingParent,
     #[error("profile document is invalid: {0}")]
     InvalidStructure(String),
+    #[error("profile {profile_id} has invalid SSH configuration: {reason}")]
+    InvalidSshConfiguration { profile_id: Uuid, reason: String },
     #[error("profile lock failed: {0}")]
     Lock(#[from] super::profile_transaction::ProfileLockError),
 }
@@ -130,6 +132,7 @@ impl From<ConnectionProfileV5> for ConnectionProfile {
             read_only: profile.read_only,
             environment: profile.environment,
             catalog_scope: profile.catalog_scope,
+            ssh: None,
         }
     }
 }
@@ -195,6 +198,7 @@ impl From<ConnectionProfileV2> for ConnectionProfile {
             read_only: profile.read_only,
             environment: profile.environment,
             catalog_scope: profile.catalog_scope,
+            ssh: None,
         }
     }
 }
@@ -314,13 +318,14 @@ impl ProfileStore {
         for (index, value) in profiles.iter().enumerate() {
             match value.clone().try_into::<ConnectionProfile>() {
                 Ok(profile)
-                    if profile.kind == DatabaseKind::BigQuery
-                        && profile.validate_bigquery().is_err() =>
+                    if (profile.kind == DatabaseKind::BigQuery
+                        && profile.validate_bigquery().is_err())
+                        || profile.validate_ssh().is_err() =>
                 {
                     unavailable.push(UnavailableProfile {
                         id: Some(profile.id),
                         name: profile.name,
-                        kind: Some("bigquery".into()),
+                        kind: Some(database_kind_name(profile.kind)),
                         reason: ProfileUnavailableReason::InvalidConfiguration,
                     });
                 }
@@ -759,6 +764,7 @@ fn preserve_unavailable_profiles(
             // An absent username is an explicit clear, including switching to no auth.
             previous.remove("user");
             previous.remove("bigquery_options");
+            previous.remove("ssh");
             if current["kind"].as_str() != previous["kind"].as_str() {
                 // Switching drivers explicitly clears fields omitted by the new
                 // profile; retaining old transport fields can invalidate ADC profiles.
@@ -811,7 +817,8 @@ fn profile_table_is_unavailable(table: &toml_edit::Table) -> bool {
         .is_none_or(|profile| match profile.try_into::<ConnectionProfile>() {
             Err(_) => true,
             Ok(profile) => {
-                profile.kind == DatabaseKind::BigQuery && profile.validate_bigquery().is_err()
+                (profile.kind == DatabaseKind::BigQuery && profile.validate_bigquery().is_err())
+                    || profile.validate_ssh().is_err()
             }
         })
 }
@@ -872,6 +879,10 @@ fn normalize_legacy_profile(mut profile: ConnectionProfile) -> ConnectionProfile
     normalize_v3_profile(profile)
 }
 
+fn database_kind_name(kind: DatabaseKind) -> String {
+    format!("{kind:?}").to_ascii_lowercase()
+}
+
 fn validate_profile_ids(profiles: &[ConnectionProfile]) -> Result<(), PersistenceError> {
     let mut ids = HashSet::with_capacity(profiles.len());
     for profile in profiles {
@@ -920,6 +931,12 @@ fn validate_collection(collection: &ProfileCollection) -> Result<(), Persistence
         }
     }
     for profile in &collection.profiles {
+        profile
+            .validate_ssh()
+            .map_err(|reason| PersistenceError::InvalidSshConfiguration {
+                profile_id: profile.id,
+                reason,
+            })?;
         if let Some(group_id) = profile.group_id
             && !ids.contains(&group_id)
         {

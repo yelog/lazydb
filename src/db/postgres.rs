@@ -40,6 +40,7 @@ use super::pgwire::decode::{format_pg_array, format_pg_interval};
 use super::transaction::{
     RelationMutationCategory, RelationMutationDiagnostic, TransactionBackend, TransactionError,
 };
+use super::transport::ConnectionRoute;
 use super::{
     DatabaseError, ErrorCategory, ServerInfo,
     catalog::{
@@ -265,6 +266,7 @@ pub struct PostgresAdapter {
     connection_id: Uuid,
     catalog_scope: CatalogScope,
     server_version_num: i32,
+    _route: ConnectionRoute,
 }
 
 struct PgIndexInfo {
@@ -3802,6 +3804,7 @@ LIMIT 2001
             control: self.pool.clone(),
             pid,
             adapter: self.clone(),
+            _route: self._route.clone(),
         })
     }
 
@@ -3809,10 +3812,20 @@ LIMIT 2001
         profile: &ConnectionProfile,
         password: Option<&SecretString>,
     ) -> Result<Self, DatabaseError> {
+        let route = ConnectionRoute::require_direct(profile)?;
+        Self::connect_routed(profile, password, route).await
+    }
+
+    pub(crate) async fn connect_routed(
+        profile: &ConnectionProfile,
+        password: Option<&SecretString>,
+        route: ConnectionRoute,
+    ) -> Result<Self, DatabaseError> {
         if profile.kind != DatabaseKind::Postgres {
             return Err(DatabaseError::configuration("profile is not PostgreSQL"));
         }
-        let options = super::pgwire::connect_options(profile, password, 5432).await?;
+        let options =
+            super::pgwire::connect_options_routed(profile, password, 5432, &route).await?;
 
         let pool = PgPoolOptions::new()
             .max_connections(6)
@@ -3842,11 +3855,13 @@ LIMIT 2001
                 diagnostic: None,
             });
         }
+        close_pool_on_tunnel_failure(&route, pool.clone());
         Ok(Self {
             pool,
             connection_id: profile.id,
             catalog_scope: profile.catalog_scope.clone(),
             server_version_num: server_version,
+            _route: route,
         })
     }
 
@@ -3992,7 +4007,14 @@ LIMIT 2001
         sql: &str,
         budget: QueryBudget,
     ) -> Result<QueryOutcome, DatabaseError> {
-        super::pgwire::execute_pool(&self.pool, super::pgwire::Server::Postgres, sql, budget).await
+        super::pgwire::execute_pool(
+            &self.pool,
+            super::pgwire::Server::Postgres,
+            sql,
+            budget,
+            &self._route,
+        )
+        .await
     }
 
     pub(crate) async fn execute_connection(
@@ -6364,11 +6386,23 @@ fn relation_count_sql(sql: &str) -> String {
     format!("SELECT COUNT(*) FROM ({sql}) AS __lazydb_count")
 }
 
+fn close_pool_on_tunnel_failure(route: &ConnectionRoute, pool: PgPool) {
+    let Some(lease) = route.lease.as_ref() else {
+        return;
+    };
+    let failure = lease.failure();
+    tokio::spawn(async move {
+        failure.await;
+        pool.close().await;
+    });
+}
+
 pub struct PostgresTransactionBackend {
     connection: PoolConnection<Postgres>,
     control: PgPool,
     pid: i32,
     adapter: PostgresAdapter,
+    _route: ConnectionRoute,
 }
 
 #[async_trait::async_trait]
@@ -6665,6 +6699,7 @@ impl TransactionBackend for PostgresTransactionBackend {
     }
     fn force_close(self) -> futures_util::future::BoxFuture<'static, Result<(), TransactionError>> {
         Box::pin(async move {
+            let _route = self._route;
             // SQLx 0.9 has no close_hard on PoolConnection. Detach first, then close the raw
             // connection so a possibly dirty session can never be returned to this pool.
             let connection = self.connection.detach();
@@ -7845,8 +7880,23 @@ mod tests {
         format_pg_array, format_pg_interval, parse_pg_interval, postgres_delete_sql,
         postgres_placeholder, quote_identifier, quote_literal, stale_relation_identity,
     };
+    use crate::db::transport::ConnectionRoute;
     use sqlx::postgres::types::PgInterval;
     use uuid::Uuid;
+
+    #[tokio::test]
+    async fn direct_connect_rejects_ssh_profiles_before_network_io() {
+        let mut imported =
+            crate::profile::import_connection_url("postgresql://alice@127.0.0.1:1/app", None)
+                .unwrap();
+        imported.profile.ssh = Some(crate::profile::SshOptions::default());
+
+        let error = super::PostgresAdapter::connect(&imported.profile, None)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.category, super::ErrorCategory::Configuration);
+    }
 
     #[test]
     fn stale_relation_identity_requires_matching_profile_and_relation_path() {
@@ -7891,6 +7941,7 @@ mod tests {
                 None,
             ),
             server_version_num,
+            _route: ConnectionRoute::direct(),
         })
     }
 
@@ -8337,6 +8388,7 @@ mod tests {
                 None,
             ),
             server_version_num: 120_000,
+            _route: ConnectionRoute::direct(),
         };
         let plan = adapter
             .plan_principal_mutation(

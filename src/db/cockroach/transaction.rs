@@ -4,6 +4,7 @@ use super::super::{
     transaction::{
         RelationMutationCategory, RelationMutationDiagnostic, TransactionBackend, TransactionError,
     },
+    transport::ConnectionRoute,
 };
 use sqlx::{Postgres, pool::PoolConnection};
 use sqlx_core::transaction::TransactionManager;
@@ -11,12 +12,14 @@ use sqlx_core::transaction::TransactionManager;
 pub struct CockroachTransactionBackend {
     // Taking the connection on cancellation guarantees it cannot return to the pool.
     connection: Option<PoolConnection<Postgres>>,
+    _route: ConnectionRoute,
 }
 
 impl CockroachTransactionBackend {
-    pub(super) fn new(connection: PoolConnection<Postgres>) -> Self {
+    pub(super) fn new(connection: PoolConnection<Postgres>, route: ConnectionRoute) -> Self {
         Self {
             connection: Some(connection),
+            _route: route,
         }
     }
 

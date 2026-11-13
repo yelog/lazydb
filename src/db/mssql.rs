@@ -21,7 +21,6 @@ use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 use uuid::Uuid;
 
 use super::mutation::{InputValue, MutationResult, RelationMutation, RelationMutationRequest};
-use super::transaction::{TransactionBackend, TransactionError};
 use super::{
     DatabaseError, ErrorCategory, RelationPreview, ServerInfo,
     catalog::{
@@ -47,6 +46,10 @@ use super::{
     },
     query::{ColumnMeta, QueryBudget, QueryOutcome, QueryStats, RELATION_PREVIEW_LIMIT, ResultSet},
     value::CellValue,
+};
+use super::{
+    transaction::{TransactionBackend, TransactionError},
+    transport::{ConnectionRoute, TransportEndpoint},
 };
 use crate::{
     identity::ConnectionIdentity,
@@ -83,6 +86,7 @@ pub(crate) struct MsSqlConnectSettings {
     database: String,
     tls_mode: MsSqlTlsMode,
     read_only: bool,
+    route: ConnectionRoute,
 }
 
 impl fmt::Debug for MsSqlConnectSettings {
@@ -102,9 +106,19 @@ impl fmt::Debug for MsSqlConnectSettings {
 
 #[allow(dead_code)]
 impl MsSqlConnectSettings {
+    #[allow(dead_code)]
     pub(crate) fn from_profile(
         profile: &ConnectionProfile,
         password: Option<&SecretString>,
+    ) -> Result<Self, DatabaseError> {
+        let route = ConnectionRoute::require_direct(profile)?;
+        Self::from_profile_routed(profile, password, route)
+    }
+
+    fn from_profile_routed(
+        profile: &ConnectionProfile,
+        password: Option<&SecretString>,
+        route: ConnectionRoute,
     ) -> Result<Self, DatabaseError> {
         if profile.kind != DatabaseKind::SqlServer {
             return Err(DatabaseError::configuration("profile is not SQL Server"));
@@ -154,6 +168,7 @@ impl MsSqlConnectSettings {
             database,
             tls_mode,
             read_only: profile.read_only,
+            route,
         })
     }
 
@@ -191,9 +206,27 @@ impl MsSqlConnectSettings {
 
     async fn connect(&self) -> Result<TdsClient, DatabaseError> {
         let config = self.tiberius_config();
-        let tcp = TcpStream::connect(config.get_addr())
-            .await
-            .map_err(network_error)?;
+        self.route.ensure_alive()?;
+        let route = self.route.clone();
+        let tcp = match &self.route.endpoint {
+            TransportEndpoint::Direct => {
+                let address = config.get_addr();
+                route
+                    .guard(async move { TcpStream::connect(address).await.map_err(network_error) })
+                    .await?
+            }
+            TransportEndpoint::Tcp(endpoint) => {
+                let endpoint = *endpoint;
+                route
+                    .guard(async move { TcpStream::connect(endpoint).await.map_err(network_error) })
+                    .await?
+            }
+            TransportEndpoint::Unix(_) | TransportEndpoint::Socks5(_) => {
+                return Err(DatabaseError::unsupported(
+                    "SQL Server connections support only direct or TCP transport",
+                ));
+            }
+        };
         tcp.set_nodelay(true).map_err(network_error)?;
         Client::connect(config, tcp.compat_write())
             .await
@@ -280,6 +313,7 @@ impl MsSqlConnectionPool {
     }
 
     async fn checkout(&self) -> Result<MsSqlLease, DatabaseError> {
+        self.settings.route.ensure_alive()?;
         if self.closed.load(Ordering::Acquire) {
             return Err(pool_closed_error());
         }
@@ -287,7 +321,14 @@ impl MsSqlConnectionPool {
         let permit = Arc::clone(&self.permits)
             .acquire_owned()
             .await
-            .map_err(|_| pool_closed_error())?;
+            .map_err(|_| {
+                self.settings
+                    .route
+                    .ensure_alive()
+                    .err()
+                    .unwrap_or_else(pool_closed_error)
+            })?;
+        self.settings.route.ensure_alive()?;
         let idle_client = {
             let mut idle = self.idle.lock().unwrap_or_else(|error| error.into_inner());
             if self.closed.load(Ordering::Acquire) {
@@ -336,6 +377,7 @@ pub struct MsSqlAdapter {
     closed: Arc<AtomicBool>,
     connection_id: Uuid,
     catalog_scope: CatalogScope,
+    _route: ConnectionRoute,
 }
 
 impl fmt::Debug for MsSqlAdapter {
@@ -932,7 +974,16 @@ impl MsSqlAdapter {
         profile: &ConnectionProfile,
         password: Option<&SecretString>,
     ) -> Result<Self, DatabaseError> {
-        let adapter = Self::from_profile(profile, password)?;
+        let route = ConnectionRoute::require_direct(profile)?;
+        Self::connect_routed(profile, password, route).await
+    }
+
+    pub(crate) async fn connect_routed(
+        profile: &ConnectionProfile,
+        password: Option<&SecretString>,
+        route: ConnectionRoute,
+    ) -> Result<Self, DatabaseError> {
+        let adapter = Self::from_profile_routed(profile, password, route)?;
         if let Err(error) = adapter.probe().await {
             adapter.close().await;
             return Err(error);
@@ -940,17 +991,35 @@ impl MsSqlAdapter {
         Ok(adapter)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn from_profile(
         profile: &ConnectionProfile,
         password: Option<&SecretString>,
     ) -> Result<Self, DatabaseError> {
-        let settings = Arc::new(MsSqlConnectSettings::from_profile(profile, password)?);
+        let route = ConnectionRoute::require_direct(profile)?;
+        Self::from_profile_routed(profile, password, route)
+    }
+
+    fn from_profile_routed(
+        profile: &ConnectionProfile,
+        password: Option<&SecretString>,
+        route: ConnectionRoute,
+    ) -> Result<Self, DatabaseError> {
+        let settings = Arc::new(MsSqlConnectSettings::from_profile_routed(
+            profile,
+            password,
+            route.clone(),
+        )?);
+        let pools = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let closed = Arc::new(AtomicBool::new(false));
+        close_adapter_on_tunnel_failure(&route, Arc::clone(&pools), Arc::clone(&closed));
         Ok(Self {
             settings,
-            pools: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            closed: Arc::new(AtomicBool::new(false)),
+            pools,
+            closed,
             connection_id: profile.id,
             catalog_scope: profile.catalog_scope.clone(),
+            _route: route,
         })
     }
 
@@ -970,10 +1039,12 @@ impl MsSqlAdapter {
         &self,
         database: &str,
     ) -> Result<MsSqlConnectionPool, DatabaseError> {
+        self._route.ensure_alive()?;
         if self.closed.load(Ordering::Acquire) {
             return Err(pool_closed_error());
         }
         let mut pools = self.pools.lock().await;
+        self._route.ensure_alive()?;
         if self.closed.load(Ordering::Acquire) {
             return Err(pool_closed_error());
         }
@@ -2665,6 +2736,31 @@ impl MsSqlAdapter {
             pool.close().await;
         }
     }
+}
+
+fn close_adapter_on_tunnel_failure(
+    route: &ConnectionRoute,
+    pools: Arc<tokio::sync::Mutex<HashMap<String, MsSqlConnectionPool>>>,
+    closed: Arc<AtomicBool>,
+) {
+    let Some(lease) = route.lease.as_ref() else {
+        return;
+    };
+    let failure = lease.failure();
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    runtime.spawn(async move {
+        failure.await;
+        closed.store(true, Ordering::Release);
+        let pools = {
+            let mut pools = pools.lock().await;
+            pools.drain().map(|(_, pool)| pool).collect::<Vec<_>>()
+        };
+        for pool in pools {
+            pool.close().await;
+        }
+    });
 }
 
 async fn load_module_definition(
@@ -4766,6 +4862,7 @@ mod tests {
             read_only: false,
             environment: Environment::Development,
             catalog_scope: CatalogScope::for_profile(DatabaseKind::SqlServer, "app", Some("dbo")),
+            ssh: None,
         }
     }
 
@@ -4833,6 +4930,123 @@ mod tests {
                 "db.example.test:1433"
             );
         }
+    }
+
+    #[test]
+    fn tcp_route_keeps_the_original_tiberius_hostname() {
+        let password = SecretString::from("secret".to_owned());
+        let route = ConnectionRoute {
+            endpoint: TransportEndpoint::Tcp("127.0.0.1:41433".parse().unwrap()),
+            lease: None,
+        };
+        let settings = MsSqlConnectSettings::from_profile_routed(
+            &profile(SslMode::VerifyFull),
+            Some(&password),
+            route,
+        )
+        .unwrap();
+
+        assert_eq!(
+            settings.tiberius_config().get_addr(),
+            "db.example.test:1433"
+        );
+        assert!(matches!(
+            settings.route.endpoint,
+            TransportEndpoint::Tcp(endpoint) if endpoint.port() == 41433
+        ));
+    }
+
+    #[tokio::test]
+    async fn non_tcp_route_fails_before_dialing() {
+        let password = SecretString::from("secret".to_owned());
+        let route = ConnectionRoute {
+            endpoint: TransportEndpoint::Unix(std::path::PathBuf::from("/tmp/lazydb-mssql.sock")),
+            lease: None,
+        };
+        let settings = MsSqlConnectSettings::from_profile_routed(
+            &profile(SslMode::VerifyFull),
+            Some(&password),
+            route,
+        )
+        .unwrap();
+
+        let error = settings.connect().await.unwrap_err();
+        assert_eq!(error.category, ErrorCategory::Unsupported);
+    }
+
+    #[tokio::test]
+    async fn failed_tunnel_route_rejects_pool_checkout_before_dialing() {
+        let password = SecretString::from("secret".to_owned());
+        let (lease, fail_tunnel) = crate::ssh::test_lease();
+        let route = ConnectionRoute {
+            endpoint: TransportEndpoint::Tcp("127.0.0.1:41433".parse().unwrap()),
+            lease: Some(lease),
+        };
+        let settings = Arc::new(
+            MsSqlConnectSettings::from_profile_routed(
+                &profile(SslMode::VerifyFull),
+                Some(&password),
+                route,
+            )
+            .unwrap(),
+        );
+        let pool = MsSqlConnectionPool::new(settings);
+        fail_tunnel();
+
+        let error = match pool.checkout().await {
+            Ok(_) => panic!("failed route unexpectedly opened a SQL Server connection"),
+            Err(error) => error,
+        };
+        assert_eq!(error.category, ErrorCategory::Network);
+        assert_eq!(error.code.as_deref(), Some("ssh_tunnel_exited"));
+    }
+
+    #[tokio::test]
+    async fn tunnel_failure_closes_existing_sql_server_pools() {
+        let password = SecretString::from("secret".to_owned());
+        let (lease, fail_tunnel) = crate::ssh::test_lease();
+        let route = ConnectionRoute {
+            endpoint: TransportEndpoint::Tcp("127.0.0.1:41433".parse().unwrap()),
+            lease: Some(lease),
+        };
+        let adapter = MsSqlAdapter::from_profile_routed(
+            &profile(SslMode::VerifyFull),
+            Some(&password),
+            route,
+        )
+        .unwrap();
+        let pool = adapter.pool_for_database("app").await.unwrap();
+        fail_tunnel();
+
+        for _ in 0..100 {
+            if adapter.closed.load(Ordering::Acquire) && pool.closed.load(Ordering::Acquire) {
+                let error = adapter
+                    .pool_for_database("app")
+                    .await
+                    .err()
+                    .expect("failed SQL Server route reopened a pool");
+                assert_eq!(error.code.as_deref(), Some("ssh_tunnel_exited"));
+                let error = pool
+                    .checkout()
+                    .await
+                    .err()
+                    .expect("failed SQL Server route reopened a connection");
+                assert_eq!(error.code.as_deref(), Some("ssh_tunnel_exited"));
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("tunnel failure did not close the SQL Server adapter and pool");
+    }
+
+    #[tokio::test]
+    async fn direct_connect_rejects_ssh_profiles_before_network_io() {
+        let mut profile = profile(SslMode::Disable);
+        profile.ssh = Some(crate::profile::SshOptions::default());
+
+        let error = MsSqlAdapter::connect(&profile, None).await.unwrap_err();
+
+        assert_eq!(error.category, ErrorCategory::Configuration);
     }
 
     #[test]

@@ -12,12 +12,15 @@ pub mod types;
 
 use mongodb::{
     Client,
-    options::{ClientOptions, Tls, TlsOptions},
+    options::{ClientOptions, Socks5Proxy, Tls, TlsOptions},
 };
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::{
-    db::{DatabaseError, ErrorCategory, ServerInfo},
+    db::{
+        DatabaseError, ErrorCategory, ServerInfo,
+        transport::{ConnectionRoute, TransportEndpoint},
+    },
     profile::{ConnectionProfile, DatabaseKind, MongoConnectionOptions, SslMode},
 };
 
@@ -25,11 +28,17 @@ use crate::{
 pub struct MongoAdapter {
     client: Client,
     database: String,
+    route: ConnectionRoute,
 }
 
 impl MongoAdapter {
     pub fn client(&self) -> &Client {
         &self.client
+    }
+
+    fn checked_client(&self) -> Result<&Client, DatabaseError> {
+        self.route.ensure_alive()?;
+        Ok(&self.client)
     }
 
     pub(super) fn selected_database(&self) -> &str {
@@ -46,9 +55,26 @@ impl MongoAdapter {
         profile: &ConnectionProfile,
         password: Option<&SecretString>,
     ) -> Result<Self, DatabaseError> {
+        let route = ConnectionRoute::require_direct(profile)?;
+        Self::connect_routed(profile, password, route).await
+    }
+
+    pub(crate) async fn connect_routed(
+        profile: &ConnectionProfile,
+        password: Option<&SecretString>,
+        route: ConnectionRoute,
+    ) -> Result<Self, DatabaseError> {
         let uri_options = profile.mongodb_options.as_ref().ok_or_else(|| {
             DatabaseError::configuration("MongoDB connection options are missing")
         })?;
+        if !matches!(
+            &route.endpoint,
+            TransportEndpoint::Direct | TransportEndpoint::Socks5(_)
+        ) {
+            return Err(DatabaseError::unsupported(
+                "MongoDB connections support only direct or SOCKS5 transport",
+            ));
+        }
         let database = profile
             .database
             .clone()
@@ -95,19 +121,32 @@ impl MongoAdapter {
                 options.tls = Some(tls.into());
             }
         }
+        if let TransportEndpoint::Socks5(proxy) = &route.endpoint {
+            options.socks5_proxy = Some(
+                Socks5Proxy::builder()
+                    .host(proxy.ip().to_string())
+                    .port(proxy.port())
+                    .build(),
+            );
+        }
         let client = Client::with_options(options)
             .map_err(|_| DatabaseError::configuration("MongoDB client configuration is invalid"))?;
+        shutdown_on_tunnel_failure(&route, &client);
         client
             .database(&database)
             .run_command(mongodb::bson::doc! { "ping": 1 })
             .await
             .map_err(map_error)?;
-        Ok(Self { client, database })
+        Ok(Self {
+            client,
+            database,
+            route,
+        })
     }
 
     pub async fn probe(&self) -> Result<ServerInfo, DatabaseError> {
         let version = self
-            .client
+            .checked_client()?
             .database(&self.database)
             .run_command(mongodb::bson::doc! { "buildInfo": 1 })
             .await
@@ -177,7 +216,7 @@ impl MongoAdapter {
         })?;
         let count = documents.len() as u64;
         let result = self
-            .client
+            .checked_client()?
             .database(&namespace.database)
             .collection::<mongodb::bson::Document>(collection)
             .insert_many(documents)
@@ -240,7 +279,7 @@ impl MongoAdapter {
         })?;
         let filter = exact_document_guard(id, expected);
         let result = self
-            .client
+            .checked_client()?
             .database(&namespace.database)
             .collection::<mongodb::bson::Document>(collection)
             .delete_one(filter)
@@ -288,7 +327,7 @@ impl MongoAdapter {
         })?;
         let filter = exact_document_guard(id, expected);
         let result = self
-            .client
+            .checked_client()?
             .database(&namespace.database)
             .collection::<mongodb::bson::Document>(collection)
             .replace_one(filter, replacement)
@@ -331,6 +370,22 @@ impl MongoAdapter {
             tracing::debug!("MongoDB client shutdown deadline reached; remote cleanup unconfirmed");
         }
     }
+}
+
+fn shutdown_on_tunnel_failure(route: &ConnectionRoute, client: &Client) {
+    let Some(lease) = route.lease.as_ref() else {
+        return;
+    };
+    let failure = lease.failure();
+    let client = client.clone();
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    runtime.spawn(async move {
+        failure.await;
+        let _ =
+            tokio::time::timeout(Duration::from_secs(2), client.shutdown().immediate(true)).await;
+    });
 }
 
 fn build_uri(
@@ -457,13 +512,65 @@ fn map_error(error: mongodb::error::Error) -> DatabaseError {
 
 #[cfg(test)]
 mod tests {
-    use super::build_uri;
+    use super::{MongoAdapter, build_uri};
+    use crate::db::ErrorCategory;
+    use crate::db::transport::{ConnectionRoute, TransportEndpoint};
     use crate::profile::{
         CatalogScope, ConnectionProfile, ConnectionUrlFormat, CredentialPolicy, DatabaseKind,
-        Environment, MongoConnectionOptions, MongoSeed, ProfileAccess, SslMode,
+        Environment, MongoConnectionOptions, MongoSeed, ProfileAccess, SshOptions, SslMode,
+        import_connection_url,
     };
     use secrecy::SecretString;
     use uuid::Uuid;
+
+    #[tokio::test]
+    async fn direct_connect_rejects_ssh_profiles_before_network_io() {
+        let mut imported =
+            import_connection_url("mongodb://127.0.0.1:1/app", Some("secret")).unwrap();
+        imported.profile.ssh = Some(SshOptions::default());
+
+        let error = MongoAdapter::connect(&imported.profile, None)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.category, ErrorCategory::Configuration);
+    }
+
+    #[tokio::test]
+    async fn tcp_route_fails_closed_before_network_io() {
+        let imported = import_connection_url("mongodb://127.0.0.1:1/app", Some("secret")).unwrap();
+        let route = ConnectionRoute {
+            endpoint: TransportEndpoint::Tcp("127.0.0.1:27018".parse().unwrap()),
+            lease: None,
+        };
+
+        let error = MongoAdapter::connect_routed(&imported.profile, None, route)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.category, ErrorCategory::Unsupported);
+    }
+
+    #[tokio::test]
+    async fn failed_tunnel_route_rejects_client_access() {
+        let (lease, fail_tunnel) = crate::ssh::test_lease();
+        fail_tunnel();
+        let options = mongodb::options::ClientOptions::parse("mongodb://127.0.0.1:1/app")
+            .await
+            .unwrap();
+        let adapter = MongoAdapter {
+            client: mongodb::Client::with_options(options).unwrap(),
+            database: "app".into(),
+            route: ConnectionRoute {
+                endpoint: TransportEndpoint::Socks5("127.0.0.1:1080".parse().unwrap()),
+                lease: Some(lease),
+            },
+        };
+
+        let error = adapter.probe().await.unwrap_err();
+        assert_eq!(error.category, ErrorCategory::Network);
+        assert_eq!(error.code.as_deref(), Some("ssh_tunnel_exited"));
+    }
 
     fn profile(options: MongoConnectionOptions) -> ConnectionProfile {
         ConnectionProfile {
@@ -495,6 +602,7 @@ mod tests {
             read_only: false,
             environment: Environment::Development,
             catalog_scope: CatalogScope::for_profile(DatabaseKind::MongoDb, "app", None),
+            ssh: None,
         }
     }
 

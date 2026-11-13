@@ -143,6 +143,7 @@ fn fixture_profile_type_contract_is_explicit() {
         mongodb_options: None,
         elasticsearch_options: None,
         opensearch_options: None,
+        ssh: None,
         pg_options: None,
         ssl_mode: SslMode::Disable,
         credential_policy: CredentialPolicy::None,

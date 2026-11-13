@@ -24,7 +24,7 @@ impl MongoAdapter {
     ) -> Result<MongoDatabaseListing, DatabaseError> {
         let authorized_only = authority == DatabaseListAuthority::AuthorizedOnly;
         match self
-            .client()
+            .checked_client()?
             .list_database_names()
             .authorized_databases(authorized_only)
             .await
@@ -50,7 +50,7 @@ impl MongoAdapter {
         database: &str,
     ) -> Result<Vec<MongoCollectionInfo>, DatabaseError> {
         let cursor = self
-            .client()
+            .checked_client()?
             .database(database)
             .list_collections()
             .await
@@ -95,7 +95,7 @@ impl MongoAdapter {
             DatabaseError::configuration("MongoDB collection namespace is required")
         })?;
         let specifications = self
-            .client()
+            .checked_client()?
             .database(&namespace.database)
             .list_collections()
             .filter(mongodb::bson::doc! { "name": collection })
@@ -160,7 +160,7 @@ impl MongoAdapter {
             DatabaseError::configuration("MongoDB collection namespace is required")
         })?;
         let cursor = self
-            .client()
+            .checked_client()?
             .database(&namespace.database)
             .collection::<Document>(collection)
             .list_indexes()

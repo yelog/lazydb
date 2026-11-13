@@ -99,6 +99,29 @@
 
 ## [Unreleased]
 
+### Added
+
+- Add managed SSH tunnels for supported saved profiles using the system OpenSSH client, non-interactive key/agent/config authentication, strict host-key checking, and ProxyJump. SQLx uses TCP forwarding only for plaintext connections and Unix socket forwarding for TLS-capable modes on macOS/Linux so logical hostnames and SNI remain intact; HTTP and MongoDB use SOCKS5, and Redis/Valkey route the logical hostname to the managed endpoint. See [SSH tunnels](docs/ssh-tunnel.md).
+
+### Changed
+
+- Present the previous manual loopback forwarding instructions as the external-tunnel alternative, and document profile/CLI configuration, TLS differences, lifecycle, cleanup, dependencies, DNS boundaries, and current verification scope.
+
+### Internal
+
+- Add an isolated Docker SSH fixture with a three-member TLS/SCRAM MongoDB
+  replica set, CLI/Agent/MCP/LSP service tests, an optional pinned `linux/amd64`
+  SQL Server 2022 profile, a real PTY TUI check, and cleanup/target-directory
+  handling, including cleanup of the optional SQL Server profile. The complete
+  macOS arm64/OpenSSH 10.5 run passed 47 Rust integration tests plus the PTY
+  check: OpenSSH 6/6, PostgreSQL/MySQL 18/18 (including an agent-only key,
+  20 concurrent waiters, pool saturation, transactions, database targets, and
+  fail-closed handling of a replaced tunnel),
+  SQL Server 2/2, Redis/Valkey 6/6, HTTP 5/5, MongoDB 6/6, and
+  CLI/Agent/MCP/LSP 4/4. SQL Server ran as an emulated `linux/amd64` container.
+  Linux/Windows native clients, HTTP IP-SAN/IPv6, and broader MongoDB and Redis
+  topologies remain unverified.
+
 ## [0.3.1] - 2026-11-01
 
 ### Added

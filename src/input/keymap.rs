@@ -5314,6 +5314,13 @@ fn is_text_field(field: ProfileField) -> bool {
             | ProfileField::DataProject
             | ProfileField::MaximumBytesBilled
             | ProfileField::QueryTimeoutSecs
+            | ProfileField::SshHost
+            | ProfileField::SshUser
+            | ProfileField::SshPort
+            | ProfileField::SshIdentityFile
+            | ProfileField::SshConfigFile
+            | ProfileField::SshProxyJump
+            | ProfileField::SshKnownHostsFile
     )
 }
 
@@ -5334,7 +5341,10 @@ fn is_cycle_field(field: ProfileField) -> bool {
 }
 
 fn is_toggle_field(field: ProfileField) -> bool {
-    matches!(field, ProfileField::ReadOnly | ProfileField::SqliteMemory)
+    matches!(
+        field,
+        ProfileField::ReadOnly | ProfileField::SqliteMemory | ProfileField::SshEnabled
+    )
 }
 
 fn map_explorer(code: KeyCode, app: &App) -> Option<Action> {

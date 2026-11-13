@@ -28,6 +28,12 @@ const MIN_REDIS_AUTO_FILL_BUDGET_MS: u64 = 1;
 const MIN_REDIS_INDEX_DISK_BYTES: u64 = 1;
 const MIN_REDIS_METADATA_CACHE_CAPACITY: usize = 1;
 const MIN_REDIS_METADATA_CACHE_TTL_SECONDS: u64 = 1;
+const MIN_SSH_CONNECT_TIMEOUT_SECONDS: u64 = 1;
+const MAX_SSH_CONNECT_TIMEOUT_SECONDS: u64 = 300;
+const MIN_SSH_SERVER_ALIVE_INTERVAL_SECONDS: u64 = 1;
+const MAX_SSH_SERVER_ALIVE_INTERVAL_SECONDS: u64 = 3_600;
+const MIN_SSH_SERVER_ALIVE_COUNT_MAX: u32 = 1;
+const MAX_SSH_SERVER_ALIVE_COUNT_MAX: u32 = 10;
 const SUPPORTED_COMMANDS: &[&str] = &[
     "help",
     "omni",
@@ -123,6 +129,10 @@ pub enum ConfigError {
     InvalidUpdateCheckInterval,
     #[error("redis settings must all be greater than zero")]
     InvalidRedisSettings,
+    #[error(
+        "connections.ssh settings must be bounded: connect_timeout_seconds 1..=300, server_alive_interval_seconds 1..=3600, and server_alive_count_max 1..=10"
+    )]
+    InvalidSshSettings,
     #[error("invalid keybinding for `{command}`: `{key}`")]
     InvalidKeybinding { command: String, key: String },
     #[error("keybinding `{key}` is assigned to both `{first}` and `{second}`")]
@@ -227,6 +237,34 @@ pub struct ExecutionConfig {
 #[serde(deny_unknown_fields)]
 pub struct ConnectionsConfig {
     pub default_access: ConnectionAccessDefault,
+    #[serde(default)]
+    pub ssh: SshConfig,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SshConfig {
+    pub connect_timeout_seconds: u64,
+    pub server_alive_interval_seconds: u64,
+    pub server_alive_count_max: u32,
+}
+
+impl Default for SshConfig {
+    fn default() -> Self {
+        #[derive(Deserialize)]
+        struct EmbeddedDefaults {
+            connections: EmbeddedConnections,
+        }
+
+        #[derive(Deserialize)]
+        struct EmbeddedConnections {
+            ssh: SshConfig,
+        }
+
+        let defaults: EmbeddedDefaults = toml::from_str(DEFAULT_CONFIG_TOML)
+            .expect("embedded default configuration must be valid");
+        defaults.connections.ssh
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
@@ -686,6 +724,15 @@ impl AppConfig {
         {
             return Err(ConfigError::InvalidRedisSettings);
         }
+        if !(MIN_SSH_CONNECT_TIMEOUT_SECONDS..=MAX_SSH_CONNECT_TIMEOUT_SECONDS)
+            .contains(&self.connections.ssh.connect_timeout_seconds)
+            || !(MIN_SSH_SERVER_ALIVE_INTERVAL_SECONDS..=MAX_SSH_SERVER_ALIVE_INTERVAL_SECONDS)
+                .contains(&self.connections.ssh.server_alive_interval_seconds)
+            || !(MIN_SSH_SERVER_ALIVE_COUNT_MAX..=MAX_SSH_SERVER_ALIVE_COUNT_MAX)
+                .contains(&self.connections.ssh.server_alive_count_max)
+        {
+            return Err(ConfigError::InvalidSshSettings);
+        }
         self.keybindings.key_bindings()?;
         Ok(())
     }
@@ -813,7 +860,7 @@ mod tests {
 
     use super::{
         AppConfig, ClipboardBackend, ConfigError, ConnectionAccessDefault, DEFAULT_CONFIG_TOML,
-        HelpPanelView,
+        HelpPanelView, SshConfig,
     };
     use crate::{cli::MotionMode, ui::icons::IconMode};
 
@@ -873,6 +920,10 @@ mod tests {
             config.connections.default_access,
             ConnectionAccessDefault::Global
         );
+        assert_eq!(config.connections.ssh, SshConfig::default());
+        assert_eq!(config.connections.ssh.connect_timeout_seconds, 30);
+        assert_eq!(config.connections.ssh.server_alive_interval_seconds, 30);
+        assert_eq!(config.connections.ssh.server_alive_count_max, 3);
         assert_eq!(config.terminal.clipboard.backend, ClipboardBackend::System);
         assert_eq!(config.redis.scan_count_hint, 200);
         assert_eq!(config.redis.page_size, 200);
@@ -911,6 +962,96 @@ mod tests {
         let contents = format!("{before}\n[updates]\n{after}");
         let config = AppConfig::from_toml(&contents).unwrap();
         assert_eq!(config.redis, super::RedisConfig::default());
+    }
+
+    #[test]
+    fn missing_ssh_section_uses_bounded_ssh_defaults() {
+        let (before, after) = DEFAULT_CONFIG_TOML
+            .split_once("\n[connections.ssh]\n")
+            .unwrap();
+        let after = after.split_once("\n[dashboard]\n").unwrap().1;
+        let contents = format!("{before}\n[dashboard]\n{after}");
+
+        let config = AppConfig::from_toml(&contents).unwrap();
+
+        assert_eq!(config.connections.ssh, SshConfig::default());
+    }
+
+    #[test]
+    fn partial_ssh_settings_are_merged_with_embedded_defaults() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("settings.toml");
+        fs::write(&path, "[connections.ssh]\nconnect_timeout_seconds = 45\n").unwrap();
+
+        let config = AppConfig::load(path).unwrap();
+
+        assert_eq!(config.connections.ssh.connect_timeout_seconds, 45);
+        assert_eq!(config.connections.ssh.server_alive_interval_seconds, 30);
+        assert_eq!(config.connections.ssh.server_alive_count_max, 3);
+    }
+
+    #[test]
+    fn legacy_settings_without_ssh_use_embedded_defaults() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("settings.toml");
+        fs::write(&path, "[ui]\nmotion = \"reduced\"\n").unwrap();
+
+        let config = AppConfig::load(path).unwrap();
+
+        assert_eq!(config.connections.ssh, SshConfig::default());
+    }
+
+    #[test]
+    fn ssh_settings_accept_the_documented_upper_bounds() {
+        let contents = DEFAULT_CONFIG_TOML
+            .replace(
+                "connect_timeout_seconds = 30",
+                "connect_timeout_seconds = 300",
+            )
+            .replace(
+                "server_alive_interval_seconds = 30",
+                "server_alive_interval_seconds = 3600",
+            )
+            .replace("server_alive_count_max = 3", "server_alive_count_max = 10");
+
+        let config = AppConfig::from_toml(&contents).unwrap();
+
+        assert_eq!(config.connections.ssh.connect_timeout_seconds, 300);
+        assert_eq!(config.connections.ssh.server_alive_interval_seconds, 3_600);
+        assert_eq!(config.connections.ssh.server_alive_count_max, 10);
+    }
+
+    #[test]
+    fn ssh_settings_reject_zero_and_out_of_range_values() {
+        for (from, to) in [
+            (
+                "connect_timeout_seconds = 30",
+                "connect_timeout_seconds = 0",
+            ),
+            (
+                "connect_timeout_seconds = 30",
+                "connect_timeout_seconds = 301",
+            ),
+            (
+                "server_alive_interval_seconds = 30",
+                "server_alive_interval_seconds = 0",
+            ),
+            (
+                "server_alive_interval_seconds = 30",
+                "server_alive_interval_seconds = 3601",
+            ),
+            ("server_alive_count_max = 3", "server_alive_count_max = 0"),
+            ("server_alive_count_max = 3", "server_alive_count_max = 11"),
+        ] {
+            let contents = DEFAULT_CONFIG_TOML.replace(from, to);
+            assert!(
+                matches!(
+                    AppConfig::from_toml(&contents),
+                    Err(ConfigError::InvalidSshSettings)
+                ),
+                "accepted {to}"
+            );
+        }
     }
 
     #[test]

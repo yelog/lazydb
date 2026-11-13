@@ -6014,7 +6014,7 @@ mod tests {
         let mut manager = ProfileManagerState::new(false);
         manager.page = ProfileManagerPage::Scope;
         manager.begin_scope_discovery(1, fingerprint);
-        app.profile_manager = Some(manager);
+        app.profile_manager = Some(Box::new(manager));
         app.overlay = Some(Overlay::ProfileManager);
 
         let capabilities = shortcut_capabilities(&app);

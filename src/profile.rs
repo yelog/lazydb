@@ -36,6 +36,24 @@ impl DatabaseKind {
         matches!(self, Self::Elasticsearch | Self::OpenSearch)
     }
 
+    pub const fn supports_ssh(self) -> bool {
+        matches!(
+            self,
+            Self::Postgres
+                | Self::CockroachDb
+                | Self::MySql
+                | Self::MariaDb
+                | Self::TiDb
+                | Self::SqlServer
+                | Self::Redis
+                | Self::Valkey
+                | Self::MongoDb
+                | Self::ClickHouse
+                | Self::Elasticsearch
+                | Self::OpenSearch
+        )
+    }
+
     pub const fn is_redis_compatible(self) -> bool {
         matches!(self, Self::Redis | Self::Valkey)
     }
@@ -607,6 +625,179 @@ pub struct OpenSearchConnectionOptions {
     pub ca_cert_path: Option<PathBuf>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SshOptions {
+    pub host: String,
+    pub port: Option<u16>,
+    pub user: Option<String>,
+    pub identity_file: Option<PathBuf>,
+    pub config_file: Option<PathBuf>,
+    pub known_hosts_file: Option<PathBuf>,
+    pub proxy_jump: Option<String>,
+}
+
+impl SshOptions {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_ssh_host("SSH host", &self.host)?;
+        if self.port == Some(0) {
+            return Err("SSH port must be between 1 and 65535".to_owned());
+        }
+        if let Some(user) = &self.user {
+            validate_ssh_user("SSH user", user)?;
+        }
+        if let Some(proxy_jump) = &self.proxy_jump {
+            validate_ssh_proxy_jump(proxy_jump)?;
+        }
+        for (label, path) in [
+            ("SSH identity file", self.identity_file.as_ref()),
+            ("SSH config file", self.config_file.as_ref()),
+            ("SSH known_hosts file", self.known_hosts_file.as_ref()),
+        ] {
+            if let Some(path) = path {
+                validate_ssh_path(label, path)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_ssh_host(label: &str, host: &str) -> Result<(), String> {
+    if host.is_empty() {
+        return Err(format!("{label} is required"));
+    }
+    if host != host.trim()
+        || host
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return Err(format!(
+            "{label} must not contain whitespace or control characters"
+        ));
+    }
+    if host.starts_with('-') {
+        return Err(format!("{label} must not start with an option prefix"));
+    }
+    if !host.chars().all(|character| {
+        character.is_ascii_alphanumeric()
+            || matches!(character, '.' | '-' | '_' | ':' | '%' | '[' | ']')
+    }) {
+        return Err(format!("{label} contains unsupported characters"));
+    }
+    Ok(())
+}
+
+fn validate_ssh_user(label: &str, user: &str) -> Result<(), String> {
+    if user.is_empty() {
+        return Err(format!("{label} must not be empty"));
+    }
+    if user.starts_with('-')
+        || !user.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
+        })
+    {
+        return Err(format!("{label} contains unsupported characters"));
+    }
+    Ok(())
+}
+
+fn validate_ssh_proxy_jump(proxy_jump: &str) -> Result<(), String> {
+    if proxy_jump.is_empty() {
+        return Err("SSH proxy jump must not be empty".to_owned());
+    }
+    if proxy_jump.starts_with('-')
+        || proxy_jump
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return Err(
+            "SSH proxy jump must not contain whitespace, control characters, or an option prefix"
+                .to_owned(),
+        );
+    }
+    for hop in proxy_jump.split(',') {
+        if hop.is_empty() {
+            return Err("SSH proxy jump contains an empty hop".to_owned());
+        }
+        let target = match hop.rsplit_once('@') {
+            Some((user, target)) => {
+                validate_ssh_user("SSH proxy jump user", user)?;
+                target
+            }
+            None => hop,
+        };
+        let (host, port) = parse_ssh_proxy_jump_target(target)?;
+        validate_ssh_host("SSH proxy jump host", host)?;
+        if port == Some(0) {
+            return Err("SSH proxy jump port must be between 1 and 65535".to_owned());
+        }
+    }
+    Ok(())
+}
+
+fn parse_ssh_proxy_jump_target(target: &str) -> Result<(&str, Option<u16>), String> {
+    if target.is_empty() {
+        return Err("SSH proxy jump host is required".to_owned());
+    }
+    if let Some(target) = target.strip_prefix('[') {
+        let end = target
+            .find(']')
+            .ok_or_else(|| "SSH proxy jump has an unterminated IPv6 address".to_owned())?;
+        let host = &target[..end];
+        let suffix = &target[end + 1..];
+        if host.is_empty() {
+            return Err("SSH proxy jump host is required".to_owned());
+        }
+        let port = if suffix.is_empty() {
+            None
+        } else {
+            let port = suffix
+                .strip_prefix(':')
+                .ok_or_else(|| "SSH proxy jump has an invalid port".to_owned())?;
+            if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err("SSH proxy jump has an invalid port".to_owned());
+            }
+            Some(
+                port.parse::<u16>()
+                    .map_err(|_| "SSH proxy jump has an invalid port".to_owned())?,
+            )
+        };
+        return Ok((host, port));
+    }
+    if target.matches(':').count() == 1 {
+        let (host, port) = target
+            .split_once(':')
+            .ok_or_else(|| "SSH proxy jump has an invalid host".to_owned())?;
+        if host.is_empty() || port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err("SSH proxy jump has an invalid host or port".to_owned());
+        }
+        return Ok((
+            host,
+            Some(
+                port.parse::<u16>()
+                    .map_err(|_| "SSH proxy jump has an invalid port".to_owned())?,
+            ),
+        ));
+    }
+    Ok((target, None))
+}
+
+fn validate_ssh_path(label: &str, path: &std::path::Path) -> Result<(), String> {
+    let value = path
+        .to_str()
+        .ok_or_else(|| format!("{label} must be valid UTF-8"))?;
+    if value.is_empty() {
+        return Err(format!("{label} must not be empty"));
+    }
+    if value.starts_with('-') {
+        return Err(format!("{label} must not start with an option prefix"));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(format!("{label} must not contain control characters"));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConnectionProfile {
@@ -648,6 +839,8 @@ pub struct ConnectionProfile {
     pub snowflake_options: Option<SnowflakeConnectionOptions>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bigquery_options: Option<BigQueryOptions>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh: Option<SshOptions>,
 }
 
 #[derive(Debug)]
@@ -931,6 +1124,19 @@ pub fn validate_bigquery_project(project: &str) -> Result<(), ProfileError> {
 }
 
 impl ConnectionProfile {
+    pub fn validate_ssh(&self) -> Result<(), String> {
+        let Some(options) = &self.ssh else {
+            return Ok(());
+        };
+        if !self.kind.supports_ssh() {
+            return Err(format!(
+                "SSH tunnels are not supported for {:?} connections",
+                self.kind
+            ));
+        }
+        options.validate()
+    }
+
     /// The metadata project may differ from the execution and billing project.
     pub fn catalog_database(&self) -> Option<&str> {
         let database = self.database.as_deref()?;
@@ -1602,6 +1808,7 @@ pub fn import_connection_url_with_driver(
             pg_options: parsed.pg_options,
             snowflake_options: parsed.snowflake_options,
             bigquery_options: parsed.bigquery_options,
+            ssh: None,
         },
         transient_password: parsed.password,
         read_only_explicit: parsed.read_only_explicit,

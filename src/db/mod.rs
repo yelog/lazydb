@@ -33,6 +33,7 @@ pub mod relation_plan;
 pub mod snowflake;
 pub mod sqlite;
 pub mod transaction;
+pub(crate) mod transport;
 pub mod value;
 
 use secrecy::SecretString;
@@ -731,54 +732,78 @@ impl DatabaseConnection {
         profile: &ConnectionProfile,
         password: Option<&SecretString>,
     ) -> Result<Self, DatabaseError> {
-        match profile.kind {
-            DatabaseKind::BigQuery => bigquery::BigQueryAdapter::connect(profile)
-                .await
-                .map(Self::BigQuery),
-            DatabaseKind::Snowflake => snowflake::SnowflakeAdapter::connect(profile, password)
-                .await
-                .map(Self::Snowflake),
-            DatabaseKind::Sqlite => SqliteAdapter::connect(profile).await.map(Self::Sqlite),
-            DatabaseKind::DuckDb => duckdb::DuckDbAdapter::connect(profile)
-                .await
-                .map(Self::DuckDb),
-            DatabaseKind::CockroachDb => CockroachAdapter::connect(profile, password)
-                .await
-                .map(Self::CockroachDb),
-            DatabaseKind::Postgres => PostgresAdapter::connect(profile, password)
-                .await
-                .map(Self::Postgres),
-            DatabaseKind::MySql => MySqlAdapter::connect(profile, password)
-                .await
-                .map(Self::MySql),
-            DatabaseKind::MariaDb => MySqlAdapter::connect(profile, password)
-                .await
-                .map(Self::MariaDb),
-            DatabaseKind::TiDb => MySqlAdapter::connect(profile, password)
-                .await
-                .map(Self::TiDb),
-            DatabaseKind::Oracle => OracleAdapter::connect(profile, password)
-                .await
-                .map(Self::Oracle),
-            DatabaseKind::SqlServer => MsSqlAdapter::connect(profile, password)
-                .await
-                .map(Self::SqlServer),
-            DatabaseKind::Redis | DatabaseKind::Valkey => RedisAdapter::connect(profile, password)
-                .await
-                .map(Self::Redis),
-            DatabaseKind::MongoDb => mongodb::MongoAdapter::connect(profile, password)
-                .await
-                .map(Self::MongoDb),
-            DatabaseKind::ClickHouse => ClickHouseAdapter::connect(profile, password)
-                .await
-                .map(Self::ClickHouse),
-            DatabaseKind::Elasticsearch => ElasticsearchAdapter::connect(profile, password)
-                .await
-                .map(Self::Elasticsearch),
-            DatabaseKind::OpenSearch => ElasticsearchAdapter::connect(profile, password)
-                .await
-                .map(Self::OpenSearch),
-        }
+        let route = transport::ConnectionRoute::require_direct(profile)?;
+        Self::connect_routed(profile, password, route).await
+    }
+
+    pub(crate) fn connect_routed<'connection>(
+        profile: &'connection ConnectionProfile,
+        password: Option<&'connection SecretString>,
+        route: transport::ConnectionRoute,
+    ) -> futures_util::future::BoxFuture<'connection, Result<Self, DatabaseError>> {
+        Box::pin(async move {
+            route.ensure_alive()?;
+            match profile.kind {
+                DatabaseKind::BigQuery => bigquery::BigQueryAdapter::connect(profile)
+                    .await
+                    .map(Self::BigQuery),
+                DatabaseKind::Snowflake => snowflake::SnowflakeAdapter::connect(profile, password)
+                    .await
+                    .map(Self::Snowflake),
+                DatabaseKind::Sqlite => SqliteAdapter::connect(profile).await.map(Self::Sqlite),
+                DatabaseKind::DuckDb => duckdb::DuckDbAdapter::connect(profile)
+                    .await
+                    .map(Self::DuckDb),
+                DatabaseKind::CockroachDb => {
+                    CockroachAdapter::connect_routed(profile, password, route)
+                        .await
+                        .map(Self::CockroachDb)
+                }
+                DatabaseKind::Postgres => PostgresAdapter::connect_routed(profile, password, route)
+                    .await
+                    .map(Self::Postgres),
+                DatabaseKind::MySql => MySqlAdapter::connect_routed(profile, password, route)
+                    .await
+                    .map(Self::MySql),
+                DatabaseKind::MariaDb => MySqlAdapter::connect_routed(profile, password, route)
+                    .await
+                    .map(Self::MariaDb),
+                DatabaseKind::TiDb => MySqlAdapter::connect_routed(profile, password, route)
+                    .await
+                    .map(Self::TiDb),
+                DatabaseKind::Oracle => OracleAdapter::connect(profile, password)
+                    .await
+                    .map(Self::Oracle),
+                DatabaseKind::SqlServer => MsSqlAdapter::connect_routed(profile, password, route)
+                    .await
+                    .map(Self::SqlServer),
+                DatabaseKind::Redis | DatabaseKind::Valkey => {
+                    RedisAdapter::connect_routed(profile, password, route)
+                        .await
+                        .map(Self::Redis)
+                }
+                DatabaseKind::MongoDb => {
+                    mongodb::MongoAdapter::connect_routed(profile, password, route)
+                        .await
+                        .map(Self::MongoDb)
+                }
+                DatabaseKind::ClickHouse => {
+                    ClickHouseAdapter::connect_routed(profile, password, route)
+                        .await
+                        .map(Self::ClickHouse)
+                }
+                DatabaseKind::Elasticsearch => {
+                    ElasticsearchAdapter::connect_routed(profile, password, route)
+                        .await
+                        .map(Self::Elasticsearch)
+                }
+                DatabaseKind::OpenSearch => {
+                    ElasticsearchAdapter::connect_routed(profile, password, route)
+                        .await
+                        .map(Self::OpenSearch)
+                }
+            }
+        })
     }
 
     pub async fn connect_target(

@@ -30,8 +30,8 @@ use crate::{
     profile::{
         CatalogScope, CatalogScopeValidationError, CatalogSelection, ConnectionProfile,
         ConnectionUrlFormat, CredentialPolicy, DatabaseKind, DatabaseScope, Environment,
-        ParsedConnectionUrl, PasswordStorageChoice, ProfileAccess, SslMode, format_connection_url,
-        parse_connection_url, parse_connection_url_with_driver,
+        ParsedConnectionUrl, PasswordStorageChoice, ProfileAccess, SshOptions, SslMode,
+        format_connection_url, parse_connection_url, parse_connection_url_with_driver,
     },
 };
 
@@ -120,6 +120,14 @@ pub enum ProfileField {
     DataProject,
     MaximumBytesBilled,
     QueryTimeoutSecs,
+    SshEnabled,
+    SshHost,
+    SshUser,
+    SshPort,
+    SshIdentityFile,
+    SshConfigFile,
+    SshProxyJump,
+    SshKnownHostsFile,
     Test,
     Save,
     Cancel,
@@ -219,6 +227,7 @@ impl DiscoveryFingerprint {
         profile.elasticsearch_options.hash(&mut hasher);
         profile.opensearch_options.hash(&mut hasher);
         profile.pg_options.hash(&mut hasher);
+        profile.ssh.hash(&mut hasher);
         profile.sqlite_path.hash(&mut hasher);
         (profile.kind == DatabaseKind::Sqlite
             && profile.sqlite_path.is_none()
@@ -411,6 +420,14 @@ pub struct ProfileDraft {
     pub data_project: TextInput,
     pub maximum_bytes_billed: TextInput,
     pub query_timeout_secs: TextInput,
+    pub ssh_enabled: bool,
+    pub ssh_host: TextInput,
+    pub ssh_user: TextInput,
+    pub ssh_port: TextInput,
+    pub ssh_identity_file: TextInput,
+    pub ssh_config_file: TextInput,
+    pub ssh_proxy_jump: TextInput,
+    pub ssh_known_hosts_file: TextInput,
 
     pub original_credential_policy: CredentialPolicy,
     pub has_stored_credential: bool,
@@ -519,6 +536,14 @@ impl ProfileDraft {
             data_project: TextInput::default(),
             maximum_bytes_billed: TextInput::from("1000000000"),
             query_timeout_secs: TextInput::from("120"),
+            ssh_enabled: false,
+            ssh_host: TextInput::default(),
+            ssh_user: TextInput::default(),
+            ssh_port: TextInput::default(),
+            ssh_identity_file: TextInput::default(),
+            ssh_config_file: TextInput::default(),
+            ssh_proxy_jump: TextInput::default(),
+            ssh_known_hosts_file: TextInput::default(),
 
             original_credential_policy: CredentialPolicy::None,
             has_stored_credential: false,
@@ -579,6 +604,7 @@ impl ProfileDraft {
         );
 
         let bigquery = profile.bigquery_options.clone().unwrap_or_default();
+        let ssh = profile.ssh.as_ref().filter(|_| profile.kind.supports_ssh());
         let mut draft = Self {
             profile_id: profile.id,
             access: profile.access.clone(),
@@ -612,6 +638,36 @@ impl ProfileDraft {
             data_project: TextInput::from(bigquery.data_project.unwrap_or_default()),
             maximum_bytes_billed: TextInput::from(bigquery.maximum_bytes_billed.to_string()),
             query_timeout_secs: TextInput::from(bigquery.query_timeout_secs.to_string()),
+            ssh_enabled: ssh.is_some(),
+            ssh_host: TextInput::from(ssh.map(|options| options.host.clone()).unwrap_or_default()),
+            ssh_user: TextInput::from(
+                ssh.and_then(|options| options.user.clone())
+                    .unwrap_or_default(),
+            ),
+            ssh_port: TextInput::from(
+                ssh.and_then(|options| options.port)
+                    .map(|port| port.to_string())
+                    .unwrap_or_default(),
+            ),
+            ssh_identity_file: TextInput::from(
+                ssh.and_then(|options| options.identity_file.as_ref())
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            ),
+            ssh_config_file: TextInput::from(
+                ssh.and_then(|options| options.config_file.as_ref())
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            ),
+            ssh_proxy_jump: TextInput::from(
+                ssh.and_then(|options| options.proxy_jump.clone())
+                    .unwrap_or_default(),
+            ),
+            ssh_known_hosts_file: TextInput::from(
+                ssh.and_then(|options| options.known_hosts_file.as_ref())
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            ),
             user: TextInput::from(profile.user.clone().unwrap_or_default()),
             password: SecretTextInput::default(),
             database: TextInput::from(profile.database.clone().unwrap_or_default()),
@@ -876,6 +932,9 @@ impl ProfileDraft {
         } else if !parsed.kind.is_search_rest() {
             self.ca_cert_path.set("");
         }
+        if !parsed.kind.supports_ssh() {
+            self.clear_ssh();
+        }
         self.kind = parsed.kind;
         self.automatic_port = match parsed.kind {
             DatabaseKind::ClickHouse if parsed.port == Some(8123) => Some("8123".to_owned()),
@@ -1088,6 +1147,13 @@ impl ProfileDraft {
                 | ProfileField::DataProject
                 | ProfileField::MaximumBytesBilled
                 | ProfileField::QueryTimeoutSecs
+                | ProfileField::SshHost
+                | ProfileField::SshUser
+                | ProfileField::SshPort
+                | ProfileField::SshIdentityFile
+                | ProfileField::SshConfigFile
+                | ProfileField::SshProxyJump
+                | ProfileField::SshKnownHostsFile
         ) {
             self.invalidate_catalog_discovery();
         }
@@ -1199,7 +1265,8 @@ impl ProfileDraft {
             (DatabaseKind::BigQuery, _) => &BIGQUERY_FIELDS,
             (DatabaseKind::Postgres | DatabaseKind::CockroachDb, _) => &POSTGRES_FIELDS,
             (DatabaseKind::MySql, _) => &MYSQL_FIELDS,
-            (DatabaseKind::SqlServer | DatabaseKind::Snowflake, _) => &POSTGRES_FIELDS,
+            (DatabaseKind::SqlServer, _) => &POSTGRES_FIELDS,
+            (DatabaseKind::Snowflake, _) => &SNOWFLAKE_FIELDS,
             (DatabaseKind::Sqlite, false) => &SQLITE_FILE_FIELDS,
             (DatabaseKind::Sqlite, true) => &SQLITE_MEMORY_FIELDS,
             (DatabaseKind::DuckDb, _) => &DUCKDB_FIELDS,
@@ -1607,6 +1674,7 @@ impl ProfileDraft {
                 ProfileValidationError::new(ProfileField::Url, error.to_string())
             })?;
         }
+        let ssh = self.ssh_options()?;
         let credential = self.credential_update();
         let credential_policy = match &credential {
             CredentialUpdate::Preserve => self.original_credential_policy.clone(),
@@ -1672,6 +1740,7 @@ impl ProfileDraft {
                 read_only: self.read_only,
                 environment: self.environment,
                 catalog_scope,
+                ssh,
             },
             credential,
             self.credential_revision,
@@ -1719,6 +1788,71 @@ impl ProfileDraft {
             if matches!(&error, crate::profile::ProfileError::InvalidQueryParameter(name) if name == "project") {
                 ProfileValidationError::new(ProfileField::DataProject, error.to_string())
             } else { bigquery_validation_error(error) }
+        })?;
+        Ok(Some(options))
+    }
+
+    fn ssh_options(&self) -> Result<Option<SshOptions>, ProfileValidationError> {
+        if !self.ssh_enabled {
+            return Ok(None);
+        }
+        if !self.kind.supports_ssh() {
+            return Err(ProfileValidationError::new(
+                ProfileField::SshEnabled,
+                "SSH tunnels are not supported for this database driver",
+            ));
+        }
+        let host = required_verbatim(
+            &self.ssh_host,
+            ProfileField::SshHost,
+            "SSH host is required",
+        )?;
+        let port = match self.ssh_port.value() {
+            "" => None,
+            raw if raw.bytes().all(|byte| byte.is_ascii_digit()) => Some(
+                raw.parse::<u16>()
+                    .ok()
+                    .filter(|port| *port > 0)
+                    .ok_or_else(|| {
+                        ProfileValidationError::new(
+                            ProfileField::SshPort,
+                            "SSH port must be an integer from 1 to 65535",
+                        )
+                    })?,
+            ),
+            _ => {
+                return Err(ProfileValidationError::new(
+                    ProfileField::SshPort,
+                    "SSH port must be an integer from 1 to 65535",
+                ));
+            }
+        };
+        let options = SshOptions {
+            host,
+            port,
+            user: optional_verbatim(&self.ssh_user),
+            identity_file: optional_verbatim(&self.ssh_identity_file).map(PathBuf::from),
+            config_file: optional_verbatim(&self.ssh_config_file).map(PathBuf::from),
+            known_hosts_file: optional_verbatim(&self.ssh_known_hosts_file).map(PathBuf::from),
+            proxy_jump: optional_verbatim(&self.ssh_proxy_jump),
+        };
+        options.validate().map_err(|message| {
+            let field = if message.starts_with("SSH identity file") {
+                ProfileField::SshIdentityFile
+            } else if message.starts_with("SSH config file") {
+                ProfileField::SshConfigFile
+            } else if message.starts_with("SSH known_hosts file") {
+                ProfileField::SshKnownHostsFile
+            } else if message.starts_with("SSH proxy jump") {
+                ProfileField::SshProxyJump
+            } else if message.starts_with("SSH user") {
+                ProfileField::SshUser
+            } else if message.starts_with("SSH port") {
+                ProfileField::SshPort
+            } else {
+                ProfileField::SshHost
+            };
+            ProfileValidationError::new(field, message)
         })?;
         Ok(Some(options))
     }
@@ -1861,6 +1995,13 @@ impl ProfileDraft {
             ProfileField::MaximumBytesBilled => Some(&mut self.maximum_bytes_billed),
             ProfileField::QueryTimeoutSecs => Some(&mut self.query_timeout_secs),
             ProfileField::CaCertPath => Some(&mut self.ca_cert_path),
+            ProfileField::SshHost => Some(&mut self.ssh_host),
+            ProfileField::SshUser => Some(&mut self.ssh_user),
+            ProfileField::SshPort => Some(&mut self.ssh_port),
+            ProfileField::SshIdentityFile => Some(&mut self.ssh_identity_file),
+            ProfileField::SshConfigFile => Some(&mut self.ssh_config_file),
+            ProfileField::SshProxyJump => Some(&mut self.ssh_proxy_jump),
+            ProfileField::SshKnownHostsFile => Some(&mut self.ssh_known_hosts_file),
             _ => None,
         }
     }
@@ -1888,6 +2029,13 @@ impl ProfileDraft {
             ProfileField::MaximumBytesBilled => Some(&self.maximum_bytes_billed),
             ProfileField::QueryTimeoutSecs => Some(&self.query_timeout_secs),
             ProfileField::CaCertPath => Some(&self.ca_cert_path),
+            ProfileField::SshHost => Some(&self.ssh_host),
+            ProfileField::SshUser => Some(&self.ssh_user),
+            ProfileField::SshPort => Some(&self.ssh_port),
+            ProfileField::SshIdentityFile => Some(&self.ssh_identity_file),
+            ProfileField::SshConfigFile => Some(&self.ssh_config_file),
+            ProfileField::SshProxyJump => Some(&self.ssh_proxy_jump),
+            ProfileField::SshKnownHostsFile => Some(&self.ssh_known_hosts_file),
             _ => None,
         }
     }
@@ -1938,6 +2086,9 @@ impl ProfileDraft {
         }
 
         self.invalidate_catalog_discovery();
+        if !kind.supports_ssh() {
+            self.clear_ssh();
+        }
         if self.kind == DatabaseKind::Elasticsearch {
             self.set_elasticsearch_auth(crate::profile::ElasticsearchAuth::Basic);
             self.ca_cert_path.set("");
@@ -2115,6 +2266,17 @@ impl ProfileDraft {
         }
         self.sync_derived_catalog_scope();
         self.refresh_url();
+    }
+
+    fn clear_ssh(&mut self) {
+        self.ssh_enabled = false;
+        self.ssh_host.set("");
+        self.ssh_user.set("");
+        self.ssh_port.set("");
+        self.ssh_identity_file.set("");
+        self.ssh_config_file.set("");
+        self.ssh_proxy_jump.set("");
+        self.ssh_known_hosts_file.set("");
     }
 
     fn mark_url_edited(&mut self) {
@@ -2448,6 +2610,7 @@ impl ProfileDraft {
             read_only: self.read_only,
             environment: self.environment,
             catalog_scope: self.catalog_scope.clone(),
+            ssh: None,
         })
     }
 }
@@ -3200,10 +3363,12 @@ impl ProfileManagerState {
         if self.operation.is_some() {
             return;
         }
-        let Some(draft) = self.draft.as_mut() else {
-            return;
-        };
-        draft.set_kind(kind);
+        if let Some(draft) = self.draft.as_mut() {
+            draft.set_kind(kind);
+        }
+        if !self.visible_fields().contains(&self.selected_field) {
+            self.selected_field = ProfileField::Kind;
+        }
         self.message = None;
     }
 
@@ -3218,6 +3383,10 @@ impl ProfileManagerState {
             ProfileField::PasswordStorage => {
                 draft.password_storage = cycle_value(draft.password_storage, password_choices, 1);
                 draft.credential_changed();
+            }
+            ProfileField::SshEnabled => {
+                draft.ssh_enabled = !draft.ssh_enabled;
+                draft.invalidate_catalog_discovery();
             }
             ProfileField::SqliteMemory => {
                 draft.sqlite_memory = !draft.sqlite_memory;
@@ -3257,6 +3426,19 @@ fn required(
     message: &'static str,
 ) -> Result<String, ProfileValidationError> {
     let value = input.value().trim();
+    if value.is_empty() {
+        Err(ProfileValidationError::new(field, message))
+    } else {
+        Ok(value.to_owned())
+    }
+}
+
+fn required_verbatim(
+    input: &TextInput,
+    field: ProfileField,
+    message: &'static str,
+) -> Result<String, ProfileValidationError> {
+    let value = input.value();
     if value.is_empty() {
         Err(ProfileValidationError::new(field, message))
     } else {
@@ -3312,6 +3494,11 @@ fn redis_compatible_url_format(kind: DatabaseKind, ssl_mode: SslMode) -> Connect
 
 fn optional(input: &TextInput) -> Option<String> {
     let value = input.value().trim();
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+fn optional_verbatim(input: &TextInput) -> Option<String> {
+    let value = input.value();
     (!value.is_empty()).then(|| value.to_owned())
 }
 
@@ -3652,7 +3839,7 @@ const BIGQUERY_FIELDS: [ProfileField; 17] = [
     ProfileField::Cancel,
 ];
 
-const POSTGRES_FIELDS: [ProfileField; 18] = [
+const SNOWFLAKE_FIELDS: [ProfileField; 18] = [
     ProfileField::DatabaseCategory,
     ProfileField::Kind,
     ProfileField::Name,
@@ -3667,6 +3854,35 @@ const POSTGRES_FIELDS: [ProfileField; 18] = [
     ProfileField::SslMode,
     ProfileField::Environment,
     ProfileField::ReadOnly,
+    ProfileField::Url,
+    ProfileField::Test,
+    ProfileField::Save,
+    ProfileField::Cancel,
+];
+
+const POSTGRES_FIELDS: [ProfileField; 26] = [
+    ProfileField::DatabaseCategory,
+    ProfileField::Kind,
+    ProfileField::Name,
+    ProfileField::Host,
+    ProfileField::Port,
+    ProfileField::Database,
+    ProfileField::Schema,
+    ProfileField::VisibleObjects,
+    ProfileField::User,
+    ProfileField::Password,
+    ProfileField::PasswordStorage,
+    ProfileField::SslMode,
+    ProfileField::Environment,
+    ProfileField::ReadOnly,
+    ProfileField::SshEnabled,
+    ProfileField::SshHost,
+    ProfileField::SshUser,
+    ProfileField::SshPort,
+    ProfileField::SshIdentityFile,
+    ProfileField::SshConfigFile,
+    ProfileField::SshProxyJump,
+    ProfileField::SshKnownHostsFile,
     ProfileField::Url,
     ProfileField::Test,
     ProfileField::Save,
@@ -3693,7 +3909,7 @@ const ORACLE_FIELDS: [ProfileField; 17] = [
     ProfileField::Cancel,
 ];
 
-const ELASTICSEARCH_FIELDS: [ProfileField; 19] = [
+const ELASTICSEARCH_FIELDS: [ProfileField; 27] = [
     ProfileField::DatabaseCategory,
     ProfileField::Kind,
     ProfileField::Name,
@@ -3709,13 +3925,21 @@ const ELASTICSEARCH_FIELDS: [ProfileField; 19] = [
     ProfileField::CaCertPath,
     ProfileField::Environment,
     ProfileField::ReadOnly,
+    ProfileField::SshEnabled,
+    ProfileField::SshHost,
+    ProfileField::SshUser,
+    ProfileField::SshPort,
+    ProfileField::SshIdentityFile,
+    ProfileField::SshConfigFile,
+    ProfileField::SshProxyJump,
+    ProfileField::SshKnownHostsFile,
     ProfileField::Url,
     ProfileField::Test,
     ProfileField::Save,
     ProfileField::Cancel,
 ];
 
-const OPENSEARCH_FIELDS: [ProfileField; 19] = [
+const OPENSEARCH_FIELDS: [ProfileField; 27] = [
     ProfileField::DatabaseCategory,
     ProfileField::Kind,
     ProfileField::Name,
@@ -3731,13 +3955,21 @@ const OPENSEARCH_FIELDS: [ProfileField; 19] = [
     ProfileField::CaCertPath,
     ProfileField::Environment,
     ProfileField::ReadOnly,
+    ProfileField::SshEnabled,
+    ProfileField::SshHost,
+    ProfileField::SshUser,
+    ProfileField::SshPort,
+    ProfileField::SshIdentityFile,
+    ProfileField::SshConfigFile,
+    ProfileField::SshProxyJump,
+    ProfileField::SshKnownHostsFile,
     ProfileField::Url,
     ProfileField::Test,
     ProfileField::Save,
     ProfileField::Cancel,
 ];
 
-const OPENSEARCH_NO_AUTH_FIELDS: [ProfileField; 16] = [
+const OPENSEARCH_NO_AUTH_FIELDS: [ProfileField; 24] = [
     ProfileField::DatabaseCategory,
     ProfileField::Kind,
     ProfileField::Name,
@@ -3750,13 +3982,21 @@ const OPENSEARCH_NO_AUTH_FIELDS: [ProfileField; 16] = [
     ProfileField::CaCertPath,
     ProfileField::Environment,
     ProfileField::ReadOnly,
+    ProfileField::SshEnabled,
+    ProfileField::SshHost,
+    ProfileField::SshUser,
+    ProfileField::SshPort,
+    ProfileField::SshIdentityFile,
+    ProfileField::SshConfigFile,
+    ProfileField::SshProxyJump,
+    ProfileField::SshKnownHostsFile,
     ProfileField::Url,
     ProfileField::Test,
     ProfileField::Save,
     ProfileField::Cancel,
 ];
 
-const ELASTICSEARCH_API_KEY_FIELDS: [ProfileField; 18] = [
+const ELASTICSEARCH_API_KEY_FIELDS: [ProfileField; 26] = [
     ProfileField::DatabaseCategory,
     ProfileField::Kind,
     ProfileField::Name,
@@ -3771,13 +4011,21 @@ const ELASTICSEARCH_API_KEY_FIELDS: [ProfileField; 18] = [
     ProfileField::CaCertPath,
     ProfileField::Environment,
     ProfileField::ReadOnly,
+    ProfileField::SshEnabled,
+    ProfileField::SshHost,
+    ProfileField::SshUser,
+    ProfileField::SshPort,
+    ProfileField::SshIdentityFile,
+    ProfileField::SshConfigFile,
+    ProfileField::SshProxyJump,
+    ProfileField::SshKnownHostsFile,
     ProfileField::Url,
     ProfileField::Test,
     ProfileField::Save,
     ProfileField::Cancel,
 ];
 
-const MYSQL_FIELDS: [ProfileField; 17] = [
+const MYSQL_FIELDS: [ProfileField; 25] = [
     ProfileField::DatabaseCategory,
     ProfileField::Kind,
     ProfileField::Name,
@@ -3791,6 +4039,14 @@ const MYSQL_FIELDS: [ProfileField; 17] = [
     ProfileField::SslMode,
     ProfileField::Environment,
     ProfileField::ReadOnly,
+    ProfileField::SshEnabled,
+    ProfileField::SshHost,
+    ProfileField::SshUser,
+    ProfileField::SshPort,
+    ProfileField::SshIdentityFile,
+    ProfileField::SshConfigFile,
+    ProfileField::SshProxyJump,
+    ProfileField::SshKnownHostsFile,
     ProfileField::Url,
     ProfileField::Test,
     ProfileField::Save,
@@ -3838,7 +4094,7 @@ const DUCKDB_FIELDS: [ProfileField; 11] = [
     ProfileField::Cancel,
 ];
 
-const REDIS_FIELDS: [ProfileField; 16] = [
+const REDIS_FIELDS: [ProfileField; 24] = [
     ProfileField::DatabaseCategory,
     ProfileField::Kind,
     ProfileField::Name,
@@ -3851,13 +4107,21 @@ const REDIS_FIELDS: [ProfileField; 16] = [
     ProfileField::SslMode,
     ProfileField::Environment,
     ProfileField::ReadOnly,
+    ProfileField::SshEnabled,
+    ProfileField::SshHost,
+    ProfileField::SshUser,
+    ProfileField::SshPort,
+    ProfileField::SshIdentityFile,
+    ProfileField::SshConfigFile,
+    ProfileField::SshProxyJump,
+    ProfileField::SshKnownHostsFile,
     ProfileField::Url,
     ProfileField::Test,
     ProfileField::Save,
     ProfileField::Cancel,
 ];
 
-const MONGODB_FIELDS: [ProfileField; 15] = [
+const MONGODB_FIELDS: [ProfileField; 23] = [
     ProfileField::DatabaseCategory,
     ProfileField::Kind,
     ProfileField::Name,
@@ -3870,6 +4134,14 @@ const MONGODB_FIELDS: [ProfileField; 15] = [
     ProfileField::SslMode,
     ProfileField::Environment,
     ProfileField::ReadOnly,
+    ProfileField::SshEnabled,
+    ProfileField::SshHost,
+    ProfileField::SshUser,
+    ProfileField::SshPort,
+    ProfileField::SshIdentityFile,
+    ProfileField::SshConfigFile,
+    ProfileField::SshProxyJump,
+    ProfileField::SshKnownHostsFile,
     ProfileField::Url,
     ProfileField::Test,
     ProfileField::Cancel,

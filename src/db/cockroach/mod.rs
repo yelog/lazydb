@@ -7,6 +7,7 @@ use super::{
     catalog::*,
     pgwire,
     query::{ColumnMeta, QueryBudget, QueryOutcome, ResultSet},
+    transport::ConnectionRoute,
 };
 use crate::{
     identity::ConnectionIdentity,
@@ -35,6 +36,7 @@ pub struct CockroachAdapter {
     pool: PgPool,
     connection_id: Uuid,
     catalog_scope: CatalogScope,
+    _route: ConnectionRoute,
 }
 
 impl CockroachAdapter {
@@ -45,31 +47,45 @@ impl CockroachAdapter {
         profile: &ConnectionProfile,
         password: Option<&SecretString>,
     ) -> Result<Self, DatabaseError> {
+        let route = ConnectionRoute::require_direct(profile)?;
+        Self::connect_routed(profile, password, route).await
+    }
+
+    pub(crate) async fn connect_routed(
+        profile: &ConnectionProfile,
+        password: Option<&SecretString>,
+        route: ConnectionRoute,
+    ) -> Result<Self, DatabaseError> {
         if profile.kind != DatabaseKind::CockroachDb {
             return Err(DatabaseError::configuration("profile is not CockroachDB"));
         }
-        let options = pgwire::connect_options(profile, password, 26257).await?;
+        let options = pgwire::connect_options_routed(profile, password, 26257, &route).await?;
         let pool = PgPoolOptions::new()
             .max_connections(6)
             .acquire_timeout(Duration::from_secs(10))
             .connect_with(options)
             .await
             .map_err(network_error)?;
-        let adapter = Self {
+        if let Err(error) = Self::probe_pool(&pool).await {
+            pool.close().await;
+            return Err(error);
+        }
+        close_pool_on_tunnel_failure(&route, pool.clone());
+        Ok(Self {
             pool,
             connection_id: profile.id,
             catalog_scope: profile.catalog_scope.clone(),
-        };
-        if let Err(error) = adapter.probe().await {
-            adapter.pool.close().await;
-            return Err(error);
-        }
-        Ok(adapter)
+            _route: route,
+        })
     }
 
     pub async fn probe(&self) -> Result<ServerInfo, DatabaseError> {
+        Self::probe_pool(&self.pool).await
+    }
+
+    async fn probe_pool(pool: &PgPool) -> Result<ServerInfo, DatabaseError> {
         let row = sqlx::query(Self::PROBE_SQL)
-            .fetch_one(&self.pool)
+            .fetch_one(pool)
             .await
             .map_err(network_error)?;
         let version: String = row.try_get("version").map_err(decode_error)?;
@@ -129,12 +145,20 @@ impl CockroachAdapter {
         sql: &str,
         budget: QueryBudget,
     ) -> Result<QueryOutcome, DatabaseError> {
-        pgwire::execute_pool(&self.pool, pgwire::Server::Cockroach, sql, budget).await
+        pgwire::execute_pool(
+            &self.pool,
+            pgwire::Server::Cockroach,
+            sql,
+            budget,
+            &self._route,
+        )
+        .await
     }
 
     pub async fn transaction_backend(&self) -> Result<CockroachTransactionBackend, DatabaseError> {
         Ok(CockroachTransactionBackend::new(
             self.pool.acquire().await.map_err(network_error)?,
+            self._route.clone(),
         ))
     }
 
@@ -991,9 +1015,42 @@ fn invariant(error: CatalogValidationError) -> DatabaseError {
 fn sql_error(error: sqlx::Error) -> DatabaseError {
     DatabaseError::from_sqlx(error, ErrorCategory::Sql)
 }
+
+fn close_pool_on_tunnel_failure(route: &ConnectionRoute, pool: PgPool) {
+    let Some(lease) = route.lease.as_ref() else {
+        return;
+    };
+    let failure = lease.failure();
+    tokio::spawn(async move {
+        failure.await;
+        pool.close().await;
+    });
+}
+
 fn network_error(error: sqlx::Error) -> DatabaseError {
     DatabaseError::from_sqlx(error, ErrorCategory::Network)
 }
 fn decode_error(error: sqlx::Error) -> DatabaseError {
     DatabaseError::from_sqlx(error, ErrorCategory::Internal)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CockroachAdapter;
+    use crate::db::ErrorCategory;
+    use crate::profile::{SshOptions, import_connection_url};
+
+    #[tokio::test]
+    async fn direct_connect_rejects_ssh_profiles_before_network_io() {
+        let mut imported =
+            import_connection_url("postgresql://alice@127.0.0.1:1/app", None).unwrap();
+        imported.profile.kind = crate::profile::DatabaseKind::CockroachDb;
+        imported.profile.ssh = Some(SshOptions::default());
+
+        let error = CockroachAdapter::connect(&imported.profile, None)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.category, ErrorCategory::Configuration);
+    }
 }

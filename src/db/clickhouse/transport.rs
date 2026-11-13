@@ -1,11 +1,14 @@
 use std::time::Duration;
 
 use futures_util::StreamExt;
-use reqwest::{Client, StatusCode, header};
+use reqwest::{Client, Proxy, StatusCode, header};
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::{
-    db::{DatabaseError, ErrorCategory, ServerInfo},
+    db::{
+        DatabaseError, ErrorCategory, ServerInfo,
+        transport::{ConnectionRoute, TransportEndpoint},
+    },
     profile::{ConnectionProfile, DatabaseKind, SslMode},
     security::sanitize_terminal_text,
 };
@@ -23,6 +26,7 @@ pub struct ClickHouseAdapter {
     user: String,
     password: Option<SecretString>,
     profile_id: uuid::Uuid,
+    route: ConnectionRoute,
 }
 
 impl ClickHouseAdapter {
@@ -30,9 +34,26 @@ impl ClickHouseAdapter {
         profile: &ConnectionProfile,
         password: Option<&SecretString>,
     ) -> Result<Self, DatabaseError> {
+        let route = ConnectionRoute::require_direct(profile)?;
+        Self::connect_routed(profile, password, route).await
+    }
+
+    pub(crate) async fn connect_routed(
+        profile: &ConnectionProfile,
+        password: Option<&SecretString>,
+        route: ConnectionRoute,
+    ) -> Result<Self, DatabaseError> {
         if profile.kind != DatabaseKind::ClickHouse {
             return Err(DatabaseError::configuration(
                 "ClickHouse adapter requires a ClickHouse profile",
+            ));
+        }
+        if !matches!(
+            &route.endpoint,
+            TransportEndpoint::Direct | TransportEndpoint::Socks5(_)
+        ) {
+            return Err(DatabaseError::unsupported(
+                "ClickHouse connections support only direct or SOCKS5 transport",
             ));
         }
         let host = profile
@@ -59,10 +80,18 @@ impl ClickHouseAdapter {
             host.to_owned()
         };
         let endpoint = format!("{scheme}://{authority_host}:{port}/");
-        let client = Client::builder()
+        let mut builder = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(REQUEST_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT);
+        if let TransportEndpoint::Socks5(proxy) = &route.endpoint {
+            builder = builder
+                .no_proxy()
+                .proxy(Proxy::all(format!("socks5h://{proxy}")).map_err(|_| {
+                    DatabaseError::configuration("invalid ClickHouse SOCKS5 proxy endpoint")
+                })?);
+        }
+        let client = builder
             .build()
             .map_err(|error| DatabaseError::configuration(error.to_string()))?;
         let adapter = Self {
@@ -81,6 +110,7 @@ impl ClickHouseAdapter {
                 .unwrap_or_else(|| "default".to_owned()),
             password: password.cloned(),
             profile_id: profile.id,
+            route,
         };
         adapter.probe().await?;
         Ok(adapter)
@@ -132,10 +162,15 @@ impl ClickHouseAdapter {
             value.set_sensitive(true);
             request = request.header("X-ClickHouse-Key", value);
         }
-        request
-            .send()
+        let route = self.route.clone();
+        route
+            .guard(async move {
+                request
+                    .send()
+                    .await
+                    .map_err(|error| network_error(error.to_string()))
+            })
             .await
-            .map_err(|error| network_error(error.to_string()))
     }
 
     pub(crate) async fn query_response(
@@ -232,5 +267,42 @@ fn network_error(message: impl AsRef<str>) -> DatabaseError {
         code: None,
         message: sanitize_terminal_text(message.as_ref()),
         diagnostic: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::profile::{SshOptions, import_connection_url};
+
+    #[tokio::test]
+    async fn direct_connect_rejects_ssh_profiles_before_network_io() {
+        let mut imported =
+            import_connection_url("clickhouse://default@127.0.0.1:1/default", Some("secret"))
+                .unwrap();
+        imported.profile.ssh = Some(SshOptions::default());
+
+        let error = ClickHouseAdapter::connect(&imported.profile, None)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.category, ErrorCategory::Configuration);
+    }
+
+    #[tokio::test]
+    async fn tcp_route_fails_closed_before_network_io() {
+        let imported =
+            import_connection_url("clickhouse://default@127.0.0.1:1/default", Some("secret"))
+                .unwrap();
+        let route = ConnectionRoute {
+            endpoint: TransportEndpoint::Tcp("127.0.0.1:18123".parse().unwrap()),
+            lease: None,
+        };
+
+        let error = ClickHouseAdapter::connect_routed(&imported.profile, None, route)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.category, ErrorCategory::Unsupported);
     }
 }

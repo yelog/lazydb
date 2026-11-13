@@ -295,6 +295,7 @@ mod tests {
             connection_id: Uuid::new_v4(),
             catalog_scope: CatalogScope::for_profile(DatabaseKind::TiDb, "test", None),
             read_only: false,
+            _route: ConnectionRoute::direct(),
         };
         assert!(
             matches!(adapter.transaction_backend().await, Err(error) if error.category == ErrorCategory::Unsupported)

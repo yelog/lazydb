@@ -1,0 +1,28 @@
+Port 22
+ListenAddress 0.0.0.0
+HostKey /run/lazydb-ssh/ssh_host_ed25519_key
+PidFile /run/sshd.pid
+
+PermitRootLogin no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
+AuthenticationMethods publickey
+AuthorizedKeysFile .ssh/authorized_keys
+StrictModes yes
+PermitEmptyPasswords no
+MaxAuthTries 2
+
+AllowUsers lazydb
+AllowTcpForwarding local
+AllowStreamLocalForwarding no
+PermitOpen any
+GatewayPorts no
+X11Forwarding no
+AllowAgentForwarding no
+
+ClientAliveInterval 30
+ClientAliveCountMax 3
+LoginGraceTime 15
+PrintMotd no
+LogLevel VERBOSE

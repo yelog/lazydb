@@ -15,7 +15,11 @@ use super::catalog::{CatalogProvider, CatalogTargetLoader, CatalogTargetService}
 use super::completion::{complete_document_with_catalog, complete_document_with_embedded_sql};
 use super::diagnostics::diagnostics_for_document;
 use super::document::Documents;
+use crate::connections::DatabaseConnector;
 use crate::sql::{CompletionContext, CompletionIndex, SqlDialect};
+
+const CATALOG_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+const CONNECTOR_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Debug)]
 struct LanguageServerState {
@@ -24,6 +28,8 @@ struct LanguageServerState {
     dialect: crate::cli::LspDialect,
     documents: tokio::sync::Mutex<Documents>,
     catalog_service: Option<std::sync::Arc<CatalogTargetService>>,
+    catalog_operations: Arc<tokio::sync::RwLock<()>>,
+    connector: DatabaseConnector,
 }
 
 impl LanguageServer for LanguageServerState {
@@ -54,6 +60,11 @@ impl LanguageServer for LanguageServerState {
     }
 
     async fn shutdown(&self) -> LspResult<()> {
+        let _catalog_closed =
+            tokio::time::timeout(CATALOG_SHUTDOWN_TIMEOUT, self.catalog_operations.write())
+                .await
+                .ok();
+        let _ = tokio::time::timeout(CONNECTOR_SHUTDOWN_TIMEOUT, self.connector.shutdown()).await;
         Ok(())
     }
 
@@ -70,6 +81,7 @@ impl LanguageServer for LanguageServerState {
         let dialect = sql_dialect(self.dialect);
         let response = match &self.catalog_service {
             Some(service) => {
+                let _operation = self.catalog_operations.read().await;
                 complete_document_with_catalog(
                     &document,
                     position,
@@ -136,26 +148,32 @@ pub async fn run(
     config: Option<PathBuf>,
     profile: Option<String>,
 ) -> Result<()> {
-    let provider =
-        match CatalogProvider::from_config(args.project.as_deref(), config, profile.as_deref())
-            .await
-        {
-            Ok(provider) => {
-                eprintln!(
-                    "lazydb lsp: catalog provider {}",
-                    if provider.is_some() {
-                        "initialized"
-                    } else {
-                        "not selected"
-                    }
-                );
-                provider
-            }
-            Err(error) => {
-                eprintln!("lazydb lsp: catalog unavailable; using offline completion: {error}");
-                None
-            }
-        };
+    let connector = configured_database_connector();
+    let provider = match CatalogProvider::from_config_with_connector(
+        args.project.as_deref(),
+        config,
+        profile.as_deref(),
+        connector.clone(),
+    )
+    .await
+    {
+        Ok(provider) => {
+            eprintln!(
+                "lazydb lsp: catalog provider {}",
+                if provider.is_some() {
+                    "initialized"
+                } else {
+                    "not selected"
+                }
+            );
+            provider
+        }
+        Err(error) => {
+            let _ = tokio::time::timeout(CONNECTOR_SHUTDOWN_TIMEOUT, connector.shutdown()).await;
+            eprintln!("lazydb lsp: catalog unavailable; using offline completion: {error}");
+            None
+        }
+    };
     let dialect = match args.dialect {
         Some(dialect) => dialect,
         None => provider
@@ -164,6 +182,17 @@ pub async fn run(
             .unwrap_or_default(),
     };
     run_server_with_provider(args.project, dialect, provider).await
+}
+
+fn configured_database_connector() -> DatabaseConnector {
+    let ssh = crate::persistence::paths::AppPaths::discover()
+        .ok()
+        .and_then(|paths| {
+            crate::persistence::settings::AppSettings::load(paths.settings_file()).ok()
+        })
+        .map(|settings| settings.connections.ssh)
+        .unwrap_or_default();
+    DatabaseConnector::with_ssh_config(ssh)
 }
 
 pub async fn run_server(
@@ -181,6 +210,13 @@ async fn run_server_with_provider(
 ) -> Result<()> {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
+    let connector = catalog_provider
+        .as_ref()
+        .map(CatalogProvider::connector)
+        .unwrap_or_default();
+    let shutdown_connector = connector.clone();
+    let catalog_operations = Arc::new(tokio::sync::RwLock::new(()));
+    let shutdown_catalog_operations = Arc::clone(&catalog_operations);
     let catalog_service = catalog_provider.map(|provider| {
         let scope = provider.catalog_scope().clone();
         let context = provider.completion_context();
@@ -195,11 +231,20 @@ async fn run_server_with_provider(
         dialect,
         documents: tokio::sync::Mutex::new(Documents::default()),
         catalog_service,
+        catalog_operations,
+        connector,
     });
     Server::new(stdin, stdout, socket)
         .concurrency_level(8)
         .serve(service)
         .await;
+    let _catalog_closed = tokio::time::timeout(
+        CATALOG_SHUTDOWN_TIMEOUT,
+        shutdown_catalog_operations.write(),
+    )
+    .await
+    .ok();
+    let _ = tokio::time::timeout(CONNECTOR_SHUTDOWN_TIMEOUT, shutdown_connector.shutdown()).await;
     Ok(())
 }
 

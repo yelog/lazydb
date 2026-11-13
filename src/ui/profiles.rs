@@ -985,7 +985,7 @@ mod tests {
         draft.name.set("BigQuery");
         draft.paste(ProfileField::Database, "billing-project");
         draft.paste(ProfileField::Schema, "analytics");
-        app.profile_manager = Some(manager);
+        app.profile_manager = Some(Box::new(manager));
         let mut terminal = Terminal::new(TestBackend::new(120, 42)).unwrap();
         let mut state = UiState::default();
         terminal
@@ -1037,7 +1037,7 @@ mod tests {
             ProfileMessageLevel::Error,
             "Unable to save connection profiles: duplicate key",
         );
-        app.profile_manager = Some(manager);
+        app.profile_manager = Some(Box::new(manager));
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = UiState::default();
@@ -1085,7 +1085,7 @@ mod tests {
             ProfileMessageLevel::Warning,
             "Cancel the running query first",
         );
-        app.profile_manager = Some(manager);
+        app.profile_manager = Some(Box::new(manager));
         let mut terminal = Terminal::new(TestBackend::new(60, 16)).unwrap();
         let mut state = UiState::default();
         terminal
@@ -1289,6 +1289,13 @@ fn is_text_field(field: ProfileField) -> bool {
             | ProfileField::DataProject
             | ProfileField::MaximumBytesBilled
             | ProfileField::QueryTimeoutSecs
+            | ProfileField::SshHost
+            | ProfileField::SshUser
+            | ProfileField::SshPort
+            | ProfileField::SshIdentityFile
+            | ProfileField::SshConfigFile
+            | ProfileField::SshProxyJump
+            | ProfileField::SshKnownHostsFile
     )
 }
 
@@ -1361,6 +1368,7 @@ fn form_layout(inner: Rect) -> FormLayout {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FormSection {
     Connection,
+    Ssh,
     Authentication,
     Options,
 }
@@ -1369,6 +1377,7 @@ impl FormSection {
     const fn title(self) -> &'static str {
         match self {
             Self::Connection => "CONNECTION",
+            Self::Ssh => "SSH TUNNEL",
             Self::Authentication => "AUTHENTICATION",
             Self::Options => "OPTIONS",
         }
@@ -1394,6 +1403,14 @@ fn field_section(field: ProfileField) -> Option<FormSection> {
         | ProfileField::SqliteMemory
         | ProfileField::SqlitePath
         | ProfileField::DuckDbPath => Some(FormSection::Connection),
+        ProfileField::SshEnabled
+        | ProfileField::SshHost
+        | ProfileField::SshUser
+        | ProfileField::SshPort
+        | ProfileField::SshIdentityFile
+        | ProfileField::SshConfigFile
+        | ProfileField::SshProxyJump
+        | ProfileField::SshKnownHostsFile => Some(FormSection::Ssh),
         ProfileField::CredentialsFile
         | ProfileField::ElasticsearchAuth
         | ProfileField::OpenSearchAuth
@@ -1466,6 +1483,13 @@ fn text_input(draft: &ProfileDraft, field: ProfileField) -> Option<&TextInput> {
         ProfileField::MaximumBytesBilled => Some(&draft.maximum_bytes_billed),
         ProfileField::QueryTimeoutSecs => Some(&draft.query_timeout_secs),
         ProfileField::CaCertPath => Some(&draft.ca_cert_path),
+        ProfileField::SshHost => Some(&draft.ssh_host),
+        ProfileField::SshUser => Some(&draft.ssh_user),
+        ProfileField::SshPort => Some(&draft.ssh_port),
+        ProfileField::SshIdentityFile => Some(&draft.ssh_identity_file),
+        ProfileField::SshConfigFile => Some(&draft.ssh_config_file),
+        ProfileField::SshProxyJump => Some(&draft.ssh_proxy_jump),
+        ProfileField::SshKnownHostsFile => Some(&draft.ssh_known_hosts_file),
         _ => None,
     }
 }
@@ -1526,6 +1550,14 @@ fn field_value(draft: &ProfileDraft, field: ProfileField) -> String {
         ProfileField::SqliteMemory => toggle_value(draft.sqlite_memory),
         ProfileField::SqlitePath => safe_line(draft.sqlite_path.value()),
         ProfileField::DuckDbPath => safe_line(draft.duckdb_path.value()),
+        ProfileField::SshEnabled => toggle_value(draft.ssh_enabled),
+        ProfileField::SshHost => safe_line(draft.ssh_host.value()),
+        ProfileField::SshUser => safe_line(draft.ssh_user.value()),
+        ProfileField::SshPort => safe_line(draft.ssh_port.value()),
+        ProfileField::SshIdentityFile => safe_line(draft.ssh_identity_file.value()),
+        ProfileField::SshConfigFile => safe_line(draft.ssh_config_file.value()),
+        ProfileField::SshProxyJump => safe_line(draft.ssh_proxy_jump.value()),
+        ProfileField::SshKnownHostsFile => safe_line(draft.ssh_known_hosts_file.value()),
         ProfileField::Test | ProfileField::Save | ProfileField::Cancel => String::new(),
     }
 }
@@ -1594,6 +1626,14 @@ fn field_label(field: ProfileField, kind: DatabaseKind) -> &'static str {
         ProfileField::SqliteMemory => "Memory database",
         ProfileField::SqlitePath => "Path",
         ProfileField::DuckDbPath => "DuckDB file",
+        ProfileField::SshEnabled => "SSH tunnel",
+        ProfileField::SshHost => "SSH host / alias",
+        ProfileField::SshUser => "SSH user",
+        ProfileField::SshPort => "SSH port",
+        ProfileField::SshIdentityFile => "SSH key file",
+        ProfileField::SshConfigFile => "SSH config file",
+        ProfileField::SshProxyJump => "SSH proxy jump",
+        ProfileField::SshKnownHostsFile => "Known hosts file",
         ProfileField::Test => "Test",
         ProfileField::Save => "Save",
         ProfileField::Cancel => "Cancel",
@@ -1608,7 +1648,10 @@ fn is_button_field(field: ProfileField) -> bool {
 }
 
 fn is_toggle_field(field: ProfileField) -> bool {
-    matches!(field, ProfileField::ReadOnly | ProfileField::SqliteMemory)
+    matches!(
+        field,
+        ProfileField::ReadOnly | ProfileField::SqliteMemory | ProfileField::SshEnabled
+    )
 }
 
 fn toggle_value(enabled: bool) -> String {

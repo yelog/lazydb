@@ -482,6 +482,29 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  ssh:
+    name: Managed OpenSSH and database transports
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: { persist-credentials: false }
+      - name: Install Rust
+        run: rustup toolchain install 1.94.0 --profile minimal --no-self-update
+      - name: Restore Rust dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          shared-key: ci-ubuntu-22.04
+          cmd-format: sh scripts/ci/rust-cache-command.sh {0}
+          cache-bin: false
+          save-if: false
+      - name: Build SSH protocol and service tests
+        run: python3 scripts/ci/run-with-timeout.py 1500 -- cargo test --locked --test ssh_transport --test ssh_integration --test ssh_redis --test ssh_http --test ssh_mongo --test ssh_services --test ssh_sqlserver --no-run
+      - name: Validate fixture definition
+        run: LAZYDB_SSH_RUNTIME_DIR="$RUNNER_TEMP/ssh-fixture-validation" docker compose -f docker-compose.ssh.yml config --quiet
+      - name: Verify managed tunnels against isolated services
+        run: python3 scripts/ci/run-with-timeout.py 1500 -- python3 scripts/ci/test-ssh-integration.py --with-sqlserver
+
   mongodb:
     name: MongoDB replica set and standalone integration
     # MongoDB 8.0 rejects newer Azure kernels: actions/runner-images#15005.

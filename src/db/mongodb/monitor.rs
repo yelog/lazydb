@@ -37,7 +37,19 @@ pub async fn sample_adapter(
     database: &str,
     collection: Option<&str>,
 ) -> MongoMonitorSnapshot {
-    let client = adapter.client();
+    let client = match adapter.checked_client() {
+        Ok(client) => client,
+        Err(error) => {
+            return MongoMonitorSnapshot {
+                sampled_at: std::time::SystemTime::now(),
+                errors: vec![MongoMonitorError {
+                    command: "connection",
+                    message: error.to_string(),
+                }],
+                ..MongoMonitorSnapshot::default()
+            };
+        }
+    };
     sample_monitor(client, database, collection).await
 }
 

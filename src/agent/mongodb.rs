@@ -81,7 +81,9 @@ pub(super) async fn execute(
         .resolve_headless(selected.profile)
         .await
         .map_err(|error| agent_error(AgentErrorCode::CredentialFailure, &error.to_string()))?;
-    let connection = DatabaseConnection::connect(selected.profile, password.as_ref())
+    let connection = service
+        .connector
+        .connect(selected.profile, password.as_ref())
         .await
         .map_err(|error| agent_error(AgentErrorCode::DatabaseFailure, &error.to_string()))?;
     let result = match connection {
@@ -333,7 +335,9 @@ pub(super) async fn execute_change(
         .resolve_headless(selected.profile)
         .await
         .map_err(|error| agent_error(AgentErrorCode::CredentialFailure, &error.to_string()))?;
-    let connection = DatabaseConnection::connect(selected.profile, password.as_ref())
+    let connection = service
+        .connector
+        .connect(selected.profile, password.as_ref())
         .await
         .map_err(|error| agent_error(AgentErrorCode::DatabaseFailure, &error.to_string()))?;
     let outcome = match connection {
@@ -681,7 +685,9 @@ pub(super) async fn collections(
         .resolve_headless(selected.profile)
         .await
         .map_err(|error| agent_error(AgentErrorCode::CredentialFailure, &error.to_string()))?;
-    let connection = DatabaseConnection::connect(selected.profile, password.as_ref())
+    let connection = service
+        .connector
+        .connect(selected.profile, password.as_ref())
         .await
         .map_err(|error| agent_error(AgentErrorCode::DatabaseFailure, &error.to_string()))?;
     let result = match connection {
@@ -718,7 +724,9 @@ pub(super) async fn describe_collection(
         .resolve_headless(selected.profile)
         .await
         .map_err(|error| agent_error(AgentErrorCode::CredentialFailure, &error.to_string()))?;
-    let connection = DatabaseConnection::connect(selected.profile, password.as_ref())
+    let connection = service
+        .connector
+        .connect(selected.profile, password.as_ref())
         .await
         .map_err(|error| agent_error(AgentErrorCode::DatabaseFailure, &error.to_string()))?;
     let result = match connection {

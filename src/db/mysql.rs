@@ -24,7 +24,6 @@ use crate::{
     },
 };
 
-use super::transaction::{TransactionBackend, TransactionError};
 use super::{
     DatabaseError, ErrorCategory, ServerInfo,
     catalog::{
@@ -54,6 +53,10 @@ use super::{
     },
     sanitize_terminal_text,
     value::CellValue,
+};
+use super::{
+    transaction::{TransactionBackend, TransactionError},
+    transport::{ConnectionRoute, TransportEndpoint},
 };
 use crate::model::dashboard::MetricKey;
 
@@ -232,6 +235,7 @@ pub struct MySqlAdapter {
     connection_id: Uuid,
     catalog_scope: CatalogScope,
     read_only: bool,
+    _route: ConnectionRoute,
 }
 
 pub(crate) fn mysql_membership_coverage() -> crate::db::principal::PrincipalCoverage {
@@ -1172,6 +1176,7 @@ impl MySqlAdapter {
             control: self.pool.clone(),
             connection_id,
             adapter: self.clone(),
+            _route: self._route.clone(),
         })
     }
 
@@ -1179,44 +1184,16 @@ impl MySqlAdapter {
         profile: &ConnectionProfile,
         password: Option<&SecretString>,
     ) -> Result<Self, DatabaseError> {
-        if !matches!(
-            profile.kind,
-            DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::TiDb
-        ) {
-            return Err(DatabaseError::configuration(
-                "profile is not MySQL, MariaDB or TiDB",
-            ));
-        }
-        let host = profile
-            .host
-            .as_deref()
-            .ok_or_else(|| DatabaseError::configuration("MySQL profile has no host"))?;
-        let mut options = MySqlConnectOptions::new()
-            .host(host)
-            .port(
-                profile
-                    .port
-                    .unwrap_or(if profile.kind == DatabaseKind::TiDb {
-                        4000
-                    } else {
-                        3306
-                    }),
-            )
-            .ssl_mode(mysql_ssl_mode(profile.ssl_mode));
-        if profile.kind == DatabaseKind::TiDb {
-            // Each DQL statement is prepared for empty-result metadata, then
-            // executed as text. DDL and USE can change identical SQL's columns.
-            options = options.statement_cache_capacity(0);
-        }
-        if let Some(user) = &profile.user {
-            options = options.username(user);
-        }
-        if let Some(database) = &profile.database {
-            options = options.database(database);
-        }
-        if let Some(password) = password {
-            options = options.password(password.expose_secret());
-        }
+        let route = ConnectionRoute::require_direct(profile)?;
+        Self::connect_routed(profile, password, route).await
+    }
+
+    pub(crate) async fn connect_routed(
+        profile: &ConnectionProfile,
+        password: Option<&SecretString>,
+        route: ConnectionRoute,
+    ) -> Result<Self, DatabaseError> {
+        let options = connect_options_routed(profile, password, &route)?;
 
         let mut pool_options = MySqlPoolOptions::new()
             .max_connections(6)
@@ -1235,43 +1212,46 @@ impl MySqlAdapter {
             .connect_with(options)
             .await
             .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Network))?;
-        let adapter = Self {
+        // Driver options use the MySQL wire protocol while the native product
+        // identity remains TiDB. Reject mislabelled TiDB profiles immediately.
+        if let Err(error) = Self::probe_pool(&pool, profile.kind).await {
+            pool.close().await;
+            return Err(error);
+        }
+        close_pool_on_tunnel_failure(&route, pool.clone());
+        Ok(Self {
             pool,
             kind: profile.kind,
             connection_id: profile.id,
             catalog_scope: profile.catalog_scope.clone(),
             read_only: profile.read_only,
-        };
-        // Driver options use the MySQL wire protocol while the native product
-        // identity remains TiDB. Reject mislabelled TiDB profiles immediately.
-        if let Err(error) = adapter.probe().await {
-            adapter.pool.close().await;
-            return Err(error);
-        }
-        Ok(adapter)
+            _route: route,
+        })
     }
 
     pub async fn probe(&self) -> Result<ServerInfo, DatabaseError> {
+        Self::probe_pool(&self.pool, self.kind).await
+    }
+
+    async fn probe_pool(pool: &MySqlPool, kind: DatabaseKind) -> Result<ServerInfo, DatabaseError> {
         let row = sqlx::query(PROBE_SQL)
-            .fetch_one(&self.pool)
+            .fetch_one(pool)
             .await
             .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Network))?;
         let version: String = row.try_get("version").map_err(decode_error)?;
         let is_tidb = version.to_ascii_lowercase().contains("tidb");
-        if (self.kind == DatabaseKind::TiDb) != is_tidb {
+        if (kind == DatabaseKind::TiDb) != is_tidb {
             return Err(DatabaseError::configuration(format!(
                 "server product does not match {:?} profile (server reported {})",
-                self.kind,
+                kind,
                 sanitize_terminal_text(&version)
             )));
         }
-        if self.kind == DatabaseKind::TiDb
-            && !supports_catalog_version_for_kind(self.kind, &version)
-        {
-            return Err(unsupported_catalog_version(self.kind, &version));
+        if kind == DatabaseKind::TiDb && !supports_catalog_version_for_kind(kind, &version) {
+            return Err(unsupported_catalog_version(kind, &version));
         }
         Ok(ServerInfo {
-            kind: self.kind,
+            kind,
             version,
             database: row
                 .try_get::<Option<String>, _>("current_database")
@@ -3424,11 +3404,89 @@ fn relation_count_sql(sql: &str) -> String {
     format!("SELECT COUNT(*) FROM ({sql}) AS __lazydb_count")
 }
 
+fn connect_options_routed(
+    profile: &ConnectionProfile,
+    password: Option<&SecretString>,
+    route: &ConnectionRoute,
+) -> Result<MySqlConnectOptions, DatabaseError> {
+    if !matches!(
+        profile.kind,
+        DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::TiDb
+    ) {
+        return Err(DatabaseError::configuration(
+            "profile is not MySQL, MariaDB or TiDB",
+        ));
+    }
+    let host = profile
+        .host
+        .as_deref()
+        .ok_or_else(|| DatabaseError::configuration("MySQL profile has no host"))?;
+    let mut options = MySqlConnectOptions::new()
+        .host(host)
+        .port(
+            profile
+                .port
+                .unwrap_or(if profile.kind == DatabaseKind::TiDb {
+                    4000
+                } else {
+                    3306
+                }),
+        )
+        .ssl_mode(mysql_ssl_mode(profile.ssl_mode));
+    if profile.kind == DatabaseKind::TiDb {
+        // Each DQL statement is prepared for empty-result metadata, then
+        // executed as text. DDL and USE can change identical SQL's columns.
+        options = options.statement_cache_capacity(0);
+    }
+    if let Some(user) = &profile.user {
+        options = options.username(user);
+    }
+    if let Some(database) = &profile.database {
+        options = options.database(database);
+    }
+    if let Some(password) = password {
+        options = options.password(password.expose_secret());
+    }
+    match &route.endpoint {
+        TransportEndpoint::Direct => {}
+        TransportEndpoint::Unix(path) => {
+            options = options.socket(path);
+        }
+        TransportEndpoint::Tcp(endpoint) => {
+            if matches!(profile.ssl_mode, SslMode::VerifyCa | SslMode::VerifyFull) {
+                return Err(DatabaseError::unsupported(
+                    "MySQL TCP forwarding cannot preserve the original TLS hostname in this configuration",
+                ));
+            }
+            let host = endpoint.ip().to_string();
+            options = options.host(&host).port(endpoint.port());
+        }
+        TransportEndpoint::Socks5(_) => {
+            return Err(DatabaseError::unsupported(
+                "MySQL SQLx connections do not support SOCKS5 transport",
+            ));
+        }
+    }
+    Ok(options)
+}
+
+fn close_pool_on_tunnel_failure(route: &ConnectionRoute, pool: MySqlPool) {
+    let Some(lease) = route.lease.as_ref() else {
+        return;
+    };
+    let failure = lease.failure();
+    tokio::spawn(async move {
+        failure.await;
+        pool.close().await;
+    });
+}
+
 pub(crate) struct MySqlTransactionBackend {
     connection: PoolConnection<MySql>,
     control: MySqlPool,
     connection_id: u64,
     adapter: MySqlAdapter,
+    _route: ConnectionRoute,
 }
 
 #[async_trait::async_trait]
@@ -3827,6 +3885,7 @@ impl TransactionBackend for MySqlTransactionBackend {
     }
     fn force_close(self) -> futures_util::future::BoxFuture<'static, Result<(), TransactionError>> {
         Box::pin(async move {
+            let _route = self._route;
             // SQLx 0.9 has no close_hard; detaching before closing is the safe equivalent.
             let connection = self.connection.detach();
             connection
@@ -4873,25 +4932,109 @@ fn decode_error(error: sqlx::Error) -> DatabaseError {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::MySqlAdapter;
     use super::{
         MySqlConstraintPart, MySqlIndexPart, PROBE_SQL, assemble_relation_ddl,
-        group_constraint_parts, group_index_parts, relation_kind, relation_path,
-        search_catalog_kind,
+        connect_options_routed, group_constraint_parts, group_index_parts, relation_kind,
+        relation_path, search_catalog_kind,
     };
+    use crate::db::ErrorCategory;
     use crate::db::catalog::{CatalogId, CatalogKind, DdlProvenance};
     use crate::db::mutation::{
         InputValue, InsertRowMutation, MetadataFingerprint, MutationResult, RelationMutation,
         RelationMutationRequest,
     };
     use crate::db::transaction::TransactionBackend;
+    use crate::db::transport::{ConnectionRoute, TransportEndpoint};
     use crate::db::value::CellValue;
     use crate::identity::ConnectionIdentity;
     use crate::model::execution_target::ExecutionTarget;
     use crate::model::relation::RelationKey;
     use crate::model::relation_edit::EditableRowId;
-    use crate::profile::import_connection_url;
+    use crate::profile::{SshOptions, SslMode, import_connection_url};
     use uuid::Uuid;
+
+    #[tokio::test]
+    async fn direct_connect_rejects_ssh_profiles_before_network_io() {
+        let mut imported =
+            import_connection_url("mysql://alice@127.0.0.1:1/app", Some("secret")).unwrap();
+        imported.profile.ssh = Some(SshOptions::default());
+
+        let error = MySqlAdapter::connect(&imported.profile, None)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.category, ErrorCategory::Configuration);
+    }
+
+    #[test]
+    fn routed_unix_options_keep_the_original_host_and_full_socket_path() {
+        let imported = import_connection_url(
+            "mysql://alice@db.example.test:3307/app",
+            Some("mysql-routed"),
+        )
+        .unwrap();
+        let socket = PathBuf::from("/tmp/lazydb-mysql.sock");
+        let route = ConnectionRoute {
+            endpoint: TransportEndpoint::Unix(socket.clone()),
+            lease: None,
+        };
+
+        let options = connect_options_routed(&imported.profile, None, &route).unwrap();
+
+        assert_eq!(options.get_host(), "db.example.test");
+        assert_eq!(options.get_port(), 3307);
+        assert_eq!(options.get_socket(), Some(&socket));
+    }
+
+    #[test]
+    fn routed_tcp_options_reject_host_verifying_tls_instead_of_downgrading() {
+        let mut imported = import_connection_url(
+            "mysql://alice@db.example.test:3306/app",
+            Some("mysql-routed"),
+        )
+        .unwrap();
+        imported.profile.ssl_mode = SslMode::VerifyFull;
+        let route = ConnectionRoute {
+            endpoint: TransportEndpoint::Tcp("127.0.0.1:13306".parse().unwrap()),
+            lease: None,
+        };
+
+        let error = connect_options_routed(&imported.profile, None, &route).unwrap_err();
+
+        assert_eq!(error.category, ErrorCategory::Unsupported);
+    }
+
+    #[test]
+    fn routed_tcp_options_use_the_forwarded_endpoint_for_non_verifying_tls() {
+        let imported =
+            import_connection_url("mysql://alice@db.example.test:3306/app", None).unwrap();
+        let route = ConnectionRoute {
+            endpoint: TransportEndpoint::Tcp("127.0.0.1:13306".parse().unwrap()),
+            lease: None,
+        };
+
+        let options = connect_options_routed(&imported.profile, None, &route).unwrap();
+
+        assert_eq!(options.get_host(), "127.0.0.1");
+        assert_eq!(options.get_port(), 13306);
+    }
+
+    #[test]
+    fn routed_socks5_transport_is_rejected_for_sqlx() {
+        let imported =
+            import_connection_url("mysql://alice@db.example.test:3306/app", None).unwrap();
+        let route = ConnectionRoute {
+            endpoint: TransportEndpoint::Socks5("127.0.0.1:1080".parse().unwrap()),
+            lease: None,
+        };
+
+        let error = connect_options_routed(&imported.profile, None, &route).unwrap_err();
+
+        assert_eq!(error.category, ErrorCategory::Unsupported);
+    }
 
     #[test]
     fn principal_ddl_omits_credentials_and_keeps_account_identity() {

@@ -261,7 +261,7 @@ pub struct App {
     pub omni: Option<crate::model::omni::OmniState>,
     help_panel_view: crate::config::HelpPanelView,
     help_panel_session: Option<crate::model::help_panel::HelpPanelSession>,
-    pub profile_manager: Option<ProfileManagerState>,
+    pub profile_manager: Option<Box<ProfileManagerState>>,
     pub catalog_editor: Option<CatalogEditorState>,
     pub system_credential_availability: crate::persistence::secrets::SecretStoreAvailability,
     pub should_quit: bool,
@@ -3801,7 +3801,7 @@ impl App {
                     omni.origin_overlay = Some(overlay);
                     return false;
                 };
-                SuspendedInteractionState::ProfileManager(Box::new(manager))
+                SuspendedInteractionState::ProfileManager(manager)
             } else {
                 let Some(editor) = self.catalog_editor.take() else {
                     omni.status = Some("The catalog form is no longer available".into());
@@ -7825,7 +7825,7 @@ impl App {
                                 "Another profile form is already active",
                             );
                         } else {
-                            self.profile_manager = Some(*manager);
+                            self.profile_manager = Some(manager);
                             self.overlay = Some(Overlay::ProfileManager);
                         }
                     }
@@ -8150,7 +8150,7 @@ impl App {
                     return Vec::new();
                 }
                 if self.overlay == Some(Overlay::ProfileManager) {
-                    self.close_profile_manager();
+                    return self.close_profile_manager();
                 } else {
                     self.overlay = None;
                 }
@@ -8391,7 +8391,7 @@ impl App {
                 let mut manager = ProfileManagerState::default();
                 manager.start_new(DatabaseKind::Postgres);
                 manager.set_system_credential_availability(self.system_credential_availability);
-                self.profile_manager = Some(manager);
+                self.profile_manager = Some(Box::new(manager));
                 self.overlay = Some(Overlay::ProfileManager);
                 Vec::new()
             }
@@ -8402,10 +8402,7 @@ impl App {
                 }
                 Vec::new()
             }
-            Action::CloseProfileManager => {
-                self.close_profile_manager();
-                Vec::new()
-            }
+            Action::CloseProfileManager => self.close_profile_manager(),
             Action::ProfileStartNew => {
                 if self
                     .profile_manager
@@ -8418,7 +8415,7 @@ impl App {
                 let mut manager = ProfileManagerState::default();
                 manager.start_new(DatabaseKind::Postgres);
                 manager.set_system_credential_availability(self.system_credential_availability);
-                self.profile_manager = Some(manager);
+                self.profile_manager = Some(Box::new(manager));
                 self.overlay = Some(Overlay::ProfileManager);
                 Vec::new()
             }
@@ -8442,7 +8439,7 @@ impl App {
                         profile.credential_policy.has_persisted_credential();
                     manager.start_edit(&profile, has_stored_credential);
                     manager.set_system_credential_availability(self.system_credential_availability);
-                    self.profile_manager = Some(manager);
+                    self.profile_manager = Some(Box::new(manager));
                     self.overlay = Some(Overlay::ProfileManager);
                 }
                 Vec::new()
@@ -11301,14 +11298,23 @@ impl App {
                 Vec::new()
             }
             Action::ProfileScopeBack => {
+                let mut cancelled = false;
                 if let Some(manager) = self
                     .profile_manager
                     .as_mut()
                     .filter(|manager| manager.page == ProfileManagerPage::Scope)
                 {
+                    if manager.scope_discovery_loading() {
+                        manager.finish_scope_discovery();
+                        cancelled = true;
+                    }
                     manager.close_scope_picker();
                 }
-                Vec::new()
+                if cancelled {
+                    vec![Command::CancelProfileConnections]
+                } else {
+                    Vec::new()
+                }
             }
             Action::ProfileTest => self.test_profile_draft(),
             Action::ProfileSave { connect } => self.save_profile_draft(connect),
@@ -11618,7 +11624,7 @@ impl App {
                 manager.set_system_credential_availability(self.system_credential_availability);
                 manager.selected_field = ProfileField::Password;
                 manager.set_message(ProfileMessageLevel::Error, message);
-                self.profile_manager = Some(manager);
+                self.profile_manager = Some(Box::new(manager));
                 self.overlay = Some(Overlay::ProfileManager);
                 Vec::new()
             }
@@ -19411,16 +19417,26 @@ impl App {
         }
     }
 
-    fn close_profile_manager(&mut self) {
+    fn close_profile_manager(&mut self) -> Vec<Command> {
         let Some(manager) = self.profile_manager.as_ref() else {
-            return;
+            return Vec::new();
         };
-        if manager.operation.is_some() {
-            return;
+        if manager
+            .operation
+            .is_some_and(|operation| operation != ProfileOperation::Testing)
+        {
+            return Vec::new();
         }
+        let cancel = manager.operation == Some(ProfileOperation::Testing)
+            || manager.scope_discovery_loading();
         self.profile_manager = None;
         if self.overlay == Some(Overlay::ProfileManager) {
             self.overlay = None;
+        }
+        if cancel {
+            vec![Command::CancelProfileConnections]
+        } else {
+            Vec::new()
         }
     }
 
@@ -20948,7 +20964,7 @@ impl App {
         page: ProfileManagerPage,
     ) -> Option<&mut ProfileManagerState> {
         self.profile_manager
-            .as_mut()
+            .as_deref_mut()
             .filter(|manager| manager.page == page && manager.operation.is_none())
     }
 
@@ -20974,7 +20990,7 @@ impl App {
                 "Cancel the running query before deleting this profile",
             );
         }
-        self.profile_manager = Some(manager);
+        self.profile_manager = Some(Box::new(manager));
         self.overlay = Some(Overlay::ProfileManager);
     }
 
@@ -21463,7 +21479,7 @@ impl App {
         request_id: u64,
         operations: &[ProfileOperation],
     ) -> Option<&mut ProfileManagerState> {
-        self.profile_manager.as_mut().filter(|manager| {
+        self.profile_manager.as_deref_mut().filter(|manager| {
             manager.request_generation == request_id
                 && manager
                     .operation

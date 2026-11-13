@@ -980,6 +980,14 @@ fn visible_fields_follow_the_selected_driver_and_sqlite_mode() {
             ProfileField::SslMode,
             ProfileField::Environment,
             ProfileField::ReadOnly,
+            ProfileField::SshEnabled,
+            ProfileField::SshHost,
+            ProfileField::SshUser,
+            ProfileField::SshPort,
+            ProfileField::SshIdentityFile,
+            ProfileField::SshConfigFile,
+            ProfileField::SshProxyJump,
+            ProfileField::SshKnownHostsFile,
             ProfileField::Url,
             ProfileField::Test,
             ProfileField::Save,
@@ -1103,6 +1111,11 @@ fn visible_field_navigation_reaches_url_before_actions_without_url_format() {
     assert_eq!(fields[fields.len() - 4], ProfileField::Url);
 
     state.selected_field = ProfileField::ReadOnly;
+    state.move_field(1);
+    assert_eq!(state.selected_field, ProfileField::SshEnabled);
+    state.move_field(1);
+    assert_eq!(state.selected_field, ProfileField::SshHost);
+    state.selected_field = ProfileField::SshKnownHostsFile;
     state.move_field(1);
     assert_eq!(state.selected_field, ProfileField::Url);
     state.move_field(1);

@@ -76,7 +76,7 @@ impl MongoAdapter {
             return Err(DatabaseError::configuration("distinct field is invalid"));
         }
         let collection = self
-            .client()
+            .checked_client()?
             .database(&spec.namespace.database)
             .collection::<Document>(
                 spec.namespace
@@ -120,7 +120,7 @@ impl MongoAdapter {
             ));
         }
         let collection = self
-            .client()
+            .checked_client()?
             .database(&namespace.database)
             .collection::<Document>(namespace.collection.as_deref().expect("checked collection"));
         let mut cursor = collection
@@ -178,7 +178,7 @@ impl MongoAdapter {
             .as_deref()
             .expect("validated collection");
         let collection = self
-            .client()
+            .checked_client()?
             .database(&spec.namespace.database)
             .collection::<Document>(collection_name);
         let remaining = spec.limit.map(|limit| limit.saturating_sub(spec.skip));
@@ -297,7 +297,7 @@ impl MongoAdapter {
             .collection
             .as_deref()
             .expect("validated collection");
-        self.client()
+        self.checked_client()?
             .database(&spec.namespace.database)
             .collection::<Document>(collection_name)
             .count_documents(spec.filter.clone())
@@ -312,7 +312,7 @@ impl MongoAdapter {
             .collection
             .as_deref()
             .expect("validated collection");
-        self.client()
+        self.checked_client()?
             .database(&spec.namespace.database)
             .collection::<Document>(collection_name)
             .estimated_document_count()

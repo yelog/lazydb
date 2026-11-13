@@ -1,0 +1,313 @@
+services:
+  sshd:
+    build:
+      context: tests/fixtures/ssh
+      dockerfile: Dockerfile
+    environment:
+      SSH_USER: lazydb
+    ports:
+      - "127.0.0.1::22"
+    volumes:
+      - "${LAZYDB_SSH_RUNTIME_DIR:?}/ssh:/run/lazydb-ssh-src:ro"
+      - "./tests/fixtures/ssh/sshd_config:/etc/ssh/lazydb/sshd_config:ro"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+      mongo1:
+        condition: service_healthy
+      mongo2:
+        condition: service_healthy
+      mongo3:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 22"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  jump:
+    build:
+      context: tests/fixtures/ssh
+      dockerfile: Dockerfile
+    environment:
+      SSH_USER: lazydb
+    ports:
+      - "127.0.0.1::22"
+    volumes:
+      - "${LAZYDB_SSH_RUNTIME_DIR:?}/ssh:/run/lazydb-ssh-src:ro"
+      - "./tests/fixtures/ssh/sshd_config:/etc/ssh/lazydb/sshd_config:ro"
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 22"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  http:
+    image: nginx:1.27-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10
+    volumes:
+      - "./tests/fixtures/ssh/nginx.conf:/etc/nginx/nginx.conf:ro"
+      - "${LAZYDB_SSH_RUNTIME_DIR:?}/http:/run/lazydb-http:ro"
+    networks:
+      default:
+        aliases:
+          - clickhouse.internal
+          - search.internal
+          - opensearch.internal
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:8080/ >/dev/null"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  mongo1:
+    image: mongo:7.0@sha256:9896df581dfd0718b7abe112f4c37598d0986c54060e4ec1384997e6503c8c71
+    environment:
+      MONGO_MEMBER: mongo1
+    entrypoint: ["/bin/bash", "/opt/lazydb/mongo-entrypoint.sh"]
+    command:
+      - mongod
+      - --replSet
+      - rs0
+      - --bind_ip_all
+      - --port
+      - "27017"
+      - --tlsMode
+      - requireTLS
+      - --tlsCertificateKeyFile
+      - /run/lazydb-mongo-runtime/server.pem
+      - --tlsCAFile
+      - /run/lazydb-mongo-runtime/ca.pem
+      - --tlsAllowConnectionsWithoutCertificates
+      - --keyFile
+      - /run/lazydb-mongo-runtime/keyfile
+      - --auth
+      - --wiredTigerCacheSizeGB
+      - "0.25"
+    volumes:
+      - "${LAZYDB_SSH_RUNTIME_DIR:?}/mongo:/run/lazydb-mongo:ro"
+      - "./tests/fixtures/ssh/mongo-entrypoint.sh:/opt/lazydb/mongo-entrypoint.sh:ro"
+    networks:
+      default:
+        aliases:
+          - mongo1.internal
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mongosh --quiet --norc --tls --tlsCAFile /run/lazydb-mongo-runtime/ca.pem --host 127.0.0.1 --port 27017 --eval 'db.adminCommand({hello:1}).ok' | grep -q 1",
+        ]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+      start_period: 20s
+
+  mongo2:
+    image: mongo:7.0@sha256:9896df581dfd0718b7abe112f4c37598d0986c54060e4ec1384997e6503c8c71
+    environment:
+      MONGO_MEMBER: mongo2
+    entrypoint: ["/bin/bash", "/opt/lazydb/mongo-entrypoint.sh"]
+    command:
+      - mongod
+      - --replSet
+      - rs0
+      - --bind_ip_all
+      - --port
+      - "27018"
+      - --tlsMode
+      - requireTLS
+      - --tlsCertificateKeyFile
+      - /run/lazydb-mongo-runtime/server.pem
+      - --tlsCAFile
+      - /run/lazydb-mongo-runtime/ca.pem
+      - --tlsAllowConnectionsWithoutCertificates
+      - --keyFile
+      - /run/lazydb-mongo-runtime/keyfile
+      - --auth
+      - --wiredTigerCacheSizeGB
+      - "0.25"
+    volumes:
+      - "${LAZYDB_SSH_RUNTIME_DIR:?}/mongo:/run/lazydb-mongo:ro"
+      - "./tests/fixtures/ssh/mongo-entrypoint.sh:/opt/lazydb/mongo-entrypoint.sh:ro"
+    networks:
+      default:
+        aliases:
+          - mongo2.internal
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mongosh --quiet --norc --tls --tlsCAFile /run/lazydb-mongo-runtime/ca.pem --host 127.0.0.1 --port 27018 --eval 'db.adminCommand({hello:1}).ok' | grep -q 1",
+        ]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+      start_period: 20s
+
+  mongo3:
+    image: mongo:7.0@sha256:9896df581dfd0718b7abe112f4c37598d0986c54060e4ec1384997e6503c8c71
+    environment:
+      MONGO_MEMBER: mongo3
+    entrypoint: ["/bin/bash", "/opt/lazydb/mongo-entrypoint.sh"]
+    command:
+      - mongod
+      - --replSet
+      - rs0
+      - --bind_ip_all
+      - --port
+      - "27019"
+      - --tlsMode
+      - requireTLS
+      - --tlsCertificateKeyFile
+      - /run/lazydb-mongo-runtime/server.pem
+      - --tlsCAFile
+      - /run/lazydb-mongo-runtime/ca.pem
+      - --tlsAllowConnectionsWithoutCertificates
+      - --keyFile
+      - /run/lazydb-mongo-runtime/keyfile
+      - --auth
+      - --wiredTigerCacheSizeGB
+      - "0.25"
+    volumes:
+      - "${LAZYDB_SSH_RUNTIME_DIR:?}/mongo:/run/lazydb-mongo:ro"
+      - "./tests/fixtures/ssh/mongo-entrypoint.sh:/opt/lazydb/mongo-entrypoint.sh:ro"
+    networks:
+      default:
+        aliases:
+          - mongo3.internal
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mongosh --quiet --norc --tls --tlsCAFile /run/lazydb-mongo-runtime/ca.pem --host 127.0.0.1 --port 27019 --eval 'db.adminCommand({hello:1}).ok' | grep -q 1",
+        ]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+      start_period: 20s
+
+  postgres:
+    image: postgres:17.6-bookworm@sha256:f3bd19c606e442c3d7bdfa8002e03fe260a1023351e0ea4598032022b68dd6e3
+    environment:
+      POSTGRES_DB: lazydb
+      POSTGRES_USER: lazydb
+      POSTGRES_PASSWORD_FILE: /run/lazydb-secrets/postgres_password
+    entrypoint: ["/bin/bash", "/opt/lazydb/postgres-entrypoint.sh"]
+    command:
+      - postgres
+      - -c
+      - ssl=on
+      - -c
+      - ssl_cert_file=/run/lazydb-tls/postgres.crt
+      - -c
+      - ssl_key_file=/run/lazydb-tls/postgres.key
+      - -c
+      - ssl_ca_file=/run/lazydb-tls/ca.pem
+      - -c
+      - hba_file=/run/lazydb-tls/pg_hba.conf
+    volumes:
+      - "${LAZYDB_SSH_RUNTIME_DIR:?}/postgres:/run/lazydb-tls-src:ro"
+      - "${LAZYDB_SSH_RUNTIME_DIR:?}/secrets/postgres_password:/run/lazydb-secrets/postgres_password:ro"
+      - "./tests/fixtures/ssh/postgres-entrypoint.sh:/opt/lazydb/postgres-entrypoint.sh:ro"
+    networks:
+      default:
+        aliases:
+          - postgres.internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lazydb -d lazydb -h /var/run/postgresql"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  mysql:
+    image: mysql:8.4.6@sha256:869218921e61d6c3c89820955d63cca42971f0e3e6c1e2792247bbd944ebc6e9
+    environment:
+      MYSQL_DATABASE: lazydb
+      MYSQL_USER: lazydb
+      MYSQL_PASSWORD_FILE: /run/lazydb-secrets/mysql_password
+      MYSQL_ROOT_PASSWORD_FILE: /run/lazydb-secrets/mysql_root_password
+    entrypoint: ["/bin/bash", "/opt/lazydb/mysql-entrypoint.sh"]
+    command:
+      - mysqld
+      - --bind-address=0.0.0.0
+      - --require-secure-transport=ON
+      - --ssl-ca=/run/lazydb-tls/ca.pem
+      - --ssl-cert=/run/lazydb-tls/mysql.crt
+      - --ssl-key=/run/lazydb-tls/mysql.key
+    volumes:
+      - "${LAZYDB_SSH_RUNTIME_DIR:?}/mysql:/run/lazydb-tls-src:ro"
+      - "${LAZYDB_SSH_RUNTIME_DIR:?}/secrets/mysql_password:/run/lazydb-secrets/mysql_password:ro"
+      - "${LAZYDB_SSH_RUNTIME_DIR:?}/secrets/mysql_root_password:/run/lazydb-secrets/mysql_root_password:ro"
+      - "${LAZYDB_SSH_RUNTIME_DIR:?}/secrets/mysql-client.cnf:/run/lazydb-secrets/mysql-client.cnf:ro"
+      - "./tests/fixtures/ssh/mysql-entrypoint.sh:/opt/lazydb/mysql-entrypoint.sh:ro"
+      - "./tests/fixtures/ssh/mysql/001-require-tls.sql:/docker-entrypoint-initdb.d/001-require-tls.sql:ro"
+    networks:
+      default:
+        aliases:
+          - mysql.internal
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mysqladmin --defaults-extra-file=/run/lazydb-secrets/mysql-client.cnf --protocol=socket --socket=/var/run/mysqld/mysqld.sock ping --silent",
+        ]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+      start_period: 15s
+
+  mssql:
+    profiles: ["sqlserver"]
+    image: mcr.microsoft.com/mssql/server:2022-CU16-ubuntu-22.04@sha256:45a1a9d13ca5574cf8e0fe4ae73ab77248b66d9c3132ac9658fb6c16dd72a8af
+    platform: linux/amd64
+    user: root
+    environment:
+      ACCEPT_EULA: Y
+      MSSQL_MEMORY_LIMIT_MB: "1024"
+    entrypoint: ["/bin/bash", "/opt/lazydb/mssql-entrypoint.sh"]
+    volumes:
+      - "${LAZYDB_SSH_RUNTIME_DIR:?}/secrets/mssql_password:/run/lazydb-secrets/mssql_password:ro"
+      - "./tests/fixtures/ssh/mssql-entrypoint.sh:/opt/lazydb/mssql-entrypoint.sh:ro"
+    networks:
+      default:
+        aliases:
+          - mssql.internal
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "SQLCMDPASSWORD=\"$$(cat /run/lazydb-secrets/mssql_password)\" /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -C -Q 'SELECT 1' >/dev/null 2>&1",
+        ]
+      interval: 3s
+      timeout: 10s
+      retries: 60
+      start_period: 20s
+
+  valkey:
+    image: valkey/valkey:8.1.10-alpine@sha256:081c2f5cb575efc901aa80ff9cdbd1ec6a301682fd35e1ebb4b0990a4a4a8507
+    command: ["valkey-server", "/run/lazydb-valkey/valkey.conf"]
+    volumes:
+      - "${LAZYDB_SSH_RUNTIME_DIR:?}/valkey:/run/lazydb-valkey:ro"
+      - "${LAZYDB_SSH_RUNTIME_DIR:?}/secrets/valkey_password:/run/lazydb-secrets/valkey_password:ro"
+      - "valkey-data:/data"
+    networks:
+      default:
+        aliases:
+          - redis.internal
+          - valkey.internal
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "valkey-cli --no-auth-warning -a \"$$(cat /run/lazydb-secrets/valkey_password)\" ping | grep -q PONG",
+        ]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+volumes:
+  valkey-data:

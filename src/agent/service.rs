@@ -9,7 +9,8 @@ use crate::{
         selection::{AgentError, SelectedAgentProfile, select_profile},
         types::{AgentConnection, AgentContext, AgentQueryResult, AgentTarget, QueryOutcomeJson},
     },
-    db::{DatabaseConnection, query::QueryBudget},
+    connections::DatabaseConnector,
+    db::query::QueryBudget,
     persistence::{
         credentials::CredentialResolver, local_credentials::LocalCredentialStore, paths::AppPaths,
         profiles::ProfileStore, secrets::NativeSecretStore,
@@ -19,10 +20,12 @@ use crate::{
 
 pub const DEFAULT_MAX_ROWS: usize = 500;
 pub const DEFAULT_MAX_RESULT_BYTES: usize = 1024 * 1024;
+const CONNECTOR_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 pub struct AgentService {
     project: AgentProjectContext,
     profiles: Vec<ConnectionProfile>,
+    pub(super) connector: DatabaseConnector,
     pub(super) credential_resolver: CredentialResolver,
     pub(super) max_rows: usize,
     pub(super) max_result_bytes: usize,
@@ -57,7 +60,11 @@ impl AgentService {
                         .unwrap_or_else(|| PathBuf::from("credential.key")),
                 ),
         );
-        Ok(Self::new(project, profiles, credentials))
+        let ssh = crate::persistence::settings::AppSettings::load(paths.settings_file())
+            .map(|settings| settings.connections.ssh)
+            .unwrap_or_default();
+        Ok(Self::new(project, profiles, credentials)
+            .with_connector(DatabaseConnector::with_ssh_config(ssh)))
     }
 
     pub fn new(
@@ -68,16 +75,26 @@ impl AgentService {
         Self {
             project,
             profiles,
+            connector: DatabaseConnector::new(),
             credential_resolver,
             max_rows: DEFAULT_MAX_ROWS,
             max_result_bytes: DEFAULT_MAX_RESULT_BYTES,
         }
     }
 
+    pub fn with_connector(mut self, connector: DatabaseConnector) -> Self {
+        self.connector = connector;
+        self
+    }
+
     pub fn with_limits(mut self, max_rows: usize, max_result_bytes: usize) -> Self {
         self.max_rows = max_rows;
         self.max_result_bytes = max_result_bytes;
         self
+    }
+
+    pub async fn shutdown(&self) {
+        let _ = tokio::time::timeout(CONNECTOR_SHUTDOWN_TIMEOUT, self.connector.shutdown()).await;
     }
 
     pub fn visible_profiles(&self) -> Vec<VisibleAgentProfile<'_>> {
@@ -128,7 +145,9 @@ impl AgentService {
                 code: super::selection::AgentErrorCode::CredentialFailure,
                 message: error.to_string(),
             })?;
-        let connection = DatabaseConnection::connect(selected.profile, password.as_ref())
+        let connection = self
+            .connector
+            .connect(selected.profile, password.as_ref())
             .await
             .map_err(|error| AgentError {
                 code: super::selection::AgentErrorCode::DatabaseFailure,
@@ -210,7 +229,9 @@ impl AgentService {
                 code: super::selection::AgentErrorCode::CredentialFailure,
                 message: error.to_string(),
             })?;
-        let connection = DatabaseConnection::connect(selected.profile, password.as_ref())
+        let connection = self
+            .connector
+            .connect(selected.profile, password.as_ref())
             .await
             .map_err(|error| AgentError {
                 code: super::selection::AgentErrorCode::DatabaseFailure,
@@ -248,7 +269,9 @@ impl AgentService {
                 code: super::selection::AgentErrorCode::CredentialFailure,
                 message: error.to_string(),
             })?;
-        let connection = DatabaseConnection::connect(selected.profile, password.as_ref())
+        let connection = self
+            .connector
+            .connect(selected.profile, password.as_ref())
             .await
             .map_err(|error| AgentError {
                 code: super::selection::AgentErrorCode::DatabaseFailure,

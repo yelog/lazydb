@@ -1,3 +1,4 @@
+pub(crate) mod connection;
 pub mod discovery;
 pub mod key_index;
 pub mod key_store;
@@ -12,23 +13,27 @@ pub mod scan_scheduler;
 pub mod server_info;
 pub mod types;
 
-use redis::{
-    Client,
-    aio::{ConnectionManager, ConnectionManagerConfig},
-};
+use redis::{Client, aio::ConnectionManagerConfig};
 use secrecy::{ExposeSecret, SecretString};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use uuid::Uuid;
 
 use crate::{
-    db::{DatabaseError, ErrorCategory, ServerInfo},
+    db::{
+        DatabaseError, ErrorCategory, ServerInfo,
+        transport::{ConnectionRoute, TransportEndpoint},
+    },
     profile::{ConnectionProfile, DatabaseKind, SslMode},
+};
+
+use self::connection::{
+    CONNECTION_TIMEOUT, RESPONSE_TIMEOUT, RedisConnection, is_tunnel_unavailable,
 };
 
 #[derive(Clone, Debug)]
 pub struct RedisAdapter {
-    connection: ConnectionManager,
+    connection: RedisConnection,
     target_database: u32,
     configured_kind: DatabaseKind,
     connection_id: Uuid,
@@ -54,6 +59,15 @@ impl RedisAdapter {
         profile: &ConnectionProfile,
         password: Option<&SecretString>,
     ) -> Result<Self, DatabaseError> {
+        let route = ConnectionRoute::require_direct(profile)?;
+        Self::connect_routed(profile, password, route).await
+    }
+
+    pub(crate) async fn connect_routed(
+        profile: &ConnectionProfile,
+        password: Option<&SecretString>,
+        route: ConnectionRoute,
+    ) -> Result<Self, DatabaseError> {
         if !profile.kind.is_redis_compatible() {
             return Err(DatabaseError::configuration(
                 "Redis-compatible adapter requires a Redis or Valkey profile",
@@ -65,6 +79,7 @@ impl RedisAdapter {
             .ok_or_else(|| DatabaseError::configuration("Redis-compatible host is required"))?;
         let port = profile.port.unwrap_or(6379);
         let database = parse_database(profile.database.as_deref())?;
+        let logical_host = normalized_host(host);
         let scheme = match profile.ssl_mode {
             SslMode::Disable => "redis",
             SslMode::Require | SslMode::VerifyCa | SslMode::VerifyFull => "rediss",
@@ -90,26 +105,65 @@ impl RedisAdapter {
                     .map(|user| format!("{}@", encode_url_part(user)))
             })
             .unwrap_or_default();
-        let url = format!("{scheme}://{credentials}{host}:{port}/{database}");
+        let url = format!(
+            "{scheme}://{credentials}{}:{port}/{database}",
+            url_host(host)
+        );
         let client =
             Client::open(url).map_err(|error| redis_error(error, ErrorCategory::Configuration))?;
-        let reconnect = reconnect::policy();
-        let manager_config = ConnectionManagerConfig::new()
-            .set_connection_timeout(Some(Duration::from_secs(5)))
-            .set_response_timeout(Some(Duration::from_secs(10)))
-            .set_number_of_retries(reconnect.attempts)
-            .set_min_delay(reconnect.initial_delay)
-            .set_max_delay(reconnect.max_delay);
-        let connection = ConnectionManager::new_with_config(client, manager_config)
-            .await
-            .map_err(|error| {
-                let category = if password.is_some() {
-                    ErrorCategory::Authentication
-                } else {
-                    ErrorCategory::Network
-                };
-                redis_error(error, category)
-            })?;
+        let connection = match route.endpoint.clone() {
+            TransportEndpoint::Direct => {
+                if route.lease.is_some() {
+                    return Err(DatabaseError::configuration(
+                        "Redis direct transport cannot carry an SSH tunnel lease",
+                    ));
+                }
+                let _ = ConnectionRoute::require_direct(profile)?;
+                let reconnect = reconnect::policy();
+                let manager_config = ConnectionManagerConfig::new()
+                    .set_connection_timeout(Some(CONNECTION_TIMEOUT))
+                    .set_response_timeout(Some(RESPONSE_TIMEOUT))
+                    .set_number_of_retries(reconnect.attempts)
+                    .set_min_delay(reconnect.initial_delay)
+                    .set_max_delay(reconnect.max_delay);
+                redis::aio::ConnectionManager::new_with_config(client, manager_config)
+                    .await
+                    .map(RedisConnection::direct)
+            }
+            TransportEndpoint::Tcp(endpoint) => {
+                if route.lease.as_ref().is_some_and(|lease| !lease.is_alive()) {
+                    return Err(tunnel_unavailable());
+                }
+                RedisConnection::connect_routed(
+                    client,
+                    route,
+                    endpoint,
+                    logical_host,
+                    i64::from(database),
+                )
+                .await
+            }
+            TransportEndpoint::Unix(_) => {
+                return Err(DatabaseError::unsupported(
+                    "Redis routed connections do not support Unix socket transport",
+                ));
+            }
+            TransportEndpoint::Socks5(_) => {
+                return Err(DatabaseError::unsupported(
+                    "Redis routed connections do not support SOCKS5 transport",
+                ));
+            }
+        }
+        .map_err(|error| {
+            let category = if matches!(error.kind(), redis::ErrorKind::InvalidClientConfig) {
+                ErrorCategory::Configuration
+            } else if password.is_some() {
+                ErrorCategory::Authentication
+            } else {
+                ErrorCategory::Network
+            };
+            redis_error(error, category)
+        })?;
         let adapter = Self {
             connection,
             target_database: database,
@@ -196,7 +250,7 @@ impl RedisAdapter {
         drop(self.connection);
     }
 
-    pub(crate) fn connection_clone(&self) -> ConnectionManager {
+    pub(crate) fn connection_clone(&self) -> RedisConnection {
         self.connection.clone()
     }
 
@@ -246,6 +300,30 @@ fn parse_database(value: Option<&str>) -> Result<u32, DatabaseError> {
     })
 }
 
+fn normalized_host(host: &str) -> &str {
+    host.strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host)
+}
+
+fn url_host(host: &str) -> String {
+    let host = normalized_host(host);
+    if host.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("[{host}]")
+    } else {
+        host.to_owned()
+    }
+}
+
+fn tunnel_unavailable() -> DatabaseError {
+    DatabaseError {
+        category: ErrorCategory::Network,
+        code: Some("ssh_tunnel_unavailable".into()),
+        message: "SSH tunnel transport is no longer available; reconnect the Redis profile".into(),
+        diagnostic: None,
+    }
+}
+
 fn encode_url_part(value: &str) -> String {
     url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
@@ -253,7 +331,10 @@ fn encode_url_part(value: &str) -> String {
 fn redis_error(error: redis::RedisError, default_category: ErrorCategory) -> DatabaseError {
     let message = error.to_string();
     let lower = message.to_ascii_lowercase();
-    let category = if lower.contains("wrongpass") || lower.contains("noauth") {
+    let tunnel_unavailable = is_tunnel_unavailable(&error);
+    let category = if tunnel_unavailable {
+        ErrorCategory::Network
+    } else if lower.contains("wrongpass") || lower.contains("noauth") {
         ErrorCategory::Authentication
     } else if lower.contains("noperm") {
         ErrorCategory::Permission
@@ -264,7 +345,9 @@ fn redis_error(error: redis::RedisError, default_category: ErrorCategory) -> Dat
     };
     DatabaseError {
         category,
-        code: error.code().map(str::to_owned),
+        code: tunnel_unavailable
+            .then(|| "ssh_tunnel_unavailable".to_owned())
+            .or_else(|| error.code().map(str::to_owned)),
         message: crate::security::sanitize_terminal_text(&message),
         diagnostic: None,
     }
@@ -273,6 +356,15 @@ fn redis_error(error: redis::RedisError, default_category: ErrorCategory) -> Dat
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redis_url_host_formats_ipv6_literals_without_double_brackets() {
+        assert_eq!(url_host("redis.internal"), "redis.internal");
+        assert_eq!(url_host("192.0.2.10"), "192.0.2.10");
+        assert_eq!(url_host("::1"), "[::1]");
+        assert_eq!(url_host("[2001:db8::10]"), "[2001:db8::10]");
+        assert_eq!(normalized_host("[2001:db8::10]"), "2001:db8::10");
+    }
 
     #[test]
     fn redis_error_classifies_auth_permission_and_cluster_redirects() {
@@ -286,5 +378,17 @@ mod tests {
             redis_error(error, ErrorCategory::Network).category,
             ErrorCategory::Permission
         );
+    }
+
+    #[test]
+    fn tunnel_failure_is_network_not_authentication_when_a_password_is_present() {
+        let error = redis::RedisError::from((
+            redis::ErrorKind::Io,
+            "SSH tunnel transport is no longer available; reconnect the Redis profile",
+            "ssh_tunnel_unavailable".to_owned(),
+        ));
+        let mapped = redis_error(error, ErrorCategory::Authentication);
+        assert_eq!(mapped.category, ErrorCategory::Network);
+        assert_eq!(mapped.code.as_deref(), Some("ssh_tunnel_unavailable"));
     }
 }

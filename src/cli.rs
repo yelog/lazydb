@@ -157,6 +157,42 @@ pub enum ConnectionsCommand {
         upsert: bool,
         #[arg(long, conflicts_with = "read_only")]
         read_write: bool,
+        /// SSH host name or SSH config alias. Providing any SSH option
+        /// explicitly updates the saved tunnel configuration.
+        #[arg(long)]
+        ssh_host: Option<String>,
+        /// SSH username; omitted uses the SSH config or client default.
+        #[arg(long)]
+        ssh_user: Option<String>,
+        /// SSH port; omitted uses the SSH config or client default.
+        #[arg(long)]
+        ssh_port: Option<u16>,
+        /// Optional private-key file passed to OpenSSH.
+        #[arg(long)]
+        ssh_identity_file: Option<PathBuf>,
+        /// Optional OpenSSH config file.
+        #[arg(long)]
+        ssh_config_file: Option<PathBuf>,
+        /// Optional comma-separated ProxyJump destinations.
+        #[arg(long)]
+        ssh_proxy_jump: Option<String>,
+        /// Optional known-hosts file used for host-key verification.
+        #[arg(long)]
+        ssh_known_hosts_file: Option<PathBuf>,
+        /// Remove the saved SSH tunnel configuration.
+        #[arg(
+            long,
+            conflicts_with_all = [
+                "ssh_host",
+                "ssh_user",
+                "ssh_port",
+                "ssh_identity_file",
+                "ssh_config_file",
+                "ssh_proxy_jump",
+                "ssh_known_hosts_file"
+            ]
+        )]
+        no_ssh: bool,
     },
     /// List connections visible to this project.
     List {

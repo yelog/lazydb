@@ -30,11 +30,12 @@ jsonc-parser = { version = "0.33", features = ["cst", "serde_json"] }
 modalkit = { version = "=0.0.25", features = ["clipboard"] }
 nerd-font-symbols = "0.3"
 percent-encoding = "2.3"
+process-wrap = { version = "9.1.0", default-features = false, features = ["tokio1", "process-session", "job-object", "creation-flags", "kill-on-drop"] }
 ratatui = { version = "0.30.2", features = ["crossterm_0_29"] }
 regex = "1"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "system-proxy", "stream", "gzip"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "system-proxy", "stream", "gzip", "socks"] }
 redis = { version = "=1.5.0", default-features = false, features = ["connection-manager", "tokio-rustls-comp"] }
-mongodb = { version = "=3.8.2", default-features = false, features = ["rustls-tls", "dns-resolver", "compat-3-0-0"] }
+mongodb = { version = "=3.8.2", default-features = false, features = ["rustls-tls", "dns-resolver", "compat-3-0-0", "socks5-proxy"] }
 sha2 = "0.10"
 rmcp = { version = "3.1.4", default-features = false, features = ["client", "server", "macros", "transport-io", "transport-child-process"] }
 secrecy = { version = "0.10", features = ["serde"] }
@@ -48,6 +49,7 @@ sqlx-core = "0.9.0"
 tachyonfx = { version = "0.25.1", default-features = false, features = ["std"] }
 thiserror = "2.0"
 tiberius = { version = "0.12.3", default-features = false, features = ["tds73", "rustls", "chrono"] }
+tempfile = "3.20"
 tokio = { version = "1.47", features = ["fs", "macros", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 tower-lsp-server = "0.23"
@@ -66,7 +68,6 @@ serde-pickle = "1.2.0"
 http = "1"
 duckdb = { version = "=1.10506.0", default-features = false, features = ["vtab"] }
 pretty_assertions = "1.4"
-tempfile = "3.20"
 tokio = { version = "1.47", features = ["test-util"] }
 
 [profile.release]

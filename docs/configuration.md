@@ -151,6 +151,23 @@ default_access = "project"
 This setting only affects newly created connections. Editing an existing
 connection preserves its current access scope.
 
+Managed SSH tunnels use the system OpenSSH client and have one application-wide
+connect deadline and keepalive policy:
+
+```toml
+[connections.ssh]
+connect_timeout_seconds = 30
+server_alive_interval_seconds = 30
+server_alive_count_max = 3
+```
+
+`connect_timeout_seconds` accepts `1..=300`,
+`server_alive_interval_seconds` accepts `1..=3600`, and
+`server_alive_count_max` accepts `1..=10`. The connection deadline covers SSH
+startup plus the database attempt. Per-profile SSH hosts, users, keys, config,
+jump hosts, and known-hosts files are saved in `connections.toml`; see
+[SSH tunnels](ssh-tunnel.md).
+
 The complete schema and current values are best read directly in
 [`config/default.toml`](../config/default.toml). Its sections are:
 
@@ -159,7 +176,7 @@ The complete schema and current values are best read directly in
 | `terminal` | `mouse`, `color`, `clipboard.backend`, `clipboard.max_bytes` |
 | `ui` | `icons`, `motion`, `help_panel` |
 | `execution` | `confirmation` |
-| `connections` | `default_access` |
+| `connections` | `default_access`, `ssh.connect_timeout_seconds`, `ssh.server_alive_interval_seconds`, `ssh.server_alive_count_max` |
 | `dashboard` | `refresh_interval_seconds` |
 | `redis` | Scan/page sizes, value preview budgets, concurrency, temporary key-index, and metadata-cache limits |
 | `updates` | `check_on_startup`, `check_interval_hours` |
@@ -215,9 +232,10 @@ context change; increasing the timeout is unnecessary to read Leader hints.
 | `--read-only` | Flag | Off | Force an ad-hoc connection to read-only. For a saved profile, the stored profile setting remains unchanged; adapter behavior is described below. |
 | `connections add --name NAME --url URL` | Connection name and supported URL | None | Create a saved connection without opening the TUI. Use `--scope project|global`, `--project PATH`, and optionally `--password-env VAR` or `--password-stdin`. |
 | `connections add --upsert` | Flag (requires `--scope`) | Off | Update one matching connection while retaining its UUID and saved metadata; repeated identical configuration is a no-op. |
+| `connections add ... --ssh-host HOST [SSH options]` | SSH host or alias plus optional user, port, key, config, ProxyJump, and known-hosts paths | No tunnel | Attach managed SSH settings to a saved profile. `--no-ssh` clears the entire SSH table and conflicts with every SSH option. |
 | `connections list [--all]` | Flag | Project-visible connections | List connections visible to the current project; `--all` includes profiles scoped to other projects. |
 | `connections show SELECTOR` | Name or UUID | None | Show one saved profile without credentials. |
-| `connections test SELECTOR` | Name or UUID; `--timeout 1..300` | 10 seconds | Connect and probe without changing saved configuration. |
+| `connections test SELECTOR` | Name or UUID; `--timeout 1..300` | 10 seconds | Connect and probe without changing saved configuration. The deadline covers SSH startup, the database connection, and the probe. |
 | `--mouse MODE` | `auto`, `on`, `off` | `auto` | Enable mouse input automatically, force it on, or disable it. |
 | `--color MODE` | `auto`, `always`, `never` | `auto` | Select automatic, forced, or disabled terminal color output. |
 | `--icons MODE` | `nerd-font`, `unicode`, `ascii` | `nerd-font` | Select branded Nerd Font glyphs, standard Unicode fallbacks, or ASCII-only output. |
@@ -422,15 +440,21 @@ The current profile file format is version `6`:
 | `pg_options` | Optional table | Absent | PostgreSQL/CockroachDB `ssl_root_cert`, `ssl_client_cert`, `ssl_client_key` paths and startup `options`. |
 | `snowflake_options` | Table or omitted | PAT with no warehouse or role override | Snowflake `warehouse`, `role`, and `token_type`; accepts `PROGRAMMATIC_ACCESS_TOKEN`, `OAUTH`, or `KEYPAIR_JWT`. Contains no credentials. |
 | `opensearch_options` | Optional table | Basic auth, no extra CA | OpenSearch `auth` (`basic`/`none`) and `ca_cert_path`; independent of Elasticsearch options, contains no credentials. |
-
 | `bigquery_options` | Table or omitted | ADC, 1 GB billing cap, 120 second timeout | `credentials_file`, `data_project`, `location`, `maximum_bytes_billed`, `query_timeout_secs`; contains no credential contents. BigQuery `database` is the billing project and `default_schema` is its default data dataset. |
+| `ssh` | Optional table | Absent (direct connection) | Managed SSH settings: `host`, optional `port`, `user`, `identity_file`, `config_file`, `proxy_jump`, and `known_hosts_file`. Contains paths but no SSH secrets. |
 | `credential_policy` | Tagged table | `{ policy = "none" }` | Where the password or Snowflake access token comes from. |
 | `read_only` | Boolean | `false` | Requests adapter-level read-only behavior. Use database grants for authorization. |
 | `environment` | `development`, `staging`, `production` | `development` | Environment label used by the UI and agent write-policy checks. |
 | `catalog_scope` | Table | Derived from database and schema | Databases and schemas visible to Explorer and completion. |
 
-LazyDB does not manage SSH tunnels. If the database is only reachable through a
-bastion host, see the [SSH tunnel workaround](ssh-tunnel.md).
+SSH settings are optional, and an absent `ssh` table means a direct connection.
+The database `host` and `port` remain the logical endpoint used by the database
+from the final bastion; do not replace them with a local forwarded port. SSH is
+accepted for PostgreSQL, CockroachDB, MySQL, MariaDB, TiDB, SQL Server, Redis,
+Valkey, MongoDB, ClickHouse, Elasticsearch, and OpenSearch. It is rejected for
+Oracle, SQLite, DuckDB, Snowflake, and BigQuery. See [SSH tunnels](ssh-tunnel.md)
+for authentication, ProxyJump, TLS, cleanup, verification status, and the
+external port-forward alternative.
 
 Oracle profiles use the native Oracle client. LazyDB first checks the
 `LAZYDB_ORACLE_CLIENT_LIB_DIR` environment variable, then
@@ -453,6 +477,52 @@ OpenSearch additionally accepts `open-search` (default HTTP) and `open-search-tl
 TiDB profiles retain their own product identity and use `tidb://root@host:4000/database`
 with MySQL-compatible TLS parameters. For TiDB Cloud, use `sslMode=verify-full`.
 See [TiDB setup and capability limits](tidb.md).
+
+### SSH Tunnel Settings
+
+Add a `[profiles.ssh]` table to a saved profile. This example keeps the
+database's logical hostname:
+
+```toml
+[[profiles]]
+id = "1c73c7c0-f944-4adc-a73a-1265fe1260a9"
+name = "orders-via-bastion"
+kind = "postgres"
+url_format = "postgresql"
+host = "orders-db.internal"
+port = 5432
+user = "app_user"
+database = "orders"
+default_schema = "public"
+ssl_mode = "verify-full"
+credential_policy = { policy = "prompt" }
+read_only = false
+environment = "production"
+catalog_scope = { databases = { mode = "all" } }
+
+[profiles.ssh]
+host = "bastion.example.com"
+port = 2222
+user = "alice"
+identity_file = "~/.ssh/id_ed25519"
+config_file = "~/.ssh/config"
+proxy_jump = "ops@jump.example.com:2200"
+known_hosts_file = "~/.ssh/known_hosts"
+```
+
+Only `host` is required. A leading `~` is expanded when the tunnel starts;
+explicit key, config, and known-hosts paths must exist. Omitting `config_file`
+uses OpenSSH's normal per-user configuration. Omitting `known_hosts_file` uses
+OpenSSH's normal host-key files. `proxy_jump` accepts comma-separated
+destinations and cannot contain whitespace.
+
+From the CLI, `--ssh-host`, `--ssh-user`, `--ssh-port`,
+`--ssh-identity-file`, `--ssh-config-file`, `--ssh-proxy-jump`, and
+`--ssh-known-hosts-file` are available on `connections add`. During
+`--upsert`, explicitly supplied SSH options update those fields, omitted fields
+remain unchanged, and `--no-ssh` removes the complete SSH table. `--no-ssh`
+conflicts with every SSH option. An ad-hoc `--url` session cannot carry managed
+SSH settings, so save a profile first.
 
 ### Profile Access
 

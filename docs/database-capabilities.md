@@ -7,7 +7,8 @@ machine.
 For connection setup, see [Configuration](configuration.md). Dedicated guides
 cover [DuckDB runtime and sessions](duckdb.md), [MongoDB](mongodb.md),
 [Snowflake](snowflake.md), [BigQuery](bigquery.md), and the
-[Redis/Valkey browser](redis-browser.md).
+[Redis/Valkey browser](redis-browser.md). Managed bastion access is covered by
+[SSH tunnels](ssh-tunnel.md).
 
 ## Driver Matrix
 
@@ -52,13 +53,64 @@ bundled with the default binary or downloaded automatically. See the
 [DuckDB guide](duckdb.md) for installation, local files, in-memory sessions,
 and supported catalog operations.
 
+SSH tunnels require the system OpenSSH client. LazyDB does not bundle or
+download it. Profile authentication must work without an interactive prompt;
+keys, agents, SSH config, strict known-hosts files, and ProxyJump follow the
+normal OpenSSH behavior.
+
+## SSH Tunnel Transports
+
+`DatabaseConnector` starts an SSH tunnel only for saved profiles with an `ssh`
+table. The database endpoint remains logical, and the driver receives a
+separate private transport endpoint:
+
+| Driver | Tunnel transport | Implemented TLS behavior |
+| --- | --- | --- |
+| PostgreSQL, CockroachDB | TCP for `disable`; SQLx local Unix socket for every TLS-capable mode on macOS/Linux; TCP for `prefer`/`require` on Windows | Unix socket retains the original database hostname for SNI and certificate verification. Windows rejects `verify-ca`/`verify-full`; its non-verifying TCP fallback cannot preserve SNI. |
+| MySQL, MariaDB, TiDB | TCP for `disable`; SQLx local Unix socket for every TLS-capable mode on macOS/Linux; TCP for `prefer`/`require` on Windows | Unix socket retains the original hostname for SNI and strict identity verification. Windows rejects `verify-ca`/`verify-full`; its non-verifying TCP fallback cannot preserve SNI. Profiles have no MySQL CA/client-certificate fields; a custom CA comes from the process trust store. |
+| SQL Server | TCP | Tiberius keeps the logical host in its TLS settings and dials the forwarded socket. |
+| Redis, Valkey | TCP plus a resolver for the logical hostname | TLS server name, AUTH, and SELECT are retained. A custom CA must come from the process trust store; Redis profiles have no CA field. |
+| ClickHouse, Elasticsearch, OpenSearch | OpenSSH SOCKS5 | Original URL, HTTP authority, SNI, and configured CA semantics remain in use. |
+| MongoDB | OpenSSH SOCKS5 | The driver's topology, business, and monitoring connections use SOCKS; TLS keeps the logical seed hostnames. |
+
+Oracle, SQLite, DuckDB, Snowflake, and BigQuery reject SSH configuration.
+Redis Cluster/Sentinel and arbitrary remote Unix sockets are not supported.
+MongoDB SRV/TXT lookup remains local and is not carried by SSH.
+
+The complete Docker acceptance was run on macOS arm64 with OpenSSH 10.5 and
+passed 47 Rust integration tests plus the real PTY check:
+
+- OpenSSH Unix, TCP, and SOCKS forwarding, including wrong keys, wrong host
+  keys, and an occupied port (`tests/ssh_integration.rs`, 6/6);
+- PostgreSQL and MySQL strict TLS, TLS negatives, required-TLS Unix forwarding,
+  reuse, pool-saturation cancellation, transactions, database targets, an
+  agent-only key, concurrent waiters, and stale-endpoint rejection
+  (`tests/ssh_transport.rs`, 18/18);
+- SQL Server pool reuse, transactions, database targets, and stale-endpoint
+  rejection (`tests/ssh_sqlserver.rs`, 2/2);
+- Redis/Valkey TLS, AUTH, SELECT, ProxyJump, shutdown, and crash handling
+  (`tests/ssh_redis.rs`, 6/6);
+- ClickHouse HTTP and Elasticsearch/OpenSearch HTTPS through SOCKS
+  (`tests/ssh_http.rs`, 5/5);
+- a three-member TLS/SCRAM-SHA-256 MongoDB 7.0 replica set
+  (`tests/ssh_mongo.rs`, 6/6);
+- CLI, Agent, MCP, and LSP entry points (`tests/ssh_services.rs`, 4/4);
+- a saved PostgreSQL profile in the real TUI PTY.
+
+The SQL Server test used a pinned `linux/amd64` SQL Server 2022 image under
+Docker emulation on macOS arm64. It does not establish native Linux or Windows
+client behavior. Linux and Windows native clients, HTTP IP-SAN/IPv6 endpoints,
+separate CockroachDB/MariaDB/TiDB topology runs, MongoDB SRV/sharded clusters,
+and Redis Cluster/Sentinel are not recorded as accepted.
+
 ## Current Limitations
 
 Shared workflows that are not available yet include general SQL query-plan
-visualization, SSH tunneling, general-purpose data import/export, and automatic
+visualization, general-purpose data import/export, and automatic
 recovery-bundle export for a corrupted or partially unreadable workspace.
-Normal console/tab persistence and console renaming are supported. For a manual
-local-forward setup, see the [SSH tunnel workaround](ssh-tunnel.md).
+Normal console/tab persistence and console renaming are supported. Managed SSH
+has driver and platform limits described in [SSH tunnels](ssh-tunnel.md); an
+external local-forward setup remains available as an alternative.
 
 Editing, transactions, cancellation, and monitoring differ by database as shown
 above. Relation operations can also be disabled by missing row identity,

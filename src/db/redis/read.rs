@@ -575,7 +575,7 @@ fn stream_bytes(value: Option<&redis::Value>) -> Result<Vec<u8>, DatabaseError> 
 }
 
 async fn best_effort_u64(
-    connection: &mut redis::aio::ConnectionManager,
+    connection: &mut super::connection::RedisConnection,
     command_name: &str,
     configure: impl FnOnce(&mut redis::Cmd),
 ) -> Result<Option<u64>, DatabaseError> {
@@ -589,7 +589,7 @@ async fn best_effort_u64(
 }
 
 async fn scan_values(
-    connection: &mut redis::aio::ConnectionManager,
+    connection: &mut super::connection::RedisConnection,
     command_name: &str,
     key: &[u8],
 ) -> Result<String, DatabaseError> {
@@ -610,7 +610,7 @@ async fn scan_values(
 }
 
 async fn scan_pairs(
-    connection: &mut redis::aio::ConnectionManager,
+    connection: &mut super::connection::RedisConnection,
     command_name: &str,
     key: &[u8],
 ) -> Result<String, DatabaseError> {

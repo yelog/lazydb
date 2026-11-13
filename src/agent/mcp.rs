@@ -101,8 +101,17 @@ impl AgentMcpServer {
     }
 
     pub async fn serve_stdio(self) -> anyhow::Result<()> {
-        let service = ServiceExt::serve(self, stdio()).await?;
-        service.waiting().await?;
+        let agent_service = self.service.clone();
+        let service = match ServiceExt::serve(self, stdio()).await {
+            Ok(service) => service,
+            Err(error) => {
+                agent_service.shutdown().await;
+                return Err(error.into());
+            }
+        };
+        let result = service.waiting().await;
+        agent_service.shutdown().await;
+        result?;
         Ok(())
     }
 

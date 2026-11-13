@@ -5,6 +5,7 @@ use tokio::sync::{Mutex, OnceCell};
 
 use crate::sql::CompletionIndex;
 use crate::{
+    connections::DatabaseConnector,
     db::{
         DatabaseConnection,
         catalog::{
@@ -468,6 +469,7 @@ async fn load_cell_inner(
 pub struct CatalogProvider {
     connection: Arc<DatabaseConnection>,
     profile: ConnectionProfile,
+    connector: DatabaseConnector,
 }
 
 impl CatalogProvider {
@@ -495,6 +497,28 @@ impl CatalogProvider {
         config: Option<std::path::PathBuf>,
         selector: Option<&str>,
     ) -> anyhow::Result<Option<Self>> {
+        let ssh = AppPaths::discover()
+            .ok()
+            .and_then(|paths| {
+                crate::persistence::settings::AppSettings::load(paths.settings_file()).ok()
+            })
+            .map(|settings| settings.connections.ssh)
+            .unwrap_or_default();
+        Self::from_config_with_connector(
+            project,
+            config,
+            selector,
+            DatabaseConnector::with_ssh_config(ssh),
+        )
+        .await
+    }
+
+    pub(crate) async fn from_config_with_connector(
+        project: Option<&std::path::Path>,
+        config: Option<std::path::PathBuf>,
+        selector: Option<&str>,
+        connector: DatabaseConnector,
+    ) -> anyhow::Result<Option<Self>> {
         let project = crate::agent::context::AgentProjectContext::resolve(project)?;
         let paths = AppPaths::discover()?;
         let profile_store = ProfileStore::new(config.unwrap_or_else(|| paths.profiles_file()))
@@ -515,11 +539,18 @@ impl CatalogProvider {
                 ),
         );
         let password = resolver.resolve_headless(selected.profile).await?;
-        let connection = DatabaseConnection::connect(selected.profile, password.as_ref()).await?;
+        let connection = connector
+            .connect(selected.profile, password.as_ref())
+            .await?;
         Ok(Some(Self {
             connection: std::sync::Arc::new(connection),
             profile: selected.profile.clone(),
+            connector,
         }))
+    }
+
+    pub(crate) fn connector(&self) -> DatabaseConnector {
+        self.connector.clone()
     }
 }
 

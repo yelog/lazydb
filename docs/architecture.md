@@ -205,6 +205,57 @@ omitted from the canonical URL.
 tracks whether scope is derived or explicitly customized so default database and
 schema changes only rewrite derived visibility.
 
+## SSH Tunnel Boundary
+
+`DatabaseConnector` is the production entry point for profiles that may use a
+managed tunnel. It owns a shared `TunnelManager`; the TUI Runtime and each
+long-lived Agent/MCP or LSP service hold their own connector, while one-shot CLI
+commands create a short-lived instance. There is no global mutable connector.
+
+The connector validates the driver/TLS/SSH combination, acquires a
+`TunnelLease`, and passes a private `ConnectionRoute` to the concrete adapter.
+The route contains the physical `Tcp`, `Unix`, or `Socks5` endpoint and retains
+the lease. Adapter clones, pools, pool factories, manual transaction workers,
+PostgreSQL cancellation control connections, and background shutdown tasks keep
+the same route alive. They do not carry a local endpoint in profile state,
+workspace state, or the displayed database URL.
+
+Tunnel identity includes the profile UUID, SSH options, forwarding mode, and
+static destination. Database names, schemas, Console UUIDs, and query
+generations do not create new SSH processes. Concurrent acquisition for the same
+key is single-flight; different profiles or destinations are separate.
+
+The manager uses a weak registry so monitoring or failure waiters do not keep a
+tunnel alive. Dropping the last lease cancels the process, and connector
+shutdown rejects new leases, stops owned children, and waits with a bounded
+timeout before aborting remaining tasks. An observed tunnel failure invalidates
+the old route; adapters either reject through a route guard or close their
+pool/client, and operations that race the exit surface a transport error. The
+old lease is never silently replaced by a new endpoint, so a disconnected
+tunnel cannot redirect existing pools or transactions to another process.
+
+The transport split is:
+
+- PostgreSQL/CockroachDB and MySQL/MariaDB/TiDB use local SQLx TCP forwarding
+  for `disable` and a local Unix stream for every TLS-capable mode, so the
+  driver keeps the logical hostname for SNI and certificate checks. The
+  plaintext-only TCP path avoids the Unix-socket throughput penalty.
+- SQL Server and Redis/Valkey use loopback TCP forwarding. SQL Server retains
+  the logical host for Tiberius TLS, while Redis uses a resolver that maps the
+  logical hostname to the forwarded endpoint.
+- ClickHouse, Elasticsearch, OpenSearch, and MongoDB use OpenSSH dynamic SOCKS5
+  forwarding so HTTP authorities and MongoDB topology connections retain their
+  logical names.
+- SQLx on Windows uses TCP for `disable` and the non-verifying TLS modes;
+  `verify-ca` and `verify-full` SSH profiles fail closed. The non-verifying
+  fallback cannot preserve SNI because the TLS server name becomes loopback.
+
+OpenSSH is a system dependency, not an embedded protocol stack. The manager
+finds an absolute executable path, runs it without a shell, gives it null stdin,
+forces strict host-key checking and batch authentication, and parses bounded
+stderr evidence before declaring a forward ready. Unix sockets use a private
+temporary directory; TCP and SOCKS listeners bind only to `127.0.0.1`.
+
 ## Database Boundary
 
 `DatabaseConnection` dispatches to concrete PostgreSQL, MySQL/MariaDB, Oracle,
@@ -383,5 +434,5 @@ separate follow-up.
   for the currently gated drivers and complex table shapes.
 - Replace complete result collection with bounded row batches and viewport
   storage for very large arbitrary SQL result sets.
-- Add a first-class query-plan/`EXPLAIN` workflow, SSH tunneling, and import/
-  export surfaces without weakening the existing write-safety boundaries.
+- Add a first-class query-plan/`EXPLAIN` workflow and import/export surfaces
+  without weakening the existing write-safety boundaries.

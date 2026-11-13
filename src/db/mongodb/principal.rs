@@ -76,7 +76,7 @@ pub async fn users_for_adapter(
     adapter: &super::MongoAdapter,
     database: &str,
 ) -> mongodb::error::Result<Vec<MongoPrincipalInfo>> {
-    users(adapter.client(), database).await
+    users(checked_client(adapter)?, database).await
 }
 
 pub async fn roles(
@@ -85,7 +85,7 @@ pub async fn roles(
 ) -> mongodb::error::Result<Vec<Document>> {
     let response = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        adapter.client().database(database).run_command(
+        checked_client(adapter)?.database(database).run_command(
             doc! {"rolesInfo": 1, "showPrivileges": true, "showAuthenticationRestrictions": false},
         ),
     )
@@ -99,6 +99,12 @@ pub async fn roles(
         .filter_map(|role| role.as_document().cloned())
         .take(500)
         .collect())
+}
+
+fn checked_client(adapter: &super::MongoAdapter) -> mongodb::error::Result<&mongodb::Client> {
+    adapter
+        .checked_client()
+        .map_err(|error| mongodb::error::Error::custom(error.to_string()))
 }
 
 pub fn validate_management_command(command: &Document, database: &str) -> Result<(), &'static str> {

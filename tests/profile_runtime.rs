@@ -268,6 +268,51 @@ async fn pgwire_tls_and_routing_edits_are_connection_changes_even_with_a_rename(
 }
 
 #[tokio::test]
+async fn ssh_only_changes_require_a_new_connection() {
+    let temp = TempDir::new().unwrap();
+    let store = ProfileStore::new(temp.path().join("connections.toml"));
+    let mut original = postgres_profile("original");
+    original.ssh = Some(lazydb::profile::SshOptions {
+        host: "bastion-a.example.test".into(),
+        port: Some(2222),
+        user: Some("alice".into()),
+        identity_file: None,
+        config_file: None,
+        known_hosts_file: None,
+        proxy_jump: None,
+    });
+    store.save(vec![original.clone()]).unwrap();
+    let (mut runtime, mut receiver) = runtime(
+        vec![original.clone()],
+        HashSet::from([original.id]),
+        store,
+        Arc::new(FakeSecretStore::default()),
+    );
+
+    let mut edited = original.clone();
+    edited.ssh.as_mut().unwrap().host = "bastion-b.example.test".into();
+    runtime.dispatch(Command::SaveProfile {
+        request_id: 1,
+        submission: submission(edited.clone(), CredentialUpdate::Preserve),
+        connect: false,
+    });
+
+    match next_action(&mut receiver).await {
+        Action::ProfileSaved {
+            change, profile, ..
+        } => {
+            assert_eq!(profile.ssh, edited.ssh);
+            assert!(change.connection_settings_changed);
+            assert!(!change.catalog_scope_changed);
+            assert!(!change.display_only_changed);
+            assert!(!change.credentials_changed);
+        }
+        action => panic!("unexpected action: {action:?}"),
+    }
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
 async fn snowflake_scope_changes_require_a_new_connection_without_changing_other_drivers() {
     use lazydb::profile::{CatalogSelection, DatabaseKind};
     for url in [

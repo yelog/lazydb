@@ -11,6 +11,7 @@ use crate::{
     action::{Action, Command, ProfileAccessChange, ProfileOrganizationMutation},
     app::App,
     cli::{Cli, ColorMode, MouseMode},
+    connections::DatabaseConnector,
     db::{
         DatabaseConnection, DatabaseError,
         catalog::{CatalogDiscovery, DiscoveredDatabase},
@@ -46,9 +47,11 @@ use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, Mous
 use futures_util::FutureExt;
 use futures_util::StreamExt;
 use secrecy::SecretString;
+use tokio_util::sync::CancellationToken;
 
 const EXPLORER_METADATA_TIMEOUT: Duration = Duration::from_secs(30);
 const GRID_INPUT_BATCH_MAX_EVENTS: usize = 64;
+const CONNECTOR_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const GRID_INPUT_BATCH_BUDGET: Duration = Duration::from_millis(2);
 
 fn is_grid_navigation_action(action: &Action) -> bool {
@@ -449,6 +452,17 @@ fn clipboard_write_failure_message() -> String {
     "Clipboard unavailable".to_owned()
 }
 
+fn configured_database_connector() -> DatabaseConnector {
+    let ssh = AppPaths::discover()
+        .ok()
+        .and_then(|paths| {
+            crate::persistence::settings::AppSettings::load(paths.settings_file()).ok()
+        })
+        .map(|settings| settings.connections.ssh)
+        .unwrap_or_default();
+    DatabaseConnector::with_ssh_config(ssh)
+}
+
 #[derive(Clone, Debug)]
 struct ActiveConnection {
     database: DatabaseConnection,
@@ -639,8 +653,11 @@ pub struct Runtime {
     profile_mutation: Arc<Mutex<()>>,
     event_sender: mpsc::UnboundedSender<Action>,
     connection: Arc<Mutex<HashMap<ConnectionKey, ActiveConnection>>>,
+    connector: DatabaseConnector,
     duckdb_sessions: Arc<Mutex<duckdb::DuckDbSessions>>,
     connection_attempts: Arc<StdMutex<ConnectionAttempts>>,
+    profile_test_cancellation: CancellationToken,
+    profile_discovery_cancellation: CancellationToken,
     query_tasks: HashMap<(Uuid, u64), JoinHandle<()>>,
     bigquery_cancellations: Arc<
         StdMutex<HashMap<(Uuid, u64), (ConnectionIdentity, tokio_util::sync::CancellationToken)>>,
@@ -787,8 +804,11 @@ impl Runtime {
             profile_mutation: Arc::new(Mutex::new(())),
             event_sender,
             connection: Arc::new(Mutex::new(HashMap::new())),
+            connector: configured_database_connector(),
             duckdb_sessions: Arc::new(Mutex::new(duckdb::DuckDbSessions::default())),
             connection_attempts: Arc::new(StdMutex::new(ConnectionAttempts::default())),
+            profile_test_cancellation: CancellationToken::new(),
+            profile_discovery_cancellation: CancellationToken::new(),
             query_tasks: HashMap::new(),
             bigquery_cancellations: Arc::new(StdMutex::new(HashMap::new())),
             duckdb_query_interrupts: Arc::new(StdMutex::new(HashMap::new())),
@@ -910,11 +930,21 @@ impl Runtime {
             Command::TestProfile {
                 request_id,
                 submission,
-            } => self.test_profile(request_id, submission),
+            } => {
+                let cancellation = self.begin_profile_test();
+                self.test_profile(request_id, submission, cancellation);
+            }
             Command::DiscoverProfileCatalog {
                 request_id,
                 submission,
-            } => self.discover_profile_catalog(request_id, submission),
+            } => {
+                let cancellation = self.begin_profile_discovery();
+                self.discover_profile_catalog(request_id, submission, cancellation);
+            }
+            Command::CancelProfileConnections => {
+                self.profile_test_cancellation.cancel();
+                self.profile_discovery_cancellation.cancel();
+            }
             Command::SaveProfile {
                 request_id,
                 submission,
@@ -1858,72 +1888,101 @@ impl Runtime {
         }
     }
 
-    fn test_profile(&mut self, request_id: u64, submission: ProfileSubmission) {
+    fn begin_profile_test(&mut self) -> CancellationToken {
+        self.profile_test_cancellation.cancel();
+        let cancellation = CancellationToken::new();
+        self.profile_test_cancellation = cancellation.clone();
+        cancellation
+    }
+
+    fn begin_profile_discovery(&mut self) -> CancellationToken {
+        self.profile_discovery_cancellation.cancel();
+        let cancellation = CancellationToken::new();
+        self.profile_discovery_cancellation = cancellation.clone();
+        cancellation
+    }
+
+    fn test_profile(
+        &mut self,
+        request_id: u64,
+        submission: ProfileSubmission,
+        cancellation: CancellationToken,
+    ) {
         let registry = Arc::clone(&self.registry);
         let secret_store = Arc::clone(&self.secret_store);
         let local_credential_store = self.local_credential_store.clone();
+        let connector = self.connector.clone();
         let sender = self.event_sender.clone();
         self.background_tasks.push(tokio::spawn(async move {
-            let ProfileSubmission {
-                profile,
-                credential,
-                discovery_fingerprint,
-            } = submission;
-            let password = match resolve_submission_password(
-                &registry,
-                &secret_store,
-                &local_credential_store,
-                &profile,
-                credential,
-            )
-            .await
-            {
-                Ok(password) => password,
-                Err(message) => {
-                    let _ = sender.send(Action::ProfileTestFailed {
-                        request_id,
-                        message,
-                    });
-                    return;
-                }
-            };
-            match DatabaseConnection::connect(&profile, password.as_ref()).await {
-                Ok(database) => {
-                    match database.probe().await {
-                        Ok(server) => {
-                            let capabilities = database.catalog_capabilities();
-                            let discovery =
-                                if profile.kind.is_redis_compatible() {
-                                    None
-                                } else {
-                                    Some(database.discover_catalog_scope().await.map_err(|error| {
-                                        sanitize_terminal_text(&error.to_string())
-                                    }))
-                                };
-                            database.close().await;
-                            let _ = sender.send(Action::ProfileTestSucceeded {
+            let action = tokio::select! {
+                _ = cancellation.cancelled() => None,
+                action = async {
+                    let ProfileSubmission {
+                        profile,
+                        credential,
+                        discovery_fingerprint,
+                    } = submission;
+                    let password = match resolve_submission_password(
+                        &registry,
+                        &secret_store,
+                        &local_credential_store,
+                        &profile,
+                        credential,
+                    )
+                    .await
+                    {
+                        Ok(password) => password,
+                        Err(message) => {
+                            return Some(Action::ProfileTestFailed {
                                 request_id,
-                                fingerprint: discovery_fingerprint,
-                                server,
-                                capabilities,
-                                discovery,
+                                message,
                             });
                         }
-                        Err(error) => {
-                            database.close().await;
-                            let _ = sender.send(Action::ProfileTestFailed {
-                                request_id,
-                                message: sanitize_terminal_text(&error.to_string()),
-                            });
+                    };
+                    match connector.connect(&profile, password.as_ref()).await {
+                        Ok(database) => {
+                            match database.probe().await {
+                                Ok(server) => {
+                                    let capabilities = database.catalog_capabilities();
+                                    let discovery = if profile.kind.is_redis_compatible() {
+                                        None
+                                    } else {
+                                        Some(
+                                            database
+                                                .discover_catalog_scope()
+                                                .await
+                                                .map_err(|error| {
+                                                    sanitize_terminal_text(&error.to_string())
+                                                }),
+                                        )
+                                    };
+                                    database.close().await;
+                                    Some(Action::ProfileTestSucceeded {
+                                        request_id,
+                                        fingerprint: discovery_fingerprint,
+                                        server,
+                                        capabilities,
+                                        discovery,
+                                    })
+                                }
+                                Err(error) => {
+                                    database.close().await;
+                                    Some(Action::ProfileTestFailed {
+                                        request_id,
+                                        message: sanitize_terminal_text(&error.to_string()),
+                                    })
+                                }
+                            }
                         }
+                        Err(error) => Some(Action::ProfileTestFailed {
+                            request_id,
+                            message: sanitize_terminal_text(&error.to_string()),
+                        }),
                     }
-                }
-                Err(error) => {
-                    let _ = sender.send(Action::ProfileTestFailed {
-                        request_id,
-                        message: sanitize_terminal_text(&error.to_string()),
-                    });
-                }
+                } => action,
+            };
+            if let Some(action) = action {
+                let _ = sender.send(action);
             }
         }));
     }
@@ -3806,53 +3865,64 @@ impl Runtime {
         }));
     }
 
-    fn discover_profile_catalog(&mut self, request_id: u64, submission: ProfileSubmission) {
+    fn discover_profile_catalog(
+        &mut self,
+        request_id: u64,
+        submission: ProfileSubmission,
+        cancellation: CancellationToken,
+    ) {
         let registry = Arc::clone(&self.registry);
         let secret_store = Arc::clone(&self.secret_store);
         let local_credential_store = self.local_credential_store.clone();
+        let connector = self.connector.clone();
         let sender = self.event_sender.clone();
         self.background_tasks.push(tokio::spawn(async move {
-            let ProfileSubmission {
-                profile,
-                credential,
-                discovery_fingerprint,
-            } = submission;
-            let password = match resolve_submission_password(
-                &registry,
-                &secret_store,
-                &local_credential_store,
-                &profile,
-                credential,
-            )
-            .await
-            {
-                Ok(password) => password,
-                Err(message) => {
-                    let _ = sender.send(Action::ProfileCatalogDiscoveryFailed {
-                        request_id,
-                        fingerprint: discovery_fingerprint,
-                        message,
-                    });
-                    return;
-                }
+            let action = tokio::select! {
+                _ = cancellation.cancelled() => None,
+                action = async {
+                    let ProfileSubmission {
+                        profile,
+                        credential,
+                        discovery_fingerprint,
+                    } = submission;
+                    let password = match resolve_submission_password(
+                        &registry,
+                        &secret_store,
+                        &local_credential_store,
+                        &profile,
+                        credential,
+                    )
+                    .await
+                    {
+                        Ok(password) => password,
+                        Err(message) => {
+                            return Some(Action::ProfileCatalogDiscoveryFailed {
+                                request_id,
+                                fingerprint: discovery_fingerprint,
+                                message,
+                            });
+                        }
+                    };
+                    match discover_profile_catalog(&connector, &profile, password.as_ref()).await {
+                        Ok((server, capabilities, discovery)) => {
+                            Some(Action::ProfileCatalogDiscoverySucceeded {
+                                request_id,
+                                fingerprint: discovery_fingerprint,
+                                server,
+                                capabilities,
+                                discovery,
+                            })
+                        }
+                        Err(message) => Some(Action::ProfileCatalogDiscoveryFailed {
+                            request_id,
+                            fingerprint: discovery_fingerprint,
+                            message,
+                        }),
+                    }
+                } => action,
             };
-            match discover_profile_catalog(&profile, password.as_ref()).await {
-                Ok((server, capabilities, discovery)) => {
-                    let _ = sender.send(Action::ProfileCatalogDiscoverySucceeded {
-                        request_id,
-                        fingerprint: discovery_fingerprint,
-                        server,
-                        capabilities,
-                        discovery,
-                    });
-                }
-                Err(message) => {
-                    let _ = sender.send(Action::ProfileCatalogDiscoveryFailed {
-                        request_id,
-                        fingerprint: discovery_fingerprint,
-                        message,
-                    });
-                }
+            if let Some(action) = action {
+                let _ = sender.send(action);
             }
         }));
     }
@@ -4244,6 +4314,7 @@ impl Runtime {
         let known_relation_targets = Arc::clone(&self.known_relation_targets);
         let latest_catalog_requests = Arc::clone(&self.latest_catalog_requests);
         let duckdb_sessions = Arc::clone(&self.duckdb_sessions);
+        let connector = self.connector.clone();
         let expected = ConnectionIdentity {
             profile_id,
             generation,
@@ -4255,6 +4326,11 @@ impl Runtime {
                 return;
             }
         }
+        let cancellation = attempts
+            .lock()
+            .expect("connection attempt mutex poisoned")
+            .cancellation(&key)
+            .expect("connection attempt cancellation exists");
         self.background_tasks.push(tokio::spawn(async move {
             let finish_attempt = || {
                 attempts
@@ -4327,39 +4403,55 @@ impl Runtime {
                 .lock()
                 .await
                 .has_session(expected, &target, console_id);
-            let candidate = timeout(Duration::from_secs(10), async {
-                let connected = match reusable_embedded {
-                    Some(database) => database,
-                    None if duckdb_owner.is_some() => duckdb_owner.as_ref().unwrap().clone(),
-                    None => {
-                        DatabaseConnection::connect_target(&profile, password.as_ref(), &target)
-                            .await?
-                    }
-                };
-                let database = if profile.kind == crate::profile::DatabaseKind::DuckDb {
-                    let mut sessions = duckdb_sessions.lock().await;
-                    let root = sessions.root_connected(expected, connected);
-                    sessions.console_session(expected, target.clone(), console_id, root)?
-                } else {
-                    connected
-                };
-                let server = match database.probe().await {
-                    Ok(server) => server,
-                    Err(error) => {
-                        if !reused_embedded
-                            && duckdb_owner.is_none()
-                            && profile.kind != crate::profile::DatabaseKind::DuckDb
-                        {
-                            database.close().await;
+            let connect_timeout = connector.connect_timeout(&profile);
+            let connecting = async {
+                timeout(connect_timeout, async {
+                    let connected = match reusable_embedded {
+                        Some(database) => database,
+                        None if duckdb_owner.is_some() => duckdb_owner.as_ref().unwrap().clone(),
+                        None => {
+                            connector
+                                .connect_target(&profile, password.as_ref(), &target)
+                                .await?
                         }
-                        return Err(error);
-                    }
-                };
-                let mutation_capabilities = database.catalog_mutation_capabilities();
-                Ok::<_, crate::db::DatabaseError>((database, server, mutation_capabilities))
-            })
-            .await
-            .map_err(|_| DatabaseError::configuration("connection timed out after 10 seconds"));
+                    };
+                    let database = if profile.kind == crate::profile::DatabaseKind::DuckDb {
+                        let mut sessions = duckdb_sessions.lock().await;
+                        let root = sessions.root_connected(expected, connected);
+                        sessions.console_session(expected, target.clone(), console_id, root)?
+                    } else {
+                        connected
+                    };
+                    let server = match database.probe().await {
+                        Ok(server) => server,
+                        Err(error) => {
+                            if !reused_embedded
+                                && duckdb_owner.is_none()
+                                && profile.kind != crate::profile::DatabaseKind::DuckDb
+                            {
+                                database.close().await;
+                            }
+                            return Err(error);
+                        }
+                    };
+                    let mutation_capabilities = database.catalog_mutation_capabilities();
+                    Ok::<_, crate::db::DatabaseError>((database, server, mutation_capabilities))
+                })
+                .await
+                .map_err(|_| {
+                    DatabaseError::configuration(format!(
+                        "connection timed out after {} seconds",
+                        connect_timeout.as_secs()
+                    ))
+                })
+            };
+            let candidate = tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => {
+                    Err(DatabaseError::configuration("connection attempt cancelled"))
+                }
+                candidate = connecting => candidate,
+            };
             match candidate {
                 Ok(Ok((database, server, mutation_capabilities))) => {
                     let mutation_guard = mutation.lock().await;
@@ -4640,6 +4732,7 @@ impl Runtime {
         let registry = Arc::clone(&self.registry);
         let secret_store = Arc::clone(&self.secret_store);
         let local_credential_store = self.local_credential_store.clone();
+        let connector = self.connector.clone();
         self.background_tasks.push(tokio::spawn(async move {
             let routed = match resolve_catalog_mutation_connection(
                 Arc::clone(&connection),
@@ -4647,6 +4740,7 @@ impl Runtime {
                 crate::db::catalog_mutation::CatalogMutationTarget::Database(
                     request.target.clone(),
                 ),
+                connector,
                 &registry,
                 &secret_store,
                 &local_credential_store,
@@ -4691,6 +4785,7 @@ impl Runtime {
         let registry = Arc::clone(&self.registry);
         let secret_store = Arc::clone(&self.secret_store);
         let local_credential_store = self.local_credential_store.clone();
+        let connector = self.connector.clone();
         self.background_tasks.push(tokio::spawn(async move {
             let routed = match resolve_catalog_mutation_connection(
                 Arc::clone(&connection),
@@ -4698,6 +4793,7 @@ impl Runtime {
                 crate::db::catalog_mutation::CatalogMutationTarget::Database(
                     request.target.clone(),
                 ),
+                connector,
                 &registry,
                 &secret_store,
                 &local_credential_store,
@@ -4987,6 +5083,7 @@ impl Runtime {
         let registry = Arc::clone(&self.registry);
         let secret_store = Arc::clone(&self.secret_store);
         let local_credential_store = self.local_credential_store.clone();
+        let connector = self.connector.clone();
         let task_plan = plan.clone();
         let task = tokio::spawn(async move {
             if let Err(error) = task_plan.validate() {
@@ -5002,6 +5099,7 @@ impl Runtime {
                 Arc::clone(&connection),
                 task_plan.request.connection,
                 target.clone(),
+                connector,
                 &registry,
                 &secret_store,
                 &local_credential_store,
@@ -5254,6 +5352,7 @@ impl Runtime {
         let registry = Arc::clone(&self.registry);
         let secret_store = Arc::clone(&self.secret_store);
         let local_credential_store = self.local_credential_store.clone();
+        let connector = self.connector.clone();
         let target = plan.execution_target.clone();
         if let crate::db::catalog_drop::CatalogDropExecutionTarget::MaintenanceDatabase(
             maintenance_database,
@@ -5273,6 +5372,7 @@ impl Runtime {
                     execute_clickhouse_database_drop(
                         task_plan,
                         maintenance_database,
+                        connector.clone(),
                         registry,
                         secret_store,
                         local_credential_store,
@@ -5283,6 +5383,7 @@ impl Runtime {
                     execute_catalog_drop_on_maintenance(
                         task_plan,
                         maintenance_database,
+                        connector,
                         connection,
                         registry,
                         secret_store,
@@ -5372,15 +5473,12 @@ impl Runtime {
                             )
                             .await
                             {
-                                Ok(password) => DatabaseConnection::connect_target(
-                                    &profile,
-                                    password.as_ref(),
-                                    &target,
-                                )
-                                .await
-                                .inspect(|database| {
-                                    owned_drop_database = Some(database.clone());
-                                }),
+                                Ok(password) => connector
+                                    .connect_target(&profile, password.as_ref(), &target)
+                                    .await
+                                    .inspect(|database| {
+                                        owned_drop_database = Some(database.clone());
+                                    }),
                                 Err(error) => Err(DatabaseError::configuration(error)),
                             }
                         };
@@ -5441,6 +5539,7 @@ impl Runtime {
                 Runtime::execute_oracle_catalog_drop(
                     &task_plan,
                     &profile,
+                    &connector,
                     &registry,
                     &secret_store,
                     &local_credential_store,
@@ -5473,6 +5572,7 @@ impl Runtime {
     async fn execute_oracle_catalog_drop(
         plan: &crate::db::catalog_drop::CatalogDropPlan,
         profile: &crate::profile::ConnectionProfile,
+        connector: &DatabaseConnector,
         registry: &Arc<Mutex<ProfileRegistry>>,
         secret_store: &Arc<dyn SecretStore>,
         local_credential_store: &LocalCredentialStore,
@@ -5496,8 +5596,9 @@ impl Runtime {
             resolve_profile_password(registry, secret_store, local_credential_store, profile)
                 .await
                 .map_err(DatabaseError::configuration)?;
-        let database =
-            DatabaseConnection::connect_target(profile, password.as_ref(), &target).await?;
+        let database = connector
+            .connect_target(profile, password.as_ref(), &target)
+            .await?;
         let result = database.execute(plan.sql()).await;
         database.close().await;
         result
@@ -7690,6 +7791,12 @@ impl Runtime {
     }
 
     pub async fn shutdown(mut self) {
+        self.profile_test_cancellation.cancel();
+        self.profile_discovery_cancellation.cancel();
+        self.connection_attempts
+            .lock()
+            .expect("connection attempt mutex poisoned")
+            .cancel_all();
         if let Some(task) = self.update_startup_task.take() {
             task.abort();
             let _ = task.await;
@@ -7751,10 +7858,22 @@ impl Runtime {
             task.abort();
             let _ = task.await;
         }
-        for task in self.background_tasks.drain(..) {
-            task.abort();
-            let _ = task.await;
-        }
+        abort_and_await_tasks(self.background_tasks.drain(..)).await;
+        let mut database_tasks = Vec::new();
+        database_tasks.extend(self.catalog_drop_plan_tasks.drain().map(|(_, task)| task));
+        database_tasks.extend(
+            self.catalog_drop_execute_tasks
+                .drain()
+                .map(|(_, task)| task),
+        );
+        database_tasks.extend(self.catalog_mutation_tasks.drain().map(|(_, task)| task));
+        database_tasks.extend(self.redis_mutation_tasks.drain().map(|(_, task)| task));
+        database_tasks.extend(self.dashboard_metric_tasks.drain().map(|(_, task)| task));
+        database_tasks.extend(self.dashboard_metadata_tasks.drain().map(|(_, task)| task));
+        database_tasks.extend(self.dashboard_process_tasks.drain().map(|(_, task)| task));
+        database_tasks.extend(self.completion_tasks.drain().map(|(_, task)| task));
+        database_tasks.extend(self.diagnostic_tasks.drain().map(|(_, task)| task));
+        abort_and_await_tasks(database_tasks).await;
         if let Ok(mut workers) = self.mongo_transaction_workers.lock() {
             // The user has already chosen Abandon in the quit review. Dropping
             // these senders releases local session handles without claiming a
@@ -7787,10 +7906,7 @@ impl Runtime {
             }
         }
         for (_, entry) in self.relation_transactions.drain() {
-            let _ = entry
-                .request_sender
-                .send(crate::db::transaction::TransactionRequest::Shutdown);
-            let _ = entry.worker_handle.await;
+            shutdown_transaction_entry(entry).await;
         }
         let databases = self
             .connection
@@ -7826,10 +7942,21 @@ impl Runtime {
         for database in self.duckdb_sessions.lock().await.remove_all() {
             database.close().await;
         }
+        let _ = timeout(CONNECTOR_SHUTDOWN_TIMEOUT, self.connector.shutdown()).await;
         if let Some(recorder) = self.history_recorder.take() {
             let _ = recorder.flush().await;
             let _ = recorder.shutdown().await;
         }
+    }
+}
+
+async fn abort_and_await_tasks(tasks: impl IntoIterator<Item = JoinHandle<()>>) {
+    let tasks = tasks.into_iter().collect::<Vec<_>>();
+    for task in &tasks {
+        task.abort();
+    }
+    for task in tasks {
+        let _ = task.await;
     }
 }
 
@@ -7960,9 +8087,11 @@ fn relation_target_for(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_catalog_drop_on_maintenance(
     plan: crate::db::catalog_drop::CatalogDropPlan,
     maintenance_database: String,
+    connector: DatabaseConnector,
     connection: Arc<Mutex<HashMap<ConnectionKey, ActiveConnection>>>,
     registry: Arc<Mutex<ProfileRegistry>>,
     secret_store: Arc<dyn SecretStore>,
@@ -8021,20 +8150,22 @@ async fn execute_catalog_drop_on_maintenance(
                 return;
             }
         };
-    let maintenance =
-        match DatabaseConnection::connect_target(&profile, password.as_ref(), &target).await {
-            Ok(database) => database,
-            Err(error) => {
-                let _ = sender.send(Action::CatalogDropFailed {
-                    plan,
-                    message: format!(
-                        "unable to connect to PostgreSQL maintenance database: {}",
-                        sanitize_terminal_text(&error.to_string())
-                    ),
-                });
-                return;
-            }
-        };
+    let maintenance = match connector
+        .connect_target(&profile, password.as_ref(), &target)
+        .await
+    {
+        Ok(database) => database,
+        Err(error) => {
+            let _ = sender.send(Action::CatalogDropFailed {
+                plan,
+                message: format!(
+                    "unable to connect to PostgreSQL maintenance database: {}",
+                    sanitize_terminal_text(&error.to_string())
+                ),
+            });
+            return;
+        }
+    };
     let expected = plan.request.connection;
     let active = {
         let mut guard = connection.lock().await;
@@ -8076,6 +8207,7 @@ async fn execute_catalog_drop_on_maintenance(
 async fn execute_clickhouse_database_drop(
     plan: crate::db::catalog_drop::CatalogDropPlan,
     maintenance_database: String,
+    connector: DatabaseConnector,
     registry: Arc<Mutex<ProfileRegistry>>,
     secret_store: Arc<dyn SecretStore>,
     local_credential_store: LocalCredentialStore,
@@ -8132,17 +8264,19 @@ async fn execute_clickhouse_database_drop(
                 return;
             }
         };
-    let database =
-        match DatabaseConnection::connect_target(&profile, password.as_ref(), &target).await {
-            Ok(database) => database,
-            Err(error) => {
-                let _ = sender.send(Action::CatalogDropFailed {
-                    plan,
-                    message: sanitize_terminal_text(&error.to_string()),
-                });
-                return;
-            }
-        };
+    let database = match connector
+        .connect_target(&profile, password.as_ref(), &target)
+        .await
+    {
+        Ok(database) => database,
+        Err(error) => {
+            let _ = sender.send(Action::CatalogDropFailed {
+                plan,
+                message: sanitize_terminal_text(&error.to_string()),
+            });
+            return;
+        }
+    };
     match database.execute(plan.sql()).await {
         Ok(outcome) => {
             let _ = sender.send(Action::CatalogDropSucceeded { plan, outcome });
@@ -8373,6 +8507,7 @@ async fn save_profile_transaction(
                 || old.ssl_mode != profile.ssl_mode
                 || old.elasticsearch_options != profile.elasticsearch_options
                 || old.opensearch_options != profile.opensearch_options
+                || old.ssh != profile.ssh
                 || ((profile.kind.is_search_rest()
                     || profile.kind == crate::profile::DatabaseKind::BigQuery)
                     && old.read_only != profile.read_only)
@@ -8579,6 +8714,7 @@ async fn resolve_submission_password(
 }
 
 async fn discover_profile_catalog(
+    connector: &DatabaseConnector,
     profile: &ConnectionProfile,
     password: Option<&SecretString>,
 ) -> Result<
@@ -8589,7 +8725,8 @@ async fn discover_profile_catalog(
     ),
     String,
 > {
-    let connection = DatabaseConnection::connect(profile, password)
+    let connection = connector
+        .connect(profile, password)
         .await
         .map_err(|error| sanitize_terminal_text(&error.to_string()))?;
     let server = match connection.probe().await {
@@ -8611,14 +8748,17 @@ async fn discover_profile_catalog(
         connection.close().await;
         let profile = profile.clone();
         let password = password.cloned();
+        let connector = connector.clone();
         let results = futures_util::stream::iter(databases.into_iter().map(|database| {
             let mut database_profile = profile.clone();
             let password = password.clone();
+            let connector = connector.clone();
             async move {
                 database_profile.database = Some(database.clone());
                 let operation = async {
-                    let connection =
-                        DatabaseConnection::connect(&database_profile, password.as_ref()).await?;
+                    let connection = connector
+                        .connect(&database_profile, password.as_ref())
+                        .await?;
                     let result = connection.discover_catalog_scope().await;
                     connection.close().await;
                     result
@@ -8907,6 +9047,7 @@ async fn resolve_catalog_mutation_connection(
     connection: Arc<Mutex<HashMap<ConnectionKey, ActiveConnection>>>,
     expected: ConnectionIdentity,
     target: crate::db::catalog_mutation::CatalogMutationTarget,
+    connector: DatabaseConnector,
     registry: &Arc<Mutex<ProfileRegistry>>,
     secret_store: &Arc<dyn SecretStore>,
     local_credential_store: &LocalCredentialStore,
@@ -8932,7 +9073,8 @@ async fn resolve_catalog_mutation_connection(
     drop(active_guard);
     let password =
         resolve_profile_password(registry, secret_store, local_credential_store, &profile).await?;
-    DatabaseConnection::connect_target(&profile, password.as_ref(), &target)
+    connector
+        .connect_target(&profile, password.as_ref(), &target)
         .await
         .map(|database| CatalogMutationConnection {
             database,

@@ -26,7 +26,7 @@ impl MongoAdapter {
                         command.insert(key, value.clone());
                     }
                 }
-                self.client()
+                self.checked_client()?
                     .database(database)
                     .run_command(command)
                     .await
@@ -43,7 +43,7 @@ impl MongoAdapter {
                     .get_array("pipeline")
                     .map_err(|_| DatabaseError::configuration("pipeline must be an array"))?
                     .clone();
-                self.client()
+                self.checked_client()?
                     .database(database)
                     .run_command(doc! { "create": &name, "viewOn": view_on, "pipeline": pipeline })
                     .await
@@ -58,7 +58,7 @@ impl MongoAdapter {
                 validate_name(&target)?;
                 let source = namespace.full_name();
                 let target_ns = format!("{}.{}", namespace.database, target);
-                self.client()
+                self.checked_client()?
                     .database("admin")
                     .run_command(doc! { "renameCollection": source, "to": target_ns })
                     .await
@@ -71,13 +71,13 @@ impl MongoAdapter {
             Op::DropCollection { namespace, kind } => {
                 let collection = required_collection(namespace)?;
                 if *kind == MongoCollectionType::View {
-                    self.client()
+                    self.checked_client()?
                         .database(&namespace.database)
                         .run_command(doc! { "drop": collection })
                         .await
                         .map_err(super::map_error)?;
                 } else {
-                    self.client()
+                    self.checked_client()?
                         .database(&namespace.database)
                         .collection::<Document>(collection)
                         .drop()
@@ -115,7 +115,7 @@ impl MongoAdapter {
                 for (key, value) in draft {
                     command.insert(key, value);
                 }
-                self.client()
+                self.checked_client()?
                     .database(&namespace.database)
                     .run_command(command)
                     .await
@@ -139,7 +139,7 @@ impl MongoAdapter {
                 let options_document = draft.get_document("options").cloned().unwrap_or_default();
                 let options: IndexOptions = mongodb::bson::from_document(options_document)
                     .map_err(|_| DatabaseError::configuration("index options are invalid"))?;
-                self.client()
+                self.checked_client()?
                     .database(&namespace.database)
                     .collection::<Document>(collection)
                     .create_index(IndexModel::builder().keys(keys).options(options).build())
@@ -162,7 +162,7 @@ impl MongoAdapter {
                     ));
                 }
                 let collection = required_collection(namespace)?;
-                self.client()
+                self.checked_client()?
                     .database(&namespace.database)
                     .collection::<Document>(collection)
                     .drop_index(name)

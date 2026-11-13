@@ -4,6 +4,7 @@ pub(crate) mod decode;
 use super::{
     DatabaseError, ErrorCategory,
     query::{QueryBudget, QueryOutcome, QueryOutcomeAccumulator},
+    transport::{ConnectionRoute, TransportEndpoint},
 };
 use crate::profile::{ConnectionProfile, SslMode};
 use futures_util::TryStreamExt;
@@ -14,10 +15,21 @@ use sqlx::{
     postgres::{PgConnectOptions, PgConnection, PgRow, PgSslMode},
 };
 
+#[allow(dead_code)]
 pub(crate) async fn connect_options(
     profile: &ConnectionProfile,
     password: Option<&SecretString>,
     default_port: u16,
+) -> Result<PgConnectOptions, DatabaseError> {
+    let route = ConnectionRoute::require_direct(profile)?;
+    connect_options_routed(profile, password, default_port, &route).await
+}
+
+pub(crate) async fn connect_options_routed(
+    profile: &ConnectionProfile,
+    password: Option<&SecretString>,
+    default_port: u16,
+    route: &ConnectionRoute,
 ) -> Result<PgConnectOptions, DatabaseError> {
     let host = profile
         .host
@@ -83,6 +95,34 @@ pub(crate) async fn connect_options(
         let search_path = format!("\"{}\", public", schema.replace('"', "\"\""));
         options = options.options([("search_path", search_path.as_str())]);
     }
+    match &route.endpoint {
+        TransportEndpoint::Direct => {}
+        TransportEndpoint::Unix(path) => {
+            let directory = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty());
+            let Some(directory) = directory else {
+                return Err(DatabaseError::configuration(
+                    "PostgreSQL Unix socket route has no parent directory",
+                ));
+            };
+            options = options.socket(directory);
+        }
+        TransportEndpoint::Tcp(endpoint) => {
+            if matches!(profile.ssl_mode, SslMode::VerifyCa | SslMode::VerifyFull) {
+                return Err(DatabaseError::unsupported(
+                    "PostgreSQL TCP forwarding cannot preserve the original TLS hostname in this configuration",
+                ));
+            }
+            let host = endpoint.ip().to_string();
+            options = options.host(&host).port(endpoint.port());
+        }
+        TransportEndpoint::Socks5(_) => {
+            return Err(DatabaseError::unsupported(
+                "PostgreSQL SQLx connections do not support SOCKS5 transport",
+            ));
+        }
+    }
     Ok(options)
 }
 
@@ -108,6 +148,7 @@ pub(crate) enum Server {
 struct ExecutingSession {
     connection: Option<PoolConnection<Postgres>>,
     options: std::sync::Arc<PgConnectOptions>,
+    route: ConnectionRoute,
     cancel_sql: Option<String>,
 }
 
@@ -131,20 +172,19 @@ impl Drop for ExecutingSession {
         let disposal = Self {
             connection: Some(connection),
             options: options.clone(),
+            route: self.route.clone(),
             cancel_sql: None,
         };
         runtime.spawn(async move {
             // Use a separate connection: every pool slot may be executing a query.
             // Keep the original socket alive until cancellation has been sent so its
             // backend/session ID cannot be recycled for another client meanwhile.
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-                let mut control = PgConnection::connect_with(&options).await?;
-                let result = sqlx::raw_sql(AssertSqlSafe(cancel_sql.as_str()))
-                    .execute(&mut control)
-                    .await;
-                drop(control);
-                result
-            })
+            // The route guard rejects the control connection if the tunnel has already
+            // exited and drops it if the exit is observed while cancellation is in flight.
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                cancel_backend(options, &disposal.route, &cancel_sql),
+            )
             .await;
             // Socket disposal is unconditional, including failed cancellation. A
             // cancellation racing a commit cannot promise that writes rolled back.
@@ -153,11 +193,33 @@ impl Drop for ExecutingSession {
     }
 }
 
+async fn cancel_backend(
+    options: std::sync::Arc<PgConnectOptions>,
+    route: &ConnectionRoute,
+    cancel_sql: &str,
+) -> Result<(), DatabaseError> {
+    route
+        .guard(async {
+            let mut control = PgConnection::connect_with(&options)
+                .await
+                .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Network))?;
+            let result = sqlx::raw_sql(AssertSqlSafe(cancel_sql))
+                .execute(&mut control)
+                .await;
+            drop(control);
+            result
+                .map(|_| ())
+                .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Sql))
+        })
+        .await
+}
+
 pub(crate) async fn execute_pool(
     pool: &PgPool,
     server: Server,
     sql: &str,
     budget: QueryBudget,
+    route: &ConnectionRoute,
 ) -> Result<QueryOutcome, DatabaseError> {
     let mut session = ExecutingSession {
         connection: Some(
@@ -166,6 +228,7 @@ pub(crate) async fn execute_pool(
                 .map_err(|error| DatabaseError::from_sqlx(error, ErrorCategory::Network))?,
         ),
         options: pool.connect_options(),
+        route: route.clone(),
         cancel_sql: None,
     };
     let connection = session.connection.as_mut().expect("executing session");
@@ -229,8 +292,11 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::{path::PathBuf, sync::Arc};
+
     use super::*;
     use crate::profile::import_connection_url;
+    use crate::ssh::test_lease;
 
     #[test]
     fn root_certificate_rejects_empty_text_and_malformed_pem() {
@@ -262,5 +328,99 @@ mod tests {
         assert!(startup.starts_with("--cluster=tenant-1"));
         assert!(startup.contains("default_transaction_read_only=on"));
         assert!(startup.contains("quoted\"\"schema"));
+    }
+
+    #[tokio::test]
+    async fn routed_unix_options_keep_the_logical_host_and_use_the_socket_parent() {
+        let imported = import_connection_url(
+            "postgresql://alice@db.example.test:5544/app",
+            Some("pgwire-routed"),
+        )
+        .unwrap();
+        let route = ConnectionRoute {
+            endpoint: TransportEndpoint::Unix(PathBuf::from("/tmp/lazydb-pg/.s.PGSQL.5544")),
+            lease: None,
+        };
+
+        let options = connect_options_routed(&imported.profile, None, 5432, &route)
+            .await
+            .unwrap();
+
+        assert_eq!(options.get_host(), "db.example.test");
+        assert_eq!(options.get_port(), 5544);
+        assert_eq!(options.get_socket(), Some(&PathBuf::from("/tmp/lazydb-pg")));
+    }
+
+    #[tokio::test]
+    async fn routed_tcp_options_reject_host_verifying_tls_instead_of_downgrading() {
+        let mut imported = import_connection_url(
+            "postgresql://alice@db.example.test:5432/app?sslmode=verify-full",
+            Some("pgwire-routed"),
+        )
+        .unwrap();
+        imported.profile.ssl_mode = SslMode::VerifyFull;
+        let route = ConnectionRoute {
+            endpoint: TransportEndpoint::Tcp("127.0.0.1:15432".parse().unwrap()),
+            lease: None,
+        };
+
+        let error = connect_options_routed(&imported.profile, None, 5432, &route)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.category, ErrorCategory::Unsupported);
+    }
+
+    #[tokio::test]
+    async fn routed_tcp_options_use_the_forwarded_endpoint_for_non_verifying_tls() {
+        let imported = import_connection_url(
+            "postgresql://alice@db.example.test:5432/app?sslmode=require",
+            Some("pgwire-routed"),
+        )
+        .unwrap();
+        let route = ConnectionRoute {
+            endpoint: TransportEndpoint::Tcp("127.0.0.1:15432".parse().unwrap()),
+            lease: None,
+        };
+
+        let options = connect_options_routed(&imported.profile, None, 5432, &route)
+            .await
+            .unwrap();
+
+        assert_eq!(options.get_host(), "127.0.0.1");
+        assert_eq!(options.get_port(), 15432);
+        assert!(matches!(options.get_ssl_mode(), PgSslMode::Require));
+    }
+
+    #[tokio::test]
+    async fn routed_socks5_transport_is_rejected_for_sqlx() {
+        let imported =
+            import_connection_url("postgresql://alice@db.example.test:5432/app", None).unwrap();
+        let route = ConnectionRoute {
+            endpoint: TransportEndpoint::Socks5("127.0.0.1:1080".parse().unwrap()),
+            lease: None,
+        };
+
+        let error = connect_options_routed(&imported.profile, None, 5432, &route)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.category, ErrorCategory::Unsupported);
+    }
+
+    #[tokio::test]
+    async fn cancellation_rejects_a_route_that_already_failed() {
+        let (lease, fail) = test_lease();
+        let route = ConnectionRoute {
+            endpoint: TransportEndpoint::Tcp("127.0.0.1:15432".parse().unwrap()),
+            lease: Some(lease),
+        };
+        fail();
+
+        let error = cancel_backend(Arc::new(PgConnectOptions::new()), &route, "SELECT 1")
+            .await
+            .expect_err("failed route attempted a cancellation connection");
+
+        assert_eq!(error.code.as_deref(), Some("ssh_tunnel_exited"));
     }
 }

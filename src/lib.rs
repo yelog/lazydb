@@ -25,6 +25,7 @@ pub mod redis_command;
 pub mod runtime;
 pub mod security;
 pub mod sql;
+pub mod ssh;
 pub mod terminal;
 pub mod ui;
 pub mod uninstall;

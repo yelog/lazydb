@@ -42,6 +42,8 @@ A keyboard-first database workspace for your terminal, built in Rust.
 - **Write SQL** — use Vim-style editing, catalog-aware completion, and multiple
   consoles with query results and transaction controls where supported.
 - **Work in your tools** — integrate with Neovim, coding agents, MCP, and a JSON CLI.
+- **Reach private databases** — attach managed SSH tunnels with system
+  OpenSSH, agent/key/config authentication, strict host checks, and ProxyJump.
 
 > LazyDB is in beta. Feature availability varies by database; see the
 > [capability reference and current limitations](docs/database-capabilities.md).
@@ -112,6 +114,11 @@ REST/JSON console; see the [Elasticsearch guide](docs/elasticsearch.md).
 OpenSearch has its own driver with Basic/None authentication and shares the REST
 browser/console; see [OpenSearch setup and verification limits](docs/opensearch.md).
 
+Saved profiles for supported drivers can connect through a managed bastion
+tunnel without replacing the database host with a loopback port. This requires
+an OpenSSH client and non-interactive authentication; see
+[SSH tunnels](docs/ssh-tunnel.md).
+
 Browse the [database capability matrix](docs/database-capabilities.md) for server
 versions, editing, transactions, monitoring, and driver-specific limits.
 
@@ -144,7 +151,7 @@ See [Neovim setup and the SQL language server](docs/sql-language-server.md).
 | --- | --- |
 | Install, update, or uninstall | [Installation](docs/installation.md) |
 | Configure connections, credentials, themes, or clipboard behavior | [Configuration](docs/configuration.md) |
-| Connect through an existing SSH tunnel | [SSH tunnel workaround](docs/ssh-tunnel.md) |
+| Connect through a bastion or an existing SSH tunnel | [SSH tunnels](docs/ssh-tunnel.md) |
 | Learn navigation and keyboard controls | [Keyboard reference](docs/keybindings.md) |
 | Check database support and limitations | [Database capabilities](docs/database-capabilities.md) |
 | Find database guides, integrations, and development docs | [Documentation index](docs/README.md) |

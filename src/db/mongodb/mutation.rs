@@ -209,7 +209,7 @@ impl MongoAdapter {
             DatabaseError::configuration("MongoDB collection namespace is required")
         })?;
         let mut command = delete_documents_command(collection, &documents)?;
-        let database = self.client().database(&namespace.database);
+        let database = self.checked_client()?.database(&namespace.database);
         // run_command does not inherit write concern automatically. Reject w:0
         // before any I/O and explicitly preserve the configured acknowledgement.
         apply_delete_write_concern(&mut command, database.write_concern())?;
