@@ -97,30 +97,32 @@
 - [`ec04bbf`](https://github.com/yelog/lazydb/commit/ec04bbf) fix(input): cancel running SQL before handling global quit
 - [`ed282ac`](https://github.com/yelog/lazydb/commit/ed282ac) feat(cockroachdb): add native catalog and transaction support
 
-## [Unreleased]
+## [0.3.3] - 2026-11-13
 
 ### Added
 
-- Add managed SSH tunnels for supported saved profiles using the system OpenSSH client, non-interactive key/agent/config authentication, strict host-key checking, and ProxyJump. SQLx uses TCP forwarding only for plaintext connections and Unix socket forwarding for TLS-capable modes on macOS/Linux so logical hostnames and SNI remain intact; HTTP and MongoDB use SOCKS5, and Redis/Valkey route the logical hostname to the managed endpoint. See [SSH tunnels](docs/ssh-tunnel.md).
+- Add managed SSH tunnels for saved profiles using the system OpenSSH client, with key/agent/SSH config authentication, ProxyJump, strict host-key checking, shared single-flight leases, and fail-closed routing across TUI, CLI, Agent/MCP, and LSP.
+- Support PostgreSQL/CockroachDB, MySQL/MariaDB/TiDB, SQL Server, Redis/Valkey, ClickHouse, Elasticsearch/OpenSearch, and MongoDB through managed tunnels. SQLx uses Unix sockets for TLS-capable modes on macOS/Linux to preserve logical hostnames and SNI, while HTTP and MongoDB use SOCKS5.
 
 ### Changed
 
-- Present the previous manual loopback forwarding instructions as the external-tunnel alternative, and document profile/CLI configuration, TLS differences, lifecycle, cleanup, dependencies, DNS boundaries, and current verification scope.
+- Present the previous manual loopback forwarding instructions as the external-tunnel alternative and document profile/CLI configuration, TLS behavior, lifecycle, cleanup, dependencies, DNS boundaries, and known limitations.
+
+### Fixed
+
+- Guard PostgreSQL cancellation control connections with the same tunnel route so an observed tunnel exit cannot reconnect through a stale local endpoint.
 
 ### Internal
 
-- Add an isolated Docker SSH fixture with a three-member TLS/SCRAM MongoDB
-  replica set, CLI/Agent/MCP/LSP service tests, an optional pinned `linux/amd64`
-  SQL Server 2022 profile, a real PTY TUI check, and cleanup/target-directory
-  handling, including cleanup of the optional SQL Server profile. The complete
-  macOS arm64/OpenSSH 10.5 run passed 47 Rust integration tests plus the PTY
-  check: OpenSSH 6/6, PostgreSQL/MySQL 18/18 (including an agent-only key,
-  20 concurrent waiters, pool saturation, transactions, database targets, and
-  fail-closed handling of a replaced tunnel),
-  SQL Server 2/2, Redis/Valkey 6/6, HTTP 5/5, MongoDB 6/6, and
-  CLI/Agent/MCP/LSP 4/4. SQL Server ran as an emulated `linux/amd64` container.
-  Linux/Windows native clients, HTTP IP-SAN/IPv6, and broader MongoDB and Redis
-  topologies remain unverified.
+- Add an isolated Docker SSH fixture and CI job covering OpenSSH forwarding, strict TLS, transactions, cancellation, ProxyJump, MongoDB replica-set failover, HTTP authority, and CLI/Agent/MCP/LSP entry points. The recorded macOS arm64/OpenSSH 10.5 run passed 47 Rust integration tests plus the real TUI PTY check.
+- Add regression coverage for profile persistence, stale routes, and SQLx cancellation control connections, and document the measured release-size and TLS transport trade-offs.
+
+### Commits
+
+- [`be14344`](https://github.com/yelog/lazydb/commit/be14344) feat(ssh): add managed database tunnels
+- [`541d5c9`](https://github.com/yelog/lazydb/commit/541d5c9) docs(connections): add SSH tunnel workaround guide
+
+## [Unreleased]
 
 ## [0.3.1] - 2026-11-01
 
@@ -2621,5 +2623,6 @@ Changes that are not part of a tagged release go here.
   lazy shells without persisting result data across restarts, and profile
   deletion removes the workspace.
 
-[unreleased]: https://github.com/yelog/lazydb/compare/v0.3.2...HEAD
+[unreleased]: https://github.com/yelog/lazydb/compare/v0.3.3...HEAD
+[0.3.3]: https://github.com/yelog/lazydb/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/yelog/lazydb/compare/v0.3.1...v0.3.2
