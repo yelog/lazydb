@@ -429,6 +429,9 @@ The current profile file format is version `6`:
 | `environment` | `development`, `staging`, `production` | `development` | Environment label used by the UI and agent write-policy checks. |
 | `catalog_scope` | Table | Derived from database and schema | Databases and schemas visible to Explorer and completion. |
 
+LazyDB does not manage SSH tunnels. If the database is only reachable through a
+bastion host, see the [SSH tunnel workaround](ssh-tunnel.md).
+
 Oracle profiles use the native Oracle client. LazyDB first checks the
 `LAZYDB_ORACLE_CLIENT_LIB_DIR` environment variable, then
 `~/.local/share/lazydb/oracle/current`, and finally the Oracle client's normal

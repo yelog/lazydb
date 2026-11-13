@@ -10,6 +10,7 @@ Choose a guide below for the task you want to complete.
 | Install, choose a release channel, update, or uninstall | [Installation](installation.md) |
 | Check Linux runtime requirements | [Linux compatibility](linux-runtime-compatibility.md) |
 | Manage connections, credentials, project scope, and settings | [Configuration](configuration.md) |
+| Connect through an existing SSH tunnel | [SSH tunnel workaround](ssh-tunnel.md) |
 | Find the built-in setting values | [Default configuration](../config/default.toml) |
 | Check database support and current limitations | [Database capabilities](database-capabilities.md) |
 

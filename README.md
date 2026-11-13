@@ -144,6 +144,7 @@ See [Neovim setup and the SQL language server](docs/sql-language-server.md).
 | --- | --- |
 | Install, update, or uninstall | [Installation](docs/installation.md) |
 | Configure connections, credentials, themes, or clipboard behavior | [Configuration](docs/configuration.md) |
+| Connect through an existing SSH tunnel | [SSH tunnel workaround](docs/ssh-tunnel.md) |
 | Learn navigation and keyboard controls | [Keyboard reference](docs/keybindings.md) |
 | Check database support and limitations | [Database capabilities](docs/database-capabilities.md) |
 | Find database guides, integrations, and development docs | [Documentation index](docs/README.md) |

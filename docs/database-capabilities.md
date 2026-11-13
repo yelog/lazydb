@@ -57,7 +57,8 @@ and supported catalog operations.
 Shared workflows that are not available yet include general SQL query-plan
 visualization, SSH tunneling, general-purpose data import/export, and automatic
 recovery-bundle export for a corrupted or partially unreadable workspace.
-Normal console/tab persistence and console renaming are supported.
+Normal console/tab persistence and console renaming are supported. For a manual
+local-forward setup, see the [SSH tunnel workaround](ssh-tunnel.md).
 
 Editing, transactions, cancellation, and monitoring differ by database as shown
 above. Relation operations can also be disabled by missing row identity,
