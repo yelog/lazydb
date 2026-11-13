@@ -173,7 +173,7 @@ pub struct SshForwarder {
     socks_addr: Option<SocketAddr>,
     kind: ForwardKind,
     marker: String,
-    listener_type: &'static str,
+    listener_markers: &'static [&'static str],
 }
 
 impl SshForwarder {
@@ -200,7 +200,7 @@ impl SshForwarder {
             directory,
             ForwardKind::Unix,
             format!("path {}", socket_path.display()),
-            "new unix-listener",
+            &["new unix-listener", "new [unix listener]"],
         )
         .await;
         forwarder.unix_path = Some(socket_path.to_path_buf());
@@ -223,7 +223,7 @@ impl SshForwarder {
             directory,
             ForwardKind::Tcp,
             marker,
-            "new port-listener",
+            &["new port-listener", "new [port listener]"],
         )
         .await;
         forwarder.tcp_addr = Some(
@@ -246,7 +246,7 @@ impl SshForwarder {
             directory,
             ForwardKind::Socks,
             marker,
-            "new port-listener",
+            &["new port-listener", "new [port listener]"],
         )
         .await;
         forwarder.socks_addr = Some(
@@ -265,7 +265,7 @@ impl SshForwarder {
         directory: TempDir,
         kind: ForwardKind,
         marker: String,
-        listener_type: &'static str,
+        listener_markers: &'static [&'static str],
     ) -> Self {
         let log_path = directory.path().join("ssh.log");
         let mut command = Command::new("ssh");
@@ -310,7 +310,7 @@ impl SshForwarder {
             socks_addr: None,
             kind,
             marker,
-            listener_type,
+            listener_markers,
         }
     }
 
@@ -386,7 +386,11 @@ impl SshForwarder {
             .enumerate()
             .skip(local + 1)
             .find(|(_, line)| {
-                line.starts_with("debug1: channel ") && line.contains(self.listener_type)
+                line.starts_with("debug1: channel ")
+                    && self
+                        .listener_markers
+                        .iter()
+                        .any(|marker| line.contains(marker))
             })
             .map(|(position, _)| position)?;
         let session = lines

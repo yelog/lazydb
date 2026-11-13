@@ -226,8 +226,10 @@ For Unix, TCP, and SOCKS forwarding, the client is accepted as ready only after
 ordered evidence appears in the same managed SSH process log:
 
 1. `debug1: Local forwarding listening on <exact requested endpoint>.`
-2. `debug1: channel ... new unix-listener` for a Unix socket, or
-   `debug1: channel ... new port-listener` for TCP/SOCKS.
+2. `debug1: channel ... new unix-listener` (or the legacy
+   `new [unix listener]`) for a Unix socket, or
+   `debug1: channel ... new port-listener` (or the legacy
+   `new [port listener]`) for TCP/SOCKS.
 3. `debug1: Entering interactive session.`
 
 The earlier "Local forwarding listening" line alone is not sufficient. The test

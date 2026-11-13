@@ -458,7 +458,7 @@ struct ForwardSpec {
     endpoint: TransportEndpoint,
     arguments: Vec<OsString>,
     marker: String,
-    listener_type: &'static str,
+    listener_markers: &'static [&'static str],
     _directory: Option<tempfile::TempDir>,
 }
 
@@ -505,7 +505,7 @@ impl ForwardSpec {
                     forward.into(),
                 ],
                 marker,
-                listener_type: "new unix-listener",
+                listener_markers: &["new unix-listener", "new [unix listener]"],
                 _directory: Some(directory),
             });
         }
@@ -541,7 +541,7 @@ impl ForwardSpec {
             },
             arguments: vec![flag.into(), target.into()],
             marker: format!("127.0.0.1 port {}", endpoint.port()),
-            listener_type: "new port-listener",
+            listener_markers: &["new port-listener", "new [port listener]"],
             _directory: None,
         })
     }
@@ -598,7 +598,7 @@ impl DiagnosticBuffer {
 
 struct ReadyEvidence {
     marker: String,
-    listener_type: &'static str,
+    listener_markers: &'static [&'static str],
     forward_seen: bool,
     listener_seen: bool,
 }
@@ -611,7 +611,10 @@ impl ReadyEvidence {
         }
         if self.forward_seen
             && line.starts_with("debug1: channel ")
-            && line.contains(self.listener_type)
+            && self
+                .listener_markers
+                .iter()
+                .any(|marker| line.contains(marker))
         {
             self.listener_seen = true;
         }
@@ -668,7 +671,7 @@ async fn run_forward(
     let mut diagnostics = DiagnosticBuffer::default();
     let mut evidence = ReadyEvidence {
         marker: spec.marker.clone(),
-        listener_type: spec.listener_type,
+        listener_markers: spec.listener_markers,
         forward_seen: false,
         listener_seen: false,
     };
@@ -779,7 +782,7 @@ mod tests {
     fn listening_message_alone_cannot_mark_a_forward_ready() {
         let mut evidence = ReadyEvidence {
             marker: "127.0.0.1 port 12345".to_owned(),
-            listener_type: "new port-listener",
+            listener_markers: &["new port-listener", "new [port listener]"],
             forward_seen: false,
             listener_seen: false,
         };
@@ -792,10 +795,30 @@ mod tests {
     }
 
     #[test]
+    fn current_and_legacy_openssh_listener_messages_mark_a_forward_ready() {
+        for listener in [
+            "debug1: channel 0: new port-listener [port listener]",
+            "debug1: channel 0: new [port listener]",
+        ] {
+            let mut evidence = ReadyEvidence {
+                marker: "127.0.0.1 port 12345".to_owned(),
+                listener_markers: &["new port-listener", "new [port listener]"],
+                forward_seen: false,
+                listener_seen: false,
+            };
+            assert!(
+                !evidence.observe("debug1: Local forwarding listening on 127.0.0.1 port 12345.")
+            );
+            assert!(!evidence.observe(listener));
+            assert!(evidence.observe("debug1: Entering interactive session."));
+        }
+    }
+
+    #[test]
     fn another_forward_or_jump_cannot_mark_the_target_ready() {
         let mut evidence = ReadyEvidence {
             marker: "127.0.0.1 port 12345".to_owned(),
-            listener_type: "new port-listener",
+            listener_markers: &["new port-listener", "new [port listener]"],
             forward_seen: false,
             listener_seen: false,
         };
