@@ -138,6 +138,8 @@ pub fn redis_pane_resize(
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Overlay {
+    DataOperation,
+    DataTasks,
     Update(crate::model::update::UpdateOverlayState),
     Help(HelpState),
     NotificationHistory(crate::model::notification::NotificationHistoryState),

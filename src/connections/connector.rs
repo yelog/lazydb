@@ -46,6 +46,31 @@ impl DatabaseConnector {
         self.tunnels.active_count()
     }
 
+    pub(crate) async fn native_tcp_route(
+        &self,
+        profile: &ConnectionProfile,
+    ) -> Result<ConnectionRoute, DatabaseError> {
+        if profile.ssh.is_none() {
+            return Ok(ConnectionRoute::direct());
+        }
+        profile
+            .validate_ssh()
+            .map_err(DatabaseError::configuration)?;
+        let mut forwarding_profile = profile.clone();
+        forwarding_profile.ssl_mode = crate::profile::SslMode::Disable;
+        let lease = tokio::time::timeout(
+            self.connect_timeout(profile),
+            self.tunnels.acquire(&forwarding_profile),
+        )
+        .await
+        .map_err(|_| DatabaseError::configuration("native SSH route acquisition timed out"))?
+        .map_err(SshError::into_database_error)?;
+        Ok(ConnectionRoute {
+            endpoint: lease.endpoint().map_err(SshError::into_database_error)?,
+            lease: Some(lease),
+        })
+    }
+
     pub async fn connect(
         &self,
         profile: &ConnectionProfile,

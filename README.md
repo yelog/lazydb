@@ -44,6 +44,9 @@ A keyboard-first database workspace for your terminal, built in Rust.
 - **Work in your tools** — integrate with Neovim, coding agents, MCP, and a JSON CLI.
 - **Reach private databases** — attach managed SSH tunnels with system
   OpenSSH, agent/key/config authentication, strict host checks, and ProxyJump.
+- **Back up and copy databases** — review native PostgreSQL, MySQL, MariaDB,
+  and SQLite operations, restore into new targets, and inspect task history.
+  See [data operations](docs/data-operations.md).
 
 > LazyDB is in beta. Feature availability varies by database; see the
 > [capability reference and current limitations](docs/database-capabilities.md).

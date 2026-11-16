@@ -121,6 +121,7 @@ pub enum Command {
         #[command(subcommand)]
         command: ConnectionsCommand,
     },
+    Data(crate::data_ops::cli::DataArgs),
     /// Run an agent protocol server.
     Mcp {
         #[command(subcommand)]
@@ -503,7 +504,7 @@ pub struct VersionInfo<'a> {
 pub struct Capabilities<'a> {
     pub version: &'a str,
     pub cli_api: u16,
-    pub features: [&'a str; 11],
+    pub features: [&'a str; 12],
     pub drivers: &'a [&'a str; crate::db::descriptor::DRIVERS.len()],
 }
 
@@ -556,6 +557,7 @@ pub fn capabilities() -> Capabilities<'static> {
             "mongodb-document-console-v1",
             "mongodb-monitor-v1",
             "mongodb-principals-read-v1",
+            "native-data-operations-v1",
         ],
         drivers: &crate::db::descriptor::DRIVER_NAMES,
     }
@@ -622,7 +624,7 @@ pub fn render_command(command: &Command) -> Result<String, serde_json::Error> {
         Command::Version { json: false } => Ok(format!("lazydb {}", env!("CARGO_PKG_VERSION"))),
         Command::Capabilities { json: true } => serde_json::to_string(&capabilities()),
         Command::Capabilities { json: false } => Ok(format!(
-            "lazydb {} (cli api {})\ndrivers: {}\nfeatures: mouse, read-only, context-help, profile-manager, system-keyring, theme-file-v1, lsp-v1, connections-v1, mongodb-document-console-v1, mongodb-monitor-v1, mongodb-principals-read-v1",
+            "lazydb {} (cli api {})\ndrivers: {}\nfeatures: mouse, read-only, context-help, profile-manager, system-keyring, theme-file-v1, lsp-v1, connections-v1, mongodb-document-console-v1, mongodb-monitor-v1, mongodb-principals-read-v1, native-data-operations-v1",
             env!("CARGO_PKG_VERSION"),
             CLI_API_VERSION,
             crate::db::descriptor::DRIVER_LIST
@@ -648,9 +650,10 @@ pub fn render_command(command: &Command) -> Result<String, serde_json::Error> {
                 report.checks[3].detail,
             ))
         }
-        Command::Agent { .. } | Command::Connections { .. } | Command::Mcp { .. } => {
-            Ok("This command requires asynchronous execution".to_owned())
-        }
+        Command::Agent { .. }
+        | Command::Connections { .. }
+        | Command::Mcp { .. }
+        | Command::Data(_) => Ok("This command requires asynchronous execution".to_owned()),
         Command::Lsp(_) => Ok("This command requires asynchronous execution".to_owned()),
         Command::Update(_) | Command::Uninstall(_) | Command::MigrateHome(_) => {
             Ok("This command requires asynchronous execution".to_owned())
@@ -828,7 +831,8 @@ mod tests {
                 "connections-v1",
                 "mongodb-document-console-v1",
                 "mongodb-monitor-v1",
-                "mongodb-principals-read-v1"
+                "mongodb-principals-read-v1",
+                "native-data-operations-v1"
             ])
         );
     }

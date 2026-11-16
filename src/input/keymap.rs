@@ -168,6 +168,19 @@ impl Keymap {
         if matches!(event.kind, KeyEventKind::Release) {
             return None;
         }
+        if app.omni.is_none()
+            && matches!(
+                app.overlay,
+                Some(Overlay::DataOperation | Overlay::DataTasks)
+            )
+        {
+            self.pending = None;
+            return if self.bindings.matches("omni", event) {
+                (event.kind != KeyEventKind::Repeat).then_some(Action::OpenOmni)
+            } else {
+                map_data_operations(event, app)
+            };
+        }
         if matches!(
             app.tabs.get(app.active_tab),
             Some(crate::model::tab::WorkspaceTab::MongoConsole(_))
@@ -4393,6 +4406,14 @@ fn configured_command_action(command: &str, app: &App) -> Option<Action> {
 }
 
 pub fn map_paste(value: String, app: &App) -> Vec<Action> {
+    if app.omni.is_none() && app.overlay == Some(Overlay::DataOperation) {
+        return vec![Action::DataOperation(
+            crate::model::data_ops::DataOperationAction::Paste(value),
+        )];
+    }
+    if app.omni.is_none() && app.overlay == Some(Overlay::DataTasks) {
+        return Vec::new();
+    }
     if let Some(Overlay::MongoPrincipalMutation(draft)) = app.overlay.as_ref() {
         if draft.selected_field == crate::model::mongodb_principal::MongoPrincipalField::Password {
             return vec![Action::MongoPrincipalMutationPasswordPaste(value)];
@@ -5020,6 +5041,72 @@ fn map_relation_edit_text(event: KeyEvent) -> Option<Action> {
         TextInputEdit::Undo => Action::RelationEditUndo,
         TextInputEdit::Redo => Action::RelationEditRedo,
     })
+}
+
+fn map_data_operations(event: KeyEvent, app: &App) -> Option<Action> {
+    use crate::model::data_ops::{DataField, DataOperationAction as A};
+    let action = if event.code == KeyCode::Esc
+        || (event.modifiers.contains(KeyModifiers::CONTROL) && event.code == KeyCode::Char('c'))
+    {
+        if event.code == KeyCode::Esc
+            && app.overlay == Some(Overlay::DataOperation)
+            && app
+                .data_operations
+                .draft
+                .as_ref()
+                .is_some_and(|draft| draft.plan.is_some())
+        {
+            A::Back
+        } else {
+            A::Close
+        }
+    } else if app.overlay == Some(Overlay::DataTasks) {
+        match event.code {
+            KeyCode::Up | KeyCode::Char('k') => A::TaskMove(-1),
+            KeyCode::Down | KeyCode::Char('j') => A::TaskMove(1),
+            KeyCode::PageUp => A::Scroll(-8),
+            KeyCode::PageDown => A::Scroll(8),
+            KeyCode::Char('c') => A::CancelTask,
+            KeyCode::Char('r') | KeyCode::Enter => A::RerunTask,
+            KeyCode::Char('R') => A::RefreshTasks,
+            _ => return None,
+        }
+    } else {
+        let draft = app.data_operations.draft.as_ref()?;
+        if draft.plan.is_some() {
+            match event.code {
+                KeyCode::Enter => A::Execute,
+                KeyCode::Up | KeyCode::PageUp => A::Scroll(-5),
+                KeyCode::Down | KeyCode::PageDown => A::Scroll(5),
+                _ => return None,
+            }
+        } else {
+            match event.code {
+                KeyCode::Tab => A::FocusNext(true),
+                KeyCode::BackTab => A::FocusNext(false),
+                KeyCode::Enter if draft.focus == DataField::Cancel => A::Close,
+                KeyCode::Enter => A::Review,
+                KeyCode::Left | KeyCode::Up
+                    if matches!(
+                        draft.focus,
+                        DataField::SourceProfile | DataField::TargetProfile
+                    ) =>
+                {
+                    A::CycleProfile(-1)
+                }
+                KeyCode::Right | KeyCode::Down | KeyCode::Char(' ')
+                    if matches!(
+                        draft.focus,
+                        DataField::SourceProfile | DataField::TargetProfile
+                    ) =>
+                {
+                    A::CycleProfile(1)
+                }
+                _ => A::Edit(map_text_input_edit(event)?),
+            }
+        }
+    };
+    Some(Action::DataOperation(action))
 }
 
 fn map_text_input_edit(event: KeyEvent) -> Option<TextInputEdit> {

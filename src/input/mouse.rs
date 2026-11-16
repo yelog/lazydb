@@ -79,6 +79,27 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
             None
         };
     }
+    if app.omni.is_none()
+        && matches!(
+            app.overlay,
+            Some(Overlay::DataOperation | Overlay::DataTasks)
+        )
+    {
+        use crate::model::data_ops::DataOperationAction as A;
+        return match event.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                match ui.target_at(event.column, event.row) {
+                    Some(HitTarget::DataOperation(action)) => {
+                        Some(Action::DataOperation(action.as_ref().clone()))
+                    }
+                    _ => None,
+                }
+            }
+            MouseEventKind::ScrollUp => Some(Action::DataOperation(A::Scroll(-3))),
+            MouseEventKind::ScrollDown => Some(Action::DataOperation(A::Scroll(3))),
+            _ => None,
+        };
+    }
     match event.kind {
         MouseEventKind::Drag(MouseButton::Left) => {
             if *ui.mouse_gesture.borrow() == Some(crate::ui::text_selection::GestureOwner::Input) {
@@ -764,6 +785,7 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
             }
             match target {
                 HitTarget::Shortcut(_) => None,
+                HitTarget::DataOperation(_) => None,
                 HitTarget::Focus(focus) => Some(Action::Focus(focus)),
                 HitTarget::Tab(index) => Some(Action::ActivateTab(index)),
                 HitTarget::TabScrollLeft(index) | HitTarget::TabScrollRight(index) => {
@@ -1606,6 +1628,7 @@ fn profile_button_action(button: ProfileButton) -> Action {
 
 fn focus_at(ui: &UiState, column: u16, row: u16) -> Option<Focus> {
     match ui.target_at(column, row)? {
+        HitTarget::DataOperation(_) => None,
         HitTarget::PaneResize(PaneSplit::RedisKeysWidth) => Some(Focus::Results),
         HitTarget::Focus(focus) => Some(*focus),
         HitTarget::ExplorerRow(_) => Some(Focus::Explorer),

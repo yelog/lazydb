@@ -839,6 +839,32 @@ executes the selected executable shortcut; Esc closes Help.
 
 Display-only catalog rows are informational and cannot execute an action.
 
+## Data Operations
+
+Open **Backup Database**, **Restore Database**, **Copy Database**, or **Data
+Tasks** through `F2`. See [Data operations](data-operations.md) for scope,
+native clients, and verification.
+
+| Context | Key | Action |
+| --- | --- | --- |
+| Draft | `Tab` / `Shift-Tab` | Move between fields and actions |
+| Profile field | Left/Up or Right/Down/Space | Select the previous or next eligible profile |
+| Draft | `Enter` | Review the plan; activate Cancel when it is focused |
+| Review | `Enter` | Execute the immutable reviewed plan |
+| Review | Up/Down or `PageUp`/`PageDown` | Scroll plan details |
+| Review | `Esc` | Return to the draft |
+| Draft or task history | `Esc` / `Ctrl-c` | Close the overlay |
+| Task history | `j`/`k` or Down/Up | Select a task |
+| Task history | `PageUp` / `PageDown` | Scroll task details |
+| Task history | `r` / `Enter` | Open a fresh draft from a completed task |
+| Task history | `c` | Cancel the selected task running in this process |
+| Task history | `R` | Refresh persistent task history |
+
+Closing the task overlay leaves its running tasks active. A quit request
+opens Data Tasks while tasks are running. Wait for completion, or cancel
+explicitly and wait for cancellation before quitting again. Tasks do not
+detach into a daemon.
+
 ## Profile Access
 
 | Keys | Behavior |

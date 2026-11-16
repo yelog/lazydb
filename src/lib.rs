@@ -6,6 +6,7 @@ pub mod clipboard;
 pub mod commands;
 pub mod config;
 pub mod connections;
+pub mod data_ops;
 pub mod db;
 pub(crate) mod editor;
 pub mod help;

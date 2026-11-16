@@ -25,6 +25,7 @@ pub enum CredentialResolutionError {
     Store,
 }
 
+#[derive(Clone)]
 pub struct CredentialResolver {
     secret_store: Arc<dyn SecretStore>,
     local_store: LocalCredentialStore,

@@ -20,6 +20,7 @@ Choose a guide below for the task you want to complete.
 | --- | --- |
 | Find commands, connections, consoles, and tables | [Omni Bar](omni-bar.md) |
 | Learn navigation, SQL execution, editing, and transaction controls | [Keyboard reference](keybindings.md) |
+| Back up, restore, copy databases, and inspect task history | [Data operations](data-operations.md) |
 | Browse Redis and Valkey keys, values, and TTLs | [Key/value browser](redis-browser.md) |
 | Inspect structured or serialized Redis-compatible values | [Value preview](redis-value-preview.md) |
 | Configure Kitty pane navigation and resizing | [Kitty integration](kitty-integration.md) |

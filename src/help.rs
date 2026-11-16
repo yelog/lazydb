@@ -152,6 +152,7 @@ fn shortcut_context_with_overlay(app: &App, include_help: bool) -> ShortcutConte
             // Validate against the pane beneath Help.
         } else {
             return match overlay {
+                Overlay::DataOperation | Overlay::DataTasks => ShortcutContext::Message,
                 Overlay::Help(_) => ShortcutContext::Help,
                 Overlay::RecordView(_) => ShortcutContext::RecordView,
                 Overlay::TextDetail(_) => ShortcutContext::Message,

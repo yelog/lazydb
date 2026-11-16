@@ -36,6 +36,7 @@ use crate::{
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
+    DataOperation(crate::model::data_ops::DataOperationAction),
     NewConsole,
     NewConsoleNamed(String),
     NewUnboundConsole,
@@ -1830,6 +1831,22 @@ pub enum CatalogEditorCursorTarget {
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 pub enum Command {
+    PlanDataOperation {
+        request_id: Uuid,
+        spec: crate::data_ops::DataJobSpec,
+        policy: crate::agent::policy::WritePolicy,
+    },
+    RunDataOperation {
+        request_id: Uuid,
+        plan: crate::data_ops::DataJobPlan,
+        policy: crate::agent::policy::WritePolicy,
+    },
+    CancelDataOperation {
+        request_id: Uuid,
+    },
+    LoadDataTasks {
+        request_id: Uuid,
+    },
     PersistHelpPanelView(crate::config::HelpPanelView),
     LoadSqlHistory {
         overlay_id: Uuid,

@@ -2,6 +2,7 @@ pub mod animation;
 pub mod catalog_editor;
 pub(crate) mod dashboard;
 pub mod data_grid;
+mod data_ops;
 pub(crate) mod dialog;
 pub(crate) mod dialog_footer;
 pub(crate) mod execution_confirm;
@@ -109,6 +110,7 @@ pub enum ProfileButton {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum HitTarget {
+    DataOperation(Box<crate::model::data_ops::DataOperationAction>),
     Focus(Focus),
     Tab(usize),
     TabScrollLeft(usize),
@@ -1760,6 +1762,7 @@ fn render_key_sequence_popup(
 
 fn overlay_key(overlay: &Overlay) -> animation::OverlayKey {
     match overlay {
+        Overlay::DataOperation | Overlay::DataTasks => animation::OverlayKey::TextDetail,
         Overlay::Help(_) => animation::OverlayKey::Help,
         Overlay::Update(_) => animation::OverlayKey::Update,
         Overlay::NotificationHistory(_) => animation::OverlayKey::NotificationHistory,
@@ -4858,6 +4861,9 @@ fn render_overlay(
     icons: icons::IconSet,
 ) {
     match overlay {
+        Overlay::DataOperation | Overlay::DataTasks => {
+            data_ops::render(frame, area, app, state, theme)
+        }
         Overlay::Help(help) => render_help(frame, area, help, state, theme),
         Overlay::Update(_) => update::render(frame, area, app, state, theme),
         Overlay::NotificationHistory(history) => {

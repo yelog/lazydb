@@ -10,6 +10,7 @@ use crate::{
         types::{AgentConnection, AgentContext, AgentQueryResult, AgentTarget, QueryOutcomeJson},
     },
     connections::DatabaseConnector,
+    data_ops::{DataJobService, DataJobStore},
     db::query::QueryBudget,
     persistence::{
         credentials::CredentialResolver, local_credentials::LocalCredentialStore, paths::AppPaths,
@@ -29,6 +30,7 @@ pub struct AgentService {
     pub(super) credential_resolver: CredentialResolver,
     pub(super) max_rows: usize,
     pub(super) max_result_bytes: usize,
+    data_job_store: Option<DataJobStore>,
 }
 
 impl AgentService {
@@ -41,9 +43,19 @@ impl AgentService {
             code: super::selection::AgentErrorCode::NoVisibleConnections,
             message: error.to_string(),
         })?;
+        let explicit_config = config.is_some();
         let profile_path = config.unwrap_or_else(|| paths.profiles_file());
         let profile_store =
             ProfileStore::new(profile_path).with_credential_key_path(paths.credential_key_file());
+        let data_job_directory = if explicit_config {
+            profile_store
+                .path()
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("data-jobs")
+        } else {
+            paths.state_dir.join("data-jobs")
+        };
         let profiles = profile_store.load().map_err(|error| AgentError {
             code: super::selection::AgentErrorCode::NoVisibleConnections,
             message: error.to_string(),
@@ -64,7 +76,8 @@ impl AgentService {
             .map(|settings| settings.connections.ssh)
             .unwrap_or_default();
         Ok(Self::new(project, profiles, credentials)
-            .with_connector(DatabaseConnector::with_ssh_config(ssh)))
+            .with_connector(DatabaseConnector::with_ssh_config(ssh))
+            .with_data_job_store(DataJobStore::new(data_job_directory)))
     }
 
     pub fn new(
@@ -79,6 +92,7 @@ impl AgentService {
             credential_resolver,
             max_rows: DEFAULT_MAX_ROWS,
             max_result_bytes: DEFAULT_MAX_RESULT_BYTES,
+            data_job_store: None,
         }
     }
 
@@ -91,6 +105,37 @@ impl AgentService {
         self.max_rows = max_rows;
         self.max_result_bytes = max_result_bytes;
         self
+    }
+
+    pub fn with_data_job_store(mut self, store: DataJobStore) -> Self {
+        self.data_job_store = Some(store);
+        self
+    }
+
+    pub fn data_job_service(&self) -> anyhow::Result<DataJobService> {
+        let store = match &self.data_job_store {
+            Some(store) => store.clone(),
+            None => DataJobStore::new(AppPaths::discover()?.state_dir.join("data-jobs")),
+        };
+        let profiles = self
+            .visible_profiles()
+            .into_iter()
+            .map(|entry| {
+                let mut profile = entry.profile.clone();
+                if let Some(path) = &mut profile.sqlite_path
+                    && path.is_relative()
+                {
+                    *path = self.project_root().join(&*path);
+                }
+                profile
+            })
+            .collect();
+        Ok(DataJobService::new(
+            profiles,
+            Arc::new(self.credential_resolver.clone()),
+            self.connector.clone(),
+            store,
+        ))
     }
 
     pub async fn shutdown(&self) {

@@ -1,5 +1,7 @@
 #![allow(clippy::collapsible_if)]
 
+mod data_ops;
+
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     time::{Instant, SystemTime, UNIX_EPOCH},
@@ -258,6 +260,7 @@ pub struct App {
     pub pane_sizes: PaneSizePreferences,
     pane_layout: PaneLayoutMetrics,
     pub overlay: Option<Overlay>,
+    pub data_operations: crate::model::data_ops::DataOperationsState,
     pub omni: Option<crate::model::omni::OmniState>,
     help_panel_view: crate::config::HelpPanelView,
     help_panel_session: Option<crate::model::help_panel::HelpPanelSession>,
@@ -1081,6 +1084,7 @@ impl App {
             pane_sizes: PaneSizePreferences::default(),
             pane_layout: PaneLayoutMetrics::default(),
             overlay: None,
+            data_operations: Default::default(),
             omni: None,
             help_panel_view: crate::config::HelpPanelView::Help,
             help_panel_session: None,
@@ -1208,7 +1212,12 @@ impl App {
                 .and_then(|session| session.omni.take())
                 .unwrap_or_else(|| {
                     self.next_omni_session = self.next_omni_session.saturating_add(1);
-                    crate::model::omni::OmniState::new(self.next_omni_session, self.omni_context())
+                    let mut omni = crate::model::omni::OmniState::new(
+                        self.next_omni_session,
+                        self.omni_context(),
+                    );
+                    omni.data_origin = self.data_operation_command_context();
+                    omni
                 });
             let mut session = self.help_panel_session.take().unwrap_or_default();
             omni.origin_overlay = session.origin_overlay.take();
@@ -3510,6 +3519,13 @@ impl App {
             for spec in COMMANDS {
                 let context = if matches!(
                     spec.id,
+                    CommandId::BackupDatabase
+                        | CommandId::RestoreDatabase
+                        | CommandId::CopyDatabase
+                ) {
+                    omni.data_origin.clone()
+                } else if matches!(
+                    spec.id,
                     CommandId::RunStatement
                         | CommandId::RunBuffer
                         | CommandId::FormatSql
@@ -3533,7 +3549,9 @@ impl App {
                     .map(|alias| (*alias).to_owned())
                     .collect();
                 item.context = context.clone();
-                item.availability = crate::commands::availability(spec.id, &context);
+                item.availability = self
+                    .data_command_availability(spec.id, &context)
+                    .unwrap_or_else(|| crate::commands::availability(spec.id, &context));
                 items.push(item);
             }
 
@@ -3737,6 +3755,7 @@ impl App {
             return true;
         };
         let busy = match &overlay {
+            Overlay::DataOperation => true,
             Overlay::ProfileManager => self
                 .profile_manager
                 .as_ref()
@@ -4030,7 +4049,10 @@ impl App {
     ) -> Vec<Command> {
         use crate::commands::{CommandAvailability, UserIntent};
 
-        if let CommandAvailability::Disabled(reason) = crate::commands::availability(id, &context) {
+        if let CommandAvailability::Disabled(reason) = self
+            .data_command_availability(id, &context)
+            .unwrap_or_else(|| crate::commands::availability(id, &context))
+        {
             self.notify_warning("Command unavailable", reason);
             return Vec::new();
         }
@@ -4039,6 +4061,12 @@ impl App {
             return Vec::new();
         };
         match intent {
+            UserIntent::DataOperation { operation, context } => self.update(Action::DataOperation(
+                crate::model::data_ops::DataOperationAction::Open { operation, context },
+            )),
+            UserIntent::DataTasks => self.update(Action::DataOperation(
+                crate::model::data_ops::DataOperationAction::OpenTasks,
+            )),
             UserIntent::OpenDashboard => self.update(Action::OpenDashboard),
             UserIntent::RunStatement { context } => {
                 if !self.activate_context_tab(&context) {
@@ -4368,6 +4396,7 @@ impl App {
         }
         let review_session = self.review_preview_session_id();
         let commands = match action {
+            Action::DataOperation(action) => self.update_data_operation(action),
             Action::ExecuteHelpShortcut(id) => self.execute_help_shortcut(id),
             Action::OmniConfirm => self.confirm_omni_item(),
             Action::ExecuteSemanticCommand { id, context } => {
@@ -7710,6 +7739,7 @@ impl App {
                 self.next_omni_session = self.next_omni_session.saturating_add(1);
                 let context = self.omni_context();
                 let mut omni = crate::model::omni::OmniState::new(self.next_omni_session, context);
+                omni.data_origin = self.data_operation_command_context();
                 omni.origin_overlay = self.overlay.take();
                 omni.origin_tab_id = self.active_tab_id();
                 omni.origin_profile_id = self.active_workspace_profile;
@@ -7861,7 +7891,9 @@ impl App {
                 }
                 Vec::new()
             }
-            Action::OmniConfirm | Action::ExecuteSemanticCommand { .. } => {
+            Action::DataOperation(_)
+            | Action::OmniConfirm
+            | Action::ExecuteSemanticCommand { .. } => {
                 unreachable!("omni and semantic commands are handled before reducer dispatch")
             }
             Action::OpenRecordView => {
@@ -8107,6 +8139,13 @@ impl App {
                 Vec::new()
             }
             Action::DismissOverlay => {
+                if matches!(
+                    self.overlay,
+                    Some(Overlay::DataOperation | Overlay::DataTasks)
+                ) {
+                    return self
+                        .update_data_operation(crate::model::data_ops::DataOperationAction::Close);
+                }
                 if matches!(self.overlay, Some(Overlay::Help(_))) {
                     self.overlay = None;
                     if let Some(session) = self.help_panel_session.take() {
@@ -18952,6 +18991,9 @@ impl App {
                     crate::model::workspace_save::QuitSaveState::Idle
                 ) {
                     return Vec::new();
+                }
+                if !self.data_operations.runs.is_empty() {
+                    return self.open_data_tasks_before_quit();
                 }
                 if matches!(
                     self.overlay,

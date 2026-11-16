@@ -43,6 +43,26 @@ async fn main() -> Result<()> {
                     }
                 }
             }
+            Command::Data(args) => {
+                let json = args.json;
+                match lazydb::data_ops::cli::run(args, config, profile, read_only, url).await {
+                    Ok(output) => {
+                        println!("{}", output.text);
+                        if output.exit_code != 0 {
+                            std::process::exit(output.exit_code);
+                        }
+                    }
+                    Err(error) => {
+                        let output = lazydb::data_ops::cli::render_error(&error, json);
+                        if json {
+                            println!("{output}");
+                        } else {
+                            eprintln!("{output}");
+                        }
+                        std::process::exit(1);
+                    }
+                }
+            }
             Command::Mcp { command } => match command {
                 lazydb::cli::McpCommand::Serve {
                     project,

@@ -401,6 +401,7 @@ use tokio::{
 };
 
 pub(crate) mod connections;
+mod data_ops;
 pub(crate) mod duckdb;
 pub(crate) mod transaction;
 
@@ -641,6 +642,7 @@ impl WorkspaceSaveQueue {
 }
 
 pub struct Runtime {
+    data_operations: data_ops::DataOperationsRuntime,
     registry: Arc<Mutex<ProfileRegistry>>,
     profile_store: ProfileStore,
     workspace_store: Option<WorkspaceStore>,
@@ -765,6 +767,7 @@ impl Runtime {
         let profiles = collection.profiles;
         let mongo_transaction_workers = Arc::new(StdMutex::new(HashMap::new()));
         let local_credential_store = local_credential_store_for(&profile_store);
+        let data_operations = data_ops::DataOperationsRuntime::new(&profile_store);
         let mut order = Vec::with_capacity(profiles.len());
         let mut profiles_by_id = HashMap::with_capacity(profiles.len());
         for profile in profiles {
@@ -783,6 +786,7 @@ impl Runtime {
             .map(|(profile_id, password)| (Some(profile_id), Some(password)))
             .unwrap_or((None, None));
         Self {
+            data_operations,
             registry: Arc::new(Mutex::new(ProfileRegistry {
                 groups: collection.groups,
                 order,
@@ -917,6 +921,24 @@ impl Runtime {
         self.background_tasks.retain(|task| !task.is_finished());
         self.profile_tasks.retain(|task| !task.is_finished());
         match command {
+            Command::PlanDataOperation {
+                request_id,
+                spec,
+                policy,
+            } => {
+                self.plan_data_operation(request_id, spec, policy);
+            }
+            Command::RunDataOperation {
+                request_id,
+                plan,
+                policy,
+            } => {
+                self.run_data_operation(request_id, plan, policy);
+            }
+            Command::CancelDataOperation { request_id } => {
+                self.cancel_data_operation(request_id);
+            }
+            Command::LoadDataTasks { request_id } => self.load_data_tasks(request_id),
             Command::PersistHelpPanelView(view) => {
                 if let Some(store) = self.settings_store.as_ref()
                     && let Err(error) = store.save_help_panel(view)
@@ -7791,6 +7813,7 @@ impl Runtime {
     }
 
     pub async fn shutdown(mut self) {
+        self.shutdown_data_operations().await;
         self.profile_test_cancellation.cancel();
         self.profile_discovery_cancellation.cancel();
         self.connection_attempts
@@ -9152,6 +9175,9 @@ pub async fn run_tui(cli: Cli) -> Result<RunOutcome> {
         settings.execution.confirmation,
         project,
     );
+    if cli.read_only {
+        app.set_data_operation_write_policy(crate::agent::policy::WritePolicy::Deny);
+    }
     app.set_default_connection_access(settings.connections.default_access);
     app.connection_groups = startup.collection.groups.clone();
     app.explorer.normalized.sync_organization(
@@ -9193,6 +9219,10 @@ pub async fn run_tui(cli: Cli) -> Result<RunOutcome> {
         Arc::new(NativeSecretStore),
         event_sender,
     );
+    runtime.set_data_operation_project_root(app.project.root.clone());
+    if cli.read_only {
+        runtime.set_data_operation_write_policy(crate::agent::policy::WritePolicy::Deny);
+    }
     let history_store = crate::persistence::sql_history::HistoryStore::open(paths.history_file())
         .await
         .context("failed to open SQL history database")?;

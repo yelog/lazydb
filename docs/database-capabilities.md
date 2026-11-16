@@ -42,6 +42,18 @@ Native key/value and document workflows have their own operation checks. The
 relational grid and SQL transaction flags do not describe those workflows;
 consult the linked database guide for the supported command scope.
 
+## Native Data Operations
+
+PostgreSQL, MySQL, MariaDB, and SQLite provide database-scoped backup,
+restore into a new target, and same-engine copy through the TUI and
+`lazydb data` CLI. Native client/version requirements, verification levels,
+write restrictions, and task history are described in
+[Data operations](data-operations.md).
+
+This capability is separate from relation-grid editing. Compatible protocols
+do not automatically enable it for CockroachDB or TiDB. General-purpose
+table import/export and heterogeneous migration remain unavailable.
+
 ## Runtime Requirements
 
 Oracle connections require Oracle Database 12c or newer and a working native

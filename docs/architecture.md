@@ -147,6 +147,21 @@ does not override live names, targets, SQL text, or deletion decisions.
 
 ## Profile and Credential Boundary
 
+Native data operations live in `data_ops`, outside the bounded query-result
+pipeline. `DataJobService` owns profile/policy validation, immutable plan
+bindings, credential resolution, destination/artifact locks, and durable task
+records. Native providers own engine-specific preflight, execution, and
+verification; they stream archives through private staged files and publish
+without overwriting.
+
+The TUI reducer holds only drafts, reviewed plans, progress projections, and
+history selections. Runtime work carries request IDs and binds the complete
+source/destination snapshot. CLI uses the same service, while MCP exposes
+project-scoped planning and history without native execution. Task locks
+distinguish a live task in another process from an interrupted task, and
+cancelled or failed restores retain explicit uncertainty about partial
+destination data.
+
 Coding-agent access uses a headless boundary above `DatabaseConnection`:
 
 ```text

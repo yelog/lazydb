@@ -6,6 +6,10 @@ use crate::{db::catalog::CatalogId, model::execution_target::ExecutionTarget};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum CommandId {
+    BackupDatabase,
+    RestoreDatabase,
+    CopyDatabase,
+    DataTasks,
     OpenDashboard,
     RunStatement,
     RunBuffer,
@@ -44,6 +48,11 @@ pub struct CommandContext {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UserIntent {
+    DataOperation {
+        operation: crate::data_ops::DataOperation,
+        context: CommandContext,
+    },
+    DataTasks,
     OpenDashboard,
     OpenConsole {
         profile_id: Option<Uuid>,
@@ -96,6 +105,30 @@ pub struct CommandSpec {
 }
 
 pub const COMMANDS: &[CommandSpec] = &[
+    CommandSpec {
+        id: CommandId::BackupDatabase,
+        title: "Backup Database",
+        aliases: &["backup", "dump database"],
+        category: "Data",
+    },
+    CommandSpec {
+        id: CommandId::RestoreDatabase,
+        title: "Restore Database",
+        aliases: &["restore", "restore backup"],
+        category: "Data",
+    },
+    CommandSpec {
+        id: CommandId::CopyDatabase,
+        title: "Copy Database",
+        aliases: &["copy database", "clone database"],
+        category: "Data",
+    },
+    CommandSpec {
+        id: CommandId::DataTasks,
+        title: "Data Tasks",
+        aliases: &["backup history", "restore history", "data jobs"],
+        category: "Data",
+    },
     CommandSpec {
         id: CommandId::OpenDashboard,
         title: "Open Dashboard",
@@ -255,6 +288,17 @@ pub fn command(id: CommandId) -> &'static CommandSpec {
 
 pub fn intent_for_command(id: CommandId, context: &CommandContext) -> Option<UserIntent> {
     Some(match id {
+        CommandId::BackupDatabase | CommandId::RestoreDatabase | CommandId::CopyDatabase => {
+            UserIntent::DataOperation {
+                operation: match id {
+                    CommandId::BackupDatabase => crate::data_ops::DataOperation::Backup,
+                    CommandId::RestoreDatabase => crate::data_ops::DataOperation::Restore,
+                    _ => crate::data_ops::DataOperation::Copy,
+                },
+                context: context.clone(),
+            }
+        }
+        CommandId::DataTasks => UserIntent::DataTasks,
         CommandId::OpenDashboard => UserIntent::OpenDashboard,
         CommandId::RunStatement => UserIntent::RunStatement {
             context: context.clone(),
