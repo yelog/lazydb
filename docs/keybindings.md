@@ -244,6 +244,16 @@ Relation Data while edits or transaction restrictions are pending.
 | `Ctrl-PageUp` / `Ctrl-PageDown` | Previous/next workspace tab |
 | `Q` | Quit from Editor Normal mode |
 
+Help opened from any right-hand workspace pane includes tab switching, reordering,
+and closing shortcuts, including editor input modes, Redis views, dashboards, and
+relation views. Configurable tab shortcuts display their current bindings.
+Explorer Help does not list tab switching or reordering.
+
+In Redis Keys, `gt` / `gT` and `]t` / `[t` switch workspace tabs using the
+configured next/previous-tab bindings. `Tab` / `Shift-Tab` cycle pane focus
+between Explorer, Keys, and Value. While editing a Keys search, printable tab
+sequence keys remain search text.
+
 ## Schema Owner Picker
 
 When the New Schema Owner field has loaded PostgreSQL roles, the contextual
@@ -950,6 +960,8 @@ the drop, and Esc cancels. Printable `y` and `Y` are text input, not shortcuts.
 
 Left click focuses panels, activates tabs, selects Explorer rows and grid cells,
 and toggles view selectors. Wheel scrolling affects the panel under the pointer.
+Clicking a Redis Keys row, title, or blank area focuses Keys. A single click
+selects a key or toggles a group; double-clicking a key opens and focuses Value.
 Relation DDL scrolls vertically; Relation Data scrolls the grid. Mouse/paste/
 resize/focus events clear pending key sequences; plain pointer movement does not.
 In Relation Data, clicking a column header applies the Header Sorting cycle

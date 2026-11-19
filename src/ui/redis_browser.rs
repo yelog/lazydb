@@ -39,6 +39,10 @@ pub fn render(
     let keys_block = super::panel_block("", keys_focused, theme);
     let keys_area = keys_block.inner(layout.keys);
     let preview_area = layout.preview;
+    ui.hit_regions.push(crate::ui::HitRegion {
+        area: layout.keys,
+        target: crate::ui::HitTarget::RedisKeysFocus(tab.id),
+    });
     frame.render_widget(
         keys_block
             .title(keys_title(tab))

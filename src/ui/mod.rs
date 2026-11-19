@@ -125,6 +125,7 @@ pub enum HitTarget {
         tab_id: Uuid,
         node: crate::model::redis_key_tree::KeyTreeNodeId,
     },
+    RedisKeysFocus(Uuid),
     RedisFindInput(Uuid),
     RedisValueFilter(Uuid),
     RedisPreviewFormat(Uuid),
@@ -7686,43 +7687,49 @@ fn render_help(
     let start = help
         .scroll
         .min(entries.len().saturating_sub(visible_height));
-    let rows = entries
+    let items = entries
         .iter()
         .enumerate()
         .skip(start)
         .take(visible_height)
         .map(|(index, shortcut)| {
-            let marker = if index == help.selected { ">" } else { " " };
-            Line::from(vec![
+            let selected = index == help.selected;
+            let marker = if selected { "> " } else { "  " };
+            let base_style = Style::new().fg(theme.text).bg(if selected {
+                theme.selection
+            } else {
+                theme.surface_raised
+            });
+            ListItem::new(Line::from(vec![
+                Span::styled(marker, base_style.fg(theme.accent)),
                 Span::styled(
                     format!(
-                        "{marker} {:<18}",
+                        "{:<18}",
                         crate::help::configured_sequence(shortcut, Some(&help.bindings))
                     ),
-                    Style::new().fg(theme.action).add_modifier(Modifier::BOLD),
+                    base_style.fg(theme.action).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     truncate_to_cells(
                         shortcut.description,
                         usize::from(list_area.width).saturating_sub(20),
                     ),
-                    Style::new().fg(theme.text),
+                    base_style,
                 ),
-            ])
+            ]))
+            .style(base_style)
         })
         .collect::<Vec<_>>();
-    let list = if rows.is_empty() {
-        vec![Line::from(Span::styled(
+    let items = if items.is_empty() {
+        vec![ListItem::new(Span::styled(
             "No matching shortcuts",
             Style::new().fg(theme.muted),
         ))]
     } else {
-        rows
+        items
     };
     frame.render_widget(
-        Paragraph::new(list)
-            .style(Style::new().fg(theme.text).bg(theme.surface_raised))
-            .wrap(Wrap { trim: true }),
+        List::new(items).style(Style::new().fg(theme.text).bg(theme.surface_raised)),
         list_area,
     );
     for (offset, _shortcut) in entries.iter().enumerate().skip(start).take(visible_height) {

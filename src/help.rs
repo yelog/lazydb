@@ -1006,6 +1006,42 @@ macro_rules! row {
     };
 }
 
+macro_rules! workspace_tab_row {
+    ($id:ident, [$($extra_context:ident),*], $($fields:tt)+) => {
+        row!(
+            $id,
+            [
+                $($extra_context,)*
+                EditorNormal,
+                EditorInsert,
+                EditorVisual,
+                SqlResultsData,
+                SqlOutput,
+                RedisKeys,
+                RedisKeysFindEditing,
+                RedisKeysFindConfirmed,
+                RedisPreview,
+                RedisPreviewVisual,
+                RedisPreviewTable,
+                Dashboard,
+                MongoDashboard,
+                RelationDataBrowse,
+                RelationDataEdit,
+                MongoDocumentFields,
+                MongoDocumentField,
+                MongoDocumentFieldMultiline,
+                MongoDocumentEjson,
+                RelationDataVisual,
+                RelationDataBusy,
+                RelationDdl,
+                PrincipalDdl,
+                DataQueryInput
+            ],
+            $($fields)+
+        )
+    };
+}
+
 static SHORTCUT_CATALOG: &[Shortcut] = &[
     row!(
         Help,
@@ -1202,62 +1238,10 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
         "f",
         always
     ),
-    row!(
-        PreviousTab,
-        [
-            EditorNormal,
-            EditorVisual,
-            SqlResultsData,
-            SqlOutput,
-            RelationDataBrowse
-        ],
-        "gT",
-        "previous tab",
-        Goto,
-        "T"
-    ),
-    row!(
-        NextTab,
-        [
-            EditorNormal,
-            EditorVisual,
-            SqlResultsData,
-            SqlOutput,
-            RelationDataBrowse
-        ],
-        "gt",
-        "next tab",
-        Goto,
-        "t"
-    ),
-    row!(
-        MoveTabRight,
-        [
-            EditorNormal,
-            EditorVisual,
-            SqlResultsData,
-            SqlOutput,
-            RelationDataBrowse,
-            RelationDdl,
-            PrincipalDdl
-        ],
-        "Ctrl-Shift-n",
-        "move tab right"
-    ),
-    row!(
-        MoveTabLeft,
-        [
-            EditorNormal,
-            EditorVisual,
-            SqlResultsData,
-            SqlOutput,
-            RelationDataBrowse,
-            RelationDdl,
-            PrincipalDdl
-        ],
-        "Ctrl-Shift-p",
-        "move tab left"
-    ),
+    workspace_tab_row!(PreviousTab, [], "gT", "previous tab", Goto, "T"),
+    workspace_tab_row!(NextTab, [], "gt", "next tab", Goto, "t"),
+    workspace_tab_row!(MoveTabRight, [], "Ctrl-Shift-n", "move tab right"),
+    workspace_tab_row!(MoveTabLeft, [], "Ctrl-Shift-p", "move tab left"),
     row!(
         PreviousTabAlias,
         [
@@ -1347,31 +1331,17 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
         "p",
         "toggle automatic refresh"
     ),
-    row!(
+    workspace_tab_row!(
         CloseTab,
-        [
-            Explorer,
-            SqlResultsData,
-            SqlOutput,
-            RelationDataBrowse,
-            RelationDdl,
-            PrincipalDdl
-        ],
+        [Explorer],
         "Space q",
         "close current tab",
         Leader,
         "q"
     ),
-    row!(
+    workspace_tab_row!(
         CloseOtherTabs,
-        [
-            Explorer,
-            SqlResultsData,
-            SqlOutput,
-            RelationDataBrowse,
-            RelationDdl,
-            PrincipalDdl
-        ],
+        [Explorer],
         "Ctrl+Shift+q",
         "close other tabs"
     ),
@@ -4300,6 +4270,141 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use std::collections::HashSet;
 
+    const TAB_CONTROLS: &[HelpShortcutId] = &[
+        HelpShortcutId::PreviousTab,
+        HelpShortcutId::NextTab,
+        HelpShortcutId::MoveTabRight,
+        HelpShortcutId::MoveTabLeft,
+        HelpShortcutId::CloseTab,
+        HelpShortcutId::CloseOtherTabs,
+    ];
+
+    #[test]
+    fn right_pane_help_always_lists_tab_controls() {
+        let mut config = crate::config::AppConfig::default();
+        for (command, binding) in [
+            ("previous-tab", "Alt-p"),
+            ("next-tab", "Alt-n"),
+            ("move-tab-right", "Alt-l"),
+            ("move-tab-left", "Alt-h"),
+            ("close-tab", "Alt-q"),
+        ] {
+            config
+                .keybindings
+                .global
+                .insert(command.into(), vec![binding.into()]);
+        }
+        let custom_bindings = config.keybindings.key_bindings().unwrap();
+        for context in [
+            ShortcutContext::EditorNormal,
+            ShortcutContext::EditorInsert,
+            ShortcutContext::EditorVisual,
+            ShortcutContext::SqlResultsData,
+            ShortcutContext::SqlOutput,
+            ShortcutContext::RedisKeys,
+            ShortcutContext::RedisKeysFindEditing,
+            ShortcutContext::RedisKeysFindConfirmed,
+            ShortcutContext::RedisPreview,
+            ShortcutContext::RedisPreviewVisual,
+            ShortcutContext::RedisPreviewTable,
+            ShortcutContext::Dashboard,
+            ShortcutContext::MongoDashboard,
+            ShortcutContext::RelationDataBrowse,
+            ShortcutContext::RelationDataEdit,
+            ShortcutContext::MongoDocumentFields,
+            ShortcutContext::MongoDocumentField,
+            ShortcutContext::MongoDocumentFieldMultiline,
+            ShortcutContext::MongoDocumentEjson,
+            ShortcutContext::RelationDataVisual,
+            ShortcutContext::RelationDataBusy,
+            ShortcutContext::RelationDdl,
+            ShortcutContext::PrincipalDdl,
+            ShortcutContext::DataQueryInput,
+        ] {
+            let mut help = HelpState::new(context, ShortcutCapabilities::default());
+            help.paste("tab");
+            let rows = help.entries();
+            for id in TAB_CONTROLS {
+                assert!(
+                    rows.iter().any(|row| row.id == *id),
+                    "{context:?} is missing {id:?}"
+                );
+            }
+            for (id, default_key, custom_key) in [
+                (HelpShortcutId::PreviousTab, "Ctrl-p", "Alt-p"),
+                (HelpShortcutId::NextTab, "Ctrl-n", "Alt-n"),
+                (HelpShortcutId::MoveTabRight, "Ctrl-Shift-n", "Alt-l"),
+                (HelpShortcutId::MoveTabLeft, "Ctrl-Shift-p", "Alt-h"),
+                (HelpShortcutId::CloseTab, "Ctrl-q", "Alt-q"),
+            ] {
+                let row = rows.iter().find(|row| row.id == id).unwrap();
+                assert!(
+                    configured_sequence(row, Some(&help.bindings)).contains(default_key),
+                    "{context:?}: {id:?}"
+                );
+                assert_eq!(
+                    configured_sequence(row, Some(&custom_bindings)),
+                    custom_key,
+                    "{context:?}: {id:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tab_navigation_help_stays_out_of_explorer_and_overlays() {
+        for context in [
+            ShortcutContext::Explorer,
+            ShortcutContext::ExplorerFindEditing,
+            ShortcutContext::ExplorerFindConfirmed,
+            ShortcutContext::ExplorerCatalogSearchEditing,
+            ShortcutContext::ExplorerCatalogSearchConfirmed,
+            ShortcutContext::RecordView,
+            ShortcutContext::Help,
+            ShortcutContext::Message,
+            ShortcutContext::CatalogEditorForm,
+        ] {
+            let rows = HelpState::new(context, ShortcutCapabilities::default()).entries();
+            for id in [
+                HelpShortcutId::PreviousTab,
+                HelpShortcutId::NextTab,
+                HelpShortcutId::MoveTabRight,
+                HelpShortcutId::MoveTabLeft,
+            ] {
+                assert!(
+                    rows.iter().all(|row| row.id != id),
+                    "{context:?} unexpectedly lists {id:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn editor_insert_help_can_execute_tab_controls() {
+        for (query, id, expected_active, expected_count) in [
+            ("next tab", HelpShortcutId::NextTab, 1, 3),
+            ("previous tab", HelpShortcutId::PreviousTab, 2, 3),
+            ("close current tab", HelpShortcutId::CloseTab, 0, 2),
+        ] {
+            let mut app = App::new(Vec::new());
+            for name in ["second", "third"] {
+                app.tabs
+                    .push(WorkspaceTab::Sql(crate::model::tab::ConsoleTab::new(name)));
+            }
+            app.focus = Focus::Editor;
+            assert_eq!(shortcut_context(&app), ShortcutContext::EditorInsert);
+            app.update(Action::ShowHelp);
+            app.update(Action::HelpPaste(query.into()));
+            assert_eq!(app.help_selected_id(), Some(id));
+
+            app.update(Action::ExecuteHelpShortcut(id));
+
+            assert!(app.overlay.is_none());
+            assert_eq!(app.active_tab, expected_active);
+            assert_eq!(app.tabs.len(), expected_count);
+        }
+    }
+
     #[test]
     fn pane_help_uses_configured_binding_and_hides_disabled_commands() {
         let mut config = crate::config::AppConfig::default();
@@ -4788,9 +4893,15 @@ mod tests {
             );
             assert_eq!(
                 rows.len(),
-                expected.len() + usize::from(selected_field.is_some() || ejson)
+                expected.len()
+                    + usize::from(selected_field.is_some() || ejson)
+                    + TAB_CONTROLS.len()
             );
-            assert!(rows.iter().all(|row| !shortcut_is_executable(row.id)));
+            assert!(
+                rows.iter()
+                    .filter(|row| !TAB_CONTROLS.contains(&row.id))
+                    .all(|row| !shortcut_is_executable(row.id))
+            );
             assert!(rows.iter().all(|row| {
                 !row.description.contains("SQL")
                     && !row.description.contains("DEFAULT")

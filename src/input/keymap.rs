@@ -2349,6 +2349,22 @@ impl Keymap {
                     }
                 }
             }
+            if event.modifiers.is_empty() {
+                let pending = match event.code {
+                    KeyCode::Char('g') => Some(Pending::Goto),
+                    KeyCode::Char('[') => Some(Pending::Previous),
+                    KeyCode::Char(']') => Some(Pending::Next),
+                    _ => None,
+                };
+                if let Some(pending) = pending
+                    && ["next-tab", "previous-tab"]
+                        .into_iter()
+                        .any(|command| self.bindings.has_sequence_prefix(command, &[event]))
+                {
+                    self.set_pending(pending, app);
+                    return None;
+                }
+            }
             if event.modifiers.is_empty() && event.code == KeyCode::Char('/') {
                 return Some(Action::RedisFindOpen);
             }

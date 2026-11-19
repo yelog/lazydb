@@ -18438,7 +18438,7 @@ impl App {
             }
             Action::SelectRedisNode { tab_id, node } => {
                 self.select_redis_key(tab_id, node);
-                Vec::new()
+                self.focus_redis_keys_for_tab(tab_id)
             }
             Action::OpenRedisKey { tab_id, node } => self.open_redis_key(tab_id, node),
             Action::RedisToggleNode { tab_id, node } => {
@@ -18448,7 +18448,7 @@ impl App {
                     tab.select(Some(node.clone()));
                     tab.toggle_prefix(&node);
                 }
-                Vec::new()
+                self.focus_redis_keys_for_tab(tab_id)
             }
             Action::RedisMoveSelection(delta) => self.move_redis_selection(delta),
             Action::RedisExpandSelection => self.expand_redis_selection(),
@@ -18524,14 +18524,7 @@ impl App {
                 }
                 Vec::new()
             }
-            Action::RedisFocusPane(focus) => {
-                let previous_focus = self.focus;
-                self.focus = Focus::Results;
-                if let Some(WorkspaceTab::RedisBrowser(tab)) = self.tabs.get_mut(self.active_tab) {
-                    tab.focus = focus;
-                }
-                self.prepare_active_tab_after_focus_change(previous_focus)
-            }
+            Action::RedisFocusPane(focus) => self.focus_redis_pane(focus),
             Action::RedisKeysViewportChanged { tab_id, rows } => {
                 if let Some(WorkspaceTab::RedisBrowser(tab)) =
                     self.tabs.iter_mut().find(|tab| tab.id() == tab_id)
@@ -26787,6 +26780,29 @@ impl App {
                 count_hint: crate::model::keyspace::DEFAULT_SCAN_COUNT,
             },
         )]
+    }
+
+    fn focus_redis_pane(
+        &mut self,
+        focus: crate::model::redis_browser::RedisBrowserFocus,
+    ) -> Vec<Command> {
+        let previous_focus = self.focus;
+        self.focus = Focus::Results;
+        if let Some(WorkspaceTab::RedisBrowser(tab)) = self.tabs.get_mut(self.active_tab) {
+            tab.focus = focus;
+        }
+        self.prepare_active_tab_after_focus_change(previous_focus)
+    }
+
+    fn focus_redis_keys_for_tab(&mut self, tab_id: Uuid) -> Vec<Command> {
+        if matches!(
+            self.tabs.get(self.active_tab),
+            Some(WorkspaceTab::RedisBrowser(tab)) if tab.id == tab_id
+        ) {
+            self.focus_redis_pane(crate::model::redis_browser::RedisBrowserFocus::Keys)
+        } else {
+            Vec::new()
+        }
     }
 
     pub fn select_redis_key(
