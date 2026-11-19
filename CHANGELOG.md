@@ -271,6 +271,41 @@
 - [`045c0f9`](https://github.com/yelog/lazydb/commit/045c0f9) fix(release): allow cold macOS builds to finish
 - [`27f4a9c`](https://github.com/yelog/lazydb/commit/27f4a9c) fix(release): prepare Linux image before verification
 
+## [0.3.4] - 2026-11-19
+
+### Added
+
+- Add reviewed native backup, restore, and database-copy jobs for PostgreSQL, MySQL, MariaDB, and SQLite across the TUI, CLI, and scoped MCP planning and history, including cancellation, archive verification, and retained recovery artifacts.
+- Reveal the active workspace tab in Explorer by default, expanding ancestors and scrolling it into view without changing pane focus; `explorer.auto_reveal_active_tab` can preserve manual navigation.
+- Focus Redis Keys when clicking or selecting its nodes, honor configured workspace tab sequences in Redis browsing, and expose tab controls across right-hand panes.
+
+### Changed
+
+- Align Explorer and help navigation with consistent selection highlighting and document native data operations, active-tab synchronization, Redis navigation, and release runner requirements.
+
+### Fixed
+
+- Accept legacy OpenSSH listener diagnostics when establishing managed database tunnels.
+- Render one read-only schema alias for MySQL-family databases so discovery cannot duplicate row identities and stall scope-picker navigation.
+- Open the New Connection Group editor from Explorer help and Omni search without reaching the display-only shortcut execution guard.
+
+### Internal
+
+- Add native data-operation fixtures and regressions, Explorer active-tab and Redis navigation coverage, and keep catalog and MCP probe tests aligned with current defaults.
+- Keep native Explorer tab-sync fixtures Clippy-clean without redundant node cloning.
+- Use a supported macOS ARM runner for Release and Pages workflows.
+
+### Commits
+
+- [`075c699`](https://github.com/yelog/lazydb/commit/075c699) ci(release): use supported macOS ARM runner
+- [`913693a`](https://github.com/yelog/lazydb/commit/913693a) fix(ssh): accept legacy OpenSSH listener diagnostics
+- [`a6d455a`](https://github.com/yelog/lazydb/commit/a6d455a) feat(data): add native backup, restore, and database copy
+- [`ba6fed7`](https://github.com/yelog/lazydb/commit/ba6fed7) feat(explorer): follow active workspace tab
+- [`1cdbbd3`](https://github.com/yelog/lazydb/commit/1cdbbd3) feat(ui): improve Redis key and help navigation
+- [`9426082`](https://github.com/yelog/lazydb/commit/9426082) fix(profile): deduplicate schema alias rows
+- [`3927798`](https://github.com/yelog/lazydb/commit/3927798) fix(explorer): handle new connection group shortcut
+- [`eff04de`](https://github.com/yelog/lazydb/commit/eff04de) test(explorer): avoid redundant node clone
+
 ## Unreleased
 
 ### Fixed
@@ -2623,6 +2658,7 @@ Changes that are not part of a tagged release go here.
   lazy shells without persisting result data across restarts, and profile
   deletion removes the workspace.
 
-[unreleased]: https://github.com/yelog/lazydb/compare/v0.3.3...HEAD
+[unreleased]: https://github.com/yelog/lazydb/compare/v0.3.4...HEAD
+[0.3.4]: https://github.com/yelog/lazydb/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/yelog/lazydb/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/yelog/lazydb/compare/v0.3.1...v0.3.2
