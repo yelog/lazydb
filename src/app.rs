@@ -3309,6 +3309,7 @@ impl App {
             }],
             Id::ExplorerAccess => vec![Action::OpenProfileAccess],
             Id::ExplorerMoveToGroup => vec![Action::ProfileGroupOpen],
+            Id::ExplorerCreateGroup => vec![Action::ProfileGroupCreate],
             Id::EditorInsert => vec![editor_key(KeyCode::Char('i'))],
             Id::EditorNormal => vec![editor_key(KeyCode::Esc)],
             Id::EditorUndo => vec![editor_key(KeyCode::Char('u'))],

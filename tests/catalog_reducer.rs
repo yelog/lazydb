@@ -2323,6 +2323,7 @@ fn connected_app() -> (App, ConnectionProfile) {
     profile.database = Some("app".into());
     profile.catalog_scope.databases = lazydb::profile::CatalogSelection::All;
     let mut app = App::new(vec![profile.clone()]);
+    app.set_explorer_auto_reveal_active_tab(false);
     app.update(Action::NewConsole);
     let generation = match app.update(Action::RequestConnect(profile.id)).as_slice() {
         [Command::Connect { generation, .. }] => *generation,

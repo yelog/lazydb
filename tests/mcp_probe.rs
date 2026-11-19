@@ -27,7 +27,7 @@ async fn probes_current_lazydb_without_database_io() {
     .unwrap();
     assert_eq!(report.status, "ok");
     assert_eq!(report.stage, "tools/list");
-    assert_eq!(report.tool_count, Some(11));
+    assert_eq!(report.tool_count, Some(14));
 }
 
 #[tokio::test]

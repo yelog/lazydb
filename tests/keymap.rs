@@ -3260,6 +3260,39 @@ fn filtered_help_moves_to_non_first_id_and_executes_it() {
 }
 
 #[test]
+fn explorer_help_new_connection_group_opens_group_editor() {
+    let mut app = App::new(Vec::new());
+    app.focus = Focus::Explorer;
+    app.update(Action::ShowHelp);
+    app.update(Action::HelpPaste("new connection".into()));
+    assert_eq!(
+        app.help_selected_id(),
+        Some(lazydb::help::HelpShortcutId::ExplorerCreateGroup)
+    );
+
+    let mut keymap = Keymap::default();
+    let action = keymap.map(key(KeyCode::Enter), &app);
+    assert_eq!(
+        action,
+        Some(Action::ExecuteHelpShortcut(
+            lazydb::help::HelpShortcutId::ExplorerCreateGroup
+        ))
+    );
+    app.update(action.unwrap());
+
+    assert!(matches!(
+        app.overlay,
+        Some(Overlay::ProfileGroup(
+            lazydb::model::profile_group::ProfileGroupOverlay::Edit {
+                group_id: None,
+                busy: false,
+                ..
+            }
+        ))
+    ));
+}
+
+#[test]
 fn help_sql_history_enter_opens_history_and_loads_first_page() {
     for focus in [Focus::Explorer, Focus::Editor, Focus::Results] {
         let mut app = App::new(Vec::new());

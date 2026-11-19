@@ -1543,7 +1543,8 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
         ExplorerEditGroup,
         [Explorer],
         "e",
-        "edit selected connection group"
+        "edit selected connection group",
+        display
     ),
     row!(
         ExplorerMoveToGroup,
@@ -1557,7 +1558,8 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
         ExplorerDeleteGroup,
         [Explorer],
         "d",
-        "delete selected connection group"
+        "delete selected connection group",
+        display
     ),
     row!(ExplorerDeleteProfile, [Explorer], "d", "delete connection"),
     row!(ExplorerConnect, [Explorer], "c", "connect"),
