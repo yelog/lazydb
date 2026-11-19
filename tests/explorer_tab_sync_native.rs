@@ -257,7 +257,7 @@ fn mongo_native_tabs_reveal_namespaces_without_sql_catalog_entries() {
                     &mut app,
                     tab,
                     database_node.clone(),
-                    &[profile_node.clone()],
+                    std::slice::from_ref(&profile_node),
                 );
             }
         }
