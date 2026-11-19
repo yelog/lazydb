@@ -1214,7 +1214,7 @@ fn scope_picker_keeps_all_and_selected_schema_modes_exclusive() {
 }
 
 #[test]
-fn mysql_mirrored_schema_row_is_selected_and_read_only() {
+fn mysql_schema_alias_row_is_selected_and_read_only() {
     let mut state = ProfileManagerState::new(false);
     state.start_new(DatabaseKind::MySql);
     state.draft.as_mut().unwrap().database.set("sales");
@@ -1229,6 +1229,93 @@ fn mysql_mirrored_schema_row_is_selected_and_read_only() {
     );
     assert!(row.read_only);
     assert!(!state.toggle_scope_row("database:sales:schema:sales"));
+}
+
+#[test]
+fn mysql_tenant_discovery_has_unique_rows_and_navigable_schema_aliases() {
+    for kind in [
+        DatabaseKind::MySql,
+        DatabaseKind::MariaDb,
+        DatabaseKind::TiDb,
+    ] {
+        let mut state = ProfileManagerState::new(false);
+        state.start_new(kind);
+        let draft = state.draft.as_mut().unwrap();
+        draft.name.set("tenant");
+        draft.database.set("tenant_001");
+        let profile = draft.validate(&[]).unwrap().profile;
+        let fingerprint =
+            lazydb::model::profile_manager::DiscoveryFingerprint::for_profile(&profile, false, 0);
+        draft.begin_catalog_discovery(fingerprint);
+        draft.apply_catalog_discovery(lazydb::model::profile_manager::ProfileCatalogDiscovery {
+            fingerprint,
+            server: lazydb::db::ServerInfo {
+                kind,
+                version: "fixture".into(),
+                database: "tenant_001".into(),
+                current_user: None,
+            },
+            capabilities: lazydb::db::catalog::CatalogCapabilities {
+                namespace_model: lazydb::db::catalog::NamespaceModel::DatabaseIsSchema,
+                top_level_groups: vec![],
+                column_metadata: Default::default(),
+                supports_lazy_children: false,
+            },
+            discovery: Some(Ok(lazydb::db::catalog::CatalogDiscovery {
+                databases: ["tenant_001", "tenant_002"]
+                    .into_iter()
+                    .map(|name| lazydb::db::catalog::DiscoveredDatabase {
+                        name: name.into(),
+                        schemas: vec![name.into()],
+                    })
+                    .collect(),
+                warnings: Vec::new(),
+            })),
+        });
+        state.open_scope_picker();
+
+        let rows = state.scope_rows_for_render();
+        assert_eq!(
+            rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            [
+                "database:tenant_001",
+                "database:tenant_001:schema:tenant_001",
+                "database:tenant_002",
+            ],
+            "{kind:?}"
+        );
+
+        state.move_scope_selection(1);
+        assert_eq!(
+            state.scope_selected_row.as_deref(),
+            Some("database:tenant_001:schema:tenant_001"),
+            "{kind:?}"
+        );
+        state.move_scope_selection(1);
+        assert_eq!(
+            state.scope_selected_row.as_deref(),
+            Some("database:tenant_002"),
+            "{kind:?}"
+        );
+        state.move_scope_selection(1);
+        assert_eq!(
+            state.scope_selected_row.as_deref(),
+            Some("database:tenant_002:schema:tenant_002"),
+            "{kind:?}"
+        );
+        state.move_scope_selection(-1);
+        assert_eq!(
+            state.scope_selected_row.as_deref(),
+            Some("database:tenant_002"),
+            "{kind:?}"
+        );
+        state.move_scope_selection(-1);
+        assert_eq!(
+            state.scope_selected_row.as_deref(),
+            Some("database:tenant_001:schema:tenant_001"),
+            "{kind:?}"
+        );
+    }
 }
 
 #[test]

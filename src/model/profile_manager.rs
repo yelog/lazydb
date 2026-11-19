@@ -2992,10 +2992,11 @@ impl ProfileManagerState {
                 || self.scope_selected_row.as_deref() == Some(&format!("database:{database}"))
             {
                 let selected_schemas = selected_schema(&draft.catalog_scope, database);
-                if matches!(
+                let database_is_schema = matches!(
                     draft.kind,
                     DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::TiDb
-                ) {
+                );
+                if database_is_schema {
                     rows.push(ScopeRow {
                         id: format!("database:{database}:schema:{database}"),
                         name: database.to_owned(),
@@ -3012,6 +3013,7 @@ impl ProfileManagerState {
                         }),
                         database: false,
                     });
+                    continue;
                 }
                 let custom_schemas =
                     selected_schemas.map_or_else(Vec::new, |selection| match selection {
@@ -3031,10 +3033,7 @@ impl ProfileManagerState {
                         } else {
                             ScopeSelectionState::Unchecked
                         },
-                        read_only: matches!(
-                            draft.kind,
-                            DatabaseKind::MySql | DatabaseKind::MariaDb | DatabaseKind::TiDb
-                        ),
+                        read_only: false,
                         unavailable: discovery.is_none_or(|result| {
                             result.as_ref().map_or(true, |items| {
                                 !items

@@ -205,9 +205,9 @@ The Profile Manager owns one draft form. `Test Connection` uses a temporary
 connection, probes it, and performs read-only database/schema discovery for the
 hierarchical scope picker without persistence or active-connection mutation.
 Scope is `All` or `Selected`; MySQL's database-is-schema namespace is represented
-as a mirrored, non-toggleable schema row. Discovery is fingerprinted by the
-connection fields and credential revision; edits make a previous discovery
-stale and late test results are ignored.
+as one non-toggleable schema alias row. Discovery is fingerprinted by the
+connection fields and credential revision; edits make a previous discovery stale
+and late test results are ignored.
 
 Profile fields are the sole connection source of truth. The form URL
 is a secret-backed editing projection with a persisted format preference. URL

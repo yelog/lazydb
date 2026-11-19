@@ -794,7 +794,7 @@ encryption key.
 The current profile serializer stores scope under `catalog_scope`, with
 `databases` and `schemas` represented as `All` or `Selected` lists. PostgreSQL
 and SQLite expose database then schema rows. MySQL treats each selected database
-as its own schema and mirrors that name in the picker; the mirrored schema
+as its own schema and shows one read-only schema alias beneath it; the alias
 cannot be toggled separately. If discovery is stale or unavailable, saved
 selections remain visible with a warning.
 

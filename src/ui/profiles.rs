@@ -436,7 +436,7 @@ fn render_scope(
         } else {
             theme.text
         };
-        let suffix = if row.read_only { " (mirrored)" } else { "" };
+        let suffix = if row.read_only { " (schema alias)" } else { "" };
         let line = Line::from(vec![
             Span::styled(prefix, Style::new().fg(name_color).bg(background)),
             Span::styled(
