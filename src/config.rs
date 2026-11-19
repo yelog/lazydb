@@ -161,6 +161,8 @@ pub struct AppConfig {
     pub connections: ConnectionsConfig,
     pub dashboard: DashboardConfig,
     #[serde(default)]
+    pub explorer: ExplorerConfig,
+    #[serde(default)]
     pub redis: RedisConfig,
     #[serde(default)]
     pub updates: UpdateConfig,
@@ -279,6 +281,25 @@ pub enum ConnectionAccessDefault {
 #[serde(deny_unknown_fields)]
 pub struct DashboardConfig {
     pub refresh_interval_seconds: u64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ExplorerConfig {
+    pub auto_reveal_active_tab: bool,
+}
+
+impl Default for ExplorerConfig {
+    fn default() -> Self {
+        #[derive(Deserialize)]
+        struct EmbeddedDefaults {
+            explorer: ExplorerConfig,
+        }
+
+        let defaults: EmbeddedDefaults = toml::from_str(DEFAULT_CONFIG_TOML)
+            .expect("embedded default configuration must be valid");
+        defaults.explorer
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
@@ -860,7 +881,7 @@ mod tests {
 
     use super::{
         AppConfig, ClipboardBackend, ConfigError, ConnectionAccessDefault, DEFAULT_CONFIG_TOML,
-        HelpPanelView, SshConfig,
+        ExplorerConfig, HelpPanelView, SshConfig,
     };
     use crate::{cli::MotionMode, ui::icons::IconMode};
 
@@ -925,6 +946,8 @@ mod tests {
         assert_eq!(config.connections.ssh.server_alive_interval_seconds, 30);
         assert_eq!(config.connections.ssh.server_alive_count_max, 3);
         assert_eq!(config.terminal.clipboard.backend, ClipboardBackend::System);
+        assert_eq!(config.explorer, ExplorerConfig::default());
+        assert!(config.explorer.auto_reveal_active_tab);
         assert_eq!(config.redis.scan_count_hint, 200);
         assert_eq!(config.redis.page_size, 200);
         assert_eq!(config.redis.memory_key_limit, 10_000);
@@ -953,6 +976,88 @@ mod tests {
             AppConfig::load(temp.path().join("settings.toml")).unwrap(),
             AppConfig::default()
         );
+    }
+
+    #[test]
+    fn missing_explorer_section_uses_embedded_defaults() {
+        let (before, after) = DEFAULT_CONFIG_TOML.split_once("\n[explorer]\n").unwrap();
+        let after = after.split_once("\n[redis]\n").unwrap().1;
+        let contents = format!("{before}\n[redis]\n{after}");
+
+        let config = AppConfig::from_toml(&contents).unwrap();
+
+        assert_eq!(config.explorer, ExplorerConfig::default());
+    }
+
+    #[test]
+    fn partial_explorer_settings_are_merged_with_embedded_defaults() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("settings.toml");
+        fs::write(&path, "[explorer]\nauto_reveal_active_tab = false\n").unwrap();
+
+        let config = AppConfig::load(path).unwrap();
+        let mut expected = AppConfig::default();
+        expected.explorer.auto_reveal_active_tab = false;
+
+        assert_eq!(config, expected);
+    }
+
+    #[test]
+    fn legacy_settings_without_explorer_use_embedded_defaults() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("settings.toml");
+        fs::write(&path, "[ui]\nmotion = \"reduced\"\n").unwrap();
+
+        let config = AppConfig::load(path).unwrap();
+
+        assert_eq!(config.explorer, ExplorerConfig::default());
+        assert_eq!(config.ui.motion, MotionMode::Reduced);
+    }
+
+    #[test]
+    fn explorer_settings_reject_invalid_types() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("settings.toml");
+
+        for value in ["\"false\"", "0", "[]", "{}"] {
+            let setting = format!("auto_reveal_active_tab = {value}");
+            let contents = DEFAULT_CONFIG_TOML.replace("auto_reveal_active_tab = true", &setting);
+            assert!(
+                matches!(AppConfig::from_toml(&contents), Err(ConfigError::Decode(_))),
+                "accepted {setting}"
+            );
+
+            fs::write(&path, format!("[explorer]\n{setting}\n")).unwrap();
+            assert!(
+                matches!(AppConfig::load(path.clone()), Err(ConfigError::Decode(_))),
+                "accepted user override {setting}"
+            );
+        }
+    }
+
+    #[test]
+    fn explorer_settings_reject_unknown_fields() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("settings.toml");
+
+        for settings in [
+            "[explorer]\nauto_reveal_active_tabs = false",
+            "[explorer]\nauto_revel_active_tab = false",
+            "[explorers]\nauto_reveal_active_tab = false",
+        ] {
+            let contents =
+                DEFAULT_CONFIG_TOML.replace("[explorer]\nauto_reveal_active_tab = true", settings);
+            assert!(
+                matches!(AppConfig::from_toml(&contents), Err(ConfigError::Decode(_))),
+                "accepted {settings}"
+            );
+
+            fs::write(&path, settings).unwrap();
+            assert!(
+                matches!(AppConfig::load(path.clone()), Err(ConfigError::Decode(_))),
+                "accepted user override {settings}"
+            );
+        }
     }
 
     #[test]

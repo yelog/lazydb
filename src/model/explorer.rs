@@ -2168,6 +2168,17 @@ impl ExplorerTreeState {
         true
     }
 
+    pub(crate) fn reveal_node_index(&mut self, id: ExplorerNodeId) -> Option<usize> {
+        if !self.reveal_node(id) {
+            return None;
+        }
+        let rows = self.visible();
+        let selected = self.selected.as_ref()?;
+        let index = rows.iter().position(|row| &row.id == selected)?;
+        self.update_scroll(&rows, index);
+        Some(index)
+    }
+
     pub fn expand(&mut self) -> bool {
         let Some(selected) = self.selected.clone() else {
             return false;
@@ -2670,6 +2681,17 @@ impl ExplorerTreeState {
             ExplorerNodeId::EmptyProfiles | ExplorerNodeId::Others => None,
             ExplorerNodeId::Profile(profile_id) => {
                 let profile = self.profiles.get(profile_id)?;
+                if let Some(group_id) = profile.group_id {
+                    return Some(ExplorerNodeId::ConnectionGroup {
+                        group_id,
+                        region: match profile.placement {
+                            ProfilePlacement::OtherProject => ProfileRegion::Others,
+                            ProfilePlacement::CurrentProject | ProfilePlacement::Global => {
+                                ProfileRegion::Primary
+                            }
+                        },
+                    });
+                }
                 (profile.placement == ProfilePlacement::OtherProject)
                     .then_some(ExplorerNodeId::Others)
             }
@@ -2755,10 +2777,10 @@ impl ExplorerTreeState {
                     profile_id: *profile_id,
                 })
             }
-            ExplorerNodeId::ConnectionGroup { region, .. } => Some(match region {
-                ProfileRegion::Primary => ExplorerNodeId::EmptyProfiles,
-                ProfileRegion::Others => ExplorerNodeId::Others,
-            }),
+            ExplorerNodeId::ConnectionGroup { region, .. } => match region {
+                ProfileRegion::Primary => None,
+                ProfileRegion::Others => Some(ExplorerNodeId::Others),
+            },
             ExplorerNodeId::Status { owner, .. } | ExplorerNodeId::Empty { owner } => {
                 Some(owner.node_id())
             }

@@ -1591,6 +1591,17 @@ impl ExplorerState {
         true
     }
 
+    pub fn reveal_node(&mut self, id: ExplorerNodeId) -> bool {
+        let Some(index) = self.normalized.reveal_node_index(id) else {
+            return false;
+        };
+        self.search = None;
+        self.find = None;
+        self.selected = index;
+        self.scroll = self.normalized.scroll;
+        true
+    }
+
     pub fn remove_dropped_subtree(
         &mut self,
         root: &CatalogId,
@@ -2058,6 +2069,25 @@ mod explorer_hot_path_tests {
             "moving must project the tree at most once"
         );
         assert!(explorer.selected > 0);
+        assert_eq!(explorer.scroll, explorer.normalized.scroll);
+    }
+
+    #[test]
+    fn revealing_a_tab_object_projects_the_tree_once_without_formatting_rows() {
+        let (mut normalized, tables) = crate::model::explorer::tests::explorer_with_tables(956);
+        normalized.expanded.clear();
+        let mut explorer = ExplorerState {
+            normalized,
+            ..ExplorerState::default()
+        };
+        explorer.set_viewport_height(30);
+        let _ = take_projection_calls();
+        let _ = take_display_row_conversions();
+
+        assert!(explorer.reveal_node(tables.last().unwrap().clone()));
+
+        assert_eq!(take_projection_calls(), 1);
+        assert_eq!(take_display_row_conversions(), 0);
         assert_eq!(explorer.scroll, explorer.normalized.scroll);
     }
 

@@ -101,12 +101,13 @@ fn opening_relation_is_a_semantic_action() {
 }
 
 #[test]
-fn explicit_catalog_id_opens_relation_without_changing_explorer_selection() {
+fn explicit_catalog_id_opens_relation_without_changing_selection_when_auto_reveal_is_disabled() {
     let profile = lazydb::profile::import_connection_url("sqlite::memory:", Some("local"))
         .unwrap()
         .profile;
     let profile_id = profile.id;
     let mut app = lazydb::app::App::new(vec![profile.clone()]);
+    app.set_explorer_auto_reveal_active_tab(false);
     app.update(Action::ConnectionSucceeded {
         profile_id,
         generation: 1,

@@ -590,6 +590,62 @@ fn reveal_node_expands_the_complete_visible_parent_path() {
 }
 
 #[test]
+fn reveal_node_opens_connection_groups_in_both_profile_regions() {
+    for placement in [ProfilePlacement::Global, ProfilePlacement::OtherProject] {
+        let profile = profile_id(1);
+        let fixture = fixture(profile);
+        let mut explorer = explorer_with_fixture(&fixture);
+        let group_id = Uuid::from_u128(30);
+        let state = explorer.profiles.get_mut(&profile).unwrap();
+        state.placement = placement;
+        state.group_id = Some(group_id);
+        explorer.groups.push(lazydb::profile::ConnectionGroup {
+            id: group_id,
+            name: "Production".into(),
+        });
+        explorer.expanded.clear();
+        let table = ExplorerNodeId::Catalog(fixture.table.id.clone());
+        let region = if placement == ProfilePlacement::OtherProject {
+            ProfileRegion::Others
+        } else {
+            ProfileRegion::Primary
+        };
+
+        assert!(explorer.reveal_node(table.clone()));
+
+        assert!(
+            explorer
+                .expanded
+                .contains(&ExplorerNodeId::ConnectionGroup { group_id, region })
+        );
+        assert!(visible_ids(&explorer).contains(&table));
+        assert_eq!(
+            explorer.expanded.contains(&ExplorerNodeId::Others),
+            placement == ProfilePlacement::OtherProject
+        );
+    }
+}
+
+#[test]
+fn revealing_an_explorer_node_scrolls_it_into_view_and_syncs_cached_selection() {
+    let fixture = fixture(profile_id(1));
+    let mut explorer = ExplorerState {
+        normalized: explorer_with_fixture(&fixture),
+        ..ExplorerState::default()
+    };
+    explorer.set_viewport_height(3);
+    let table = ExplorerNodeId::Catalog(fixture.table.id.clone());
+
+    assert!(explorer.reveal_node(table.clone()));
+
+    assert_eq!(explorer.selected_id(), Some(&table));
+    assert_eq!(explorer.scroll, explorer.normalized.scroll);
+    assert_eq!(explorer.normalized.visible()[explorer.selected].id, table);
+    let viewport = explorer.viewport(3);
+    assert!(viewport.rows.iter().any(|row| row.id == table));
+}
+
+#[test]
 fn projection_inserts_groups_and_skips_collapsed_catalog_subtrees() {
     let profile = profile_id(1);
     let fixture = fixture(profile);

@@ -1,6 +1,7 @@
 #![allow(clippy::collapsible_if)]
 
 mod data_ops;
+mod explorer;
 
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
@@ -253,6 +254,8 @@ pub struct App {
     pub sql_editors: Vec<ConsoleRecord>,
     pub recent_targets: Vec<ExecutionTarget>,
     pub active_tab: usize,
+    explorer_auto_reveal_active_tab: bool,
+    pending_explorer_tab_reveal: Option<Uuid>,
     placeholder_console_id: Option<Uuid>,
     pub focus: Focus,
     pub redis_info_scroll: u16,
@@ -1077,6 +1080,9 @@ impl App {
             sql_editors,
             recent_targets: Vec::new(),
             active_tab: 0,
+            explorer_auto_reveal_active_tab: crate::config::ExplorerConfig::default()
+                .auto_reveal_active_tab,
+            pending_explorer_tab_reveal: None,
             placeholder_console_id,
             focus: Focus::Editor,
             redis_info_scroll: 0,
@@ -4378,6 +4384,35 @@ impl App {
             Action::SubmitRelationQuery => Action::SubmitDataQuery,
             action => action,
         };
+        let explorer_reveal_requested_tab = self.explorer_reveal_requested_tab(&action);
+        let explorer_metadata_arrived = matches!(
+            action,
+            Action::ConnectionSucceeded { .. }
+                | Action::CatalogPageLoaded(_)
+                | Action::CatalogRelationResolved { .. }
+                | Action::RedisDatabasesLoaded { .. }
+                | Action::MongoDatabasesLoaded { .. }
+                | Action::MongoCollectionsLoaded { .. }
+                | Action::PrincipalPageLoaded { .. }
+        );
+        let explorer_navigation = matches!(
+            action,
+            Action::ExplorerMove(_)
+                | Action::ExplorerSelect(_)
+                | Action::ExplorerSelectTarget(_)
+                | Action::ExplorerScrollNodes { .. }
+                | Action::ExplorerSetScrollOffset(_)
+                | Action::ExplorerAlignSelected(_)
+                | Action::ExplorerToggle
+                | Action::ExplorerToggleNode(_)
+                | Action::ExplorerExpand
+                | Action::ExplorerCollapse
+                | Action::ExplorerFindOpen
+                | Action::ExplorerFindNext
+                | Action::ExplorerFindPrevious
+                | Action::ExplorerSearchOpen
+                | Action::ExplorerSearchLocate
+        );
         let leader_context = (
             self.focus,
             self.tabs.get(self.active_tab).map(WorkspaceTab::id),
@@ -4420,6 +4455,12 @@ impl App {
         {
             self.editor.close_console(id);
         }
+        self.synchronize_explorer_with_active_tab(
+            leader_context.1,
+            explorer_reveal_requested_tab,
+            explorer_metadata_arrived,
+            explorer_navigation,
+        );
         commands
     }
 

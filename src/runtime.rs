@@ -9179,6 +9179,7 @@ pub async fn run_tui(cli: Cli) -> Result<RunOutcome> {
         app.set_data_operation_write_policy(crate::agent::policy::WritePolicy::Deny);
     }
     app.set_default_connection_access(settings.connections.default_access);
+    app.set_explorer_auto_reveal_active_tab(settings.explorer.auto_reveal_active_tab);
     app.connection_groups = startup.collection.groups.clone();
     app.explorer.normalized.sync_organization(
         startup.collection.groups.clone(),

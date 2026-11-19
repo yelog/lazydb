@@ -61,6 +61,9 @@ server_alive_count_max = 3
 [dashboard]
 refresh_interval_seconds = 5
 
+[explorer]
+auto_reveal_active_tab = true
+
 [redis]
 # SCAN COUNT is a server-side hint, not a hard result limit.
 scan_count_hint = 200

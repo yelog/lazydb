@@ -140,6 +140,22 @@ refresh_interval_seconds = 5
 The value must be at least one second. The setting controls both metric and
 process polling when the Dashboard is active.
 
+Activating a workspace tab synchronizes the Explorer selection with that tab's
+object by default (`explorer.auto_reveal_active_tab = true`). The Explorer
+expands the object's ancestors and scrolls the selection into view; keyboard
+focus is not changed by revealing. An active Explorer search/find view is
+dismissed when an object is revealed. SQL console tabs use their execution schema
+or database as the reveal target. When a tab has no matching object or its
+Explorer nodes are not loaded, revealing is best effort and may fall back to
+an available context or wait for metadata to load.
+
+To disable automatic revealing, add this to `settings.toml`:
+
+```toml
+[explorer]
+auto_reveal_active_tab = false
+```
+
 New connections are global by default. To restrict newly saved connections to
 the current project instead, set:
 
@@ -178,6 +194,7 @@ The complete schema and current values are best read directly in
 | `execution` | `confirmation` |
 | `connections` | `default_access`, `ssh.connect_timeout_seconds`, `ssh.server_alive_interval_seconds`, `ssh.server_alive_count_max` |
 | `dashboard` | `refresh_interval_seconds` |
+| `explorer` | `auto_reveal_active_tab` |
 | `redis` | Scan/page sizes, value preview budgets, concurrency, temporary key-index, and metadata-cache limits |
 | `updates` | `check_on_startup`, `check_interval_hours` |
 | `keybindings` | `preset`, `sequence_timeout_ms`, and grouped `global`, `leader`, `panes`, `explorer`, `results`, `editor`, `overlays` tables |
