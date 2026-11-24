@@ -306,6 +306,21 @@
 - [`3927798`](https://github.com/yelog/lazydb/commit/3927798) fix(explorer): handle new connection group shortcut
 - [`eff04de`](https://github.com/yelog/lazydb/commit/eff04de) test(explorer): avoid redundant node clone
 
+## [0.3.5] - 2026-11-24
+
+### Fixed
+
+- Fix SQLite `NEW Table` constraint editing and creation: open primary-key, unique, check, and foreign-key details in a dedicated dialog, keep the keyboard and mouse flow usable at `80×20`, generate schema-qualified `CREATE TABLE` DDL, and reuse the owning connection for attached schemas and in-memory databases ([#54](https://github.com/yelog/lazydb/issues/54), [`3e52b0e`](https://github.com/yelog/lazydb/commit/3e52b0e)).
+
+### Internal
+
+- Keep the table renderer clippy-clean after adding mutation mode ([`25bb7d1`](https://github.com/yelog/lazydb/commit/25bb7d1)).
+
+### Commits
+
+- [`25bb7d1`](https://github.com/yelog/lazydb/commit/25bb7d1) chore(ui): keep table renderer clippy-clean
+- [`3e52b0e`](https://github.com/yelog/lazydb/commit/3e52b0e) fix(catalog): support SQLite table constraints
+
 ## Unreleased
 
 ### Fixed
@@ -2658,7 +2673,8 @@ Changes that are not part of a tagged release go here.
   lazy shells without persisting result data across restarts, and profile
   deletion removes the workspace.
 
-[unreleased]: https://github.com/yelog/lazydb/compare/v0.3.4...HEAD
+[unreleased]: https://github.com/yelog/lazydb/compare/v0.3.5...HEAD
+[0.3.5]: https://github.com/yelog/lazydb/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/yelog/lazydb/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/yelog/lazydb/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/yelog/lazydb/compare/v0.3.1...v0.3.2
