@@ -1801,6 +1801,7 @@ fn render_index(frame: &mut Frame<'_>, area: Rect, draft: &IndexDraft, theme: Th
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_table(
     frame: &mut Frame<'_>,
     area: Rect,
