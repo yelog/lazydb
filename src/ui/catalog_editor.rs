@@ -14,8 +14,8 @@ use crate::{
     model::catalog_editor::{
         CatalogDraft, CatalogEditorOperation, CatalogEditorPage, CatalogEditorState,
         CatalogFormFocus, ConstraintDraft, DatabaseDraft, IndexDraft, MaterializedViewDraft,
-        RoleDraft, SchemaDraft, SequenceDraft, TableActionField, TableColumnField, TableDraft,
-        TableEditorFocus, TableGeneralField, ViewDraft,
+        RoleDraft, SchemaDraft, SequenceDraft, TableActionField, TableColumnField,
+        TableConstraintEditSession, TableDraft, TableEditorFocus, TableGeneralField, ViewDraft,
     },
     model::text_input::TextInput,
     security::sanitize_terminal_text,
@@ -23,8 +23,7 @@ use crate::{
 };
 
 use super::{
-    HitRegion, HitTarget, Theme, UiState,
-    dialog_footer::{self, FooterDensity},
+    HitRegion, HitTarget, Theme, UiState, dialog_footer,
     icons::IconSet,
     render_text_input,
     shortcut_hints::{self, ShortcutHint},
@@ -55,17 +54,23 @@ pub fn render(
     }
     if editor.page == CatalogEditorPage::Form
         && let Some(CatalogDraft::Table(draft)) = editor.draft.as_ref()
-        && let Some(session) = draft.column_editor.as_ref()
     {
-        render_table_column_details_modal(
-            frame,
-            inner,
-            draft.focus,
-            session,
-            editor.database_kind,
-            ui,
-            theme,
-        );
+        if let Some(session) = draft.column_editor.as_ref() {
+            render_table_column_details_modal(
+                frame,
+                inner,
+                draft.focus,
+                session,
+                editor.database_kind,
+                ui,
+                theme,
+            );
+        } else if let Some(session) = draft.constraint_editor.as_ref() {
+            ui.hit_regions.clear();
+            ui.catalog_input_targets.clear();
+            ui.input_selection_targets.clear();
+            render_table_constraint_details_modal(frame, inner, session, ui, theme);
+        }
     }
 }
 
@@ -336,6 +341,7 @@ fn form(
             frame,
             chunks[1],
             draft,
+            editor.mode,
             editor.baseline.as_ref(),
             ui,
             theme,
@@ -1799,6 +1805,7 @@ fn render_table(
     frame: &mut Frame<'_>,
     area: Rect,
     draft: &TableDraft,
+    mode: crate::db::catalog_mutation::CatalogMutationMode,
     baseline: Option<&crate::db::catalog_mutation::CatalogObjectDefinition>,
     ui: &mut UiState,
     theme: Theme,
@@ -1953,109 +1960,23 @@ fn render_table(
             theme,
         );
     }
-    if let TableEditorFocus::Action(TableActionField::Constraint(index)) = draft.focus
-        && let Some(constraint) = draft.table_constraints.get(index)
-    {
-        let fields: Vec<(usize, &str, &TextInput)> = match constraint.kind {
-            crate::db::catalog_mutation::ConstraintDefinitionKind::PrimaryKey { .. }
-            | crate::db::catalog_mutation::ConstraintDefinitionKind::Unique { .. } => {
-                vec![
-                    (0, "Name", &constraint.name),
-                    (1, "Columns", &constraint.columns),
-                ]
-            }
-            crate::db::catalog_mutation::ConstraintDefinitionKind::Check { .. } => vec![
-                (0, "Name", &constraint.name),
-                (1, "Expression", &constraint.expression),
-            ],
-            crate::db::catalog_mutation::ConstraintDefinitionKind::ForeignKey { .. } => vec![
-                (0, "Name", &constraint.name),
-                (1, "Columns", &constraint.columns),
-                (2, "Target schema", &constraint.referenced_schema),
-                (3, "Target table", &constraint.referenced_relation),
-                (4, "Target columns", &constraint.referenced_columns),
-                (5, "On update", &constraint.on_update),
-                (6, "On delete", &constraint.on_delete),
-            ],
-        };
-        let top = area.y.saturating_add(2);
-        let content_bottom = area.y.saturating_add(area.height.saturating_sub(10));
-        for (field_index, (selection_index, label, input)) in fields.iter().enumerate() {
-            let y = top.saturating_add(field_index as u16);
-            if y >= content_bottom {
-                break;
-            }
-            let row = Rect::new(area.x, y, area.width, 1);
-            frame.render_widget(
-                Paragraph::new(format!(
-                    "{label:<16} {}",
-                    sanitize_terminal_text(input.value())
-                ))
-                .style(Style::new().fg(theme.text).bg(
-                    if constraint.selected_field == *selection_index {
-                        theme.selection
-                    } else {
-                        theme.surface
-                    },
-                )),
-                row,
-            );
-            ui.hit_regions.push(HitRegion {
-                area: row,
-                target: HitTarget::CatalogEditorConstraintField {
-                    constraint: index,
-                    field: *selection_index,
-                },
-            });
-        }
-    }
     let hints = table_shortcut_hints(draft, compact);
-    let footer_action_width = dialog_footer::action_width(
-        &[
-            "[ Add Column ]",
-            "[ Add PK ]",
-            "[ Add UNIQUE ]",
-            "[ Add CHECK ]",
-            "[ Add FK ]",
-            "[ Edit name ]",
-            "[ Edit columns ]",
-            "[ Edit expression ]",
-            "[ Edit target schema ]",
-            "[ Edit target table ]",
-            "[ Edit target columns ]",
-            "[ Edit on update ]",
-            "[ Edit on delete ]",
-            "[ Remove Constraint ]",
-            "[ Review SQL ]",
-            "[ Cancel ]",
-        ],
-        1,
-    );
-    let footer = dialog_footer::measure(
-        area,
-        footer_action_width,
-        1,
-        if compact {
-            FooterDensity::Compact
-        } else {
-            FooterDensity::Standard
-        },
-    );
-    if let Some(separator) = footer.content_separator {
-        frame.render_widget(
-            Paragraph::new("─").style(Style::new().fg(theme.border).bg(theme.surface)),
-            separator,
-        );
-    }
-    if let Some(separator) = footer.help_separator {
-        frame.render_widget(
-            Paragraph::new("─").style(Style::new().fg(theme.border).bg(theme.surface)),
-            separator,
-        );
-    }
-    let content_bottom = footer
-        .content_separator
-        .map_or(footer.status_and_actions.y, |separator| separator.y);
+    let structured_constraints_editable = mode
+        == crate::db::catalog_mutation::CatalogMutationMode::Create
+        && draft.supports_structured_table_constraints();
+    let has_constraints = !draft.table_constraints.is_empty();
+    let constraint_strip_height = u16::from(has_constraints);
+    let constraint_actions_height = u16::from(has_constraints);
+    let footer_height = 3 + constraint_strip_height + constraint_actions_height;
+    let footer_top = area.bottom().saturating_sub(footer_height);
+    let constraint_strip_y = has_constraints.then_some(footer_top);
+    let add_actions_y = footer_top.saturating_add(constraint_strip_height);
+    let constraint_actions_y = has_constraints.then_some(add_actions_y.saturating_add(1));
+    let summary_actions_y = add_actions_y
+        .saturating_add(1)
+        .saturating_add(constraint_actions_height);
+    let hints_y = summary_actions_y.saturating_add(1);
+    let content_bottom = footer_top;
     if let Some(ddl) = draft.clickhouse_native_ddl.as_deref() {
         let preview = Rect::new(area.x, area.y.saturating_add(1), area.width, 2);
         frame.render_widget(
@@ -2076,7 +1997,7 @@ fn render_table(
         }
         _ => None,
     };
-    let baseline = match baseline {
+    let table_baseline = match baseline {
         Some(crate::db::catalog_mutation::CatalogObjectDefinition::Table(definition)) => {
             Some(definition)
         }
@@ -2108,7 +2029,7 @@ fn render_table(
             ..Default::default()
         }
     } else {
-        draft.change_summary(baseline)
+        draft.change_summary(table_baseline)
     };
     let list_bottom = content_bottom;
     let columns_y = if compact {
@@ -2214,7 +2135,7 @@ fn render_table(
                 icons.catalog_column_delete()
             };
             let field_style = |field| {
-                if column.field_changed_against(field, baseline) {
+                if column.field_changed_against(field, table_baseline) {
                     Style::new().bg(theme.row_updated)
                 } else {
                     Style::new()
@@ -2340,12 +2261,139 @@ fn render_table(
             &mut table_state,
         );
     }
-    let summary_line = table_change_summary_line(summary, theme);
-    frame.render_widget(
-        Paragraph::new(summary_line).style(Style::new().bg(theme.surface)),
-        footer.status_area(footer_action_width, 3),
+    let add_actions = [
+        (
+            "[ Add Column ]",
+            TableEditorFocus::Action(TableActionField::AddColumn),
+            HitTarget::CatalogEditorAddTableColumn,
+            true,
+        ),
+        (
+            "[ Add PK ]",
+            TableEditorFocus::Action(TableActionField::AddConstraintPrimaryKey),
+            HitTarget::CatalogEditorAddTableConstraintPrimaryKey,
+            structured_constraints_editable,
+        ),
+        (
+            "[ Add UNIQUE ]",
+            TableEditorFocus::Action(TableActionField::AddConstraintUnique),
+            HitTarget::CatalogEditorAddTableConstraintUnique,
+            structured_constraints_editable,
+        ),
+        (
+            "[ Add CHECK ]",
+            TableEditorFocus::Action(TableActionField::AddConstraintCheck),
+            HitTarget::CatalogEditorAddTableConstraintCheck,
+            structured_constraints_editable,
+        ),
+        (
+            "[ Add FK ]",
+            TableEditorFocus::Action(TableActionField::AddConstraintForeignKey),
+            HitTarget::CatalogEditorAddTableConstraintForeignKey,
+            structured_constraints_editable,
+        ),
+    ];
+    render_table_action_row(
+        frame,
+        Rect::new(area.x, add_actions_y, area.width, 1),
+        &add_actions,
+        draft.focus,
+        ui,
+        theme,
     );
-    let mut bottom_actions = vec![
+    if let Some(y) = constraint_actions_y {
+        let constraint_index = match draft.focus {
+            TableEditorFocus::Action(
+                TableActionField::Constraint(index) | TableActionField::RemoveConstraint(index),
+            ) => index.min(draft.table_constraints.len() - 1),
+            _ => 0,
+        };
+        render_table_action_row(
+            frame,
+            Rect::new(area.x, y, area.width, 1),
+            &[
+                (
+                    "[ Edit Constraint ]",
+                    TableEditorFocus::Action(TableActionField::Constraint(constraint_index)),
+                    HitTarget::CatalogEditorEditTableConstraint(constraint_index),
+                    structured_constraints_editable,
+                ),
+                (
+                    "[ Remove Constraint ]",
+                    TableEditorFocus::Action(TableActionField::RemoveConstraint(constraint_index)),
+                    HitTarget::CatalogEditorRemoveTableConstraint(constraint_index),
+                    structured_constraints_editable,
+                ),
+            ],
+            draft.focus,
+            ui,
+            theme,
+        );
+    }
+    if let Some(y) = constraint_strip_y {
+        render_table_constraint_strip(
+            frame,
+            Rect::new(area.x, y, area.width, 1),
+            draft,
+            structured_constraints_editable,
+            ui,
+            theme,
+        );
+    }
+    render_table_summary_row(
+        frame,
+        Rect::new(area.x, summary_actions_y, area.width, 1),
+        summary,
+        draft.focus,
+        ui,
+        theme,
+    );
+    render_interactive_hints(
+        frame,
+        Rect::new(area.x, hints_y, area.width, 1),
+        &hints,
+        theme,
+        ui,
+    );
+}
+
+fn render_table_action_row(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    actions: &[(&str, TableEditorFocus, HitTarget, bool)],
+    selected: TableEditorFocus,
+    ui: &mut UiState,
+    theme: Theme,
+) {
+    let mut x = area.x;
+    for (label, field, target, enabled) in actions {
+        let width = label.width() as u16;
+        if x.saturating_add(width) > area.right() {
+            break;
+        }
+        render_catalog_action(
+            frame,
+            Rect::new(x, area.y, width, 1),
+            label,
+            selected == *field,
+            *enabled,
+            target.clone(),
+            ui,
+            theme,
+        );
+        x = x.saturating_add(width + 3);
+    }
+}
+
+fn render_table_summary_row(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    summary: crate::model::catalog_editor::TableChangeSummary,
+    selected: TableEditorFocus,
+    ui: &mut UiState,
+    theme: Theme,
+) {
+    let actions = [
         (
             "[ Review SQL ]",
             TableEditorFocus::Action(TableActionField::Review),
@@ -2356,88 +2404,37 @@ fn render_table(
             TableEditorFocus::Action(TableActionField::Cancel),
             HitTarget::CatalogEditorCancel,
         ),
-        (
-            "[ Add Column ]",
-            TableEditorFocus::Action(TableActionField::AddColumn),
-            HitTarget::CatalogEditorAddTableColumn,
-        ),
-        (
-            "[ Add PK ]",
-            TableEditorFocus::Action(TableActionField::AddConstraintPrimaryKey),
-            HitTarget::CatalogEditorAddTableConstraintPrimaryKey,
-        ),
-        (
-            "[ Add UNIQUE ]",
-            TableEditorFocus::Action(TableActionField::AddConstraintUnique),
-            HitTarget::CatalogEditorAddTableConstraintUnique,
-        ),
-        (
-            "[ Add CHECK ]",
-            TableEditorFocus::Action(TableActionField::AddConstraintCheck),
-            HitTarget::CatalogEditorAddTableConstraintCheck,
-        ),
-        (
-            "[ Add FK ]",
-            TableEditorFocus::Action(TableActionField::AddConstraintForeignKey),
-            HitTarget::CatalogEditorAddTableConstraintForeignKey,
-        ),
     ];
-    if !draft.table_constraints.is_empty() {
-        let constraint_index = match draft.focus {
-            TableEditorFocus::Action(
-                TableActionField::Constraint(index) | TableActionField::RemoveConstraint(index),
-            ) => index.min(draft.table_constraints.len() - 1),
-            _ => 0,
-        };
-        bottom_actions.push((
-            "[ Remove Constraint ]",
-            TableEditorFocus::Action(TableActionField::RemoveConstraint(constraint_index)),
-            HitTarget::CatalogEditorRemoveTableConstraint(constraint_index),
-        ));
-        let constraint = &draft.table_constraints[constraint_index];
-        let field_labels: Vec<(usize, &str)> = match constraint.kind {
-            crate::db::catalog_mutation::ConstraintDefinitionKind::PrimaryKey { .. }
-            | crate::db::catalog_mutation::ConstraintDefinitionKind::Unique { .. } => {
-                vec![(0, "Edit name"), (1, "Edit columns")]
-            }
-            crate::db::catalog_mutation::ConstraintDefinitionKind::Check { .. } => {
-                vec![(0, "Edit name"), (1, "Edit expression")]
-            }
-            crate::db::catalog_mutation::ConstraintDefinitionKind::ForeignKey { .. } => vec![
-                (0, "Edit name"),
-                (1, "Edit columns"),
-                (2, "Edit target schema"),
-                (3, "Edit target table"),
-                (4, "Edit target columns"),
-                (5, "Edit on update"),
-                (6, "Edit on delete"),
-            ],
-        };
-        for (field, label) in field_labels {
-            bottom_actions.push((
-                label,
-                TableEditorFocus::Action(TableActionField::Constraint(constraint_index)),
-                HitTarget::CatalogEditorConstraintField {
-                    constraint: constraint_index,
-                    field,
-                },
-            ));
-        }
+    let action_width = dialog_footer::action_width(
+        &actions
+            .iter()
+            .map(|(label, _, _)| *label)
+            .collect::<Vec<_>>(),
+        3,
+    );
+    let actions_x = area.right().saturating_sub(action_width);
+    let summary_width = actions_x
+        .saturating_sub(area.x)
+        .saturating_sub(3)
+        .min(area.width);
+    if summary_width > 0 {
+        frame.render_widget(
+            Paragraph::new(table_change_summary_line(summary, theme))
+                .style(Style::new().bg(theme.surface)),
+            Rect::new(area.x, area.y, summary_width, 1),
+        );
     }
-    let action_width = footer_action_width;
-    let mut x = footer.action_area(action_width, 1).x;
-    let action_right = footer.status_and_actions.right();
-    for (label, field, target) in bottom_actions {
+    let mut x = actions_x;
+    for (label, field, target) in actions {
         let width = label.width() as u16;
-        if x.saturating_add(width) > action_right {
+        if x.saturating_add(width) > area.right() {
             break;
         }
-        let action_area = Rect::new(x, footer.status_and_actions.y, width, 1);
         render_catalog_action(
             frame,
-            action_area,
+            Rect::new(x, area.y, width, 1),
             label,
-            draft.focus == field,
+            selected == field,
             true,
             target,
             ui,
@@ -2445,7 +2442,240 @@ fn render_table(
         );
         x = x.saturating_add(width + 3);
     }
-    render_interactive_hints(frame, footer.help, &hints, theme, ui);
+}
+
+fn render_table_constraint_strip(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    draft: &TableDraft,
+    editable: bool,
+    ui: &mut UiState,
+    theme: Theme,
+) {
+    let selected_index = match draft.focus {
+        TableEditorFocus::Action(
+            TableActionField::Constraint(index) | TableActionField::RemoveConstraint(index),
+        ) if index < draft.table_constraints.len() => Some(index),
+        _ => None,
+    };
+    let chip_width = |index: usize| {
+        let label = table_constraint_chip_label(index, draft);
+        let label_width = label.width() as u16;
+        if editable {
+            label_width.saturating_add(7)
+        } else {
+            label_width.saturating_add(3)
+        }
+    };
+    let mut start = 0;
+    if let Some(selected) = selected_index {
+        start = selected;
+        let mut used = usize::from(chip_width(selected));
+        while start > 0 {
+            let previous = usize::from(chip_width(start - 1));
+            if used.saturating_add(previous) > usize::from(area.width) {
+                break;
+            }
+            used += previous;
+            start -= 1;
+        }
+    }
+    let mut x = area.x;
+    for index in start..draft.table_constraints.len() {
+        let label = table_constraint_chip_label(index, draft);
+        let label_width = label.width() as u16;
+        let width = chip_width(index);
+        if x.saturating_add(width) > area.right() {
+            break;
+        }
+        let active = editable && selected_index == Some(index);
+        let label_area = Rect::new(x, area.y, label_width, 1);
+        frame.render_widget(
+            Paragraph::new(label).style(
+                Style::new()
+                    .fg(if !editable {
+                        theme.muted
+                    } else if active {
+                        theme.background
+                    } else {
+                        theme.action
+                    })
+                    .bg(if active { theme.accent } else { theme.surface }),
+            ),
+            label_area,
+        );
+        if editable {
+            ui.hit_regions.push(HitRegion {
+                area: label_area,
+                target: HitTarget::CatalogEditorEditTableConstraint(index),
+            });
+            x = x.saturating_add(label_width + 1);
+        } else {
+            x = x.saturating_add(label_width + 3);
+            continue;
+        }
+        let remove = "[x]";
+        let remove_width = remove.width() as u16;
+        let remove_area = Rect::new(x, area.y, remove_width, 1);
+        frame.render_widget(
+            Paragraph::new(remove).style(Style::new().fg(theme.error).bg(if active {
+                theme.selection
+            } else {
+                theme.surface
+            })),
+            remove_area,
+        );
+        ui.hit_regions.push(HitRegion {
+            area: remove_area,
+            target: HitTarget::CatalogEditorRemoveTableConstraint(index),
+        });
+        x = x.saturating_add(remove_width + 3);
+    }
+}
+
+fn table_constraint_chip_label(index: usize, draft: &TableDraft) -> String {
+    let kind = match draft.table_constraints[index].kind {
+        crate::db::catalog_mutation::ConstraintDefinitionKind::PrimaryKey { .. } => "PK",
+        crate::db::catalog_mutation::ConstraintDefinitionKind::Unique { .. } => "UNIQUE",
+        crate::db::catalog_mutation::ConstraintDefinitionKind::Check { .. } => "CHECK",
+        crate::db::catalog_mutation::ConstraintDefinitionKind::ForeignKey { .. } => "FK",
+    };
+    format!("[{} {kind}]", index + 1)
+}
+
+fn render_table_constraint_details_modal(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    session: &TableConstraintEditSession,
+    ui: &mut UiState,
+    theme: Theme,
+) {
+    if area.width < 24 || area.height < 8 {
+        return;
+    }
+    let popup = super::centered(
+        area,
+        76.min(area.width.saturating_sub(4)),
+        18.min(area.height),
+    );
+    frame.render_widget(Clear, popup);
+    let kind = match session.draft.kind {
+        crate::db::catalog_mutation::ConstraintDefinitionKind::PrimaryKey { .. } => "PRIMARY KEY",
+        crate::db::catalog_mutation::ConstraintDefinitionKind::Unique { .. } => "UNIQUE",
+        crate::db::catalog_mutation::ConstraintDefinitionKind::Check { .. } => "CHECK",
+        crate::db::catalog_mutation::ConstraintDefinitionKind::ForeignKey { .. } => "FOREIGN KEY",
+    };
+    let title = format!(" CONSTRAINT DETAILS // {kind} ");
+    let block = super::panel_block(&title, true, theme);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    if inner.height < 8 || inner.width < 20 {
+        return;
+    }
+    let fields: Vec<(usize, &str, &TextInput)> = match session.draft.kind {
+        crate::db::catalog_mutation::ConstraintDefinitionKind::PrimaryKey { .. }
+        | crate::db::catalog_mutation::ConstraintDefinitionKind::Unique { .. } => vec![
+            (0, "Name", &session.draft.name),
+            (1, "Columns", &session.draft.columns),
+        ],
+        crate::db::catalog_mutation::ConstraintDefinitionKind::Check { .. } => vec![
+            (0, "Name", &session.draft.name),
+            (1, "Expression", &session.draft.expression),
+        ],
+        crate::db::catalog_mutation::ConstraintDefinitionKind::ForeignKey { .. } => vec![
+            (0, "Name", &session.draft.name),
+            (1, "Columns", &session.draft.columns),
+            (2, "Target schema", &session.draft.referenced_schema),
+            (3, "Target table", &session.draft.referenced_relation),
+            (4, "Target columns", &session.draft.referenced_columns),
+            (5, "On update", &session.draft.on_update),
+            (6, "On delete", &session.draft.on_delete),
+        ],
+    };
+    let hints = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
+    let controls = Rect::new(inner.x, hints.y.saturating_sub(1), inner.width, 1);
+    let error = Rect::new(
+        inner.x,
+        controls.y.saturating_sub(2),
+        inner.width,
+        controls.y.saturating_sub(controls.y.saturating_sub(2)),
+    );
+    for (offset, (field, label, input)) in fields.iter().enumerate() {
+        let row = Rect::new(
+            inner.x,
+            inner.y.saturating_add(offset as u16),
+            inner.width,
+            1,
+        );
+        if row.y >= error.y {
+            break;
+        }
+        render_catalog_text_field(
+            frame,
+            row,
+            label,
+            input,
+            session.draft.selected_field == *field,
+            true,
+            HitTarget::CatalogEditorConstraintDetailsField(*field),
+            ui,
+            theme,
+        );
+    }
+    if let Some(message) = session.error.as_deref() {
+        frame.render_widget(
+            Paragraph::new(format!("x {}", sanitize_terminal_text(message)))
+                .wrap(Wrap { trim: true })
+                .style(Style::new().fg(theme.error).bg(theme.surface)),
+            error,
+        );
+    }
+    let confirm_width = 13.min(controls.width);
+    let cancel_x = controls.x.saturating_add(confirm_width.saturating_add(3));
+    let cancel_width = 12.min(controls.right().saturating_sub(cancel_x));
+    for (x, width, label, target) in [
+        (
+            controls.x,
+            confirm_width,
+            "[ Confirm ]",
+            HitTarget::CatalogEditorConstraintDetailsConfirm,
+        ),
+        (
+            cancel_x,
+            cancel_width,
+            "[ Cancel ]",
+            HitTarget::CatalogEditorConstraintDetailsCancel,
+        ),
+    ] {
+        if width == 0 {
+            continue;
+        }
+        let row = Rect::new(x, controls.y, width, 1);
+        frame.render_widget(
+            Paragraph::new(label).style(Style::new().fg(theme.action).bg(theme.surface)),
+            row,
+        );
+        ui.hit_regions.push(HitRegion { area: row, target });
+    }
+    render_interactive_hints(
+        frame,
+        hints,
+        &[
+            ShortcutHint::new("Tab/Shift-Tab/Up/Down", "move field"),
+            ShortcutHint::with_keys(
+                "Enter",
+                "confirm",
+                [KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)],
+            ),
+            ShortcutHint::with_keys(
+                "Esc",
+                "cancel",
+                [KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)],
+            ),
+        ],
+        theme,
+        ui,
+    );
 }
 
 fn table_change_summary_line(
@@ -2489,7 +2719,7 @@ fn table_change_summary_line(
 }
 
 fn table_shortcut_hints(draft: &TableDraft, compact: bool) -> Vec<ShortcutHint<'static>> {
-    if draft.column_editor.is_some() {
+    if draft.column_editor.is_some() || draft.constraint_editor.is_some() {
         return Vec::new();
     }
     match draft.focus {
@@ -2928,6 +3158,9 @@ fn render_catalog_text_field(
             Some(HitTarget::CatalogEditorTableField(field)) => {
                 Some(crate::action::CatalogEditorCursorTarget::TableField(*field))
             }
+            Some(HitTarget::CatalogEditorConstraintDetailsField(field)) => Some(
+                crate::action::CatalogEditorCursorTarget::ConstraintField(*field),
+            ),
             _ => None,
         };
         if let Some(cursor_target) = cursor_target {

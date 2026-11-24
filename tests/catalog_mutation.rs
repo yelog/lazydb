@@ -1385,6 +1385,7 @@ fn table_draft(name: &str, columns: Vec<ColumnDraft>) -> CatalogDraft {
         selected_column: 0,
         focus: lazydb::model::catalog_editor::TableEditorFocus::Columns,
         column_editor: None,
+        constraint_editor: None,
         indexes: vec![],
         constraints: vec![],
         clickhouse_engine: "MergeTree".into(),

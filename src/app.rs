@@ -9141,6 +9141,15 @@ impl App {
                 let allow_with_data = self.catalog_editor.as_ref().is_some_and(|editor| {
                     editor.mode == crate::db::catalog_mutation::CatalogMutationMode::Create
                 });
+                let allow_structured_constraints =
+                    self.catalog_editor.as_ref().is_some_and(|editor| {
+                        editor.mode == crate::db::catalog_mutation::CatalogMutationMode::Create
+                            && matches!(
+                                editor.draft.as_ref(),
+                                Some(crate::model::catalog_editor::CatalogDraft::Table(draft))
+                                    if draft.supports_structured_table_constraints()
+                            )
+                    });
                 if let Some(editor) = self.catalog_editor.as_mut()
                     && editor.owner_picker.open
                 {
@@ -9149,30 +9158,15 @@ impl App {
                 if let Some(draft) = self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut()) {
                     if matches!(draft, crate::model::catalog_editor::CatalogDraft::Table(_)) {
                         if let crate::model::catalog_editor::CatalogDraft::Table(table) = draft {
-                            if let Some(index) = match table.focus {
-                                crate::model::catalog_editor::TableEditorFocus::Action(
-                                    crate::model::catalog_editor::TableActionField::Constraint(index)
-                                    | crate::model::catalog_editor::TableActionField::RemoveConstraint(index),
-                                ) => Some(index),
-                                _ => None,
-                            } && let Some(constraint) = table.table_constraints.get_mut(index)
-                            {
-                                constraint.move_field(1);
+                            if table.constraint_editor.is_some() {
+                                table.move_table_constraint_details_field(1);
                                 return Vec::new();
                             }
                             if matches!(
                                 table.focus,
-                                crate::model::catalog_editor::TableEditorFocus::Action(
-                                    crate::model::catalog_editor::TableActionField::AddColumn
-                                        | crate::model::catalog_editor::TableActionField::AddConstraintPrimaryKey
-                                        | crate::model::catalog_editor::TableActionField::AddConstraintUnique
-                                        | crate::model::catalog_editor::TableActionField::AddConstraintCheck
-                                        | crate::model::catalog_editor::TableActionField::AddConstraintForeignKey
-                                        | crate::model::catalog_editor::TableActionField::Review
-                                        | crate::model::catalog_editor::TableActionField::Cancel
-                                )
+                                crate::model::catalog_editor::TableEditorFocus::Action(_)
                             ) {
-                                table.focus_next();
+                                table.focus_next_action(allow_structured_constraints);
                                 return Vec::new();
                             }
                         }
@@ -9237,6 +9231,15 @@ impl App {
                 let allow_with_data = self.catalog_editor.as_ref().is_some_and(|editor| {
                     editor.mode == crate::db::catalog_mutation::CatalogMutationMode::Create
                 });
+                let allow_structured_constraints =
+                    self.catalog_editor.as_ref().is_some_and(|editor| {
+                        editor.mode == crate::db::catalog_mutation::CatalogMutationMode::Create
+                            && matches!(
+                                editor.draft.as_ref(),
+                                Some(crate::model::catalog_editor::CatalogDraft::Table(draft))
+                                    if draft.supports_structured_table_constraints()
+                            )
+                    });
                 if let Some(editor) = self.catalog_editor.as_mut()
                     && editor.owner_picker.open
                 {
@@ -9245,30 +9248,15 @@ impl App {
                 if let Some(draft) = self.catalog_editor.as_mut().and_then(|e| e.draft.as_mut()) {
                     if matches!(draft, crate::model::catalog_editor::CatalogDraft::Table(_)) {
                         if let crate::model::catalog_editor::CatalogDraft::Table(table) = draft {
-                            if let Some(index) = match table.focus {
-                                crate::model::catalog_editor::TableEditorFocus::Action(
-                                    crate::model::catalog_editor::TableActionField::Constraint(index)
-                                    | crate::model::catalog_editor::TableActionField::RemoveConstraint(index),
-                                ) => Some(index),
-                                _ => None,
-                            } && let Some(constraint) = table.table_constraints.get_mut(index)
-                            {
-                                constraint.move_field(-1);
+                            if table.constraint_editor.is_some() {
+                                table.move_table_constraint_details_field(-1);
                                 return Vec::new();
                             }
                             if matches!(
                                 table.focus,
-                                crate::model::catalog_editor::TableEditorFocus::Action(
-                                    crate::model::catalog_editor::TableActionField::AddColumn
-                                        | crate::model::catalog_editor::TableActionField::AddConstraintPrimaryKey
-                                        | crate::model::catalog_editor::TableActionField::AddConstraintUnique
-                                        | crate::model::catalog_editor::TableActionField::AddConstraintCheck
-                                        | crate::model::catalog_editor::TableActionField::AddConstraintForeignKey
-                                        | crate::model::catalog_editor::TableActionField::Review
-                                        | crate::model::catalog_editor::TableActionField::Cancel
-                                )
+                                crate::model::catalog_editor::TableEditorFocus::Action(_)
                             ) {
-                                table.focus_previous();
+                                table.focus_previous_action(allow_structured_constraints);
                                 return Vec::new();
                             }
                         }
@@ -9463,6 +9451,18 @@ impl App {
                             }
                         }
                     }
+                    crate::action::CatalogEditorCursorTarget::ConstraintField(field) => {
+                        if let Some(crate::model::catalog_editor::CatalogDraft::Table(draft)) =
+                            editor.draft.as_mut()
+                            && let Some(session) = draft.constraint_editor.as_mut()
+                            && field < session.draft.field_count()
+                        {
+                            session.draft.selected_field = field;
+                            if let Some(input) = session.draft.input_for_field_mut(field) {
+                                input.set_cursor(cursor);
+                            }
+                        }
+                    }
                 }
                 Vec::new()
             }
@@ -9542,97 +9542,119 @@ impl App {
             | Action::CatalogEditorAddTableConstraintUnique
             | Action::CatalogEditorAddTableConstraintCheck
             | Action::CatalogEditorAddTableConstraintForeignKey => {
+                use crate::db::catalog_mutation::ConstraintDefinitionKind;
+                let create_mode = self.catalog_editor.as_ref().is_some_and(|editor| {
+                    editor.mode == crate::db::catalog_mutation::CatalogMutationMode::Create
+                });
+                if !create_mode {
+                    if let Some(editor) = self.catalog_editor.as_mut() {
+                        editor.set_validation_error(
+                            "structured table constraints can be added only while creating a table",
+                        );
+                    }
+                    return Vec::new();
+                }
+                let kind = match action {
+                    Action::CatalogEditorAddTableConstraintPrimaryKey => {
+                        ConstraintDefinitionKind::PrimaryKey {
+                            columns: Vec::new(),
+                        }
+                    }
+                    Action::CatalogEditorAddTableConstraintUnique => {
+                        ConstraintDefinitionKind::Unique {
+                            columns: Vec::new(),
+                        }
+                    }
+                    Action::CatalogEditorAddTableConstraintForeignKey => {
+                        ConstraintDefinitionKind::ForeignKey {
+                            columns: Vec::new(),
+                            referenced_schema: String::new(),
+                            referenced_relation: String::new(),
+                            referenced_columns: Vec::new(),
+                            match_type: "SIMPLE".into(),
+                            on_update: "NO ACTION".into(),
+                            on_delete: "NO ACTION".into(),
+                        }
+                    }
+                    _ => ConstraintDefinitionKind::Check {
+                        expression: String::new(),
+                        no_inherit: false,
+                    },
+                };
+                let result = if let Some(crate::model::catalog_editor::CatalogDraft::Table(draft)) =
+                    self.catalog_editor
+                        .as_mut()
+                        .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.begin_new_table_constraint(kind)
+                } else {
+                    Ok(())
+                };
+                if let Err(message) = result
+                    && let Some(editor) = self.catalog_editor.as_mut()
+                {
+                    editor.set_validation_error(message);
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorEditTableConstraint(index) => {
+                let create_mode = self.catalog_editor.as_ref().is_some_and(|editor| {
+                    editor.mode == crate::db::catalog_mutation::CatalogMutationMode::Create
+                });
+                if !create_mode {
+                    if let Some(editor) = self.catalog_editor.as_mut() {
+                        editor.set_validation_error(
+                            "existing table constraints are read-only in the table editor",
+                        );
+                    }
+                    return Vec::new();
+                }
                 if let Some(crate::model::catalog_editor::CatalogDraft::Table(draft)) = self
                     .catalog_editor
                     .as_mut()
                     .and_then(|editor| editor.draft.as_mut())
                 {
-                    let schema = draft.schema.value().to_owned();
-                    let relation = draft.name.value().to_owned();
-                    let kind = match action {
-                        Action::CatalogEditorAddTableConstraintPrimaryKey => {
-                            crate::db::catalog_mutation::ConstraintDefinitionKind::PrimaryKey {
-                                columns: Vec::new(),
-                            }
+                    draft.begin_edit_table_constraint(index);
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorFocusTableConstraintDetails(field) => {
+                if let Some(crate::model::catalog_editor::CatalogDraft::Table(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                    && let Some(session) = draft.constraint_editor.as_mut()
+                    && field < session.draft.field_count()
+                {
+                    session.draft.selected_field = field;
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorConfirmTableConstraintDetails => {
+                if let Some(crate::model::catalog_editor::CatalogDraft::Table(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    if let Some((field, message)) = draft.validate_table_constraint_details() {
+                        if let Some(session) = draft.constraint_editor.as_mut() {
+                            session.draft.selected_field = field;
+                            session.error = Some(message);
                         }
-                        Action::CatalogEditorAddTableConstraintUnique => {
-                            crate::db::catalog_mutation::ConstraintDefinitionKind::Unique {
-                                columns: Vec::new(),
-                            }
-                        }
-                        Action::CatalogEditorAddTableConstraintForeignKey => {
-                            crate::db::catalog_mutation::ConstraintDefinitionKind::ForeignKey {
-                                columns: Vec::new(),
-                                referenced_schema: schema.clone(),
-                                referenced_relation: String::new(),
-                                referenced_columns: Vec::new(),
-                                match_type: "SIMPLE".into(),
-                                on_update: "NO ACTION".into(),
-                                on_delete: "NO ACTION".into(),
-                            }
-                        }
-                        _ => crate::db::catalog_mutation::ConstraintDefinitionKind::Check {
-                            expression: String::new(),
-                            no_inherit: false,
-                        },
-                    };
-                    let mut constraint = crate::model::catalog_editor::ConstraintDraft::new(
-                        kind, &schema, &relation,
-                    );
-                    let suffix = draft.table_constraints.len() + 1;
-                    constraint.name = format!("{}_constraint_{}", relation, suffix).into();
-                    match action {
-                        Action::CatalogEditorAddTableConstraintPrimaryKey => {
-                            constraint.columns = draft
-                                .columns
-                                .iter()
-                                .find(|column| {
-                                    !matches!(
-                                        column.state,
-                                        crate::model::catalog_editor::DraftRowState::Removed { .. }
-                                    )
-                                })
-                                .map(|column| column.name.value().to_owned())
-                                .unwrap_or_default()
-                                .into()
-                        }
-                        Action::CatalogEditorAddTableConstraintUnique => {
-                            constraint.columns = draft
-                                .columns
-                                .iter()
-                                .find(|column| {
-                                    !matches!(
-                                        column.state,
-                                        crate::model::catalog_editor::DraftRowState::Removed { .. }
-                                    )
-                                })
-                                .map(|column| column.name.value().to_owned())
-                                .unwrap_or_default()
-                                .into()
-                        }
-                        Action::CatalogEditorAddTableConstraintCheck => {
-                            constraint.expression = "TRUE".into()
-                        }
-                        Action::CatalogEditorAddTableConstraintForeignKey => {
-                            constraint.columns = draft
-                                .columns
-                                .iter()
-                                .find(|column| {
-                                    !matches!(
-                                        column.state,
-                                        crate::model::catalog_editor::DraftRowState::Removed { .. }
-                                    )
-                                })
-                                .map(|column| column.name.value().to_owned())
-                                .unwrap_or_default()
-                                .into();
-                            constraint.referenced_relation = relation.clone().into();
-                            constraint.referenced_columns =
-                                constraint.columns.value().to_owned().into();
-                        }
-                        _ => {}
+                    } else {
+                        draft.confirm_table_constraint_details();
                     }
-                    draft.add_constraint(constraint);
+                }
+                Vec::new()
+            }
+            Action::CatalogEditorCancelTableConstraintDetails => {
+                if let Some(crate::model::catalog_editor::CatalogDraft::Table(draft)) = self
+                    .catalog_editor
+                    .as_mut()
+                    .and_then(|editor| editor.draft.as_mut())
+                {
+                    draft.finish_edit_group();
+                    draft.cancel_table_constraint_details();
                 }
                 Vec::new()
             }
@@ -9673,6 +9695,17 @@ impl App {
                 Vec::new()
             }
             Action::CatalogEditorRemoveTableConstraint(index) => {
+                let create_mode = self.catalog_editor.as_ref().is_some_and(|editor| {
+                    editor.mode == crate::db::catalog_mutation::CatalogMutationMode::Create
+                });
+                if !create_mode {
+                    if let Some(editor) = self.catalog_editor.as_mut() {
+                        editor.set_validation_error(
+                            "existing table constraints are read-only in the table editor",
+                        );
+                    }
+                    return Vec::new();
+                }
                 if let Some(crate::model::catalog_editor::CatalogDraft::Table(draft)) = self
                     .catalog_editor
                     .as_mut()
@@ -10339,6 +10372,15 @@ impl App {
                 Vec::new()
             }
             Action::CatalogEditorPreview => {
+                if self.catalog_editor.as_ref().is_some_and(|editor| {
+                    matches!(
+                        editor.draft.as_ref(),
+                        Some(crate::model::catalog_editor::CatalogDraft::Table(draft))
+                            if draft.constraint_editor.is_some()
+                    )
+                }) {
+                    return Vec::new();
+                }
                 if let Some(draft) = self
                     .catalog_editor
                     .as_mut()

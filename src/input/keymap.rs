@@ -3976,25 +3976,8 @@ fn map_table_editor(
     if editor_table_details_open(editor) {
         return map_table_column_details(event, field);
     }
-    if matches!(
-        field,
-        TableEditorFocus::Action(TableActionField::Constraint(_))
-    ) {
-        return match event.code {
-            KeyCode::Esc => Some(Action::CatalogEditorPreview),
-            KeyCode::Tab => Some(Action::CatalogEditorFieldNext),
-            KeyCode::BackTab => Some(Action::CatalogEditorFieldPrevious),
-            KeyCode::Up => Some(Action::CatalogEditorMove(-1)),
-            KeyCode::Down => Some(Action::CatalogEditorMove(1)),
-            KeyCode::Char(character) => Some(Action::CatalogEditorInsert(character)),
-            KeyCode::Backspace => Some(Action::CatalogEditorBackspace),
-            KeyCode::Delete => Some(Action::CatalogEditorDelete),
-            KeyCode::Left => Some(Action::CatalogEditorMoveLeft),
-            KeyCode::Right => Some(Action::CatalogEditorMoveRight),
-            KeyCode::Home => Some(Action::CatalogEditorMoveHome),
-            KeyCode::End => Some(Action::CatalogEditorMoveEnd),
-            _ => None,
-        };
+    if editor_table_constraint_details_open(editor) {
+        return map_table_constraint_details(event);
     }
     let text_focus = matches!(
         field,
@@ -4119,6 +4102,10 @@ fn map_table_editor(
             KeyCode::Enter | KeyCode::Char(' '),
         ) => Some(Action::CatalogEditorAddTableConstraintForeignKey),
         (
+            TableEditorFocus::Action(TableActionField::Constraint(index)),
+            KeyCode::Enter | KeyCode::Char(' '),
+        ) => Some(Action::CatalogEditorEditTableConstraint(index)),
+        (
             TableEditorFocus::Action(TableActionField::RemoveConstraint(index)),
             KeyCode::Enter | KeyCode::Char(' '),
         ) => Some(Action::CatalogEditorRemoveTableConstraint(index)),
@@ -4139,6 +4126,16 @@ fn editor_table_details_open(editor: &crate::model::catalog_editor::CatalogEdito
         editor.draft.as_ref(),
         Some(crate::model::catalog_editor::CatalogDraft::Table(draft))
             if draft.column_editor.is_some()
+    )
+}
+
+fn editor_table_constraint_details_open(
+    editor: &crate::model::catalog_editor::CatalogEditorState,
+) -> bool {
+    matches!(
+        editor.draft.as_ref(),
+        Some(crate::model::catalog_editor::CatalogDraft::Table(draft))
+            if draft.constraint_editor.is_some()
     )
 }
 
@@ -4192,6 +4189,47 @@ fn map_table_column_details(
                 },
             )
         }
+        KeyCode::Char(character) => Some(Action::CatalogEditorInsert(character)),
+        KeyCode::Backspace => Some(Action::CatalogEditorBackspace),
+        KeyCode::Delete => Some(Action::CatalogEditorDelete),
+        KeyCode::Left => Some(Action::CatalogEditorMoveLeft),
+        KeyCode::Right => Some(Action::CatalogEditorMoveRight),
+        KeyCode::Home => Some(Action::CatalogEditorMoveHome),
+        KeyCode::End => Some(Action::CatalogEditorMoveEnd),
+        _ => None,
+    }
+}
+
+fn map_table_constraint_details(event: KeyEvent) -> Option<Action> {
+    if is_text_redo(event) {
+        return Some(Action::CatalogEditorRedo);
+    }
+    if is_text_undo(event) {
+        return Some(Action::CatalogEditorUndo);
+    }
+    if event.modifiers == KeyModifiers::CONTROL {
+        return match event.code {
+            KeyCode::Char('w') => Some(Action::CatalogEditorDeletePreviousWord),
+            KeyCode::Char('u') => Some(Action::CatalogEditorDeleteToStart),
+            KeyCode::Char('a') => Some(Action::CatalogEditorMoveHome),
+            KeyCode::Char('e') => Some(Action::CatalogEditorMoveEnd),
+            _ => None,
+        };
+    }
+    if event.modifiers != KeyModifiers::NONE
+        && !matches!(event.code, KeyCode::Tab | KeyCode::BackTab)
+    {
+        return None;
+    }
+    match event.code {
+        KeyCode::Esc => Some(Action::CatalogEditorCancelTableConstraintDetails),
+        KeyCode::Enter => Some(Action::CatalogEditorConfirmTableConstraintDetails),
+        KeyCode::Tab if event.modifiers.contains(KeyModifiers::SHIFT) => {
+            Some(Action::CatalogEditorFieldPrevious)
+        }
+        KeyCode::Tab => Some(Action::CatalogEditorFieldNext),
+        KeyCode::BackTab | KeyCode::Up => Some(Action::CatalogEditorFieldPrevious),
+        KeyCode::Down => Some(Action::CatalogEditorFieldNext),
         KeyCode::Char(character) => Some(Action::CatalogEditorInsert(character)),
         KeyCode::Backspace => Some(Action::CatalogEditorBackspace),
         KeyCode::Delete => Some(Action::CatalogEditorDelete),

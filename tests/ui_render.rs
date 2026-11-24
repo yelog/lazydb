@@ -726,6 +726,7 @@ fn table_editor_renders_general_and_columns_sections() {
                 selected_column: 0,
                 focus: lazydb::model::catalog_editor::TableEditorFocus::Columns,
                 column_editor: None,
+                constraint_editor: None,
                 indexes: vec![],
                 constraints: vec![],
                 clickhouse_engine: Default::default(),
@@ -754,6 +755,339 @@ fn table_editor_renders_general_and_columns_sections() {
         !compact_output.contains("COLUMN DETAILS"),
         "{compact_output}"
     );
+}
+
+#[test]
+fn table_constraint_add_actions_are_supported_only_for_new_sqlite_and_duckdb_tables() {
+    let supported = table_constraint_ui_app(
+        lazydb::profile::DatabaseKind::Sqlite,
+        CatalogMutationMode::Create,
+        0,
+        None,
+    );
+    let (output, state) = render_with_state(&supported, 80, 20);
+    for target in [
+        HitTarget::CatalogEditorAddTableConstraintPrimaryKey,
+        HitTarget::CatalogEditorAddTableConstraintUnique,
+        HitTarget::CatalogEditorAddTableConstraintCheck,
+        HitTarget::CatalogEditorAddTableConstraintForeignKey,
+    ] {
+        assert!(
+            state
+                .hit_regions
+                .iter()
+                .any(|region| region.target == target),
+            "missing {target:?}: {output}"
+        );
+    }
+
+    for (kind, mode) in [
+        (
+            lazydb::profile::DatabaseKind::Postgres,
+            CatalogMutationMode::Create,
+        ),
+        (
+            lazydb::profile::DatabaseKind::Sqlite,
+            CatalogMutationMode::Edit,
+        ),
+        (
+            lazydb::profile::DatabaseKind::DuckDb,
+            CatalogMutationMode::Edit,
+        ),
+    ] {
+        let app = table_constraint_ui_app(kind, mode, 0, None);
+        let (output, state) = render_with_state(&app, 80, 20);
+        assert!(
+            state
+                .hit_regions
+                .iter()
+                .any(|region| region.target == HitTarget::CatalogEditorAddTableColumn),
+            "{kind:?}/{mode:?}: {output}"
+        );
+        for target in [
+            HitTarget::CatalogEditorAddTableConstraintPrimaryKey,
+            HitTarget::CatalogEditorAddTableConstraintUnique,
+            HitTarget::CatalogEditorAddTableConstraintCheck,
+            HitTarget::CatalogEditorAddTableConstraintForeignKey,
+        ] {
+            assert!(
+                !state
+                    .hit_regions
+                    .iter()
+                    .any(|region| region.target == target),
+                "{kind:?}/{mode:?} advertised {target:?}: {output}"
+            );
+        }
+        assert!(
+            state
+                .hit_regions
+                .iter()
+                .any(|region| region.target == HitTarget::CatalogEditorReview)
+        );
+        assert!(
+            state
+                .hit_regions
+                .iter()
+                .any(|region| region.target == HitTarget::CatalogEditorCancel)
+        );
+    }
+}
+
+#[test]
+fn table_constraint_details_modals_expose_all_fields_and_controls_at_80x20() {
+    use lazydb::db::catalog_mutation::ConstraintDefinitionKind;
+
+    for (kind, title, fields) in [
+        (
+            ConstraintDefinitionKind::PrimaryKey {
+                columns: Vec::new(),
+            },
+            "CONSTRAINT DETAILS // PRIMARY KEY",
+            2,
+        ),
+        (
+            ConstraintDefinitionKind::Unique {
+                columns: Vec::new(),
+            },
+            "CONSTRAINT DETAILS // UNIQUE",
+            2,
+        ),
+        (
+            ConstraintDefinitionKind::Check {
+                expression: String::new(),
+                no_inherit: false,
+            },
+            "CONSTRAINT DETAILS // CHECK",
+            2,
+        ),
+        (
+            ConstraintDefinitionKind::ForeignKey {
+                columns: Vec::new(),
+                referenced_schema: String::new(),
+                referenced_relation: String::new(),
+                referenced_columns: Vec::new(),
+                match_type: "SIMPLE".into(),
+                on_update: "NO ACTION".into(),
+                on_delete: "NO ACTION".into(),
+            },
+            "CONSTRAINT DETAILS // FOREIGN KEY",
+            7,
+        ),
+    ] {
+        let app = table_constraint_ui_app(
+            lazydb::profile::DatabaseKind::Sqlite,
+            CatalogMutationMode::Create,
+            0,
+            Some(kind),
+        );
+        let (output, state) = render_with_state(&app, 80, 20);
+        assert!(output.contains(title), "{title}: {output}");
+        assert!(output.contains("[ Confirm ]"), "{title}: {output}");
+        assert!(output.contains("[ Cancel ]"), "{title}: {output}");
+        for field in 0..fields {
+            assert!(
+                state
+                    .hit_regions
+                    .iter()
+                    .any(|region| region.target
+                        == HitTarget::CatalogEditorConstraintDetailsField(field)),
+                "{title} missing field {field}: {output}"
+            );
+        }
+        for target in [
+            HitTarget::CatalogEditorConstraintDetailsConfirm,
+            HitTarget::CatalogEditorConstraintDetailsCancel,
+        ] {
+            assert!(
+                state
+                    .hit_regions
+                    .iter()
+                    .any(|region| region.target == target),
+                "{title} missing {target:?}: {output}"
+            );
+        }
+    }
+}
+
+#[test]
+fn table_constraint_strip_scrolls_to_the_selected_chip() {
+    let mut app = table_constraint_ui_app(
+        lazydb::profile::DatabaseKind::Sqlite,
+        CatalogMutationMode::Create,
+        6,
+        None,
+    );
+    if let Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)) = app
+        .catalog_editor
+        .as_mut()
+        .and_then(|editor| editor.draft.as_mut())
+    {
+        draft.focus = lazydb::model::catalog_editor::TableEditorFocus::Action(
+            lazydb::model::catalog_editor::TableActionField::Constraint(5),
+        );
+    }
+    let (output, state) = render_with_state(&app, 80, 20);
+    assert!(
+        state
+            .hit_regions
+            .iter()
+            .any(|region| region.target == HitTarget::CatalogEditorEditTableConstraint(5)),
+        "{output}"
+    );
+    assert!(
+        state
+            .hit_regions
+            .iter()
+            .any(|region| region.target == HitTarget::CatalogEditorRemoveTableConstraint(5)),
+        "{output}"
+    );
+    assert!(
+        !state
+            .hit_regions
+            .iter()
+            .any(|region| region.target == HitTarget::CatalogEditorEditTableConstraint(0)),
+        "{output}"
+    );
+}
+
+#[test]
+fn table_constraint_summary_and_window_actions_fit_at_56x16() {
+    let app = table_constraint_ui_app(
+        lazydb::profile::DatabaseKind::Sqlite,
+        CatalogMutationMode::Create,
+        2,
+        None,
+    );
+    let (output, state) = render_with_state(&app, 56, 16);
+    assert!(output.contains("pending changes"), "{output}");
+    assert!(output.contains("[ Review SQL ]"), "{output}");
+    assert!(output.contains("[ Cancel ]"), "{output}");
+    assert!(
+        state
+            .hit_regions
+            .iter()
+            .any(|region| region.target == HitTarget::CatalogEditorReview),
+        "{output}"
+    );
+    assert!(
+        state
+            .hit_regions
+            .iter()
+            .any(|region| region.target == HitTarget::CatalogEditorCancel),
+        "{output}"
+    );
+}
+
+#[test]
+fn clickhouse_edit_keeps_the_native_baseline_and_change_summary() {
+    let definition = lazydb::db::catalog_mutation::ClickHouseTableDefinition {
+        database: "analytics".into(),
+        name: "events".into(),
+        engine: "MergeTree".into(),
+        columns: vec![lazydb::db::catalog_mutation::ClickHouseColumnDefinition {
+            name: "id".into(),
+            ordinal_position: 1,
+            native_type: "UInt64".into(),
+            default_kind: String::new(),
+            default_expression: String::new(),
+            comment: OptionalMetadata::Supported(None),
+        }],
+        canonical_ddl: "CREATE TABLE analytics.events (id UInt64) ENGINE = MergeTree ORDER BY id"
+            .into(),
+        baseline_fingerprint: "sha256:test".into(),
+        comment: OptionalMetadata::Supported(None),
+    };
+    let mut draft =
+        lazydb::model::catalog_editor::TableDraft::from_clickhouse_definition(&definition);
+    draft.name = "events_v2".into();
+    let mut app = table_constraint_ui_app(
+        lazydb::profile::DatabaseKind::ClickHouse,
+        CatalogMutationMode::Edit,
+        0,
+        None,
+    );
+    if let Some(lazydb::model::catalog_editor::CatalogDraft::Table(table)) = app
+        .catalog_editor
+        .as_mut()
+        .and_then(|editor| editor.draft.as_mut())
+    {
+        *table = draft;
+    }
+    app.catalog_editor.as_mut().unwrap().baseline =
+        Some(lazydb::db::catalog_mutation::CatalogObjectDefinition::ClickHouseTable(definition));
+
+    let (output, _) = render_with_state(&app, 100, 30);
+    assert!(output.contains("Native baseline:"), "{output}");
+    assert!(output.contains("1 pending changes"), "{output}");
+}
+
+fn table_constraint_ui_app(
+    database_kind: lazydb::profile::DatabaseKind,
+    mode: CatalogMutationMode,
+    accepted: usize,
+    open: Option<lazydb::db::catalog_mutation::ConstraintDefinitionKind>,
+) -> App {
+    use lazydb::db::catalog_mutation::ConstraintDefinitionKind;
+
+    let mut draft =
+        lazydb::model::catalog_editor::TableDraft::new_for_database("main", database_kind);
+    draft.name = "items".into();
+    draft.columns[0].name = "id".into();
+    draft.columns[0].native_type = "INTEGER".into();
+    for index in 0..accepted {
+        let kind = match index % 4 {
+            0 => ConstraintDefinitionKind::PrimaryKey {
+                columns: Vec::new(),
+            },
+            1 => ConstraintDefinitionKind::Unique {
+                columns: Vec::new(),
+            },
+            2 => ConstraintDefinitionKind::Check {
+                expression: String::new(),
+                no_inherit: false,
+            },
+            _ => ConstraintDefinitionKind::ForeignKey {
+                columns: Vec::new(),
+                referenced_schema: String::new(),
+                referenced_relation: String::new(),
+                referenced_columns: Vec::new(),
+                match_type: "SIMPLE".into(),
+                on_update: "NO ACTION".into(),
+                on_delete: "NO ACTION".into(),
+            },
+        };
+        draft
+            .table_constraints
+            .push(lazydb::model::catalog_editor::ConstraintDraft::new(
+                kind, "main", "items",
+            ));
+    }
+    if let Some(kind) = open {
+        assert!(draft.begin_new_table_constraint(kind).is_ok());
+    }
+    let mut app = App::new(Vec::new());
+    app.catalog_editor = Some(lazydb::model::catalog_editor::CatalogEditorState {
+        database_kind: Some(database_kind),
+        mode,
+        anchor: CatalogMutationAnchor::Profile {
+            profile_id: uuid::Uuid::nil(),
+        },
+        object_type: Some(CatalogObjectType::Catalog(CatalogKind::Table)),
+        page: CatalogEditorPage::Form,
+        operation: None,
+        catalog_epoch: 0,
+        options: vec![],
+        selected_option: 0,
+        baseline: None,
+        plan: None,
+        error: None,
+        owner_picker: Default::default(),
+        preview_scroll: 0,
+        outcome_unknown: false,
+        draft: Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)),
+    });
+    app.overlay = Some(Overlay::CatalogEditor);
+    app
 }
 
 #[test]
@@ -1227,6 +1561,7 @@ fn table_editor_focus_drives_sections_details_actions_and_context_hints() {
                     lazydb::model::catalog_editor::TableGeneralField::Name,
                 ),
                 column_editor: None,
+                constraint_editor: None,
                 indexes: vec![],
                 constraints: vec![],
                 clickhouse_engine: Default::default(),

@@ -531,6 +531,41 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
             if !matches!(target, HitTarget::ExplorerRow(_)) {
                 ui.clear_click_tracker();
             }
+            if matches!(app.overlay, Some(Overlay::CatalogEditor)) {
+                let (column_details_open, constraint_details_open) = app
+                    .catalog_editor
+                    .as_ref()
+                    .and_then(|editor| editor.draft.as_ref())
+                    .and_then(|draft| match draft {
+                        crate::model::catalog_editor::CatalogDraft::Table(table) => Some((
+                            table.column_editor.is_some(),
+                            table.constraint_editor.is_some(),
+                        )),
+                        _ => None,
+                    })
+                    .unwrap_or((false, false));
+                if column_details_open
+                    && !matches!(
+                        target,
+                        HitTarget::CatalogEditorTableField(
+                            crate::model::catalog_editor::TableEditorFocus::ColumnDetails(_)
+                        ) | HitTarget::CatalogEditorColumnDetailsConfirm
+                            | HitTarget::CatalogEditorColumnDetailsCancel
+                    )
+                {
+                    return None;
+                }
+                if constraint_details_open
+                    && !matches!(
+                        target,
+                        HitTarget::CatalogEditorConstraintDetailsField(_)
+                            | HitTarget::CatalogEditorConstraintDetailsConfirm
+                            | HitTarget::CatalogEditorConstraintDetailsCancel
+                    )
+                {
+                    return None;
+                }
+            }
             match target {
                 HitTarget::HelpItem(index) => return Some(Action::HelpSelect(index)),
                 HitTarget::HelpTogglePanel | HitTarget::OmniTogglePanel => {
@@ -690,6 +725,10 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                                 | HitTarget::CatalogEditorAddTableConstraintUnique
                                 | HitTarget::CatalogEditorAddTableConstraintCheck
                                 | HitTarget::CatalogEditorAddTableConstraintForeignKey
+                                | HitTarget::CatalogEditorEditTableConstraint(_)
+                                | HitTarget::CatalogEditorConstraintDetailsField(_)
+                                | HitTarget::CatalogEditorConstraintDetailsConfirm
+                                | HitTarget::CatalogEditorConstraintDetailsCancel
                                 | HitTarget::CatalogEditorFocusTableConstraint(_)
                                 | HitTarget::CatalogEditorRemoveTableConstraint(_)
                                 | HitTarget::CatalogEditorConstraintField { .. }
@@ -728,28 +767,6 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                                 | HitTarget::OmniScrollbarThumb { .. }
                                 | HitTarget::Shortcut(_)
                         )))
-            {
-                return None;
-            }
-            let details_open = app
-                .catalog_editor
-                .as_ref()
-                .and_then(|editor| editor.draft.as_ref())
-                .is_some_and(|draft| {
-                    matches!(
-                        draft,
-                        crate::model::catalog_editor::CatalogDraft::Table(table)
-                            if table.column_editor.is_some()
-                    )
-                });
-            if details_open
-                && !matches!(
-                    target,
-                    HitTarget::CatalogEditorTableField(
-                        crate::model::catalog_editor::TableEditorFocus::ColumnDetails(_)
-                    ) | HitTarget::CatalogEditorColumnDetailsConfirm
-                        | HitTarget::CatalogEditorColumnDetailsCancel
-                )
             {
                 return None;
             }
@@ -1165,6 +1182,18 @@ pub fn map_mouse(event: MouseEvent, ui: &UiState, app: &App) -> Option<Action> {
                 }
                 HitTarget::CatalogEditorAddTableConstraintForeignKey => {
                     Some(Action::CatalogEditorAddTableConstraintForeignKey)
+                }
+                HitTarget::CatalogEditorEditTableConstraint(index) => {
+                    Some(Action::CatalogEditorEditTableConstraint(index))
+                }
+                HitTarget::CatalogEditorConstraintDetailsField(field) => {
+                    Some(Action::CatalogEditorFocusTableConstraintDetails(field))
+                }
+                HitTarget::CatalogEditorConstraintDetailsConfirm => {
+                    Some(Action::CatalogEditorConfirmTableConstraintDetails)
+                }
+                HitTarget::CatalogEditorConstraintDetailsCancel => {
+                    Some(Action::CatalogEditorCancelTableConstraintDetails)
                 }
                 HitTarget::CatalogEditorFocusTableConstraint(index) => {
                     Some(Action::CatalogEditorFocusTableConstraint(index))
@@ -1716,6 +1745,10 @@ fn focus_at(ui: &UiState, column: u16, row: u16) -> Option<Focus> {
         | HitTarget::CatalogEditorAddTableConstraintUnique
         | HitTarget::CatalogEditorAddTableConstraintCheck
         | HitTarget::CatalogEditorAddTableConstraintForeignKey
+        | HitTarget::CatalogEditorEditTableConstraint(_)
+        | HitTarget::CatalogEditorConstraintDetailsField(_)
+        | HitTarget::CatalogEditorConstraintDetailsConfirm
+        | HitTarget::CatalogEditorConstraintDetailsCancel
         | HitTarget::CatalogEditorFocusTableConstraint(_)
         | HitTarget::CatalogEditorRemoveTableConstraint(_)
         | HitTarget::CatalogEditorConstraintField { .. }

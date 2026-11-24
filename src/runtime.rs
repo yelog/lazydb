@@ -9087,7 +9087,18 @@ async fn resolve_catalog_mutation_connection(
         return Err("Catalog mutation target is invalid for this profile".to_owned());
     }
     let active_guard = connection.lock().await;
-    if let Some(active) = active_guard.get(&ConnectionKey::new(expected, target.clone())) {
+    let active = match active_guard.get(&ConnectionKey::new(expected, target.clone())) {
+        None if profile.kind == crate::profile::DatabaseKind::Sqlite => {
+            let owner = ConnectionKey::new(expected, ExecutionTarget::from_profile(&profile));
+            Some(
+                active_guard
+                    .get(&owner)
+                    .ok_or("SQLite catalog connection is no longer active")?,
+            )
+        }
+        active => active,
+    };
+    if let Some(active) = active {
         return Ok(CatalogMutationConnection {
             database: active.database.clone(),
             owned: false,
@@ -10360,6 +10371,77 @@ fn authorize_profile_execution(
 mod tests {
     use super::*;
     use crate::{db::transaction::WorkerDisposition, profile::import_connection_url};
+
+    #[tokio::test]
+    async fn sqlite_catalog_apply_keeps_attachments_on_their_owning_connection() {
+        use crate::db::catalog_mutation::CatalogMutationTarget;
+        use crate::profile::{CatalogScope, CatalogSelection, DatabaseScope};
+
+        let mut profile = import_connection_url(":memory:", None).unwrap().profile;
+        profile.catalog_scope = CatalogScope {
+            databases: CatalogSelection::Selected(vec![DatabaseScope {
+                name: ":memory:".into(),
+                schemas: CatalogSelection::Selected(vec!["main".into(), "archive".into()]),
+            }]),
+        };
+        let identity = ConnectionIdentity {
+            profile_id: profile.id,
+            generation: 1,
+        };
+        let root = ExecutionTarget::from_profile(&profile);
+        let database = DatabaseConnection::connect(&profile, None).await.unwrap();
+        database
+            .execute(
+                "ATTACH DATABASE ':memory:' AS archive; CREATE TABLE archive.marker (id INTEGER)",
+            )
+            .await
+            .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let (sender, _receiver) = mpsc::unbounded_channel();
+        let runtime = Runtime::new(
+            vec![profile],
+            HashSet::new(),
+            HashMap::new(),
+            None,
+            ProfileStore::new(temp.path().join("connections.toml")),
+            Arc::new(NativeSecretStore),
+            sender,
+        );
+        runtime.connection.lock().await.insert(
+            ConnectionKey::new(identity, root.clone()),
+            ActiveConnection {
+                database,
+                target: root.clone(),
+            },
+        );
+        let resolve = |schema: &str, generation| {
+            resolve_catalog_mutation_connection(
+                Arc::clone(&runtime.connection),
+                ConnectionIdentity {
+                    generation,
+                    ..identity
+                },
+                CatalogMutationTarget::Database(ExecutionTarget {
+                    schema: Some(schema.to_owned()),
+                    ..root.clone()
+                }),
+                runtime.connector.clone(),
+                &runtime.registry,
+                &runtime.secret_store,
+                &runtime.local_credential_store,
+            )
+        };
+        let attached = resolve("archive", identity.generation).await.unwrap();
+        assert!(!attached.owned);
+        attached
+            .database
+            .execute("SELECT id FROM archive.marker")
+            .await
+            .unwrap();
+        assert!(resolve("outside_scope", identity.generation).await.is_err());
+        assert!(resolve("archive", identity.generation + 1).await.is_err());
+        runtime.shutdown().await;
+    }
 
     #[tokio::test]
     async fn relation_document_deletes_recheck_the_current_profile_before_io() {

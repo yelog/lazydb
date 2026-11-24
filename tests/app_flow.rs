@@ -1093,6 +1093,148 @@ fn insert_ctrl_u_deletes_to_the_current_line_start() {
 }
 
 #[tokio::test]
+async fn sqlite_table_editor_applies_reviewed_unique_constraint() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    use lazydb::{
+        db::catalog::{CatalogId, CatalogKind, ObjectGroup},
+        input::{keymap::Keymap, mouse::map_mouse},
+        model::{catalog_editor::CatalogEditorPage, explorer::ExplorerNodeId},
+        ui::{self, HitTarget, UiState},
+    };
+    use ratatui::{Terminal, backend::TestBackend};
+    use sqlx::{Connection, SqliteConnection, sqlite::SqliteConnectOptions};
+
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("constraints.db");
+    let profile = import_connection_url(&format!("sqlite://{}", path.display()), None)
+        .unwrap()
+        .profile;
+    let profile_id = profile.id;
+    let schema = CatalogId::new(
+        profile_id,
+        CatalogKind::Schema,
+        [profile.database.as_deref().unwrap(), "main"],
+    );
+    let mut app = App::new(vec![profile.clone()]);
+    let (events, mut receiver) = mpsc::unbounded_channel();
+    let mut runtime = Runtime::new(
+        vec![profile],
+        HashSet::from([profile_id]),
+        HashMap::new(),
+        None,
+        ProfileStore::new(temp.path().join("connections.toml")),
+        Arc::new(NativeSecretStore),
+        events,
+    );
+    let tables = ExplorerNodeId::Group {
+        parent: schema,
+        group: ObjectGroup::Tables,
+    };
+    app.update(Action::ExplorerSelect(ExplorerNodeId::Profile(profile_id)));
+    dispatch(&mut app, &mut runtime, Action::ExplorerOpenSelected);
+    wait_for_catalog_flow(&mut app, &mut runtime, &mut receiver, |app| {
+        app.explorer
+            .normalized
+            .visible()
+            .iter()
+            .any(|node| node.id == tables)
+    })
+    .await;
+    app.update(Action::ExplorerSelect(tables));
+    app.update(Action::OpenCatalogCreate);
+    assert_eq!(
+        app.catalog_editor.as_ref().unwrap().page,
+        CatalogEditorPage::Form
+    );
+    app.update(Action::CatalogEditorPaste("accounts".into()));
+    app.update(Action::CatalogEditorOpenTableColumnDetails);
+    app.update(Action::CatalogEditorPaste("username".into()));
+    app.update(Action::CatalogEditorConfirmTableColumnDetails);
+
+    let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+    let mut ui = UiState::new();
+    terminal
+        .draw(|frame| ui::render_with_state(frame, &app, &mut ui))
+        .unwrap();
+    let button = ui
+        .hit_regions
+        .iter()
+        .find(|region| region.target == HitTarget::CatalogEditorAddTableConstraintUnique)
+        .expect("Add UNIQUE is clickable at 80×20");
+    let click = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: button.area.x + button.area.width / 2,
+        row: button.area.y,
+        modifiers: KeyModifiers::NONE,
+    };
+    let add_unique = map_mouse(click, &ui, &app).expect("click on Add UNIQUE");
+    assert_eq!(add_unique, Action::CatalogEditorAddTableConstraintUnique);
+    app.update(add_unique);
+    let mut keymap = Keymap::default();
+    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+    let confirm = keymap.map(enter, &app).expect("confirm UNIQUE details");
+    dispatch(&mut app, &mut runtime, confirm);
+    dispatch(&mut app, &mut runtime, Action::CatalogEditorPreview);
+    wait_for_catalog_flow(&mut app, &mut runtime, &mut receiver, |app| {
+        app.catalog_editor
+            .as_ref()
+            .is_some_and(|editor| editor.page == CatalogEditorPage::SqlPreview)
+    })
+    .await;
+    let plan = app.catalog_editor.as_ref().unwrap().plan.as_ref().unwrap();
+    assert_eq!(plan.statements().len(), 1);
+    assert!(plan.statements()[0].contains("UNIQUE (\"username\")"));
+
+    let mut sqlite = SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(&path))
+        .await
+        .unwrap();
+    let table_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM sqlite_schema WHERE name = 'accounts'")
+            .fetch_one(&mut sqlite)
+            .await
+            .unwrap();
+    assert_eq!(table_count, 0);
+
+    let apply = keymap.map(enter, &app).expect("apply reviewed SQL");
+    dispatch(&mut app, &mut runtime, apply);
+    wait_for_catalog_flow(&mut app, &mut runtime, &mut receiver, |app| {
+        app.catalog_editor.is_none()
+    })
+    .await;
+    let insert = "INSERT INTO accounts (username) VALUES ('ada')";
+    sqlx::query(insert).execute(&mut sqlite).await.unwrap();
+    let duplicate = sqlx::query(insert).execute(&mut sqlite).await.unwrap_err();
+    assert!(
+        duplicate
+            .as_database_error()
+            .is_some_and(|error| error.is_unique_violation()),
+        "{duplicate}"
+    );
+    runtime.shutdown().await;
+}
+
+async fn wait_for_catalog_flow(
+    app: &mut App,
+    runtime: &mut Runtime,
+    receiver: &mut mpsc::UnboundedReceiver<Action>,
+    reached: impl Fn(&App) -> bool,
+) {
+    timeout(Duration::from_secs(5), async {
+        while !reached(app) {
+            let event = receiver.recv().await.expect("runtime event");
+            match &event {
+                Action::ConnectionFailed { message, .. }
+                | Action::CatalogMutationPlanFailed { message, .. }
+                | Action::CatalogMutationFailed { message, .. } => panic!("{message}"),
+                _ => dispatch(app, runtime, event),
+            }
+        }
+    })
+    .await
+    .expect("catalog editor did not reach the expected state");
+}
+
+#[tokio::test]
 async fn connects_loads_catalog_and_executes_through_runtime() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("flow.db");

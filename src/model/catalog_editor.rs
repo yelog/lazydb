@@ -563,6 +563,20 @@ pub struct TableColumnEditSession {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TableConstraintEditTarget {
+    New,
+    Existing { index: usize },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TableConstraintEditSession {
+    pub target: TableConstraintEditTarget,
+    pub draft: ConstraintDraft,
+    pub return_focus: TableEditorFocus,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CatalogMutationOption {
     pub object_type: CatalogObjectType,
     pub label: String,
@@ -894,6 +908,7 @@ pub struct TableDraft {
     pub selected_column: usize,
     pub focus: TableEditorFocus,
     pub column_editor: Option<TableColumnEditSession>,
+    pub constraint_editor: Option<Box<TableConstraintEditSession>>,
     pub indexes: Vec<String>,
     pub constraints: Vec<String>,
     pub clickhouse_engine: TextInput,
@@ -1781,18 +1796,74 @@ impl ConstraintDraft {
     }
 
     pub fn move_field(&mut self, delta: isize) {
-        let field_count = match self.kind {
+        let field_count = self.field_count();
+        self.selected_field =
+            (self.selected_field as isize + delta).rem_euclid(field_count as isize) as usize;
+    }
+
+    pub fn field_count(&self) -> usize {
+        match self.kind {
             crate::db::catalog_mutation::ConstraintDefinitionKind::PrimaryKey { .. }
             | crate::db::catalog_mutation::ConstraintDefinitionKind::Unique { .. }
             | crate::db::catalog_mutation::ConstraintDefinitionKind::Check { .. } => 2,
             crate::db::catalog_mutation::ConstraintDefinitionKind::ForeignKey { .. } => 7,
-        };
-        self.selected_field =
-            (self.selected_field as isize + delta).rem_euclid(field_count) as usize;
+        }
     }
 
     pub fn selected_input_mut(&mut self) -> Option<&mut TextInput> {
-        match self.selected_field {
+        self.input_for_field_mut(self.selected_field)
+    }
+
+    pub(crate) fn input_for_field(&self, field: usize) -> Option<&TextInput> {
+        match field {
+            0 => Some(&self.name),
+            1 => match self.kind {
+                crate::db::catalog_mutation::ConstraintDefinitionKind::Check { .. } => {
+                    Some(&self.expression)
+                }
+                _ => Some(&self.columns),
+            },
+            2 if matches!(
+                self.kind,
+                crate::db::catalog_mutation::ConstraintDefinitionKind::ForeignKey { .. }
+            ) =>
+            {
+                Some(&self.referenced_schema)
+            }
+            3 if matches!(
+                self.kind,
+                crate::db::catalog_mutation::ConstraintDefinitionKind::ForeignKey { .. }
+            ) =>
+            {
+                Some(&self.referenced_relation)
+            }
+            4 if matches!(
+                self.kind,
+                crate::db::catalog_mutation::ConstraintDefinitionKind::ForeignKey { .. }
+            ) =>
+            {
+                Some(&self.referenced_columns)
+            }
+            5 if matches!(
+                self.kind,
+                crate::db::catalog_mutation::ConstraintDefinitionKind::ForeignKey { .. }
+            ) =>
+            {
+                Some(&self.on_update)
+            }
+            6 if matches!(
+                self.kind,
+                crate::db::catalog_mutation::ConstraintDefinitionKind::ForeignKey { .. }
+            ) =>
+            {
+                Some(&self.on_delete)
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn input_for_field_mut(&mut self, field: usize) -> Option<&mut TextInput> {
+        match field {
             0 => Some(&mut self.name),
             1 => match self.kind {
                 crate::db::catalog_mutation::ConstraintDefinitionKind::Check { .. } => {
@@ -1944,6 +2015,58 @@ impl ConstraintDraft {
         }
         Ok(())
     }
+
+    pub fn validation_focus(&self) -> Option<(usize, String)> {
+        let columns = split_names(self.columns.value());
+        match &self.kind {
+            crate::db::catalog_mutation::ConstraintDefinitionKind::Check { .. } => self
+                .expression
+                .value()
+                .trim()
+                .is_empty()
+                .then(|| (1, "check expression is required".into())),
+            crate::db::catalog_mutation::ConstraintDefinitionKind::ForeignKey { .. } => {
+                if columns.is_empty() {
+                    return Some((1, "foreign key columns are required".into()));
+                }
+                if columns.windows(2).any(|pair| pair[0] == pair[1]) {
+                    return Some((1, "duplicate foreign key columns are not allowed".into()));
+                }
+                if self.referenced_schema.value().trim().is_empty() {
+                    return Some((2, "target schema is required".into()));
+                }
+                if self.referenced_relation.value().trim().is_empty() {
+                    return Some((3, "target table is required".into()));
+                }
+                let referenced = split_names(self.referenced_columns.value());
+                if referenced.is_empty() {
+                    return Some((4, "target columns are required".into()));
+                }
+                if columns.len() != referenced.len() {
+                    return Some((
+                        4,
+                        "foreign key source and target column counts must match".into(),
+                    ));
+                }
+                if self.on_update.value().trim().is_empty() {
+                    return Some((5, "on update action is required".into()));
+                }
+                if self.on_delete.value().trim().is_empty() {
+                    return Some((6, "on delete action is required".into()));
+                }
+                None
+            }
+            _ => {
+                if columns.is_empty() {
+                    return Some((1, "constraint columns are required".into()));
+                }
+                columns
+                    .windows(2)
+                    .any(|pair| pair[0] == pair[1])
+                    .then(|| (1, "duplicate constraint columns are not allowed".into()))
+            }
+        }
+    }
 }
 
 fn split_names(value: &str) -> Vec<String> {
@@ -2006,6 +2129,155 @@ impl IndexDraft {
 }
 
 impl TableDraft {
+    pub fn supports_structured_table_constraints(&self) -> bool {
+        matches!(
+            self.database_kind,
+            crate::profile::DatabaseKind::Sqlite | crate::profile::DatabaseKind::DuckDb
+        )
+    }
+
+    pub fn begin_new_table_constraint(
+        &mut self,
+        kind: crate::db::catalog_mutation::ConstraintDefinitionKind,
+    ) -> Result<(), String> {
+        if self.column_editor.is_some() || self.constraint_editor.is_some() {
+            return Err("finish the open details editor first".into());
+        }
+        if !self.supports_structured_table_constraints() {
+            return Err(
+                "structured table constraints are available for SQLite and DuckDB tables only"
+                    .into(),
+            );
+        }
+        let schema = self.schema.value().to_owned();
+        let relation = self.name.value().to_owned();
+        let mut constraint = ConstraintDraft::new(kind, &schema, &relation);
+        constraint.name = self.next_constraint_name(&relation).into();
+        match &constraint.kind {
+            crate::db::catalog_mutation::ConstraintDefinitionKind::PrimaryKey { .. }
+            | crate::db::catalog_mutation::ConstraintDefinitionKind::Unique { .. }
+            | crate::db::catalog_mutation::ConstraintDefinitionKind::ForeignKey { .. } => {
+                constraint.columns = self
+                    .columns
+                    .iter()
+                    .filter(|column| {
+                        !matches!(column.state, DraftRowState::Removed { .. })
+                            && !column.name.value().trim().is_empty()
+                    })
+                    .map(|column| column.name.value().trim().to_owned())
+                    .next()
+                    .unwrap_or_default()
+                    .into();
+            }
+            crate::db::catalog_mutation::ConstraintDefinitionKind::Check { .. } => {}
+        }
+        if matches!(
+            &constraint.kind,
+            crate::db::catalog_mutation::ConstraintDefinitionKind::ForeignKey { .. }
+        ) {
+            constraint.referenced_schema = schema.into();
+        }
+        let return_focus = match &constraint.kind {
+            crate::db::catalog_mutation::ConstraintDefinitionKind::PrimaryKey { .. } => {
+                TableActionField::AddConstraintPrimaryKey
+            }
+            crate::db::catalog_mutation::ConstraintDefinitionKind::Unique { .. } => {
+                TableActionField::AddConstraintUnique
+            }
+            crate::db::catalog_mutation::ConstraintDefinitionKind::Check { .. } => {
+                TableActionField::AddConstraintCheck
+            }
+            crate::db::catalog_mutation::ConstraintDefinitionKind::ForeignKey { .. } => {
+                TableActionField::AddConstraintForeignKey
+            }
+        };
+        self.constraint_editor = Some(Box::new(TableConstraintEditSession {
+            target: TableConstraintEditTarget::New,
+            draft: constraint,
+            return_focus: TableEditorFocus::Action(return_focus),
+            error: None,
+        }));
+        Ok(())
+    }
+
+    pub fn begin_edit_table_constraint(&mut self, index: usize) -> bool {
+        if self.column_editor.is_some() || self.constraint_editor.is_some() {
+            return false;
+        }
+        let Some(constraint) = self.table_constraints.get(index).cloned() else {
+            return false;
+        };
+        self.focus = TableEditorFocus::Action(TableActionField::Constraint(index));
+        self.constraint_editor = Some(Box::new(TableConstraintEditSession {
+            target: TableConstraintEditTarget::Existing { index },
+            draft: constraint,
+            return_focus: TableEditorFocus::Action(TableActionField::Constraint(index)),
+            error: None,
+        }));
+        true
+    }
+
+    pub fn validate_table_constraint_details(&self) -> Option<(usize, String)> {
+        self.constraint_editor
+            .as_ref()
+            .and_then(|session| session.draft.validation_focus())
+    }
+
+    pub fn confirm_table_constraint_details(&mut self) -> bool {
+        let Some(session) = self.constraint_editor.take() else {
+            return false;
+        };
+        match session.target {
+            TableConstraintEditTarget::Existing { index } => {
+                let Some(constraint) = self.table_constraints.get_mut(index) else {
+                    self.focus = TableEditorFocus::Action(TableActionField::AddColumn);
+                    return false;
+                };
+                *constraint = session.draft;
+                self.focus = TableEditorFocus::Action(TableActionField::Constraint(index));
+            }
+            TableConstraintEditTarget::New => {
+                let index = self.table_constraints.len();
+                self.table_constraints.push(session.draft);
+                self.focus = TableEditorFocus::Action(TableActionField::Constraint(index));
+            }
+        }
+        true
+    }
+
+    pub fn cancel_table_constraint_details(&mut self) {
+        let Some(session) = self.constraint_editor.take() else {
+            return;
+        };
+        self.focus = session.return_focus;
+    }
+
+    pub fn move_table_constraint_details_field(&mut self, delta: isize) {
+        if let Some(session) = self.constraint_editor.as_mut() {
+            session.draft.move_field(delta);
+        }
+    }
+
+    fn next_constraint_name(&self, relation: &str) -> String {
+        let stem = if relation.trim().is_empty() {
+            "table"
+        } else {
+            relation.trim()
+        };
+        let mut suffix = self.table_constraints.len() + 1;
+        loop {
+            let candidate = format!("{stem}_constraint_{suffix}");
+            if !self
+                .table_constraints
+                .iter()
+                .any(|constraint| constraint.name.value() == candidate)
+            {
+                return candidate;
+            }
+            suffix += 1;
+        }
+    }
+
     pub fn move_selected_constraint_field(&mut self, delta: isize) {
         if let TableEditorFocus::Action(TableActionField::Constraint(index)) = self.focus
             && let Some(constraint) = self.table_constraints.get_mut(index)
@@ -2027,6 +2299,9 @@ impl TableDraft {
     }
 
     pub fn remove_constraint(&mut self, index: usize) -> bool {
+        if self.constraint_editor.is_some() || self.column_editor.is_some() {
+            return false;
+        }
         if index < self.table_constraints.len() {
             self.table_constraints.remove(index);
             if self.table_constraints.is_empty() {
@@ -2064,6 +2339,7 @@ impl TableDraft {
             selected_column: 0,
             focus: TableEditorFocus::General(TableGeneralField::Name),
             column_editor: None,
+            constraint_editor: None,
             indexes: Vec::new(),
             constraints: Vec::new(),
             clickhouse_engine: "MergeTree".into(),
@@ -2100,6 +2376,7 @@ impl TableDraft {
             selected_column: 0,
             focus: TableEditorFocus::General(TableGeneralField::Name),
             column_editor: None,
+            constraint_editor: None,
             indexes: definition.indexes.clone(),
             constraints: definition.constraints.clone(),
             clickhouse_engine: "MergeTree".into(),
@@ -2212,6 +2489,11 @@ impl TableDraft {
         }
         if self.database_kind != crate::profile::DatabaseKind::ClickHouse && column_count == 0 {
             return Err(invalid("a table requires at least one column"));
+        }
+        if !self.table_constraints.is_empty() && !self.supports_structured_table_constraints() {
+            return Err(invalid(
+                "structured table constraints are supported for SQLite and DuckDB table creation only",
+            ));
         }
         for constraint in &self.table_constraints {
             constraint.validate()?;
@@ -2529,6 +2811,48 @@ impl TableDraft {
         };
     }
 
+    pub fn focus_next_action(&mut self, allow_structured_constraints: bool) {
+        loop {
+            self.focus_next();
+            if allow_structured_constraints
+                || !matches!(
+                    self.focus,
+                    TableEditorFocus::Action(
+                        TableActionField::AddConstraintPrimaryKey
+                            | TableActionField::AddConstraintUnique
+                            | TableActionField::AddConstraintCheck
+                            | TableActionField::AddConstraintForeignKey
+                            | TableActionField::Constraint(_)
+                            | TableActionField::RemoveConstraint(_)
+                    )
+                )
+            {
+                break;
+            }
+        }
+    }
+
+    pub fn focus_previous_action(&mut self, allow_structured_constraints: bool) {
+        loop {
+            self.focus_previous();
+            if allow_structured_constraints
+                || !matches!(
+                    self.focus,
+                    TableEditorFocus::Action(
+                        TableActionField::AddConstraintPrimaryKey
+                            | TableActionField::AddConstraintUnique
+                            | TableActionField::AddConstraintCheck
+                            | TableActionField::AddConstraintForeignKey
+                            | TableActionField::Constraint(_)
+                            | TableActionField::RemoveConstraint(_)
+                    )
+                )
+            {
+                break;
+            }
+        }
+    }
+
     pub fn focus_previous(&mut self) {
         if matches!(
             self.focus,
@@ -2768,6 +3092,10 @@ impl TableDraft {
     }
 
     pub fn move_field(&mut self, delta: isize) {
+        if self.constraint_editor.is_some() {
+            self.move_table_constraint_details_field(delta);
+            return;
+        }
         for _ in 0..delta.unsigned_abs() {
             if delta < 0 {
                 self.focus_previous();
@@ -3025,8 +3353,29 @@ impl TableDraft {
     }
 
     pub(crate) fn selected_text_input_mut(&mut self) -> Option<&mut TextInput> {
+        if self.constraint_editor.is_some() {
+            return self
+                .constraint_editor
+                .as_mut()
+                .and_then(|session| session.draft.selected_input_mut());
+        }
         let focus = self.focus;
         self.input_for_target_mut(&focus)
+    }
+
+    pub(crate) fn constraint_details_input_for_field(&self, field: usize) -> Option<&TextInput> {
+        self.constraint_editor
+            .as_ref()
+            .and_then(|session| session.draft.input_for_field(field))
+    }
+
+    pub(crate) fn constraint_details_input_for_field_mut(
+        &mut self,
+        field: usize,
+    ) -> Option<&mut TextInput> {
+        self.constraint_editor
+            .as_mut()
+            .and_then(|session| session.draft.input_for_field_mut(field))
     }
 
     pub fn insert(&mut self, character: char) {
@@ -3401,6 +3750,10 @@ impl CatalogDraft {
             (Self::Table(draft), crate::action::CatalogEditorCursorTarget::TableField(field)) => {
                 draft.input_for_target(field)
             }
+            (
+                Self::Table(draft),
+                crate::action::CatalogEditorCursorTarget::ConstraintField(field),
+            ) => draft.constraint_details_input_for_field(*field),
             _ => None,
         }
     }
@@ -3475,6 +3828,10 @@ impl CatalogDraft {
             (Self::Table(draft), crate::action::CatalogEditorCursorTarget::TableField(field)) => {
                 draft.input_for_target_mut(field)
             }
+            (
+                Self::Table(draft),
+                crate::action::CatalogEditorCursorTarget::ConstraintField(field),
+            ) => draft.constraint_details_input_for_field_mut(*field),
             _ => None,
         }
     }

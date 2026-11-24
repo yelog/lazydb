@@ -2128,6 +2128,149 @@ fn table_editor_action_buttons_keep_arrow_navigation() {
 }
 
 #[test]
+fn table_constraint_details_keymap_owns_navigation_and_text_input() {
+    let mut app = table_constraint_editor_app(
+        lazydb::db::catalog_mutation::ConstraintDefinitionKind::ForeignKey {
+            columns: Vec::new(),
+            referenced_schema: String::new(),
+            referenced_relation: String::new(),
+            referenced_columns: Vec::new(),
+            match_type: "SIMPLE".into(),
+            on_update: "NO ACTION".into(),
+            on_delete: "NO ACTION".into(),
+        },
+    );
+    let mut keymap = Keymap::default();
+    assert_eq!(
+        keymap.map(key(KeyCode::Esc), &app),
+        Some(Action::CatalogEditorCancelTableConstraintDetails)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Enter), &app),
+        Some(Action::CatalogEditorConfirmTableConstraintDetails)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Tab), &app),
+        Some(Action::CatalogEditorFieldNext)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::BackTab), &app),
+        Some(Action::CatalogEditorFieldPrevious)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Down), &app),
+        Some(Action::CatalogEditorFieldNext)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Up), &app),
+        Some(Action::CatalogEditorFieldPrevious)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('x')), &app),
+        Some(Action::CatalogEditorInsert('x'))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Backspace), &app),
+        Some(Action::CatalogEditorBackspace)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Delete), &app),
+        Some(Action::CatalogEditorDelete)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Left), &app),
+        Some(Action::CatalogEditorMoveLeft)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Right), &app),
+        Some(Action::CatalogEditorMoveRight)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Home), &app),
+        Some(Action::CatalogEditorMoveHome)
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::End), &app),
+        Some(Action::CatalogEditorMoveEnd)
+    );
+    assert_eq!(
+        keymap.map(
+            KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+            &app
+        ),
+        Some(Action::CatalogEditorDeletePreviousWord)
+    );
+
+    app.update(Action::CatalogEditorFieldNext);
+    assert_eq!(
+        app.catalog_editor
+            .as_ref()
+            .and_then(|editor| editor.draft.as_ref())
+            .and_then(|draft| match draft {
+                lazydb::model::catalog_editor::CatalogDraft::Table(table) =>
+                    table.constraint_editor.as_ref(),
+                _ => None,
+            })
+            .unwrap()
+            .draft
+            .selected_field,
+        1
+    );
+}
+
+#[test]
+fn accepted_table_constraint_actions_reopen_and_remove_from_the_keyboard() {
+    let mut app = table_constraint_editor_app(
+        lazydb::db::catalog_mutation::ConstraintDefinitionKind::Unique {
+            columns: Vec::new(),
+        },
+    );
+    app.update(Action::CatalogEditorConfirmTableConstraintDetails);
+    let mut keymap = Keymap::default();
+    assert_eq!(
+        keymap.map(key(KeyCode::Enter), &app),
+        Some(Action::CatalogEditorEditTableConstraint(0))
+    );
+    assert_eq!(
+        keymap.map(key(KeyCode::Char(' ')), &app),
+        Some(Action::CatalogEditorEditTableConstraint(0))
+    );
+
+    if let Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)) = app
+        .catalog_editor
+        .as_mut()
+        .and_then(|editor| editor.draft.as_mut())
+    {
+        draft.focus = lazydb::model::catalog_editor::TableEditorFocus::Action(
+            lazydb::model::catalog_editor::TableActionField::RemoveConstraint(0),
+        );
+    }
+    assert_eq!(
+        keymap.map(key(KeyCode::Enter), &app),
+        Some(Action::CatalogEditorRemoveTableConstraint(0))
+    );
+}
+
+fn table_constraint_editor_app(
+    kind: lazydb::db::catalog_mutation::ConstraintDefinitionKind,
+) -> App {
+    let mut app = table_editor_app();
+    let Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)) = app
+        .catalog_editor
+        .as_mut()
+        .and_then(|editor| editor.draft.as_mut())
+    else {
+        panic!("table draft expected");
+    };
+    draft.database_kind = lazydb::profile::DatabaseKind::Sqlite;
+    draft.schema = "main".into();
+    draft.name = "items".into();
+    draft.columns[0].name = "id".into();
+    assert!(draft.begin_new_table_constraint(kind).is_ok());
+    app
+}
+
+#[test]
 fn constraint_editor_maps_field_navigation_and_text_input() {
     let mut app = App::new(Vec::new());
     app.catalog_editor = Some(lazydb::model::catalog_editor::CatalogEditorState {

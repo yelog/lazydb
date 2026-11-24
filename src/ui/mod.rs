@@ -243,6 +243,10 @@ pub enum HitTarget {
     CatalogEditorAddTableConstraintUnique,
     CatalogEditorAddTableConstraintCheck,
     CatalogEditorAddTableConstraintForeignKey,
+    CatalogEditorEditTableConstraint(usize),
+    CatalogEditorConstraintDetailsField(usize),
+    CatalogEditorConstraintDetailsConfirm,
+    CatalogEditorConstraintDetailsCancel,
     CatalogEditorFocusTableConstraint(usize),
     CatalogEditorRemoveTableConstraint(usize),
     CatalogEditorConstraintField {

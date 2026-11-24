@@ -1359,6 +1359,202 @@ fn table_new_column_is_committed_only_after_details_confirmation() {
 }
 
 #[test]
+fn table_constraint_add_actions_remain_transient_until_confirmed() {
+    for action in [
+        Action::CatalogEditorAddTableConstraintPrimaryKey,
+        Action::CatalogEditorAddTableConstraintUnique,
+        Action::CatalogEditorAddTableConstraintCheck,
+        Action::CatalogEditorAddTableConstraintForeignKey,
+    ] {
+        let mut app =
+            sqlite_table_editor(lazydb::db::catalog_mutation::CatalogMutationMode::Create);
+        assert!(app.update(action).is_empty());
+        assert!(draft(&app).constraint_editor.is_some());
+        assert!(draft(&app).table_constraints.is_empty());
+
+        let before = app.catalog_editor.as_ref().unwrap().page;
+        assert!(app.update(Action::CatalogEditorPreview).is_empty());
+        assert_eq!(app.catalog_editor.as_ref().unwrap().page, before);
+        assert!(app.catalog_editor.as_ref().unwrap().plan.is_none());
+
+        app.update(Action::CatalogEditorCancelTableConstraintDetails);
+        assert!(draft(&app).constraint_editor.is_none());
+        assert!(draft(&app).table_constraints.is_empty());
+    }
+}
+
+#[test]
+fn invalid_table_constraint_confirmation_keeps_the_details_open() {
+    let mut app = sqlite_table_editor(lazydb::db::catalog_mutation::CatalogMutationMode::Create);
+    app.update(Action::CatalogEditorAddTableConstraintCheck);
+    app.update(Action::CatalogEditorConfirmTableConstraintDetails);
+    let table = draft(&app);
+    assert!(table.table_constraints.is_empty());
+    assert!(table.constraint_editor.as_ref().unwrap().error.is_some());
+    assert_eq!(
+        table
+            .constraint_editor
+            .as_ref()
+            .unwrap()
+            .draft
+            .selected_field,
+        1
+    );
+
+    draft_mut(&mut app)
+        .constraint_editor
+        .as_mut()
+        .unwrap()
+        .draft
+        .expression = "id > 0".into();
+    app.update(Action::CatalogEditorConfirmTableConstraintDetails);
+    assert!(draft(&app).constraint_editor.is_none());
+    assert_eq!(draft(&app).table_constraints.len(), 1);
+
+    let mut app = sqlite_table_editor(lazydb::db::catalog_mutation::CatalogMutationMode::Create);
+    app.update(Action::CatalogEditorAddTableConstraintForeignKey);
+    {
+        let session = draft_mut(&mut app)
+            .constraint_editor
+            .as_mut()
+            .expect("foreign key session");
+        session.draft.columns = String::new().into();
+    }
+    app.update(Action::CatalogEditorConfirmTableConstraintDetails);
+    assert!(draft(&app).table_constraints.is_empty());
+    assert!(
+        draft(&app)
+            .constraint_editor
+            .as_ref()
+            .unwrap()
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("columns are required"))
+    );
+}
+
+#[test]
+fn multiple_table_constraints_can_be_accepted_reopened_and_removed() {
+    let mut app = sqlite_table_editor(lazydb::db::catalog_mutation::CatalogMutationMode::Create);
+    for (action, kind) in [
+        (Action::CatalogEditorAddTableConstraintPrimaryKey, "pk"),
+        (Action::CatalogEditorAddTableConstraintUnique, "unique"),
+    ] {
+        app.update(action);
+        draft_mut(&mut app)
+            .constraint_editor
+            .as_mut()
+            .unwrap()
+            .draft
+            .name = format!("items_{kind}").into();
+        app.update(Action::CatalogEditorConfirmTableConstraintDetails);
+    }
+    app.update(Action::CatalogEditorAddTableConstraintCheck);
+    draft_mut(&mut app)
+        .constraint_editor
+        .as_mut()
+        .unwrap()
+        .draft
+        .expression = "id > 0".into();
+    app.update(Action::CatalogEditorConfirmTableConstraintDetails);
+    assert_eq!(draft(&app).table_constraints.len(), 3);
+
+    app.update(Action::CatalogEditorEditTableConstraint(1));
+    assert!(draft(&app).constraint_editor.is_some());
+    draft_mut(&mut app)
+        .constraint_editor
+        .as_mut()
+        .unwrap()
+        .draft
+        .name = "items_unique_v2".into();
+    app.update(Action::CatalogEditorConfirmTableConstraintDetails);
+    assert_eq!(
+        draft(&app).table_constraints[1].name.value(),
+        "items_unique_v2"
+    );
+
+    app.update(Action::CatalogEditorRemoveTableConstraint(1));
+    assert_eq!(draft(&app).table_constraints.len(), 2);
+    assert!(matches!(
+        draft(&app).table_constraints[1].kind,
+        lazydb::db::catalog_mutation::ConstraintDefinitionKind::Check { .. }
+    ));
+}
+
+#[test]
+fn foreign_key_details_accept_all_seven_fields() {
+    let mut app = sqlite_table_editor(lazydb::db::catalog_mutation::CatalogMutationMode::Create);
+    app.update(Action::CatalogEditorAddTableConstraintForeignKey);
+    for field in 0..7 {
+        app.update(Action::CatalogEditorFocusTableConstraintDetails(field));
+        assert_eq!(
+            draft(&app)
+                .constraint_editor
+                .as_ref()
+                .unwrap()
+                .draft
+                .selected_field,
+            field
+        );
+    }
+    {
+        let session = draft_mut(&mut app)
+            .constraint_editor
+            .as_mut()
+            .expect("foreign key session");
+        session.draft.name = "items_parent".into();
+        session.draft.columns = "parent_id".into();
+        session.draft.referenced_schema = "main".into();
+        session.draft.referenced_relation = "parent".into();
+        session.draft.referenced_columns = "id".into();
+        session.draft.on_update = "CASCADE".into();
+        session.draft.on_delete = "RESTRICT".into();
+    }
+    app.update(Action::CatalogEditorConfirmTableConstraintDetails);
+    let constraint = &draft(&app).table_constraints[0];
+    assert!(matches!(
+        &constraint.kind,
+        lazydb::db::catalog_mutation::ConstraintDefinitionKind::ForeignKey { .. }
+    ));
+    assert_eq!(constraint.name.value(), "items_parent");
+    assert_eq!(constraint.referenced_schema.value(), "main");
+    assert_eq!(constraint.referenced_relation.value(), "parent");
+    assert_eq!(constraint.referenced_columns.value(), "id");
+    assert_eq!(constraint.on_update.value(), "CASCADE");
+    assert_eq!(constraint.on_delete.value(), "RESTRICT");
+}
+
+#[test]
+fn structured_constraint_actions_are_rejected_outside_new_table_creation() {
+    for (kind, mode) in [
+        (
+            lazydb::profile::DatabaseKind::Postgres,
+            lazydb::db::catalog_mutation::CatalogMutationMode::Create,
+        ),
+        (
+            lazydb::profile::DatabaseKind::Sqlite,
+            lazydb::db::catalog_mutation::CatalogMutationMode::Edit,
+        ),
+        (
+            lazydb::profile::DatabaseKind::DuckDb,
+            lazydb::db::catalog_mutation::CatalogMutationMode::Edit,
+        ),
+    ] {
+        let mut app = sqlite_table_editor(mode);
+        draft_mut(&mut app).database_kind = kind;
+        app.update(Action::CatalogEditorAddTableConstraintPrimaryKey);
+        assert!(draft(&app).constraint_editor.is_none());
+        assert!(draft(&app).table_constraints.is_empty());
+        assert!(
+            app.catalog_editor
+                .as_ref()
+                .and_then(|editor| editor.error.as_deref())
+                .is_some_and(|error| !error.is_empty())
+        );
+    }
+}
+
+#[test]
 fn table_preview_opens_column_details_for_the_first_invalid_column_field() {
     let mut app = table_editor_for_paste();
     draft_mut(&mut app).name = "events".into();
@@ -1393,6 +1589,19 @@ fn draft(app: &App) -> &lazydb::model::catalog_editor::TableDraft {
         lazydb::model::catalog_editor::CatalogDraft::Table(draft) => draft,
         _ => panic!("table draft expected"),
     }
+}
+
+fn sqlite_table_editor(mode: CatalogMutationMode) -> App {
+    let mut draft = lazydb::model::catalog_editor::TableDraft::new_for_database(
+        "main",
+        lazydb::profile::DatabaseKind::Sqlite,
+    );
+    draft.name = "items".into();
+    draft.columns[0].name = "id".into();
+    draft.columns[0].native_type = "INTEGER".into();
+    let mut app = simple_catalog_editor(mode, CatalogDraft::Table(draft));
+    app.overlay = Some(Overlay::CatalogEditor);
+    app
 }
 
 #[test]

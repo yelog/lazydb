@@ -20,10 +20,154 @@ use lazydb::{
 use tempfile::TempDir;
 use uuid::Uuid;
 
-use lazydb::db::catalog_mutation::{CatalogMutationAnchor, CatalogMutationMode, CatalogObjectType};
-use lazydb::model::catalog_editor::{CatalogDraft, TableDraft};
+use lazydb::db::catalog_mutation::{
+    CatalogMutationAnchor, CatalogMutationError, CatalogMutationMode, CatalogMutationPlan,
+    CatalogMutationRequest, CatalogObjectType, ConstraintDefinitionKind,
+};
+use lazydb::model::catalog_editor::{CatalogDraft, ConstraintDraft, TableDraft};
 
 const ATTACHED_ALIAS: &str = "ArchiveCase";
+
+fn sqlite_create_request(
+    profile_id: Uuid,
+    database: &str,
+    schema_name: &str,
+) -> CatalogMutationRequest {
+    CatalogMutationRequest {
+        connection: ConnectionIdentity {
+            profile_id,
+            generation: 1,
+        },
+        request_id: 1,
+        catalog_epoch: 1,
+        mode: CatalogMutationMode::Create,
+        anchor: CatalogMutationAnchor::Group {
+            schema: CatalogId::new(
+                profile_id,
+                CatalogKind::Schema,
+                [database.to_owned(), schema_name.to_owned()],
+            ),
+            group: ObjectGroup::Tables,
+        },
+        object_type: CatalogObjectType::Catalog(CatalogKind::Table),
+        current_database: Some(database.to_owned()),
+    }
+}
+
+fn sqlite_table_create_plan(
+    profile_id: Uuid,
+    database: &str,
+    schema_name: &str,
+    draft: TableDraft,
+) -> Result<CatalogMutationPlan, CatalogMutationError> {
+    lazydb::db::sqlite::SqliteAdapter::plan_catalog_mutation(
+        sqlite_create_request(profile_id, database, schema_name),
+        CatalogDraft::Table(draft),
+        None,
+    )
+}
+
+fn sqlite_table_draft(
+    schema_name: &str,
+    table_name: &str,
+    columns: &[(&str, &str, bool)],
+) -> TableDraft {
+    let mut draft =
+        TableDraft::new_for_database(schema_name, lazydb::profile::DatabaseKind::Sqlite);
+    draft.name.set(table_name);
+    draft.columns.clear();
+    for (column_name, native_type, nullable) in columns {
+        let mut column = lazydb::model::catalog_editor::ColumnDraft::new_added_for_database(
+            lazydb::profile::DatabaseKind::Sqlite,
+        );
+        column.name.set(*column_name);
+        column.native_type.set(*native_type);
+        column.nullable = *nullable;
+        draft.columns.push(column);
+    }
+    draft
+}
+
+fn sqlite_constrained_child_draft() -> TableDraft {
+    let mut draft = sqlite_table_draft(
+        "main",
+        "child",
+        &[
+            ("tenant_id", "INTEGER", false),
+            ("child_id", "INTEGER", false),
+            ("parent_id", "INTEGER", true),
+            ("code", "TEXT", false),
+            ("amount", "INTEGER", false),
+        ],
+    );
+
+    let mut primary_key = ConstraintDraft::new(
+        ConstraintDefinitionKind::PrimaryKey { columns: vec![] },
+        "main",
+        "child",
+    );
+    primary_key.name.set("child\"pk");
+    primary_key.columns.set("tenant_id, child_id");
+    draft.add_constraint(primary_key);
+
+    let mut unique = ConstraintDraft::new(
+        ConstraintDefinitionKind::Unique { columns: vec![] },
+        "main",
+        "child",
+    );
+    unique.name.set("child_unique");
+    unique.columns.set("tenant_id, code");
+    draft.add_constraint(unique);
+
+    let mut check = ConstraintDraft::new(
+        ConstraintDefinitionKind::Check {
+            expression: String::new(),
+            no_inherit: false,
+        },
+        "main",
+        "child",
+    );
+    check.name.set("child_check");
+    check.expression.set("amount > 0 AND length(code) > 0");
+    draft.add_constraint(check);
+
+    let mut foreign_key = ConstraintDraft::new(
+        ConstraintDefinitionKind::ForeignKey {
+            columns: vec![],
+            referenced_schema: "main".into(),
+            referenced_relation: "parent".into(),
+            referenced_columns: vec![],
+            match_type: "SIMPLE".into(),
+            on_update: "NO ACTION".into(),
+            on_delete: "NO ACTION".into(),
+        },
+        "main",
+        "child",
+    );
+    foreign_key.name.set("child\"fk");
+    foreign_key.columns.set("tenant_id, parent_id");
+    foreign_key.referenced_schema.set("main");
+    foreign_key.referenced_relation.set("parent");
+    foreign_key.referenced_columns.set("tenant_id, parent_id");
+    foreign_key.on_update.set("cascade");
+    foreign_key.on_delete.set("restrict");
+    draft.add_constraint(foreign_key);
+
+    draft
+}
+
+fn sqlite_create_error(
+    profile_id: Uuid,
+    database: &str,
+    schema_name: &str,
+    draft: TableDraft,
+) -> String {
+    match sqlite_table_create_plan(profile_id, database, schema_name, draft) {
+        Ok(plan) => panic!("expected SQLite create plan to fail, got {}", plan.sql()),
+        Err(CatalogMutationError::InvalidDraft { reason }) => reason,
+        Err(error) => panic!("expected invalid SQLite draft, got {error:?}"),
+    }
+}
 
 #[tokio::test]
 async fn sqlite_executes_a_table_create_plan_against_a_temporary_database() {
@@ -65,6 +209,398 @@ async fn sqlite_executes_a_table_create_plan_against_a_temporary_database() {
         .await
         .unwrap();
     assert_eq!(result.result_sets[0].rows.len(), 1);
+    database.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_create_plan_qualifies_main_and_targets_the_authorized_schema() {
+    let imported = import_connection_url("sqlite://:memory:", Some("create-target")).unwrap();
+    let profile_id = imported.profile.id;
+    let database = DatabaseConnection::connect(&imported.profile, None)
+        .await
+        .unwrap();
+    let draft = sqlite_table_draft(
+        "main",
+        "created\"table",
+        &[("id", "INTEGER", false), ("label", "TEXT", true)],
+    );
+
+    let plan = sqlite_table_create_plan(profile_id, ":memory:", "main", draft).unwrap();
+    assert_eq!(
+        plan.sql(),
+        "CREATE TABLE \"main\".\"created\"\"table\" (\"id\" INTEGER NOT NULL, \"label\" TEXT)"
+    );
+    assert!(!plan.sql().contains("CONSTRAINT"));
+    let target = plan.execution_target.execution_target(profile_id);
+    assert_eq!(target.database, ":memory:");
+    assert_eq!(target.schema.as_deref(), Some("main"));
+    assert!(target.is_valid(&imported.profile));
+
+    database.execute_catalog_mutation(&plan).await.unwrap();
+    let result = database
+        .execute(
+            "SELECT name FROM main.sqlite_master WHERE type = 'table' AND name = 'created\"table'",
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.result_sets[0].rows.len(), 1);
+    database.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_create_plan_applies_quoted_multi_column_constraints_and_enforces_them() {
+    let imported = import_connection_url("sqlite://:memory:", Some("create-constraints")).unwrap();
+    let profile_id = imported.profile.id;
+    let database = DatabaseConnection::connect(&imported.profile, None)
+        .await
+        .unwrap();
+    database
+        .execute(
+            "CREATE TABLE parent (tenant_id INTEGER NOT NULL, parent_id INTEGER NOT NULL, PRIMARY KEY (tenant_id, parent_id)); INSERT INTO parent VALUES (1, 10);",
+        )
+        .await
+        .unwrap();
+
+    let plan = sqlite_table_create_plan(
+        profile_id,
+        ":memory:",
+        "main",
+        sqlite_constrained_child_draft(),
+    )
+    .unwrap();
+    let sql = plan.sql();
+    assert!(sql.starts_with("CREATE TABLE \"main\".\"child\""));
+    assert!(sql.contains("CONSTRAINT \"child\"\"pk\" PRIMARY KEY (\"tenant_id\", \"child_id\")"));
+    assert!(sql.contains("CONSTRAINT \"child_unique\" UNIQUE (\"tenant_id\", \"code\")"));
+    assert!(sql.contains("CONSTRAINT \"child_check\" CHECK (amount > 0 AND length(code) > 0)"));
+    assert!(sql.contains(
+        "CONSTRAINT \"child\"\"fk\" FOREIGN KEY (\"tenant_id\", \"parent_id\") REFERENCES \"parent\" (\"tenant_id\", \"parent_id\") ON UPDATE CASCADE ON DELETE RESTRICT"
+    ));
+    assert_eq!(
+        plan.execution_target
+            .execution_target(profile_id)
+            .schema
+            .as_deref(),
+        Some("main")
+    );
+
+    database.execute_catalog_mutation(&plan).await.unwrap();
+    database
+        .execute(
+            "INSERT INTO main.child (tenant_id, child_id, parent_id, code, amount) VALUES (1, 100, 10, 'ok', 5)",
+        )
+        .await
+        .unwrap();
+    assert!(
+        database
+            .execute(
+                "INSERT INTO main.child (tenant_id, child_id, parent_id, code, amount) VALUES (1, 100, 10, 'other', 6)",
+            )
+            .await
+            .is_err(),
+        "the composite primary key must reject duplicate keys"
+    );
+    assert!(
+        database
+            .execute(
+                "INSERT INTO main.child (tenant_id, child_id, parent_id, code, amount) VALUES (1, 101, 10, 'ok', 6)",
+            )
+            .await
+            .is_err(),
+        "the unique constraint must reject duplicate tenant/code pairs"
+    );
+    assert!(
+        database
+            .execute(
+                "INSERT INTO main.child (tenant_id, child_id, parent_id, code, amount) VALUES (1, 102, 10, 'ok', 0)",
+            )
+            .await
+            .is_err(),
+        "the check constraint must reject non-positive amounts"
+    );
+    assert!(
+        database
+            .execute(
+                "INSERT INTO main.child (tenant_id, child_id, parent_id, code, amount) VALUES (1, 103, 99, 'ok', 5)",
+            )
+            .await
+            .is_err(),
+        "the foreign key must reject a missing parent"
+    );
+
+    database
+        .execute("UPDATE main.parent SET parent_id = 11 WHERE tenant_id = 1 AND parent_id = 10")
+        .await
+        .unwrap();
+    let cascaded = database
+        .execute("SELECT parent_id FROM main.child WHERE tenant_id = 1 AND child_id = 100")
+        .await
+        .unwrap();
+    assert!(matches!(
+        cascaded.result_sets[0].rows[0][0],
+        CellValue::Integer(11)
+    ));
+    assert!(
+        database
+            .execute("DELETE FROM main.parent WHERE tenant_id = 1 AND parent_id = 11")
+            .await
+            .is_err(),
+        "the restrictive foreign key must reject deleting a referenced parent"
+    );
+    database.close().await;
+}
+
+#[test]
+fn sqlite_create_plan_rejects_cross_schema_and_unsupported_constraint_options() {
+    let profile_id = Uuid::new_v4();
+
+    let mut cross_schema = sqlite_constrained_child_draft();
+    cross_schema.table_constraints[3].referenced_schema = ATTACHED_ALIAS.into();
+    let error = sqlite_create_error(profile_id, ":memory:", "main", cross_schema);
+    assert!(error.contains("cross-schema"), "{error}");
+
+    let mut unsupported_match = sqlite_constrained_child_draft();
+    unsupported_match.table_constraints[3].match_type = "FULL".into();
+    let error = sqlite_create_error(profile_id, ":memory:", "main", unsupported_match);
+    assert!(error.contains("MATCH SIMPLE"), "{error}");
+
+    let mut unsupported_action = sqlite_constrained_child_draft();
+    unsupported_action.table_constraints[3].on_delete = "SET NULL (tenant_id)".into();
+    let error = sqlite_create_error(profile_id, ":memory:", "main", unsupported_action);
+    assert!(error.contains("ON DELETE action"), "{error}");
+
+    let mut not_valid = sqlite_constrained_child_draft();
+    not_valid.table_constraints[3].not_valid = true;
+    let error = sqlite_create_error(profile_id, ":memory:", "main", not_valid);
+    assert!(error.contains("NOT VALID"), "{error}");
+
+    let mut deferred_key = sqlite_constrained_child_draft();
+    deferred_key.table_constraints[0].deferrable = true;
+    let error = sqlite_create_error(profile_id, ":memory:", "main", deferred_key);
+    assert!(error.contains("DEFERRABLE PRIMARY KEY"), "{error}");
+
+    let mut unknown_column = sqlite_constrained_child_draft();
+    unknown_column.table_constraints[1].columns = "tenant_id, missing".into();
+    let error = sqlite_create_error(profile_id, ":memory:", "main", unknown_column);
+    assert!(error.contains("unknown column"), "{error}");
+
+    let mut duplicate_name = sqlite_constrained_child_draft();
+    duplicate_name.table_constraints[1].name = duplicate_name.table_constraints[0].name.clone();
+    let error = sqlite_create_error(profile_id, ":memory:", "main", duplicate_name);
+    assert!(error.contains("names must be unique"), "{error}");
+
+    let mut multiple_primary_keys = sqlite_constrained_child_draft();
+    multiple_primary_keys.table_constraints[0].name = "second_pk".into();
+    multiple_primary_keys.add_constraint(ConstraintDraft::new(
+        ConstraintDefinitionKind::PrimaryKey { columns: vec![] },
+        "main",
+        "child",
+    ));
+    multiple_primary_keys.table_constraints[4].columns = "code".into();
+    let error = sqlite_create_error(profile_id, ":memory:", "main", multiple_primary_keys);
+    assert!(error.contains("at most one PRIMARY KEY"), "{error}");
+
+    let mut unsafe_check = sqlite_constrained_child_draft();
+    unsafe_check.table_constraints[2].expression = "amount > 0; DROP TABLE child".into();
+    let error = sqlite_create_error(profile_id, ":memory:", "main", unsafe_check);
+    assert!(error.contains("single expression"), "{error}");
+
+    let mut malformed_check = sqlite_constrained_child_draft();
+    malformed_check.table_constraints[2].expression = "amount >".into();
+    let error = sqlite_create_error(profile_id, ":memory:", "main", malformed_check);
+    assert!(error.contains("single expression"), "{error}");
+
+    let mut terminated_check = sqlite_constrained_child_draft();
+    terminated_check.table_constraints[2].expression = "amount > 0;".into();
+    let error = sqlite_create_error(profile_id, ":memory:", "main", terminated_check);
+    assert!(error.contains("single expression"), "{error}");
+
+    let mut duplicate_source_columns = sqlite_constrained_child_draft();
+    duplicate_source_columns.table_constraints[0].columns = "tenant_id, TENANT_ID".into();
+    let error = sqlite_create_error(profile_id, ":memory:", "main", duplicate_source_columns);
+    assert!(error.contains("must not repeat"), "{error}");
+
+    let mut duplicate_referenced_columns = sqlite_constrained_child_draft();
+    duplicate_referenced_columns.table_constraints[3].referenced_columns =
+        "tenant_id, TENANT_ID".into();
+    let error = sqlite_create_error(profile_id, ":memory:", "main", duplicate_referenced_columns);
+    assert!(error.contains("must not repeat"), "{error}");
+
+    let mut duplicate_columns = sqlite_table_draft(
+        "main",
+        "duplicate_columns",
+        &[("id", "INTEGER", false), ("ID", "INTEGER", false)],
+    );
+    duplicate_columns.table_constraints.clear();
+    let error = sqlite_create_error(profile_id, ":memory:", "main", duplicate_columns);
+    assert!(error.contains("ASCII case"), "{error}");
+
+    let mut mismatched_schema =
+        sqlite_table_draft("other", "wrong_schema", &[("id", "INTEGER", false)]);
+    mismatched_schema.table_constraints.clear();
+    let error = sqlite_create_error(profile_id, ":memory:", "main", mismatched_schema);
+    assert!(
+        error.contains("does not match the selected schema"),
+        "{error}"
+    );
+
+    let mut opaque_constraint = sqlite_constrained_child_draft();
+    opaque_constraint.constraints = vec!["UNIQUE (code)".into()];
+    let error = sqlite_create_error(profile_id, ":memory:", "main", opaque_constraint);
+    assert!(error.contains("opaque constraint"), "{error}");
+}
+
+#[test]
+fn sqlite_create_plan_rejects_malformed_schema_anchors() {
+    let profile_id = Uuid::new_v4();
+    let mut request = sqlite_create_request(profile_id, ":memory:", "main");
+    let CatalogMutationAnchor::Group { schema, .. } = &mut request.anchor else {
+        panic!("SQLite create request must use a group anchor");
+    };
+    *schema = CatalogId::new(
+        profile_id,
+        CatalogKind::Schema,
+        [":memory:", "main", "extra"],
+    );
+    let error = lazydb::db::sqlite::SqliteAdapter::plan_catalog_mutation(
+        request,
+        CatalogDraft::Table(sqlite_table_draft(
+            "main",
+            "bad_anchor",
+            &[("id", "INTEGER", false)],
+        )),
+        None,
+    )
+    .unwrap_err();
+    match error {
+        CatalogMutationError::InvalidAnchor { reason } => {
+            assert!(reason.contains("incomplete"), "{reason}");
+        }
+        other => panic!("expected invalid SQLite anchor, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn sqlite_create_plan_matches_source_columns_case_insensitively_and_accepts_check_literals() {
+    let imported =
+        import_connection_url("sqlite://:memory:", Some("create-case-and-check")).unwrap();
+    let profile_id = imported.profile.id;
+    let database = DatabaseConnection::connect(&imported.profile, None)
+        .await
+        .unwrap();
+    database
+        .execute(
+            "CREATE TABLE parent (tenant_id INTEGER NOT NULL, parent_id INTEGER NOT NULL, PRIMARY KEY (tenant_id, parent_id)); INSERT INTO parent VALUES (1, 10);",
+        )
+        .await
+        .unwrap();
+
+    let mut draft = sqlite_constrained_child_draft();
+    draft.table_constraints[0].columns = "TENANT_ID, Child_Id".into();
+    draft.table_constraints[1].columns = "Tenant_Id, CODE".into();
+    draft.table_constraints[2].expression = "amount > 0 AND instr(code, ';') = 0".into();
+    draft.table_constraints[3].columns = "TENANT_ID, Parent_Id".into();
+    draft.table_constraints[3].referenced_columns = "TENANT_ID, PARENT_ID".into();
+
+    let plan = sqlite_table_create_plan(profile_id, ":memory:", "main", draft).unwrap();
+    let sql = plan.sql();
+    assert!(
+        sql.contains("PRIMARY KEY (\"tenant_id\", \"child_id\")"),
+        "{sql}"
+    );
+    assert!(sql.contains("UNIQUE (\"tenant_id\", \"code\")"), "{sql}");
+    assert!(
+        sql.contains("FOREIGN KEY (\"tenant_id\", \"parent_id\")"),
+        "{sql}"
+    );
+    assert!(
+        sql.contains("REFERENCES \"parent\" (\"TENANT_ID\", \"PARENT_ID\")"),
+        "{sql}"
+    );
+    assert!(
+        sql.contains("CHECK (amount > 0 AND instr(code, ';') = 0)"),
+        "{sql}"
+    );
+
+    database.execute_catalog_mutation(&plan).await.unwrap();
+    database
+        .execute(
+            "INSERT INTO main.child (tenant_id, child_id, parent_id, code, amount) VALUES (1, 100, 10, 'ok', 5)",
+        )
+        .await
+        .unwrap();
+    assert!(
+        database
+            .execute(
+                "INSERT INTO main.child (tenant_id, child_id, parent_id, code, amount) VALUES (1, 101, 10, 'bad;code', 5)",
+            )
+            .await
+            .is_err(),
+        "a semicolon inside a string literal must still be enforced by the check expression"
+    );
+    database.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_create_plan_targets_a_named_attached_schema_without_redirecting_to_main() {
+    let temp = TempDir::new().unwrap();
+    let main_path = temp.path().join("create-target.db");
+    let attached_path = temp.path().join("create-attached.db");
+    let imported = import_connection_url(
+        &format!("sqlite://{}", main_path.display()),
+        Some("create-attached"),
+    )
+    .unwrap();
+    let mut profile = imported.profile;
+    let database_name = profile.database.clone().unwrap();
+    profile.catalog_scope = selected_scope(&database_name, &["main", ATTACHED_ALIAS]);
+    let profile_id = profile.id;
+    let database = DatabaseConnection::connect(&profile, None).await.unwrap();
+    let attached_path = attached_path.to_string_lossy().replace('\'', "''");
+    database
+        .execute(&format!(
+            "ATTACH DATABASE '{attached_path}' AS \"{ATTACHED_ALIAS}\""
+        ))
+        .await
+        .unwrap();
+
+    let plan = sqlite_table_create_plan(
+        profile_id,
+        &database_name,
+        ATTACHED_ALIAS,
+        sqlite_table_draft(
+            ATTACHED_ALIAS,
+            "attached_created",
+            &[("id", "INTEGER", false)],
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        plan.sql(),
+        "CREATE TABLE \"ArchiveCase\".\"attached_created\" (\"id\" INTEGER NOT NULL)"
+    );
+    let target = plan.execution_target.execution_target(profile_id);
+    assert_eq!(target.schema.as_deref(), Some(ATTACHED_ALIAS));
+    assert!(target.is_valid(&profile));
+    let mut restricted = profile.clone();
+    restricted.catalog_scope = selected_scope(&database_name, &["main"]);
+    assert!(!target.is_valid(&restricted));
+
+    database.execute_catalog_mutation(&plan).await.unwrap();
+    let attached = database
+        .execute(&format!(
+            "SELECT name FROM \"{ATTACHED_ALIAS}\".sqlite_master WHERE type = 'table' AND name = 'attached_created'"
+        ))
+        .await
+        .unwrap();
+    assert_eq!(attached.result_sets[0].rows.len(), 1);
+    let main = database
+        .execute(
+            "SELECT name FROM main.sqlite_master WHERE type = 'table' AND name = 'attached_created'",
+        )
+        .await
+        .unwrap();
+    assert!(main.result_sets[0].rows.is_empty());
     database.close().await;
 }
 

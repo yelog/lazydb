@@ -1076,6 +1076,171 @@ fn column_details_modal_controls_map_to_confirm_and_cancel() {
 }
 
 #[test]
+fn constraint_details_modal_fields_and_controls_block_background_hits() {
+    use lazydb::db::catalog_mutation::ConstraintDefinitionKind;
+
+    let app = sqlite_table_constraint_app(
+        Some(ConstraintDefinitionKind::ForeignKey {
+            columns: Vec::new(),
+            referenced_schema: String::new(),
+            referenced_relation: String::new(),
+            referenced_columns: Vec::new(),
+            match_type: "SIMPLE".into(),
+            on_update: "NO ACTION".into(),
+            on_delete: "NO ACTION".into(),
+        }),
+        0,
+    );
+    let mut state = UiState::new();
+    let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+    terminal
+        .draw(|frame| ui::render_with_state(frame, &app, &mut state))
+        .unwrap();
+
+    for field in 0..7 {
+        assert_click_maps(
+            &state,
+            &app,
+            &HitTarget::CatalogEditorConstraintDetailsField(field),
+            Action::CatalogEditorFocusTableConstraintDetails(field),
+        );
+    }
+    assert_click_maps(
+        &state,
+        &app,
+        &HitTarget::CatalogEditorConstraintDetailsConfirm,
+        Action::CatalogEditorConfirmTableConstraintDetails,
+    );
+    assert_click_maps(
+        &state,
+        &app,
+        &HitTarget::CatalogEditorConstraintDetailsCancel,
+        Action::CatalogEditorCancelTableConstraintDetails,
+    );
+
+    assert!(
+        !state
+            .hit_regions
+            .iter()
+            .any(|region| region.target == HitTarget::CatalogEditorAddTableColumn)
+    );
+    assert!(state.catalog_input_targets.iter().all(|(target, _)| {
+        matches!(
+            target,
+            lazydb::action::CatalogEditorCursorTarget::ConstraintField(_)
+        )
+    }));
+    assert_eq!(
+        map_mouse(
+            mouse(MouseEventKind::Down(MouseButton::Left), 1, 1),
+            &state,
+            &app,
+        ),
+        None
+    );
+}
+
+#[test]
+fn table_constraint_strip_keeps_the_selected_chip_mouse_reachable_when_clipped() {
+    let mut app = sqlite_table_constraint_app(None, 6);
+    if let Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)) = app
+        .catalog_editor
+        .as_mut()
+        .and_then(|editor| editor.draft.as_mut())
+    {
+        draft.focus = lazydb::model::catalog_editor::TableEditorFocus::Action(
+            lazydb::model::catalog_editor::TableActionField::Constraint(5),
+        );
+    }
+    let mut state = UiState::new();
+    let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+    terminal
+        .draw(|frame| ui::render_with_state(frame, &app, &mut state))
+        .unwrap();
+
+    assert_click_maps(
+        &state,
+        &app,
+        &HitTarget::CatalogEditorEditTableConstraint(5),
+        Action::CatalogEditorEditTableConstraint(5),
+    );
+    assert_click_maps(
+        &state,
+        &app,
+        &HitTarget::CatalogEditorRemoveTableConstraint(5),
+        Action::CatalogEditorRemoveTableConstraint(5),
+    );
+    assert!(
+        !state
+            .hit_regions
+            .iter()
+            .any(|region| region.target == HitTarget::CatalogEditorEditTableConstraint(0))
+    );
+}
+
+fn sqlite_table_constraint_app(
+    open: Option<lazydb::db::catalog_mutation::ConstraintDefinitionKind>,
+    accepted: usize,
+) -> App {
+    use lazydb::db::catalog_mutation::ConstraintDefinitionKind;
+
+    let mut editor = lazydb::model::catalog_editor::CatalogEditorState::new(
+        CatalogMutationMode::Create,
+        CatalogMutationAnchor::Group {
+            schema: CatalogId::new(Uuid::nil(), CatalogKind::Schema, ["app", "main"]),
+            group: ObjectGroup::Tables,
+        },
+        0,
+        Vec::new(),
+    );
+    assert!(editor.select_object_type(CatalogObjectType::Catalog(CatalogKind::Table)));
+    let Some(lazydb::model::catalog_editor::CatalogDraft::Table(draft)) = editor.draft.as_mut()
+    else {
+        panic!("table draft expected");
+    };
+    draft.database_kind = DatabaseKind::Sqlite;
+    draft.schema = "main".into();
+    draft.name = "items".into();
+    draft.columns[0].name = "id".into();
+    for index in 0..accepted {
+        let kind = match index % 4 {
+            0 => ConstraintDefinitionKind::PrimaryKey {
+                columns: Vec::new(),
+            },
+            1 => ConstraintDefinitionKind::Unique {
+                columns: Vec::new(),
+            },
+            2 => ConstraintDefinitionKind::Check {
+                expression: String::new(),
+                no_inherit: false,
+            },
+            _ => ConstraintDefinitionKind::ForeignKey {
+                columns: Vec::new(),
+                referenced_schema: String::new(),
+                referenced_relation: String::new(),
+                referenced_columns: Vec::new(),
+                match_type: "SIMPLE".into(),
+                on_update: "NO ACTION".into(),
+                on_delete: "NO ACTION".into(),
+            },
+        };
+        draft
+            .table_constraints
+            .push(lazydb::model::catalog_editor::ConstraintDraft::new(
+                kind, "main", "items",
+            ));
+    }
+    if let Some(kind) = open {
+        assert!(draft.begin_new_table_constraint(kind).is_ok());
+    }
+
+    let mut app = App::new(Vec::new());
+    app.overlay = Some(Overlay::CatalogEditor);
+    app.catalog_editor = Some(editor);
+    app
+}
+
+#[test]
 fn rendered_table_sections_and_controls_map_to_layered_focus_actions() {
     let profile = import_connection_url(":memory:", Some("test"))
         .unwrap()

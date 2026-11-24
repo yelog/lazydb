@@ -400,6 +400,10 @@ pub enum Action {
     CatalogEditorAddTableConstraintUnique,
     CatalogEditorAddTableConstraintCheck,
     CatalogEditorAddTableConstraintForeignKey,
+    CatalogEditorEditTableConstraint(usize),
+    CatalogEditorFocusTableConstraintDetails(usize),
+    CatalogEditorConfirmTableConstraintDetails,
+    CatalogEditorCancelTableConstraintDetails,
     CatalogEditorFocusTableConstraint(usize),
     CatalogEditorFocusConstraintField {
         constraint: usize,
@@ -1826,6 +1830,7 @@ pub enum CatalogEditorCursorTarget {
     SchemaField(usize),
     FormField(crate::model::catalog_editor::CatalogFormFocus),
     TableField(crate::model::catalog_editor::TableEditorFocus),
+    ConstraintField(usize),
 }
 
 #[allow(clippy::large_enum_variant)]

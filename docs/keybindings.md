@@ -200,10 +200,11 @@ The table editor renders a row-scoped delete or restore icon at the end of each
 column row. Clicking the icon acts on that row's stable identity; it does not
 require the row to be selected first. Existing rows become muted when removed
 and can be restored from the same position. `dd` and `r` remain the keyboard
-operations for the selected row. `Add Column`, `Review SQL`, and `Cancel` are
-the bottom actions in that order. A status row reports `No changes` or the
-number of pending changes; added, modified, and removed counts use success,
-action, and error semantic colors respectively.
+operations for the selected row. `Add Column` opens column details. For new
+SQLite and DuckDB tables, the same row offers `Add PK`, `Add UNIQUE`, `Add CHECK`,
+and `Add FK`. `Review SQL` and `Cancel` act on the entire table. The change
+summary reports `No changes` or the pending count and uses the success, action,
+and error colors for added, modified, and removed columns.
 
 ## Result Pagination
 
@@ -402,6 +403,14 @@ In a Table form, `Up/Down` moves within the selected column list and
 `Tab/Shift-Tab` moves between the list and form controls. `e` opens the selected
 column details, `a` adds a column below it, and `r` restores a removed existing
 column. Removing the last effective column is blocked.
+
+When creating a SQLite or DuckDB table, choose an `Add` constraint button to
+open its details. Use `Tab` or `Down` for the next field and `Shift-Tab` or `Up`
+for the previous one, or click a field. `Enter` or `Confirm` accepts the
+constraint into the table draft. `Esc` or `Cancel` discards the changes made
+in that dialog. Existing draft constraints can be reopened or removed from the
+table form. Choose `Review SQL` to check the complete `CREATE TABLE` before
+applying it.
 
 In SQL Preview, `Up/Down` scrolls the generated SQL, `PageUp/PageDown` moves by
 pages, and `Home/End` jumps to the beginning or end. `Enter` applies the plan

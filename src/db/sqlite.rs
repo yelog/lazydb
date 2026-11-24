@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -336,44 +336,30 @@ impl SqliteAdapter {
                 reason: "SQLite schema anchor is incomplete",
             });
         }
-        let (kind, name, sql) = match (group, draft) {
+        let (kind, name, sql, execution_schema) = match (group, draft) {
             (ObjectGroup::Tables, crate::model::catalog_editor::CatalogDraft::Table(draft)) => {
                 draft.validate()?;
+                let [database, anchor_schema] = schema.native_path.as_slice() else {
+                    return Err(CatalogMutationError::InvalidAnchor {
+                        reason: "SQLite table schema anchor is incomplete",
+                    });
+                };
+                if request.current_database.as_deref() != Some(database.as_str()) {
+                    return Err(CatalogMutationError::InvalidAnchor {
+                        reason: "SQLite table creation targets another database",
+                    });
+                }
+                if draft.schema.value().trim() != anchor_schema {
+                    return Err(CatalogMutationError::InvalidDraft {
+                        reason: format!(
+                            "SQLite table schema `{}` does not match the selected schema `{anchor_schema}`",
+                            draft.schema.value().trim()
+                        ),
+                    });
+                }
                 let name = draft.name.value().trim().to_owned();
-                let columns = draft
-                    .columns
-                    .iter()
-                    .filter(|column| {
-                        !matches!(
-                            column.state,
-                            crate::model::catalog_editor::DraftRowState::Removed { .. }
-                        )
-                    })
-                    .map(|column| {
-                        let mut sql = format!(
-                            "{} {}",
-                            sqlite_quote_identifier(column.name.value().trim()),
-                            column.native_type.value().trim()
-                        );
-                        if !column.nullable {
-                            sql.push_str(" NOT NULL");
-                        }
-                        if !column.default_expression.value().trim().is_empty() {
-                            sql.push_str(" DEFAULT ");
-                            sql.push_str(column.default_expression.value().trim());
-                        }
-                        Ok(sql)
-                    })
-                    .collect::<Result<Vec<_>, CatalogMutationError>>()?;
-                (
-                    CatalogKind::Table,
-                    name.clone(),
-                    format!(
-                        "CREATE TABLE {} ({})",
-                        sqlite_quote_identifier(&name),
-                        columns.join(", ")
-                    ),
-                )
+                let sql = sqlite_create_table_sql(anchor_schema, &name, &draft)?;
+                (CatalogKind::Table, name, sql, Some(anchor_schema.clone()))
             }
             (ObjectGroup::Views, crate::model::catalog_editor::CatalogDraft::View(draft)) => {
                 draft.validate()?;
@@ -386,6 +372,7 @@ impl SqliteAdapter {
                         sqlite_quote_identifier(&name),
                         draft.query.value().trim()
                     ),
+                    None,
                 )
             }
             (_, draft) => {
@@ -411,7 +398,7 @@ impl SqliteAdapter {
                 crate::model::execution_target::ExecutionTarget {
                     profile_id: object.profile_id(),
                     database: object.native_path[0].clone(),
-                    schema: None,
+                    schema: execution_schema,
                 },
             )?,
             vec![CatalogTarget::Objects {
@@ -2603,6 +2590,299 @@ impl SqliteAdapter {
 
 fn sqlite_quote_identifier(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
+}
+
+fn sqlite_create_table_sql(
+    schema: &str,
+    name: &str,
+    draft: &crate::model::catalog_editor::TableDraft,
+) -> Result<String, CatalogMutationError> {
+    use crate::db::catalog_mutation::ConstraintDefinitionKind;
+    use crate::model::catalog_editor::DraftRowState;
+
+    if !draft.constraints.is_empty() {
+        return Err(CatalogMutationError::InvalidDraft {
+            reason: "SQLite structured table creation does not accept opaque constraint strings; use structured table constraints".into(),
+        });
+    }
+
+    let active_columns = sqlite_active_columns(draft)?;
+    let mut definitions = Vec::with_capacity(draft.columns.len() + draft.table_constraints.len());
+    for column in draft
+        .columns
+        .iter()
+        .filter(|column| !matches!(column.state, DraftRowState::Removed { .. }))
+    {
+        let column_name = column.name.value().trim();
+        let native_type = column.native_type.value().trim();
+        let mut definition = format!("{} {}", sqlite_quote_identifier(column_name), native_type);
+        if !column.nullable {
+            definition.push_str(" NOT NULL");
+        }
+        if !column.default_expression.value().trim().is_empty() {
+            definition.push_str(" DEFAULT ");
+            definition.push_str(column.default_expression.value().trim());
+        }
+        definitions.push(definition);
+    }
+    if definitions.is_empty() {
+        return Err(CatalogMutationError::InvalidDraft {
+            reason: "SQLite tables require at least one column".into(),
+        });
+    }
+
+    let mut constraint_names = HashSet::new();
+    let mut has_primary_key = false;
+    for constraint in &draft.table_constraints {
+        if constraint.not_valid {
+            return Err(CatalogMutationError::InvalidDraft {
+                reason: "SQLite table constraints do not support NOT VALID".into(),
+            });
+        }
+        if constraint.no_inherit {
+            return Err(CatalogMutationError::InvalidDraft {
+                reason: "SQLite table constraints do not support NO INHERIT".into(),
+            });
+        }
+        let constraint_name = constraint.name.value().trim();
+        if !constraint_name.is_empty() && !constraint_names.insert(constraint_name.to_owned()) {
+            return Err(CatalogMutationError::InvalidDraft {
+                reason: "table constraint names must be unique".into(),
+            });
+        }
+        let prefix = if constraint_name.is_empty() {
+            String::new()
+        } else {
+            format!("CONSTRAINT {} ", sqlite_quote_identifier(constraint_name))
+        };
+        let clause = match &constraint.kind {
+            ConstraintDefinitionKind::PrimaryKey { .. } => {
+                if has_primary_key {
+                    return Err(CatalogMutationError::InvalidDraft {
+                        reason: "SQLite tables support at most one PRIMARY KEY constraint".into(),
+                    });
+                }
+                has_primary_key = true;
+                sqlite_reject_unsupported_deferral(constraint, "PRIMARY KEY")?;
+                let columns =
+                    sqlite_constraint_columns(constraint.columns.value(), Some(&active_columns))?;
+                format!(
+                    "{prefix}PRIMARY KEY ({})",
+                    sqlite_quoted_column_list(&columns)
+                )
+            }
+            ConstraintDefinitionKind::Unique { .. } => {
+                sqlite_reject_unsupported_deferral(constraint, "UNIQUE")?;
+                let columns =
+                    sqlite_constraint_columns(constraint.columns.value(), Some(&active_columns))?;
+                format!("{prefix}UNIQUE ({})", sqlite_quoted_column_list(&columns))
+            }
+            ConstraintDefinitionKind::Check { .. } => {
+                sqlite_reject_unsupported_deferral(constraint, "CHECK")?;
+                let expression = constraint.expression.value().trim();
+                sqlite_validate_check_expression(expression)?;
+                format!("{prefix}CHECK ({expression})")
+            }
+            ConstraintDefinitionKind::ForeignKey { .. } => {
+                if !constraint
+                    .match_type
+                    .value()
+                    .trim()
+                    .eq_ignore_ascii_case("SIMPLE")
+                {
+                    return Err(CatalogMutationError::InvalidDraft {
+                        reason: "SQLite foreign keys support only MATCH SIMPLE".into(),
+                    });
+                }
+                if !constraint
+                    .referenced_schema
+                    .value()
+                    .trim()
+                    .eq_ignore_ascii_case(schema)
+                {
+                    return Err(CatalogMutationError::InvalidDraft {
+                        reason: format!(
+                            "SQLite foreign keys must reference the same schema `{schema}`; cross-schema references are not supported"
+                        ),
+                    });
+                }
+                let columns =
+                    sqlite_constraint_columns(constraint.columns.value(), Some(&active_columns))?;
+                let referenced_columns =
+                    sqlite_constraint_columns(constraint.referenced_columns.value(), None)?;
+                if columns.len() != referenced_columns.len() {
+                    return Err(CatalogMutationError::InvalidDraft {
+                        reason: "foreign key source and referenced column counts must match".into(),
+                    });
+                }
+                let referenced_relation = constraint.referenced_relation.value().trim();
+                if referenced_relation.is_empty() {
+                    return Err(CatalogMutationError::InvalidDraft {
+                        reason: "foreign key referenced relation is required".into(),
+                    });
+                }
+                let on_update =
+                    sqlite_referential_action(constraint.on_update.value(), "ON UPDATE")?;
+                let on_delete =
+                    sqlite_referential_action(constraint.on_delete.value(), "ON DELETE")?;
+                let mut clause = format!(
+                    "{prefix}FOREIGN KEY ({}) REFERENCES {} ({}) ON UPDATE {on_update} ON DELETE {on_delete}",
+                    sqlite_quoted_column_list(&columns),
+                    sqlite_quote_identifier(referenced_relation),
+                    sqlite_quoted_column_list(&referenced_columns),
+                );
+                if constraint.deferrable {
+                    clause.push_str(" DEFERRABLE");
+                }
+                if constraint.initially_deferred {
+                    clause.push_str(" INITIALLY DEFERRED");
+                }
+                clause
+            }
+        };
+        definitions.push(clause);
+    }
+
+    Ok(format!(
+        "CREATE TABLE {}.{} ({})",
+        sqlite_quote_identifier(schema),
+        sqlite_quote_identifier(name),
+        definitions.join(", ")
+    ))
+}
+
+fn sqlite_reject_unsupported_deferral(
+    constraint: &crate::model::catalog_editor::ConstraintDraft,
+    clause: &str,
+) -> Result<(), CatalogMutationError> {
+    if constraint.deferrable || constraint.initially_deferred {
+        return Err(CatalogMutationError::InvalidDraft {
+            reason: format!("SQLite does not support DEFERRABLE {clause} table constraints"),
+        });
+    }
+    Ok(())
+}
+
+fn sqlite_active_columns(
+    draft: &crate::model::catalog_editor::TableDraft,
+) -> Result<HashMap<String, String>, CatalogMutationError> {
+    use crate::model::catalog_editor::DraftRowState;
+
+    let mut active = HashMap::new();
+    for column in draft
+        .columns
+        .iter()
+        .filter(|column| !matches!(column.state, DraftRowState::Removed { .. }))
+    {
+        let name = column.name.value().trim();
+        let key = name.to_ascii_lowercase();
+        if let Some(existing) = active.insert(key, name.to_owned()) {
+            return Err(CatalogMutationError::InvalidDraft {
+                reason: format!(
+                    "SQLite column names must be unique ignoring ASCII case: `{existing}` and `{name}`"
+                ),
+            });
+        }
+    }
+    Ok(active)
+}
+
+fn sqlite_constraint_columns(
+    value: &str,
+    active_columns: Option<&HashMap<String, String>>,
+) -> Result<Vec<String>, CatalogMutationError> {
+    let columns = value
+        .split(',')
+        .map(str::trim)
+        .filter(|column| !column.is_empty())
+        .collect::<Vec<_>>();
+    if columns.is_empty() {
+        return Err(CatalogMutationError::InvalidDraft {
+            reason: "table constraint columns are required".into(),
+        });
+    }
+    let mut seen = HashMap::new();
+    let mut resolved = Vec::with_capacity(columns.len());
+    for column in &columns {
+        let key = column.to_ascii_lowercase();
+        if let Some(existing) = seen.insert(key.clone(), *column) {
+            return Err(CatalogMutationError::InvalidDraft {
+                reason: format!(
+                    "table constraint columns must not repeat ignoring ASCII case: `{existing}` and `{column}`"
+                ),
+            });
+        }
+        let resolved_name = match active_columns {
+            Some(active) => {
+                active
+                    .get(&key)
+                    .cloned()
+                    .ok_or_else(|| CatalogMutationError::InvalidDraft {
+                        reason: format!("table constraint references unknown column `{column}`"),
+                    })?
+            }
+            None => (*column).to_owned(),
+        };
+        resolved.push(resolved_name);
+    }
+    Ok(resolved)
+}
+
+fn sqlite_quoted_column_list(columns: &[String]) -> String {
+    columns
+        .iter()
+        .map(|column| sqlite_quote_identifier(column))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn sqlite_referential_action(value: &str, clause: &str) -> Result<String, CatalogMutationError> {
+    let action = value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_uppercase();
+    match action.as_str() {
+        "NO ACTION" | "RESTRICT" | "SET NULL" | "SET DEFAULT" | "CASCADE" => Ok(action),
+        _ => Err(CatalogMutationError::InvalidDraft {
+            reason: format!("SQLite foreign key {clause} action `{value}` is not supported"),
+        }),
+    }
+}
+
+fn sqlite_validate_check_expression(expression: &str) -> Result<(), CatalogMutationError> {
+    use sqlparser::{
+        dialect::SQLiteDialect,
+        parser::Parser,
+        tokenizer::{Token, Whitespace},
+    };
+
+    let invalid = |detail: String| CatalogMutationError::InvalidDraft {
+        reason: format!("check expression must be a single expression: {detail}"),
+    };
+    if expression.is_empty() {
+        return Err(invalid("expression is required".into()));
+    }
+    let dialect = SQLiteDialect {};
+    let mut parser = Parser::new(&dialect)
+        .try_with_sql(expression)
+        .map_err(|error| invalid(error.to_string()))?;
+    parser
+        .parse_expr()
+        .map_err(|error| invalid(error.to_string()))?;
+    while let Some(token) = parser.next_token_no_skip() {
+        match &token.token {
+            Token::Whitespace(Whitespace::Space | Whitespace::Newline | Whitespace::Tab)
+            | Token::Whitespace(Whitespace::MultiLineComment(_)) => {}
+            _ => {
+                return Err(invalid(format!(
+                    "unexpected token `{}` after the expression",
+                    token.token
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn sqlite_snapshot_fingerprint(snapshot: &SqliteRebuildSnapshot) -> String {

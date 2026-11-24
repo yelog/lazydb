@@ -58,6 +58,145 @@ fn table_column_edit_session_is_atomic_across_confirm_and_cancel() {
 }
 
 #[test]
+fn table_constraint_session_is_boxed_and_only_commits_on_confirm() {
+    use lazydb::db::catalog_mutation::ConstraintDefinitionKind;
+
+    assert_eq!(
+        std::mem::size_of::<Option<Box<lazydb::model::catalog_editor::TableConstraintEditSession>>>(
+        ),
+        std::mem::size_of::<Option<Box<u8>>>()
+    );
+
+    let mut draft = TableDraft::new_for_database("main", lazydb::profile::DatabaseKind::Sqlite);
+    draft.name = "items".into();
+    draft.columns[0].name = "id".into();
+    assert!(
+        draft
+            .begin_new_table_constraint(ConstraintDefinitionKind::Check {
+                expression: String::new(),
+                no_inherit: false,
+            })
+            .is_ok()
+    );
+    assert!(draft.table_constraints.is_empty());
+    {
+        let session = draft.constraint_editor.as_mut().expect("check session");
+        assert_eq!(session.draft.expression.value(), "");
+        session.draft.name = "items_positive".into();
+        session.draft.expression = "id > 0".into();
+    }
+    draft.cancel_table_constraint_details();
+    assert!(draft.constraint_editor.is_none());
+    assert!(draft.table_constraints.is_empty());
+
+    assert!(
+        draft
+            .begin_new_table_constraint(ConstraintDefinitionKind::Check {
+                expression: String::new(),
+                no_inherit: false,
+            })
+            .is_ok()
+    );
+    {
+        let session = draft.constraint_editor.as_mut().expect("check session");
+        session.draft.name = "items_positive".into();
+        session.draft.expression = "id > 0".into();
+    }
+    assert!(draft.confirm_table_constraint_details());
+    assert_eq!(draft.table_constraints.len(), 1);
+    assert_eq!(
+        draft.focus,
+        TableEditorFocus::Action(TableActionField::Constraint(0))
+    );
+
+    assert!(draft.begin_edit_table_constraint(0));
+    {
+        let session = draft.constraint_editor.as_mut().expect("check session");
+        session.draft.name = "discarded".into();
+    }
+    draft.cancel_table_constraint_details();
+    assert_eq!(draft.table_constraints[0].name.value(), "items_positive");
+
+    assert!(draft.begin_edit_table_constraint(0));
+    {
+        let session = draft.constraint_editor.as_mut().expect("check session");
+        session.draft.name = "items_positive_v2".into();
+    }
+    assert!(draft.confirm_table_constraint_details());
+    assert_eq!(draft.table_constraints[0].name.value(), "items_positive_v2");
+}
+
+#[test]
+fn foreign_key_session_prefills_target_schema_and_local_column() {
+    use lazydb::db::catalog_mutation::ConstraintDefinitionKind;
+
+    let mut draft = TableDraft::new_for_database("main", lazydb::profile::DatabaseKind::Sqlite);
+    draft.name = "child".into();
+    draft.columns[0].name = "parent_id".into();
+    assert!(
+        draft
+            .begin_new_table_constraint(ConstraintDefinitionKind::ForeignKey {
+                columns: Vec::new(),
+                referenced_schema: String::new(),
+                referenced_relation: String::new(),
+                referenced_columns: Vec::new(),
+                match_type: "SIMPLE".into(),
+                on_update: "NO ACTION".into(),
+                on_delete: "NO ACTION".into(),
+            })
+            .is_ok()
+    );
+    let session = draft
+        .constraint_editor
+        .as_ref()
+        .expect("foreign key session");
+    assert_eq!(session.draft.columns.value(), "parent_id");
+    assert_eq!(session.draft.referenced_schema.value(), "main");
+    assert_eq!(session.draft.field_count(), 7);
+    assert_eq!(session.draft.on_update.value(), "NO ACTION");
+    assert_eq!(session.draft.on_delete.value(), "NO ACTION");
+
+    let mut postgres =
+        TableDraft::new_for_database("public", lazydb::profile::DatabaseKind::Postgres);
+    postgres.name = "items".into();
+    assert!(
+        postgres
+            .begin_new_table_constraint(ConstraintDefinitionKind::Unique {
+                columns: Vec::new(),
+            })
+            .is_err()
+    );
+    assert!(postgres.constraint_editor.is_none());
+}
+
+#[test]
+fn action_focus_skips_unavailable_structured_constraints() {
+    let mut draft = TableDraft::new_for_database("main", lazydb::profile::DatabaseKind::Sqlite);
+    draft.focus = TableEditorFocus::Action(TableActionField::AddColumn);
+    draft.focus_next_action(true);
+    assert_eq!(
+        draft.focus,
+        TableEditorFocus::Action(TableActionField::AddConstraintPrimaryKey)
+    );
+    draft.focus_previous_action(true);
+    assert_eq!(
+        draft.focus,
+        TableEditorFocus::Action(TableActionField::AddColumn)
+    );
+
+    draft.focus_next_action(false);
+    assert_eq!(
+        draft.focus,
+        TableEditorFocus::Action(TableActionField::Review)
+    );
+    draft.focus_previous_action(false);
+    assert_eq!(
+        draft.focus,
+        TableEditorFocus::Action(TableActionField::AddColumn)
+    );
+}
+
+#[test]
 fn clickhouse_native_definition_populates_editor_baseline_without_rebuilding_columns() {
     let definition = lazydb::db::catalog_mutation::ClickHouseTableDefinition {
         database: "analytics".into(),
